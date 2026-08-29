@@ -1730,15 +1730,34 @@ class SubagentView(Vertical):
                 new_blocks = [entry_block(entry, fold_width=fold) for entry in new_entries]
                 # TWO LISTS, ONE INDEX. `prefix` counts entries, which exclude
                 # the truncation note; `insert_blocks` indexes the BODY's list,
-                # which holds it at 0 because it is appended before any row
-                # (`_sync_body` mounts it outside the diffed sequence and keeps
-                # it out of `self._blocks`). Measured on a truncated
-                # trajectory: `view._blocks` 168 against a body of 169. Without
-                # the offset a history page prepended to a truncated child
-                # lands one row too high — above the note that is supposed to
-                # head the page. Both conditions are needed at once, which is
-                # why it survived unnoticed (review round 1, N1).
-                head_offset = 1 if self._head_block is not None else 0
+                # which also holds the note (`_sync_body` mounts it outside the
+                # diffed sequence and keeps it out of `self._blocks`). Measured
+                # on a truncated trajectory: `view._blocks` 168 against a body
+                # of 169. Without the offset a history page prepended to a
+                # truncated child lands one row too high — above the note that
+                # is supposed to head the page. Both conditions are needed at
+                # once, which is why it survived unnoticed (review round 1, N1).
+                #
+                # Keyed on the note's POSITION, not its existence. It is
+                # created lazily and appended at whatever length the body has
+                # reached, so it heads the list only when the child was already
+                # truncated at open. A child that crosses the cap while the
+                # page is open mounts it mid-list (measured: index 5 of 257),
+                # and correcting for a note that is not above the rows pushes
+                # the prepended page one row too low instead — which is how
+                # this arrived as a misordering the previous fix introduced
+                # (`durable 40` above `durable 0`) in a case `origin/main` had
+                # right (review round 2, M3).
+                mounted_blocks = self._body.blocks()
+                head_offset = (
+                    1
+                    if (
+                        self._head_block is not None
+                        and mounted_blocks
+                        and mounted_blocks[0] is self._head_block
+                    )
+                    else 0
+                )
                 self._body.insert_blocks(prefix + head_offset, new_blocks, anchor_offset=anchor)
                 self._blocks[prefix:prefix] = new_blocks
                 self._entries[prefix:prefix] = new_entries

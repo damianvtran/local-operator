@@ -2618,3 +2618,60 @@ async def test_a_history_page_lands_below_the_truncation_note(tmp_path) -> None:
 
         # The note still heads the page, and nothing was inserted above it.
         assert view._body.blocks()[0] is view._head_block, "a history page landed above the note"
+
+
+@pytest.mark.asyncio
+async def test_a_history_page_lands_in_order_when_the_cap_is_crossed_mid_read(tmp_path) -> None:
+    """The prepend offset keys on the note's POSITION, not its existence.
+
+    `_head_block` is created lazily and appended at whatever length the body
+    has reached, so it heads the list only when the child was ALREADY
+    truncated when the page opened. A child that is under the cap at open and
+    crosses it while the reader watches mounts the note mid-list (measured:
+    index 5 of 257) — and correcting for a note that is not above the rows
+    pushes the prepended page one row too LOW, which reorders the durable
+    window (`durable 40` above `durable 0`).
+
+    That is the mirror image of round 1's N1 and it is the case `origin/main`
+    happened to get right, so it needs its own guard: the two scenarios are
+    disjoint and a fix conditioned on existence alone passes the other test
+    while breaking this one (review round 2, M3).
+    """
+    transcript = Transcript(tmp_path / "child")
+    for index in range(140):
+        await transcript.append_message(Message.assistant(f"durable {index}"))
+    # UNDER the cap at open: no truncation note exists yet.
+    job = _job_with(_text("m0", "live 0"), status="running")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    session._subagent_comms = type(
+        "Comms", (), {"session_dir_of": lambda self, _job_id: transcript.directory}
+    )()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(90, 28)) as pilot:
+        view = await _open(pilot, app, job)
+        await _wait_history(pilot, view)
+        assert view._head_block is None, "the fixture must start under the cap"
+
+        # Now cross the cap under the reader, which appends the note mid-list.
+        events: list[dict[str, Any]] = []
+        while len(events) < TRAJECTORY_MAX_EVENTS + 10:
+            events.extend(_text(f"m{len(events)}", f"live {len(events)}"))
+        job.trajectory = events
+        app._refresh_subagent_view()
+        for _ in range(4):
+            await pilot.pause()
+        assert view._head_block is not None, "the fixture needs to cross the cap"
+        assert (
+            view._body.blocks()[0] is not view._head_block
+        ), "this test only means anything while the note is NOT at index 0"
+
+        view.action_home()
+        await _wait_history(pilot, view)
+        await _wait_geometry_settled(pilot, view._body)
+
+        # The durable window stays in order: the page that was paged in must
+        # not be split around the row it belongs above.
+        durable = [row for row in view.rendered_rows() if row.strip().startswith("durable ")]
+        ordering = [int(row.strip().split()[1]) for row in durable]
+        assert ordering == sorted(ordering), f"the prepended page landed out of order: {ordering}"
