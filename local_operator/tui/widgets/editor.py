@@ -85,6 +85,7 @@ from textual.style import Style as ContentStyle
 from textual.widgets import TextArea
 from textual.widgets.text_area import Edit, EditResult, Selection
 
+from local_operator.clipboard import MAX_CLIPBOARD_READ_BYTES, read_clipboard
 from local_operator.harness.types import ImageContent
 from local_operator.imaging import bound_image_for_model
 from local_operator.media import ImageInfo, sniff_image, sniff_image_file
@@ -306,11 +307,18 @@ def _marker_runs(
 def _pasted_paths(pasted: str) -> list[str]:
     """The paste read as a list of filesystem paths, or ``[]``.
 
-    Terminals deliver a dropped or copied file as its path, shell-quoted:
-    Ghostty writes a clipboard image to a temp file and pastes that name, and a
-    Finder drag arrives with spaces backslash-escaped. ``shlex`` is exactly the
-    grammar they are quoting for, so it is what unpicks it — hand-rolled
-    unescaping is how a path with a space becomes two paths that do not exist.
+    Terminals deliver a DROPPED file as its path, shell-quoted, with spaces
+    backslash-escaped. ``shlex`` is exactly the grammar they are quoting for,
+    so it is what unpicks it — hand-rolled unescaping is how a path with a
+    space becomes two paths that do not exist.
+
+    This branch handles drag-and-drop, and it also catches the one terminal
+    that synthesises a path for a clipboard IMAGE: **cmux** watches the
+    pasteboard, writes ``$TMPDIR/clipboard-<stamp>-<hash>.png``, and
+    bracket-pastes that filename. No other emulator does this — Ghostty,
+    Terminal.app and iTerm2 all paste text only — so a path is not how a
+    clipboard image usually arrives, and :meth:`Editor._attach_clipboard_image`
+    is the terminal-independent route (issue #372).
 
     Newlines separate multi-file drops on some terminals and are inside a
     filename on none of them, so they split first.
@@ -386,6 +394,78 @@ class EditorCopyStale(Message):
 
     def __init__(self) -> None:
         super().__init__()
+
+
+class EditorPasteAttached(Message):
+    """Posted when a clipboard paste DID attach an image.
+
+    Exists so the app can retire a paste notice that is still held behind an
+    actionable card. Without it that notice surfaces when the slot frees and
+    contradicts a composer the user can see holding the image (design round 1,
+    D3) — the same staleness :class:`EditorCopyStale` answers for the copy
+    receipt, and it uses the same machinery.
+
+    Posted by BOTH ingestion routes. An earlier version reasoned that the path
+    route "cannot leave a stale notice behind because it never raises one",
+    which conflates RAISING a notice with FALSIFYING one: the path route never
+    raises the card, but it does make a held one false, and the held card
+    belongs to the composer's paste slot regardless of which route filled the
+    buffer. That gap left the original stale-toast frame reachable through the
+    route cmux users actually hit — and through the very gesture the notice
+    recommends (round 2, D8/D3).
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+
+
+class EditorPasteEmpty(Message):
+    """Posted when a paste that could only have been an image attached nothing.
+
+    Raised ONLY from the empty-paste branch — the payload the terminal sends
+    when ``Cmd+V`` had no text to give, which on macOS means the pasteboard
+    held image bytes, a file URL, or nothing at all. It is deliberately NOT
+    raised for an ordinary text paste that happens not to be a path: that paste
+    inserts its text, so the user can already see what happened, and a notice
+    there would fire on every quote pasted into a prompt.
+
+    That narrowness is the whole design of this notice. The reported bug (issue
+    #372) is that a failed image paste was indistinguishable from a dead
+    keystroke: nothing inserted, nothing said. The empty-paste branch is the
+    only place where the user performed a gesture and the composer can end up
+    with literally no visible response, so it is the only place that owes them
+    one. It fires at most once per keypress, and only for a keypress that
+    otherwise produces nothing at all.
+
+    ``reason`` names the outcome, and only where the code genuinely knows it
+    (review round 1, D2/U2). The first version said "no image on the clipboard"
+    for every case, which is false in two reachable ones: over SSH the
+    clipboard was never read, and an oversized screenshot IS on the clipboard.
+    Both mislead a user into the one move that cannot help — re-copying.
+
+    Three values, no more, because three is what the code can establish:
+
+    * ``"nothing"`` — the clipboard was read and had nothing attachable on it.
+      This is the deliberately vague one: an empty clipboard, a text-only one,
+      a missing ``xclip`` and a wedged daemon are indistinguishable by design
+      (see :mod:`local_operator.clipboard`) and a message naming a cause here
+      would be guessing.
+    * ``"unattachable"`` — image BYTES were found and refused: too large even
+      after bounding, undecodable, or a decompression bomb.
+    * ``"unreadable"`` — a copied FILE was found and could not be attached.
+      Distinct from ``"unattachable"`` because the causes differ (a non-image
+      file, an unreadable path, a mixed selection hitting the all-or-nothing
+      rule) and so does the advice that would help (round 2, D10).
+    * ``"remote"`` — the read was refused because the session is remote. Not a
+      statement about the clipboard at all.
+
+    The app owns the wording, the same way :class:`EditorCopyStale` leaves the
+    card to the app; this only says which of the three happened.
+    """
+
+    def __init__(self, reason: str = "nothing") -> None:
+        super().__init__()
+        self.reason = reason
 
 
 class EditorCopied(Message):
@@ -2360,15 +2440,33 @@ class Editor(TextArea):
 
     # -- paste ----------------------------------------------------------------
     async def _on_paste(self, event: events.Paste) -> None:
-        """Attach pasted images instead of pasting the path to them.
+        """Attach a pasted image, from a path OR from the system clipboard.
 
         Textual's ``Paste`` carries TEXT only — there is no binary channel at
-        the terminal, so an image never arrives as bytes here. What arrives on
-        the owner's setup is a PATH: Ghostty writes a clipboard image to
-        ``$TMPDIR/clipboard-<stamp>-<hash>.png`` and bracketed-pastes the
-        filename. Finder's Cmd+C and a drag-and-drop both land the same way.
-        That is the hot path, and it is why this hooks paste rather than
-        binding a key to read the system clipboard.
+        the terminal, so an image never arrives as bytes here. There are two
+        ways it can still reach the composer, and both are handled:
+
+        **A path in the text.** A drag-and-drop lands this way on every
+        terminal, and a clipboard image lands this way in **cmux**, which
+        watches the pasteboard, writes
+        ``$TMPDIR/clipboard-<stamp>-<hash>.png`` and bracket-pastes that
+        filename. That is the branch this widget shipped with, and it is why
+        the gap below stayed invisible: cmux is where this code was developed,
+        so ``Cmd+V`` on a screenshot appeared to work everywhere.
+
+        **An EMPTY paste, meaning the bytes are on the clipboard.** No other
+        emulator synthesises a path — Ghostty, Terminal.app and iTerm2 all
+        paste text only. So a native macOS screenshot
+        (``Cmd+Shift+Ctrl+4``) put PNG bytes on the pasteboard, the terminal
+        had no text to send, and this handler received ``Paste("")``: a
+        keystroke that inserted an empty string and was indistinguishable from
+        a dead key (issue #372). Textual delivers that event for real
+        (``XTermParser`` yields ``Paste(text='')`` for a bare
+        ``ESC[200~ ESC[201~``), so it is a usable hook, and
+        :meth:`_attach_clipboard_image` reads the clipboard itself. Finder's
+        ``Cmd+C`` arrives the same way — it puts only a ``public.file-url``
+        flavor on the pasteboard, with no text and no image bytes — and is
+        routed back into the path branch.
 
         Anything that is not a readable image path is left alone: this returns
         without touching the event, and ``TextArea._on_paste`` inserts it as
@@ -2389,12 +2487,135 @@ class Editor(TextArea):
         sequencing is why two fast pastes cannot interleave: the pump dispatches
         one message at a time, so marker issuance stays in paste order.
         """
+        if not event.text.strip():
+            # A payload with no text in it is the clipboard-image signal. The
+            # clipboard is consulted, but the event is consumed ONLY if that
+            # produced an attachment — the same shape the path branch below
+            # uses, and the correction from review round 1 (F1/D1).
+            #
+            # Consuming unconditionally was a real regression on a gesture that
+            # has nothing to do with images: an indent, a tab or a blank line
+            # copied and pasted into the composer is ordinary in a multi-line
+            # prompt, it worked before this feature existed, and it silently
+            # vanished with a toast about images the user was not pasting. The
+            # code cannot tell a terminal-synthesised `""` from user-authored
+            # whitespace by inspecting the payload, so it stops trying: falling
+            # through inserts whitespace the user did have on their clipboard,
+            # and for the genuinely empty payload inserting `""` is a no-op
+            # nobody can see.
+            if event.text:
+                # WHITESPACE THE USER COPIED. It reaches this branch because
+                # the payload has no text in it, but it is not the terminal's
+                # empty-paste signal, and the clipboard is not consulted at
+                # all: whatever an image read found, the user asked for these
+                # characters on this keypress and trading them for a marker
+                # they did not request is the round-1 D1 defect at one tenth
+                # the reach (round 2, D9 — reproduced here before fixing:
+                # pasting an indent with a PNG on the pasteboard replaced the
+                # indent with `[Image #1, 1568x200]`).
+                #
+                # Skipping the read also makes an ordinary indent paste cost
+                # nothing again, rather than paying a clipboard round trip an
+                # editing gesture never needed (round 2, U7).
+                return
+            attached = await self._attach_clipboard_image()
+            if attached is None:
+                return
+            event.prevent_default()
+            event.stop()
+            self.insert(attached)
+            return
         attached = await self._attach_pasted_images(event.text)
         if attached is None:
             return
         event.prevent_default()
         event.stop()
+        # Posted from the PATH branch too, not just the clipboard one. A held
+        # notice is falsified by an image arriving, whichever route delivered
+        # it — and this is the route the notice's own advice sends the user
+        # down ("paste a file path instead"), so without this the card that
+        # gave the instruction reappears to deny it worked (round 2, D8/D3).
+        self.post_message(EditorPasteAttached())
         self.insert(attached)
+
+    async def _attach_clipboard_image(self) -> str | None:
+        """The empty-paste branch: read the clipboard and attach what is there.
+
+        Two shapes, tried in the order they are likely. IMAGE BYTES first, the
+        reported case — a screenshot on the pasteboard with no text for the
+        terminal to send. Then FILE URLS, which is Finder's ``Cmd+C``: also a
+        textless pasteboard, routed into :meth:`_attach_pasted_images` so a
+        copied file behaves exactly like the same file dragged in, down to the
+        all-or-nothing rule for a multi-file selection.
+
+        The read runs in a thread for the same reason the decode does: it
+        shells out to ``osascript``/``wl-paste``/``xclip``/PowerShell, and this
+        is the keystroke handler. The measured macOS read is ~0.6 s for an 8 MB
+        Retina screenshot, which is a visible freeze inline and nothing at all
+        off the loop. ``local_operator.clipboard`` bounds the WHOLE read \u2014 both
+        shapes, every subprocess \u2014 with one 2 s deadline and never raises, so a
+        wedged clipboard daemon costs one pause.
+
+        The read is bounded by :data:`~local_operator.clipboard.
+        MAX_CLIPBOARD_READ_BYTES` and NOT by :data:`MAX_ATTACHMENT_BYTES`.
+        Those are different budgets and conflating them broke the exact gesture
+        this branch exists for (review round 1, U1): a native screenshot on a
+        Retina display is 8.4-8.5 MB on the pasteboard and bounds down to
+        0.28 MB, so capping the READ at the 4 MB attachment budget threw the
+        screenshot away before :func:`~local_operator.imaging.
+        bound_image_for_model` \u2014 whose entire job is to make it attachable \u2014
+        could run. ``_attach_image_bytes`` remains the authority on what may be
+        attached, and applies the attachment cap after the resize.
+
+        Returns ``None`` when nothing was attached, and posts
+        :class:`EditorPasteEmpty` on the way out so the app can say so. That
+        notice is the other half of the reported bug: before it, a ``Cmd+V``
+        that attached nothing was indistinguishable from a broken keyboard. It
+        carries the outcomes the app can honestly name \u2014 see
+        :class:`EditorPasteEmpty`.
+
+        Reached ONLY for the terminal's genuinely empty payload. Whitespace the
+        user copied is handled by the caller and never gets here, so every
+        outcome below belongs to a keypress that would otherwise produce no
+        visible response at all \u2014 which is what makes a notice right here and
+        noise anywhere else.
+        """
+        contents = await asyncio.to_thread(read_clipboard)
+        if contents.image is not None:
+            markers = await self._attach_image_bytes([contents.image.data])
+            if markers is not None:
+                self.post_message(EditorPasteAttached())
+                return markers
+            # An image WAS on the clipboard and could not be attached: too
+            # large even after bounding, an undecodable payload, a
+            # decompression bomb. Reported as its own outcome rather than as
+            # "no image", because the two lead to different moves — cropping
+            # versus copying something (review round 1, D2/U2).
+            self.post_message(EditorPasteEmpty(reason="unattachable"))
+            return None
+        if contents.paths:
+            # Rejoins the path branch rather than duplicating it: shell quoting
+            # is what `_pasted_paths` exists to undo, and these paths come from
+            # an API rather than a terminal, so they are quoted here to keep one
+            # parser rather than two.
+            markers = await self._attach_pasted_images(
+                " ".join(shlex.quote(path) for path in contents.paths)
+            )
+            if markers is not None:
+                self.post_message(EditorPasteAttached())
+                return markers
+            # A COPIED FILE that would not attach, which is a different failure
+            # from an oversized image: the usual causes are a non-image file,
+            # an unreadable path, or a mixed multi-file selection hitting the
+            # all-or-nothing rule. "Try a smaller one" answers none of them,
+            # and neither does "paste its file path" \u2014 the path is exactly what
+            # this branch just tried (round 2, D10).
+            self.post_message(EditorPasteEmpty(reason="unreadable"))
+            return None
+        self.post_message(
+            EditorPasteEmpty(reason="remote" if contents.refused_remote else "nothing")
+        )
+        return None
 
     async def _attach_pasted_images(self, pasted: str) -> str | None:
         """Load every path in ``pasted`` as an attachment; return the markers.
@@ -2429,7 +2650,7 @@ class Editor(TextArea):
         if not candidates:
             return None
 
-        loaded: list[tuple[ImageContent, str]] = []
+        payloads: list[bytes] = []
         for path in candidates:
             # STAT FIRST. Two things this closes, both measured in review round
             # 17 against the previous read-then-check order:
@@ -2450,32 +2671,89 @@ class Editor(TextArea):
                 # ValueError for a NUL byte in the name, which is not an
                 # OSError and would otherwise escape onto the keystroke.
                 return None
-            if not S_ISREG(stat.st_mode) or stat.st_size > MAX_ATTACHMENT_BYTES:
+            # Bounded by the INGEST ceiling, not the attachment budget. Those
+            # are different bounds (see `MAX_CLIPBOARD_READ_BYTES`) and using
+            # the smaller one here refused files the resize was about to make
+            # attachable — the same mistake U1 found on the clipboard route,
+            # left behind on this one. It produced a contradiction between two
+            # of this feature's own paths: one 8.6 MB screenshot attached as
+            # `[Image #1, 1568x523 ↓]` via Cmd+V and was refused via Finder
+            # Cmd+C, which lands here (round 3, D12).
+            #
+            # The gate itself stays, and stays BEFORE the read, because that is
+            # what it was for: a 601 MB file behind a valid PNG header took
+            # peak RSS to 618 MB before the cap fired, and `open()` on a FIFO
+            # blocks forever on the event loop. Both are still closed; only the
+            # threshold moves to the bound that is actually about ingest.
+            if not S_ISREG(stat.st_mode) or stat.st_size > MAX_CLIPBOARD_READ_BYTES:
                 return None
-            info = sniff_image_file(path)
+            # An EARLY gate, not the authoritative one: `_attach_image_bytes`
+            # sniffs again below, and that second sniff is what actually decides
+            # sendability for both routes. This one exists to avoid reading a
+            # 4 MB file that was never going to be attachable — a header read of
+            # 64 KB is much cheaper than the whole file.
+            #
             # `sendable` and not merely "recognised": HEIC sniffs fine and no
             # provider will take it, so attaching it would trade a readable
             # path in the prompt for a 400 later in the turn.
+            info = sniff_image_file(path)
             if info is None or not info.sendable:
                 return None
             try:
                 data = Path(path).read_bytes()
             except (OSError, ValueError):
                 return None
-            if len(data) > MAX_ATTACHMENT_BYTES:
+            if len(data) > MAX_CLIPBOARD_READ_BYTES:
                 # The stat above is the real gate; this catches a file that grew
-                # between the two calls.
+                # between the two calls. Same ceiling as the stat, for the same
+                # reason: `_attach_image_bytes` applies the ATTACHMENT cap after
+                # bounding, which is the only place it belongs.
                 return None
-            # BOUND before attaching, in a thread. The bytes on disk are
-            # whatever the screen produced, and a provider refuses an image over
-            # 2000 pixels on its long edge as soon as the request carries more
-            # than twenty of them (see local_operator.imaging). Forwarding
-            # verbatim was therefore not "lossless", it was a delayed fault: a
-            # 2206x266 paste sat harmlessly in the history for a hundred turns
-            # and then wedged the session permanently the moment the twenty
-            # first screenshot arrived, because the block is in the HISTORY and
-            # every later request — including the compaction that is supposed to
-            # be the escape hatch — re-sends it and earns the same 400.
+            payloads.append(data)
+
+        return await self._attach_image_bytes(payloads)
+
+    async def _attach_image_bytes(self, payloads: list[bytes]) -> str | None:
+        """Bound each payload, attach it, and return the markers it earned.
+
+        The shared tail of BOTH ingestion routes — a path in the paste text and
+        the system clipboard — so the two cannot drift. They must produce byte
+        for byte the same marker, apply the same bound, and honour the same
+        all-or-nothing rule, because from the user's side they are one gesture
+        (``Cmd+V`` on a screenshot) that merely takes different roads depending
+        on which terminal is running. Two copies of this tail is exactly how
+        one route would quietly start attaching unbounded bytes.
+
+        ``None`` means nothing was attached, and NOTHING has been mutated: the
+        loop below completes every bound before a single marker is issued, so a
+        refusal in the third image cannot leave the first two attached with
+        markers the caller then discards.
+
+        Sniffs the BYTES rather than trusting the caller. The path branch has
+        already sniffed the file, and the clipboard backend already knows what
+        it asked for, but this is the last gate before an ``ImageContent``
+        reaches the history, and an unsendable block there is not a failed
+        paste — it is a session that answers every later prompt with the same
+        provider 400 (see :mod:`local_operator.imaging`).
+        """
+        loaded: list[tuple[ImageContent, str]] = []
+        for data in payloads:
+            info = sniff_image(data)
+            # `sendable` and not merely "recognised": HEIC sniffs fine and no
+            # provider will take it, so attaching it would trade a readable
+            # path in the prompt for a 400 later in the turn.
+            if info is None or not info.sendable:
+                return None
+            # BOUND before attaching, in a thread. The bytes are whatever the
+            # screen produced, and a provider refuses an image over 2000 pixels
+            # on its long edge as soon as the request carries more than twenty
+            # of them (see local_operator.imaging). Forwarding verbatim was
+            # therefore not "lossless", it was a delayed fault: a 2206x266
+            # paste sat harmlessly in the history for a hundred turns and then
+            # wedged the session permanently the moment the twenty first
+            # screenshot arrived, because the block is in the HISTORY and every
+            # later request — including the compaction that is supposed to be
+            # the escape hatch — re-sends it and earns the same 400.
             #
             # `to_thread` and not an inline call: this runs on the keystroke
             # that pasted, and a 20 MP screenshot decodes in ~315 ms.
@@ -2490,20 +2768,31 @@ class Editor(TextArea):
                 # not attached, where a silently dropped attachment is the shape
                 # nobody notices until the model answers about nothing.
                 return None
+            if len(payload) > MAX_ATTACHMENT_BYTES:
+                # AFTER the bound, which is the only place this cap belongs.
+                # Applied to the SOURCE bytes it refuses images the resize was
+                # about to make attachable: a Retina screenshot is 8.4-8.5 MB
+                # on the pasteboard and 0.28 MB once bounded, so a pre-bound
+                # gate discarded the exact gesture this feature exists for
+                # (review round 1, U1). What must not reach a provider is the
+                # payload actually sent, and this is it.
+                return None
             loaded.append(
                 (
                     ImageContent(
                         data=base64.b64encode(payload).decode("ascii"),
                         mime_type=wire_mime,
                     ),
-                    # The marker reports what was ATTACHED, not what is on disk.
-                    # A marker reading 2560x1440 beside a 1568x882 attachment is
-                    # a receipt for something that was never sent, and the whole
-                    # point of the dimensions is that the user can check them at
-                    # a glance.
+                    # The marker reports what was ATTACHED, not what was on the
+                    # clipboard or on disk. A marker reading 2560x1440 beside a
+                    # 1568x882 attachment is a receipt for something that was
+                    # never sent, and the whole point of the dimensions is that
+                    # the user can check them at a glance.
                     _bounded_dimensions(payload, info),
                 )
             )
+        if not loaded:
+            return None
 
         # From the BUFFER, immediately before issuing. Every OTHER seam derives
         # the counter, but issuance read it blind, so text carrying a marker

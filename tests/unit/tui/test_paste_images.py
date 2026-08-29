@@ -1,11 +1,15 @@
 """Pasting an image into the composer.
 
 The mechanism, because it is not the obvious one: Textual's ``Paste`` event
-carries TEXT only, so an image never arrives here as bytes. What arrives is a
-PATH — Ghostty writes a clipboard image to ``$TMPDIR/clipboard-<stamp>.png``
-and bracketed-pastes the filename, and Finder's Cmd+C and a drag-and-drop land
-the same way. So the composer hooks paste and loads the file, rather than
-binding a key to read the system clipboard.
+carries TEXT only, so an image never arrives here as bytes. This file covers
+the route where a PATH arrives instead — a drag-and-drop on any terminal, and a
+clipboard image under **cmux**, which watches the pasteboard, writes
+``$TMPDIR/clipboard-<stamp>-<hash>.png`` and bracket-pastes that filename.
+
+That is a cmux feature and not a terminal one, which is what made issue #372
+invisible for so long: in Ghostty, Terminal.app or iTerm2 the same ``Cmd+V``
+delivers an EMPTY paste and this route never fires. The empty-paste route, and
+the clipboard read behind it, are covered in ``test_paste_clipboard.py``.
 
 Every paste here is posted to the APP, not to the widget. ``App.on_event``
 forwards a non-forwarded ``Paste`` to the focused widget (``app.py:4142``), so
@@ -31,12 +35,12 @@ from textual.app import App, ComposeResult
 from textual.widgets import TextArea
 from textual.widgets.text_area import Selection
 
+from local_operator.clipboard import MAX_CLIPBOARD_READ_BYTES
 from local_operator.harness.types import ImageContent
 from local_operator.imaging import IMAGE_MAX_EDGE
 from local_operator.tui.widgets import editor as editor_module
 from local_operator.tui.widgets.editor import (
     IMAGE_MARKER,
-    MAX_ATTACHMENT_BYTES,
     RESIZED_MARK,
     Editor,
     EditorSubmitted,
@@ -284,9 +288,15 @@ async def test_an_oversized_image_is_refused_here_not_by_the_provider(tmp_path) 
     """Refused in the composer, where it is one visible path the user can act
     on, rather than as a provider 400 halfway through a turn — which lands in
     the history and, before the session learned to recover, stayed there."""
+    # Over the INGEST ceiling, so it is refused at the stat gate. A file merely
+    # over the ATTACHMENT cap is no longer refused here — it is bounded down
+    # and attached, which is D12's fix and is covered in test_paste_clipboard.
     big = tmp_path / "huge.png"
     Image.new("RGB", (64, 64)).save(big)
-    big.write_bytes(big.read_bytes() + b"\x00" * (MAX_ATTACHMENT_BYTES + 1))
+    header = big.read_bytes()
+    with big.open("wb") as handle:
+        handle.write(header)
+        handle.truncate(MAX_CLIPBOARD_READ_BYTES + 1)
     app = Host()
     async with app.run_test() as pilot:
         editor = app.query_one(Editor)
@@ -499,9 +509,23 @@ async def test_an_unlabelled_bound_falls_back_to_the_source_dimensions(
     dropping the image or printing a number it invented. Pinned because the
     fallback is otherwise unreachable and would rot silently (review round 1,
     F6).
+
+    The stub answers for the SOURCE bytes and only fails for the bound's
+    output. ``sniff_image`` has two callers on this path and they ask different
+    questions: ``_attach_image_bytes`` asks "is this an image at all", which is
+    the gate that admits a clipboard payload and must keep working, while
+    ``_bounded_dimensions`` asks "what size did the bound deliver", which is
+    the label this test degrades. A blanket ``lambda: None`` disables both and
+    tests nothing, since no attachment survives to carry a label.
     """
     path = _png(tmp_path / "shot.png", 2560, 1440)
-    monkeypatch.setattr(editor_module, "sniff_image", lambda payload: None)
+    source = Path(path).read_bytes()
+    real_sniff = editor_module.sniff_image
+    monkeypatch.setattr(
+        editor_module,
+        "sniff_image",
+        lambda payload: real_sniff(payload) if payload == source else None,
+    )
     app = Host()
     async with app.run_test() as pilot:
         editor = app.query_one(Editor)
@@ -985,9 +1009,17 @@ async def test_an_oversized_file_is_refused_before_it_is_read(tmp_path, no_full_
     was opened at all, which is the property, rather than on timing or memory,
     which are flaky.
     """
+    # Sized against the INGEST ceiling, which is what the stat gate bounds:
+    # the attachment cap applies after `bound_image_for_model`, because a file
+    # that resizes under it is attachable and refusing it early was D12
+    # (a valid screenshot refused by the file route and blamed on its format).
+    # Sparse, so this costs bytes on disk rather than 64 MB of them.
     big = tmp_path / "huge.png"
     Image.new("RGB", (64, 64)).save(big)
-    big.write_bytes(big.read_bytes() + b"\x00" * (MAX_ATTACHMENT_BYTES + 1))
+    header = big.read_bytes()
+    with big.open("wb") as handle:
+        handle.write(header)
+        handle.truncate(MAX_CLIPBOARD_READ_BYTES + 1)
     no_full_reads.clear()  # the fixture setup above is not the composer
 
     app = Host()
