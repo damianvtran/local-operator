@@ -263,6 +263,12 @@ class TranscriptBlock(Static):
     _settled_rows_cache: int | None = None
     #: Memoized "taller than one row?" answer for the spacing decision.
     _multirow_cache: bool | None = None
+    #: Width to fold at while this block has no width of its own and no parent
+    #: to borrow one from — set by a builder that KNOWS where the block is
+    #: about to be mounted. Zero means "not supplied", which is the state of
+    #: every block the app builds through the ordinary mount-then-fill path.
+    #: See :meth:`fold_width` for why the ladder cannot answer this case itself.
+    _fold_hint: int = 0
 
     def set_content(self, renderable: RenderableType, *, layout: bool = True) -> None:
         """Apply ``renderable`` as the block content (no-op once finalized).
@@ -307,6 +313,79 @@ class TranscriptBlock(Static):
             Content.from_rich_text(renderable) if isinstance(renderable, Text) else renderable,
             layout=layout,
         )
+
+    def set_fold_hint(self, width: int) -> None:
+        """Tell a not-yet-parented block the width it is being built for.
+
+        The escape hatch for the one case :meth:`fold_width`'s ladder cannot
+        serve: a block CONSTRUCTED detached and given its content before it is
+        appended anywhere. The ladder walks the block, its container and its
+        parent, and such a block has none of the three — so it folds at the
+        caller's fallback and re-folds a frame later, which is the width flash
+        this whole mechanism exists to remove.
+
+        Only a caller that can prove the destination may use it, and it is a
+        HINT rather than an override: everything above it in the ladder wins,
+        so a stale hint cannot outlive the block's first real layout.
+        """
+        self._fold_hint = max(0, width)
+
+    def fold_width(self, fallback: int) -> int:
+        """The width this block should fold its rows at, right now.
+
+        Every block here bakes its width into the rows it authors, so the one
+        that matters is the width it will END UP at — not the one Textual has
+        got round to assigning. A block is routinely given its content while
+        it is still unmounted or mounted-but-not-yet-laid-out (the app builds
+        a block, fills it, and appends it; the subagent page reconciles into a
+        body that lays out one frame later), and in that window ``self.size``
+        is 0. Falling straight to a hardcoded 80 there is what made a message
+        fold narrow, pin that fold as its height, and then re-fold a frame
+        later when the resize landed — a visible width flash on every mount
+        into a terminal that is not 80 columns wide.
+
+        The ladder walks from the most authoritative source down:
+
+        1. the block's own laid-out width, once it has one;
+        2. its container's, which Textual assigns before the child;
+        3. the PARENT's scrollable content region, which is the width this
+           block is about to be given — the transcript is a vertical container
+           of ``width: 1fr`` blocks, so its scrollable content width (its own
+           content box less any scrollbar gutter) is exactly the child's
+           eventual width. Measured on the subagent page at 140x34: 134, which
+           is the settled ``_built_width`` to the cell, at 100x30: 94, and at
+           60x24 with a scrollbar up: 54;
+        4. a :meth:`set_fold_hint` supplied by a builder that knows where this
+           block is going, for a block built entirely detached — it has no
+           parent to ask, so nothing above this rung can answer;
+        5. ``fallback`` — reached only when nothing knows anything, i.e. a
+           detached block in a unit test.
+
+        It deliberately does NOT consult ``app.console.width``: that is the
+        whole TERMINAL (175 in the harness above), never this block's column,
+        so a block that trusted it would fold far too wide and clip.
+
+        ``fallback`` is passed rather than read from a module constant because
+        the three callers own different ones; they agree on 80 today, and this
+        method is about ordering the sources, not about unifying the last step.
+        """
+        width = self.size.width
+        if width:
+            return width
+        container = getattr(self, "container_size", None)
+        width = container.width if container is not None else 0
+        if width:
+            return width
+        parent = self.parent
+        if isinstance(parent, Widget):
+            # `scrollable_content_region` is the content box minus the gutter
+            # a shown scrollbar occupies, which is the difference between a
+            # fold that is right and one that is two cells too wide on a
+            # scrolled page.
+            region = parent.scrollable_content_region
+            if region.width:
+                return region.width
+        return self._fold_hint or fallback
 
     def invalidate_row_measurements(self) -> None:
         """Drop the memoized row counts (content or WIDTH changed).
@@ -1217,8 +1296,10 @@ class WakeBlock(ExpandableActionBlock):
         """
         from local_operator.tui.widgets.tool_card import FALLBACK_WIDTH
 
-        container = getattr(self, "container_size", None)
-        width = self.size.width or (container.width if container else 0)
+        # Same ladder as `ToolCard._refresh_row`, for the same reason: a row
+        # built before its first layout pass must fold at the width it is
+        # about to be given, not at the terminal's or at 80.
+        width = self.fold_width(0)
         detached = False
         if width <= 0:
             try:

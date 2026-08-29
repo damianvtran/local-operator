@@ -362,8 +362,21 @@ class AssistantBlock(TranscriptBlock):
         self._apply_rows(self._flat_rows(self._flat_width()))
 
     def _flat_width(self) -> int:
-        """The width the rows are built at — the block's own once laid out."""
-        return self.size.width or FALLBACK_WIDTH
+        """The width the rows are built at — the block's own once laid out.
+
+        Before layout it is the width this block is ABOUT to be given, which
+        :meth:`TranscriptBlock.fold_width` derives from the container it was
+        appended into. Going straight to :data:`FALLBACK_WIDTH` here is what
+        made every mount-then-stream path fold at 80 columns, pin that fold as
+        the block's height, and re-fold one frame later when ``on_resize``
+        landed: at 140 columns the block measurably built at 80 and settled at
+        134, which a reader sees as the message flashing narrow. The pin is
+        untouched — ``_apply_rows`` still pins the count of whatever rows it is
+        handed — so the invariant that a self-authoring block is never MEASURED
+        holds exactly as before; only the width those rows are folded at is
+        better informed.
+        """
+        return self.fold_width(FALLBACK_WIDTH)
 
     def _flat_console(self) -> Console | None:
         """The app's console, or ``None`` when this block is detached.
