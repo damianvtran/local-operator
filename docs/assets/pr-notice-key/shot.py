@@ -105,6 +105,27 @@ def _seed() -> list[dict[str, Any]]:
     return events
 
 
+def _pin_view_tail(view: SubagentView) -> None:
+    """Anchor the body at its TAIL, deterministically.
+
+    The before-frame overflows its viewport: eleven duplicate rows do not fit,
+    which is the whole point of the artifact. The page opens at the tail and
+    settles there over several refreshes, so a capture could land at one of two
+    stable offsets and show either 7 or 11 of the duplicates — a difference in
+    the headline number that has nothing to do with the fix (round 3, D6).
+
+    Anchoring at the TAIL is both stable and the right frame to publish: it is
+    where the page actually opens for a reader watching a live child, and it is
+    the state the bug report showed — the newest rows, with the duplicates
+    filling the viewport above the working line. The after-frame does not
+    overflow, so this is a no-op for it and the pair stays comparable.
+    """
+    body = view._body
+    body.scroll_end(animate=False)
+    body.scroll_y = body.max_scroll_y
+    body.scroll_target_y = body.max_scroll_y
+
+
 def _pin_live_clocks(view: SubagentView) -> None:
     """Freeze the still-running tool card's own elapsed counter at 0s.
 
@@ -116,12 +137,16 @@ def _pin_live_clocks(view: SubagentView) -> None:
     to NOW makes the counter a function of the captured state rather than of
     how long the harness happened to take.
     """
+    # The working line carries the same kind of clock and paints on the same
+    # frame, so it is pinned from the same place — pinning it earlier let it
+    # tick between the settle loop and the shot (round 3, D6).
+    for line in view.query(WorkingBlock):
+        line._phase_started = time.monotonic()
     for card in view.query(ToolCard):
         if getattr(card, "_started", None) is not None:
             card._started = time.monotonic()
         if getattr(card, "_compose_started", None) is not None:
             card._compose_started = time.monotonic()
-        card.refresh()
 
 
 async def main() -> None:
@@ -229,6 +254,10 @@ async def main() -> None:
         # than of timing.
         for _ in range(12):
             await pilot.pause()
+        _pin_view_tail(view)
+        for _ in range(6):
+            await pilot.pause()
+
         # LAST, because every `show()` restarts the spinner for a running job:
         # stopping it earlier only holds until the next paint. Pinned to frame
         # 0 so the header glyph is a constant rather than whatever the 80 ms
@@ -245,14 +274,15 @@ async def main() -> None:
         # row's clock and its compose-time clock to NOW, immediately before the
         # shot, so the counter is a function of the state and not of how long
         # the harness happened to take.
-        _pin_live_clocks(view)
         await pilot.pause()
         rows = [row for row in view.rendered_rows() if ERR in row]
         print(f"error rows painted: {len(rows)}")
-        # LAST write wins: a repaint between the pin above and the shot is
-        # enough to advance the counter, so pin again with nothing awaited
-        # afterwards. `save_screenshot` renders from the current widget state,
-        # so this is the value that reaches the file.
+        # LAST, with nothing awaited afterwards: `refresh()` marks the widget
+        # dirty but `save_screenshot` renders from current state, so pinning
+        # here sets the counter without giving the layout a chance to reflow.
+        # Awaiting after this point re-runs the tail scroll and shifts every
+        # row (round 3, D6).
+        _pin_view_tail(view)
         _pin_live_clocks(view)
         app.save_screenshot(sys.argv[1])
 

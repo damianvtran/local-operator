@@ -41,6 +41,14 @@ source of drift before it was (review round 2, D6):
   restarts it for a running job.
 - **The layout is settled** to a fixed point before the shot, since the body
   applies its rows and its tail scroll over several refreshes.
+- **The body is anchored at its tail**, explicitly rather than by asking for a
+  scroll. The before-frame overflows its viewport — eleven duplicate rows do
+  not fit, which is the point of the artifact — and the page could settle at
+  either of two stable offsets, showing 7 or 11 of the duplicates. That is a
+  difference in the headline number with no relation to the fix.
+- **The live clocks are re-anchored last**, with nothing awaited afterwards:
+  the tool card and the working line each run their own `time.monotonic()`
+  counter, and anything awaited after pinning them lets the counter tick.
 
 The one thing that legitimately differs between the two frames is the working
 directory in the status line: the before-frame is captured from a throwaway
