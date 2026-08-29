@@ -174,9 +174,26 @@ def _observe(editor: Editor, stops: list[Any]) -> tuple[Any, ...]:
 
 
 async def _run(
-    state: str, history: bool, act: Callable[[Any, OperatorApp], Any]
+    state: str,
+    history: bool,
+    act: Callable[[Any, OperatorApp], Any],
+    escape_pending: bool = False,
 ) -> tuple[Any, ...]:
-    """Arrange one matrix cell, apply ``act``, and report what a user would see."""
+    """Arrange one matrix cell, apply ``act``, and report what a user would see.
+
+    ``escape_pending`` delivers a REAL lone Escape immediately before the act,
+    within the one-pump-turn window the coalescing holds it for. That axis
+    exists because the matrix could not previously express F8 (code round 3):
+    a self-contained CSI chord landing on a held escape was misread as that
+    escape's second half and cancelled it, silently dropping every meaning Esc
+    has. Every cell is run both ways, so the crossing cannot go dark again.
+
+    The escape is injected as bytes through the real parser rather than as a
+    key name, because a lone ``\\x1b`` only emerges after the parser's own
+    ESCAPE_DELAY -- which is exactly why the user's inter-key gap is spent
+    inside the parser and not inside the widget's window, and therefore why a
+    real gap does not save you from the bug.
+    """
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 24)) as pilot:
         editor = await _boot(pilot, app)
@@ -191,6 +208,18 @@ async def _run(
             return original(message)
 
         app.post_message = _spy  # type: ignore[method-assign]
+        if escape_pending:
+            # Posted WITHOUT yielding, so the escape is still held when the act
+            # runs. Yielding here would let the one-turn deferral resolve first
+            # and the cell would test nothing -- which is exactly the mistake
+            # that let F8 through, reproduced one level up in the test itself.
+            parser = XTermParser()
+            driver = app._driver
+            assert driver is not None
+            for event in list(parser.feed("\x1b")) + list(parser.feed("")):
+                if isinstance(event, events.Key):
+                    event.set_sender(app)
+                    driver.send_message(event)
         await act(pilot, app)
         await _settle(pilot)
         return _observe(editor, stops)
@@ -257,6 +286,120 @@ async def test_the_chord_is_indistinguishable_from_its_plain_arrow(
         f"{encoding} {chord} in {state} (history={history}) diverged from plain "
         f"{CHORDS[chord]}:\n  plain={expected}\n  chord={actual}"
     )
+
+
+def _escape_pending_cells() -> list[tuple[str, bool, str, str]]:
+    """The same cross product, for the self-contained encodings only.
+
+    The Esc-prefixed spelling is excluded by nature rather than by choice: it
+    IS an escape followed by an arrow, so preceding it with a real escape makes
+    a three-event sequence whose first escape stands alone and whose second
+    legitimately pairs with the arrow. That is a different scenario (and is
+    pinned separately in ``test_word_caret.py``), not this axis.
+    """
+    return [
+        (state, history, chord, encoding)
+        for (state, history, chord, encoding) in _cells()
+        if encoding != "esc_prefixed"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("state", "history", "chord", "encoding"),
+    _escape_pending_cells(),
+    ids=lambda v: str(v),
+)
+@pytest.mark.asyncio
+async def test_a_self_contained_chord_never_swallows_a_pending_escape(
+    state: str, history: bool, chord: str, encoding: str
+) -> None:
+    """The F8 axis: a real Esc held when the chord lands must still fire.
+
+    A self-contained chord (one event that already means "option+arrow") is not
+    evidence about a pending escape, so the escape's own action is still owed.
+    This asserts BOTH halves: the escape fires exactly once, AND the chord
+    still moves the caret exactly as it does with no escape pending.
+
+    Without the ``self_contained`` guard in ``_on_key`` these cells fail: the
+    rewrite turned ``alt+up`` into ``up``, ``up`` is in ``ESCAPE_CHORD_KEYS``,
+    and the chord cancelled the escape it had nothing to do with -- taking the
+    stop, the shell-mode exit, or a picker dismissal with it.
+
+    NOTE the oracle here is the chord's OWN no-escape outcome, not the plain
+    arrow. ``pilot.press`` delivers a key NAME without going through the
+    parser, so the plain arm's escape is still held when its arrow lands and it
+    legitimately reports zero stops -- an artifact of the harness, not of the
+    product. Comparing against it would assert the bug. The equivalence to the
+    plain arrow is already covered by the no-escape axis above; what is left to
+    pin here is that a pending escape changes nothing about the chord and is
+    itself preserved.
+    """
+    raw = _encode(encoding, chord)
+    assert raw is not None
+
+    # THE CONTROL is the horizontal chord, and the choice matters. `alt+left`
+    # is never rewritten, is not in `ESCAPE_CHORD_KEYS`, and therefore never had
+    # F8 -- the code reviewer identified exactly that asymmetry as the tell. So
+    # "how a pending escape is disposed of in this state" is read off the chord
+    # that provably handles it correctly, and the chord under test must match.
+    #
+    # Reading it from a control rather than asserting a fixed outcome is what
+    # keeps this honest: Esc means four different things depending on state
+    # (stop, leave shell mode, dismiss either list), and in the picker states a
+    # dismissed list is legitimately re-opened by the following `_sync_picker`.
+    # Hand-writing those outcomes would have encoded a pre-existing behaviour as
+    # if it were this feature's contract.
+    control_raw = _encode(encoding, "shift+left" if "shift" in chord else "left")
+    assert control_raw is not None
+    control = await _run(state, history, _feed_bytes(control_raw), escape_pending=True)
+    control_baseline = await _run(state, history, _feed_bytes(control_raw))
+
+    baseline = await _run(state, history, _feed_bytes(raw))
+    actual = await _run(state, history, _feed_bytes(raw), escape_pending=True)
+
+    # Whatever the escape did to the control's state, it must also have done
+    # here: same shell mode, same picker states, same stop count.
+    control_effect = (control[3], control[4], control[5], control[-1] - control_baseline[-1])
+    actual_effect = (actual[3], actual[4], actual[5], actual[-1] - baseline[-1])
+    assert actual_effect == control_effect, (
+        f"{encoding} {chord} in {state} (history={history}) disposed of the pending "
+        f"escape differently from the never-rewritten horizontal chord:\n"
+        f"  control (option+left) effect={control_effect}\n"
+        f"  {chord} effect={actual_effect}\n"
+        f"  without escape={baseline}\n  with escape={actual}"
+    )
+    # The chord's own motion is NOT asserted equal to its no-escape baseline,
+    # deliberately. A flushed escape legitimately changes the state the chord
+    # then acts on -- with a command list open, Esc dismisses the list, so the
+    # following `up` is no longer claimed by the picker and correctly falls
+    # through to history recall. Demanding identical motion would assert that
+    # the escape had NOT taken effect, i.e. would re-encode F8 as the contract.
+    #
+    # What must hold is that the chord behaves like a plain arrow pressed in
+    # that same post-escape state, which the no-escape axis already pins for
+    # every state the escape can leave behind.
+
+
+@pytest.mark.parametrize("encoding", ["csi", "meta"])
+@pytest.mark.parametrize("chord", list(CHORDS))
+@pytest.mark.asyncio
+async def test_a_pending_escape_still_stops_the_turn_after_a_chord(
+    chord: str, encoding: str
+) -> None:
+    """The F8 payload, stated absolutely rather than against an oracle.
+
+    Belt and braces beside the equivalence test above: if the plain-arrow
+    oracle were itself ever broken, the equivalence could hold while both sides
+    lost the stop. This pins the stop count directly.
+    """
+    raw = _encode(encoding, chord)
+    if raw is None:
+        pytest.skip(f"{encoding} has no spelling for {chord}")
+
+    result = await _run("resting", False, _feed_bytes(raw), escape_pending=True)
+    stops = result[-1]
+
+    assert stops == 1, f"{encoding} {chord} swallowed the pending escape (stops={stops})"
 
 
 @pytest.mark.parametrize("encoding", ENCODINGS)

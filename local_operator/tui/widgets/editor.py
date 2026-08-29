@@ -1434,13 +1434,41 @@ class Editor(TextArea):
         # `up`/`down`. Both encodings therefore converge on ONE implementation
         # of what the arrow means, which is the property that stops them
         # drifting apart again.
-        if key in self.VERTICAL_CHORD_KEYS:
+        #
+        # THE INVARIANT, stated because getting it wrong has now caused a defect
+        # in three consecutive rounds, each time on the encoding the previous
+        # fix did not touch:
+        #
+        #   A key that arrived as its own SELF-CONTAINED chord must never be
+        #   treated as the tail of an escape chord.
+        #
+        # The two encodings carry the same intent in structurally different
+        # shapes. `\x1b[1;3A` is ONE event that already means "option+up";
+        # `\x1b\x1b[A` is TWO events whose first is indistinguishable from a
+        # real Escape until the second arrives. Only the second kind is
+        # evidence about a pending escape. `self_contained` records which kind
+        # this was BEFORE the rewrite erases the distinction, because after the
+        # rewrite both spellings read as `up` and the difference is
+        # unrecoverable (code round 3, F8).
+        self_contained = key in self.VERTICAL_CHORD_KEYS
+        if self_contained:
             key = self.VERTICAL_CHORD_KEYS[key]
         # FIRST, ahead of every other branch: an arrow completing a held escape
         # is the second half of an option+arrow chord, and it must be read as
         # that before any picker or history handler claims it. See the
         # escape-coalescing block below `_on_key` for the whole rationale.
-        if self._pending_escape is not None and key in self.ESCAPE_CHORD_KEYS:
+        #
+        # `not self_contained` is the invariant above doing its work. Without
+        # it a rewritten `alt+up` landing while an escape was held was read as
+        # that escape's second half and CANCELLED it, silently dropping every
+        # meaning Esc has — the turn kept running, bang-mode stayed on, an open
+        # list refused to dismiss. The horizontal chords never had the bug only
+        # because `alt+left` is not rewritten and so was never in this table.
+        if (
+            self._pending_escape is not None
+            and not self_contained
+            and key in self.ESCAPE_CHORD_KEYS
+        ):
             chord = self.ESCAPE_CHORD_KEYS[key]
             # The escape is DROPPED, not run: the user pressed one chord, so
             # whatever that escape would have done — stop the turn, leave shell
@@ -1753,6 +1781,16 @@ class Editor(TextArea):
             }
             move = moves.get(key)
             if move is not None:
+                # `_restart_blink` for the same reason the rest of this method
+                # exists: `TextArea._on_key` calls it on every cursor key, and
+                # the whole correctness argument for the rewrite is that a
+                # chord is INDISTINGUISHABLE from its plain arrow. Inert today
+                # — this composer ships `cursor_blink = False`, so there is no
+                # timer to reset — but leaving it out would make that claim
+                # true only by accident of a setting somewhere else, and the
+                # divergence would surface as `⌥↑` parking the caret mid-blink
+                # where `↑` leaves it solid (ux round 3, U10).
+                self._restart_blink()
                 move()
                 event.stop()
                 event.prevent_default()
