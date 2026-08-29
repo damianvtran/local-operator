@@ -668,8 +668,12 @@ class AssistantBlock(TranscriptBlock):
         break between them is a soft wrap at the current width rather than a
         character in the document (design round 1, D2). A space is not always
         right — a token wider than the render segment is folded mid-token and
-        nothing is consumed — so the separator is decided against the source
-        line by :func:`_copy_markdown.wrap_separator`.
+        nothing is consumed — so each fold's separator is decided by walking
+        the row against its source line, :func:`_copy_markdown.wrap_separators`.
+        The decision is POSITIONAL: an earlier version asked only whether the
+        two rows' adjoining tokens appeared welded ANYWHERE in the line, which
+        destroyed a real word boundary on any line using both ``file system``
+        and ``filesystem`` (review round 2, R2-1; design round 2, D2-2).
 
         **The accepted cost**, stated so it is chosen rather than rediscovered:
         a drag from the middle of one bullet to the middle of the next copies
@@ -786,12 +790,24 @@ class AssistantBlock(TranscriptBlock):
             # composer bug ``_put_on_clipboard`` already fixed (design round 1,
             # D2). Once rejoined the receipt falls into the character branch by
             # itself, so the unit needs no separate fix.
+            # The separators are decided from the FULL rows of the source line,
+            # not from the clipped ends the reader highlighted. The walk that
+            # replaced the old substring test is positional and end-anchored, so
+            # it needs the same text Rich painted: a trimmed first row cannot be
+            # located in the source line, and a partial take is exactly where a
+            # membership test used to guess wrong (review round 2, R2-1).
             source_line = self._source_line(mapping, content[0][0])
+            full_rows = [
+                rows[index][self._furniture_width(rows, mapping, index, content) :].rstrip()
+                for index, _ in content
+            ]
+            separators = _copy_markdown.wrap_separators(full_rows, source_line)
+
             joined = trimmed[0]
-            for position, text in enumerate(trimmed[1:], start=1):
+            for offset, text in enumerate(trimmed[1:]):
                 if not text:
                     continue
-                separator = _copy_markdown.wrap_separator(joined, text, source_line)
+                separator = separators[offset] if offset < len(separators) else " "
                 joined = f"{joined}{separator}{text}" if joined else text
             return joined, "\n"
 

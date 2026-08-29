@@ -28,9 +28,28 @@ renderer trims them.
 from __future__ import annotations
 
 import re
+import unicodedata
 
 #: A line that opens or closes a fenced code block.
-_FENCE_RE = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
+#:
+#: The indent is deliberately UNBOUNDED rather than CommonMark's three spaces.
+#: Three is the limit relative to the block's CONTAINER, and these lines arrive
+#: flat with no container context, so a fence indented under a list item — four
+#: spaces under ``- `` , five under ``1. `` , more when nested — read as ordinary
+#: text under a bounded pattern. That made ``classify`` return an EMPTY covered
+#: set for one of the most common shapes this app paints (numbered steps with a
+#: fenced command under each), which in turn let ``furniture_width`` take its
+#: list branch over CODE and strip a leading digit: ``3 rows expected`` copied as
+#: ``rows expected`` (design round 2, D2-1).
+#:
+#: The trade-off, taken knowingly: a literal `````` ``` ```` inside a FOUR-SPACE
+#: INDENTED code block is now read as a fence. That construct is vanishingly rare
+#: in assistant output (Rich's markdown renders indented code as code either
+#: way), while list-nested fences are routine, and the failure directions are not
+#: symmetric — over-recognising a fence makes the copy verbatim, which is the
+#: conservative answer for a clipboard, while under-recognising one deletes
+#: characters from the user's code.
+_FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
 #: A list item (bullet or ordered).
 _LIST_RE = re.compile(r"^\s{0,3}(?:[-+*]|\d{1,9}[.)])\s")
 #: A blockquote line (one or more ``>`` levels).
@@ -229,15 +248,48 @@ def align(source: str, rendered_rows: list[str]) -> list[int | None]:
                 if look in covered or not line.strip():
                     continue
                 if _LIST_RE.match(line) or _QUOTE_RE.match(line) or _HEADING_RE.match(line):
+                    # A bare ``>`` separating two quote lines paints no word of
+                    # its own, so it cannot answer whether this row starts a new
+                    # structural line. Stopping the scan there hid the quoted
+                    # LIST behind it: every row of the list was attributed to the
+                    # quote's opening line, so ``furniture_width`` was handed a
+                    # source line that is a quote but not a list item and kept
+                    # the ``•`` (design round 2, D2-4).
+                    if _QUOTE_RE.match(line) and not _strip_markup(line):
+                        continue
                     anchor = _first_word(_strip_markup(line)) or _first_word(line)
                     if word and anchor and word == anchor:
                         starts_structural = True
+                    break
+
+        # A FENCE BODY line likewise always opens its own rendered row, and it
+        # has to be checked separately because the structural scan above skips
+        # covered lines. Without this a fence indented under a list item was
+        # absorbed as a WRAP of the item that opens it: the item's wrap budget
+        # was still live, the code row matched no structural anchor, so the code
+        # was attributed to ``- Run the check:``. That mis-attribution is what
+        # made ``fenced`` False over code even once ``classify`` saw the fence,
+        # so ``furniture_width`` read the code's leading ``1`` as an ordered
+        # marker and deleted it (design round 2, D2-1, second cause).
+        #
+        # Matched on EXACT stripped text, the same key the anchor scan below
+        # uses for a covered line: a code line has no markup to normalise, and
+        # an exact match cannot steal a row from the prose it wraps.
+        starts_fence_body = False
+        if not starts_structural:
+            for look in range(src, min(src + _LOOKAHEAD, n)):
+                if look in markers or look not in covered:
+                    continue
+                line = src_lines[look]
+                if line.strip() and row.strip() == line.strip():
+                    starts_fence_body = True
                     break
         if (
             current is not None
             and budget > 0
             and not no_wrap_now
             and not starts_structural
+            and not starts_fence_body
             and not _RENDERED_MARKER_RE.match(row)
         ):
             placed = current
@@ -336,41 +388,191 @@ def furniture_width(row: str, source_line: str | None, *, opens_line: bool, fenc
         # to attribute a prefix to, every glyph is content until proven
         # otherwise, and that is the conservative direction for a clipboard.
         return 0
-    if _QUOTE_RE.match(source_line):
+    # Constructs COMPOSE, so the branches are applied in painted order rather
+    # than as an either/or. A list nested in a blockquote paints ``▌  • text``:
+    # testing the quote first and returning stripped the bar but kept the ``•``,
+    # leaking a glyph that is nowhere in the user's document and flipping the
+    # paste format on a one-cell change of drag start (design round 2, D2-4).
+    width = 0
+    remainder = source_line
+    if _QUOTE_RE.match(remainder):
         match = _RENDERED_QUOTE_PREFIX_RE.match(row)
-        return match.end() if match else 0
-    if _LIST_RE.match(source_line):
+        if match:
+            width = match.end()
+        # Peel the quote marker so the line can be re-tested for what it CONTAINS
+        # — the same source line is both a quote line and a list item.
+        remainder = _QUOTE_RE.sub("", remainder, count=1)
+
+    if _LIST_RE.match(remainder):
         if opens_line:
-            match = _RENDERED_LIST_PREFIX_RE.match(row)
-            return match.end() if match else 0
-        return len(row) - len(row.lstrip(" "))
-    return 0
+            match = _RENDERED_LIST_PREFIX_RE.match(row[width:])
+            return width + (match.end() if match else 0)
+        # A continuation is indented to the marker's column with plain spaces.
+        tail = row[width:]
+        return width + (len(tail) - len(tail.lstrip(" ")))
+    return width
 
 
-def wrap_separator(before: str, after: str, source_line: str | None) -> str:
-    """What the terminal CONSUMED at the fold between two rows of one source line.
+#: Inline markers Rich DROPS when it paints, so a rendered row is not a literal
+#: substring of its source line. Stepping over these is what lets the positional
+#: walk below place a row of ``**bold text** and `code```.
+_INLINE_MARKUP = "*_`~"
+
+
+def _skip_inline_markup(source: str, i: int) -> int:
+    """Advance past inline markers at ``i`` that render as nothing.
+
+    Handles emphasis/code runs and a link's ``](target)`` tail, whose label is
+    painted while the target is not.
+    """
+    while i < len(source):
+        char = source[i]
+        if char in _INLINE_MARKUP or char == "[":
+            i += 1
+            continue
+        if char == "]" and source.startswith("](", i):
+            close = source.find(")", i + 2)
+            if close < 0:
+                return i
+            i = close + 1
+            continue
+        break
+    return i
+
+
+def _match_visible(source: str, start: int, text: str) -> int | None:
+    """End offset of ``text`` rendered from ``source`` at ``start``, or ``None``.
+
+    Compares the LITERAL character first and only treats a mismatch as markup.
+    The order matters: intraword ``_`` is literal in CommonMark, so a walk that
+    skipped markers unconditionally could not place
+    ``some_verylongtoken_here`` and fell back to guessing on exactly the
+    mid-token folds the separator has to get right.
+    """
+    i, j = start, 0
+    while j < len(text):
+        if i < len(source) and source[i] == text[j]:
+            i += 1
+            j += 1
+            continue
+        nxt = _skip_inline_markup(source, i)
+        if nxt == i:
+            return None
+        i = nxt
+    return i
+
+
+def _separator_for_scripts(left: str, right: str) -> str:
+    """Fallback separator judged from the characters either side of a fold.
+
+    Only reached when the positional walk could not place the rows. A terminal
+    breaks CJK between any two characters because those scripts do not write
+    spaces, so a space there is never something the user had; Latin text breaks
+    at a space it then consumes, so one has to go back. Asking the adjacent
+    characters is a HEURISTIC, but a far narrower one than assuming a space
+    everywhere: it is what stops a Chinese or Japanese paragraph gaining an
+    invented space at every fold (review round 2, R2-2; design round 2, D2-3),
+    while leaving Latin prose — emoji and double-width cells included, which are
+    placed by the walk and never reach here — rejoining with the space it lost.
+    """
+    for char in (left, right):
+        if not char or unicodedata.east_asian_width(char) not in ("W", "F"):
+            continue
+        # Width alone is the WRONG test: an emoji is double-width too, and emoji
+        # sit in space-delimited Latin prose that genuinely lost a space at the
+        # fold. Review round 2 verified emoji already copied correctly, so the
+        # rule is narrowed to wide characters that are TEXT (letters and the
+        # CJK punctuation that ends a clause) rather than symbols (category
+        # ``So``, which is where emoji live).
+        if unicodedata.category(char)[0] in ("L", "P"):
+            return ""
+    return " "
+
+
+def wrap_separators(row_texts: list[str], source_line: str | None) -> list[str]:
+    """What the terminal CONSUMED at each fold between rows of ONE source line.
+
+    Returns one separator per fold, so ``len(row_texts) - 1`` entries.
 
     A soft wrap is not always a space. Rich breaks at a space when it can and
     consumes it, so rejoining needs one put back; but a token wider than the
     render segment is broken MID-TOKEN and nothing is consumed, so putting a
-    space back would invent a character the user never had. Measured, both are
-    reachable in ordinary prose at ordinary widths: a bare URL or a long
-    identifier folds mid-token at 40 columns while the sentence around it folds
-    at spaces.
+    space back would invent a character the user never had. Both are reachable
+    in ordinary prose at ordinary widths: a bare URL folds mid-token at 40
+    columns while the sentence around it folds at spaces.
 
-    The discriminator is the source line itself, which is the only place that
-    records what was really between them: if the last token of ``before``
-    concatenated to the first token of ``after`` occurs in it, the fold split
-    one token and the rejoin takes nothing. Asking the source rather than
-    inferring from the row's fill level is what makes this exact rather than a
-    heuristic about padding.
+    **The decision is POSITIONAL.** The rows are walked against the source line
+    with a cursor, and the separator for a fold is the whitespace actually
+    sitting at that point in the line. The previous test — does
+    ``last_token_of_A + first_token_of_B`` occur ANYWHERE in the line — ignored
+    position, so a line using both ``file system`` and ``filesystem`` judged a
+    real space-fold to be mid-token and welded two words shut: ``filesystem
+    layer``, silently wrong and unrepairable by the reader (review round 2,
+    R2-1; design round 2, D2-2, 30 reproductions across five prose lines).
+
+    The walk is **end-anchored**: the rows must consume the line's whole visible
+    content, which is what forces a single correct alignment instead of letting
+    an early partial match stand. ``row_texts`` must therefore be the FULL rows
+    of the source line, not a selection's clipped ends.
+
+    When the walk cannot place the rows the answer falls to
+    :func:`_separator_for_scripts`, and that fallback IS a heuristic — stated
+    plainly here because an earlier version of this docstring claimed the
+    source-asking approach was exact when it was not (design round 2, D2-2).
     """
-    if source_line is None:
-        return " "
-    tokens_before, tokens_after = before.split(), after.split()
-    if not tokens_before or not tokens_after:
-        return " "
-    return "" if (tokens_before[-1] + tokens_after[0]) in source_line else " "
+    folds = max(len(row_texts) - 1, 0)
+    if not folds:
+        return []
+
+    stripped = [text.strip() for text in row_texts]
+    if source_line is not None:
+        walked = _walk_folds(stripped, source_line)
+        if walked is not None:
+            return walked
+
+    # No placement, so decide each fold from the scripts meeting at it. This is
+    # also the branch an unplaceable row takes (``align`` returned ``None``),
+    # where returning ``" "`` unconditionally is what put a space into CJK.
+    return [_separator_for_scripts(stripped[i][-1:], stripped[i + 1][:1]) for i in range(folds)]
+
+
+def _walk_folds(row_texts: list[str], source_line: str) -> list[str] | None:
+    """Separators from a positional walk of ``row_texts`` over ``source_line``.
+
+    ``None`` when no start offset lets the rows consume the line exactly, which
+    leaves the caller its documented fallback rather than a wrong answer.
+    """
+    for start in range(len(source_line) + 1):
+        cursor = _match_visible(source_line, start, row_texts[0])
+        if cursor is None:
+            continue
+        separators: list[str] = []
+        for text in row_texts[1:]:
+            # Step over whatever sits between the rows: the whitespace the fold
+            # consumed, plus any inline marker that paints nothing. Whether that
+            # run held WHITESPACE is the whole question — that is the character
+            # the rejoin has to put back.
+            gap = cursor
+            saw_space = False
+            while gap < len(source_line):
+                if source_line[gap].isspace():
+                    saw_space = True
+                    gap += 1
+                    continue
+                nxt = _skip_inline_markup(source_line, gap)
+                if nxt == gap:
+                    break
+                gap = nxt
+            end = _match_visible(source_line, gap, text)
+            if end is None:
+                separators = []
+                break
+            separators.append(" " if saw_space else "")
+            cursor = end
+        else:
+            if source_line[cursor:].strip() == "":
+                return separators
+    return None
 
 
 def slice_markdown(source: str, mapping: list[int | None], first_row: int, last_row: int) -> str:

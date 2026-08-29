@@ -71,6 +71,7 @@ from local_operator.tui import theme as theme_mod
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.glyphs import tool_icon
 from local_operator.tui.markdown_theme import install_markdown_theme
+from local_operator.tui.widgets import _copy_markdown
 from local_operator.tui.widgets.assistant import AssistantBlock, flatten
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.toast import TOAST_FAILURE_MS, Toast
@@ -534,6 +535,82 @@ WRAPPED_QUOTE = (
 #: so a take across this fold must rejoin with no separator at all.
 LONG_TOKEN = "See supercalifragilisticexpialidociousandthensome_verylongtoken_here now.\n"
 
+#: A line using BOTH the open and closed form of a compound. The closed form is
+#: what made the round-2 rejoin weld the open one shut: the discriminator asked
+#: whether ``file`` + ``system`` occurs ANYWHERE in the line, and it does, so a
+#: real space-fold was judged mid-token (review round 2, R2-1; design round 2,
+#: D2-2). Position is the only thing that separates the two occurrences.
+COMPOUND_PAIR = (
+    "The filesystem and the file system layer are different things in this "
+    "codebase, remember that.\n"
+)
+
+#: Ordinary English compound pairs, swept rather than sampled: a
+#: membership-versus-position bug reproduces on whichever pair happens to fall
+#: either side of the fold at a given width, so one fixture proves very little.
+COMPOUND_PAIRS = (
+    ("filesystem", "file system"),
+    ("login", "log in"),
+    ("setup", "set up"),
+    ("checkout", "check out"),
+    ("timeout", "time out"),
+    ("backup", "back up"),
+    ("workflow", "work flow"),
+    ("runtime", "run time"),
+    ("database", "data base"),
+    ("frontend", "front end"),
+    ("username", "user name"),
+    ("hostname", "host name"),
+    ("keyword", "key word"),
+    ("website", "web site"),
+    ("dropdown", "drop down"),
+)
+
+#: CJK prose. ``align`` cannot place these rows (no anchor word survives), so
+#: the copy takes the ``source_line is None`` fallback — the branch that
+#: returned ``" "`` unconditionally and put a space into text whose script never
+#: writes one (review round 2, R2-2; design round 2, D2-3).
+CJK_PARAGRAPH = "这是一个很长的中文句子用来测试换行和复制的行为是否正确无误请仔细检查每一个字符是否都被正确地复制到剪贴板中。\n"
+
+JAPANESE_PARAGRAPH = "これは日本語の段落です。この行は端末の幅で折り返されますので、コピーの境界を確認するのに適しています。\n"
+
+#: Emoji in Latin prose: double-width like CJK, but space-delimited, so a fold
+#: here DID consume a space. The control that keeps the CJK fix from being
+#: written as "wide characters never rejoin with a space" (review round 2
+#: verified emoji already copied correctly and asked that it stay that way).
+EMOJI_PROSE = "The status 🎉🎉🎉 report 🚀🚀🚀 with many emoji 🔥 and more text here now.\n"
+
+#: A fenced block indented INSIDE a list item — numbered steps with a command
+#: under each, one of the most common shapes this app paints. The fence sits at
+#: four spaces, which a three-space-bounded ``_FENCE_RE`` did not recognise, so
+#: ``classify`` saw no fence, ``furniture_width`` took its LIST branch over code
+#: and read the leading ``1`` as a rendered ordered marker (design round 2,
+#: D2-1). The code lines deliberately open with digits.
+NESTED_FENCE = (
+    "1. Start the service:\n"
+    "\n"
+    "    ```sh\n"
+    "    1 / 0\n"
+    "    docker compose up -d\n"
+    "    ```\n"
+    "\n"
+    "2. Then check the row count:\n"
+    "\n"
+    "    ```sh\n"
+    "    3 rows expected\n"
+    "    psql -c 'select count(*) from ingest'\n"
+    "    ```\n"
+)
+
+#: A bulleted list nested inside a blockquote. Rich paints ``▌  • text`` — two
+#: constructs' furniture on one row — and a branch chain that returns on the
+#: first match strips the bar and leaves the bullet (design round 2, D2-4).
+QUOTED_LIST = (
+    "> Here is a quoted list:\n"
+    ">\n"
+    "> - a quoted bullet item that is long enough to wrap across two rows\n"
+)
+
 
 def _rendered_rows(block: AssistantBlock) -> list[str]:
     """The frame's rows, as ``get_selection`` and the highlight both see them."""
@@ -937,7 +1014,7 @@ async def test_a_take_across_a_mid_token_fold_rejoins_with_no_space() -> None:
     segment mid-token, so putting a space back would invent a character the
     document never had and silently break a pasted URL or identifier. Measured
     reachable in ordinary prose at ordinary widths, which is why
-    ``wrap_separator`` asks the source line instead of assuming a space.
+    ``wrap_separators`` walks the source line instead of assuming a space.
     """
     app = StyledTranscriptApp()
     async with app.run_test(size=(34, 40)) as pilot:
@@ -2800,3 +2877,307 @@ async def test_a_receipt_retires_even_when_the_caret_moved_before_the_edit() -> 
         assert not any(
             "copied" in row.lower() for row in rows
         ), f"a stale copy receipt is still painted: {[r for r in rows if 'copied' in r.lower()]}"
+
+
+# -- review round 2 / design round 2 -----------------------------------------
+@pytest.mark.asyncio
+async def test_a_fold_between_two_words_keeps_the_space_the_user_had() -> None:
+    """Pins that the wrap rejoin is POSITIONAL, not a substring membership test.
+
+    The regression this replaces: ``wrap_separator`` asked whether the last
+    token of one row concatenated to the first token of the next occurred
+    ANYWHERE in the source line. A line using both ``file system`` and
+    ``filesystem`` answers yes, so a fold at a real space was judged mid-token
+    and the two words were welded shut — ``filesystem layer`` where the user
+    highlighted ``file system layer`` (review round 2, R2-1; design round 2,
+    D2-2).
+
+    That is silent corruption: unlike the over-copy it replaced and unlike the
+    newline before it, the paste looks like well-formed prose and the reader
+    cannot tell a character is missing. Swept across widths because which pair
+    lands either side of the fold is width-dependent.
+    """
+    welded: list[tuple[int, str]] = []
+    for width in range(28, 40):
+        app = StyledTranscriptApp()
+        async with app.run_test(size=(width, 40)) as pilot:
+            block = AssistantBlock()
+            await _mounted(app, block)
+            block.update_text(COMPOUND_PAIR)
+            block.finalize_text()
+            await pilot.pause()
+
+            rows = _rendered_rows(block)
+            # Anchor on the OPEN form's first word where it is followed by the
+            # fold, i.e. the last row that ends in "file" — the closed compound
+            # "filesystem" appears earlier in the same line, which is the whole
+            # point of the fixture, so a plain index() would find the wrong one.
+            last_row, _, end = _find(rows, "layer")
+            first_row = next(
+                (i for i in range(last_row - 1, -1, -1) if rows[i].rstrip().endswith("file")),
+                None,
+            )
+            if first_row is None:
+                continue  # the fold does not fall between "file" and "system" here
+            start = rows[first_row].rstrip().rindex("file")
+
+            selection = Selection.from_offsets(
+                Offset(x=start, y=first_row), Offset(x=end, y=last_row)
+            )
+            copied = block.get_selection(selection)
+            assert copied is not None
+
+            # The clipboard must be text the source actually contains. A welded
+            # compound is not, which is what makes this a regression test.
+            if copied[0] not in COMPOUND_PAIR:
+                welded.append((width, copied[0]))
+
+    assert not welded, f"the rejoin destroyed a word boundary: {welded}"
+
+
+@pytest.mark.asyncio
+async def test_no_ordinary_compound_pair_is_welded_at_any_width() -> None:
+    """The sweep that a single fixture cannot stand in for.
+
+    A membership-versus-position bug fires only when the two words either side
+    of the fold also appear welded elsewhere in the line, so it hides from any
+    sampled test whose fixture happens to fold elsewhere. Review round 2 found
+    it by probing 15 ordinary compound pairs; design round 2 found 30
+    reproductions across five prose lines. This pins the whole class rather
+    than the one example that was reported.
+    """
+    failures: list[tuple[str, int, str]] = []
+    for joined, spaced in COMPOUND_PAIRS:
+        head = spaced.split()[0]
+        source = (
+            f"The {joined} and the {spaced} layer are different things in this "
+            f"codebase, remember that.\n"
+        )
+        for width in (29, 31, 33, 35):
+            app = StyledTranscriptApp()
+            async with app.run_test(size=(width, 40)) as pilot:
+                block = AssistantBlock()
+                await _mounted(app, block)
+                block.update_text(source)
+                block.finalize_text()
+                await pilot.pause()
+
+                rows = _rendered_rows(block)
+                try:
+                    last_row, _, end = _find(rows, "layer")
+                except AssertionError:
+                    continue
+                first_row = next(
+                    (i for i in range(last_row - 1, -1, -1) if rows[i].rstrip().endswith(head)),
+                    None,
+                )
+                if first_row is None:
+                    continue  # this width does not fold between the pair's words
+                start = rows[first_row].rstrip().rindex(head)
+
+                selection = Selection.from_offsets(
+                    Offset(x=start, y=first_row), Offset(x=end, y=last_row)
+                )
+                copied = block.get_selection(selection)
+                assert copied is not None
+                if copied[0] not in source:
+                    failures.append((spaced, width, copied[0]))
+
+    assert not failures, f"compound pairs welded shut: {failures}"
+
+
+@pytest.mark.asyncio
+async def test_a_cjk_fold_does_not_invent_a_space() -> None:
+    """Pins the ``align``-returned-``None`` fallback as conservative.
+
+    ``wrap_separator`` returned ``" "`` unconditionally when the row could not
+    be placed. CJK rows are exactly that case — no anchor word survives, so the
+    whole message maps to ``None`` — and CJK never breaks at a space, so every
+    fold gained a character the document does not contain anywhere (review
+    round 2, R2-2; design round 2, D2-3).
+
+    In Japanese an interpolated space is not cosmetic; it reads as a deliberate
+    break. Asserted as "the clipboard is a substring of the source", the same
+    invariant the compound test uses, because that is the property a paste has
+    to have.
+    """
+    for label, text in (("chinese", CJK_PARAGRAPH), ("japanese", JAPANESE_PARAGRAPH)):
+        for width in (30, 34, 40):
+            app = StyledTranscriptApp()
+            async with app.run_test(size=(width, 40)) as pilot:
+                block = AssistantBlock()
+                await _mounted(app, block)
+                block.update_text(text)
+                block.finalize_text()
+                await pilot.pause()
+
+                rows = _rendered_rows(block)
+                content = [i for i, row in enumerate(rows) if row.strip()]
+                if len(content) < 2:
+                    continue
+                first_row, last_row = content[0], content[1]
+
+                selection = Selection.from_offsets(
+                    Offset(x=2, y=first_row),
+                    Offset(x=max(1, len(rows[last_row].rstrip()) - 4), y=last_row),
+                )
+                copied = block.get_selection(selection)
+                assert copied is not None
+                assert " " not in copied[0], (
+                    f"{label} at width {width} gained a space the source never had: "
+                    f"{copied[0]!r}"
+                )
+                assert copied[0] in text, (
+                    f"{label} at width {width} copied text absent from the source: "
+                    f"{copied[0]!r}"
+                )
+
+
+@pytest.mark.asyncio
+async def test_an_emoji_fold_still_rejoins_with_its_space() -> None:
+    """The control that keeps the CJK fix from over-reaching.
+
+    Emoji are double-width like CJK, but they sit in space-delimited Latin
+    prose, so a fold beside one DID consume a space and the rejoin must put it
+    back. Review round 2 verified emoji already copied correctly and explicitly
+    asked that width handling not be re-engineered, so this pins the boundary:
+    the rule is about scripts that do not write spaces, not about cell width.
+    """
+    for width in (30, 34, 40):
+        app = StyledTranscriptApp()
+        async with app.run_test(size=(width, 40)) as pilot:
+            block = AssistantBlock()
+            await _mounted(app, block)
+            block.update_text(EMOJI_PROSE)
+            block.finalize_text()
+            await pilot.pause()
+
+            rows = _rendered_rows(block)
+            first_row, start, _ = _find(rows, "status")
+            last_row, _, end = _find(rows, "emoji")
+            if first_row == last_row:
+                continue
+
+            selection = Selection.from_offsets(
+                Offset(x=start, y=first_row), Offset(x=end, y=last_row)
+            )
+            copied = block.get_selection(selection)
+            assert copied is not None
+            assert (
+                copied[0] in EMOJI_PROSE
+            ), f"emoji prose at width {width} did not rejoin as written: {copied[0]!r}"
+
+
+@pytest.mark.asyncio
+async def test_a_fence_indented_inside_a_list_item_keeps_its_first_character() -> None:
+    """The blocker: code nested under a list item lost its leading character.
+
+    ``test_a_column_zero_drag_inside_a_fence_keeps_the_code`` uses a TOP-LEVEL
+    fence, where both ``classify`` and ``align`` already worked, so it never
+    discriminated this case — it passes on the prior head too.
+
+    Two independent causes, either sufficient (design round 2, D2-1). The fence
+    pattern allowed at most three leading spaces while a fence under a list item
+    is conventionally indented four, so ``classify`` returned an empty covered
+    set; and ``align`` attributed the code rows to the LIST's source line rather
+    than to the fence body. With ``fenced`` false and a source line matching the
+    list pattern, ``furniture_width`` read the code's own leading ``1`` or ``3``
+    as a rendered ordered marker and stripped it, so ``3 rows expected`` pasted
+    as ``rows expected``. Silent corruption of a command the user highlighted.
+    """
+    for width in (40, 60):
+        app = StyledTranscriptApp()
+        async with app.run_test(size=(width, 40)) as pilot:
+            block = AssistantBlock()
+            await _mounted(app, block)
+            block.update_text(NESTED_FENCE)
+            block.finalize_text()
+            await pilot.pause()
+
+            rows = _rendered_rows(block)
+            code_row, _, _ = _find(rows, "3 rows expected")
+
+            # Column 0 through the row's end: the gesture that takes a line of
+            # code as a line of code.
+            selection = Selection.from_offsets(
+                Offset(x=0, y=code_row), Offset(x=len(rows[code_row]), y=code_row)
+            )
+            copied = block.get_selection(selection)
+            assert copied is not None
+            assert (
+                "3 rows expected" in copied[0]
+            ), f"the code's leading character was deleted at width {width}: {copied[0]!r}"
+
+            # And across the fold into the next code line, the shape design
+            # round 2 reported as 'rows expected psql -c'.
+            next_row, _, _ = _find(rows, "psql -c")
+            across = Selection.from_offsets(
+                Offset(x=0, y=code_row), Offset(x=len(rows[next_row].rstrip()), y=next_row)
+            )
+            copied_across = block.get_selection(across)
+            assert copied_across is not None
+            assert "3 rows expected" in copied_across[0], (
+                f"a take across the fold dropped the leading 3 at width {width}: "
+                f"{copied_across[0]!r}"
+            )
+
+
+def test_a_fence_is_recognised_at_a_list_item_indent() -> None:
+    """The first of D2-1's two causes, pinned at the unit it lives in.
+
+    A fence under ``- `` is indented four spaces and under ``1. `` five, so a
+    three-space bound made ``classify`` blind to the most common nested shape.
+    Pinned separately from the widget test because the widget test would still
+    pass if only the second cause were fixed, and this is the cheaper signal
+    about which one regressed.
+    """
+    for indent in range(0, 9):
+        source = f"{' ' * indent}```python\n{' ' * indent}1 / 0\n{' ' * indent}```\n"
+        lines: list[str] = list(source.split("\n"))
+        covered, markers = _copy_markdown.classify(lines)
+        assert markers == {0, 2}, f"indent {indent} hid the fence markers: {markers}"
+        assert 1 in covered, f"indent {indent} left the code line uncovered: {covered}"
+
+
+@pytest.mark.asyncio
+async def test_a_bullet_inside_a_quote_leaks_neither_the_bar_nor_the_dot() -> None:
+    """Constructs COMPOSE: quote furniture and list furniture on the same row.
+
+    ``furniture_width`` tested the quote pattern first and returned, so a list
+    inside a blockquote stripped the ``▌`` and kept the ``•`` — a glyph nowhere
+    in the user's document — and the paste format still flipped on a one-cell
+    change of drag start (design round 2, D2-4).
+
+    Asserted over a range of start columns because the format flip is precisely
+    a disagreement between adjacent columns: the whole-row gesture must give the
+    same answer wherever inside the painted furniture it began.
+    """
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(44, 40)) as pilot:
+        block = AssistantBlock()
+        await _mounted(app, block)
+        block.update_text(QUOTED_LIST)
+        block.finalize_text()
+        await pilot.pause()
+
+        rows = _rendered_rows(block)
+        bullet_row, _, _ = _find(rows, "quoted bullet")
+
+        answers: dict[int, str] = {}
+        for column in range(0, 5):
+            selection = Selection.from_offsets(
+                Offset(x=column, y=bullet_row), Offset(x=len(rows[bullet_row]), y=bullet_row)
+            )
+            copied = block.get_selection(selection)
+            assert copied is not None
+            answers[column] = copied[0]
+            assert (
+                "•" not in copied[0]
+            ), f"start column {column} leaked a painted bullet: {copied[0]!r}"
+            assert (
+                "▌" not in copied[0]
+            ), f"start column {column} leaked a painted quote bar: {copied[0]!r}"
+
+        assert (
+            len(set(answers.values())) == 1
+        ), f"the paste format flips with the drag's start cell: {answers}"
