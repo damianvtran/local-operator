@@ -830,6 +830,19 @@ async def _drive_boundary(session: Session, context_tokens: int) -> None:
     await session._on_turn_end([*session._context.messages, assistant])
 
 
+async def _settle_background(session: Session, tries: int = 50) -> None:
+    """Let detached session tasks (advisor call, async compaction pass) run.
+
+    Nothing awaits them in production either, so a test that wants to observe
+    their effect has to yield the loop the same way a real turn does between
+    boundaries.
+    """
+    for _ in range(tries):
+        await asyncio.sleep(0.01)
+        if not session._compaction_pass_in_flight and not session._advisor_in_flight:
+            return
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("context_tokens", [350_000, 400_000, 500_000, 590_000])
 async def test_advisor_fires_in_its_own_band_through_the_real_boundary(
@@ -868,6 +881,14 @@ async def test_a_landed_hint_survives_the_mid_turn_pre_gate(tmp_path, monkeypatc
     through once a usable hint exists, or the hint is spawned, lands, and is
     then unreachable because the gate returned before the plan gate could read
     it. Asserted as a real compaction pass at 400k, below the 600k trigger.
+
+    The pass an advisory authorises now runs OFF the turn and applies at the
+    next safe boundary, so the receipt arrives one boundary later than it used
+    to. That is the async-pass behaviour, not a weaker assertion: what this
+    test still pins is that a landed hint reaches a REAL pass with the
+    advisory receipt on it, which is the property the pre-gate exists to
+    protect. ``tests/unit/session/test_async_compaction.py`` pins the timing
+    itself.
     """
     session = make_session(tmp_path, compaction_settings=advisor_settings())
     await talk(session, turns=6)
@@ -876,6 +897,9 @@ async def test_a_landed_hint_survives_the_mid_turn_pre_gate(tmp_path, monkeypatc
 
     pin_measured_context(monkeypatch, 400_000)
     seed_hint(session)
+    await _drive_boundary(session, 400_000)
+    await _settle_background(session)
+    # The second boundary is where the finished pass is applied.
     await _drive_boundary(session, 400_000)
 
     ends = [e for e in events if isinstance(e, CompactionEndEvent) and e.success]

@@ -283,6 +283,41 @@ class _CompactionPlan:
     advisor_hint: Any | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _PendingCompaction:
+    """A compaction pass whose SUMMARY is done but which has not been applied.
+
+    Exists because an advisor-triggered pass runs off the critical path: the
+    summarization provider call is the expensive half (20-50 s on a large
+    context), and awaiting it inline made the user wait mid-conversation for a
+    pass the advisor fired EARLY and OFTEN. So the call happens in the
+    background against a SNAPSHOT and the cheap half — rebuilding the context —
+    is applied later, at a safe boundary.
+
+    That split is only sound because the transcript keeps moving while the call
+    is in flight, and the result must not be applied to a conversation it no
+    longer describes. ``summarized_ids`` is what makes that checkable: the ids
+    of the prefix this summary actually covers, in order. At apply time the
+    live render's first ``plan.cut`` entries must still be exactly those ids.
+
+    Why that single check is sufficient, rather than a broader diff: the commit
+    keeps ``render[plan.cut:]``, so history APPENDED while the pass ran is
+    inside the kept window automatically and is never at risk. The only way to
+    lose history is for the PREFIX to have changed — a competing pass, a
+    rebuild — and an unchanged prefix proves that did not happen. A pass that
+    fails the check is discarded, never repaired: a stale pass that silently
+    drops new history is the worst failure this feature can have, and
+    discarding costs only the summary call.
+    """
+
+    plan: _CompactionPlan
+    summary: str
+    preserve_data: dict[str, Any] | None
+    reason: str
+    #: Ids of ``plan.llm_history[: plan.cut]`` — the span the summary replaces.
+    summarized_ids: tuple[str, ...]
+
+
 def _configured_max_running() -> dict[str, int]:
     """``{"max_running": N}`` from config, or ``{}`` to keep the default.
 
@@ -1579,6 +1614,25 @@ class Session:
         # treadmill on the user's bill. Non-negotiable: once set, the advisor
         # is done for the life of the session.
         self._advisor_disabled = False
+        # --- Asynchronous compaction pass (advisor-triggered path only) ------
+        #
+        # The advisor call was already off the turn, but the PASS it authorised
+        # was awaited inline at every gate, and that pass makes its own
+        # summarization provider call. While a pass only ever fired at the
+        # ceiling that was invisible: the turn had to stop there anyway. The
+        # advisor's whole purpose is to fire EARLIER and more often, which
+        # turns the same inline await into a visible stall in the middle of
+        # otherwise healthy work.
+        #
+        # So an advisor-triggered pass runs detached and is applied at the next
+        # safe boundary. ``_pending_compaction`` is single-slot for the reason
+        # ``_advisor_hint`` is: a queue of passes is a queue of plans about a
+        # conversation that has since moved.
+        self._pending_compaction: _PendingCompaction | None = None
+        # At most ONE detached pass outstanding; skip, never queue. Mirrors
+        # ``_advisor_in_flight``, and is what stops a boundary that fires every
+        # tool batch from spawning a pass per batch while the first still runs.
+        self._compaction_pass_in_flight = False
         # Last completed provider request (epoch ms). Distinct from
         # _last_activity_ms: the idle-flush pruning must measure provider-cache
         # age, and stamping turn bookkeeping right before the check made the
@@ -5249,6 +5303,16 @@ class Session:
         # It also deliberately does NOT depend on ``_persist_new_messages``
         # below: the advisor reads the live context to form an opinion and
         # writes nothing, so it has no replayable-cut requirement of its own.
+        #
+        # A finished BACKGROUND pass is applied here, above the pre-gate, for
+        # exactly the reason the spawn sits above it: an advisor-triggered pass
+        # fires below the ordinary trigger, so the pre-gate returns before it
+        # every time and the pass would wait forever for a boundary that never
+        # comes. Applied BEFORE the spawn so the advisor forms its opinion
+        # about the context the pass just produced rather than the one it
+        # replaced. ``_persist_progress`` at the top of this hook has already
+        # run, so the kept window is on disk.
+        applied = await self._apply_pending_compaction() is not None
         self._maybe_spawn_advisor()
         if provider_reported is not None:
             from local_operator.compaction import api as compaction_api
@@ -5267,7 +5331,10 @@ class Session:
                 settings,
                 self._has_pending_advisory(settings),
             ):
-                return None
+                # A background pass that just landed still has to reach the
+                # loop, or the run accumulator keeps the history the pass
+                # removed and the next request re-sends every token of it.
+                return list(self._context.messages) if applied else None
         # Persist what the run has produced SO FAR before planning a cut.
         #
         # The post-run path writes the whole run at once (see the persistence
@@ -5287,10 +5354,28 @@ class Session:
         await self._persist_new_messages(messages)
         planned = await self._plan_compaction(respect_threshold=True)
         if isinstance(planned, CompactionOutcome):
-            return None
+            # No new pass is due. Still hand the loop the rebuilt context when
+            # a background pass just landed, or the run accumulator keeps the
+            # history the pass removed and the next request re-sends it.
+            return list(self._context.messages) if applied else None
+        if planned.advisor_hint is not None:
+            # Advisor-triggered: the pass runs off the turn and applies at a
+            # later boundary. The context is unchanged right now, so the loop
+            # continues on exactly the history it already holds.
+            #
+            # A spawn REFUSED (one already in flight) skips the pass rather
+            # than falling back to the inline one. An advisory pass fires below
+            # the configured threshold by construction, so nothing is forcing
+            # relief and there is no reason to make the user wait for a
+            # summarization call — falling through would reintroduce exactly
+            # the stall this path removes, and at the worst moment: a boundary
+            # that already has a pass running. The hint was consumed, and the
+            # advisor produces another when it next runs.
+            self._spawn_compaction_pass(planned, reason="mid-turn")
+            return list(self._context.messages) if applied else None
         outcome = await self._run_compaction(planned, reason="mid-turn")
         if not outcome.ran:
-            return None
+            return list(self._context.messages) if applied else None
         self._settle_advisor(planned, outcome)
         return list(self._context.messages)
 
@@ -5317,16 +5402,47 @@ class Session:
         5. After a successful pass, schedule auto-continue only when the
            residual cleared the recovery band (``residual <= 0.8 * threshold``).
         """
+        # The turn is over and the next one has not started: the safest
+        # boundary there is, and the one a mid-turn spawn most often lands on
+        # (a pass spawned at the last tool batch finishes while the model
+        # writes its closing message).
+        landed = await self._apply_pending_compaction()
+        if landed is not None:
+            # A background pass just rebuilt the context. It owes the user the
+            # same post-pass bookkeeping a synchronous one does, or an early
+            # advisory pass would silently lose the auto-continuation that
+            # resumes an interrupted task.
+            self._after_compaction_pass(*landed)
+            return
         planned = await self._plan_compaction(respect_threshold=True)
         if isinstance(planned, CompactionOutcome):
             # Refused: below threshold, disabled, nothing worth summarizing.
             # The automatic path has nobody to tell — a turn that did not need
             # compacting must not narrate that fact every time.
             return
+        if planned.advisor_hint is not None:
+            # Advisor-triggered, so by definition BELOW the configured
+            # threshold: nothing is forcing relief right now and the next turn
+            # can safely start on the uncompacted context. The auto-continue
+            # bookkeeping below belongs to the pass and runs when it applies.
+            # A refused spawn skips the pass for the reason the mid-turn gate
+            # spells out: an inline fallback here is the stall this path
+            # exists to remove.
+            self._spawn_compaction_pass(planned, reason="context-window")
+            return
         outcome = await self._run_compaction(planned, reason="context-window")
         if not outcome.ran:
             return
         self._settle_advisor(planned, outcome)
+        self._after_compaction_pass(planned, outcome)
+
+    def _after_compaction_pass(self, plan: _CompactionPlan, outcome: CompactionOutcome) -> None:
+        """Post-turn bookkeeping owed by ANY pass that lands at the turn edge.
+
+        Shared by the synchronous gate and by a background pass applied there,
+        so the two cannot drift about what a completed pass implies. Called
+        only after ``_settle_advisor``, which owns the anti-thrash side.
+        """
         # The provider usage in `_held_end.messages` remains authoritative for
         # BILLING, but its occupancy predates this pass. If it is allowed to win
         # the later agent-end reduction, every frontend briefly paints `after`
@@ -5335,10 +5451,10 @@ class Session:
 
         # (5) Recovery band: only schedule a continuation when the pass
         # actually created headroom (an anti-thrash guard).
-        if getattr(planned.settings, "auto_continue", False):
-            compaction_api = planned.compaction_api
+        if getattr(plan.settings, "auto_continue", False):
+            compaction_api = plan.compaction_api
             threshold = compaction_api.resolve_threshold_tokens(
-                self.effective_model.context_window, planned.settings
+                self.effective_model.context_window, plan.settings
             )
             if outcome.tokens_after <= compaction_api.RECOVERY_BAND * threshold:
                 self._continuation_queue.append(Message.user(_CONTINUATION_PROMPT))
@@ -5818,9 +5934,53 @@ class Session:
         ``reason`` rides the two events so a host can tell an automatic pass
         from one the user asked for while keeping one vocabulary for both
         (``compacting context…`` / ``context compacted``).
+
+        SYNCHRONOUS, and deliberately still the path the ceiling takes. The
+        pass is split into a summarize half and a commit half
+        (:meth:`_summarize_for_compaction` / :meth:`_finish_compaction`) so the
+        advisor-triggered path can run the expensive half off the turn, but
+        this method still runs both back to back: when the context genuinely
+        reaches the threshold the turn cannot safely continue, so the pass that
+        relieves it must complete before the next request is built. Making the
+        ceiling asynchronous would remove the one safety net that has to block.
+        """
+        await self._emit(CompactionStartEvent(reason=reason))
+        return await self._finish_compaction(plan, reason=reason, summarized=None)
+
+    async def _summarize_for_compaction(
+        self, plan: _CompactionPlan
+    ) -> tuple[str, dict[str, Any] | None]:
+        """The EXPENSIVE half of a pass: the summary, and nothing else.
+
+        Separated so it can run detached (see :meth:`_run_compaction_async`).
+        It reads ``plan.llm_history``, a snapshot taken when the plan was made,
+        and touches NO session state — no events, no context rebuild, no
+        transcript write — so a call still in flight when the conversation
+        moves on is discardable at zero cost. Every mutation lives in the
+        commit half.
+        """
+        return await self._produce_summary(
+            plan.compaction_api, plan.llm_history[: plan.cut], plan.strategy
+        )
+
+    async def _finish_compaction(
+        self,
+        plan: _CompactionPlan,
+        *,
+        reason: str,
+        summarized: tuple[str, dict[str, Any] | None] | None,
+    ) -> CompactionOutcome:
+        """Summarize if needed, then COMMIT — the one commit, for every path.
+
+        ``summarized`` is the pre-computed output of
+        :meth:`_summarize_for_compaction` for the asynchronous path, or ``None``
+        to produce it inline (the synchronous callers). One body either way, so
+        an async pass and a ceiling pass cannot drift about what a commit is;
+        the caller has already emitted ``CompactionStartEvent``, and every
+        failure below emits the matching end event rather than leaving a host's
+        "compacting context…" row open forever.
         """
         compaction_api = plan.compaction_api
-        await self._emit(CompactionStartEvent(reason=reason))
         try:
             to_summarize = plan.llm_history[: plan.cut]
             # The KEPT window is rebuilt from the UNSTRIPPED render. The plan's
@@ -5838,8 +5998,10 @@ class Session:
             kept = self._render_for_compaction(keep_images=True)[plan.cut :]
             if not kept:
                 kept = plan.llm_history[plan.cut :]
-            summary, preserve_data = await self._produce_summary(
-                compaction_api, to_summarize, plan.strategy
+            summary, preserve_data = (
+                summarized
+                if summarized is not None
+                else await self._produce_summary(compaction_api, to_summarize, plan.strategy)
             )
             # STRUCTURAL guarantee that a user turn is never paraphrased away.
             # ``to_summarize`` is the RENDERED history, where a prior marker and
@@ -5977,6 +6139,134 @@ class Session:
             logger.warning("compaction failed", exc_info=True)
             await self._emit(CompactionEndEvent(reason=reason, success=False))
             return CompactionOutcome(ran=False, reason="failed", detail=f"compaction failed: {exc}")
+
+    def _spawn_compaction_pass(self, plan: _CompactionPlan, *, reason: str) -> None:
+        """Run an ADVISOR-triggered pass off the turn, awaiting nothing.
+
+        Declining is a full answer, never a fall-back to the inline pass: an
+        advisory pass fires below the configured threshold, so skipping one
+        costs a later trigger while running one inline costs the user a
+        summarization call mid-conversation — the stall this whole path
+        removes. The callers therefore return either way.
+
+        Only ONE detached pass may be outstanding. The gate that calls this
+        fires at every tool-loop boundary, so without the latch a long tool run
+        would spawn a summarization call per batch — each against a snapshot
+        the next one invalidates, and all of them billed.
+        """
+        if self._disposed or self._compaction_pass_in_flight:
+            return
+        if self._pending_compaction is not None:
+            # A finished pass is already waiting to be applied. Starting a
+            # second one would summarize a prefix the pending one is about to
+            # replace, guaranteeing the loser is discarded as stale.
+            return
+        self._compaction_pass_in_flight = True
+        self._spawn_background(self._run_compaction_async(plan, reason=reason))
+
+    async def _run_compaction_async(self, plan: _CompactionPlan, *, reason: str) -> None:
+        """The detached half: summarize against the snapshot, park the result.
+
+        Deliberately emits NO events and mutates no context. The pass is
+        speculative until it is applied, and a host that painted
+        ``compacting context…`` here would show a spinner for a pass that may
+        legitimately be discarded, for however long the provider takes. The
+        start/end pair is emitted around the COMMIT (see
+        :meth:`_apply_pending_compaction`), where it stays adjacent and brief.
+
+        Total, like the advisor call it descends from: every failure is a
+        missing pending pass, which is exactly the state the session was in
+        before. The ceiling path is untouched and still fires synchronously if
+        the context actually reaches the threshold.
+        """
+        try:
+            summary, preserve_data = await self._summarize_for_compaction(plan)
+            if self._disposed:
+                return
+            self._pending_compaction = _PendingCompaction(
+                plan=plan,
+                summary=summary,
+                preserve_data=preserve_data,
+                reason=reason,
+                summarized_ids=tuple(str(message.id) for message in plan.llm_history[: plan.cut]),
+            )
+        except asyncio.CancelledError:
+            # Caught for the reason ``_run_advisor`` catches it: this task is
+            # detached and routinely cancelled at dispose, and a teardown
+            # traceback for a pass nobody awaited is noise.
+            pass
+        except Exception:  # noqa: BLE001 — a speculative pass must never break a turn
+            logger.debug("asynchronous compaction pass failed", exc_info=True)
+        finally:
+            self._compaction_pass_in_flight = False
+
+    def _pending_is_applicable(self, pending: _PendingCompaction, live: list[Message]) -> bool:
+        """Whether a finished pass still describes the conversation it planned against.
+
+        The summary replaces ``live[: cut]``, so the pass is applicable exactly
+        when that span is STILL the span it summarized — same ids, same order.
+        Everything the conversation added while the call was in flight sits at
+        ``live[cut:]``, which the commit keeps verbatim, so growth is safe by
+        construction and needs no check of its own.
+
+        What this rejects is the prefix having MOVED: another pass committed, a
+        rebuild reordered the history, a resume replaced it. Applying then would
+        splice a summary of one conversation over a different one and drop
+        whatever the prefix had become — the one failure mode that must never
+        be reachable, so the check is an exact identity match and the answer to
+        anything else is to discard.
+
+        Ids only, deliberately: pruning blanks tool-output CONTENT in place
+        while keeping ids, and a content-sensitive check would reject a pass
+        over a purely beneficial shrink.
+        """
+        if len(live) <= pending.plan.cut:
+            # Nothing would be kept: the history is shorter than the cut the
+            # plan chose, so the prefix cannot still be intact.
+            return False
+        return (
+            tuple(str(message.id) for message in live[: pending.plan.cut]) == pending.summarized_ids
+        )
+
+    async def _apply_pending_compaction(
+        self,
+    ) -> tuple[_CompactionPlan, CompactionOutcome] | None:
+        """Commit a finished background pass at a SAFE boundary.
+
+        Returns the plan and outcome when a pass landed, so the post-turn gate
+        can run the same recovery-band bookkeeping it runs for a synchronous
+        pass; ``None`` when nothing was pending, the pass was stale, or the
+        commit refused.
+
+        Called from the two gates that already own a safe boundary: the
+        mid-turn hook (a tool batch has landed, and ``_wire_legal_snapshot``
+        covers the dangling-call case) and the post-turn gate. Both hold the
+        turn, which is what makes rebuilding ``_context.messages`` legal here
+        and nowhere else.
+
+        The slot is cleared BEFORE the applicability check, so a stale pass is
+        consumed and dropped rather than re-examined at every subsequent
+        boundary — the single-use discipline ``_take_advisor_hint`` follows,
+        for the same reason.
+        """
+        pending = self._pending_compaction
+        self._pending_compaction = None
+        if pending is None or self._disposed:
+            return None
+        live = self._render_for_compaction()
+        if not self._pending_is_applicable(pending, live):
+            logger.debug("discarded a background compaction pass: the conversation moved past it")
+            return None
+        await self._emit(CompactionStartEvent(reason=pending.reason))
+        outcome = await self._finish_compaction(
+            pending.plan,
+            reason=pending.reason,
+            summarized=(pending.summary, pending.preserve_data),
+        )
+        if not outcome.ran:
+            return None
+        self._settle_advisor(pending.plan, outcome)
+        return pending.plan, outcome
 
     def _resolve_strategy(self, settings: Any) -> str:
         """'auto' | 'context-full' | 'snapcompact' | 'off'.
