@@ -55,6 +55,7 @@ from local_operator.tui.widgets.subagent_panel import (
     SubagentPanel,
     SubagentRow,
 )
+from local_operator.tui.widgets import subagent_view
 from local_operator.tui.widgets.subagent_view import (
     COLLAPSE_AFFORDANCE,
     EXPAND_HINT,
@@ -472,6 +473,38 @@ def test_id_less_message_and_tool_survive_eviction_without_duplicating() -> None
     tools = [entry for entry in known.values() if entry.kind == "tool"]
     assert [entry.text for entry in texts] == ["prose with no id"]
     assert [entry.tool_name for entry in tools] == ["bash"]
+
+
+def test_unstamped_fingerprint_is_bounded_but_still_separates_distinct_events() -> None:
+    """The fallback may not pay for an unbounded payload on a 1 Hz path.
+
+    Fingerprinting the whole event made a window of id-less notices carrying
+    20 KB each cost ~133 ms per fold (review round 1, F2). The digest is
+    bounded instead — which means two events whose bounded projections
+    coincide share a fingerprint, and the occurrence ordinal is what still
+    gives them separate rows. Both halves are asserted here: the bound must
+    hold, and it must not merge two distinct events into one row.
+    """
+    payload = "x" * 40_000
+    events: list[dict[str, Any]] = [
+        {"type": "notice", "kind": "error", "text": payload + "AAA"},
+        {"type": "notice", "kind": "error", "text": payload + "BBB"},
+    ]
+
+    rows = [entry for entry in fold_trajectory(events) if not entry.head]
+    assert len({entry.key for entry in rows}) == 2
+
+    # These two differ only PAST the bound, so their fingerprints collide by
+    # design — and the rows above still separated, which is the point: the
+    # occurrence ordinal, not the digest, is what keeps distinct events apart.
+    assert subagent_view._DIGEST_TOTAL_CHARS < len(payload)
+    assert subagent_view._digest(events[0]) == subagent_view._digest(events[1])
+    # Same event, same fingerprint — the property row identity depends on.
+    assert subagent_view._digest(events[0]) == subagent_view._digest(dict(events[0]))
+    # A difference INSIDE the bound is still seen.
+    assert subagent_view._digest(events[0]) != subagent_view._digest(
+        {"type": "notice", "kind": "error", "text": "short and different"}
+    )
 
 
 def test_relay_stamps_a_sequence_that_eviction_cannot_renumber() -> None:

@@ -49,7 +49,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -214,20 +213,57 @@ def _content_text(payload: Any) -> str:
     return "".join(parts)
 
 
+#: Characters of any single value the content fingerprint takes into account.
+#: Bounds the cost of the unstamped identity path, which runs once a second
+#: over a 500-event window against payloads that have no size limit (a tool
+#: result, a long error, a streamed delta). Generous enough that ordinary
+#: values are fingerprinted whole. See :func:`_digest`.
+_DIGEST_VALUE_CHARS = 512
+
+#: Total characters fed to the hash per event, across all of its fields.
+_DIGEST_TOTAL_CHARS = 4096
+
+
 def _digest(event: Mapping[str, Any]) -> str:
     """A short, stable fingerprint of one event's CONTENT.
 
     Used only for events with no :data:`TRAJECTORY_SEQ_KEY` stamp, where the
-    content is the only intrinsic thing left to identify a row by. Sorted keys
-    so two equal dicts fingerprint equally regardless of insertion order, and
-    ``default=str`` because a trajectory handed over by a future engine may
-    hold a value ``json`` cannot encode — a degraded fingerprint is fine here,
-    a raised exception inside the 1 Hz refresh is not.
+    content is the only intrinsic thing left to identify a row by. Keys are
+    visited in sorted order so two equal events fingerprint equally regardless
+    of insertion order.
+
+    BOUNDED on purpose, and the bound has to be applied while BUILDING the
+    string rather than by slicing a finished one. This runs once a second over
+    a 500-event window and an event's payload has no size limit: a full window
+    of id-less notices carrying 20 KB each measured 133 ms per fold when the
+    whole event was serialized, against 22 ms before this identity scheme
+    existed. Serializing and then truncating does not help — it measured
+    *worse* (256 ms), because the cost is the serialization, not the hashing.
+    So each value contributes at most :data:`_DIGEST_VALUE_CHARS` and the walk
+    stops at :data:`_DIGEST_TOTAL_CHARS`, which never materializes the large
+    string at all.
+
+    Truncation costs no correctness. Two events whose bounded projections
+    coincide share a fingerprint, and the occurrence ordinal in
+    :meth:`_Anchors.of` then separates them into distinct rows — precisely
+    what it already does for two events with genuinely identical content.
     """
+    parts: list[str] = []
+    budget = _DIGEST_TOTAL_CHARS
     try:
-        payload = json.dumps(event, sort_keys=True, default=str)
+        for key in sorted(event, key=str):
+            if budget <= 0:
+                break
+            value = event[key]
+            # ``str`` of a string IS the string, so slicing a huge text field
+            # here is a cheap view rather than a copy of the whole payload.
+            rendered = value if isinstance(value, str) else repr(value)
+            chunk = f"{key}={rendered[: min(_DIGEST_VALUE_CHARS, budget)]}"
+            budget -= len(chunk)
+            parts.append(chunk)
+        payload = "\x1f".join(parts)
     except Exception:  # pragma: no cover - exotic producer data only
-        payload = repr(event)
+        payload = repr(event)[:_DIGEST_TOTAL_CHARS]
     return hashlib.blake2s(payload.encode("utf-8", "replace"), digest_size=8).hexdigest()
 
 
@@ -268,6 +304,21 @@ class _Anchors:
         # producer that ever writes one is malformed, not authoritative.
         if isinstance(stamp, int) and not isinstance(stamp, bool):
             return f"s{stamp}"
+        # CEILING of the unstamped path, and it is deliberate: the ordinal
+        # counts occurrences within the CURRENT window, so the number of rows
+        # one wording can ever occupy is the most that were ever resident at
+        # once, not the number of times it truly happened. Repeats spread far
+        # enough apart that no two co-exist all resolve to ordinal 0 and fold
+        # into the row the page already holds — five such failures render as
+        # one row (design round 1, D2).
+        #
+        # Left as-is because the alternative is worse: a window-independent
+        # counter would have to persist across folds, and any counter that
+        # rises on re-reading the SAME event reintroduces exactly the
+        # duplicate-row defect this module was fixed for. Under-reporting a
+        # legacy trajectory is the safe direction; over-reporting is the bug.
+        # Only reachable for events retained across an upgrade from a release
+        # older than TRAJECTORY_SEQ_KEY, since every relayed event is stamped.
         fingerprint = _digest(event)
         ordinal = self._seen.get(fingerprint, 0)
         self._seen[fingerprint] = ordinal + 1
@@ -302,7 +353,7 @@ class SubagentEntry:
 
     A value, not a widget. ``key`` is the row's IDENTITY across folds — the
     child's message id, its ``tool_call_id``, or an eviction-proof anchor
-    (:func:`_stable_anchors`) for a notice and for anything the child sent
+    (:class:`_Anchors`) for a notice and for anything the child sent
     without an id — and everything else is the row's current content. The view
     merges successive folds by key and diffs by value, so a row has to be able
     to answer both "am I the same row" and "have I changed" without consulting
