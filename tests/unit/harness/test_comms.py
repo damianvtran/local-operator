@@ -21,6 +21,7 @@ from typing import Any, Callable
 import pytest
 
 from local_operator.harness.comms import HUB_MESSAGE_TYPE, SubagentComms
+from local_operator.harness.subagent import MCP_DENIED_ATTR
 from local_operator.harness.types import (
     AgentEvent,
     AgentMessage,
@@ -1026,6 +1027,75 @@ def test_a_resume_carries_the_childs_role_and_tier_forward(tmp_path, monkeypatch
     assert seen["effort"] == "hi"
     assert seen["model_spec"] is resolved
     assert seen["resume_dir"] == tmp_path / "child"
+
+
+def test_a_resume_carries_the_mcp_denial_a_role_cannot_express(tmp_path, monkeypatch):
+    """An inherited MCP activation denial survives the resume rebuild.
+
+    Review round 2, R5. This is the half ``agent_role`` cannot carry: a denial
+    is inherited from the LINEAGE, so the child that leaks is a plain ``task``
+    grandchild of a restricted ``manager`` whose own role says "unrestricted".
+    ``resume`` also rebuilds with ``parent_session=self._session`` -- the
+    comms-owning ROOT, not the child's real parent -- so the parent-session
+    read in ``_build_child_session`` finds an unrestricted session too. With
+    neither source able to recover the fact, a grandchild that was correctly
+    refused an ``approval_tier="exec"`` write while live came back from a
+    resume able to activate it.
+
+    Asserted at the ``run_subagent`` seam, matching the role/effort tests
+    above: this is where the fact was being dropped. The end-to-end
+    consequence is exercised in the subagent tests.
+    """
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(
+        "local_operator.harness.subagent.run_subagent",
+        lambda **kwargs: (seen.update(kwargs), "job-2")[1],
+    )
+    jobs = FakeJobs()
+    comms = SubagentComms(FakeParent(jobs))  # type: ignore[arg-type]
+    jobs.add("job-1", status="cancelled")
+    # A plain no-role child: the role carries nothing about the denial, which
+    # is exactly why the flag has to be persisted separately.
+    comms.record_launch("job-1", "worker")
+    child = FakeChild()
+    # What ``_build_child_session`` stamps on a child built under a denial.
+    setattr(child, MCP_DENIED_ATTR, True)
+    comms.attach("job-1", child, tmp_path / "child")
+    (tmp_path / "child").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "child" / TRANSCRIPT_FILENAME).write_text("{}\n", encoding="utf-8")
+    comms.detach("job-1")
+
+    new_id, error = comms.resume("job-1", "carry on")
+
+    assert error is None and new_id == "job-2"
+    assert seen["agent"] == "task", "the role still says unrestricted"
+    assert seen["restricted"] is True, "the denial must ride separately from the role"
+
+
+def test_a_resume_of_an_unrestricted_child_does_not_invent_a_denial(tmp_path, monkeypatch):
+    """The counter-check: the carry must not restrict what was never restricted.
+
+    A flag that defaulted to True (or was set from something broader than the
+    child's own stamp) would quietly strip MCP activation from every resumed
+    ordinary child, which no assertion above would catch."""
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(
+        "local_operator.harness.subagent.run_subagent",
+        lambda **kwargs: (seen.update(kwargs), "job-2")[1],
+    )
+    jobs = FakeJobs()
+    comms = SubagentComms(FakeParent(jobs))  # type: ignore[arg-type]
+    jobs.add("job-1", status="cancelled")
+    comms.record_launch("job-1", "worker")
+    comms.attach("job-1", FakeChild(), tmp_path / "child")
+    (tmp_path / "child").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "child" / TRANSCRIPT_FILENAME).write_text("{}\n", encoding="utf-8")
+    comms.detach("job-1")
+
+    new_id, error = comms.resume("job-1", "carry on")
+
+    assert error is None and new_id == "job-2"
+    assert seen["restricted"] is False
 
 
 def test_a_resume_of_a_plain_child_stays_a_plain_child(tmp_path, monkeypatch):

@@ -1508,6 +1508,85 @@ async def test_a_grandchild_cannot_activate_what_its_restricted_ancestor_was_ref
 
 
 @pytest.mark.asyncio
+async def test_a_resumed_child_keeps_the_denial_it_inherited(tmp_path, monkeypatch):
+    """The denial survives a resume, end to end (review round 2, R5).
+
+    ``hub op='resume'`` rebuilds a settled child against the comms-owning ROOT
+    session rather than the child's real parent, and the child that leaks is a
+    plain ``task`` grandchild whose own role says "unrestricted" -- so neither
+    the role nor the parent session can re-derive the denial and it has to be
+    carried forward from the persisted record. Before the carry, a grandchild
+    correctly refused ``delete_issue`` while live came back from a resume with
+    that ``approval_tier="exec"`` write in its inventory.
+
+    This asserts the CONSEQUENCE on a really-built session; the plumbing that
+    feeds ``restricted`` in from the record is asserted at the comms seam in
+    ``tests/unit/harness/test_comms.py``."""
+    from local_operator.agent_profiles import load_seed
+    from local_operator.harness import subagent as subagent_mod
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    manager_seed = load_seed("manager")
+    assert manager_seed is not None
+
+    manager = FakeMcpManager({"linear": ["list_issues", "delete_issue"]})
+    root = make_session(tmp_path, OneShotStream())
+    attach_manager(root, manager)
+    root.refresh_tools(
+        list(root._tools) + [t for t in manager.get_tools() if t.name.endswith("list_issues")]
+    )
+
+    mgr = await subagent_mod._build_child_session(
+        label="mgr",
+        prompt="coordinate",
+        parent_session=root,
+        model_spec=None,
+        job_id="job-mgr",
+        agent="manager",
+        profile=manager_seed,
+    )
+    grandchild = await subagent_mod._build_child_session(
+        label="worker",
+        prompt="work",
+        parent_session=mgr,
+        model_spec=None,
+        job_id="job-gc",
+        agent="task",
+        profile=None,
+    )
+    assert getattr(grandchild, subagent_mod.MCP_DENIED_ATTR, False) is True
+    resume_dir = grandchild._transcript.directory
+
+    # The resume: rebuilt against the ROOT (unrestricted) with no profile,
+    # exactly as ``SubagentComms.resume`` does, carrying only the flag the
+    # record persisted.
+    resumed = await subagent_mod._build_child_session(
+        label="worker",
+        prompt="continue",
+        parent_session=root,
+        model_spec=None,
+        job_id="job-gc2",
+        resume_dir=resume_dir,
+        agent="task",
+        profile=None,
+        restricted=True,
+    )
+
+    denied = resolve(resumed, "mcp://linear/delete_issue")
+    assert denied is not None and "cannot enable new ones" in denied
+    names = {tool.name for tool in resumed._tools}
+    assert "mcp__linear_delete_issue" not in names
+    assert "mcp__linear_list_issues" in names
+    # The restriction is re-stamped, so a further delegation from the resumed
+    # child inherits it too rather than starting clean.
+    assert getattr(resumed, subagent_mod.MCP_DENIED_ATTR, False) is True
+    await resumed.dispose()
+    await grandchild.dispose()
+    await mgr.dispose()
+    await root.dispose()
+
+
+@pytest.mark.asyncio
 async def test_an_unrestricted_lineage_still_activates_at_depth_two(tmp_path, monkeypatch):
     """The counter-check to the sticky denial: it must not over-apply.
 

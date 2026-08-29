@@ -313,6 +313,7 @@ def run_subagent(
     resume_dir: "Path | None" = None,
     agent: str = "task",
     effort: str | None = None,
+    restricted: bool = False,
 ) -> str:
     """Register one child-session run as a background job; return the job id.
 
@@ -333,6 +334,14 @@ def run_subagent(
     ``model_spec`` because a tier does not survive that resolution: two tiers
     can point at the same model, and a child on the parent's own model still
     ran at a chosen level the band should name.
+
+    ``restricted`` forces the MCP activation denial on regardless of what this
+    child's own role says, and exists for the resume path. A denial is
+    inherited from the LINEAGE, so a plain ``task`` grandchild of a restricted
+    role carries one while its role claims otherwise; ``hub op='resume'``
+    rebuilds against the comms-owning root rather than that child's real
+    parent, so neither the role nor the parent session can recover the fact and
+    it has to be carried forward from the child's record (review round 2, R5).
     """
     effective_prompt, profile = _effective_prompt(prompt, agent, parent_session)
     queued = jobs_manager.at_capacity()
@@ -348,6 +357,7 @@ def run_subagent(
             resume_dir=resume_dir,
             agent=agent,
             profile=profile,
+            restricted=restricted,
         ),
         queued=queued,
     )
@@ -419,6 +429,7 @@ def _make_runner(
     resume_dir: "Path | None" = None,
     agent: str = "task",
     profile: "AgentProfile | None" = None,
+    restricted: bool = False,
 ) -> Callable[[str, Any, Callable[[str], None]], Awaitable[str | None]]:
     """Build the JobRunFn for one child run (closure over its launch args)."""
     # The parent seam is private-attribute access on purpose: this module is
@@ -450,6 +461,7 @@ def _make_runner(
                 resume_dir=resume_dir,
                 agent=agent,
                 profile=profile,
+                restricted=restricted,
             )
             if job is not None:
                 # Off the CHILD, not the parent: ``model_spec`` may have put
@@ -902,7 +914,16 @@ class _ChildMcp:
 
 #: Attribute stamped on a child Session recording that IT was built under an
 #: MCP activation denial. Read back off ``parent_session`` when that child
-#: delegates, which is what makes the denial inherit at any depth.
+#: delegates, which is what makes the denial inherit at any depth of LIVE
+#: delegation.
+#:
+#: It is in-memory Session state and nothing re-derives it, so it does not by
+#: itself survive a resume: ``hub op='resume'`` builds a new Session against
+#: the comms-owning root rather than the child's real parent. The durable half
+#: is ``_ChildRecord.restricted``, which persists this flag and feeds it back
+#: through ``run_subagent(restricted=...)``. BOTH halves are required for the
+#: "at any depth" claim to hold; changing one without the other reopens the
+#: escalation on the path the other covers (review round 2, R5).
 #:
 #: A named constant rather than two spelled-out ``getattr``/``setattr`` strings:
 #: the reader and the writer are ~200 lines apart, and a typo in either would
@@ -1042,9 +1063,15 @@ async def _build_child_session(
     resume_dir: "Path | None" = None,
     agent: str = "task",
     profile: "AgentProfile | None" = None,
+    restricted: bool = False,
 ) -> "Session":
     """Compose the child Session directly (see module docstring for why the
     factory is not reused, and for the full inherit/do-not-inherit list).
+
+    ``restricted`` forces the MCP activation denial on independently of this
+    child's own role and parent. It is how a RESUMED child keeps a denial it
+    inherited from a lineage the rebuild cannot see (review round 2, R5); a
+    fresh launch leaves it False and the computation below derives the answer.
 
     ``profile`` is the resolved role (see :func:`_resolve_role`), passed in
     rather than re-resolved here so one launch performs exactly one registry
@@ -1121,8 +1148,15 @@ async def _build_child_session(
     # obtained one hop below the boundary that had just refused it. A delegator
     # cannot grant what it does not itself hold, so the denial propagates to
     # every descendant regardless of their own profiles.
+    # The fourth term is the RESUME carry (see the parameter's note): a resumed
+    # child is rebuilt against the comms-owning root rather than its real
+    # parent, so the third term reads an unrestricted session and only the
+    # persisted record can supply the fact. OR-ed, never assigned, so a resume
+    # can only ever preserve a denial and never clear one the live computation
+    # would have found.
     restricted = (
-        (profile is not None and bool(profile.tools))
+        restricted
+        or (profile is not None and bool(profile.tools))
         or agent == "scout"
         or bool(getattr(parent_session, MCP_DENIED_ATTR, False))
     )
