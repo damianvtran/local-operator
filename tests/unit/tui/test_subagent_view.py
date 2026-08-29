@@ -48,6 +48,7 @@ from local_operator.session.transcript import (
     TranscriptPage,
 )
 from local_operator.tui.app import SUBAGENT_LAYOUT_CLASS, OperatorApp
+from local_operator.tui.widgets import subagent_view
 from local_operator.tui.widgets.assistant import FALLBACK_WIDTH, AssistantBlock
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.subagent_panel import (
@@ -55,7 +56,6 @@ from local_operator.tui.widgets.subagent_panel import (
     SubagentPanel,
     SubagentRow,
 )
-from local_operator.tui.widgets import subagent_view
 from local_operator.tui.widgets.subagent_view import (
     COLLAPSE_AFFORDANCE,
     EXPAND_HINT,
