@@ -53,11 +53,14 @@ export const rosePine: ThemeDefinition = {
 		sunken: "#12101b",
 
 		ink: "#e0def4",
-		// Upstream's `subtle` #908caa is 4.36:1 on `elevated` - fine as the TUI's
-		// secondary text on three grounds, under the 4.5 floor on the fourth. The
-		// two mid inks are therefore lifted along the same violet-gray toward
-		// `text`, and canonical `subtle` becomes... nothing here; canonical
-		// `muted` #6e6a86 is `inkDisabled`, which is what upstream uses it for
+		// Upstream's `subtle` #908caa clears the 4.5 floor on all four grounds
+		// (5.48 / 5.12 / 4.71 / 5.84), so this pair is a HEADROOM choice, not a
+		// floor rescue: on `elevated` it clears by 0.21, and this contract has
+		// two mid inks where Rose Pine has one, so `inkDim` must sit BELOW
+		// `inkMuted` and would inherit that thin margin. Both are lifted along
+		// the same violet-gray toward `text` to buy the second rung room
+		// (`inkDim` #a9a5c4 lands at 6.41 on `elevated`). Canonical `muted`
+		// #6e6a86 is `inkDisabled`, which is what upstream uses it for
 		// (comments, git-ignored) and the one role exempt from the floors.
 		inkMuted: "#c5c2dd",
 		inkDim: "#a9a5c4",
@@ -66,9 +69,9 @@ export const rosePine: ThemeDefinition = {
 		// Canonical highlight-low: upstream's cursor-line colour, which is exactly
 		// a decorative rule's job.
 		hairline: "#21202e",
-		// Canonical highlight-high #524f67 is 1.76:1 on canvas - it is a highlight,
-		// not a boundary, and every input in the app would have been bounded at
-		// under 2:1. Lifted along the same hue to clear the 3:1 structural floor
+		// Canonical highlight-high #524f67 is 2.25:1 on canvas - it is a highlight,
+		// not a boundary, and every input in the app would have been bounded under
+		// the 3:1 structural floor. Lifted along the same hue to clear that floor
 		// on all four grounds (5.12:1 / 4.40:1 at the extremes).
 		borderControl: "#8b87a3",
 
@@ -80,7 +83,7 @@ export const rosePine: ThemeDefinition = {
 		// the page ground rather than a light value.
 		onAccent: "#191724",
 
-		// Canonical pine #31748f measures 3.38:1 on canvas and 3.05:1 on
+		// Canonical pine #31748f measures 3.38:1 on canvas and 2.91:1 on
 		// `elevated` - the only canonical accent under the floor here, and under
 		// it on every ground. Lifted along its own blue-green to 5.35:1 / 4.60:1.
 		success: "#5995b2",
@@ -135,7 +138,7 @@ export const rosePineMoon: ThemeDefinition = {
 		accentWash: "#382b38",
 		onAccent: "#232136",
 
-		// Canonical moon pine #3e8fb0 is 3.51:1 on `elevated`. Lifted, and kept
+		// Canonical moon pine #3e8fb0 is 3.19:1 on `elevated`. Lifted, and kept
 		// 24.5 ΔE off foam so success and info stay two signals.
 		success: "#4eadd9",
 		successWash: "#22303c",
@@ -176,8 +179,9 @@ export const rosePineDawn: ThemeDefinition = {
 		 * line with - becomes the recessed ground. Only `elevated` is derived,
 		 * warmed rather than merely lightened for the reason the brand light
 		 * ramp documents: a near-white ladder has no lightness headroom left, so
-		 * the steps separate on the chroma axis. Adjacent steps measure ΔE 2.55 /
-		 * 2.04 / 2.06 - just past the ~2 the eye needs.
+		 * the steps separate on the chroma axis. Walking the ladder from `sunken`
+		 * up, adjacent steps measure ΔE 2.06 / 2.04 / 2.55 - just past the ~2 the
+		 * eye needs.
 		 */
 		canvas: "#faf4ed",
 		surface: "#fffaf3",
@@ -215,7 +219,7 @@ export const rosePineDawn: ThemeDefinition = {
 		accentWash: "#fbece8",
 		onAccent: "#fffaf3",
 
-		success: "#276882", // pine #286983 - CANONICAL, the only one that clears
+		success: "#286983", // pine - CANONICAL, the only accent that clears unaided
 		successWash: "#e4edf1",
 		successBorder: "#5c8ba0",
 

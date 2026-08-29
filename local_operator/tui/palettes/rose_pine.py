@@ -50,7 +50,7 @@ PALETTES: list[ThemeSpec] = [
     # `sunken` (one step below base, where the status band sits).
     #
     # Two accents needed work against the 4:1 state floor:
-    #   - pine #31748f measures 3.38:1 on base and 3.15:1 on surface — the
+    #   - pine #31748f measures 3.38:1 on base and 3.16:1 on surface — the
     #     ONLY canonical accent under the floor on this ground. It lifts to
     #     #3a8aaa: same blue-green, 4.54:1 / 4.24:1.
     #   - muted #6e6a86 is canonical `faint` here (3.42:1) rather than a
@@ -138,7 +138,8 @@ PALETTES: list[ThemeSpec] = [
     # except pine misses the 4:1 state floor (gold 2.05:1, rose 2.60:1,
     # foam 3.14:1, iris 3.47:1, love 3.84:1), so each is darkened along its
     # own hue by the SMALLEST step that clears 4:1 on both grounds — the
-    # deviations are 5–25 ΔE, listed per token below.
+    # deviations are 0–25 ΔE, listed per token below: pine needs none, gold
+    # (the furthest) needs 25.2.
     #
     # The ground ladder also has to invert. Canonical dawn `surface`
     # #fffaf3 is LIGHTER than `base` #faf4ed, so it cannot be this UI's
@@ -171,7 +172,7 @@ PALETTES: list[ThemeSpec] = [
             "edge": "#eee5dc",  # between highlight-low and highlight-med
             "edge-hi": "#dfdad9",  # canonical highlight-med
             "accent": "#a8594f",  # rose #d7827e: 2.60:1 (< 4) — 16.8 ΔE, held off love
-            "success": "#276882",  # pine #286983 — CANONICAL, the only one that clears
+            "success": "#286983",  # pine — CANONICAL (5.59:1/5.27:1), the only one that clears
             "warning": "#9e6200",  # gold #ea9d34: 2.05:1 (< 4) — the largest deviation
             "danger": "#a8566c",  # love #b4637a: 3.84:1 (< 4) — 5.0 ΔE
             "string": "#9e6200",  # gold, same solve as warning
