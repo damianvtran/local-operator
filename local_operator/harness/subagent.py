@@ -900,6 +900,16 @@ class _ChildMcp:
     attach: Callable[["Session"], None]
 
 
+#: Attribute stamped on a child Session recording that IT was built under an
+#: MCP activation denial. Read back off ``parent_session`` when that child
+#: delegates, which is what makes the denial inherit at any depth.
+#:
+#: A named constant rather than two spelled-out ``getattr``/``setattr`` strings:
+#: the reader and the writer are ~200 lines apart, and a typo in either would
+#: silently reopen the escalation it exists to close — the failure mode is a
+#: quiet loss of a security boundary, not an exception.
+MCP_DENIED_ATTR = "_mcp_activation_denied"
+
 #: Rendered in place of a tool schema when a tool-restricted role reads
 #: ``mcp://<server>/<tool>``. It names the boundary and what the child still
 #: has, because a child told only "no" retries the same URL; a child told the
@@ -1098,7 +1108,24 @@ async def _build_child_session(
     # already-minted schemas afterwards. ``agent == "scout"`` is the no-profile
     # fallback path and is restricted for the same reason the allowlist below
     # applies to it.
-    restricted = (profile is not None and bool(profile.tools)) or agent == "scout"
+    #
+    # The third term makes the denial STICKY DOWNWARD, and it is load-bearing
+    # rather than defensive. A delegating restricted role (the packaged
+    # ``manager`` is exactly this: an allowlist AND ``delegate: yes``) keeps
+    # ``task`` and, since restricted roles now receive an MCP surface, is handed
+    # the parent's live manager below. Computing this from the child's own
+    # profile alone left a one-hop escape: the manager's child rebuilt with
+    # ``profile=None``, counted as unrestricted, and activated freely into that
+    # shared manager — so a manager refused ``delete_issue`` could spawn a plain
+    # child and have IT enable the tool, an ``approval_tier="exec"`` write
+    # obtained one hop below the boundary that had just refused it. A delegator
+    # cannot grant what it does not itself hold, so the denial propagates to
+    # every descendant regardless of their own profiles.
+    restricted = (
+        (profile is not None and bool(profile.tools))
+        or agent == "scout"
+        or bool(getattr(parent_session, MCP_DENIED_ATTR, False))
+    )
     mcp = _child_mcp_wiring(parent_session, restricted=restricted)
     parent_resolver = parent_session._skill_resolver
 
@@ -1352,6 +1379,14 @@ async def _build_child_session(
     if _can_background(tools):
         drop = drop - {"jobs"}
     child.refresh_tools([tool for tool in child._tools if tool.name not in drop])
+    # Record the denial on the child so its OWN children inherit it (see the
+    # ``restricted`` computation above). Set UNCONDITIONALLY, outside the
+    # ``mcp is not None`` branch below: a child built with no MCP surface --
+    # because this session had no manager wired yet -- can still delegate, and
+    # its child resolves the manager off the session at that later point. Making
+    # the stamp depend on whether MCP happened to be wired here would let the
+    # boundary evaporate on exactly the path that reintroduces the surface.
+    setattr(child, MCP_DENIED_ATTR, restricted)
     if mcp is not None:
         mcp.attach(child)
         # Diagnostics only, and BORROWED: unlike attach_mcp_dispose this adds no
