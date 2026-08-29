@@ -631,3 +631,93 @@ async def test_a_sub_ceiling_advisory_pass_still_goes_to_the_background(tmp_path
     stream.gate.set()
     await settle_background(session)
     await session.dispose()
+
+
+# --- A SIZE PASS IS NOT THE ADVISOR'S DOING -------------------------------
+#
+# Agent review round 5, MINOR-2. An over-ceiling pass still CONSUMES the hint
+# (consumption is single-use and happens before routing), so the plan used to
+# carry it and both consumers of `advisor_hint` read it as "the advisor caused
+# this": the receipt claimed credit, and `_settle_advisor` judged — and could
+# DISABLE — the advisor over a pass the ordinary trigger fired by itself.
+
+
+@pytest.mark.asyncio
+async def test_a_size_triggered_pass_is_not_attributed_to_the_advisor(tmp_path, monkeypatch):
+    """700k over a 600k ceiling with a hint pending: size did this, not advice.
+
+    The receipt must not say "advisor:", because the ordinary trigger would
+    have fired this pass with no advice at all.
+    """
+    session = make_session(tmp_path)
+    await talk(session)
+    events: list[Any] = []
+    session.subscribe(events.append)
+    pin_measured_context(monkeypatch, 700_000)
+    seed_hint(session)
+
+    await asyncio.wait_for(drive_boundary(session, 700_000), timeout=10.0)
+
+    ends = [event for event in events if isinstance(event, CompactionEndEvent) and event.success]
+    assert ends, "the ceiling pass never ran"
+    assert (
+        ends[-1].detail is None
+    ), f"a size-triggered pass claimed advisor credit on the receipt: {ends[-1].detail!r}"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_size_triggered_pass_cannot_disable_the_advisor(tmp_path, monkeypatch):
+    """The kill switch decides whether the feature survives the session.
+
+    A pass the advisor did not cause must not count against its reclaim
+    record. Reproduced by the reviewer: `_advisor_disabled` became True on a
+    pure size-triggered pass, switching off a feature that had not been
+    invoked.
+    """
+    session = make_session(tmp_path)
+    await talk(session)
+    pin_measured_context(monkeypatch, 700_000)
+    seed_hint(session)
+
+    await asyncio.wait_for(drive_boundary(session, 700_000), timeout=10.0)
+
+    assert not session._advisor_disabled, (
+        "a pass the ordinary trigger fired on size alone was judged against the "
+        "advisor's reclaim record and switched the advisor off for the session"
+    )
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_consumed_hint_still_widens_the_cut_on_a_size_pass(tmp_path, monkeypatch):
+    """Attribution is dropped; INFLUENCE is not.
+
+    The widen-only guarantee applies to every pass, so a hint consumed by a
+    size-triggered pass must still be able to keep more history than the
+    recency rule asked for. This is the direction the fix must not break: the
+    hint stops being a CREDIT, not a preserve window.
+    """
+    session = make_session(tmp_path)
+    await talk(session)
+    pin_measured_context(monkeypatch, 700_000)
+    # A preserve window far wider than the recency budget, so the cut moves
+    # only if the hint is still being read.
+    seed_hint(session, preserve=KEEP_RECENT * 20)
+
+    widths: list[int] = []
+    original = compaction_api.find_cut_point
+
+    def record(history, keep_recent):
+        widths.append(int(keep_recent))
+        return original(history, keep_recent)
+
+    monkeypatch.setattr(compaction_api, "find_cut_point", record)
+    await asyncio.wait_for(drive_boundary(session, 700_000), timeout=10.0)
+
+    assert widths, "the plan never reached find_cut_point"
+    assert max(widths) >= KEEP_RECENT * 20, (
+        f"the consumed hint stopped widening the cut (keep_recent={widths}) — dropping "
+        "ATTRIBUTION must not drop the preserve window the hint asked for"
+    )
+    await session.dispose()

@@ -220,6 +220,17 @@ Skills (deliberate design choices, user-requested):
     mid_turn_enabled (true). The former `max_threshold_tokens` ceiling is
     superseded by `threshold_tokens` (same meaning under `min`) and is read as
     it with a rename warning.
+  - Speculative compaction advisor (BETA, off by default): advisor_enabled
+    (false), advisor_every_n_turns (20), advisor_floor_tokens (200000),
+    advisor_trigger_tokens (300000), advisor_min_confidence (0.6),
+    advisor_timeout_s (30.0), advisor_max_calls (200),
+    advisor_cooldown_turns (60). With `advisor_enabled` false nothing reads the
+    rest and behaviour is byte-identical to a config written before the
+    feature. When on, a model call off the turn's critical path may pull a pass
+    EARLIER (never later, and never below `advisor_floor_tokens`); the
+    resulting pass runs in the background and applies at the next safe
+    boundary, while a pass at the ordinary ceiling and manual `/compact` stay
+    synchronous. `advisor_max_calls: 0` means NO calls, not unlimited.
   - `should_compact`/`resolve_threshold_tokens` math;
     `COMPACTION_RECOVERY_BAND = 0.8`.
   - `find_cut_point`: walk backwards accumulating estimated tokens, never cut

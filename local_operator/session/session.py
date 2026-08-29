@@ -274,12 +274,15 @@ class _CompactionPlan:
     context_tokens: int
     #: Local estimate over the pre-pass history — the receipt's "before".
     tokens_before: int
-    #: The advisory that lowered this pass's trigger, or ``None`` for an
-    #: ordinary size-triggered pass. Carried for the RECEIPT (the user is owed
-    #: an explanation when a pass fires below the configured threshold) and
-    #: for the anti-thrash bookkeeping in ``_maybe_compact``. It is not an
-    #: input to the commit: ``_run_compaction`` never reads it, so a hint can
-    #: never reach the summarizer or permanent history.
+    #: The advisory that CAUSED this pass, or ``None`` when size alone would
+    #: have fired it. Carried for the RECEIPT (the user is owed an explanation
+    #: when a pass fires below the configured threshold) and for the anti-thrash
+    #: bookkeeping in ``_maybe_compact``, both of which mean "the advisor did
+    #: this" — so a pass the ordinary trigger would have made anyway leaves this
+    #: ``None`` even when a hint was consumed and widened the cut (see the
+    #: attribution note where the plan is built). It is not an input to the
+    #: commit: ``_run_compaction`` never reads it, so a hint can never reach the
+    #: summarizer or permanent history.
     advisor_hint: Any | None = None
 
 
@@ -5798,7 +5801,35 @@ class Session:
             cut=cut,
             context_tokens=context_tokens,
             tokens_before=local_estimate,
-            advisor_hint=advisor_hint if advisory_ok else None,
+            # ATTRIBUTION, not influence. The hint above may have widened the
+            # preserve window for this pass whatever triggered it — that is the
+            # widen-only guarantee and it applies to every pass. But a pass the
+            # context would have fired ANYWAY, on size alone, was not caused by
+            # the advice, and ``advisor_hint`` on the plan is read by exactly
+            # two consumers that both mean "the advisor caused this":
+            #
+            # - ``_advisor_detail`` renders "advisor: <reason>" on the receipt.
+            #   On a size-triggered pass that tells the user the advisor did
+            #   something the ordinary trigger did by itself.
+            # - ``_settle_advisor`` JUDGES the advisor by what the pass
+            #   reclaimed, and can DISABLE it for the rest of the session. A
+            #   size pass counting against the advisor's reclaim record lets an
+            #   ordinary ceiling pass switch off a feature it never invoked;
+            #   verified reachable in agent review round 5 (MINOR-2), where a
+            #   700k pass over a 600k ceiling both claimed advisor credit on
+            #   the receipt and set ``_advisor_disabled``.
+            #
+            # So the hint is still CONSUMED (single-use: it is an opinion about
+            # one moment and must not lower a later gate) and still shapes the
+            # cut, but it is only carried onto the plan when the advice is what
+            # made the pass happen. Same predicate as the async routing, so
+            # "advisory pass" means one thing across the file.
+            advisor_hint=(
+                advisor_hint
+                if advisory_ok
+                and not self._fires_on_size_alone(compaction_api, context_tokens, settings)
+                else None
+            ),
         )
 
     def _settle_advisor(self, plan: _CompactionPlan, outcome: CompactionOutcome) -> None:
@@ -6150,6 +6181,28 @@ class Session:
             await self._emit(CompactionEndEvent(reason=reason, success=False))
             return CompactionOutcome(ran=False, reason="failed", detail=f"compaction failed: {exc}")
 
+    def _fires_on_size_alone(self, compaction_api: Any, context_tokens: int, settings: Any) -> bool:
+        """Would this context have compacted with NO advice at all?
+
+        The one place that question is asked, because two different decisions
+        depend on it and they must never disagree:
+
+        - whether a pass may be deferred (:meth:`_pass_may_run_off_the_turn`);
+        - whether the advisor may be CREDITED with a pass, and judged by it
+          (``advisor_hint`` on the plan).
+
+        Asked through the same ``should_compact`` the gate itself uses, with
+        ``advisory_ok=False``, so this is a reading of the one resolved trigger
+        rather than a second notion of the ceiling.
+        """
+        return _should_compact(
+            compaction_api,
+            context_tokens,
+            self.effective_model.context_window,
+            settings,
+            False,
+        )
+
     def _pass_may_run_off_the_turn(self, plan: _CompactionPlan) -> bool:
         """Whether THIS pass may be deferred, or must relieve the turn now.
 
@@ -6174,28 +6227,30 @@ class Session:
         assert this could not happen, which is worse than the bug: a reader
         trusts an invariant the code never enforced.
 
-        Asked through the SAME resolver the gate itself uses, with
-        ``advisory_ok=False`` so the question is exactly "would this context
-        have compacted without any advice?". That is deliberately not a second
-        notion of the ceiling — there is one resolved trigger
-        (``compaction.thresholds.should_compact``) and this reads it, so the
-        two can never drift.
+        Expressed through :meth:`_fires_on_size_alone`, which is also what
+        decides whether the advisor may be credited with a pass — the two
+        answers have to come from one question, or a pass could be deferred as
+        "advisory" while being attributed to size, or the reverse.
         """
-        return not _should_compact(
-            plan.compaction_api,
-            plan.context_tokens,
-            self.effective_model.context_window,
-            plan.settings,
-            False,
+        return not self._fires_on_size_alone(
+            plan.compaction_api, plan.context_tokens, plan.settings
         )
 
     def _spawn_compaction_pass(self, plan: _CompactionPlan, *, reason: str) -> None:
         """Run an ADVISOR-triggered pass off the turn, awaiting nothing.
 
-        Reached ONLY for a pass the callers have already established may be
-        deferred — advisory AND below the ordinary trigger
-        (:meth:`_pass_may_run_off_the_turn`). An over-ceiling context never
-        arrives here; it takes the synchronous pass, which is the safety net.
+        CALLER CONTRACT, checked below rather than asserted in prose: the pass
+        must already have been established as deferrable — advisory AND below
+        the ordinary trigger (:meth:`_pass_may_run_off_the_turn`). An
+        over-ceiling context must never arrive here; it takes the synchronous
+        pass, which is the safety net.
+
+        The re-check is deliberate belt-and-braces. This whole PR exists
+        because a comment asserted an invariant nothing enforced (round 4,
+        MAJOR-1), so the precondition that replaced it is enforced at the point
+        that depends on it rather than trusted from two call sites. It is a
+        cheap threshold read, and a future third caller cannot quietly
+        reintroduce the bug.
 
         Given that, declining is a full answer and never a fall-back to the
         inline pass: below the trigger nothing is forcing relief, so skipping
@@ -6207,8 +6262,29 @@ class Session:
         fires at every tool-loop boundary, so without the latch a long tool run
         would spawn a summarization call per batch — each against a snapshot
         the next one invalidates, and all of them billed.
+
+        KNOWN, ACCEPTED (issue #413): the latch bounds background passes
+        against each other, not against a synchronous one. If the context
+        crosses the ceiling while a legitimately sub-ceiling pass is running,
+        the next boundary correctly runs a synchronous pass alongside it and
+        two summarizations are billed over the same history — the background
+        one is then discarded as stale, so correctness holds and only spend is
+        affected. Having the ceiling AWAIT the background pass instead was
+        considered and rejected in agent review round 5: it would make the one
+        non-deferrable pass wait on a call this design deliberately leaves
+        unbounded, which is round 4's MAJOR-1 in a subtler form.
         """
         if self._disposed or self._compaction_pass_in_flight:
+            return
+        if not self._pass_may_run_off_the_turn(plan):
+            # The caller contract, enforced. Deferring an at-or-above-ceiling
+            # pass is MAJOR-1; refusing here means the worst a mistaken caller
+            # can do is fail to spawn, and every caller already falls through
+            # to the synchronous pass when this declines.
+            logger.debug(
+                "refusing to defer a compaction pass: the context is at or above "
+                "the resolved trigger, so the pass must relieve the turn now"
+            )
             return
         if self._pending_compaction is not None:
             # A finished pass is already waiting to be applied. Starting a
