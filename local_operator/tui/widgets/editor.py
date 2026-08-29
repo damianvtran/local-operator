@@ -204,7 +204,29 @@ BARREN_CLICK_WINDOW_S = 1.5
 #: trackpad, not a deliberate move to another word: at three or more the user is
 #: plausibly placing a second caret somewhere else, and this must not swallow
 #: that. It only suppresses one interrupt press; it never makes a selection.
+#:
+#: A RADIUS, applied as `max(abs(dx), abs(dy))`. Read against `Offset.clamped`
+#: it was one-sided on both axes — negatives became zero, so any leftward or
+#: upward drift measured as no drift at all and armed the claim from arbitrarily
+#: far away (agent review round 3, R3-2).
 _NEAR_MISS_CELLS = 2
+
+
+#: How long after a first click a second may land and still read as ONE gesture.
+#:
+#: Deliberately WIDER than `CLICK_CHAIN_TIME_THRESHOLD` (0.9 s), which is the
+#: window Textual's own chain uses. This branch is gated on its own constant
+#: because it measures elapsed time from a LATER instant than the chain does:
+#: `_on_click` runs after mouse-up and dispatch, a consistent +25 to +28 ms
+#: later. Sharing the chain's number therefore closed the protective window ~26
+#: ms BEFORE the window it protects, leaving a ~20 ms band where a pair got
+#: neither a selection nor protection (design review round 3, D3-1).
+#:
+#: The margin makes protection OUTLIVE selection by design rather than racing
+#: it. It costs nothing when the pair did chain — a chained click never reaches
+#: this branch — so the only presses it can absorb are ones that already
+#: produced no range.
+_NEAR_MISS_WINDOW_S = 1.0
 
 
 def _was_downscaled(bounded: ImageInfo, source: ImageInfo) -> bool:
@@ -2155,6 +2177,10 @@ class Editor(TextArea):
         # so the press was a real Esc and its action is owed now — a deferral
         # resolving later would stop a turn the user started after looking away.
         self._flush_escape()
+        # Same argument for the click gesture: focus moving elsewhere ends it,
+        # and a claim carried across the boundary would absorb a press aimed at
+        # whatever the user turned to (R3-3).
+        self.retire_barren_click()
 
     def _on_unmount(self) -> None:
         # Teardown drops the action rather than flushing it: there is no surface
@@ -2213,6 +2239,11 @@ class Editor(TextArea):
         # stuck mode. opencode resets to normal on submit for the same reason.
         self.set_shell_mode(False)
         self.clear_content()
+        # The submit seam. The composer the claim described is now empty and a
+        # turn is starting, so the next Ctrl+C is aimed at that turn — absorbing
+        # it would eat a genuine interrupt on a prompt the user just decided was
+        # wrong, which is well inside a reaction-time budget (R3-3).
+        self.retire_barren_click()
 
     def referenced_images(self) -> list[ImageContent]:
         """The attachments the buffer still cites, in the order it cites them.
@@ -3041,10 +3072,18 @@ class Editor(TextArea):
             self._single_click_at = (now, event.screen_offset)
             if previous is not None:
                 elapsed = now - previous[0]
-                drift = (event.screen_offset - previous[1]).clamped
-                if elapsed <= self.app.CLICK_CHAIN_TIME_THRESHOLD and max(drift) <= (
-                    _NEAR_MISS_CELLS
-                ):
+                # ABSOLUTE distance on BOTH axes. `Offset.clamped` restricts x
+                # and y to values above zero rather than taking a magnitude, so
+                # every negative component read as ZERO drift and a second click
+                # ANY distance to the left — or on an earlier row — landed
+                # inside the band and armed the claim (agent review round 3,
+                # R3-2). The stated bound is a radius around the first click,
+                # and a radius has no sign; measured end to end, `dx=-6` and
+                # `dy=-3` both armed while their positive twins correctly did
+                # not.
+                offset = event.screen_offset - previous[1]
+                drift = max(abs(offset.x), abs(offset.y))
+                if elapsed <= _NEAR_MISS_WINDOW_S and drift <= _NEAR_MISS_CELLS:
                     self._barren_click_at = now
             return
         # A real chain supersedes the near-miss bookkeeping.
@@ -3153,7 +3192,17 @@ class Editor(TextArea):
         defining "word" a second time here is how the two would drift.
 
         ``barriers`` are extra columns a span may not CROSS — the edges of the
-        app's own attachment markers. ``_word_pattern`` sees a line as
+        app's own attachment markers. **They are expected to be TOKEN
+        BOUNDARIES: a barrier landing inside a word splits it**, so
+        ``barriers=[12]`` on ``look at [Image #1, …]`` yields ``'Ima'`` rather
+        than ``'Image'``. That is correct for marker edges, which never fall
+        mid-word, and it is the precondition a future caller has to meet —
+        passing, say, syntax-highlight offsets would return half words rather
+        than misbehave visibly (agent review round 3, R3-5). Out-of-range,
+        negative, unsorted and duplicated values are filtered and degrade to the
+        ordinary word span.
+
+        ``_word_pattern`` sees a line as
         characters, so it happily runs one span across a marker edge: ``]`` and
         the space after it are both non-word characters, so a bare paste's
         ``[Image #1, 1568x200] `` gave the trailing space the span ``'] '``,
@@ -3318,6 +3367,20 @@ class Editor(TextArea):
         It suppresses exactly ONE press. The claim is retired by the rung that
         reads it, so a user who genuinely wants to interrupt presses again and
         gets the ordinary ladder.
+
+        THREE BOUNDS, and the property only holds with all three (agent review
+        round 3, which found one defect per missing bound):
+
+        * **Armed narrowly.** The near-miss branch measures an absolute radius
+          on both axes; `Offset.clamped` made it one-sided, so any leftward or
+          upward drift armed it from any distance (R3-2).
+        * **Read narrowly.** The app's rung takes it only when there is a draft
+          to protect. On an empty composer it protected nothing and swallowed a
+          genuine interrupt, chainably (R3-1).
+        * **Retired eagerly.** :meth:`retire_barren_click` drops it at every
+          seam that ends the gesture — an edit, a submit, a blur, a turn
+          starting — rather than waiting for the window. The window bounds how
+          long the claim can be wrong; it does not stop it being wrong (R3-3).
         """
         at = self._barren_click_at
         return at is not None and (time.monotonic() - at) < BARREN_CLICK_WINDOW_S
@@ -3329,8 +3392,26 @@ class Editor(TextArea):
         draft is also the moment the gesture is over: leaving the claim up would
         make a SECOND press a no-op too, and two silent presses is the shape of
         an unreachable exit ladder.
+
+        ALSO CALLED FROM EVERY SEAM THAT ENDS THE GESTURE, not only from the
+        rung that spends it. The claim answers "did a multi-click JUST happen
+        and produce nothing?", and the window alone does not make that true — it
+        only bounds how long it can be wrong for. A user who clicked, TYPED,
+        submitted and then reached for Ctrl+C to stop the turn they had just
+        started was still inside the window and lost the interrupt (agent review
+        round 3, R3-3).
+
+        So it retires wherever the gesture provably ended: a document edit (the
+        hand is on the keyboard, the click is over), a submit (the composer it
+        described has been emptied and a turn has started), a blur, and a turn
+        starting under it. Each of those makes the next Ctrl+C mean something
+        the click cannot speak for.
         """
         self._barren_click_at = None
+        # The near-miss bookkeeping is half of the same claim: leaving the first
+        # click's timestamp behind lets a later, unrelated click pair with it and
+        # re-arm from a gesture the user has already moved on from.
+        self._single_click_at = None
 
     def action_copy(self) -> None:
         """Copy the live range. THE composer's copy gesture.
@@ -3837,6 +3918,11 @@ class Editor(TextArea):
         # IS, and silently un-copying would be worse — but the CLAIM is retired
         # the moment its subject is edited away.
         stale_receipt = self._copied
+        # A buffer mutation means the hand has left the mouse, so the barren
+        # click is over whatever the window still says (R3-3). This is the
+        # keystroke seam, and it covers paste and history recall too, because
+        # they funnel through here as well.
+        self.retire_barren_click()
         result = super().edit(edit)
         if stale_receipt:
             self._copied = False

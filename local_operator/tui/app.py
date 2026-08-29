@@ -6097,8 +6097,30 @@ class OperatorApp(App[None]):
         # composer that diverts the key indefinitely, and a rung that cannot be
         # reached twice in a row is not a ladder. A second press gets the
         # ordinary behaviour, as does any press after the window expires.
-        if editor.barren_multi_click:
+        #
+        # GATED ON THERE BEING A DRAFT TO PROTECT. The rung's entire
+        # justification is that clearing the draft here is the sentence this
+        # change exists to eliminate, so on an EMPTY composer it protects
+        # nothing and costs a real interrupt on a live turn. Worse, it was
+        # chainable: re-clicking when nothing appeared to happen is exactly the
+        # user's reflex, each gesture re-armed the claim, and four rounds of
+        # (click, Ctrl+C) never reached the interrupt at all — the exit ladder
+        # becoming unreachable, which is the invariant this area exists to
+        # protect (agent review round 3, R3-1). The suppression now only ever
+        # diverts the press away from the DRAFT rung, which is the only rung it
+        # was ever arguing about.
+        if editor.barren_multi_click and editor.text.strip():
             editor.retire_barren_click()
+            # The ladder is NOT armed and any live exit hint is stale, for the
+            # same reason the draft rung below resets both: this press is being
+            # absorbed, so leaving "ctrl+c again to exit" on screen would
+            # promise an exit the next press does not make (design review round
+            # 3, D3-2). The neighbouring rung was written to prevent exactly
+            # this stale promise and returning early here reintroduced it.
+            self._last_interrupt_at = 0.0
+            if self._exit_hint is not None:
+                self._transcript_view().remove_block(self._exit_hint)
+                self._exit_hint = None
             return
         if editor.text.strip() and not mid_copy:
             # `remember_draft` refuses while the aside owns the composer, and a
@@ -8436,6 +8458,13 @@ class OperatorApp(App[None]):
         # repaint. Here rather than in `_submit_prompt`, because this is the
         # single dispatch point every prompt passes through, held or not.
         self._pending_user_echoes.append(text)
+        # A turn STARTING ends any barren click gesture: from here Ctrl+C means
+        # "stop this turn", and a claim raised before the turn existed cannot
+        # speak for a press aimed at it (agent review round 3, R3-3). Belt and
+        # braces with the editor's own submit seam, because a prompt held
+        # through a compaction reaches this dispatch point long after the
+        # submit that queued it.
+        self._editor().retire_barren_click()
         # Naming is deliberately NOT cancelled here. It used to be, because the
         # title call took the same provider lane the turn takes and a follow-up
         # had to be able to evict it. The call is now `isolated` and concurrent,

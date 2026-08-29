@@ -76,6 +76,7 @@ async def shot(
     draft: str = DRAFT,
     column: int = 18,
     row: int = 0,
+    arm_exit_hint: bool = False,
 ) -> None:
     # The theme has to be passed to the CONSTRUCTOR, not merely set beforehand:
     # `OperatorApp.__init__` re-applies its `theme_name` argument (which
@@ -89,6 +90,15 @@ async def shot(
         await pilot.pause()
         editor = app.query_one(Editor)
         editor.focus()
+        if arm_exit_hint:
+            # The ladder has to be armed on an EMPTY composer, because that is
+            # the press that paints `ctrl+c again to exit`. The draft is typed
+            # in afterwards so the barren rung is reachable at all: it is now
+            # gated on there being a draft to protect (agent review round 3,
+            # R3-1), and the stale-hint defect only shows where both are true
+            # (design review round 3, D3-2).
+            await pilot.press("ctrl+c")
+            await pilot.pause()
         editor.load_text(draft)
         await _settle(pilot, editor, row)
         app._clipboard = "PREEXISTING"
@@ -108,10 +118,13 @@ async def shot(
 
         app.save_screenshot(str(outdir / f"{name}.svg"))
         toast = app.query_one(Toast)
+        # `exit_hint` is printed for every frame so the D3-2 pair can be checked
+        # against a number as well as against the picture.
         print(
             f"{name}: theme={theme} selection={editor.selection} "
             f"selected_text={editor.selected_text!r} "
             f"clipboard={app._clipboard!r} toast={toast.message!r} "
+            f"exit_hint={app._exit_hint is not None} "
             f"draft={editor.text!r}"
         )
 
@@ -170,6 +183,34 @@ async def main() -> None:
             draft=TRAILING_BLANK_DRAFT,
             column=0,
             row=2,
+        )
+        # D3-2: the absorbed press must WITHDRAW a live exit hint. The barren
+        # rung returned early without resetting the ladder, so the screen kept
+        # promising `ctrl+c again to exit` after a press that made no exit —
+        # the exact stale promise the neighbouring draft rung was written to
+        # prevent. `09` is the armed hint, `10` is the frame after the absorbed
+        # press: on this branch the hint is GONE and the draft is still there.
+        await shot(
+            outdir,
+            f"{prefix}09-exit-hint-armed",
+            2,
+            False,
+            theme=theme,
+            draft=TRAILING_BLANK_DRAFT,
+            column=0,
+            row=2,
+            arm_exit_hint=True,
+        )
+        await shot(
+            outdir,
+            f"{prefix}10-exit-hint-absorbed-press",
+            2,
+            True,
+            theme=theme,
+            draft=TRAILING_BLANK_DRAFT,
+            column=0,
+            row=2,
+            arm_exit_hint=True,
         )
     theme_mod.set_theme("dark")
 

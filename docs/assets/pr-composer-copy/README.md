@@ -33,6 +33,8 @@ out byte-identical to its dark twin.
 | `06-blank-line-ctrl-c` | …then Ctrl+C | `copied 1 character`, **draft intact** — before the fix this frame is the empty composer and `draft cleared — ↑ to recover` |
 | `07-trailing-blank-double-click` | double-click the blank LAST row after two shift+enters | nothing painted — **deliberately identical** to the frame before the gesture (D2) |
 | `08-trailing-blank-ctrl-c` | …then Ctrl+C | the draft **still there**; on the parent this frame is the empty composer and `draft cleared — ↑ to recover` |
+| `09-exit-hint-armed` | Ctrl+C on the empty composer (arms the ladder), then a draft and a barren double-click | `· ctrl+c again to exit` on screen, claim armed |
+| `10-exit-hint-absorbed-press` | …then the Ctrl+C the hint invited | the hint **gone** and the draft intact; on `f53a18d6` this frame still shows `ctrl+c again to exit` after a press that made no exit (D3-2) |
 
 **`07` and `08` are byte-identical to each other on this branch, and that is
 the evidence rather than a duplicate.** The last row genuinely has no line
@@ -44,6 +46,19 @@ recover` (design review round 2, D2). Contrast R1-7, which was about presenting
 two identical captures as two independent observations; these two are one
 observation, stated as one.
 
-`light-*` are the same six on the paper ramp. All twelve frames are distinct
+**The `09`/`10` pair is the round-3 addition** (design review round 3, D3-2).
+The absorbed press now withdraws a live exit hint the way the draft rung
+already did, so the screen stops promising an exit that press does not make.
+The before-side comes from a detached control worktree at `f53a18d6` — the
+round-3 head, not the branch point — because this is a defect the round-2
+remedy introduced rather than one it inherited.
+
+Note the fixture arms the ladder on an EMPTY composer and types the draft in
+afterwards. That is not incidental: the barren rung is now gated on there being
+a draft to protect (agent review round 3, R3-1), so the designer's original
+empty-composer repro no longer reaches that rung at all and the stale hint only
+shows where both conditions hold.
+
+`light-*` are the same ten on the paper ramp. All twenty frames are distinct
 files with distinct contents; an earlier evidence set presented two
 byte-identical captures as two observations (agent review round 1, R1-7).
