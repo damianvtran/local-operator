@@ -99,7 +99,18 @@ GHOST_CASES = [
     # Enum-tail ARGUMENT: no trailing space, matching `_complete_argument`'s
     # rule that the space would terminate the argument and close the list.
     ("/mcp ", "lo", "gin"),
-    ("/mcp ", "l", "ogin"),
+    # `l` alone is deliberately NOT pinned to a literal. It is the one row in
+    # this table whose answer depends on which verbs `/mcp` offers rather than
+    # on the completion arithmetic: it was `ogin` when the verb set was
+    # login/logout/reauth, and becomes `ist` the moment a `list` verb is added
+    # (#377), which sorts ahead of it. Both branches were green in isolation, so
+    # neither CI run saw the crossing — a frozen literal here is a merge
+    # conflict waiting in a file nobody expects one in.
+    #
+    # `None` means "derive the expectation from the highlighted row", which is
+    # what this test is actually about: the ghost must equal the remainder of
+    # whatever row Tab would take. That keeps the case honest under any verb set.
+    ("/mcp ", "l", None),
     # The COMPOUND `/mcp` row the issue is about. Reached through `/mcp login `
     # because that is the route on which the app fills the server rows.
     ("/mcp login ", "n", "otion"),
@@ -120,7 +131,7 @@ GHOST_CASES = [
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("seed,typed,expected", GHOST_CASES)
-async def test_tab_commits_exactly_the_ghost(seed: str, typed: str, expected: str) -> None:
+async def test_tab_commits_exactly_the_ghost(seed: str, typed: str, expected: str | None) -> None:
     """THE invariant: ``buffer + ghost == buffer after Tab``, or no ghost.
 
     Asserted in both directions on purpose. The expected-ghost check pins WHICH
@@ -146,6 +157,13 @@ async def test_tab_commits_exactly_the_ghost(seed: str, typed: str, expected: st
 
             before = editor.text
             ghost = editor.suggestion
+            if expected is None:
+                # Registry-dependent row: the expectation IS the highlighted
+                # row's remainder, so the case survives a change to the verb set
+                # while still asserting the ghost describes the accept target.
+                row = editor.picker.highlighted_name()
+                assert row is not None, f"{before!r}: no row highlighted to predict from"
+                expected = row[len(before.rpartition(" ")[2]) :]
             assert ghost == expected, f"{before!r}: ghost {ghost!r} != {expected!r}"
 
             await pilot.press("tab")
@@ -768,3 +786,88 @@ async def test_a_live_selection_withholds_the_ghost() -> None:
                 "a live selection admitted a ghost — Tab would replace the range, "
                 "not append at a caret"
             )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "chord,ends_at_buffer_end",
+    [
+        # Every encoding #375 supports, in both directions. `alt+*` is the macOS
+        # chord, `ctrl+*` the Linux/Windows one; both reach the same action.
+        ("alt+left", False),
+        ("alt+right", True),
+        ("ctrl+left", False),
+        ("ctrl+right", True),
+        # Shift variants select rather than move, so they leave a live range.
+        ("alt+shift+left", False),
+        ("alt+shift+right", True),
+    ],
+)
+async def test_word_wise_caret_chords_never_accept_the_ghost(
+    chord: str, ends_at_buffer_end: bool
+) -> None:
+    """Word-wise movement moves the caret and never inserts the preview.
+
+    A NEW interaction: #375 landed ``option+←/→`` word-wise caret movement (the
+    ``alt``/``ctrl`` encodings and their Shift variants) into the same composer
+    this PR paints a ghost in, and the ghost sits AT the caret. Neither PR could
+    have tested the crossing, so it is pinned here.
+
+    The contract is the one plain ``→`` already has (see
+    :func:`test_right_arrow_does_not_accept_the_ghost`): these are caret keys,
+    and Tab remains the single accept key the invariant is stated over. The
+    buffer must be untouched by every one of them.
+
+    The ghost's own gates then decide whether a preview survives the move: it is
+    withheld once the caret leaves the end of the buffer (gate 1) or a Shift
+    variant opens a selection (gate 1's selection clause), and re-derived when a
+    move lands back at the end — which is why the expectation is a function of
+    where the chord finishes rather than a constant.
+    """
+    typed = "fix the parser /mc"
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await _settle(pilot, 6)
+        editor = app.query_one(Editor)
+        editor.focus()
+        await _type(pilot, typed)
+        await _settle(pilot, 8)
+        assert editor.suggestion == "p ", "precondition: a ghost is showing"
+
+        await pilot.press(chord)
+        await _settle(pilot, 8)
+
+        assert editor.text == typed, f"{chord} mutated the buffer: {editor.text!r}"
+        selection_open = editor.selection.start != editor.selection.end
+        if ends_at_buffer_end and not selection_open:
+            assert editor.suggestion == "p ", f"{chord} lost a ghost that is still true"
+        else:
+            assert editor.suggestion == "", f"{chord} left a ghost away from the caret"
+
+
+@pytest.mark.asyncio
+async def test_the_escape_prefixed_word_chord_does_not_accept_the_ghost() -> None:
+    """The Esc-prefixed encoding of the same chord, which parses as TWO events.
+
+    Terminals in "Esc+" mode send ``option+→`` as ``\\x1b`` then ``\\x1b[C``, so
+    the widget sees ``escape`` followed by ``right``. #375 coalesces those into
+    word movement; this asserts the composer's ghost survives that path the same
+    way — the buffer is untouched, and the preview is retired because the escape
+    dismissed the list it described (the U3 rule).
+    """
+    typed = "fix the parser /mc"
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await _settle(pilot, 6)
+        editor = app.query_one(Editor)
+        editor.focus()
+        await _type(pilot, typed)
+        await _settle(pilot, 8)
+        assert editor.suggestion == "p "
+
+        await pilot.press("escape")
+        await pilot.press("right")
+        await _settle(pilot, 10)
+
+        assert editor.text == typed, f"the chord mutated the buffer: {editor.text!r}"
+        assert editor.suggestion == "", "a ghost outlived the list escape dismissed"

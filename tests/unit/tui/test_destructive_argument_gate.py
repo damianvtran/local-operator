@@ -239,9 +239,18 @@ async def test_the_gate_is_armed_on_the_typed_path(verb: str, alert: bool, expec
     key missed the verb→space transition). The alert flags and this gate were
     both inert on the one path a user actually takes.
 
-    Every other test of this gate seeds the buffer through ``_set_editor_line``,
-    which calls ``_sync_picker()`` directly and therefore cannot observe a
-    missing message. This one types, which is why it would have caught it.
+    This test does NOT bind the refresh-key fix, despite typing. It calls
+    ``set_choices`` itself, so the rows are present whether or not the widget
+    posted ``RefreshArgumentChoices`` — reverting that fix leaves this file
+    10/10 green (UX review round 3, U11). What it binds is the GATE: that a
+    row's ``alert`` flag arms ``_argument_is_destructive`` on a buffer built by
+    real key presses, which is the half that was silently answering False.
+
+    The refresh fix is bound by
+    ``test_ghost_text.py::test_typing_into_the_mcp_server_slot_opens_its_rows``,
+    which asserts the rows arrive without staging them and fails 3/3 on revert.
+    Look there, not here, when deciding whether a change to the refresh key is
+    safe.
 
     The rows are constructed here because ``/mcp remove`` and the ``reauth``
     alert flag ship in the concurrent PR; the gate reads the flag off the row,
