@@ -27,6 +27,8 @@ from unittest.mock import patch
 import pytest
 
 from local_operator.tui.app import OperatorApp
+from textual.widgets.text_area import Selection
+
 from local_operator.tui.widgets.editor import Editor
 from tests.unit.tui.test_app_pilot import (
     FakeMcpManager,
@@ -158,6 +160,93 @@ async def test_tab_commits_exactly_the_ghost(seed: str, typed: str, expected: st
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "typed",
+    ["review this /team ", "fix the bug /agent cod"],
+)
+async def test_an_inline_name_command_shows_no_ghost(typed: str) -> None:
+    """The reassembly path previews nothing, because it is not an append.
+
+    ``/team`` and ``/agent`` are NAME+message commands, and when a draft
+    survives outside the command token, accepting a row does not just fill the
+    span — ``_complete_name_argument`` moves the whole ``/<cmd> <name>``
+    construct to the FRONT of the buffer with the draft as its message. The
+    ghost previewed only the span replacement, so ``review this /team `` showed
+    a dimmed ``chart `` and Tab produced ``/team chart review this`` (review
+    round 1, B1).
+
+    ``completion_for`` now models both edits, so the predicted buffer is a
+    reordering rather than an append and ``ghost_for``'s ``startswith`` rule
+    withholds the preview on its own. Asserted through real keys, and the
+    invariant is re-checked here rather than assumed: whatever the ghost says,
+    it must still describe Tab.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await _settle(pilot, 6)
+        editor = app.query_one(Editor)
+        editor.focus()
+        await _type(pilot, typed)
+        await _settle(pilot, 10)
+        before = editor.text
+        ghost = editor.suggestion
+        await pilot.press("tab")
+        await _settle(pilot, 10)
+        after = editor.text
+
+    assert ghost == "", f"the reassembly path previewed {ghost!r}, which Tab does not append"
+    # Tab still reassembles — the fix is to the prediction, not to the edit.
+    assert after != before and after.startswith(("/team ", "/agent ")), after
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "typed,width,expected",
+    [
+        # `/analytic` (9 cells) + ghost `s ` (2) needs 11 free cells.
+        ("/analytic", 20, "s "),  # 12 available: room to spare
+        ("/analytic", 19, ""),  # 11 available: EXACTLY the boundary
+        ("/mc", 14, "p "),  # 6 available
+        ("/mc", 13, ""),  # 5 available: EXACTLY the boundary
+    ],
+)
+async def test_the_width_gate_rejects_the_exact_boundary(
+    typed: str, width: int, expected: str
+) -> None:
+    """At ``col + len(ghost) == width`` the ghost must be refused, not admitted.
+
+    Textual reserves the cell AT the caret for the caret itself, so a ghost
+    ending exactly at the content edge still pushed the rendered strip one cell
+    past the box — measured as a strip one wider than the same row with no
+    ghost, at w=19 and w=13 (review round 1, B2). The original ``>`` admitted
+    precisely that case, and the existing width test sampled widths comfortably
+    either side of it.
+
+    Both a fitting and a boundary width per ghost, so the test discriminates
+    rather than just asserting emptiness at narrow widths.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(width, 20)) as pilot:
+        await _settle(pilot, 6)
+        editor = app.query_one(Editor)
+        editor.focus()
+        await _type(pilot, typed)
+        await _settle(pilot, 8)
+        ghost = editor.suggestion
+        with_ghost = editor.render_line(0).cell_length
+        editor.suggestion = ""
+        await _settle(pilot, 3)
+        without_ghost = editor.render_line(0).cell_length
+
+    assert ghost == expected, f"w={width}: ghost {ghost!r} != {expected!r}"
+    # The point of the gate, asserted directly: a ghost never widens the row.
+    assert with_ghost == without_ghost, (
+        f"w={width}: the ghost pushed the strip from {without_ghost} to "
+        f"{with_ghost} cells — it overran the content box"
+    )
+
+
+@pytest.mark.asyncio
 async def test_the_ghost_is_dropped_when_it_would_not_fit() -> None:
     """Gate 2: a ghost wider than the row is withheld, not cropped.
 
@@ -236,6 +325,46 @@ async def test_moving_the_caret_clears_the_ghost() -> None:
 
 
 @pytest.mark.asyncio
+async def test_gate_one_alone_withholds_a_mid_caret_ghost() -> None:
+    """Gate 1's OWN contribution, isolated from ``watch_selection``.
+
+    ``test_moving_the_caret_clears_the_ghost`` presses ``left``, which fires
+    ``watch_selection`` — and that clears the ghost independently, so the
+    assertion passes whether or not gate 1 exists. Deleting the gate left the
+    whole suite green (review round 1, M1), which is the worst kind of gap:
+    the docstring warns a future editor not to relax the gate, and nothing
+    held them to it.
+
+    This asks :meth:`_ghost_completion` directly with the caret parked
+    mid-buffer, which is the one question the gate answers by itself. The state
+    is reachable rather than synthetic: brute-forcing the pure functions finds
+    34 caret-mid combinations that yield a real ghost, of which ``/mcp `` with
+    the caret inside the word is one.
+
+    Verified to FAIL with the gate removed (it returns ``' '``, painting a
+    one-space ghost mid-word) and pass with it present.
+    """
+    app = _mcp_app()
+    async with app.run_test(size=(100, 24)) as pilot:
+        await _settle(pilot, 6)
+        editor = app.query_one(Editor)
+        editor.focus()
+        await _type(pilot, "/mcp")
+        await _settle(pilot, 8)
+        # The list is open on `mcp`, so a ghost is genuinely on offer here.
+        assert editor.picker.highlighted_name() == "mcp"
+        assert editor._ghost_completion() == " ", "precondition: caret at end still ghosts"
+
+        # Park the caret INSIDE the word without going through a key press, so
+        # `watch_selection`'s own clearing cannot be what produces the result.
+        editor.selection = Selection((0, 2), (0, 2))
+        assert editor._ghost_completion() == "", (
+            "gate 1 admitted a ghost with the caret mid-word — it would render "
+            "between the typed characters (`/p mc`)"
+        )
+
+
+@pytest.mark.asyncio
 async def test_enter_completes_to_the_same_text_as_tab() -> None:
     """Enter's COMPLETING path is byte-identical to Tab's.
 
@@ -291,3 +420,129 @@ async def test_a_multiline_draft_shows_no_ghost() -> None:
         editor._sync_picker()
         await _settle(pilot, 8)
         assert editor.suggestion == "", editor.suggestion
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("typed,downs", [("/", 1), ("/", 2), ("/lo", 1), ("/lo", 2)])
+async def test_arrowing_the_command_list_moves_the_ghost_with_it(typed: str, downs: int) -> None:
+    """The ghost follows the ACCEPT TARGET, including in COMMAND mode.
+
+    The ghost used to ride ``on_highlight``, which reports only ARGUMENT rows —
+    so in COMMAND mode nothing reported during an arrow press and the only sync
+    was the one at the top of ``_on_key``, which runs BEFORE ``picker.move()``.
+    The preview sat one row behind: `/` then `down` showed `help ` and Tab
+    inserted `/exit ` (review round 1, U1).
+
+    Parametrised over both lists and two depths because the defect persisted for
+    every subsequent arrow, so a single-press test could have passed on an
+    off-by-one that merely shifted.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await _settle(pilot, 6)
+        editor = app.query_one(Editor)
+        editor.focus()
+        await _type(pilot, typed)
+        for _ in range(downs):
+            await pilot.press("down")
+            await _settle(pilot, 6)
+        highlighted = editor.picker.highlighted_name()
+        before = editor.text
+        ghost = editor.suggestion
+        await pilot.press("tab")
+        await _settle(pilot, 10)
+        after = editor.text
+
+    assert ghost, "arrowing a list left no preview at all"
+    assert before + ghost == after, (
+        f"after {downs} down press(es) the ghost promised {(before + ghost)!r} "
+        f"but Tab inserted {after!r} (highlighted row was {highlighted!r})"
+    )
+
+
+@pytest.mark.asyncio
+async def test_hovering_the_list_does_not_repaint_the_ghost() -> None:
+    """The ghost follows the KEYBOARD selection, never the pointer.
+
+    ``_report_highlight`` deliberately prefers the hover — correct for the row
+    grounds, wrong for a prediction about a key. Resting the pointer over the
+    third row previewed `/mcp reauth` while Tab still inserted `/mcp login`,
+    and no keystroke existed to correct it (review round 1, U2).
+    """
+    app = _mcp_app()
+    configs = _oauth_configs()
+    async with app.run_test(size=(100, 24)) as pilot:
+        await _settle(pilot, 6)
+        editor = app.query_one(Editor)
+        editor.focus()
+        with patch("local_operator.mcp.config.load_all_mcp_configs", return_value=(configs, {})):
+            await _type(pilot, "/mcp ")
+            await _settle(pilot, 10)
+            keyboard_ghost = editor.suggestion
+            for row in range(3):
+                await pilot.hover(editor.picker, offset=(2, row))
+                await _settle(pilot, 6)
+                assert editor.suggestion == keyboard_ghost, (
+                    f"hovering row {row} repainted the ghost to {editor.suggestion!r}; "
+                    "Tab acts on the keyboard selection, so the preview must too"
+                )
+            before = editor.text
+            ghost = editor.suggestion
+            await pilot.press("tab")
+            await _settle(pilot, 10)
+            after = editor.text
+
+    assert before + ghost == after, f"{(before + ghost)!r} != {after!r}"
+
+
+@pytest.mark.asyncio
+async def test_escape_clears_the_ghost_with_the_list() -> None:
+    """Dismissing the list retires the preview it was explaining.
+
+    Escape hid the rows but left the dimmed cells painted, and Tab with no open
+    picker is a literal tab: the screen promised `/mcp ` and the buffer became
+    `/mc ` (review round 1, U3). The ghost must not outlive its own legend.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await _settle(pilot, 6)
+        editor = app.query_one(Editor)
+        editor.focus()
+        await _type(pilot, "/mc")
+        await _settle(pilot, 8)
+        assert editor.suggestion == "p ", "precondition: a ghost is showing"
+
+        await pilot.press("escape")
+        await _settle(pilot, 8)
+
+        assert editor.picker.is_open() is False
+        assert editor.suggestion == "", "the ghost outlived the list Escape dismissed"
+
+
+@pytest.mark.asyncio
+async def test_resizing_re_checks_the_width_gate() -> None:
+    """Gate 2's answer depends on the width, so a resize has to re-ask it.
+
+    Nothing re-derived the ghost on resize: one admitted at 100 columns stayed
+    painted when the terminal was narrowed to 13, where it overran and cropped
+    the user's own text — the exact failure the gate exists to prevent. The
+    inverse was equally wrong: a ghost correctly withheld at a narrow width did
+    not return on widening until another character was typed (review round 1,
+    U4).
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await _settle(pilot, 6)
+        editor = app.query_one(Editor)
+        editor.focus()
+        await _type(pilot, "/us")
+        await _settle(pilot, 8)
+        assert editor.suggestion == "age ", editor.suggestion
+
+        await pilot.resize_terminal(13, 20)
+        await _settle(pilot, 10)
+        assert editor.suggestion == "", "a ghost survived a narrowing that made it overrun"
+
+        await pilot.resize_terminal(100, 24)
+        await _settle(pilot, 10)
+        assert editor.suggestion == "age ", "the ghost did not come back when the room did"
