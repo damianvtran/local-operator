@@ -8715,8 +8715,15 @@ async def test_a_typo_is_findable_despite_an_incidental_body_hit(tmp_path, monke
     # user message, so a one-line fixture would put the typo in the name and
     # test a different gate than the one that fails on a real store, where the
     # incidental hit is a word buried in a long conversation.
-    _seed_session(tmp_path, "dec00001", prompt="quarterly planning notes")
-    _append_turn(tmp_path, "dec00001", "a paragraph that mentions mispelled in passing")
+    # THREE decoys, not one: the gate tolerates a couple of incidental hits
+    # before it treats them as a real answer, so a single-decoy fixture cannot
+    # tell the shipped floor from a floor of one. Each carries the typo in the
+    # BODY only — the picker names a row by its first user message, so a
+    # one-line fixture would put the typo in the NAME and exercise a different
+    # path than the one that fails on a real store.
+    for decoy in range(3):
+        _seed_session(tmp_path, f"dec{decoy:05d}", prompt=f"quarterly planning notes {decoy}")
+        _append_turn(tmp_path, f"dec{decoy:05d}", "a paragraph that mentions mispelled in passing")
     # The target: contains the correct spelling only, reachable by soft match.
     for index in range(5):
         _seed_session(tmp_path, f"tgt{index:05d}", prompt=f"the misspelled word report {index}")
@@ -8743,4 +8750,52 @@ async def test_a_typo_is_findable_despite_an_incidental_body_hit(tmp_path, monke
         assert shown & targets, (
             "a typo'd query returned only the incidental body hit; the session the "
             f"user was looking for is unreachable. shown={sorted(shown)}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_one_incidental_name_hit_does_not_silence_the_typo_tier(
+    tmp_path, monkeypatch
+) -> None:
+    """The floor, tested where it actually applies.
+
+    A single exact hit on a NAME is as often incidental as deliberate: on the
+    real store `spit` matches "Failover Triggering Despite Available Account",
+    and treating that as a real answer hid every `split` session behind it. So
+    the tier keeps running until a few precise hits accumulate.
+
+    The sibling body-hit test cannot cover this: with no name/id match at all
+    the tier runs whatever the floor is, so that fixture cannot tell a floor of
+    three from a floor of one. This one puts the typo in a NAME, which is the
+    only shape where the floor is the deciding factor.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    # One incidental NAME hit: "despite" contains "spit".
+    _seed_session(tmp_path, "dec00001", prompt="Failover triggering despite available account")
+    # The sessions the user means, reachable only by edit distance from `spit`.
+    for index in range(5):
+        _seed_session(tmp_path, f"tgt{index:05d}", prompt=f"split the transcript window {index}")
+
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session), resume_factory=_resume_factory([]))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app.query_one(Editor).focus()
+        for key in "/resume":
+            await pilot.press(key)
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        picker = app.screen
+        assert isinstance(picker, SessionPickerScreen)
+
+        for key in "spit":
+            await pilot.press(key)
+            await pilot.pause()
+
+        shown = {row.id for row in picker.visible_rows}
+        targets = {f"tgt{index:05d}" for index in range(5)}
+        assert shown & targets, (
+            "one incidental name hit silenced the soft tier, so the sessions the "
+            f"user meant are unreachable. shown={sorted(shown)}"
         )

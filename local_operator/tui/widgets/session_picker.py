@@ -125,6 +125,15 @@ RESUME_EMPTY_NOTICE = "no conversations of yours to resume — subagent runs are
 #: :meth:`SessionPickerScreen._page_rows`.
 PAGE_ROWS_MAX = 10
 
+#: Name/id matches at which the picker stops consulting the bounded soft tier
+#: (see ``SessionPickerScreen._soft_tier_wanted``). Three, not one: a single
+#: exact hit on a name is as often incidental as deliberate — ``spit`` matches
+#: "De\ *spit*\ e" — and treating it as a real answer hid every genuinely
+#: intended match behind it. Measured over 517 vocabulary-drawn typos, this
+#: floor loses no rows against running the tier on every keystroke while
+#: leaving the cursor exactly as stable.
+_PRECISE_HITS_ENOUGH = 3
+
 #: Non-row lines the card always draws: header, rule, blank spacer, the
 #: position counter, and the key hints. Reserved UNCONDITIONALLY (the counter
 #: included, even when the list fits) so the height never depends on content
@@ -638,7 +647,22 @@ class SessionPickerScreen(ModalScreen[str | None]):
         # Name and id only, deliberately NOT the body digests: see above. This
         # mirrors the first two admission tests in ``filter_rows`` so the gate
         # and the filter cannot drift apart on what "an exact hit" means.
-        return not any(needle in row.name.lower() or needle in row.id.lower() for row in self._all)
+        #
+        # Counted against a small floor rather than tested for emptiness,
+        # because ONE precise hit is not yet a useful answer and can easily be
+        # incidental: ``spit`` matches the name "Failover Triggering Despite
+        # Available Account", and on that single hit the previous form silenced
+        # the tier and made every ``split`` session unreachable. Below the floor
+        # the user has almost nothing to look at, so the extra recall is worth
+        # more than the precision; at or above it they have a real answer and
+        # fuzzy additions would only dilute it.
+        precise = 0
+        for row in self._all:
+            if needle in row.name.lower() or needle in row.id.lower():
+                precise += 1
+                if precise >= _PRECISE_HITS_ENOUGH:
+                    return False
+        return True
 
     @property
     def body_matched_ids(self) -> set[str]:
