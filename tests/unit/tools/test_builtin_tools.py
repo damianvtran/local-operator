@@ -112,6 +112,60 @@ async def test_bash_nonzero_exit_reported(tools, context) -> None:
 
 
 @pytest.mark.asyncio
+async def test_bash_scrubs_a_credential_a_tool_echoed(tools, context) -> None:
+    """The end-to-end bash path, with NO credential store configured.
+
+    The originating incident's value existed only inside a remote pod, so the
+    value-keyed redactor had nothing to match. Here a local command prints the
+    same BusyBox line and the value must not survive into the result.
+    """
+    fake = "f" * 64
+    result = await _call(
+        tools,
+        "bash",
+        {"command": f"echo 'wget: unrecognized option: password={fake}'"},
+        context,
+    )
+
+    assert fake not in result.text
+    assert "«REDACTED:flag=password»" in result.text
+
+
+@pytest.mark.asyncio
+async def test_bash_warns_when_a_credential_flag_goes_to_a_fetcher(tools, context) -> None:
+    """Warn only: the command still RUNS and its output is still returned.
+
+    The note is prepended to the result rather than raised as a pre-execution
+    gate, so it is read in the same breath as the output and stays useful
+    after the fact — it explains an `exit code: 0` a pipe manufactured.
+    """
+    result = await _call(
+        tools,
+        "bash",
+        {"command": 'echo ran; wget --password="$NOPE" http://127.0.0.1:1/ 2>/dev/null || true'},
+        context,
+    )
+
+    assert result.is_error is False
+    assert result.text.startswith("[harness] Note: --password was passed to wget")
+    assert "ran" in result.text  # not blocked, not rewritten
+    assert "exit code: 0" in result.text
+
+
+@pytest.mark.asyncio
+async def test_bash_does_not_warn_on_a_plain_credential_assignment(tools, context) -> None:
+    """`export FOO_PASSWORD=...` is ~80% of the unscoped rule's firings and
+    carries no flag-echo risk. Warning on it would train the model to ignore
+    harness notes."""
+    result = await _call(
+        tools, "bash", {"command": "export FOO_PASSWORD=hunter2; echo done"}, context
+    )
+
+    assert "[harness]" not in result.text
+    assert "done" in result.text
+
+
+@pytest.mark.asyncio
 async def test_bash_non_interactive_env_applied(tools, context) -> None:
     result = await _call(tools, "bash", {"command": 'echo "$CI:$NO_COLOR:$TERM"'}, context)
     assert "1:1:dumb" in result.text

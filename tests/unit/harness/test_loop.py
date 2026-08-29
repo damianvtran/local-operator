@@ -251,6 +251,125 @@ async def test_a_tool_result_is_redacted_before_it_reaches_the_model() -> None:
     assert tool_msg.text == "[redacted]"
 
 
+async def _run_one_tool(result: ToolResult, **config_kwargs) -> Message:
+    """Drive one scripted tool call through the loop and return its tool message.
+
+    Shared by the credential-scrubbing tests below so each one states only the
+    ToolResult it is about.
+    """
+
+    async def execute(tool_call_id, args, signal, on_update, context):
+        return result.model_copy(update={"tool_call_id": tool_call_id})
+
+    tool = AgentTool(
+        name="probe",
+        parameters={"type": "object", "properties": {}},
+        execute=execute,
+    )
+    stream = ScriptedStream(
+        [
+            [
+                tool_call_delta(0, id="c1", name="probe", args="{}"),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    context = LoopContext(tools=[tool])
+    config = make_config(stream, **config_kwargs)
+
+    events = []
+    async for event in AgentLoop().run([Message.user("go")], context, config, None):
+        events.append(event)
+
+    return next(m for m in events[-1].messages if isinstance(m, Message) and m.role == "tool")
+
+
+@pytest.mark.asyncio
+async def test_an_echoed_credential_is_scrubbed_with_no_credential_store() -> None:
+    """The regression for the leak that started this: a secret that lived only
+    as an env var inside a remote pod, echoed back by BusyBox wget rejecting
+    the flag that carried it.
+
+    The harness NEVER held the value, so no value-keyed hook is configured
+    here at all — which is precisely the configuration that leaked. This test
+    fails on the pre-change loop.
+    """
+    fake = "f" * 64
+
+    tool_msg = await _run_one_tool(
+        ToolResult(
+            tool_call_id="c1",
+            tool_name="probe",
+            content=[TextContent(text=f"wget: unrecognized option: password={fake}")],
+        )
+    )
+
+    assert fake not in tool_msg.text
+    assert "«REDACTED:flag=password»" in tool_msg.text
+    # The agent is told the command actually FAILED, which the incident's
+    # `2>&1 | head` pipe had hidden behind `exit code: 0`.
+    assert "[harness]" in tool_msg.text
+
+
+@pytest.mark.asyncio
+async def test_result_details_are_scrubbed_before_they_are_persisted() -> None:
+    """``details`` never reaches a provider, which is why it was missed: it IS
+    written to ``transcript.jsonl`` through ``provider_payload``. The MCP
+    bridge puts the entire raw server result here.
+    """
+    fake = "f" * 64
+
+    tool_msg = await _run_one_tool(
+        ToolResult(
+            tool_call_id="c1",
+            tool_name="probe",
+            content=[TextContent(text="ok")],
+            details={
+                "server_result": {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": f"wget: unrecognized option: password={fake}",
+                        }
+                    ]
+                }
+            },
+        )
+    )
+
+    payload = tool_msg.provider_payload
+    assert payload is not None
+    assert fake not in repr(payload)
+    text = payload["details"]["server_result"]["content"][0]["text"]
+    assert "«REDACTED:flag=password»" in text
+
+
+@pytest.mark.asyncio
+async def test_details_scrubbing_also_applies_the_value_keyed_hook() -> None:
+    """Both passes compose on details, not just on content."""
+    from local_operator.variables import VariableStore
+
+    secret = "value-keyed-secret-in-details"
+    store = VariableStore(cwd="/tmp", env={})
+    store.store_credential("LO_TEST_TOKEN", secret, "command")
+
+    tool_msg = await _run_one_tool(
+        ToolResult(
+            tool_call_id="c1",
+            tool_name="probe",
+            content=[TextContent(text="ok")],
+            details={"stdout": secret},
+        ),
+        redact_tool_result=store.redact,
+    )
+
+    payload = tool_msg.provider_payload
+    assert payload is not None
+    assert secret not in repr(payload)
+    assert payload["details"]["stdout"] == "[redacted]"
+
+
 @pytest.mark.asyncio
 async def test_abort_pairs_dangling_tool_calls():
     """stop_reason 'aborted': every dangling tool call gets a synthetic

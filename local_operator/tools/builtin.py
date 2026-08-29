@@ -99,6 +99,11 @@ from local_operator.imaging import (
     bound_image_for_model,
 )
 from local_operator.media import ImageInfo, sniff_image_file
+from local_operator.redaction import (
+    format_credential_flag_warning,
+    lint_credential_flags,
+    redact_tool_output,
+)
 from local_operator.tools import group_reaper
 from local_operator.tools.spill import (
     SPILL_ENTRY_LIMIT_BYTES,
@@ -435,7 +440,22 @@ def spill_truncate(
     (output fit, or the store refused it). ``details`` never reaches a
     provider, so recording the handle there costs no prompt tokens while still
     letting renderers, transcripts and compaction see what happened.
+
+    Scrubbing happens HERE, before the length check, because this is the one
+    funnel all eleven spill callers pass through — ``eval``, ``web_fetch``,
+    ``agent``, ``team``, ``lsp``, ``wait`` and the MCP bridge among them, none
+    of which redact anything themselves. Bash is the only tool that scrubs
+    before spilling on its own, so without this every other tool wrote
+    plaintext into the on-disk spill store while the loop's hook redacted only
+    the model-visible preview, leaving a durable plaintext copy the redaction
+    could not reach back into. Doing it at the top rather than per-caller makes
+    "scrub before disk" structural instead of eleven places to forget.
+
+    The cost on the hot path is one lowercase pass plus four substring tests
+    (``redaction._may_contain_echo``) for output that carries no rejection
+    sentence, which is all of it in practice.
     """
+    text = redact_tool_output(text, _value_redactor(context))
     if len(text) <= limit:
         return text, None
     meta = _spill(text, tool_name, context)
@@ -1111,21 +1131,36 @@ def _bash_progress_line(
     return "running"
 
 
+def _value_redactor(context: ToolContext | None) -> Callable[[str], str] | None:
+    """The session's value-keyed redactor, or ``None`` when there is no store.
+
+    A host may hand over any object as ``variables``; probing for a callable
+    ``redact`` rather than a type keeps that contract as loose here as it
+    already is at the other call sites.
+    """
+    store = context.variables if context is not None else None
+    redact = getattr(store, "redact", None)
+    # The cast is honest about the duck-typing: nothing here can prove the
+    # host's callable returns a str, which is exactly why
+    # ``redact_tool_output`` re-checks the result at runtime.
+    return cast("Callable[[str], str]", redact) if callable(redact) else None
+
+
 def _redact_tool_text(text: str, context: ToolContext | None) -> str:
-    """Strip stored session-credential values out of tool output.
+    """Strip credentials out of tool output, by value AND by shape.
 
     The LOOP's ``redact_tool_result`` hook is the model-visible choke point;
     this stays for the UIs that read live output BEFORE the result exists
     (bash stream updates, background-job peek, the abort receipt). A command
     that ``echo``s ``$GITHUB_TOKEN`` would otherwise paint the secret while
     the command is still running.
+
+    Delegating to ``redaction.redact_tool_output`` adds the value-AGNOSTIC
+    pass: a credential the harness never held, echoed back by a tool that
+    rejected the flag carrying it, has no value for the store to match on.
+    No new call site — every existing caller gains the second pass.
     """
-    store = context.variables if context is not None else None
-    redact = getattr(store, "redact", None)
-    if callable(redact):
-        redacted = redact(text)
-        return redacted if isinstance(redacted, str) else text
-    return text
+    return redact_tool_output(text, _value_redactor(context))
 
 
 def _bash_output_summary(stdout: str, stderr: str) -> str:
@@ -1660,9 +1695,9 @@ async def execute_bash(
     # to elide it — all synchronous, all on the loop that renders the TUI,
     # and the reason a batch of concurrent bash calls used to freeze the
     # frame at the moment they finished together.
-    stdout_raw, stderr_raw = await asyncio.to_thread(_decode_chunks, stdout_chunks, stderr_chunks)
-    stdout_raw = _redact_tool_text(stdout_raw, context)
-    stderr_raw = _redact_tool_text(stderr_raw, context)
+    stdout_raw, stderr_raw = await asyncio.to_thread(
+        _decode_chunks, stdout_chunks, stderr_chunks, context
+    )
     return_code = process.returncode if process.returncode is not None else -1
 
     # Both streams may end up carrying a marker, so reserve room for two.
@@ -1684,6 +1719,14 @@ async def execute_bash(
     parts = [f"exit code: {return_code}", _bash_output_summary(stdout, stderr)]
     if timed_out:
         parts.insert(0, f"TIMEOUT after {params.timeout}s (process killed)")
+    # Pre-flight lint, delivered on the RESULT: warn only, never block, never
+    # rewrite (see redaction.lint_credential_flags for why rewriting a nested
+    # shell command is a correctness hazard the harness cannot discharge).
+    # Prepended rather than appended so it is not buried under whatever the
+    # command printed, and so it stays visible when the body is elided.
+    findings = lint_credential_flags(params.command)
+    if findings:
+        parts.insert(0, format_credential_flag_warning(findings))
     return _text(tool_call_id, "bash", "\n".join(parts) + footer, details=spill_details)
 
 
@@ -1695,11 +1738,22 @@ def _bash_partial_summary(stdout_chunks: list[bytes], stderr_chunks: list[bytes]
     )
 
 
-def _decode_chunks(stdout_chunks: list[bytes], stderr_chunks: list[bytes]) -> tuple[str, str]:
-    """Join and decode both captured streams off the event loop."""
+def _decode_chunks(
+    stdout_chunks: list[bytes],
+    stderr_chunks: list[bytes],
+    context: ToolContext | None = None,
+) -> tuple[str, str]:
+    """Join, decode and redact both captured streams off the event loop.
+
+    Redaction is folded in HERE rather than applied by the caller because it
+    is linear in the output size: scrubbing 20 MB of output costs ~0.11 s even
+    when nothing matches, which is more than the whole event-loop budget the
+    liveness test enforces. This function is already the thread hop the caller
+    pays for the oversized tail, so the scrub rides along for free.
+    """
     return (
-        b"".join(stdout_chunks).decode("utf-8", errors="replace"),
-        b"".join(stderr_chunks).decode("utf-8", errors="replace"),
+        _redact_tool_text(b"".join(stdout_chunks).decode("utf-8", errors="replace"), context),
+        _redact_tool_text(b"".join(stderr_chunks).decode("utf-8", errors="replace"), context),
     )
 
 

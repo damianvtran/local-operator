@@ -79,6 +79,7 @@ from local_operator.harness.types import (
     TurnStartEvent,
     Usage,
 )
+from local_operator.redaction import redact_tool_output, scrub_details
 
 #: How often a still-composing tool call re-announces its size. Fast enough that
 #: the byte counter visibly moves (so the row reads as progress rather than as a
@@ -1357,6 +1358,20 @@ class AgentLoop:
             # one alone leaves the other emitting it (R4-1 fixed the flush, R5-1
             # was the drain doing the same thing a moment earlier). The result
             # still parks, so the WIRE stays paired; only the event is withheld.
+            # NOTE (deferred, credential scrubbing): this event carries the
+            # PRE-redaction result. ``_append_results`` is where content and
+            # details are scrubbed, and it runs after this fires, so the TUI
+            # (``tui/events.py``), the API server (``server/utils/operator.py``)
+            # and subagent plumbing (``harness/subagent.py``) render the raw
+            # text. For bash this is already covered — ``_redact_tool_text``
+            # scrubs the streams before the result exists — and for spilling
+            # tools ``spill_truncate`` covers the disk. The residual exposure
+            # is a TUI/API render of a short, non-spilled, non-bash result
+            # carrying an echoed credential. Not closed here because scrubbing
+            # on the event path doubles the regex cost on every tool call;
+            # closing it wants a measurement first (if the scrub costs <50 µs
+            # on a typical result, move it here and drop the content pass in
+            # ``_append_results``).
             started = item.failure is None and item.tool is not None
             if started:
                 queue.put_nowait(
@@ -1829,11 +1844,21 @@ class AgentLoop:
             # Redact BEFORE the empty-result backfill: a redacted secret is
             # still text, so an image-only result is untouched and a genuinely
             # empty one still gets the placeholder it needs to serialize.
-            if redact is not None:
-                content = [
-                    TextContent(text=redact(item.text)) if isinstance(item, TextContent) else item
-                    for item in content
-                ]
+            #
+            # ``redact`` (the host's value-keyed hook) may be None — a session
+            # with no stored credentials passes nothing — but the SHAPE pass
+            # must still run, because the leak it catches is precisely the one
+            # where the harness never held the value. Composing here rather
+            # than asking every host to wrap its own hook keeps the guarantee
+            # at the choke point instead of in each caller.
+            content = [
+                (
+                    TextContent(text=redact_tool_output(item.text, redact, notice=True))
+                    if isinstance(item, TextContent)
+                    else item
+                )
+                for item in content
+            ]
             # coerceToolResult: an empty tool result serializes as "" on
             # most wires and Anthropic REJECTS an empty ``is_error`` content
             # with a 400 — backfill one placeholder block. Image-only results
@@ -1849,9 +1874,21 @@ class AgentLoop:
             )
             # Compaction and transcript presenters read tool-only metadata from
             # here; wire clients deliberately ignore these harness keys.
+            #
+            # ``details`` is scrubbed too. It never reaches a provider, which
+            # is exactly why it was missed: it IS persisted, straight through
+            # ``provider_payload`` into ``transcript.jsonl``. The MCP bridge
+            # puts the entire raw server result in ``details['server_result']``
+            # and only strips its text blocks when a spill occurred, so a
+            # server echoing a credential under the spill threshold wrote it to
+            # disk past every text choke point. Bounded walk — this runs on the
+            # event loop and the payload is third-party.
             if result.details is not None or result.useless or result.duration_s is not None:
+                details = result.details
+                if details is not None:
+                    details = scrub_details(details, lambda text: redact_tool_output(text, redact))
                 message.provider_payload = {
-                    "details": result.details,
+                    "details": details,
                     "useless": result.useless,
                     "duration_s": result.duration_s,
                 }
