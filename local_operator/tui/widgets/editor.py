@@ -1632,6 +1632,23 @@ class Editor(TextArea):
                 event.stop()
                 event.prevent_default()
                 return
+            if key == "d" and not self._model_picker.query_text():
+                # `d` SAVES the highlighted row as the boot default (#369).
+                #
+                # Gated on an EMPTY query, which is the whole reason this is
+                # safe here: every printable key in this picker belongs to the
+                # filter, so `d` typed while narrowing (`/model d` → deepseek)
+                # must keep filtering. Only once the query is empty is `d` free
+                # to be an action, and that is exactly the state a user is in
+                # after arrowing to a row they already found.
+                row = self._model_picker.highlighted()
+                if row is not None:
+                    handler = getattr(self.app, "_persist_default_from_picker", None)
+                    if callable(handler):
+                        handler()
+                        event.stop()
+                        event.prevent_default()
+                        return
             if key in ("tab", "enter"):
                 row = self._model_picker.highlighted()
                 if row is not None:

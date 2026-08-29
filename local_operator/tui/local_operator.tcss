@@ -54,7 +54,13 @@
  *          was the violet `label` token first, which read as another product's
  *          theme; its caret is `muted` for the reason site 4 already gives in
  *          command_picker.py — a second green glyph beside a green label reads
- *          as a duplicated caret.
+ *          as a duplicated caret. `/settings` is part of THIS site, not a
+ *          fifth: its row cursor `›`, its enum radio `●`, its edit caret `▏`
+ *          and its live pane tab are all "what Enter will take", stated in the
+ *          same sentence as the pickers. Named explicitly because the page
+ *          paints them in three different row kinds at once, and a reader
+ *          auditing the frame would otherwise count three new accent sites
+ *          against a list claiming to be exhaustive (design round 1, D5).
  *     It was FIVE until the focused input chevron gave its site back. Focus is
  *     not liveness, and painting both green put a green chevron two rows above
  *     the band's green spinner meaning something else (D5, round 11). Focus is
@@ -1447,6 +1453,128 @@ Screen.org-chart #todo-panel {
 }
 
 Screen.org-chart #input-dock #prompt-chevron {
+    color: $lo-dim;
+}
+
+
+/* ── full-page settings view ───────────────────────────────────────────── *
+ *
+ * The third sibling MODE (see the org-chart block above): opened by
+ * `/settings`, it takes the transcript's region and leaves the dock greyed.
+ * Four rows: title, rule, the two-column body (`1fr`), the hints.
+ *
+ * A MODE and not a ModalScreen specifically because this surface WRITES. The
+ * analytics panel may be modal precisely because it "never mutates anything";
+ * here the dock is where the status band shows a change landing (a theme
+ * switch, a new default model), so blacking it out would hide the effect of
+ * the write the user just made. */
+.settings-view {
+    height: 1fr;
+    padding: 1 1 1 1;
+}
+
+.settings-view-title {
+    height: 1;
+}
+
+.settings-view-rule {
+    height: 1;
+}
+
+/* The two columns. `1fr`/`auto` rather than a percentage split: the settings
+ * list is the subject and should take the slack, while the read-only pane is
+ * sized by its own content so it never reserves width for rows it does not
+ * have (an empty registry would otherwise leave a wide blank gutter). */
+.settings-view-columns {
+    height: 1fr;
+    padding: 1 0 0 0;
+}
+
+/* VERTICAL scroll only. Unlike the org chart, whose canvas is legitimately
+ * wider than any viewport, this list truncates its rows to the available
+ * width — so a horizontal scrollbar here would be the same bug it is on the
+ * main screen, two cells of width lost to an axis nothing travels. */
+.settings-view-body {
+    width: 1fr;
+    height: 1fr;
+    overflow-x: hidden;
+    overflow-y: auto;
+    /* The SAME block `TranscriptView` declares, at the same 1 cell against the
+     * same `$lo-*` ramp. Declaring `overflow-y: auto` and no `scrollbar-*`
+     * rules fell through to Textual's stock styling — a 2-cell saturated blue
+     * thumb on a pure-black track, ink that appeared in none of the 35
+     * non-settings evidence frames and the highest-chroma thing on a page whose
+     * palette is a warm neutral ramp (design round 1, D1). At 80 columns it was
+     * exactly the failure the transcript's own note describes: a saturated
+     * column running the height of the view, reading as the right-hand border a
+     * borderless design must not have.
+     *
+     * `edge` idle, and NOT `$lo-accent` on active: the transcript's D1 already
+     * litigated that and settled on a neutral rest -> hover -> grabbed ramp,
+     * because the accent means "THIS is what the turn is on" and a passive
+     * scroll gesture is not that. `scrollbar-gutter: stable` reserves the
+     * column permanently, which is what makes `_list_width`'s unconditional
+     * 2-cell reservation honest rather than a guess about when the bar appears
+     * (1 cell of bar plus the gutter's own cell). */
+    scrollbar-size-vertical: 1;
+    scrollbar-gutter: stable;
+    scrollbar-background: $lo-bg;
+    scrollbar-color: $lo-edge;
+    scrollbar-color-hover: $lo-dim;
+    scrollbar-color-active: $lo-muted;
+}
+
+/* Pinned in Python to the row count, which is what makes the container's
+ * virtual size equal the list and the scrollbar appear exactly when the
+ * settings overflow. `auto` would collapse it to the handed content with no
+ * room to scroll. */
+.settings-view-list {
+    width: 1fr;
+    height: auto;
+}
+
+/* The read-only pane. A FIXED width, not `auto`: the pane truncates its own
+ * rows against its measured width, so `auto` was circular — the content
+ * shrank to fit the pane and the pane then shrank to fit the content, settling
+ * at 19 cells of clipped text. On a narrow terminal the pane is hidden
+ * outright by `SettingsView._paint_pane` rather than squeezed, because the
+ * settings list is the subject of the page and a 12-cell roster is not
+ * readable anyway. */
+.settings-view-pane {
+    width: 34;
+    height: 1fr;
+    padding: 0 0 0 3;
+}
+
+/* The explanation of the highlighted row. ALWAYS one row, even when empty:
+ * a detail line that appeared and disappeared would move the footer, and the
+ * body above it, on every cursor move — the "rows are load-bearing" rule. */
+.settings-view-detail {
+    height: 2;
+    padding: 1 0 0 0;
+}
+
+/* One quiet row above the hints, same as the org-chart and subagent footers:
+ * without it they sit flush on the last setting row and read as one more
+ * entry in the list rather than as the page's own chrome. */
+.settings-view-hints {
+    height: 2;
+    width: 1fr;
+    padding: 1 0 0 0;
+}
+
+/* The dock in settings mode: PRESENT and RECEDED, never removed — the exact
+ * treatment `Screen.org-chart` and `Screen.subagent` give it, and for the same
+ * reason (what recedes is what is inert; the band stays live because it still
+ * carries the session's state, and in THIS mode that is load-bearing — the
+ * band is where a theme or model change shows up). `text-opacity`, not
+ * `color`, because these paint rich `Text` whose ink is already chosen. */
+Screen.settings #prompt-chevron,
+Screen.settings #todo-panel {
+    text-opacity: 45%;
+}
+
+Screen.settings #input-dock #prompt-chevron {
     color: $lo-dim;
 }
 

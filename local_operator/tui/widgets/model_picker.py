@@ -55,6 +55,14 @@ _COLUMN_GAP = 2
 #: Hard ceiling on visible rows, and the fraction of the screen the list may
 #: take. A picker that eats the transcript is worse than one that scrolls: the
 #: user is choosing a model to use ON the conversation they can no longer see.
+#: The lead of ``app.PERSIST_HINT``, used to RECOGNISE that clause inside the
+#: `` · ``-joined status string so the footer can give it its own protected row
+#: (it is the one clause that must survive verbatim at narrow widths). Matched
+#: by PREFIX because the app composes it with other clauses; kept as a constant
+#: here rather than imported from ``app`` because ``app`` imports this module.
+#: ``test_persist_hint_prefix_matches_app`` asserts the two never drift.
+PERSIST_HINT_PREFIX = "d in /model"
+
 MAX_VISIBLE_ROWS = 14
 _SCREEN_HEIGHT_FRACTION = 3
 
@@ -317,6 +325,17 @@ class ModelPicker(Static):
         self._current = current
         self._status = status
         self._refilter(keep=held)
+
+    def query_text(self) -> str:
+        """The filter text currently narrowing the list ("" when unfiltered).
+
+        Exposed so the editor can tell an ACTION key from a FILTER key: every
+        printable character here belongs to the query, so a key like `d` may
+        only act while the query is empty (see the `d` branch in
+        `Editor._on_key`). Without this the shortcut would eat the `d` of
+        `deepseek`.
+        """
+        return self._query
 
     def is_open(self) -> bool:
         """True when the list is showing."""
@@ -609,7 +628,7 @@ class ModelPicker(Static):
         start, end, _ = self.visible_window()
         status = [part for part in self._status.split(" · ") if part]
         persistent = next(
-            (part for part in status if part.startswith("/model default ")),
+            (part for part in status if part.startswith(PERSIST_HINT_PREFIX)),
             "",
         )
         status = [part for part in status if part != persistent]
@@ -652,7 +671,7 @@ class ModelPicker(Static):
         # Catalogue status occupies footer chrome. The persistent-default
         # instruction gets a dedicated second row so wider catalogues cannot
         # crowd it out non-monotonically.
-        persistent = any(part.startswith("/model default ") for part in self._status.split(" · "))
+        persistent = any(part.startswith(PERSIST_HINT_PREFIX) for part in self._status.split(" · "))
         status_rows = 2 if persistent else (1 if self._status else 0)
         return max(
             1,
