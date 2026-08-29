@@ -1154,12 +1154,18 @@ def _require_readable_config(manager: "ConfigManager") -> None:
     distinguish "the file was broken" from "the user's config genuinely holds
     default values". The check has to happen while the bytes are still there.
 
-    The three shapes that count as unreadable are exactly the three
+    The shapes that count as unreadable are exactly the ones
     ``_load_config`` degrades on, kept deliberately in step with it: a YAML
-    syntax error, a top level that is not a mapping, and an empty file. The
-    empty case matters because YAML parses "" to ``None`` and ``_load_config``
-    back-fills defaults WITHOUT renaming anything, so it degrades just as
-    silently while leaving no `.bad` backup at all.
+    syntax error, a top level that is not a mapping, an empty file, and
+    bytes that are not UTF-8 text. The empty case matters because YAML
+    parses "" to ``None`` and ``_load_config`` back-fills defaults WITHOUT
+    renaming anything, so it degrades just as silently while leaving no
+    `.bad` backup at all.
+
+    A file whose top level IS a mapping but whose ``values`` is not passes
+    here on purpose: widening the check would put it out of step with
+    ``_load_config``, which accepts exactly a mapping. It fails later in the
+    write with its bytes intact, which is the property that matters.
 
     A MISSING file is not unreadable — that is a first run, the reload
     correctly yields defaults, and there is no prior config to destroy.
@@ -1169,6 +1175,18 @@ def _require_readable_config(manager: "ConfigManager") -> None:
         return
     try:
         raw = config_file.read_text(encoding="utf-8")
+    except UnicodeDecodeError as error:
+        # A non-UTF-8 file is unreadable in exactly the sense this function
+        # means, and it must say so through this type. `UnicodeDecodeError` is a
+        # `ValueError` subclass, so uncaught it was caught one branch EARLIER by
+        # the page's `except ValueError` — the schema's slot — and the user saw
+        # "'utf-8' codec can't decode byte 0xff in position 0" sitting where
+        # "the value you typed is wrong" goes, on a row whose value was fine
+        # (review round 3, n2). Reachable from a Windows editor or a PowerShell
+        # redirect writing UTF-16.
+        raise ConfigUnreadableError(
+            f"{config_file} is not valid UTF-8 text ({error.reason} at byte {error.start})"
+        ) from error
     except FileNotFoundError:
         return
     except OSError:

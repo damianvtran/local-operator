@@ -821,10 +821,10 @@ async def test_deleting_a_chain_asks_first_and_r_says_what_it_does(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("height", [24, 26, 28, 29, 30, 34, 40])
+@pytest.mark.parametrize("height", [20, 22, 24, 26, 28, 29, 30, 34, 40])
 @pytest.mark.parametrize("roster_size", [0, 3, 8, 40])
 async def test_the_pane_never_paints_more_lines_than_it_has(height: int, roster_size: int) -> None:
-    """The pane's height invariant, across a BAND of sizes.
+    """The pane's height invariant AND its content honesty, across a size band.
 
     Parameterised because the round-1 version of this test asserted at 100x30
     only and passed while the failure sat one size band away: below 29 rows the
@@ -834,10 +834,20 @@ async def test_the_pane_never_paints_more_lines_than_it_has(height: int, roster_
     off (design round 2, D6). That is D2's exact symptom reached by a different
     door, so the invariant is pinned rather than the one size.
 
-    Both halves matter: the block must FIT, and the boundary statement must
-    survive the fitting. A pane that fits because the caption was dropped is
-    the original defect.
+    The CONTENT assertions are the round-3 half. Height alone is satisfiable by
+    a pane that lies: the shedding loop deleted from index 1, which is the first
+    provider row rather than the separator, so between 20 and 26 rows it ate
+    signed-in providers and at 20-24 painted a bold ``providers`` header with
+    nothing beneath it — a frame that reads as "none configured" while the user
+    is signed in to three (design round 3, D11). Both of this test's old
+    assertions held throughout, which is exactly why it did not catch it. So a
+    provider that EXISTS must be represented: as its own row, or folded into a
+    ``… N more`` count. Silence is the defect.
+
+    Heights 20 and 22 are in the parameter list because that is the band the
+    lie lived in and the committed evidence stopped at 24.
     """
+    providers = [("anthropic", "signed in"), ("openrouter", "api key"), ("openai", "api key")]
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, height)) as pilot:
         await pilot.pause()
@@ -849,7 +859,7 @@ async def test_the_pane_never_paints_more_lines_than_it_has(height: int, roster_
                 (f"agent-{n}", "role · effort hi", "a summary long enough to take its own row")
                 for n in range(roster_size)
             ],
-            providers=[("anthropic", "signed in"), ("openrouter", "api key")],
+            providers=providers,
         )
         view.action_pane(1)
         await pilot.pause()
@@ -863,6 +873,26 @@ async def test_the_pane_never_paints_more_lines_than_it_has(height: int, roster_
         assert any(
             line.strip() == "read-only" for line in lines
         ), f"the boundary caption was shed at {height} rows:\n{pane}"
+
+        # Content honesty. Either every provider is named, or the pane says how
+        # many it is withholding — never a header standing over nothing.
+        shown = [name for name, _state in providers if any(name in line for line in lines)]
+        withheld = [name for name, _state in providers if name not in shown]
+        folded = any("more" in line for line in lines)
+        assert not withheld or folded, (
+            f"{len(withheld)} configured provider(s) {withheld} vanished from the pane at "
+            f"{height} rows with nothing saying so — the pane reads as though they are not "
+            f"configured:\n{pane}"
+        )
+        header_index = next(
+            (index for index, line in enumerate(lines) if line.strip() == "providers"), None
+        )
+        if header_index is not None:
+            following = [line.strip() for line in lines[header_index + 1 :]]
+            assert following and following[0], (
+                f"the `providers` header was painted with nothing under it at {height} rows, "
+                f"which reads as an empty registry while 3 providers are configured:\n{pane}"
+            )
 
 
 @pytest.mark.asyncio
@@ -1177,33 +1207,62 @@ async def test_the_delete_ask_does_not_look_like_a_validation_error(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_the_delete_ask_keeps_its_key_contract_at_eighty_columns() -> None:
-    """Design round 2, D8 \u2014 the CHAIN NAME gives way, never the keys.
+@pytest.mark.parametrize("size", [(80, 24), (100, 30), (140, 40)])
+async def test_the_delete_ask_keeps_its_key_contract(size: tuple[int, int]) -> None:
+    """Design round 2 D8 and round 3 D12 \u2014 the keys always survive, and the
+    name is clipped only when the ROW it is painted into is genuinely too
+    narrow to hold it.
 
     At 80 columns the line ran past the frame with the ellipsis landing outside
     it, so ``to confirm \u00b7 esc cancels`` vanished with no visible mark that
-    anything had been cut \u2014 on the page's only destructive prompt. Clipping the
-    least load-bearing segment is what ``_paint_pane`` already does.
+    anything had been cut \u2014 on the page's only destructive prompt. Clipping
+    the least load-bearing segment is what ``_paint_pane`` already does.
+
+    The round-3 half is the width the budget is taken AGAINST. D8's fix measured
+    the ask with ``_list_width()``, which subtracts the read-only pane \u2014 but
+    the detail row is a full-width ``Static`` that never loses those cells. At
+    100 columns the ask got 60 of its 96 cells and clipped
+    ``openrouter-budget-fallback`` to ``openrou\u2026`` with 29 cells of the row
+    empty, while the chain row directly above showed the same name in full
+    (design round 3, D12). This test ran at 80x24 ONLY \u2014 the one width where
+    the pane is hidden and the two figures agree within two cells \u2014 so the
+    defect was invisible to it. Hence the sizes: 100 and 140 are where the pane
+    is visible, which is where the defect lived.
     """
+    chain = "openrouter-budget-fallback"
     app = OperatorApp(lambda: _factory(FakeSession()))
-    async with app.run_test(size=(80, 24)) as pilot:
+    async with app.run_test(size=size) as pilot:
         await pilot.pause()
         app._open_settings_view()
         view = app.query_one(SettingsView)
         await pilot.pause()
-        view._confirm_delete = "production-failover-primary-chain"
+        view._confirm_delete = chain
         view._repaint()
         await pilot.pause()
         question, contract = view._confirm_parts()
-        # Both keys survive at 80 columns. Which RUNG is chosen is a width
-        # decision — the terse form is the point of the ladder — so the
+        # Both keys survive at every width. Which RUNG is chosen is a width
+        # decision \u2014 the terse form is the point of the ladder \u2014 so the
         # assertion is that the answer is still statable, not that a
         # particular wording was used.
         assert "d" in contract and "esc cancels" in contract, contract
-        assert "\u2026" in question, "the chain name was not the segment that gave way"
         line = view.render_lines_for_test()[-1]
         assert "esc cancels" in line, line
-        assert cell_len(line) <= view._list_width(), (cell_len(line), line)
+        if view._pane_fits():
+            # Wide enough for the whole name, so it must not be clipped by a
+            # budget taken from a narrower widget than the one painting it.
+            # Asserted BEFORE the width helpers below, so that reverting the fix
+            # fails on the user-visible symptom rather than on a missing method.
+            assert chain in question, (
+                f"the chain name was clipped to {question!r} in a "
+                f"{view._detail.size.width}-cell row with room for it"
+            )
+        else:
+            # 80 columns genuinely cannot hold the full name plus both keys, so
+            # the name is the segment that gives way \u2014 D8's original case.
+            assert "\u2026" in question, "the chain name was not the segment that gave way"
+        # And the line fits the row it is painted into, which is D8's invariant.
+        assert cell_len(line) <= view._detail.size.width, (cell_len(line), line)
+        assert cell_len(line) <= view._detail_width(), (cell_len(line), view._detail_width(), line)
 
 
 @pytest.mark.asyncio
@@ -1291,6 +1350,130 @@ async def test_choosing_a_theme_leaves_the_cursor_on_the_theme_row() -> None:
         landed = view._rows[view._selected]
         assert landed.kind == "setting" and landed.setting is not None
         assert landed.setting.key == "tui.theme", _row_id(view, view._selected)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("depth", [1, 5, 10, 20])
+async def test_backing_out_of_a_theme_expansion_leaves_the_cursor_on_the_theme_row(
+    depth: int,
+) -> None:
+    """UX round 3, U20 \u2014 ``esc`` out of an expansion must land where ``enter``
+    does.
+
+    U17 gave the PICK its re-resolution and left the ABANDON with none: the
+    ``escape``/``_expanded`` branch cleared the expansion and repainted, leaving
+    ``_selected`` at the index the choice row had occupied. Backing out of
+    ``tui.theme`` from its 20th member therefore put the cursor 20 rows away, on
+    an unrelated setting two sections down with ``r default`` lit on it \u2014 the
+    exact frame U17 argued against, reached by the other key. Backing out is the
+    MORE conservative of the two gestures, so it must not be the one that moves
+    you.
+
+    Parameterised over depth because the drift is proportional to it: a
+    2-choice enum drifts one row and nobody notices, which is how this survived
+    a round.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.pause()
+        app._run_slash_command("/settings")
+        await pilot.pause()
+        view = app.query_one(SettingsView)
+        _select(view, "tui.theme")
+        await pilot.press("enter")
+        await pilot.pause()
+        choices = [index for index, row in enumerate(view._rows) if row.kind == "choice"]
+        assert len(choices) > depth, "expected the theme enum to be registry-sourced"
+        view._selected = choices[depth]
+        view._repaint()
+        await pilot.press("escape")
+        await pilot.pause()
+        # The expansion closed rather than the page, and nothing was written.
+        assert view._expanded is None
+        assert app.query(SettingsView), "esc closed the whole page, not the expansion"
+        landed = view._rows[view._selected]
+        assert landed.kind == "setting" and landed.setting is not None
+        assert landed.setting.key == "tui.theme", (
+            f"esc from depth {depth} drifted the cursor to " f"{_row_id(view, view._selected)}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_structurally_wrong_config_names_the_file_instead_of_leaking_a_typeerror(
+    tmp_path: Path,
+) -> None:
+    """Review round 3, n3 \u2014 the generic branch must not print raw Python.
+
+    ``values: not-a-mapping`` passes the pre-parse on purpose: the top level IS
+    a mapping, which is exactly what ``_load_config`` accepts, and widening the
+    check would put the two out of step. It then fails deeper with a
+    ``TypeError`` that reached the page verbatim as "could not save: 'str'
+    object does not support item assignment" \u2014 which names nothing the user
+    can act on and does not say their file is intact.
+
+    The data was already safe here (``origin/main`` destroys this file), so this
+    pins the WORDING: the message names the config file and says it may need
+    repairing, while keeping the original text for anyone reporting it.
+    """
+    manager = ConfigManager(tmp_path)
+    config_file = tmp_path / "config.yml"
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._open_settings_view()
+        view = app.query_one(SettingsView)
+        view._manager = manager
+        await pilot.pause()
+        # Corrupted with the page ALREADY OPEN, holding a good snapshot \u2014 the
+        # real sequence, a config another process rewrites badly underneath it.
+        config_file.write_text("values: not-a-mapping\n")
+        before = config_file.read_bytes()
+        _select(view, "display.shimmer")
+        await pilot.press("enter")
+        await pilot.pause()
+        message = view.error_text
+        assert "config.yml" in message, message
+        assert "repair" in message, message
+        # And the user's bytes are still there to repair.
+        assert config_file.read_bytes() == before
+        assert not list(tmp_path.glob("config.yml.bad*"))
+
+
+@pytest.mark.asyncio
+async def test_tab_cannot_park_focus_on_the_invisible_scroll_container() -> None:
+    """UX round 3, U19 \u2014 an unfocusable body, so the cursor and the keys agree.
+
+    The page's focus chain held two members, ``SettingsView`` and the unlabelled
+    ``ScrollableContainer`` behind the row list, so one ``tab`` moved focus to
+    the container. The container owns the scroll keys, so the arrows then moved
+    the VIEWPORT while the cursor stayed put, with no focus ring or any other
+    cue \u2014 and ``enter`` still bubbled to the page, so a user looking at rows
+    24-37 with the cursor stranded on row 1 pressed ``enter`` on the row they
+    could see and opened an editor on a row off screen.
+
+    Asserted on both halves: focus must not leave the page, and after a tab the
+    arrows must still move the CURSOR rather than scroll underneath it.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        app._run_slash_command("/settings")
+        await pilot.pause()
+        view = app.query_one(SettingsView)
+        assert view._body.can_focus is False
+        before = view._selected
+        for _ in range(3):
+            await pilot.press("tab")
+            await pilot.pause()
+            focused = app.focused
+            assert isinstance(focused, SettingsView), (
+                "tab parked focus on "
+                f"{type(focused).__name__}, which owns the scroll keys and paints no cursor"
+            )
+        await pilot.press("down")
+        await pilot.pause()
+        assert view._selected != before, "the arrows scrolled the viewport instead of the cursor"
 
 
 @pytest.mark.asyncio

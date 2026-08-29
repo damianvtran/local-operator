@@ -25,6 +25,9 @@ STATE selects what the page is showing:
     error      a text editor open with a rejected value and its inline error
     cascade    the failover cascade editor with a chain open
     confirm    `d` on a chain row, asking before it deletes the whole chain
+    confirm-long  the same ask on a 26-character chain name, which is what
+               shows whether the ask is budgeted against the row it is
+               painted into (D12) rather than against the settings list
     teams      the read-only teams pane
     agents     the read-only agents pane
     retired    scrolled to the retired section
@@ -69,9 +72,16 @@ AGENTS = [
     ("coder", "role · effort med", "implements one bounded slice"),
     ("reviewer", "role · effort hi", "posts the agent review round"),
 ]
+# THREE providers, not two. The provider section sheds by height, and with two
+# entries the frames could not show the difference between shedding honestly and
+# dropping content: at 20-26 rows the pane ate signed-in providers and painted a
+# bare `providers` header, which reads as "none configured" (design round 3,
+# D11). Three is the smallest roster where a fold to `… N more` is visibly a
+# count rather than a single missing row.
 PROVIDERS = [
     ("anthropic", "signed in"),
     ("openrouter", "api key"),
+    ("openai", "api key"),
 ]
 
 
@@ -89,9 +99,18 @@ def _seed_config() -> None:
     manager.set_config_value("display.shimmer", False)
     retry = dict(manager.get_config_value("retry", {}) or {})
     retry["maxRetries"] = 4
+    # A LONG chain name alongside the short ones. `default` is 7 characters and
+    # fits at every width, so a confirm frame built on it demonstrates no
+    # truncation behaviour at all — which is why the committed `confirm-80x24`
+    # was captioned for a shed it did not show (design round 3, D13), and why
+    # the over-clipping at 100 and 140 columns went unphotographed (D12).
     retry["fallbackChains"] = {
         "default": ["anthropic/claude-opus-5", "openrouter/deepseek/deepseek-chat"],
         "cheap": ["openrouter/qwen/qwen3-coder"],
+        "openrouter-budget-fallback": [
+            "openrouter/deepseek/deepseek-chat",
+            "openrouter/qwen/qwen3-coder",
+        ],
     }
     manager.set_config_value("retry", retry)
 
@@ -148,6 +167,15 @@ async def main() -> None:
         elif state == "cascade":
             _select_chain(view, "default")
             view.action_activate()
+            await pilot.pause()
+            app.save_screenshot(out)
+        elif state == "confirm-long":
+            # The SAME ask on a 26-character chain name. The `confirm` frames
+            # use `default` (7 characters), which fits everywhere and therefore
+            # photographs none of the width behaviour the ask actually has
+            # (design round 3, D12/D13).
+            _select_chain(view, "openrouter-budget-fallback")
+            view._delete_hop()
             await pilot.pause()
             app.save_screenshot(out)
         elif state == "confirm":

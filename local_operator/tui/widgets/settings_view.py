@@ -252,6 +252,20 @@ class SettingsView(Vertical):
         self._rule = Static(classes="settings-view-rule")
         self._list = Static(classes="settings-view-list")
         self._body = ScrollableContainer(self._list, classes="settings-view-body")
+        # NOT focusable. With it in the focus chain, one `tab` moved focus from
+        # the page to this container, which owns the scroll keys — so the arrows
+        # then scrolled the VIEWPORT while the cursor stayed where it was, with
+        # no focus ring or any other cue that focus had moved. `enter` still
+        # bubbled to the page, so a user looking at rows 24-37 with the cursor
+        # stranded on row 1 pressed `enter` on the row they could see and opened
+        # an editor on a row off screen, then wrote a setting they never chose
+        # (UX round 3, U19). Same remedy and same reasoning as `todo_panel.py`
+        # and `subagent_panel.py`: "the app looked correctly focused while every
+        # keystroke went to a widget that does nothing with them". Mouse-wheel
+        # scrolling does not require focus, so the list still scrolls with the
+        # wheel, and `_scroll_to_selection` drives this container programmatically
+        # rather than through focus.
+        self._body.can_focus = False
         self._pane_view = Static(classes="settings-view-pane")
         self._columns = Horizontal(self._body, self._pane_view, classes="settings-view-columns")
         # Footer hints, same vocabulary and same shedding ladder as the org
@@ -558,14 +572,7 @@ class SettingsView(Vertical):
             self._write(row.setting, row.choice.value)
             self._expanded = None
             self._repaint()
-            for index, candidate in enumerate(self._rows):
-                if (
-                    candidate.kind == "setting"
-                    and candidate.setting is not None
-                    and candidate.setting.key == owner
-                ):
-                    self._selected = index
-                    break
+            self._select_setting_row(owner)
             self._repaint()
             self._scroll_to_selection()
             return
@@ -693,6 +700,23 @@ class SettingsView(Vertical):
             return False
         except ValueError as error:
             self._error = str(error)
+            self._repaint()
+            return False
+        except TypeError as error:
+            # A config that parses to a mapping but holds the wrong SHAPE
+            # underneath — `values: not-a-mapping` is the reachable case — gets
+            # this far, because the pre-parse deliberately checks only what
+            # `_load_config` checks and must stay in step with it. Left to the
+            # generic branch it reached the page as a raw Python message
+            # ("'str' object does not support item assignment"), which names
+            # nothing the user can act on (review round 3, n3). The bytes are
+            # preserved either way; only the wording was unhelpful, so this
+            # names the file and the remedy while keeping the original text for
+            # anyone reporting it.
+            self._error = (
+                f"could not save — {self._config_path()} has an unexpected structure "
+                f"and may need repairing ({error})"
+            )
             self._repaint()
             return False
         except Exception as error:  # noqa: BLE001 — a read-only config dir, a full disk
@@ -917,6 +941,33 @@ class SettingsView(Vertical):
         self.post_message(SettingsChanged("retry.fallbackChains", chains))
         self._repaint()
 
+    def _config_path(self) -> str:
+        """The config file's path, home-relative, for messages that name it.
+
+        Shared by the title and the error slots so a user reading "this file has
+        an unexpected structure" sees the same string the page already shows
+        them at the top, rather than two spellings of one path.
+        """
+        return _home_relative(str(getattr(self._manager, "config_file", ""))) or "config.yml"
+
+    def _select_setting_row(self, key: str) -> None:
+        """Put the cursor on the SETTING row owning ``key``, if it is present.
+
+        The counterpart of :meth:`_close_chain` for an enum expansion: choice
+        rows stop existing when the expansion collapses, so the index they
+        occupied names whatever the rebuild put there. Both exits from an
+        expansion — picking a choice and abandoning with ``esc`` — route through
+        here, because two copies of this search is how the abandon kept the
+        drift after the pick was fixed (UX round 2 U17, round 3 U20).
+
+        Call it AFTER the repaint that rebuilds ``_rows``: it resolves against
+        the current row list, not the one the expansion was open in.
+        """
+        for index, row in enumerate(self._rows):
+            if row.kind == "setting" and row.setting is not None and row.setting.key == key:
+                self._selected = index
+                return
+
     def _close_chain(self) -> None:
         """Close the open chain and put the cursor back on its own row.
 
@@ -1090,10 +1141,22 @@ class SettingsView(Vertical):
             # Rung three of the ladder: Esc closes the EXPANSION before it
             # closes the page, so a user who opened a dropdown to look at it can
             # back out of it without losing the whole surface.
+            #
+            # The cursor returns to the SETTING row, exactly as `action_activate`
+            # does when a choice is picked. U17 fixed the pick and left the
+            # abandon, so backing out of `tui.theme` from its 34th member landed
+            # the cursor 34 rows away with `r default` lit on an unrelated
+            # setting two sections down (UX round 3, U20) — and backing out is
+            # the MORE conservative gesture of the two, so it must not be the
+            # one that moves you. `_close_chain` is the model this follows.
             event.stop()
             event.prevent_default()
+            owner = self._expanded
             self._expanded = None
             self._repaint()
+            self._select_setting_row(owner)
+            self._repaint()
+            self._scroll_to_selection()
             return
         row = self._current()
         if row is not None and row.kind in ("hop", "chain"):
@@ -1478,7 +1541,11 @@ class SettingsView(Vertical):
             return ("", "")
         hops = settings_io.read_chains(self._manager).get(chain, [])
         count = f"{len(hops)} hop{'' if len(hops) == 1 else 's'}"
-        width = self._list_width()
+        # The row this text is PAINTED into, not the settings list beside it.
+        # `_list_width()` subtracts the pane, which the full-width detail row
+        # does not lose — budgeting against it clipped the chain name with a
+        # third of the row empty (design round 3, D12).
+        width = self._detail_width()
 
         #: The key contract, longest first. It sheds to a terser form BEFORE
         #: the chain name is clipped below readability, because a name cut to
@@ -1587,6 +1654,33 @@ class SettingsView(Vertical):
         except Exception:
             return True
 
+    def _detail_width(self) -> int:
+        """Cells the detail ROW may occupy, which is not the list's width.
+
+        The detail line is a full-width ``Static`` spanning the whole view
+        (``compose`` yields it OUTSIDE ``_columns``), so it keeps its cells
+        whether or not the read-only pane is displayed. Budgeting it with
+        :meth:`_list_width` — which subtracts ``_PANE_WIDTH`` — clipped the
+        delete confirmation to 60 cells inside a 96-cell row at 100 columns,
+        truncating `openrouter-budget-fallback` to `openrou…` while the chain
+        row directly above it showed the same name in full, with 29 cells of the
+        row empty (design round 3, D12). The 80-column case hid it because the
+        pane is hidden there and the two figures come within two cells.
+
+        Two cells go to the view's own horizontal padding (`.settings-view`
+        declares `padding: 1 1 1 1`), the same reservation `_list_width` makes
+        for the scrollbar gutter — derived from the view's width for the reason
+        :meth:`_pane_width` records: children are still ``0`` wide at
+        ``on_mount``.
+        """
+        try:
+            total = self.size.width
+        except Exception:
+            total = 80
+        if total <= 0:
+            total = 80
+        return max(total - 2, 24)
+
     def _list_width(self) -> int:
         """Cells a settings row may occupy, computed from the VIEW's width.
 
@@ -1639,14 +1733,15 @@ class SettingsView(Vertical):
         # Each line is a LIST of styled segments, because a provider row is two
         # inks on one line (the id in `muted`, its state in `faint`) and folding
         # them into a single style loses the distinction the row is built on.
-        lines: list[_PaneLine] = [[("providers", head)]]
+        header: _PaneLine = [("providers", head)]
+        provider_lines: list[_PaneLine] = []
         if self._providers:
             for name, state in self._providers:
                 # Truncated per SEGMENT so the id survives and the state gives
                 # way: "anthropic" is what the row is about, and a clipped id
                 # is unreadable where a clipped state is merely terse.
                 width = max(room - cell_len(name) - 4, 3)
-                lines.append(
+                provider_lines.append(
                     [
                         (f"  {truncate_cells(name, room - 2)}  ", muted),
                         (truncate_cells(state, width), faint),
@@ -1657,10 +1752,15 @@ class SettingsView(Vertical):
             # line: budgeting the text against the full width and THEN adding
             # the prefix overran the pane by exactly those two cells, which is
             # the one line in the pane that got this wrong (design round 2, D10).
-            lines.append(
+            provider_lines.append(
                 [(f"  {truncate_cells('none logged in — /login <provider>', room - 2)}", dim)]
             )
-        lines.append([("", dim)])
+        # The header and the provider rows stay SEPARATE all the way into
+        # `_fit_pane`, which sheds them as a section. Flattening them into one
+        # list is what let the shedding loop delete `rendered[1]` believing it
+        # was the separator when it was the first provider (design round 3,
+        # D11). `used` below is the flat count the roster budget needs: the
+        # header, the provider rows and the blank that follows them.
 
         # The tab row names BOTH panes and marks the live one, so ←/→ has a
         # visible target rather than being a key you have to already know about.
@@ -1694,7 +1794,8 @@ class SettingsView(Vertical):
             #
             # `used` counts the head block and the tab row, both of which are
             # already decided above.
-            shown, hidden = self._budget_pane_rows(rows, used=len(lines) + 1)
+            used = 1 + len(provider_lines) + 1
+            shown, hidden = self._budget_pane_rows(rows, used=used + 1)
             for name, facts, summary in shown:
                 body.append([(f"  {truncate_cells(name, room - 2)}", muted)])
                 body.append([(f"    {truncate_cells(facts, room - 4)}", faint)])
@@ -1707,12 +1808,13 @@ class SettingsView(Vertical):
                 # glyph made a count read as an affordance (design round 2, D9).
                 body.append([(f"  … {hidden} more", dim)])
 
-        self._pane_text = self._fit_pane(lines, tabs, body, dim)
+        self._pane_text = self._fit_pane(header, provider_lines, tabs, body, dim)
         self._pane_view.update(self._pane_text)
 
     def _fit_pane(
         self,
-        head_lines: list["_PaneLine"],
+        header: "_PaneLine",
+        provider_lines: list["_PaneLine"],
         tabs: Text,
         body: list["_PaneLine"],
         dim: Style,
@@ -1734,6 +1836,23 @@ class SettingsView(Vertical):
         The tab row and the caption survive to the last two rows, because a pane
         that cannot say what it is or whether it is editable is worse than no
         pane at all.
+
+        Provider rows shed into a COUNT rather than vanishing. The previous
+        version deleted from index 1 — which is the first provider row, not the
+        separator its comment named — so between 20 and 26 terminal rows it ate
+        signed-in providers from the top, and at 20-24 rows it painted a bold
+        `providers` header with nothing under it. That frame is indistinguishable
+        from the honest empty state the page deliberately paints (`none logged
+        in — /login <provider>`), so the pane stated the OPPOSITE of the truth
+        about the user's own logins while satisfying the height invariant D6
+        added (design round 3, D11). A `… N more` line is the vocabulary the
+        roster already uses for the same trade, and the last provider row is
+        given up to make space for it rather than the count displacing content
+        silently. Below that the header and the count collapse onto ONE line
+        (`providers  … 3 more`), and only when even that will not fit does the
+        section go entirely. Saying nothing about providers is honest; a header
+        standing over nothing is the one shape this pane must never paint,
+        because it is indistinguishable from the empty state.
         """
         height = self._pane_height()
         if height <= 1:
@@ -1743,29 +1862,93 @@ class SettingsView(Vertical):
             # a pane showing only `read-only` is merely small.
             return Text("read-only", style=dim, no_wrap=True, overflow="ellipsis")
         # Two rows for the caption block (its blank separator and the word),
-        # collapsing to one when the pane cannot afford the separator.
+        # collapsing to one when the pane cannot afford the separator. The
+        # separator is a SPACING row, so it sheds later than the roster but
+        # earlier than any row carrying a fact — see step 5.
         separator = height >= 3
-        available = height - (2 if separator else 1)
-        rendered: list[_PaneLine] = list(head_lines) + [[("", dim)]] + list(body)
-        # The tab row sits at the index the head block ends on; it is rebuilt
-        # below rather than carried as a string so its per-tab styling survives.
-        tab_index = len(head_lines)
-        while len(rendered) > available and len(rendered) > tab_index + 1:
-            # Drop from the END: the roster and the spill line first.
-            rendered.pop()
-        while len(rendered) > available and len(rendered) > 1:
-            # Still over: give up the blank separator and the provider details,
-            # oldest-first from index 1 so the `providers` header stays until
-            # there is nothing else left to take.
-            del rendered[1]
-            tab_index = max(tab_index - 1, 1)
+
+        def available() -> int:
+            return height - (2 if separator else 1)
+
+        rows = list(body)
+        shown = list(provider_lines)
+        hidden = 0
+        gap = True
+        # The empty state (`none logged in — /login <provider>`) is a STATEMENT,
+        # not a row that can be folded into a count — "… 1 more" over an empty
+        # registry would invent a provider. So it sheds with its header instead.
+        foldable = bool(self._providers)
+
+        collapsed = False
+
+        def provider_block() -> list[_PaneLine]:
+            """The provider section exactly as it would paint right now."""
+            if collapsed:
+                # Header and count on ONE line, so a section with configured
+                # providers still states that it has them when it cannot afford
+                # a row each. `providers  … 3 more` is two cells longer than the
+                # header alone and says something true, where the header alone
+                # says the opposite of the truth.
+                return [[("providers", header[0][1]), (f"  … {hidden} more", dim)]]
+            if not shown and not hidden:
+                return []
+            block = [header, *shown]
+            if hidden:
+                block.append([(f"  … {hidden} more", dim)])
+            return block
+
+        def painted() -> int:
+            # The tab row always costs its one line: a pane that cannot say
+            # which of the two rosters it is showing is worse than a short one.
+            return len(provider_block()) + (1 if gap else 0) + 1 + len(rows)
+
+        # 1. The roster and its spill line — the pane's least load-bearing rows,
+        #    and the ones `_budget_pane_rows` has already trimmed once.
+        while painted() > available() and rows:
+            rows.pop()
+        # 2. The blank separating the provider block from the tab row.
+        if painted() > available():
+            gap = False
+        # 3. Provider rows fold into a count, LAST first, so the pane keeps
+        #    saying how many it is withholding instead of silently dropping
+        #    them (design round 3, D11).
+        while painted() > available() and shown and foldable:
+            shown.pop()
+            hidden += 1
+        # 4. Down to one line for the whole section: the header carries the
+        #    count itself rather than standing over nothing. A `providers`
+        #    header with no rows beneath it reads as "none configured", which is
+        #    the opposite of the truth when providers ARE signed in — the one
+        #    statement this pane must never make (design round 3, D11).
+        if painted() > available() and foldable:
+            collapsed = True
+        # 5. The caption's own blank line. It is spacing, and spacing is worth
+        #    less than the fact that providers exist: at a 3-row pane (a 20-row
+        #    terminal) keeping it is what forced the section out entirely, so
+        #    the pane spent a row on whitespace to say nothing about three
+        #    signed-in providers. `read-only` still sits last, just without the
+        #    gap above it.
+        if painted() > available() and separator:
+            separator = False
+        # 6. No room even for one line: the section goes entirely. Saying
+        #    NOTHING about providers is honest; announcing an empty one is not.
+        if painted() > available():
+            collapsed = False
+            shown = []
+            hidden = 0
+
         text = Text(no_wrap=True, overflow="ellipsis")
-        for index, segments in enumerate(rendered):
-            if index == tab_index:
-                text.append_text(tabs)
-            else:
-                for chunk, style in segments:
-                    text.append(chunk, style=style)
+        for segments in provider_block():
+            for chunk, style in segments:
+                text.append(chunk, style=style)
+            text.append("\n")
+        if gap:
+            text.append("\n")
+        text.append_text(tabs)
+        text.append("\n")
+        for segments in rows:
+            for chunk, style in segments:
+                text.append(chunk, style=style)
             text.append("\n")
         if separator:
             text.append("\n")
@@ -1847,7 +2030,7 @@ class SettingsView(Vertical):
         # than cut, so a long config path (a scratch dir under /var/folders,
         # which is exactly what a capture and a test use) rendered the title as
         # "settings  ·" with no path at all.
-        path = _home_relative(str(getattr(self._manager, "config_file", "")))
+        path = self._config_path()
         title.append(truncate_cells(path, max(self._title_room(), 12)), style=dim)
         self._title_text = title
         self._title.update(title)

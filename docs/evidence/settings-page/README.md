@@ -24,13 +24,19 @@ env -u NO_COLOR TERM=xterm-256color .venv/bin/python \
 | `cascade-100x30.svg` | the failover cascade, one chain open with its ordered hops |
 | `cascade-80x24.svg` | the same cascade at a split-pane width |
 | `confirm-100x30.svg` | `d` on a chain row asking before it deletes the whole chain |
-| `confirm-80x24.svg` | the same ask at 80 columns, where the chain name sheds so `esc cancels` survives (D8) |
+| `confirm-80x24.svg` | the same ask at 80 columns on a short chain name |
+| `confirm-long-100x30.svg` | the ask on a 26-character chain name, which fits in full because it is budgeted against the detail ROW (D12) |
+| `confirm-long-140x40.svg` | the same at a large terminal, where the long key rung fits too (D12) |
+| `confirm-long-80x24.svg` | the same at 80 columns, where the name genuinely sheds so `esc cancels` survives (D8/D13) |
 | `teams-100x30.svg` | the read-only teams pane |
 | `agents-100x30.svg` | the read-only agents pane |
 | `agents-100x28.svg` | the pane one row below the band where the view's height steps down (D6) |
-| `agents-100x24.svg` | the shortest terminal the page is captured at, where the roster sheds to the caption (D6) |
+| `agents-100x26.svg` | providers folding to `… N more` while the signed-in one keeps its row (D11) |
+| `agents-100x24.svg` | the roster shed to the caption, provider count still stated (D6/D11) |
+| `agents-100x22.svg` | the section down to a header plus a count (D11) |
+| `agents-100x20.svg` | the tightest pane, `providers  … 3 more` on one line (D11) |
 
-The two SHORT `agents` frames (`100x28`, `100x24`) exist for the same reason,
+The SHORT `agents` frames (`100x28` down to `100x20`) exist for the same reason,
 from the other axis. The pane's height derivation tracks the real pane exactly
 down to 29 terminal rows and then the view's height steps down in one jump, and
 the round-1 evidence set stopped at 30 — so the pane painted eight lines into a
@@ -55,3 +61,19 @@ rows wrapping by the scrollbar's two cells (widths were being read off child
 widgets before layout had sized them, so every child size was still 0), and an
 enum or chain expanded at the viewport's bottom edge showing an open `▾`
 marker with its group entirely below the fold.
+
+The band was extended down to 20 rows in round 3. The pane's shedding loop
+deleted from index 1, which is the first PROVIDER row rather than the separator
+its comment named, so between 20 and 26 rows it ate signed-in providers and at
+20-24 painted a bold `providers` header with nothing under it — a frame that
+reads as "none configured" while three providers are signed in, and the exact
+opposite of the honest empty state the page paints deliberately (design round 3,
+D11). The committed set stopped at 24, which is why it went unphotographed. The
+rule the frames now show is that a provider which exists is always represented:
+as its own row, or folded into a `… N more` count, never silently.
+
+The `confirm-long-*` frames use a 26-character chain name for the same reason.
+`default` is 7 characters and fits at every width, so the original `confirm`
+frames demonstrated none of the ask's width behaviour — they hid both the
+over-clipping at 100 and 140 columns (D12) and the shed the 80-column frame was
+captioned for (D13).

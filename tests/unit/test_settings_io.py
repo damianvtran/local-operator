@@ -634,6 +634,34 @@ def test_an_unreadable_config_aborts_the_write_instead_of_defaulting_over_it(
     assert not list(tmp_path.glob("config.yml.bad*"))
 
 
+def test_a_non_utf8_config_is_refused_as_unreadable_not_as_a_bad_value(
+    tmp_path: Path,
+) -> None:
+    """Review round 3, n2 \u2014 a codec error must reach the unreadable-config slot.
+
+    ``UnicodeDecodeError`` is a ``ValueError`` subclass, so left uncaught it was
+    caught by the page's ``except ValueError`` one branch BEFORE the
+    ``ConfigUnreadableError`` handler \u2014 and the user saw "'utf-8' codec can't
+    decode byte 0xff in position 0" sitting where "the value you typed is
+    wrong" goes, on a row whose value was perfectly fine. Reachable from a
+    Windows editor or a PowerShell redirect writing UTF-16.
+
+    The bytes were already safe on this path; it is the message that pointed at
+    the wrong thing, so the type is what this pins.
+    """
+    page = ConfigManager(tmp_path)
+    page.set_config_value("model_name", "claude-opus-4")
+    config_file = tmp_path / "config.yml"
+    config_file.write_bytes("values:\n  hosting: anthropic\n".encode("utf-16"))
+    before = config_file.read_bytes()
+
+    with pytest.raises(settings_io.ConfigUnreadableError):
+        settings_io.write_setting(page, settings_io.BY_KEY["display.shimmer"], True)
+
+    assert config_file.read_bytes() == before, "the non-UTF-8 file was overwritten"
+    assert not list(tmp_path.glob("config.yml.bad*"))
+
+
 def test_a_missing_config_is_not_treated_as_unreadable(tmp_path: Path) -> None:
     """A first run has no file and no prior config to destroy, so it writes."""
     manager = ConfigManager(tmp_path)
