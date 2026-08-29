@@ -155,7 +155,28 @@ jobs:
           # Run CLI to create test file
           # --yolo: the sanity run is sandboxed CI; the rewritten harness denies
           # approval-gated tools (write) without a tty unless auto-approved.
-          local-operator --hosting openrouter --model deepseek/deepseek-v4-flash-0731 exec --yolo "create a file called test.txt with the text 'hello world' in it" || exit 1
+          #
+          # MODEL CHOICE: these live-LLM jobs assert that a small, cheap model
+          # can still drive the agent end to end, so the model has to emit real
+          # structured tool calls rather than describe them. The previous pick
+          # (deepseek/deepseek-v4-flash-0731) regressed into printing literal
+          # `<|DSML|>tool_calls` markup as assistant TEXT, so no tool ever ran
+          # and test.txt was never written: measured 0/5 locally against this
+          # exact prompt, and it failed three consecutive CI runs on unrelated
+          # PRs while main (which had run earlier) stayed green.
+          #
+          # qwen/qwen3.7-flash measured 10/10 on the same harness and also
+          # passes the `exec --json` streaming contract. It is cheaper on input
+          # than the model it replaces ($0.03 vs $0.045 per Mtok).
+          #
+          # If this starts failing, FIRST check whether the model is emitting
+          # tool-call markup as text -- that is a model regression, not a bug in
+          # the harness. Re-measure candidates before swapping; a model that
+          # cannot tool-call makes these jobs permanently red and teaches
+          # everyone to ignore them. Any replacement must support `tools` and
+          # be verified against both the --yolo write task and the --json
+          # streaming contract.
+          local-operator --hosting openrouter --model qwen/qwen3.7-flash exec --yolo "create a file called test.txt with the text 'hello world' in it" || exit 1
 
           # Check if file exists and contains correct text
           if [ ! -f test.txt ]; then
@@ -181,7 +202,7 @@ jobs:
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: |
-          local-operator --hosting openrouter --model deepseek/deepseek-v4-flash-0731 \
+          local-operator --hosting openrouter --model qwen/qwen3.7-flash \
             --yolo exec --json "create a file called contract.txt containing ok" \
             > run.jsonl 2> run.err || exit 1
           python scripts/check_streaming_contract.py run.jsonl || {
@@ -195,7 +216,7 @@ jobs:
         run: |
           set +e
           env -u OPENROUTER_API_KEY local-operator --hosting openrouter \
-            --model deepseek/deepseek-v4-flash-0731 exec --json "hi" > err_out.jsonl 2> err_err.txt
+            --model qwen/qwen3.7-flash exec --json "hi" > err_out.jsonl 2> err_err.txt
           set -e
           if [ -s err_out.jsonl ]; then
             # `|| [ -n "$line" ]`: bash read returns non-zero at EOF on an
@@ -262,7 +283,7 @@ jobs:
             -d '{
               "prompt": "create a file called test.txt with the text '\''hello world'\'' in it",
               "hosting": "openrouter",
-              "model": "deepseek/deepseek-v4-flash-0731",
+              "model": "qwen/qwen3.7-flash",
               "context": [],
               "options": {
                 "temperature": 0.7,

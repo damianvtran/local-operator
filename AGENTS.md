@@ -34,6 +34,14 @@ instead of letting isort read the repo's own config, checks something CI does
 not: both combinations pass on a file that CI then rejects. An unsorted
 function-local import reached CI exactly that way.
 
+Editing `exclude` under `[tool.pyright]` in `pyproject.toml`? It **replaces**
+pyright's built-in defaults rather than extending them, so always restate
+`"**/node_modules"`, `"**/__pycache__"` and `"**/.*"` alongside whatever you
+are adding. Dropping `**/.*` makes pyright follow the `.venv` symlink every
+worktree has and type-check all of site-packages — 29466 files and a 30-minute
+run instead of 566 files and about 15 seconds. CI never creates a `.venv`, so
+it stays green while every local run of the gate becomes unusable.
+
 The venv is uv-managed and has the package installed **editable**, so source
 edits are live. After a pull that changes dependencies:
 

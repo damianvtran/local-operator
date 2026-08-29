@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-operator"
-version = "0.42.14"
+version = "0.42.15"
 description = "A team of proactive AI assistants that can work together behind the scenes to help you get mundane tasks done so you can focus on the fun stuff."
 readme = "README.md"
 authors = [{ name = "Damian Tran", email = "damian@gominerva.com" }]
@@ -239,6 +239,17 @@ profile = "black"
 reportMissingTypeArgument = true
 strictListInference = true
 reportPrivateImportUsage = false
+# `exclude` REPLACES pyright's built-in defaults, it does not extend them, so
+# the three defaults must be restated here alongside any addition of our own.
+# Dropping `**/.*` is not cosmetic: every worktree (and the main checkout)
+# carries a `.venv` symlink into the shared uv environment, so pyright walks it
+# and enumerates the whole site-packages tree — 29466 source files instead of
+# 566, a run that exceeds 30 minutes instead of ~15 seconds, and node workers
+# past 3 GB RSS against a 4192 MB heap limit. CI never showed this because
+# `.github/workflows/ci.yml` installs with `pip install -e ".[dev]"` into the
+# runner's own interpreter and never creates a `.venv`, so the cost lands
+# entirely on local runs of the documented gate command.
+#
 # `docs/` holds one-off tooling, not shipped package code — e.g.
 # `docs/store/assets/build_assets.py`, a Pillow script that regenerates the
 # Chrome Web Store screenshots from captured frames. Pillow ships no type stubs
@@ -247,7 +258,7 @@ reportPrivateImportUsage = false
 # runtime surface the gate exists to protect. Excluding `docs/` keeps the
 # type-check gate focused on `local_operator/` and `tests/` without weakening it
 # for real code or littering a throwaway generator with per-line ignores.
-exclude = ["docs"]
+exclude = ["**/node_modules", "**/__pycache__", "**/.*", "docs"]
 # NOTE: venvPath/venv are deliberately NOT set here, even though a bare local
 # `pyright` run resolves whatever interpreter it finds and reports spurious
 # "import could not be resolved" errors that bury the real ones.
