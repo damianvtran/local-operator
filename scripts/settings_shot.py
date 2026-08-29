@@ -24,6 +24,7 @@ STATE selects what the page is showing:
     enum       an enum row expanded into its choices
     error      a text editor open with a rejected value and its inline error
     cascade    the failover cascade editor with a chain open
+    confirm    `d` on a chain row, asking before it deletes the whole chain
     teams      the read-only teams pane
     agents     the read-only agents pane
     retired    scrolled to the retired section
@@ -147,6 +148,15 @@ async def main() -> None:
         elif state == "cascade":
             _select_chain(view, "default")
             view.action_activate()
+            await pilot.pause()
+            app.save_screenshot(out)
+        elif state == "confirm":
+            # The UX round 1 U5 fix: `d` on a CHAIN row asks first, because it
+            # destroys every hop in it and immediate-write has no undo. A still
+            # of the chain row alone would not show the ask, which lives in the
+            # detail line.
+            _select_chain(view, "default")
+            view._delete_hop()
             await pilot.pause()
             app.save_screenshot(out)
         elif state in ("teams", "agents"):

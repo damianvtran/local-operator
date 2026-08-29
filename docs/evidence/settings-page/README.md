@@ -18,10 +18,21 @@ env -u NO_COLOR TERM=xterm-256color .venv/bin/python \
 | `overview-140x40.svg` | the same at a large terminal |
 | `overview-80x24.svg` | narrow: the read-only pane sheds and `←→ panes` leaves the footer with it |
 | `enum-100x30.svg` | an enum row expanded, current member marked `●` |
+| `enum-80x24.svg` | the same expansion at a split-pane width |
 | `error-100x30.svg` | a rejected value with the editor still open and the reason inline |
+| `error-80x24.svg` | the same rejection at a split-pane width |
 | `cascade-100x30.svg` | the failover cascade, one chain open with its ordered hops |
+| `cascade-80x24.svg` | the same cascade at a split-pane width |
+| `confirm-100x30.svg` | `d` on a chain row asking before it deletes the whole chain |
 | `teams-100x30.svg` | the read-only teams pane |
 | `agents-100x30.svg` | the read-only agents pane |
+
+The three `80x24` EXPANDED states are captured because the narrow width is
+where the expansions are most likely to break and the set previously carried
+only `overview` there. Design review round 1 had to regenerate them to reach a
+finding (D3, the scope tags colliding with the gutter), which is the signal
+that they belong in the committed set rather than in a reviewer's scratch
+directory.
 
 Each capture prints its own geometry (`screen.virtual_size` vs `screen.size`,
 `show_vertical_scrollbar`, the body and pane sizes). On this app a scrollable

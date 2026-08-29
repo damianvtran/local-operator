@@ -572,6 +572,314 @@ async def test_rows_never_exceed_the_list_width() -> None:
                 assert cell_len(line) <= room, (size, room, line)
 
 
+@pytest.mark.asyncio
+async def test_enter_twice_on_an_unset_row_writes_nothing(tmp_path: Path) -> None:
+    """UX round 1, U1 — the BLOCKER. The editor is seeded from the STORED value,
+    never from the rendered one.
+
+    ``_render_value`` speaks DISPLAY vocabulary: an unset value reads ``—`` and
+    a ``None`` reads ``auto``. Seeding the buffer from it made the placeholder
+    a real, committable value, so opening ``/settings`` and pressing enter twice
+    on the first row wrote ``hosting: '—'`` — the provider the next launch boots
+    on — with the row still reading ``—`` afterwards, so nothing on screen said
+    a write had happened.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 32)) as pilot:
+        await pilot.pause()
+        app._open_settings_view()
+        view = app.query_one(SettingsView)
+        await pilot.pause()
+
+        config = tmp_path / "config.yml"
+        before = config.read_bytes() if config.exists() else b""
+
+        # The cursor lands here on open; assert that rather than seeking, since
+        # "the first row of the page" is what makes this a blocker.
+        assert view.selected_key == "hosting"
+        assert "—" in view.render_lines_for_test()[view._selected + 2]
+
+        await pilot.press("enter")
+        await pilot.pause()
+        assert view.editing_key == "hosting"
+        assert view._buffer == "", "the display placeholder was seeded into the buffer"
+
+        await pilot.press("enter")
+        await pilot.pause()
+        assert _values(tmp_path).get("hosting") != "—"
+        after = config.read_bytes() if config.exists() else b""
+        assert after == before, "enter-enter on an unset row touched the config file"
+
+        # And a typed character starts from empty rather than after the glyph.
+        _select(view, "web_search.searxng_endpoint")
+        await pilot.press("enter")
+        await pilot.press("x")
+        await pilot.pause()
+        assert view._buffer == "x"
+
+
+@pytest.mark.asyncio
+async def test_an_open_editor_owns_its_navigation_keys(tmp_path: Path) -> None:
+    """UX round 1, U2 — left/right/home/end belong to the BUFFER while an editor
+    is open. They used to fall through to the page bindings and switch the
+    read-only side pane mid-typing, which is a keypress doing something the user
+    was not looking at."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 32)) as pilot:
+        await pilot.pause()
+        app._open_settings_view()
+        view = app.query_one(SettingsView)
+        await pilot.pause()
+
+        _select(view, "web_search.searxng_endpoint")
+        await pilot.press("enter")
+        for char in "https://searx.example.com/serch":
+            await pilot.press(char)
+        await pilot.pause()
+        assert view._buffer == "https://searx.example.com/serch"
+        pane = view._pane
+
+        await pilot.press("left")
+        await pilot.pause()
+        assert view._pane == pane, "left switched the side pane during an edit"
+        assert view.editing_key == "web_search.searxng_endpoint"
+        assert view._caret == len(view._buffer) - 1
+
+        # A caret, not merely a swallowed key: the typo is fixable in place
+        # rather than by backspacing the whole tail and retyping it.
+        for _ in range(2):
+            await pilot.press("left")
+        await pilot.press("a")
+        await pilot.pause()
+        assert view._buffer == "https://searx.example.com/search"
+
+        await pilot.press("home")
+        await pilot.pause()
+        assert view._caret == 0
+        assert view.editing_key is not None, "home discarded the edit"
+        assert view.selected_key == "web_search.searxng_endpoint", "home jumped the page"
+        await pilot.press("end")
+        await pilot.pause()
+        assert view._caret == len(view._buffer)
+
+        await pilot.press("enter")
+        await pilot.pause()
+        assert _values(tmp_path)["web_search"]["searxng_endpoint"] == (
+            "https://searx.example.com/search"
+        )
+
+
+@pytest.mark.asyncio
+async def test_an_arrow_during_an_edit_does_not_silently_discard_it(tmp_path: Path) -> None:
+    """UX round 1, U3 — a valid buffer is not lost to an unrelated navigation
+    key. Up/down used to call ``_cancel_edit`` unconditionally, so a user who
+    typed a value and pressed down to look elsewhere lost it with no message,
+    while the footer promised only ``enter saves · esc cancels``."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 32)) as pilot:
+        await pilot.pause()
+        app._open_settings_view()
+        view = app.query_one(SettingsView)
+        await pilot.pause()
+
+        _select(view, "retry.baseDelayMs")
+        await pilot.press("enter")
+        for _ in range(len(view._buffer)):
+            await pilot.press("backspace")
+        for char in "1500":
+            await pilot.press(char)
+        await pilot.pause()
+        assert view._buffer == "1500"
+
+        await pilot.press("down")
+        await pilot.pause()
+        # A valid buffer COMMITS on the way out rather than evaporating.
+        assert _values(tmp_path)["retry"]["baseDelayMs"] == 1500
+        assert view.editing_key is None
+
+        # An INVALID buffer keeps the editor open instead, so the move does not
+        # throw away text the user still has to correct.
+        _select(view, "retry.maxRetries")
+        await pilot.press("enter")
+        for _ in range(len(view._buffer)):
+            await pilot.press("backspace")
+        for char in "9999":
+            await pilot.press(char)
+        await pilot.press("down")
+        await pilot.pause()
+        assert view.editing_key == "retry.maxRetries", "an invalid buffer was discarded by a move"
+        assert view._buffer == "9999"
+        assert "at most 100" in view.error_text
+
+
+@pytest.mark.asyncio
+async def test_esc_closes_an_open_chain_before_the_page(tmp_path: Path) -> None:
+    """UX round 1, U4 — the missing rung. The enum expansion directly above the
+    cascade consumes esc, so a ladder with no rung for an open chain teaches a
+    rule and then breaks it at the one place a user is two levels down."""
+    from local_operator import settings_io
+    from local_operator.config import ConfigManager
+
+    settings_io.write_chains(ConfigManager(tmp_path), {"cheap": ["anthropic/a", "openrouter/b"]})
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 32)) as pilot:
+        await pilot.pause()
+        app._open_settings_view()
+        view = app.query_one(SettingsView)
+        await pilot.pause()
+
+        for index, row in enumerate(view._rows):
+            if row.kind == "chain" and row.chain == "cheap":
+                view._selected = index
+                break
+        view.action_activate()
+        await pilot.pause()
+        assert view._chain == "cheap"
+        for index, row in enumerate(view._rows):
+            if row.kind == "hop":
+                view._selected = index
+                break
+
+        await pilot.press("escape")
+        await pilot.pause()
+        assert app.screen.has_class("settings"), "esc from a hop row exited the whole page"
+        assert view._chain is None
+        # And it leaves the cursor on the chain row it just closed.
+        current = view._rows[view._selected]
+        assert current.kind == "chain" and current.chain == "cheap"
+
+        await pilot.press("escape")
+        await pilot.pause()
+        assert not app.screen.has_class("settings")
+
+
+@pytest.mark.asyncio
+async def test_deleting_a_chain_asks_first_and_r_says_what_it_does(tmp_path: Path) -> None:
+    """UX round 1, U5 — ``d`` on a CHAIN row is a magnitude above ``d`` on a
+    hop: it destroys every hop in it, immediate-write has no undo, and ``r``
+    could not bring it back. A hop still deletes outright (one line, cheap to
+    retype); a chain asks."""
+    from local_operator import settings_io
+    from local_operator.config import ConfigManager
+
+    settings_io.write_chains(ConfigManager(tmp_path), {"cheap": ["anthropic/a", "openrouter/b"]})
+
+    def chains() -> dict[str, Any]:
+        return _values(tmp_path)["retry"]["fallbackChains"]
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 32)) as pilot:
+        await pilot.pause()
+        app._open_settings_view()
+        view = app.query_one(SettingsView)
+        await pilot.pause()
+
+        def _chain_row() -> int:
+            for index, row in enumerate(view._rows):
+                if row.kind == "chain" and row.chain == "cheap":
+                    return index
+            raise AssertionError("no chain row")
+
+        view._selected = _chain_row()
+        view._repaint()
+        await pilot.press("d")
+        await pilot.pause()
+        assert chains()["cheap"] == ["anthropic/a", "openrouter/b"], "one d deleted the chain"
+        # The ask is ON SCREEN, naming the chain and what it costs.
+        detail = view.render_lines_for_test()[-1]
+        assert "cheap" in detail and "2 hops" in detail
+        assert "d again" in detail
+
+        # Esc backs out of the confirmation without touching the chain.
+        await pilot.press("escape")
+        await pilot.pause()
+        assert app.screen.has_class("settings")
+        assert chains()["cheap"] == ["anthropic/a", "openrouter/b"]
+        assert "d again" not in view.render_lines_for_test()[-1]
+
+        # A second d confirms.
+        view._selected = _chain_row()
+        view._repaint()
+        await pilot.press("d")
+        await pilot.press("d")
+        await pilot.pause()
+        assert chains() == {}
+
+        # And `r` on the cascade row SAYS what it does rather than swallowing
+        # the press while the footer advertises the key.
+        _select(view, "retry.fallbackChains")
+        await pilot.press("r")
+        await pilot.pause()
+        assert "r" in view.error_text and "chain" in view.error_text
+
+
+@pytest.mark.asyncio
+async def test_the_read_only_caption_survives_a_long_roster() -> None:
+    """Design round 1, D2 — ``read-only`` is the one word carrying the
+    editable/not boundary, and it was the word that fell off the bottom of the
+    pane once three agents overran the row budget. The roster is what gives
+    way, spilling into a ``+N more`` line."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._open_settings_view()
+        view = app.query_one(SettingsView)
+        await pilot.pause()
+        view.load(
+            agents=[
+                (f"agent-{n}", "role · effort hi", "a summary long enough to take its own row")
+                for n in range(8)
+            ],
+            providers=[("anthropic", "signed in"), ("openrouter", "api key")],
+        )
+        view.action_pane(1)
+        await pilot.pause()
+        assert view._pane == "agents"
+        pane = view.rendered_pane()
+        assert "read-only" in pane
+        # It is the LAST line, and it is inside the pane's painted height.
+        lines = pane.split("\n")
+        assert lines[-1].strip() == "read-only"
+        assert len(lines) <= view._pane_view.size.height, pane
+        assert "more" in pane, "the roster was not truncated, so nothing was reserved"
+
+
+@pytest.mark.asyncio
+async def test_scope_tags_share_one_column() -> None:
+    """Design round 1, D3 — two headers of the same rank must put their
+    ``takes effect:`` tag in the same column. Right-aligning each against its
+    own title made the position depend on the title's length, which the eye
+    reads as an accident rather than as a grid."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._open_settings_view()
+        view = app.query_one(SettingsView)
+        await pilot.pause()
+        columns = {
+            line.index("takes effect:")
+            for line in view.render_lines_for_test()
+            if "takes effect:" in line
+        }
+        assert len(columns) == 1, columns
+
+
+@pytest.mark.asyncio
+async def test_the_longest_label_is_not_clipped_mid_parenthetical() -> None:
+    """Design round 1, D4 — ``Connectivity backoff cap (ms)`` fitted in the
+    column and was still cut to ``(m…``, an opened parenthetical that never
+    closes, because the label budget spent two cells that exist."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._open_settings_view()
+        view = app.query_one(SettingsView)
+        await pilot.pause()
+        index = _select(view, "retry.connectivityBackoffCapMs")
+        line = view.render_lines_for_test()[index + 2]
+        assert "Connectivity backoff cap (ms)" in line, line
+
+
 def test_pane_width_matches_the_stylesheet() -> None:
     """``_PANE_WIDTH`` is mirrored from ``.settings-view-pane`` because the
     width has to be known before layout runs. This is the guard that keeps the
@@ -590,6 +898,30 @@ def test_pane_width_matches_the_stylesheet() -> None:
     assert match is not None, "the .settings-view-pane rule must declare a width"
     declared = int(match.group(1))
     assert declared == _PANE_WIDTH
+
+
+def test_the_body_scrollbar_is_this_app_s_palette() -> None:
+    """Design round 1, D1 — ``overflow-y: auto`` with no ``scrollbar-*`` rules
+    inherits Textual's stock blue (``#003054`` thumb on ``#000000``, 2 cells),
+    which appeared in no other frame in the product. Both sibling scrolling
+    surfaces pin theirs at 1 cell against ``$lo-*``; this asserts this one does
+    too, since a stylesheet regression is invisible to every other test here."""
+    import re
+    from pathlib import Path as _Path
+
+    tcss = (
+        _Path(__file__).resolve().parents[3] / "local_operator/tui/local_operator.tcss"
+    ).read_text()
+    block = tcss.split(".settings-view-body {")[1].split("}")[0]
+    for rule, expected in (
+        ("scrollbar-size-vertical", "1"),
+        ("scrollbar-gutter", "stable"),
+        ("scrollbar-background", r"\$lo-bg"),
+        ("scrollbar-color", r"\$lo-edge"),
+        ("scrollbar-color-hover", r"\$lo-dim"),
+        ("scrollbar-color-active", r"\$lo-muted"),
+    ):
+        assert re.search(rf"^\s*{rule}:\s*{expected};", block, re.MULTILINE), (rule, block)
 
 
 def test_persist_hint_prefix_matches_the_app() -> None:

@@ -83,6 +83,27 @@ _CHOICE_INDENT = _ROW_INDENT + 4
 #: Marker on the row the cursor is on. A glyph rather than a background sweep
 #: so the row's own changed/default ink survives the highlight.
 _CURSOR = "›"
+#: Cells the cursor marker occupies on every row, cursor or not — the column is
+#: reserved on unselected rows too, or the labels would shift sideways as the
+#: cursor moved down the page.
+_MARKER_WIDTH = 2
+
+#: Cells a row label may occupy. Derived from the value column rather than
+#: guessed, so the widest label still leaves exactly one space before its value
+#: and the value column stays fixed: `Connectivity backoff cap (ms)` is 29 cells
+#: and fits whole, where a hand-picked budget one cell shorter clipped it to
+#: `(m…` — an opened parenthetical that never closes reads as a rendering fault
+#: rather than as an abbreviation (design round 1, D4).
+_LABEL_BUDGET = _VALUE_COLUMN - _ROW_INDENT - _MARKER_WIDTH - 1
+
+#: Rows of the page's own chrome that sit outside the two columns: the title,
+#: the rule, the columns' top padding, the two-row detail line, and the two-row
+#: hint footer. The pane's height is derived from the VIEW's height through this
+#: rather than read off `_pane_view.size`, for the reason `_pane_width` records
+#: — `_repaint` runs from `on_mount`, before layout, where every child size is
+#: still 0, and a pane budgeted against 0 rows paints a different first frame
+#: from its settled one.
+_PANE_CHROME_ROWS = 7
 
 #: The right-hand pane's two read-only tabs. Read-only on purpose: teams and
 #: agents are configured in files, and a page that showed an editable-looking
@@ -189,8 +210,23 @@ class SettingsView(Vertical):
         self._editing: str | None = None
         self._buffer = ""
         self._error = ""
+        #: Caret position INSIDE the buffer. The editor owns left/right/home/end
+        #: while it is open (UX round 1, U2): unhandled they fell through to the
+        #: page bindings and switched the read-only side pane mid-typing, and
+        #: `home` discarded the edit and teleported the cursor to row 0. Fixing
+        #: one character of a long endpoint otherwise costs retyping the tail.
+        self._caret = 0
+        #: What the editor was seeded with, so leaving a buffer the user never
+        #: altered can skip the write entirely rather than rewriting the same
+        #: value (see :meth:`_settle_edit`).
+        self._edit_seed = ""
         #: Cascade editor state: which chain is open for hop editing, if any.
         self._chain: str | None = None
+        #: Chain key whose deletion has been asked for and not yet confirmed.
+        #: `d` on a CHAIN row destroys every hop in it and immediate-write has
+        #: no undo, so it asks first — a magnitude above `d` on a single hop,
+        #: which is one line and cheap to retype (UX round 1, U5).
+        self._confirm_delete: str | None = None
         self._pane = _PANE_TEAMS
         #: Read-only pane content, injected by the app (it owns the registries).
         self._teams: list[tuple[str, str, str]] = []
@@ -341,8 +377,9 @@ class SettingsView(Vertical):
             position = indices.index(self._selected)
         else:
             position = 0
+        if not self._leave_row():
+            return
         self._selected = indices[(position + delta) % len(indices)]
-        self._cancel_edit()
         self._repaint()
         self._scroll_to_selection()
 
@@ -363,18 +400,20 @@ class SettingsView(Vertical):
         indices = self._selectable()
         if not indices:
             return
+        if not self._leave_row():
+            return
         self._selected = indices[-1] if to_end else indices[0]
-        self._cancel_edit()
         self._repaint()
         self._scroll_to_selection()
 
     def _select_after(self, header_index: int) -> None:
         """Put the cursor on the first selectable row at or after a header."""
+        if not self._leave_row():
+            return
         for index in range(header_index, len(self._rows)):
             if self._rows[index].selectable:
                 self._selected = index
                 break
-        self._cancel_edit()
         self._repaint()
         self._scroll_to_selection()
 
@@ -510,7 +549,17 @@ class SettingsView(Vertical):
         row = self._current()
         if row is None or row.setting is None or row.kind != "setting":
             return
-        if row.setting.kind in (Kind.READONLY, Kind.CASCADE):
+        if row.setting.kind is Kind.CASCADE:
+            # A cascade has no shipped default to restore — the chains are
+            # entirely the user's own — so `r` cannot mean here what it means
+            # everywhere else. It SAYS so rather than swallowing the press,
+            # because the footer advertises `r default` on this row and a lit
+            # hint whose key does nothing is the "nothing happens when I click"
+            # bug one step earlier (UX round 1, U5).
+            self._error = "r resets one setting; delete a chain with d on its row"
+            self._repaint()
+            return
+        if row.setting.kind is Kind.READONLY:
             return
         try:
             settings_io.reset_setting(self._manager, row.setting)
@@ -545,7 +594,18 @@ class SettingsView(Vertical):
 
     # -- text editing -------------------------------------------------------
     def _begin_edit(self, row: "_Row") -> None:
-        """Open the inline editor on ``row``, seeded with its current value."""
+        """Open the inline editor on ``row``, seeded with its STORED value.
+
+        Seeded from what is stored, never from what is DISPLAYED. ``_render_value``
+        speaks display vocabulary — an unset value reads ``—`` and a ``None``
+        reads ``auto`` — and neither was ever meant to be parsed back. Seeding
+        the buffer from it made the placeholder a committable value: enter twice
+        on the page's first unset row wrote ``hosting: '—'``, the provider the
+        next launch boots on, and the row still read ``—`` afterwards so nothing
+        on screen said a write had happened (UX round 1, U1 — the same silent-
+        destructive shape as #369 itself). An unset row therefore opens EMPTY,
+        which is also what ``empty_unsets`` means by "clear to unset".
+        """
         if row.kind == "hop" and row.hop is not None:
             self._editing = f"hop:{row.chain}:{row.hop_index}"
             self._buffer = row.hop
@@ -557,16 +617,58 @@ class SettingsView(Vertical):
             self._buffer = ""
         elif row.setting is not None:
             self._editing = row.setting.key
-            self._buffer = _render_value(settings_io.read_setting(self._manager, row.setting))
+            self._buffer = _edit_seed(settings_io.read_setting(self._manager, row.setting))
         else:
             return
+        self._edit_seed = self._buffer
+        self._caret = len(self._buffer)
         self._error = ""
         self._repaint()
 
     def _cancel_edit(self) -> None:
         self._editing = None
         self._buffer = ""
+        self._edit_seed = ""
+        self._caret = 0
         self._error = ""
+
+    def _leave_row(self) -> bool:
+        """Settle whatever the current row has open, and say whether to move.
+
+        Movement used to call ``_cancel_edit`` unconditionally, so a plain
+        ``down`` after typing a valid value threw it away silently — the footer
+        promises ``enter saves · esc cancels`` and says nothing about arrows, so
+        the user's model is "esc is how I lose this" (UX round 1, U3). The rule
+        here is the one the page can state honestly: a VALID buffer commits on
+        the way out, and an INVALID one holds the cursor where it is with the
+        rejected text and the reason both still on screen — the same contract
+        Enter already has, so there is only one rule to learn.
+
+        Returns ``False`` when the caller must NOT move.
+        """
+        # A pending chain-delete confirmation is answered by `d` or by `esc`,
+        # never by drifting off the row: an ask that survived the cursor moving
+        # away would fire on a row the user is no longer looking at.
+        self._confirm_delete = None
+        if self._editing is None:
+            self._error = ""
+            return True
+        if self._buffer == self._edit_seed:
+            # Nothing was typed. Closing beats committing an identical value:
+            # a write would stamp a defaulted key into the file just because the
+            # cursor passed through the row.
+            self._cancel_edit()
+            return True
+        self._commit_edit()
+        return self._editing is None
+
+    def _caret_left(self) -> None:
+        self._caret = max(0, self._caret - 1)
+        self._repaint()
+
+    def _caret_right(self) -> None:
+        self._caret = min(len(self._buffer), self._caret + 1)
+        self._repaint()
 
     def _commit_edit(self) -> None:
         """Enter inside the editor: validate, then save or keep it open.
@@ -588,6 +690,17 @@ class SettingsView(Vertical):
         setting = settings_io.resolve_key(target)
         if setting is None:
             self._cancel_edit()
+            return
+        if self._buffer == self._edit_seed:
+            # Nothing was typed, so nothing is saved — not even a rewrite of the
+            # value already there. Enter on an untouched editor must leave the
+            # file BYTE-identical: routing it through the normal save path had
+            # an unset row's empty buffer call `reset_setting`, which rewrote
+            # config.yml (and its `last_modified`) to delete a key that was
+            # never present. The user pressed enter twice on a row and their
+            # config file changed (UX round 1, U1).
+            self._cancel_edit()
+            self._repaint()
             return
         text = self._buffer.strip()
         if not text and setting.empty_unsets:
@@ -674,10 +787,44 @@ class SettingsView(Vertical):
         self.post_message(SettingsChanged("retry.fallbackChains", chains))
         self._repaint()
 
+    def _close_chain(self) -> None:
+        """Close the open chain and put the cursor back on its own row.
+
+        The cursor has to be MOVED, not merely left where it was: the hop rows
+        it may be sitting on stop existing when the chain closes, so an index
+        left alone would land on whatever the rebuild put in their place.
+        """
+        chain = self._chain
+        self._chain = None
+        self._repaint()
+        if chain is None:
+            return
+        for index, row in enumerate(self._rows):
+            if row.kind == "chain" and row.chain == chain:
+                self._selected = index
+                break
+        self._repaint()
+        self._scroll_to_selection()
+
     def _delete_hop(self) -> None:
-        """Remove the highlighted hop, or the whole chain from its key row."""
+        """Remove the highlighted hop, or the whole chain from its key row.
+
+        A HOP deletes outright: it is one line, and retyping it is cheap. A
+        CHAIN asks first. Deleting a chain destroys every hop in it, `r` cannot
+        bring it back (there is no shipped default to restore a user's own
+        failover configuration from), and `d` sits one row from `enter`, which
+        on the same row means "open" — so a user exploring the two keys the
+        detail line names could destroy a multi-hop failover config by pressing
+        the second one, with nothing on screen saying it happened (UX round 1,
+        U5). The confirmation lives in the detail line rather than in a modal
+        because the page is a mode for the reason the module docstring gives.
+        """
         row = self._current()
         if row is None:
+            return
+        if row.kind == "chain" and row.chain is not None and self._confirm_delete != row.chain:
+            self._confirm_delete = row.chain
+            self._repaint()
             return
         chains: dict[str, list[str]] = {
             key: list(hops) for key, hops in settings_io.read_chains(self._manager).items()
@@ -690,7 +837,9 @@ class SettingsView(Vertical):
             del chains[row.chain]
             self._chain = None
         else:
+            self._confirm_delete = None
             return
+        self._confirm_delete = None
         settings_io.write_chains(self._manager, chains)
         self.post_message(SettingsChanged("retry.fallbackChains", chains))
         self._repaint()
@@ -729,8 +878,15 @@ class SettingsView(Vertical):
         Handled here rather than as bindings because an OPEN EDITOR must own
         every printable key — a ``d`` typed into a model id cannot also be the
         delete-hop shortcut. The editor is checked first for exactly that
-        reason, and the Esc LADDER (editor → expansion → page, one press each)
-        falls out of the same ordering.
+        reason, and the Esc LADDER (editor → chain → expansion → page, one press
+        each) falls out of the same ordering.
+
+        The editor owns its NAVIGATION keys for the same reason it owns the
+        printable ones. Left/right/home/end were the keys a user reaches for
+        mid-edit and the ones that leaked: unhandled they fell through to the
+        page bindings, switched the read-only side pane while the user was
+        typing, and — for ``home`` — discarded the edit and jumped to row 0
+        (UX round 1, U2/U3).
         """
         key = event.key
         if self._editing is not None:
@@ -748,20 +904,64 @@ class SettingsView(Vertical):
             if key == "backspace":
                 event.stop()
                 event.prevent_default()
-                self._buffer = self._buffer[:-1]
+                # Deletes at the CARET, not off the tail: the caret exists so a
+                # typo in the middle of a long endpoint is fixable in place.
+                if self._caret > 0:
+                    self._buffer = self._buffer[: self._caret - 1] + self._buffer[self._caret :]
+                    self._caret -= 1
                 self._repaint()
+                return
+            if key == "delete":
+                event.stop()
+                event.prevent_default()
+                self._buffer = self._buffer[: self._caret] + self._buffer[self._caret + 1 :]
+                self._repaint()
+                return
+            if key in ("left", "right", "home", "end"):
+                event.stop()
+                event.prevent_default()
+                if key == "left":
+                    self._caret_left()
+                elif key == "right":
+                    self._caret_right()
+                else:
+                    # HOME/END move within the BUFFER, not the page. `home`
+                    # previously ran `action_jump(0)`, which cancelled the edit
+                    # and left the user 25 rows from where they were.
+                    self._caret = 0 if key == "home" else len(self._buffer)
+                    self._repaint()
                 return
             char = getattr(event, "character", None)
             if char and char.isprintable():
                 event.stop()
                 event.prevent_default()
-                self._buffer += char
+                self._buffer = self._buffer[: self._caret] + char + self._buffer[self._caret :]
+                self._caret += 1
                 self._repaint()
             return
+        if key == "escape" and self._confirm_delete is not None:
+            # An unanswered "delete this chain?" is backed out of before any
+            # other Esc meaning applies, so the key that cancels the ask is the
+            # key the ask itself advertises.
+            event.stop()
+            event.prevent_default()
+            self._confirm_delete = None
+            self._repaint()
+            return
+        if key == "escape" and self._chain is not None:
+            # The rung the ladder was missing (UX round 1, U4). The enum
+            # expansion below DOES consume Esc, so a cascade — the only
+            # multi-level editor on the page, and the one place a user is two
+            # levels down — dumping them out of the whole page taught a rule and
+            # then broke it. Closing leaves the cursor on the chain's own row.
+            event.stop()
+            event.prevent_default()
+            self._close_chain()
+            return
         if key == "escape" and self._expanded is not None:
-            # Rung two of the ladder: Esc closes the EXPANSION before it closes
-            # the page, so a user who opened a dropdown to look at it can back
-            # out of it without losing the whole surface.
+            # Rung three of the ladder: Esc closes the EXPANSION before it
+            # closes the page, so a user who opened a dropdown to look at it can
+            # back out of it without losing the whole surface.
             event.stop()
             event.prevent_default()
             self._expanded = None
@@ -806,8 +1006,9 @@ class SettingsView(Vertical):
         if index == self._selected:
             self.action_activate()
             return
+        if not self._leave_row():
+            return
         self._selected = index
-        self._cancel_edit()
         self._repaint()
 
     def on_mouse_move(self, event) -> None:  # type: ignore[no-untyped-def]
@@ -933,10 +1134,17 @@ class SettingsView(Vertical):
             # one case where a clipped tag would be worse than none.
             full = f"takes effect: {row.section.scope.value}"
             short = row.section.scope.value
-            room = width - cell_len(head.plain) - 2
+            # LEFT-aligned on one shared column, not right-aligned against each
+            # title. Right-aligning made the tag's position depend on the
+            # title's length, so `Model` and `Failover and retry` — two headers
+            # of the same rank — put their tags two cells apart and the eye read
+            # the difference as an accident rather than as a grid (design round
+            # 1, D3). The column is the value column the settings rows already
+            # align on, so the tag lands on structure the page already has.
+            room = width - _VALUE_COLUMN
             tag = full if cell_len(full) <= room else (short if cell_len(short) <= room else "")
-            if tag:
-                head.append(" " * max(1, width - cell_len(head.plain) - cell_len(tag)))
+            if tag and cell_len(head.plain) < _VALUE_COLUMN:
+                head.append(" " * (_VALUE_COLUMN - cell_len(head.plain)))
                 head.append(tag, style=dim)
             return head
 
@@ -1002,7 +1210,7 @@ class SettingsView(Vertical):
             return line
         line.append(" " * _ROW_INDENT)
         line.append(marker, style=accent if selected else dim)
-        label = truncate_cells(setting.label, _VALUE_COLUMN - _ROW_INDENT - 4)
+        label = truncate_cells(setting.label, _LABEL_BUDGET)
         line.append(label, style=base)
         pad = max(1, _VALUE_COLUMN - cell_len(line.plain))
         line.append(" " * pad)
@@ -1032,14 +1240,36 @@ class SettingsView(Vertical):
         editor = Text(no_wrap=True)
         accent = Style(color=theme_mod.semantic_color("accent"))
         faint = Style(color=theme_mod.semantic_color("faint"))
-        editor.append(self._buffer, style=Style(color=theme_mod.semantic_color("fg")))
+        fg = Style(color=theme_mod.semantic_color("fg"))
+        # The caret is painted IN the buffer at its index rather than always at
+        # the tail, so the frame shows where the next character will land —
+        # without that, left/right moved a position nothing on screen reported
+        # and the keys read as dead.
+        caret = max(0, min(self._caret, len(self._buffer)))
+        editor.append(self._buffer[:caret], style=fg)
         editor.append("▏", style=accent)
+        editor.append(self._buffer[caret:], style=fg)
         # The CONTRACT rides the row; the ERROR does not. The detail line below
         # already carries the rejection in full width, and printing it twice
         # read as two separate problems — the row's copy also had to compete
         # with the value column for space it does not have.
         editor.append("  enter saves · esc cancels · clear to unset", style=faint)
         return editor
+
+    def _confirm_text(self) -> str:
+        """The pending chain deletion's ask, or "" when nothing is pending.
+
+        Names the chain AND what it costs. "Are you sure?" would make the user
+        answer a question about a row they would have to look away to identify,
+        and the hop count is the part that says why this one confirms when a
+        single hop does not.
+        """
+        chain = self._confirm_delete
+        if chain is None:
+            return ""
+        hops = settings_io.read_chains(self._manager).get(chain, [])
+        count = f"{len(hops)} hop{'' if len(hops) == 1 else 's'}"
+        return f"delete chain {chain} and its {count}? press d again to confirm · esc cancels"
 
     def _paint_detail(self) -> None:
         """The one-line explanation of the HIGHLIGHTED row.
@@ -1059,7 +1289,12 @@ class SettingsView(Vertical):
         error = Style(color=theme_mod.semantic_color("danger"))
         text = Text(no_wrap=True, overflow="ellipsis")
         row = self._current()
-        if self._error:
+        confirm = self._confirm_text()
+        if confirm:
+            # Above the error and above the help: an unanswered destructive
+            # question is the only thing the user needs the row to say.
+            text.append(confirm, style=error)
+        elif self._error:
             text.append(self._error, style=error)
         elif row is None:
             pass
@@ -1110,10 +1345,12 @@ class SettingsView(Vertical):
 
         The view's width is the one dimension known before the children are
         laid out (see :meth:`_pane_width`), so the list's share is derived
-        rather than read back off the body. The scrollbar's two cells are
-        always subtracted because a fifty-row registry is always taller than
-        the viewport — assuming them away is what let rows wrap by exactly two
-        cells.
+        rather than read back off the body. Two cells go to the scrollbar
+        unconditionally: with ``scrollbar-gutter: stable`` the column is
+        reserved whether or not the thumb is painted, and a fifty-row registry
+        is taller than any viewport here anyway — assuming them away is what let
+        rows wrap by exactly two cells. The reservation and the painted bar now
+        agree rather than merely happening to match (design round 1, D1).
         """
         try:
             total = self.size.width
@@ -1183,14 +1420,80 @@ class SettingsView(Vertical):
                 f"  {truncate_cells(f'{verb} lists and attaches them', room)}\n", style=faint
             )
         else:
-            for name, facts, summary in rows:
+            # The ROSTER is what gives way, not the caption. `read-only` used to
+            # be appended unconditionally and simply fell off the bottom once
+            # three agents at three rows each overran the pane's height — and
+            # that caption is the one word carrying the editable/not boundary,
+            # beside rows that ARE editable in the identical row grammar, in
+            # exactly the pane a user is most likely to want to edit ("can I
+            # change this agent's effort here?"). It degraded silently with
+            # roster size (design round 1, D2). A clipped roster with an intact
+            # boundary statement is the right trade, and the `+N more` line
+            # makes the clipping visible rather than silent.
+            shown, hidden = self._budget_pane_rows(rows, used=len(text.plain.split("\n")) - 1)
+            for name, facts, summary in shown:
                 text.append(f"  {truncate_cells(name, room - 2)}\n", style=muted)
                 text.append(f"    {truncate_cells(facts, room - 4)}\n", style=faint)
                 if summary:
                     text.append(f"    {truncate_cells(summary, room - 4)}\n", style=faint)
+            if hidden:
+                text.append(f"  + {hidden} more\n", style=dim)
         text.append("\n  read-only", style=dim)
         self._pane_text = text
         self._pane_view.update(text)
+
+    def _budget_pane_rows(
+        self, rows: Sequence[tuple[str, str, str]], *, used: int
+    ) -> tuple[list[tuple[str, str, str]], int]:
+        """Split the roster into what fits above the caption, and the rest.
+
+        Each entry costs up to three rows (name, facts, an optional summary),
+        and the caption plus its leading blank line costs two that are reserved
+        here rather than competed for. A `+N more` line is only worth its own
+        row when something is actually hidden, so the budget is recomputed once
+        the spill line is known to be needed — otherwise an exactly-fitting
+        roster would shed an entry to make room for a line saying it had.
+        """
+        height = self._pane_height()
+        # Two for the caption block; one held back for a possible `+N more`.
+        room = height - used - 2
+        if room <= 0:
+            return ([], len(rows))
+
+        def cost(entry: tuple[str, str, str]) -> int:
+            return 3 if entry[2] else 2
+
+        def take(limit: int) -> int:
+            spent = 0
+            count = 0
+            for entry in rows:
+                spent += cost(entry)
+                if spent > limit:
+                    break
+                count += 1
+            return count
+
+        count = take(room)
+        if count < len(rows):
+            count = take(room - 1)
+        return (list(rows[:count]), len(rows) - count)
+
+    def _pane_height(self) -> int:
+        """Rows the pane has to work with, derived from the VIEW's height.
+
+        Derived rather than read off ``self._pane_view.size`` for the reason
+        :meth:`_pane_width` records in full: ``_repaint`` runs from
+        ``on_mount``, before Textual has laid the children out, so every child
+        size is still ``0`` at that moment and a budget computed against zero
+        paints a first frame that differs from the settled one.
+        """
+        try:
+            height = self.size.height
+        except Exception:
+            height = 0
+        if height <= 0:
+            return 14
+        return max(height - _PANE_CHROME_ROWS, 4)
 
     def _paint_chrome(self) -> None:
         muted = Style(color=theme_mod.semantic_color("muted"))
@@ -1414,6 +1717,28 @@ def _render_value(value: Any) -> str:
         return f"{len(value)} chain{'' if len(value) == 1 else 's'}"
     text = str(value)
     return text if text else "—"
+
+
+def _edit_seed(value: Any) -> str:
+    """What an editor opens with for a STORED value — the other vocabulary.
+
+    Deliberately NOT :func:`_render_value`. That function answers "what does
+    this row read as", and its answers include ``—`` for absent and ``auto``
+    for ``None``; both are glyphs for the ABSENCE of a value, and neither is
+    something a user could have typed or that the coercers would accept back.
+    Feeding them into an editable buffer is what let the placeholder be
+    committed as a real value (UX round 1, U1), so the two vocabularies are
+    kept apart here rather than sharing one function with a flag: a display
+    string and an editable string are different questions about the same value.
+
+    Booleans are absent on purpose — a BOOL row toggles and never opens an
+    editor, so there is no ``on``/``off`` case to round-trip.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, (list, tuple)):
+        return ", ".join(str(item) for item in value)
+    return str(value)
 
 
 def _home_relative(path: str) -> str:
