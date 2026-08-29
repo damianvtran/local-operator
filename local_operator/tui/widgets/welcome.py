@@ -291,7 +291,22 @@ HINT_KEY_WIDTH_TIGHT = max(cell_len(key) for key, _ in HINTS) + 1
 #: pressed next cleared the draft (design round 1, D4). The tip it replaced
 #: describes behaviour a user discovers by doing it — typing mid-turn works
 #: whether or not anyone said so — whereas an unadvertised key is unreachable
-#: by experiment. The first entry is the one
+#: by experiment.
+#:
+#: It LEADS WITH THE KEY for that same reason. The first wording opened on the
+#: gesture ("Double-click a word, then ctrl+c…"), which only told a user
+#: something once they had already double-clicked — and the thing nobody can
+#: discover is that ctrl+c is the copy key AT ALL, for any highlight, however
+#: it was made (agent review round 2 R2-5, design round 2 D4). Naming the
+#: highlight rather than the gesture also makes the row true of a drag and of
+#: shift+arrow, which are the same key and were equally unadvertised.
+#:
+#: The known limit, recorded rather than fixed here: `WelcomeView.display` goes
+#: False after the first message, so this reaches a user on the SPLASH and not
+#: the mid-draft user in the field report. Closing that gap means putting
+#: ctrl+c in `HINTS` or `/help`, which is a change to a different surface with
+#: its own width tiers and its own review, and this row is worth having either
+#: way. The first entry is the one
 #: EVERY LAUNCH OPENS ON — the rotation is pinned to it and only then resumes at
 #: a random point in the ring (see :meth:`WelcomeView._sync_tip_timer`) — which
 #: is why it is resumption, the single question a returning user arrives with.
@@ -303,7 +318,7 @@ TIPS: tuple[str, ...] = (
     "/usage shows how much provider quota is left",
     "/analytics shows token use across all sessions",
     "/approvals <ask|auto> sets whether tools ask first",
-    "Double-click a word, then ctrl+c to copy it",
+    "ctrl+c copies what you highlight in the composer",
     "esc stops the agent without ending the session",
     "Ask for parallel work and the agent fans out subagents",
     "! on an empty composer runs a shell command",
