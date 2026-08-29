@@ -1148,6 +1148,25 @@ COMPOSER_COPY = object()
 #: explain it.
 COMPOSER_PASTE_NOTICE = object()
 
+#: Owner tag for the IN-FLIGHT read card, deliberately distinct from
+#: :data:`COMPOSER_PASTE_NOTICE`.
+#:
+#: The two cards share a slot but not a lifetime, and conflating their owners
+#: was a real regression. The minimum-display floor (D10) defers the reading
+#: card's retirement, and that deferred `withdraw` fired AFTER an outcome had
+#: already replaced the card with a failure notice — pulling down a card it was
+#: never meant to touch, because `withdraw` matches on owner and both carried
+#: the same one. For reads landing in `[DELAY, DELAY + MIN)` the failure notice
+#: was destroyed, at 0.74 s showing for **0 ms**: the user pressed ctrl+v,
+#: waited through a visible pause and was told nothing, which is issue #372's
+#: original symptom restored (design round 3, D14).
+#:
+#: Separate owners make that unrepresentable rather than merely fixed: the
+#: retirement can only ever reach the progress card, whatever the timing. The
+#: failure notices keep `COMPOSER_PASTE_NOTICE` so `EditorPasteAttached` still
+#: retires a held one through the machinery it already used.
+COMPOSER_READING_NOTICE = object()
+
 #: What the composer says while a clipboard read is in flight. 22 cells, so it
 #: fits the toast's 58-cell content box at every width (design round 2, D4's
 #: measurement). Named here rather than inlined because the tests assert the
@@ -5142,18 +5161,35 @@ class OperatorApp(App[None]):
         """
         from local_operator.tui.widgets.toast import TOAST_DEFAULT_MS
 
+        # UNGUARDED `query_one`, deliberately, and the invariant is named
+        # rather than assumed (code round 3, F9). `compose` mounts the Toast
+        # once inside `#toast-host` and never removes it ("mounted once and
+        # kept", so showing a message never awaits a mount), and this method is
+        # reachable only from `Editor.action_system_paste` — a binding on a
+        # focused, mounted composer, which cannot exist before compose has run.
+        #
+        # A `NoMatches` guard here would therefore be unreachable code that
+        # silently swallows a broken layout. The one site in this file that
+        # DOES guard (`_splash_notice`) runs from a startup path that can fire
+        # before compose, which is the distinction.
         toast = self.query_one(Toast)
         if not reading:
             # `withdraw` refuses any card that is not ours, so an MCP failure
             # that took the slot while the read ran is never pulled out from
-            # under the user.
-            toast.withdraw(COMPOSER_PASTE_NOTICE)
+            # under the user — and, since this owner is the READING card's
+            # alone, neither is the paste outcome's own notice. That separation
+            # is what makes the deferred retirement safe (see
+            # `COMPOSER_READING_NOTICE`): by the time a delayed withdrawal
+            # fires, the slot may already belong to the failure card that
+            # replaced this one, and owner matching is the only thing standing
+            # between that card and a `dismiss_toast` (D14).
+            toast.withdraw(COMPOSER_READING_NOTICE)
             return
         toast.show(
             CLIPBOARD_READING_NOTICE,
             duration_ms=TOAST_DEFAULT_MS,
             yield_to_actionable=True,
-            owner=COMPOSER_PASTE_NOTICE,
+            owner=COMPOSER_READING_NOTICE,
         )
 
     def on_editor_paste_empty(self, message: EditorPasteEmpty) -> None:

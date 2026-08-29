@@ -1643,3 +1643,100 @@ async def test_every_paste_notice_fits_the_toast_on_one_line() -> None:
                 f"{budget}-cell box: it wraps and clips the logo behind it"
             )
         assert cell_len(CLIPBOARD_READING_NOTICE) <= budget
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "read_seconds",
+    [
+        # Straddles the whole [DELAY, DELAY + MIN) window that D14 lived in,
+        # plus a control on either side. The bug was invisible outside it.
+        pytest.param(0.20, id="below-the-delay"),
+        pytest.param(0.42, id="just-inside-the-window"),
+        pytest.param(0.60, id="mid-window"),
+        pytest.param(0.72, id="the-0ms-case"),
+        pytest.param(0.90, id="past-the-floor"),
+    ],
+)
+async def test_the_minimum_display_floor_never_suppresses_the_outcome_notice(
+    monkeypatch, read_seconds
+) -> None:
+    """THE D10/D14 INTERACTION, pinned as an interaction rather than a constant.
+
+    `PASTE_READING_NOTICE_MIN_S` holds the progress card up for a minimum time
+    so a read landing just past the delay does not flash it for ~42 ms (D10).
+    That defers the retirement — and the retirement is a `Toast.withdraw`,
+    which matches on OWNER. While the progress card and the failure notices
+    shared `COMPOSER_PASTE_NOTICE`, a read finishing inside
+    `[DELAY, DELAY + MIN)` let the deferred withdrawal fire *after* the failure
+    card had taken the slot and pull down a card it was never meant to touch.
+
+    Measured before the fix, with a 5 s courtesy duration: the failure card
+    lived 384 ms at a 0.36 s read, 12 ms at 0.70 s, and **0 ms at 0.74 s**
+    (design round 3, D14). That is issue #372's original symptom restored — a
+    keypress that produces a visible pause and then says nothing.
+
+    So this asserts the property the two mechanisms have to satisfy TOGETHER:
+    whatever the read duration, the user ends up looking at the outcome. It is
+    parametrised across the window rather than asserting the constant, because
+    the constant was never the bug; the interaction between the floor and the
+    shared owner was, and a test on the number alone would have stayed green
+    through it.
+    """
+    monkeypatch.setattr(editor_module, "PASTE_READING_NOTICE_DELAY_S", 0.35)
+    monkeypatch.setattr(editor_module, "PASTE_READING_NOTICE_MIN_S", 0.4)
+
+    def slow(*args, **kwargs):
+        time.sleep(read_seconds)
+        return ClipboardContents()
+
+    monkeypatch.setattr(editor_module, "read_clipboard", slow)
+
+    from local_operator.tui.app import CLIPBOARD_READING_NOTICE, OperatorApp
+    from local_operator.tui.widgets.toast import Toast
+    from tests.unit.tui.test_app_pilot import FakeSession, _factory
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app.query_one(Editor).focus()
+        await pilot.pause()
+        toast = app.query_one(Toast)
+
+        await _ctrl_v(app, pilot)
+        # Well past the floor's own deadline, so a deferred withdrawal has had
+        # every chance to fire. Sampled rather than checked once: the defect
+        # was a card that appeared and was then destroyed, which a single
+        # reading taken too early would have called a pass.
+        deadline = time.monotonic() + editor_module.PASTE_READING_NOTICE_MIN_S + 0.3
+        while time.monotonic() < deadline:
+            await pilot.pause()
+            await asyncio.sleep(0.02)
+
+        assert toast.display, (
+            f"a {read_seconds}s read left NOTHING on screen: the deferred "
+            "minimum-display retirement destroyed the outcome notice, which is "
+            "the dead-keypress symptom this feature exists to remove (D14)"
+        )
+        assert (
+            toast.message != CLIPBOARD_READING_NOTICE
+        ), "the progress card outlived the read it describes"
+        assert toast.message == "Nothing on the clipboard to paste."
+
+
+@pytest.mark.asyncio
+async def test_the_reading_card_and_the_outcome_notice_do_not_share_an_owner() -> None:
+    """The structural half of D14, pinned so the fix cannot be undone by
+    tidying two owners back into one.
+
+    `Toast.withdraw` matches on owner and nothing else, so a DEFERRED
+    withdrawal is only safe if it cannot name a card raised by someone else.
+    Separate owners make D14 unrepresentable rather than merely fixed: no
+    timing, however unlucky, lets the progress card's retirement reach the
+    failure notice that replaced it.
+    """
+    from local_operator.tui.app import COMPOSER_PASTE_NOTICE, COMPOSER_READING_NOTICE
+
+    assert (
+        COMPOSER_READING_NOTICE is not COMPOSER_PASTE_NOTICE
+    ), "the progress card's deferred retirement would reach the outcome notice"

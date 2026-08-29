@@ -172,3 +172,54 @@ state a user is in when they reach for a paste, mid-session, where
 Adding a fourth `welcome.HINTS` row was tried and reverted: it costs the splash
 a whole terminal row (the block goes 23 -> 24) and the height ladder spends
 that row on the logo.
+
+
+## 8. Round 3 review fix (D14)
+
+The round 2 minimum-display floor (D10) held the progress card up for 400 ms so
+a read landing just past the delay could not flash it. That deferred a
+`Toast.withdraw`, which matches on OWNER — and the progress card shared
+`COMPOSER_PASTE_NOTICE` with the failure notices. So for a read finishing
+inside `[DELAY, DELAY + MIN)` the delayed withdrawal fired *after* an outcome
+had replaced the card, and destroyed the notice it was never meant to touch.
+
+Reproduced before fixing, sampling the real `Toast`:
+
+```
+read=0.20s  failure card ~1120 ms  still_up=True    correct (below the delay)
+read=0.34s  failure card ~1140 ms  still_up=True    correct
+read=0.36s  failure card ~ 340 ms  still_up=False   BUG
+read=0.50s  failure card ~ 219 ms  still_up=False   BUG
+read=0.74s  failure card ~   0 ms  still_up=False   BUG - never readable
+read=0.80s  failure card ~1140 ms  still_up=True    correct (past the floor)
+```
+
+The 0.74 s row is issue #372's own symptom: a keypress, a visible pause, and
+nothing said. After giving the progress card its own owner
+(`COMPOSER_READING_NOTICE`):
+
+```
+read=0.20 / 0.34 / 0.36 / 0.50 / 0.74 / 0.80 / 1.20 s
+  -> failure card ~1100-1160 ms, still_up=True in every case
+```
+
+D10 still holds (the fix did not trade one for the other):
+
+```
+read=0.30s  reading-card dwell    0 ms   fast read stays silent
+read=0.36s  reading-card dwell  380 ms   was ~42 ms before D10
+read=1.20s  reading-card dwell  800 ms
+```
+
+| artifact | what it shows |
+|---|---|
+| `terminal-d14-failure-card.png` | real Terminal.app, read pinned at **0.74 s** (the 0-ms case), captured **1.2 s after the keypress** — the exact frame round 3 photographed as blank. The card reads `Nothing on the clipboard to paste.` |
+
+Checked at 3.7 s too: the card clears on its own 5 s courtesy timer, so it is a
+normal lifecycle rather than a late destruction.
+
+The test pins the INTERACTION, not the constant
+(`test_the_minimum_display_floor_never_suppresses_the_outcome_notice`,
+parametrised across the window). Verified to discriminate by restoring the
+shared owner in a throwaway copy of the tree: 3 of 5 parametrisations fail,
+exactly the ones inside `[0.35 s, 0.75 s)`.

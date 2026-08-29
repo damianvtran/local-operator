@@ -511,24 +511,49 @@ class EditorCopyStale(Message):
 #: read card. Looked up with ``getattr`` so a host without one (the widget
 #: tests, any embedder) simply has no progress card rather than an error.
 #:
-#: **A DIRECT CALL, NOT A MESSAGE, AND THAT IS THE WHOLE POINT.** The first
-#: revision posted an ``EditorPasteReading`` message from the timer, which is
-#: the idiom every other notice in this widget uses \u2014 and it could not work
-#: here. ``action_system_paste`` is an awaited binding action running on this
-#: widget's own message pump, and a pump fully awaits one handler before
-#: dequeuing the next message, so a message posted while the action is
-#: suspended cannot be delivered until the action returns. Measured: the timer
-#: fired on time at 0.351 s in every run, but the handler ran at 2.018 s for a
-#: 2.0 s read and 5.020 s for a 5.0 s read \u2014 tracking the read duration exactly
-#: and landing 2-3 ms before the paste itself. The card entered the DOM at the
-#: instant the pause it describes ended (ux round 2, U3).
+#: **THE TIMER MUST BE SET ON THIS WIDGET, AND THAT IS THE WHOLE POINT.**
+#: ``self.set_timer(...)`` here is load-bearing in a way the call site cannot
+#: show, so the mechanism is recorded here rather than left to be rediscovered.
 #:
-#: Posting to the App's pump does not fix it either; that was measured too
-#: (handler at 1.512 s against a 1.5 s read). The event loop is NOT blocked \u2014
-#: timers keep firing throughout \u2014 so the fix is to do the work IN the timer
-#: callback rather than to enqueue anything: a callback that touches the Toast
-#: directly runs at 0.202 s against a 1.5 s read, and the card is verifiably on
-#: screen at 0.4 s, 0.7 s and 1.0 s of a 1.3 s read.
+#: The first revision posted an ``EditorPasteReading`` message from the timer \u2014
+#: the idiom every other notice in this widget uses \u2014 and the card reached the
+#: screen 2-3 ms before the paste it was meant to narrate, at every read
+#: duration (2.018 s for a 2.0 s read, 5.020 s for a 5.0 s read; ux round 2,
+#: U3). Measured on this exact shape, with the read on a worker thread and the
+#: action awaiting it:
+#:
+#: =============================  ==========  ================================
+#: how the callback is scheduled  when it ran  against a 1.5 s read
+#: =============================  ==========  ================================
+#: ``self.set_timer``             0.153 s      DURING the read  <- what we use
+#: ``self.post_message``          1.510 s      after the read
+#: ``self.app.call_next``         1.510 s      after the read
+#: ``self.app.set_timer``         1.510 s      after the read
+#: =============================  ==========  ================================
+#:
+#: So it is NOT that "the Editor's pump is blocked and the App's is free", and
+#: it is NOT a direct call: ``MessagePump.set_timer`` wraps every callback in
+#: ``partial(self.call_next, callback)``, so this is a ``call_next`` on the
+#: EDITOR's pump. ``call_next`` queues onto ``_next_callbacks``, which is
+#: flushed by ``_flush_next_callbacks`` after each dispatched message rather
+#: than through the message queue \u2014 and the Editor is the pump whose flush
+#: still runs while this action is suspended. The App's does not, which is why
+#: ``self.app.set_timer`` and ``self.app.call_next`` both land late; a message
+#: posted to THIS widget is late too, because messages take the queue and the
+#: queue is what the awaited handler is holding.
+#:
+#: The practical consequence, stated plainly because it is the thing a future
+#: reader will get wrong: **"simplify" this to ``self.app.set_timer`` and U3
+#: returns exactly**, with every test still passing except
+#: ``test_the_reading_card_is_on_screen_while_the_read_is_still_running``. The
+#: event loop is fine throughout \u2014 timers keep firing \u2014 so the card is
+#: verifiably on screen at 0.4 s, 0.7 s and 1.0 s of a 1.3 s read.
+#:
+#: This rests on Textual internals (``set_timer`` \u2192 ``call_next``, and where
+#: ``_flush_next_callbacks`` is driven from) that are not part of its public
+#: contract, so it is pinned by a test that asserts VISIBILITY DURING the
+#: stall rather than delivery, and would fail if a future Textual changed the
+#: scheduling (code round 3, F8).
 PASTE_READING_HOOK = "show_clipboard_reading_notice"
 
 
@@ -3873,10 +3898,11 @@ class Editor(TextArea):
         # `PASTE_READING_NOTICE_DELAY_S` gets a card explaining the pause
         # rather than leaving the composer looking hung (ux round 1, U3).
         #
-        # The card is raised by CALLING THE APP DIRECTLY from the timer, not by
-        # posting a message: a message cannot be delivered while this action
-        # holds the pump, so it arrived only after the pause it described had
-        # ended. See `PASTE_READING_HOOK` for the measurements.
+        # `self.set_timer` and NOT `self.app.set_timer`: the timer has to be
+        # set on THIS widget, whose `call_next` queue is still flushed while
+        # this action is suspended. The App's is not, and neither is a message
+        # posted to this widget. See `PASTE_READING_HOOK` for the measured
+        # table and why the obvious simplification reintroduces U3.
         #
         # A timer rather than an unconditional call, because the fast read is
         # the common one and a card that appears and vanishes on every paste is
@@ -3922,6 +3948,16 @@ class Editor(TextArea):
                 # RAISED, so a read that finishes just past the delay does not
                 # flash the card for a few milliseconds (D10). Scheduled rather
                 # than slept: the paste must land now, and only the card waits.
+                #
+                # SAFE ONLY BECAUSE THE TWO CARDS HAVE DIFFERENT OWNERS. This
+                # retirement is a `Toast.withdraw`, which matches on owner and
+                # fires late by construction — after an outcome has already
+                # replaced the progress card with its own notice. While they
+                # shared an owner it destroyed that notice for reads landing in
+                # `[DELAY, DELAY + MIN)`, showing the failure card for 0 ms at a
+                # 0.74 s read: a keypress with a visible pause and no response,
+                # which is issue #372's own symptom (design round 3, D14).
+                # `self.set_timer` for the same pump reason as above.
                 shown_for = time.monotonic() - raised_at
                 if shown_for >= PASTE_READING_NOTICE_MIN_S:
                     notice(False)
