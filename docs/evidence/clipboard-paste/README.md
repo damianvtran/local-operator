@@ -18,6 +18,9 @@ Captured on macOS (Darwin 25.6.0, arm64) and in Debian bookworm under Docker
 | `round1_evidence.sh` | Reproduces `round1-remediation.txt` |
 | `round2-remediation.txt` | Review round 2 fixes verified: F2/U6, U3/U7, D8, D9, D10, D11 |
 | `round2_evidence.sh` | Reproduces `round2-remediation.txt` |
+| `round3-remediation.txt` | Review round 3 fixes verified: F4, D12, D13 |
+| `round3_evidence.sh` | Reproduces `round3-remediation.txt` |
+| `composer-notice-file.png` | The reworded file notice (D12) |
 | `composer-notice-unattachable.png` | The reworded refusal notice (D10) |
 | `linux_evidence.sh` | Reproduces `linux-xclip-wlpaste.txt` (runs inside the container) |
 
@@ -165,6 +168,31 @@ then fixed: only the genuinely empty payload lets an image win.
 gone from the failures it could not cure, a copied file that will not attach has
 its own message, and the vague notice returns to the courtesy duration so it no
 longer suppresses a copy receipt for 10 s.
+
+## Review round 3 remediation
+
+`round3-remediation.txt`, reproducible with `round3_evidence.sh`.
+
+**F4 (major) — the fourth hang shape.** When the direct child exits while a
+descendant still holds the inherited stdout, `poll()` returns 0, so a kill gated
+on it was skipped; the reader stayed blocked and `Popen.__exit__` deadlocked the
+MAIN thread on `stdout.close()`. Reproduced (never returned after 20 s on a 2 s
+budget, faulthandler pinning both threads), then fixed by gating the kill on the
+READER and remembering the pgid from spawn — `os.getpgid()` on a reaped leader
+raises, so the lookup form degrades to no kill in exactly this case. Now returns
+in 2.00 s with no survivors, and the regression test hangs the runner at
+`cb0ef24a`.
+
+**D12 (major) — one image, two routes, contradictory answers.** The clipboard
+route bounds before the attachment cap (U1's fix); the path route stat-gated
+against that cap, so Finder `Cmd+C` refused a screenshot `Cmd+V` attached and
+blamed its format. Both the copy and the gate are fixed, so the same 6.7 MB PNG
+now yields `[Image #1, 1568x543 ↓]` either way, and the four genuine failures
+get a sentence that does not assert a cause.
+
+**D13 (minor) — a showing card outliving its answer.** `withdraw` instead of
+`drop_deferred`; the attach lands 45-57 ms after the notice, so there is no
+mid-read to interrupt. The D3/D8 held-card sequence stays closed.
 
 ## What is NOT proven
 

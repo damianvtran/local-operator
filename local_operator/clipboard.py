@@ -205,7 +205,7 @@ _REAP_TIMEOUT_S = 0.5
 _SUPPORTS_PROCESS_GROUPS = os.name == "posix"
 
 
-def _kill_tree(process: "subprocess.Popen[bytes]") -> None:
+def _kill_tree(process: "subprocess.Popen[bytes]", pgid: int | None) -> None:
     """Kill the tool AND anything it forked, so nothing holds the pipe open.
 
     Signalling the process GROUP is the part that matters: a wedged tool is
@@ -214,15 +214,25 @@ def _kill_tree(process: "subprocess.Popen[bytes]") -> None:
     stdout, which keeps the reader thread blocked forever (round 2, F2 — the
     same freeze, one level down).
 
-    Best-effort by design. The process may have exited between the poll and the
-    signal, or the platform may not support groups; either way the fallback is
-    the direct kill, and neither may raise into a keystroke handler.
+    ``pgid`` is REMEMBERED FROM SPAWN rather than looked up here, and that is
+    load-bearing rather than tidy. Looking it up with ``os.getpgid(pid)`` works
+    only while the leader is alive; once the direct child has exited and been
+    reaped the lookup raises ``ProcessLookupError``, so the naive form silently
+    degrades to "no kill" in exactly the case that needs one — a descendant
+    still holding the pipe (round 3, F4). ``start_new_session`` makes the child
+    its own group leader, so the group id equals its pid and stays signallable
+    after the leader is gone.
+
+    Best-effort by design: the group may already be empty, or the platform may
+    not support groups. Neither may raise into a keystroke handler.
     """
-    if _SUPPORTS_PROCESS_GROUPS:
+    if pgid is not None:
         try:
-            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+            os.killpg(pgid, signal.SIGKILL)
             return
         except (OSError, AttributeError):
+            # Already reaped, or the group vanished between the check and the
+            # signal. The direct kill below is the remaining option.
             pass
     try:
         process.kill()
@@ -327,6 +337,10 @@ def _run(
             # child still took 30 s on a 1 s budget.
             start_new_session=_SUPPORTS_PROCESS_GROUPS,
         ) as process:
+            # Remembered NOW, while the leader is certainly alive. After it
+            # exits, `os.getpgid(pid)` raises and the group becomes unkillable
+            # by lookup — see `_kill_tree` (round 3, F4).
+            pgid = process.pid if _SUPPORTS_PROCESS_GROUPS else None
             captured: list[bytes] = []
 
             def drain() -> None:
@@ -354,23 +368,40 @@ def _run(
                 reader.join(max(deadline.remaining, 0.0))
                 if reader.is_alive():
                     # Still reading when the budget ran out: the tool is wedged.
-                    # Killing the child is what ends the thread's read, and it
+                    # Killing the group is what ends the thread's read, and it
                     # is done in the `finally` below so the same path covers a
                     # timed-out wait.
                     return None
                 returncode = process.wait(timeout=max(deadline.remaining, 0.0))
             finally:
-                # `Popen.__exit__` closes the pipes but only reaps a process
-                # that has already exited, so a child that outlived the budget
-                # is killed here rather than left orphaned holding the
-                # selection. `wait()` after the kill is what reaps it: without
-                # it the process becomes a zombie until this process exits.
-                if process.poll() is None:
-                    _kill_tree(process)
+                # THE CONDITION IS THE READER, NOT THE CHILD. Gating this on
+                # `process.poll() is None` looks right and is the F4 bug: when
+                # the direct child has already exited while a descendant still
+                # holds the inherited stdout, `poll()` returns 0, the kill is
+                # skipped, and the reader stays blocked on a pipe nothing will
+                # close. `Popen.__exit__` then calls `stdout.close()`, which
+                # needs the `BufferedReader` lock that blocked reader holds, so
+                # the MAIN thread deadlocks forever — an unbounded freeze on
+                # the very axis this bound exists for (round 3, F4: measured
+                # never returning after 20 s on a 2 s budget).
+                #
+                # Killing the group whenever the reader is still alive covers
+                # both shapes at once, and is harmless when the group is
+                # already empty. `wait()` after the kill is what reaps the
+                # child: without it the process becomes a zombie until this
+                # process exits.
+                if reader.is_alive() or process.poll() is None:
+                    _kill_tree(process, pgid)
                     try:
                         process.wait(timeout=_REAP_TIMEOUT_S)
                     except subprocess.SubprocessError:
                         pass
+                    # The kill closes the write end, so the abandoned read ends
+                    # promptly. Joining before `Popen.__exit__` runs is what
+                    # keeps `stdout.close()` off the reader's lock — bounded,
+                    # because a reader that somehow outlives its own pipe must
+                    # not become the new unbounded wait.
+                    reader.join(_REAP_TIMEOUT_S)
     except (OSError, subprocess.SubprocessError, ValueError):
         # OSError covers the binary vanishing between `which` and `exec`;
         # SubprocessError covers the timeout; ValueError covers a pipe closed

@@ -96,6 +96,10 @@ class FakeProcess:
     """
 
     def __init__(self, payload: bytes | None, error: BaseException | None = None) -> None:
+        # `_run` remembers the pgid at spawn (it equals the pid, since the child
+        # is its own group leader) so the group stays killable after the leader
+        # exits — see `_kill_tree` and the F4 regression test.
+        self.pid = 424242
         self._payload = b"" if payload is None else payload
         self._error = error
         self.returncode = 1 if payload is None else 0
@@ -780,3 +784,42 @@ def test_a_real_oversized_stream_is_refused_without_buffering_it_all() -> None:
         ["/bin/sh", "-c", "head -c 200000 /dev/zero"], deadline, max_bytes=1024
     )
     assert result is None
+
+
+def test_a_descendant_holding_the_pipe_is_bounded_after_its_parent_exits() -> None:
+    """The fourth hang shape: the DIRECT CHILD exits, a descendant lives on.
+
+    Round 3 (F4). The other hang tests all keep the direct child in the
+    foreground, so `process.poll()` is always `None` and a kill gated on that
+    always ran. Here the shell exits immediately and the backgrounded process
+    inherits stdout, so `poll()` returns 0, the gated kill was skipped, the
+    reader stayed blocked on a pipe nothing would close, and `Popen.__exit__`
+    then deadlocked the MAIN thread on `stdout.close()` waiting for the
+    `BufferedReader` lock the reader held. Measured: never returned after 20 s
+    on a 2 s budget.
+
+    Two things this pins that no mock could: that the kill is gated on the
+    READER rather than on the child, and that the pgid is remembered from
+    spawn — `os.getpgid()` on a reaped leader raises `ProcessLookupError`, so
+    the lookup form degrades to no kill in exactly this case.
+    """
+    marker = f"lo-clip-orphan-{os.getpid()}"
+    deadline = clipboard_module._Deadline(1.0)
+    started = time.monotonic()
+    # The shell exits (`exit 0`) while `sleep` keeps the inherited stdout open.
+    result = clipboard_module._run(
+        ["/bin/sh", "-c", f"sleep 60 & : {marker}; exit 0"],
+        deadline,
+        max_bytes=4096,
+    )
+    elapsed = time.monotonic() - started
+
+    assert result is None
+    assert elapsed < 5.0, (
+        f"took {elapsed:.1f}s against a 1.0s budget: the kill is gated on the "
+        "child rather than the reader, so a descendant holding the pipe "
+        "deadlocks Popen.__exit__"
+    )
+    time.sleep(0.3)
+    leftover = subprocess.run(["pgrep", "-f", marker], capture_output=True, text=True, check=False)
+    assert leftover.stdout.strip() == "", f"descendant survived _run: {leftover.stdout!r}"

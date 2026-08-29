@@ -85,7 +85,7 @@ from textual.style import Style as ContentStyle
 from textual.widgets import TextArea
 from textual.widgets.text_area import Edit, EditResult, Selection
 
-from local_operator.clipboard import read_clipboard
+from local_operator.clipboard import MAX_CLIPBOARD_READ_BYTES, read_clipboard
 from local_operator.harness.types import ImageContent
 from local_operator.imaging import bound_image_for_model
 from local_operator.media import ImageInfo, sniff_image, sniff_image_file
@@ -2671,7 +2671,21 @@ class Editor(TextArea):
                 # ValueError for a NUL byte in the name, which is not an
                 # OSError and would otherwise escape onto the keystroke.
                 return None
-            if not S_ISREG(stat.st_mode) or stat.st_size > MAX_ATTACHMENT_BYTES:
+            # Bounded by the INGEST ceiling, not the attachment budget. Those
+            # are different bounds (see `MAX_CLIPBOARD_READ_BYTES`) and using
+            # the smaller one here refused files the resize was about to make
+            # attachable — the same mistake U1 found on the clipboard route,
+            # left behind on this one. It produced a contradiction between two
+            # of this feature's own paths: one 8.6 MB screenshot attached as
+            # `[Image #1, 1568x523 ↓]` via Cmd+V and was refused via Finder
+            # Cmd+C, which lands here (round 3, D12).
+            #
+            # The gate itself stays, and stays BEFORE the read, because that is
+            # what it was for: a 601 MB file behind a valid PNG header took
+            # peak RSS to 618 MB before the cap fired, and `open()` on a FIFO
+            # blocks forever on the event loop. Both are still closed; only the
+            # threshold moves to the bound that is actually about ingest.
+            if not S_ISREG(stat.st_mode) or stat.st_size > MAX_CLIPBOARD_READ_BYTES:
                 return None
             # An EARLY gate, not the authoritative one: `_attach_image_bytes`
             # sniffs again below, and that second sniff is what actually decides
@@ -2689,9 +2703,11 @@ class Editor(TextArea):
                 data = Path(path).read_bytes()
             except (OSError, ValueError):
                 return None
-            if len(data) > MAX_ATTACHMENT_BYTES:
+            if len(data) > MAX_CLIPBOARD_READ_BYTES:
                 # The stat above is the real gate; this catches a file that grew
-                # between the two calls.
+                # between the two calls. Same ceiling as the stat, for the same
+                # reason: `_attach_image_bytes` applies the ATTACHMENT cap after
+                # bounding, which is the only place it belongs.
                 return None
             payloads.append(data)
 

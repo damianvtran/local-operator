@@ -5103,7 +5103,16 @@ class OperatorApp(App[None]):
             # silently because the path branch raises no notice (round 2, D10).
             text = "Couldn't attach that image. It may be too large or corrupt."
         elif message.reason == "unreadable":
-            text = "Couldn't attach that file. Only PNG, JPEG, GIF and WebP images attach."
+            # States the outcome, not a cause. This one branch is reached by
+            # five different failures — a non-image file, a HEIC, an
+            # unreadable path, a mixed selection hitting the all-or-nothing
+            # rule, and a file too large even after bounding — and the previous
+            # copy ("Only PNG, JPEG, GIF and WebP images attach") asserted a
+            # format problem for all of them. Told that while holding a valid
+            # PNG, the only remedy it suggests is converting a PNG to a PNG
+            # (round 3, D12). Same discipline as D2/U2: name what happened,
+            # never guess why.
+            text = "Couldn't attach that file. It may be too large, or not an image."
         else:
             text = "Couldn't attach an image from the clipboard."
         # The vague variant takes the COURTESY duration, the two with a remedy
@@ -5120,22 +5129,26 @@ class OperatorApp(App[None]):
         )
 
     def on_editor_paste_attached(self, message: EditorPasteAttached) -> None:
-        """An image attached — retire any paste notice still waiting for a slot.
+        """An image attached — retire this app's paste notice, in either state.
 
-        The withdrawal half of D3. A deferred notice is news waiting for the
-        slot to free, and this is the event that makes it false: the user now
-        has an image in the composer, so a card saying the app could not attach
-        one must not surface behind it seconds later.
+        The withdrawal half of D3/D8. A paste notice is a claim that the app
+        could not attach an image; an image arriving falsifies it, whichever
+        route delivered it and whether the card is held or already on screen.
 
-        ``drop_deferred`` and not ``withdraw``: a SHOWING notice describes the
-        earlier keypress and was true when it was raised, and pulling it out
-        from under the user mid-read is its own small confusion. Only the held
-        card — the one that has not been seen yet and would be read as
-        describing THIS paste — is dropped. Ownership means it can only ever
-        touch this app's own paste notice, never an MCP failure or a copy
-        receipt sharing the slot.
+        ``withdraw`` and not ``drop_deferred``, which is the round-3 correction
+        (D13). The earlier reasoning was that a SHOWING card described the
+        earlier keypress and pulling it mid-read was its own confusion — but
+        the attach lands **45-57 ms** after the notice is raised, so there is
+        no "mid-read" to interrupt: the user reads one gesture, and the card
+        would sit for the rest of its duration denying a composer they can see
+        is populated. ``withdraw`` covers the held card too, so the D3 sequence
+        it was written for is still closed.
+
+        Ownership is what keeps this safe. ``withdraw`` refuses any card that
+        is not this app's paste notice, so an MCP failure or a copy receipt
+        sharing the single slot is never touched.
         """
-        self.query_one(Toast).drop_deferred(COMPOSER_PASTE_NOTICE)
+        self.query_one(Toast).withdraw(COMPOSER_PASTE_NOTICE)
 
     def _put_on_clipboard(self, text: str | None, owner: object | None = None) -> None:
         """The one clipboard write, with the receipt that makes it visible.

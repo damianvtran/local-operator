@@ -750,6 +750,50 @@ async def test_a_path_paste_also_retires_a_held_notice(monkeypatch, tmp_path) ->
 
 
 @pytest.mark.asyncio
+async def test_a_showing_paste_notice_is_retired_by_the_attach_that_answers_it(
+    monkeypatch, tmp_path
+) -> None:
+    """Round 3 (D13): a card already on screen survived the paste answering it.
+
+    D8's fix used `drop_deferred`, which only covers the HELD card. The attach
+    lands 45-57 ms after the notice is raised, so the showing card then sat for
+    the rest of its duration above a composer the user can see is populated —
+    denying, in the same breath, the remedy it had just recommended.
+    """
+    from local_operator.tui.app import OperatorApp
+    from local_operator.tui.widgets.toast import Toast
+    from tests.unit.tui.test_app_pilot import FakeSession, _factory
+
+    path = tmp_path / "shot.png"
+    path.write_bytes(_png_bytes(400, 100))
+    monkeypatch.setattr(
+        editor_module, "read_clipboard", lambda *a, **k: ClipboardContents(refused_remote=True)
+    )
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and app._session is None:
+            await pilot.pause()
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        toast = app.query_one(Toast)
+
+        await _paste(app, pilot, "")
+        assert toast.message, "the SSH notice should be showing, not held"
+
+        # The remedy the card just recommended.
+        await _paste(app, pilot, str(path))
+        assert editor.referenced_images(), "the path paste should have attached"
+        assert toast.message == "", (
+            "a card claiming the app could not attach an image must not remain "
+            "above a composer that visibly holds one"
+        )
+
+
+@pytest.mark.asyncio
 async def test_the_vague_notice_does_not_outrank_a_copy_receipt(monkeypatch) -> None:
     """Round 2 (D11), a consequence of the D6 duration change.
 
@@ -786,3 +830,111 @@ async def test_the_vague_notice_does_not_outrank_a_copy_receipt(monkeypatch) -> 
                 f"{expected_actionable}; a notice naming no action must not "
                 "suppress a copy receipt for a gesture performed afterwards"
             )
+
+
+@pytest.mark.asyncio
+async def test_one_image_attaches_the_same_way_through_both_routes(monkeypatch, tmp_path) -> None:
+    """Round 3 (D12): the two routes disagreed about one valid image.
+
+    A large screenshot attached via `Cmd+V` (the clipboard route bounds before
+    applying the attachment cap, which is U1's fix) and was REFUSED via Finder
+    `Cmd+C`, which reaches the path branch and used to stat against the 4 MB
+    attachment budget. Two of this feature's own paths, one image, contradictory
+    answers — and the refusal blamed the format of a file that was a valid PNG.
+
+    The path branch now stats against the INGEST ceiling, so the resize decides
+    for both routes and `_attach_image_bytes` remains the single authority on
+    what may be sent.
+
+    The fixture is high-entropy on purpose: a flat-colour PNG of any dimensions
+    compresses under the cap and would pass this test without exercising it.
+    """
+    from local_operator.tui.widgets.editor import MAX_ATTACHMENT_BYTES
+
+    buffer = io.BytesIO()
+    random.seed(5)
+    image = Image.new("RGB", (2600, 900))
+    image.putdata(
+        [
+            (random.randrange(256), random.randrange(256), random.randrange(256))
+            for _ in range(2600 * 900)
+        ]
+    )
+    image.save(buffer, "PNG")
+    source = buffer.getvalue()
+    assert len(source) > MAX_ATTACHMENT_BYTES, "fixture must exceed the attachment cap"
+
+    path = tmp_path / "screenshot.png"
+    path.write_bytes(source)
+
+    # Route 1: the bytes arrive on the clipboard (Cmd+V on a screenshot).
+    _stub_clipboard(monkeypatch, image=ClipboardImage(source, "image/png"))
+    app = Host()
+    async with app.run_test() as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        for _ in range(3):
+            await _paste(app, pilot, "")
+            if editor.referenced_images():
+                break
+        from_clipboard = editor.text
+
+    # Route 2: the same bytes arrive as a copied FILE (Finder Cmd+C).
+    _stub_clipboard(monkeypatch, image=None, paths=[str(path)])
+    app = Host()
+    async with app.run_test() as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        for _ in range(3):
+            await _paste(app, pilot, "")
+            if editor.referenced_images():
+                break
+        from_path = editor.text
+        assert editor.referenced_images(), (
+            "a valid image the clipboard route attaches must not be refused by "
+            "the file route; that refusal was also blamed on its format"
+        )
+        assert app.empty_notices == []
+
+    assert from_clipboard == from_path
+
+
+@pytest.mark.asyncio
+async def test_the_file_notice_does_not_assert_a_format_problem(monkeypatch, tmp_path) -> None:
+    """Round 3 (D12), the copy half.
+
+    One branch is reached by a non-image file, a HEIC, an unreadable path and a
+    mixed selection, so a sentence naming formats is a guess — and it was
+    reaching a user holding a valid PNG, for whom the only implied remedy was
+    converting a PNG to a PNG.
+    """
+    from local_operator.tui.app import OperatorApp
+    from local_operator.tui.widgets.toast import Toast
+    from tests.unit.tui.test_app_pilot import FakeSession, _factory
+
+    not_an_image = tmp_path / "notes.txt"
+    not_an_image.write_text("hello")
+    monkeypatch.setattr(
+        editor_module,
+        "read_clipboard",
+        lambda *a, **k: ClipboardContents(paths=(str(not_an_image),)),
+    )
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and app._session is None:
+            await pilot.pause()
+        app.query_one(Editor).focus()
+        await pilot.pause()
+        await _paste(app, pilot, "")
+
+        message = app.query_one(Toast).message
+        assert message, "a file that would not attach should still be reported"
+        assert "PNG" not in message and "WebP" not in message, (
+            f"{message!r} names formats, but this branch cannot establish that "
+            "the cause was the format"
+        )
