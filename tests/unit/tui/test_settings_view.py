@@ -820,10 +820,22 @@ async def test_deleting_a_chain_asks_first_and_r_says_what_it_does(tmp_path: Pat
         assert view.error_text == ""
 
 
+#: Every section the pane paints, as (label, is-the-section-heading).
+#: The pane has TWO sections and one honesty rule between them, so the test
+#: below iterates this rather than naming `providers` in an assertion — see its
+#: docstring for why the provider-specific form of that assertion shipped a
+#: silent roster.
+_PANE_SECTIONS = ("providers", "roster")
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("height", [20, 22, 24, 26, 28, 29, 30, 34, 40])
-@pytest.mark.parametrize("roster_size", [0, 3, 8, 40])
-async def test_the_pane_never_paints_more_lines_than_it_has(height: int, roster_size: int) -> None:
+@pytest.mark.parametrize("height", [18, 20, 22, 24, 26, 28, 29, 30, 34, 40])
+@pytest.mark.parametrize("roster_size", [0, 1, 3, 8, 40])
+@pytest.mark.parametrize("provider_count", [0, 1, 3])
+@pytest.mark.parametrize("pane", ["teams", "agents"])
+async def test_the_pane_never_paints_more_lines_than_it_has(
+    height: int, roster_size: int, provider_count: int, pane: str
+) -> None:
     """The pane's height invariant AND its content honesty, across a size band.
 
     Parameterised because the round-1 version of this test asserted at 100x30
@@ -834,20 +846,44 @@ async def test_the_pane_never_paints_more_lines_than_it_has(height: int, roster_
     off (design round 2, D6). That is D2's exact symptom reached by a different
     door, so the invariant is pinned rather than the one size.
 
-    The CONTENT assertions are the round-3 half. Height alone is satisfiable by
-    a pane that lies: the shedding loop deleted from index 1, which is the first
-    provider row rather than the separator, so between 20 and 26 rows it ate
-    signed-in providers and at 20-24 painted a bold ``providers`` header with
-    nothing beneath it — a frame that reads as "none configured" while the user
-    is signed in to three (design round 3, D11). Both of this test's old
-    assertions held throughout, which is exactly why it did not catch it. So a
-    provider that EXISTS must be represented: as its own row, or folded into a
-    ``… N more`` count. Silence is the defect.
+    The CONTENT assertions are the honesty half, and they are written as a
+    GENERAL property over every section rather than as a rule about one of them.
+    That generality is the point of this test, not a stylistic preference.
+    Round 3 fixed the provider section (D11: the shedding loop deleted from
+    index 1, which is the first provider row rather than the separator, so
+    between 20 and 26 rows it ate signed-in providers and painted a bold
+    ``providers`` header over nothing) and strengthened this test — but the
+    strengthened form iterated ``providers`` and looked for the literal line
+    ``providers``, so it encoded the PROVIDER-SPECIFIC rule. The very same
+    commit inverted the shedding priority on the sibling section, and this test
+    passed on a pane that painted ``teams  agents  (←→)`` with nothing under it
+    while three agents were configured (design round 4, D15). Three rounds have
+    now shipped a pane that fits its box while saying something false, each time
+    with a green height assertion.
 
-    Heights 20 and 22 are in the parameter list because that is the band the
-    lie lived in and the committed evidence stopped at 24.
+    So the invariant asserted here is the one that has to hold for the pane to
+    be honest at all, for EVERY section:
+
+    1. A non-empty collection is REPRESENTED — as rows, or folded into a
+       ``… N more`` count. Silence about content that exists is the defect.
+    2. A section HEADING (the ``providers`` header, the ``teams agents``
+       tab row) is never the last thing above nothing, because a heading over
+       nothing is indistinguishable from the honest empty state the page paints
+       for a genuinely empty registry.
+
+    Parameterised over heights AND over which sections are populated, because
+    both defects lived in a specific combination: D11 at three providers between
+    20 and 26 rows, D15 at three agents at exactly the height where the third
+    provider row fit. An empty section is a real case too — it must paint its
+    statement or nothing, never a count that invents an entry.
     """
-    providers = [("anthropic", "signed in"), ("openrouter", "api key"), ("openai", "api key")]
+    providers = [("anthropic", "signed in"), ("openrouter", "api key"), ("openai", "api key")][
+        :provider_count
+    ]
+    roster = [
+        (f"{pane[:-1]}-{n}", "role · effort hi", "a summary long enough to take its own row")
+        for n in range(roster_size)
+    ]
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, height)) as pilot:
         await pilot.pause()
@@ -855,44 +891,98 @@ async def test_the_pane_never_paints_more_lines_than_it_has(height: int, roster_
         view = app.query_one(SettingsView)
         await pilot.pause()
         view.load(
-            agents=[
-                (f"agent-{n}", "role · effort hi", "a summary long enough to take its own row")
-                for n in range(roster_size)
-            ],
+            teams=roster if pane == "teams" else [],
+            agents=roster if pane == "agents" else [],
             providers=providers,
         )
-        view.action_pane(1)
+        # `action_pane` is a no-op when the pane does not fit, so loop to the
+        # wanted tab rather than assuming one press lands on it.
+        for _ in range(len(_PANE_SECTIONS) + 1):
+            if view._pane == pane:
+                break
+            view.action_pane(1)
         await pilot.pause()
-        pane = view.rendered_pane()
-        lines = pane.split("\n")
+        rendered = view.rendered_pane()
+        lines = rendered.split("\n")
+        context = (
+            f"at {height} rows, {provider_count} provider(s), " f"{roster_size} {pane}:\n{rendered}"
+        )
         painted = len(lines)
         assert painted <= view._pane_view.size.height, (
-            f"{painted} lines into a {view._pane_view.size.height}-row pane at "
-            f"{height} rows with {roster_size} agents:\n{pane}"
+            f"{painted} lines into a {view._pane_view.size.height}-row pane " f"{context}"
         )
         assert any(
             line.strip() == "read-only" for line in lines
-        ), f"the boundary caption was shed at {height} rows:\n{pane}"
+        ), f"the boundary caption was shed {context}"
 
-        # Content honesty. Either every provider is named, or the pane says how
-        # many it is withholding — never a header standing over nothing.
-        shown = [name for name, _state in providers if any(name in line for line in lines)]
-        withheld = [name for name, _state in providers if name not in shown]
-        folded = any("more" in line for line in lines)
-        assert not withheld or folded, (
-            f"{len(withheld)} configured provider(s) {withheld} vanished from the pane at "
-            f"{height} rows with nothing saying so — the pane reads as though they are not "
-            f"configured:\n{pane}"
-        )
-        header_index = next(
-            (index for index, line in enumerate(lines) if line.strip() == "providers"), None
-        )
-        if header_index is not None:
-            following = [line.strip() for line in lines[header_index + 1 :]]
-            assert following and following[0], (
-                f"the `providers` header was painted with nothing under it at {height} rows, "
-                f"which reads as an empty registry while 3 providers are configured:\n{pane}"
+        # The heading of each section, and the collection it is heading. The
+        # tab row is the roster's heading: it is the line that says WHICH
+        # roster the lines beneath it are, so a tab row over nothing makes the
+        # same false statement a bare `providers` header does.
+        def _heading(predicate: Any) -> int | None:
+            return next((i for i, line in enumerate(lines) if predicate(line.strip())), None)
+
+        sections: dict[str, tuple[int | None, list[str]]] = {
+            "providers": (
+                _heading(lambda line: line == "providers" or line.startswith("providers  …")),
+                [name for name, _state in providers],
+            ),
+            "roster": (
+                _heading(lambda line: "(←→)" in line),
+                [name for name, _facts, _summary in roster],
+            ),
+        }
+        assert set(sections) == set(_PANE_SECTIONS)
+
+        for section, (heading, members) in sections.items():
+            if heading is None:
+                # A section that is not painted at all says nothing false. The
+                # pane is allowed to drop a whole section when it has no room
+                # for even one line of it (step 8) — what it may not do is paint
+                # a heading and then contradict it.
+                continue
+
+            # 1. Representation. Every member either appears by name, or is
+            #    inside a count that this section owns.
+            named = [name for name in members if any(name in line for line in lines)]
+            missing = [name for name in members if name not in named]
+            owned = (
+                lines[heading:]
+                if section == "roster"
+                else lines[heading : heading + 1]
+                + [line for line in lines[heading + 1 :] if "(←→)" not in line]
             )
+            counted = any("…" in line and "more" in line for line in owned)
+            plural = "y" if len(missing) == 1 else "ies"
+            assert not missing or counted, (
+                f"section {section!r}: {len(missing)} configured entr{plural} "
+                f"{missing} vanished with nothing saying so, so the pane reads as though "
+                f"they are not configured, {context}"
+            )
+
+            # 2. A heading is never the last thing above nothing. Either it
+            #    carries its own count inline (`providers  … 3 more`, or the tab
+            #    row's `… N more`), or a non-blank line follows it.
+            inline_count = "…" in lines[heading] and "more" in lines[heading]
+            following = [line.strip() for line in lines[heading + 1 :] if line.strip()]
+            assert inline_count or following, (
+                f"section {section!r}: its heading {lines[heading].strip()!r} was painted with "
+                f"nothing under it, which is the frame this pane paints for an EMPTY registry, "
+                f"{context}"
+            )
+
+            # 3. And when the collection is non-empty, that heading must be
+            #    followed by something belonging to THIS section rather than by
+            #    the next section's heading — the shape D15 produced, where the
+            #    tab row's only follower was the `read-only` caption.
+            if members and not inline_count:
+                assert any(
+                    name in line for name in members for line in lines[heading + 1 :]
+                ) or any("…" in line and "more" in line for line in lines[heading + 1 :]), (
+                    f"section {section!r}: its heading is followed only by other sections' "
+                    f"lines, so nothing in the pane says the {len(members)} configured "
+                    f"entr{'y' if len(members) == 1 else 'ies'} exist, {context}"
+                )
 
 
 @pytest.mark.asyncio
@@ -1507,3 +1597,133 @@ async def test_any_other_key_disarms_a_pending_delete(tmp_path: Path, key: str) 
         await pilot.press("d")
         await pilot.pause()
         assert "cheap" in settings_io.read_chains(ConfigManager(tmp_path))
+
+
+def _painted_frame(app: OperatorApp) -> str:
+    """The frame as EXPORTED, which is what a user actually sees.
+
+    Deliberately not :meth:`SettingsView.rendered_hints`. That accessor returns
+    the hints' MODEL strings, which were correct on every run of the defect this
+    helper exists to catch: the clipping in D16/U21 lived strictly between the
+    logical label and the width the widget was painted at, so three rounds of
+    text assertions passed on frames that were missing a clause. Reading the
+    exported SVG goes through the same compositor ``save_screenshot`` does, so
+    what this returns is what the committed evidence frames would show.
+    """
+    import html
+    import re
+
+    svg = app.export_screenshot()
+    return " ".join(
+        html.unescape(re.sub(r"<[^>]+>", "", match.group(1)))
+        for match in re.finditer(r"<text[^>]*>(.*?)</text>", svg, re.S)
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [(100, 30), (80, 24)])
+async def test_a_hint_whose_label_grows_is_painted_at_its_new_width(
+    size: tuple[int, int],
+) -> None:
+    """Design round 4 D16 / UX round 4 U21 — the ``move · saves`` clause reached
+    the model but not the screen.
+
+    ``HintButton`` is ``width: auto`` and its ordinary repaint passes
+    ``layout=False``, which is right for hover (ink changes, the plain text does
+    not) and wrong for a label that GREW. Opening an editor turns the move
+    hint's label from ``move`` (8 cells) into ``move · saves`` (16), and through
+    the no-layout path the widget stayed 8 cells wide and the new clause was
+    clipped off — on the one frame where the rule it states ("an arrow key
+    commits this value") first applies. Below 72 columns the row contract has
+    already shed, so both carriers of that rule failed together and a plain
+    cursor move committed a value with nothing on screen having said it would.
+
+    Asserted against the PAINTED frame rather than ``rendered_hints()``. The
+    whole finding is that the model string was right while the paint was wrong,
+    so a model-string assertion cannot see it — and did not, for three rounds.
+
+    Deterministic by construction rather than by retrying. In the wild this
+    presented at about 2 runs in 8, because it is a race against whether some
+    unrelated event forced a layout pass in the same frame and incidentally
+    remeasured the widget. Settling the app fully BEFORE the label grows removes
+    that other work, which turns the coin flip into the defect every time: the
+    pre-fix code clips 6/6 under this setup and the fixed code 0/6.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        app._open_settings_view()
+        view = app.query_one(SettingsView)
+        view.load(providers=[("anthropic", "signed in")], agents=[("coder", "role", "x")])
+        # Settle everything, so the only layout work left is the one the label
+        # change itself has to request. This is the deterministic trigger.
+        for _ in range(4):
+            await pilot.pause()
+        hint = view._move_hint
+        assert hint.size.width == cell_len(hint.rendered()), "the resting hint was already clipped"
+
+        _select(view, "retry.maxRetries")
+        view.action_activate()
+        await pilot.pause()
+
+        assert view.editing_key == "retry.maxRetries"
+        logical = hint.rendered()
+        assert "saves" in logical, "the model no longer states the rule at all"
+        assert hint.size.width >= cell_len(logical), (
+            f"the move hint is painted {hint.size.width} cells wide for a "
+            f"{cell_len(logical)}-cell label {logical!r}, so the clause naming the rule "
+            f"that an arrow key commits the value is clipped off the frame"
+        )
+        frame = _painted_frame(app)
+        assert "saves" in frame, (
+            "the painted frame does not contain `saves` anywhere, so nothing on screen "
+            f"tells the user that moving off this row will commit it:\n{frame}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_r_on_an_armed_chain_row_repaints_the_disarmed_ask(tmp_path: Path) -> None:
+    """UX round 4 follow-up — ``r`` disarmed the ask without repainting.
+
+    ``action_reset`` cleared ``_confirm_delete`` and then returned early on a
+    chain row, because a chain is not a ``setting``. The flag was gone and the
+    frame was not redrawn, so the detail row kept asking ``press d again to
+    confirm`` and the footer kept offering ``esc cancel`` for an ask that no
+    longer existed — after which ``esc`` left the page instead of cancelling it
+    and ``d`` re-armed instead of confirming. It fails safe (nothing is deleted)
+    but it is the same "model changed, paint did not" class as D16, so it is
+    asserted on the frame rather than on the flag: the flag was already correct.
+    """
+    settings_io.write_chains(ConfigManager(tmp_path), {"cheap": ["anthropic/a", "openrouter/b"]})
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._run_slash_command("/settings")
+        await pilot.pause()
+        view = app.query_one(SettingsView)
+        for index, row in enumerate(view._rows):
+            if row.kind == "chain" and row.chain == "cheap":
+                view._selected = index
+                break
+        view._repaint()
+        await pilot.press("d")
+        await pilot.pause()
+        armed = _painted_frame(app)
+        assert "confirm" in armed, "the ask never reached the frame"
+
+        await pilot.press("r")
+        await pilot.pause()
+        assert view._confirm_delete is None, "`r` left the ask armed"
+        disarmed = _painted_frame(app)
+        assert disarmed != armed, (
+            "the frame after `r` is byte-identical to the armed frame, so the screen is "
+            "still asking a question the page has already stopped listening for"
+        )
+        assert "press d again to confirm" not in disarmed, (
+            "the detail row still asks `press d again to confirm` after the ask was "
+            f"disarmed:\n{disarmed}"
+        )
+        assert "cancel" not in disarmed, (
+            "the footer still offers `esc cancel` for an ask that no longer exists, so "
+            f"`esc` will leave the page instead:\n{disarmed}"
+        )

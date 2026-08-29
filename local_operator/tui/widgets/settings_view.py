@@ -650,9 +650,21 @@ class SettingsView(Vertical):
         only what its owner actually chose (see ``settings_io.reset_setting``).
         """
         # Disarms a pending delete for the reason `action_activate` records.
+        # Captured BEFORE the early returns below, because a disarm is a change
+        # to what the screen is saying and every exit from here has to paint it.
+        # It did not: `r` on an armed chain row cleared the flag and returned on
+        # the `kind != "setting"` line, leaving the detail row still asking
+        # `press d again to confirm` and the footer still offering `esc cancel`
+        # for an ask that no longer existed — after which `esc` left the page
+        # instead of cancelling and `d` re-armed instead of confirming. Safe in
+        # the destructive direction, but the same "model changed, paint did not"
+        # class as the hint clipping in D16 (UX round 4, follow-up).
+        disarmed = self._confirm_delete is not None
         self._confirm_delete = None
         row = self._current()
         if row is None or row.setting is None or row.kind != "setting":
+            if disarmed:
+                self._repaint()
             return
         if row.setting.kind is Kind.CASCADE:
             # A cascade has no shipped default to restore — the chains are
@@ -665,6 +677,12 @@ class SettingsView(Vertical):
             self._repaint()
             return
         if row.setting.kind is Kind.READONLY:
+            # Same rule as the exit above: `_leave_row` makes an armed ask on a
+            # read-only row unreachable today, but the guard is on the EXIT
+            # rather than on the state, so a future arming path cannot
+            # reintroduce a stale ask through this door.
+            if disarmed:
+                self._repaint()
             return
         setting = row.setting
         if not self._save(lambda: settings_io.reset_setting(self._manager, setting)):
@@ -1770,15 +1788,31 @@ class SettingsView(Vertical):
         tabs.append("(←→)", style=faint)
 
         rows = self._teams if self._pane == _PANE_TEAMS else self._agents
-        body: list[_PaneLine] = []
+        # Grouped per ROSTER ENTRY rather than flattened into lines, for the
+        # reason the header/provider split records one section up: `_fit_pane`
+        # has to shed a roster entry as a unit and turn it into a count, and it
+        # cannot do that to a flat list of lines it can no longer attribute to
+        # an entry. Flattening here is what made the roster's spill line — the
+        # LAST element of the flat list — the FIRST thing the shedding loop
+        # popped, so the roster lost the line saying it existed before it lost
+        # the rows that line was summarising (design round 4, D15).
+        entries: list[list[_PaneLine]] = []
+        hidden = 0
+        # The empty state is a STATEMENT about absence, not a roster that can be
+        # folded into a count: `… 1 more` over an empty registry would invent an
+        # agent. So it sheds by dropping its lines, exactly as the provider
+        # section's own empty state does, and never grows a count.
+        foldable = bool(rows)
         if not rows:
             # An HONEST empty state: name the thing that is missing and the
             # command that creates it. "No teams" alone leaves a user unable to
             # tell an empty registry from a broken page.
             verb = "/team" if self._pane == _PANE_TEAMS else "/agent"
-            body.append([(f"  {truncate_cells(f'no {self._pane} configured', room - 2)}", dim)])
-            body.append(
-                [(f"  {truncate_cells(f'{verb} lists and attaches them', room - 2)}", faint)]
+            entries.append(
+                [[(f"  {truncate_cells(f'no {self._pane} configured', room - 2)}", dim)]]
+            )
+            entries.append(
+                [[(f"  {truncate_cells(f'{verb} lists and attaches them', room - 2)}", faint)]]
             )
         else:
             # The ROSTER is what gives way, not the caption. `read-only` used to
@@ -1797,18 +1831,21 @@ class SettingsView(Vertical):
             used = 1 + len(provider_lines) + 1
             shown, hidden = self._budget_pane_rows(rows, used=used + 1)
             for name, facts, summary in shown:
-                body.append([(f"  {truncate_cells(name, room - 2)}", muted)])
-                body.append([(f"    {truncate_cells(facts, room - 4)}", faint)])
+                entry: list[_PaneLine] = [[(f"  {truncate_cells(name, room - 2)}", muted)]]
+                entry.append([(f"    {truncate_cells(facts, room - 4)}", faint)])
                 if summary:
-                    body.append([(f"    {truncate_cells(summary, room - 4)}", faint)])
-            if hidden:
-                # `+` dropped from the count. `+ add a hop` and `+ add a chain`
-                # are BUTTONS in the same frame and the same ink, so leading a
-                # statement of fact with the page's own "this row adds one"
-                # glyph made a count read as an affordance (design round 2, D9).
-                body.append([(f"  … {hidden} more", dim)])
+                    entry.append([(f"    {truncate_cells(summary, room - 4)}", faint)])
+                entries.append(entry)
 
-        self._pane_text = self._fit_pane(header, provider_lines, tabs, body, dim)
+        self._pane_text = self._fit_pane(
+            header,
+            provider_lines,
+            tabs,
+            entries,
+            hidden,
+            dim,
+            roster_foldable=foldable,
+        )
         self._pane_view.update(self._pane_text)
 
     def _fit_pane(
@@ -1816,8 +1853,11 @@ class SettingsView(Vertical):
         header: "_PaneLine",
         provider_lines: list["_PaneLine"],
         tabs: Text,
-        body: list["_PaneLine"],
+        entries: list[list["_PaneLine"]],
+        roster_hidden: int,
         dim: Style,
+        *,
+        roster_foldable: bool,
     ) -> Text:
         """Assemble the pane so the ``read-only`` caption is always the last row.
 
@@ -1836,6 +1876,18 @@ class SettingsView(Vertical):
         The tab row and the caption survive to the last two rows, because a pane
         that cannot say what it is or whether it is editable is worse than no
         pane at all.
+
+        BOTH sections shed into a COUNT rather than vanishing, and that symmetry
+        is the invariant rather than a per-section rule. The first version of
+        this ladder gave the guarantee to providers and took it from the roster
+        in the same commit: step 1 popped from the end of a FLAT list of roster
+        lines, whose last element is the ``… N more`` spill line, so the roster
+        lost its count before it lost the rows the count summarised — the exact
+        inversion of step 3's provider logic, painting `teams  agents  (←→)` over
+        nothing while three agents were configured (design round 4, D15). The
+        roster now arrives as ENTRIES with a separate ``roster_hidden``, so the
+        same "pop a unit, increment the count" move is available to it, and both
+        sections collapse to a one-line count before either disappears.
 
         Provider rows shed into a COUNT rather than vanishing. The previous
         version deleted from index 1 — which is the first provider row, not the
@@ -1870,7 +1922,9 @@ class SettingsView(Vertical):
         def available() -> int:
             return height - (2 if separator else 1)
 
-        rows = list(body)
+        roster = list(entries)
+        spilled = roster_hidden
+        roster_collapsed = False
         shown = list(provider_lines)
         hidden = 0
         gap = True
@@ -1897,32 +1951,72 @@ class SettingsView(Vertical):
                 block.append([(f"  … {hidden} more", dim)])
             return block
 
+        def roster_block() -> list[_PaneLine]:
+            """The roster's own lines, BELOW the tab row, as they would paint.
+
+            Excludes the tab row itself, which is painted from ``tabs`` and
+            costs its line unconditionally. When the roster collapses, the count
+            rides on that tab row instead of appearing here, so this returns
+            nothing and the caller adds the count to the tab line.
+            """
+            if roster_collapsed:
+                return []
+            block: list[_PaneLine] = []
+            for entry in roster:
+                block.extend(entry)
+            if spilled:
+                # `+` dropped from the count. `+ add a hop` and `+ add a chain`
+                # are BUTTONS in the same frame and the same ink, so leading a
+                # statement of fact with the page's own "this row adds one"
+                # glyph made a count read as an affordance (design round 2, D9).
+                block.append([(f"  … {spilled} more", dim)])
+            return block
+
         def painted() -> int:
             # The tab row always costs its one line: a pane that cannot say
             # which of the two rosters it is showing is worse than a short one.
-            return len(provider_block()) + (1 if gap else 0) + 1 + len(rows)
+            # The collapse rung does not save that line, it MOVES the count onto
+            # it — `teams  agents  (←→)  … 3 more` is one line where the count
+            # was a second one.
+            return len(provider_block()) + (1 if gap else 0) + 1 + len(roster_block())
 
-        # 1. The roster and its spill line — the pane's least load-bearing rows,
-        #    and the ones `_budget_pane_rows` has already trimmed once.
-        while painted() > available() and rows:
-            rows.pop()
-        # 2. The blank separating the provider block from the tab row.
+        # 1. Roster ENTRIES fold into a count, LAST first — the same priority
+        #    step 3 applies to providers. The count is what survives, because a
+        #    roster that says "… 3 more" is telling the truth about a registry
+        #    the pane cannot afford to list, while a tab row over nothing is
+        #    indistinguishable from the honest empty state this pane paints for
+        #    a genuinely empty registry (design round 4, D15).
+        while painted() > available() and roster and roster_foldable:
+            roster.pop()
+            spilled += 1
+        # 2. An unfoldable roster is the empty STATEMENT, which has no count to
+        #    fold into, so its lines simply go — the same trade step 6 makes for
+        #    the provider empty state. The tab row still says which pane is live.
+        while painted() > available() and roster and not roster_foldable:
+            roster.pop()
+        # 3. Down to one line for the whole roster: the tab row carries the count
+        #    itself. `teams  agents  (←→)  … 3 more` is the roster's exact
+        #    analogue of `providers  … 3 more`, and it is what keeps the pane
+        #    from claiming an empty roster in order to fit its box.
+        if painted() > available() and roster_foldable and spilled:
+            roster_collapsed = True
+        # 4. The blank separating the provider block from the tab row.
         if painted() > available():
             gap = False
-        # 3. Provider rows fold into a count, LAST first, so the pane keeps
+        # 5. Provider rows fold into a count, LAST first, so the pane keeps
         #    saying how many it is withholding instead of silently dropping
         #    them (design round 3, D11).
         while painted() > available() and shown and foldable:
             shown.pop()
             hidden += 1
-        # 4. Down to one line for the whole section: the header carries the
+        # 6. Down to one line for the whole section: the header carries the
         #    count itself rather than standing over nothing. A `providers`
         #    header with no rows beneath it reads as "none configured", which is
         #    the opposite of the truth when providers ARE signed in — the one
         #    statement this pane must never make (design round 3, D11).
         if painted() > available() and foldable:
             collapsed = True
-        # 5. The caption's own blank line. It is spacing, and spacing is worth
+        # 7. The caption's own blank line. It is spacing, and spacing is worth
         #    less than the fact that providers exist: at a 3-row pane (a 20-row
         #    terminal) keeping it is what forced the section out entirely, so
         #    the pane spent a row on whitespace to say nothing about three
@@ -1930,8 +2024,11 @@ class SettingsView(Vertical):
         #    gap above it.
         if painted() > available() and separator:
             separator = False
-        # 6. No room even for one line: the section goes entirely. Saying
-        #    NOTHING about providers is honest; announcing an empty one is not.
+        # 8. No room even for one line: the provider section goes entirely.
+        #    Saying NOTHING about providers is honest; announcing an empty one
+        #    is not. The roster has no equivalent rung, because its tab row is
+        #    reserved outside the competition with the caption — so the roster's
+        #    last surviving form is always the collapsed count, never silence.
         if painted() > available():
             collapsed = False
             shown = []
@@ -1945,8 +2042,13 @@ class SettingsView(Vertical):
         if gap:
             text.append("\n")
         text.append_text(tabs)
+        if roster_collapsed:
+            # The count rides on the tab row itself. The tab row keeps its own
+            # accent because it still names the live pane; the count follows in
+            # `dim` so it reads as a fact rather than as a third tab.
+            text.append(f"  … {spilled} more", style=dim)
         text.append("\n")
-        for segments in rows:
+        for segments in roster_block():
             for chunk, style in segments:
                 text.append(chunk, style=style)
             text.append("\n")

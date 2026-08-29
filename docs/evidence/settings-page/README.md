@@ -19,8 +19,8 @@ env -u NO_COLOR TERM=xterm-256color .venv/bin/python \
 | `overview-80x24.svg` | narrow: the read-only pane sheds and `←→ panes` leaves the footer with it |
 | `enum-100x30.svg` | an enum row expanded, current member marked `●` |
 | `enum-80x24.svg` | the same expansion at a split-pane width |
-| `error-100x30.svg` | a rejected value with the editor still open and the reason inline |
-| `error-80x24.svg` | the same rejection at a split-pane width |
+| `error-100x30.svg` | a rejected value with the editor still open and the reason inline, footer stating `↑↓ move · saves` in full (D16) |
+| `error-80x24.svg` | the same rejection at a split-pane width (D16) |
 | `cascade-100x30.svg` | the failover cascade, one chain open with its ordered hops |
 | `cascade-80x24.svg` | the same cascade at a split-pane width |
 | `confirm-100x30.svg` | `d` on a chain row asking before it deletes the whole chain |
@@ -32,9 +32,9 @@ env -u NO_COLOR TERM=xterm-256color .venv/bin/python \
 | `agents-100x30.svg` | the read-only agents pane |
 | `agents-100x28.svg` | the pane one row below the band where the view's height steps down (D6) |
 | `agents-100x26.svg` | providers folding to `… N more` while the signed-in one keeps its row (D11) |
-| `agents-100x24.svg` | the roster shed to the caption, provider count still stated (D6/D11) |
-| `agents-100x22.svg` | the section down to a header plus a count (D11) |
-| `agents-100x20.svg` | the tightest pane, `providers  … 3 more` on one line (D11) |
+| `agents-100x24.svg` | every provider on its own row and the roster folded onto the tab row as `teams  agents  (←→)  … 3 more` (D11/D15) |
+| `agents-100x22.svg` | the provider section down to a header plus a count, roster still counted on the tab row (D11/D15) |
+| `agents-100x20.svg` | the tightest pane: both sections collapsed to one line each, `providers  … 3 more` and `teams  agents  (←→)  … 3 more` (D11/D15) |
 
 The SHORT `agents` frames (`100x28` down to `100x20`) exist for the same reason,
 from the other axis. The pane's height derivation tracks the real pane exactly
