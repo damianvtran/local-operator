@@ -14974,14 +14974,22 @@ class OperatorApp(App[None]):
                     # description cells saying nothing.
                     "",
                     detail=detail,
-                    # Every row on a logout list destroys a credential, so the
-                    # danger tint is a property of the verb, not of a row that
-                    # went wrong — the same rule /logout applies to providers.
-                    # Also LOAD-BEARING SAFETY, not just colour: the editor's
-                    # destructive gate reads this flag to make Enter FILL the
-                    # row rather than RUN it, so a fuzzy match cannot destroy
-                    # something on one keystroke. Do not drop it as cosmetic.
-                    alert=verb == "logout",
+                    # `reauth` is flagged alongside `logout` because it DELETES
+                    # the stored grant before re-authorizing — `_mcp_logout` is
+                    # its first step, so the credential is gone from the shared
+                    # auth.db the moment the row runs. That it usually ends in a
+                    # fresh grant does not make the deletion conditional: an
+                    # abandoned browser round trip leaves the server with no
+                    # credential at all. `login` is the only non-destructive
+                    # verb here and the only one left unflagged.
+                    #
+                    # LOAD-BEARING SAFETY, not colour: the editor's destructive
+                    # gate reads this flag to make Enter FILL the row rather
+                    # than RUN it, so a fuzzy subsequence match (`reauth lnr`)
+                    # cannot forget the credential of a server the user never
+                    # named. Do not narrow this set without re-checking the
+                    # gate — the tint and the guard are the same bit.
+                    alert=verb in ("logout", "reauth"),
                 )
             )
         return choices

@@ -5398,6 +5398,76 @@ async def test_mcp_logout_list_offers_only_servers_holding_a_credential() -> Non
             assert [name for name, _ in editor.picker.suggestions()] == ["logout linear"]
 
 
+@pytest.mark.asyncio
+async def test_every_mcp_verb_that_destroys_something_flags_its_rows() -> None:
+    """`alert` is the SAFETY bit, so the set it covers must match what the
+    verbs actually destroy — not what they are named.
+
+    `reauth` reads like a login and IS a deletion: `_cmd_mcp` runs
+    `_mcp_logout` first (the docstring calls it "the two composed — forget
+    first"), so the stored grant leaves the shared auth.db the moment the row
+    runs, and an abandoned browser round trip leaves the server with no
+    credential at all. It was flagged `False` while the PR that made this flag
+    load-bearing claimed every destructive row carried it.
+
+    Asserted as a whole table rather than one row, because the claim the
+    editor's destructive gate relies on is about the SET: `login` is the only
+    verb here that destroys nothing, and it is the only one left unflagged.
+    """
+    from local_operator.mcp.config import MCPAuthConfig, MCPHttpServerConfig
+
+    configs = {
+        "linear": MCPHttpServerConfig(
+            url="https://mcp.linear.app/mcp", auth=MCPAuthConfig(type="oauth")
+        ),
+    }
+    manager = FakeMcpManager(["linear"], ["linear"])
+    manager._configs = configs
+    session = McpSession(manager=manager, startup=McpStartupOutcome())
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        for _ in range(6):
+            await pilot.pause()
+        editor = app.query_one(Editor)
+        with (
+            patch(
+                "local_operator.mcp.config.load_all_mcp_configs",
+                return_value=(configs, {"linear": "/tmp/x/.local-operator/mcp.json"}),
+            ),
+            patch(
+                "local_operator.mcp.auth.mcp_logged_out_servers",
+                return_value={"https://mcp.linear.app/mcp"},
+            ),
+        ):
+            # verb -> does choosing a row DESTROY persistent state?
+            # `logout` last: its list is filtered by the credential store, so
+            # ordering it after the others keeps a failure here pointing at the
+            # alert flag rather than at an empty list.
+            for verb, destroys in (
+                ("login", False),
+                ("reauth", True),
+                ("remove", True),
+                ("logout", True),
+            ):
+                # Clear between verbs: the picker tracks the sub-slot and only
+                # refills when it CHANGES, so hopping verb-to-verb without
+                # passing through the bare form leaves the previous list up.
+                _set_editor_line(editor, "/mcp ")
+                for _ in range(4):
+                    await pilot.pause()
+                _set_editor_line(editor, f"/mcp {verb} ")
+                for _ in range(8):
+                    await pilot.pause()
+                rows = editor.picker.suggestions()
+                assert rows, f"/mcp {verb} offered no rows"
+                for name, choice in rows:
+                    assert isinstance(choice, ArgumentChoice)
+                    assert choice.alert is destroys, (
+                        f"/mcp {verb} row {name!r} has alert={choice.alert}, "
+                        f"but the verb destroys={destroys}"
+                    )
+
+
 def _mcp_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """A sandbox HOME holding one owned config and one Claude-imported server.
 
