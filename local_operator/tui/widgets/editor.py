@@ -688,21 +688,42 @@ class Editor(TextArea):
     #: overriding them, so declaring this attribute does not cost the editor any
     #: inherited key (verified against textual 8.2.8: the instance's resolved
     #: binding map holds ``alt+left`` AND ``ctrl+left``).
-    #: The vertical entries carry no motion of their own — they exist so that
-    #: `⌥↑`/`⌥↓` on a CSI-modifier terminal (which parses to `alt+up`, a key
-    #: nothing binds) does the SAME thing as on an Esc-prefixed terminal (which
-    #: passes through as a plain `up`). Without them the two encodings diverge:
-    #: one recalls history, the other silently does nothing. See
-    #: :attr:`ESCAPE_CHORD_KEYS` for why the vertical chord is a pass-through
-    #: rather than a paragraph motion.
+    #: NOTE the vertical chords are deliberately ABSENT from this table. They
+    #: are handled in :meth:`_on_key` by :attr:`VERTICAL_CHORD_KEYS` instead,
+    #: because a ``Binding`` fires through the action system and never enters
+    #: ``_on_key`` — which is exactly how a previous revision destroyed a typed
+    #: slash command (code round 2 F5, ux round 2 U6). See that table.
     BINDINGS = [
         Binding("alt+left", "cursor_word_left", "Cursor word left", show=False),
         Binding("alt+right", "cursor_word_right", "Cursor word right", show=False),
         Binding("alt+shift+left", "cursor_word_left(True)", "Select word left", show=False),
         Binding("alt+shift+right", "cursor_word_right(True)", "Select word right", show=False),
-        Binding("alt+up", "composer_up", "Cursor up", show=False),
-        Binding("alt+down", "composer_down", "Cursor down", show=False),
     ]
+
+    #: The CSI-modifier spelling of every vertical option chord, mapped to the
+    #: plain key it must be INDISTINGUISHABLE from.
+    #:
+    #: Vertical chords are normalised to their plain arrow at the top of
+    #: :meth:`_on_key` rather than bound as actions, and the distinction is
+    #: load-bearing. ``up``/``down`` are claimed by FOUR handlers in this widget
+    #: — the model picker, the command picker, history navigation, and finally
+    #: TextArea's caret move — and every one of them lives inside ``_on_key``
+    #: and gates on the literal key name. A ``Binding`` bypasses ``_on_key``
+    #: entirely, so ``alt+up`` reached only a reimplementation of the last two
+    #: rungs and silently closed an open picker, overwriting a half-typed slash
+    #: command with a history entry on exactly the terminals where the key had
+    #: previously been a harmless no-op.
+    #:
+    #: Rewriting the key is therefore not a shortcut but the correctness
+    #: argument: there is ONE implementation of what ``up`` means, and the chord
+    #: cannot drift from it because it does not have its own. Anything added to
+    #: the plain-arrow path in future is inherited for free.
+    VERTICAL_CHORD_KEYS = {
+        "alt+up": "up",
+        "alt+down": "down",
+        "alt+shift+up": "shift+up",
+        "alt+shift+down": "shift+down",
+    }
 
     #: Every key that, arriving on the message pump turn after an ``escape``,
     #: proves that escape was the first half of an option+arrow chord rather
@@ -1401,6 +1422,20 @@ class Editor(TextArea):
     async def _on_key(self, event: events.Key) -> None:
         """Handle chat keys before TextArea's insert path sees them."""
         key = event.key
+        # A CSI-modifier vertical chord IS its plain arrow, and is rewritten to
+        # one here so that every handler below — both pickers, history, the
+        # caret — sees the key it already gates on. This is the whole fix for
+        # F5/U6: the alternative (binding `alt+up` to an action) skips `_on_key`
+        # and therefore skips the pickers, which is how `⌥↑` came to close an
+        # open list and overwrite a half-typed slash command from history.
+        #
+        # The Esc-prefixed encoding needs no rewrite: `ESCAPE_CHORD_KEYS` maps
+        # its arrows to a pass-through, so it arrives here already spelled
+        # `up`/`down`. Both encodings therefore converge on ONE implementation
+        # of what the arrow means, which is the property that stops them
+        # drifting apart again.
+        if key in self.VERTICAL_CHORD_KEYS:
+            key = self.VERTICAL_CHORD_KEYS[key]
         # FIRST, ahead of every other branch: an arrow completing a held escape
         # is the second half of an option+arrow chord, and it must be read as
         # that before any picker or history handler claims it. See the
@@ -1703,33 +1738,26 @@ class Editor(TextArea):
             event.stop()
             event.prevent_default()
             return
+        if key != event.key:
+            # A rewritten vertical chord that no branch above claimed. It cannot
+            # be handed to ``super()``, which would resolve the ORIGINAL
+            # `alt+up` against TextArea's bindings and find nothing — the silent
+            # no-op this rewrite exists to remove. Run the plain arrow's own
+            # action instead, which is where TextArea's `up`/`down` bindings
+            # would have landed anyway.
+            moves = {
+                "up": self.action_cursor_up,
+                "down": self.action_cursor_down,
+                "shift+up": lambda: self.action_cursor_up(True),
+                "shift+down": lambda: self.action_cursor_down(True),
+            }
+            move = moves.get(key)
+            if move is not None:
+                move()
+                event.stop()
+                event.prevent_default()
+                return
         await super()._on_key(event)
-
-    # -- vertical option chords ----------------------------------------------
-
-    def action_composer_up(self) -> None:
-        """``⌥↑`` — exactly what ``↑`` does in this composer.
-
-        Bound so the CSI-modifier encoding (`alt+up`, which nothing else binds)
-        matches the Esc-prefixed one (a plain `up` passed through by the chord
-        coalescing). Without this the same physical chord recalls history on one
-        terminal and does nothing on another.
-
-        Deliberately NOT macOS paragraph movement: ``↑`` here already means
-        history-at-the-edge and caret-move inside the text, and a second
-        competing meaning for the key would be a defect rather than a feature.
-        """
-        if self._caret_at_top_edge() and self._history:
-            self._navigate_history(-1)
-        else:
-            self.action_cursor_up()
-
-    def action_composer_down(self) -> None:
-        """``⌥↓`` — exactly what ``↓`` does in this composer. See above."""
-        if self._caret_at_bottom_edge() and (self._history_index is not None or self._history):
-            self._navigate_history(+1)
-        else:
-            self.action_cursor_down()
 
     # -- escape/arrow chord coalescing ---------------------------------------
     #
