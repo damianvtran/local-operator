@@ -38,6 +38,23 @@ The copy gesture is explicit: highlight, then Ctrl+C — :meth:`_on_key` routes
 the press to :meth:`action_copy` while a real range is live. See
 :meth:`Editor._copy_drag` for why no other key can carry it.
 
+Every way of MAKING that highlight has to produce a document selection, since
+that is the only state :meth:`action_copy` can read. Three do: a drag, the
+shift+arrow/shift+end family ``TextArea`` already binds, and — since
+:meth:`_on_click` — double-click for the word and triple-click for the line.
+The click chain was the gap the field report found: Textual answers it with a
+SCREEN selection, which a ``TextArea`` can neither paint nor copy, so the
+gesture users reach for first in an input box highlighted nothing and the
+Ctrl+C that followed cleared the draft instead of copying.
+
+``cmd+C`` is NOT one of them and cannot be made to be: the terminal binds it
+(Ghostty's ``super+c=copy_to_clipboard:mixed``, no ``performable:``) and eats
+the key before the app is reachable. A real-pty probe confirms the shape of
+this precisely — under a terminal that DOES forward it (kitty encoding), the
+app receives ``super+c`` and the composer's own handler runs; under Ghostty's
+default binding the key never arrives at all. So Ctrl+C is the composer's copy
+key, and the only one this widget can promise.
+
 The caret is SOLID and never blinks, and on an EMPTY composer it gets a cell of
 its own to the left of the placeholder rather than inverting the placeholder's
 first letter; see ``cursor_blink`` in :meth:`__init__` and :meth:`render_line`.
@@ -2757,6 +2774,117 @@ class Editor(TextArea):
             # receipt for it on a CLICK, which is the same noise a drag-copy
             # would be.
             return
+
+    async def _on_click(self, event: events.Click) -> None:
+        """Double-click selects the WORD, triple-click selects the LINE.
+
+        The reported defect: "I can't properly copy via ctrl/cmd+C on
+        highlighted text in the composer." Measured under a real pty, the
+        highlight the user made by double-clicking was never a composer
+        selection at all, so the Ctrl+C that followed found nothing to copy and
+        fell through to the interrupt rung — which CLEARS THE DRAFT. The user
+        was not failing to copy a selection; they were destroying their prompt
+        by asking for one.
+
+        The mechanism is entirely in Textual 8.2.8 and is worth stating,
+        because reasoning about it from the widget's own code gets it wrong.
+        ``Widget._on_click`` (``textual/widget.py``) reacts to a click chain by
+        calling ``text_select_all()`` on chain 2 and on the container at chain
+        3. Those are SCREEN selections — ``Screen.selections``, the read-only
+        band the transcript uses — and for a ``TextArea`` they are inert twice
+        over:
+
+        * the entry it writes is ``Selection(start=None, end=None)``, and
+          ``Widget.get_selection`` returns text only for a ``Text``/``Content``
+          visual, so a ``TextArea`` contributes nothing to
+          ``Screen.get_selected_text()``;
+        * nothing paints. The band is applied by ``Content.render_strips``,
+          and this widget renders its own lines, so the frame after a
+          double-click is IDENTICAL to the frame before it (captured: the
+          caret moved, no highlight appeared).
+
+        Meanwhile ``TextArea``'s own ``selection`` — the reactive that both
+        paints the composer's highlight and backs ``selected_text`` — is left
+        collapsed by the mouse-down, and no base-class handler ever widens it:
+        ``TextArea`` binds word/line selection to ``f5``/``f6``/``f7`` only and
+        has no click-chain handling whatsoever. So the gesture every user
+        reaches for first in an input box selected nothing, showed nothing, and
+        then ate the draft.
+
+        Fixed at the source rather than by teaching Ctrl+C to look somewhere
+        else: the press is right to ask for ``selected_text``, and the bug is
+        that the double-click never produced one. This handler gives the chain
+        the document meaning it has in every other editor, using
+        ``TextArea``'s own primitives — ``select_line`` for the line, and the
+        base class's ``_word_pattern`` boundaries for the word, so what counts
+        as a word here is what counts as one for ctrl+arrow navigation rather
+        than a second definition drifting beside it.
+
+        ``super()`` is deliberately NOT called. Its only behaviour for this
+        widget is the inert screen selection above, and leaving it in place
+        costs a real defect: an entry in ``Screen.selections`` makes the next
+        mouse-down call ``Screen.clear_selection()``, and it puts this widget
+        in the map that the app's transcript-copy path walks. A selection that
+        cannot render and cannot be copied is not worth keeping for symmetry.
+
+        Chains beyond 3 are folded onto the line: ``CLICK_CHAIN_TIME_THRESHOLD``
+        keeps counting for as long as the user keeps clicking in place, and a
+        fourth click that silently collapsed the selection would read as the
+        highlight flickering off.
+
+        The selection this makes is an ORDINARY one — the same state a drag
+        leaves — so every rule that already governs a composer highlight applies
+        unchanged: backspace deletes the span, typing replaces it, and Ctrl+C
+        copies it through :meth:`action_copy`. It is explicitly NOT a copy on
+        its own: like the marker click in :meth:`_on_mouse_up`, selecting is the
+        app's response to the gesture, and putting text on the clipboard from a
+        CLICK is the same unasked-for write that :meth:`_copy_drag` exists to
+        refuse.
+        """
+        if event.chain < 2:
+            # A single click is a caret move, which the base class's mouse-down
+            # has already done. Nothing to widen.
+            return
+        row, column = self.get_target_document_location(event)
+        try:
+            line = self.document[row]
+        except IndexError:  # pragma: no cover - a click lands on a real row
+            return
+        if event.chain == 2:
+            start, end = self._word_span(line, column)
+            self.selection = Selection((row, start), (row, end))
+        else:
+            self.select_line(row)
+        # Consumed so the base class's screen-selection path never runs; see the
+        # docstring on why its result is inert for a TextArea and actively
+        # harmful to keep.
+        event.stop()
+        event.prevent_default()
+
+    def _word_span(self, line: str, column: int) -> tuple[int, int]:
+        """The word around ``column``, as ``(start, end)`` columns of ``line``.
+
+        Boundaries come from ``TextArea``'s own ``_word_pattern`` so a
+        double-click selects exactly what ctrl+left/ctrl+right treat as a word;
+        defining "word" a second time here is how the two would drift.
+
+        A click on whitespace selects the whitespace run rather than jumping to
+        a neighbouring word: the user pointed at a gap, and silently selecting
+        the word to its left would take text they did not point at. Clamped to
+        the line so a click past the last character (the composer is wider than
+        its text) selects the final word rather than an empty range at the end.
+        """
+        if not line:
+            return (0, 0)
+        column = min(column, len(line) - 1)
+        # Boundaries are the ZERO-WIDTH positions between a word and a non-word
+        # character, which is what `_word_pattern` matches; bracketing them with
+        # the line's own ends turns them into spans.
+        bounds = [0, *(m.start() for m in self._word_pattern.finditer(line)), len(line)]
+        for start, end in zip(bounds, bounds[1:]):
+            if start <= column < end:
+                return (start, end)
+        return (bounds[-2], bounds[-1])  # pragma: no cover - column is clamped above
 
     def _copy_drag(self) -> None:
         """A composer drag never copies. Kept as a named no-op so the tests

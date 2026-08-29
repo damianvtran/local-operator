@@ -1905,6 +1905,235 @@ async def test_an_explicit_composer_copy_takes_what_was_highlighted() -> None:
         assert not app.screen.selections
 
 
+async def _composer_multi_click(
+    app: OperatorApp,
+    pilot: Any,
+    editor: Editor,
+    column: int,
+    times: int,
+) -> None:
+    """A double/triple click in the composer, through the CLICK path.
+
+    Deliberately `pilot.click(times=...)` rather than the hand-built
+    MouseDown/Move/Up of `_composer_drag`. The distinction is the whole reason
+    the double-click defect survived a green suite: `_composer_drag` posts the
+    three mouse events and stops, but a real terminal ALSO produces a `Click`
+    carrying a chain count, and `Widget._on_click` is what reacts to that
+    chain. A helper that never emits a Click cannot model the gesture the field
+    report was about, so these tests use the pilot's own click, which builds
+    the chain the driver builds.
+    """
+    await pilot.click(editor, offset=(editor.gutter.left + column, 0), times=times)
+    await pilot.pause()
+    await pilot.pause()
+
+
+@pytest.mark.asyncio
+async def test_double_click_selects_the_word_under_the_pointer() -> None:
+    """The reported defect: double-click made no selection the composer could copy.
+
+    Measured under a real pty before the fix: `Widget._on_click` answered a
+    chain of 2 with `text_select_all()`, which writes a SCREEN selection —
+    `{Editor(): Selection(None, None)}`. For a `TextArea` that entry is inert
+    twice over: it paints nothing (the widget renders its own lines rather
+    than a `Content`), and `Widget.get_selection` yields no text for it. The
+    document selection stayed collapsed, so `selected_text` was `''` and the
+    highlight the user believed they had made did not exist.
+
+    Pins the document meaning of the gesture: the word, taken from the widget's
+    own `_word_pattern` boundaries, in `TextArea.selection` where both the
+    painted highlight and `selected_text` read it.
+    """
+    app = _pilot_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = await _composer(app, pilot, "summarise the ingest path please")
+
+        # Column 18 sits inside "ingest" (columns 14-20).
+        await _composer_multi_click(app, pilot, editor, 18, times=2)
+
+        assert editor.selection == DocumentSelection((0, 14), (0, 20))
+        assert editor.selected_text == "ingest"
+        # The inert screen selection is gone rather than merely ignored: an
+        # entry there makes the next mouse-down clear it and puts this widget
+        # in the map the transcript-copy path walks.
+        assert not app.screen.selections
+
+
+@pytest.mark.asyncio
+async def test_triple_click_selects_the_whole_composer_line() -> None:
+    """Chain 3 takes the line, the gesture's meaning in every other editor.
+
+    Before the fix this was worse than chain 2: `Widget._on_click` escalated to
+    the CONTAINER, so `Screen.selections` picked up the input row and the
+    chrome around it and a copy took the frame's furniture — captured on a real
+    pty as a clipboard holding `'\\ndraft cleared — ↑ to recover\\n…◆ test/model
+    › ⌂ …'`. The composer's own line was the one thing not in it.
+    """
+    app = _pilot_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = await _composer(app, pilot, "summarise the ingest path please")
+
+        await _composer_multi_click(app, pilot, editor, 18, times=3)
+
+        assert editor.selection == DocumentSelection((0, 0), (0, 32))
+        assert editor.selected_text == "summarise the ingest path please"
+        assert not app.screen.selections
+
+
+@pytest.mark.asyncio
+async def test_double_click_then_ctrl_c_copies_and_keeps_the_draft() -> None:
+    """THE reported sequence, end to end: highlight by double-click, then Ctrl+C.
+
+    This is what the user actually did, and before the fix it did not merely
+    fail to copy — it DESTROYED THE PROMPT. With no live range, Ctrl+C fell
+    through to the interrupt rung, whose first tap clears the draft. The report
+    ("I can't properly copy via ctrl/cmd+C on highlighted text in the
+    composer") understates it: the gesture cost the user their text.
+
+    Pins all three outcomes, because a fix that restored the copy while still
+    clearing the draft would satisfy a narrower assertion.
+    """
+    app = _pilot_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = await _composer(app, pilot, "summarise the ingest path please")
+        app._clipboard = "SOMETHING THE USER PUT THERE"
+        toast = app.query_one(Toast)
+
+        await _composer_multi_click(app, pilot, editor, 18, times=2)
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+
+        assert app._clipboard == "ingest"
+        assert toast.message == "copied 6 characters"
+        assert editor.text == "summarise the ingest path please"
+
+
+@pytest.mark.asyncio
+async def test_a_multi_click_does_not_copy_on_its_own() -> None:
+    """Selecting is not copying, and the click must not write the clipboard.
+
+    The same rule `_copy_drag` enforces for a drag and `_on_mouse_up` for a
+    marker click: a composer highlight is usually the first half of an edit, so
+    a gesture that merely SELECTS must leave the clipboard alone. Without this,
+    the double-click fix would reintroduce the original field report — "the
+    copy can end up clearing something you have in the clipboard" — through a
+    new gesture.
+    """
+    app = _pilot_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = await _composer(app, pilot, "summarise the ingest path please")
+        app._clipboard = "SOMETHING THE USER PUT THERE"
+        toast = app.query_one(Toast)
+
+        await _composer_multi_click(app, pilot, editor, 18, times=2)
+        await _composer_multi_click(app, pilot, editor, 18, times=3)
+
+        assert app._clipboard == "SOMETHING THE USER PUT THERE"
+        assert toast.message == ""
+
+
+@pytest.mark.asyncio
+async def test_a_single_click_still_only_places_the_caret() -> None:
+    """Chain 1 is a caret move, not a selection — the commonest gesture here.
+
+    The guard the word/line handler needs: a fix that widened EVERY click
+    would make placing the caret select a word, so the next character typed
+    would replace it. Pins the collapsed selection a plain click leaves.
+    """
+    app = _pilot_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = await _composer(app, pilot, "summarise the ingest path please")
+
+        await _composer_multi_click(app, pilot, editor, 18, times=1)
+
+        assert editor.selection.start == editor.selection.end
+        assert editor.selected_text == ""
+
+
+@pytest.mark.asyncio
+async def test_ctrl_c_after_a_single_click_still_reaches_the_interrupt() -> None:
+    """The invariant the fix must not trade away (D17).
+
+    Ctrl+C's interrupt meaning cannot become conditional on a highlight, and
+    the exit ladder's first rung is what clears the draft. A single click
+    leaves no range, so the press must still reach the interrupt — the same
+    behaviour as before this change, asserted here because the new handler runs
+    on the same event that decides it.
+    """
+    app = _pilot_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = await _composer(app, pilot, "summarise the ingest path please")
+
+        await _composer_multi_click(app, pilot, editor, 18, times=1)
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+
+        assert editor.text == ""
+
+
+@pytest.mark.asyncio
+async def test_double_click_on_whitespace_takes_the_gap_not_a_neighbour() -> None:
+    """A click on a gap selects the gap, never a word the user did not point at.
+
+    `_word_span` splits on `TextArea._word_pattern`, so a run of spaces is its
+    own span. Silently snapping to the word on either side would put text on
+    the clipboard that the pointer was not over — the same class of surprise as
+    copying without being asked.
+    """
+    app = _pilot_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = await _composer(app, pilot, "summarise the ingest path please")
+
+        # Column 9 is the single space between "summarise" and "the".
+        await _composer_multi_click(app, pilot, editor, 9, times=2)
+
+        assert editor.selected_text == " "
+
+
+@pytest.mark.asyncio
+async def test_double_click_on_an_empty_composer_selects_nothing() -> None:
+    """The placeholder is not the user's text, so there is nothing to take.
+
+    An empty composer still paints `Message Local Operator…`. The word span is
+    computed from the DOCUMENT, which is empty, so the gesture yields an empty
+    range and the Ctrl+C that may follow keeps its interrupt meaning.
+    """
+    app = _pilot_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = await _composer(app, pilot, "")
+
+        await _composer_multi_click(app, pilot, editor, 4, times=2)
+
+        assert editor.selected_text == ""
+
+
+@pytest.mark.asyncio
+async def test_a_fourth_click_keeps_the_line_selected() -> None:
+    """Clicking on past three does not flicker the highlight off.
+
+    `CLICK_CHAIN_TIME_THRESHOLD` keeps counting while the user keeps clicking
+    in place, so chain 4 is reachable by accident. Folding it onto the line
+    keeps the selection stable rather than collapsing it, which would read as
+    the highlight dropping out on its own.
+    """
+    app = _pilot_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = await _composer(app, pilot, "summarise the ingest path please")
+
+        await _composer_multi_click(app, pilot, editor, 18, times=4)
+
+        assert editor.selected_text == "summarise the ingest path please"
+
+
 @pytest.mark.asyncio
 async def test_a_composer_copy_says_so_in_the_same_words() -> None:
     """One receipt for both gestures, or the toast becomes a tell.
