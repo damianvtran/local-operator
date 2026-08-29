@@ -98,6 +98,23 @@ from local_operator.tui.widgets.transcript import (
 #: pinned by a test, so the two halves of the contract cannot drift silently.
 TRAJECTORY_MAX_EVENTS = 500
 
+#: Refreshes the first reconcile may wait for the body to be LAID OUT before it
+#: gives up and folds at the fallback width anyway.
+#:
+#: `on_mount` runs before Textual has assigned the body a region, so the width
+#: every block would fold at reads 0 and `TranscriptBlock.fold_width` falls to
+#: its 80-column fallback: the page builds its first rows at 80, PINS that
+#: height, and re-folds a frame later, which a reader sees as the message
+#: flashing narrow on opening a page mid-stream. Measured at 140x34: 2 of 20
+#: opens painted the 80-column build.
+#:
+#: Two, because the ordering that needs the most is mount-then-fill-in-one-beat
+#: (`_open_subagent_view`'s deferred fill winning its race with layout), which
+#: measured exactly two refreshes before the body reported 135. It is a bound
+#: rather than a loop so a body that never gains a width paints its rows at the
+#: fallback instead of never painting them at all.
+SYNC_LAYOUT_WAITS = 2
+
 #: Rows of a delegated brief the page shows before folding the rest away. Three
 #: carries the opening sentence or two — enough to say what was asked — while
 #: leaving the child's own work the majority of a 60-column body. Measured
@@ -246,6 +263,21 @@ class SubagentEntry:
     #: diffed sequence, so its arrival at the cap appends a row instead of
     #: renumbering every entry and rebuilding the page under the reader.
     head: bool = False
+    #: Is this row DONE GROWING? A text row that has had its ``message_end``,
+    #: or a durable history row, which is complete by definition.
+    #:
+    #: Distinct from the job being settled, and that distinction is the point:
+    #: a running child's transcript is mostly FINISHED messages — the prose it
+    #: writes between tool calls — and deriving completeness from the job
+    #: status alone left every one of them unfinalized for the whole run. They
+    #: then rendered with the streaming splice's concatenated fold, which
+    #: cannot produce the blank row between two paragraphs, and because a
+    #: block PINS its height to the rows it authored they were pinned short
+    #: and grew by one row each when the job finally settled (measured 5 -> 6
+    #: and 2 -> 3 on a two-message child) — a reflow of exactly the kind this
+    #: page's in-place reconciliation exists to remove. The stream carries the
+    #: fact; it was only being discarded at the fold.
+    complete: bool = False
 
 
 def _notice(key: str, text: str, kind: NoticeKind = "info", *, head: bool = False) -> SubagentEntry:
@@ -265,6 +297,16 @@ def _supersedes(new: SubagentEntry, old: SubagentEntry) -> bool:
     if new.kind != old.kind:
         return True  # the row changed shape; the newer reading is the one to trust
     if new.kind == "text":
+        if old.complete and not new.complete:
+            # COMPLETENESS IS AS LOSABLE AS TEXT. `message_end` is an event
+            # like any other, so the rolling window evicts it too: a later
+            # fold of the same message then reports it as still streaming.
+            # Accepting that would un-finalize a committed block, and
+            # `update_entry_block` answers a finalized block's text change
+            # with a REMOUNT — so a row that had settled correctly would be
+            # torn down and rebuilt mid-read. Same rule as the text length
+            # below, applied to the other thing a fold can lose.
+            return False
         return len(new.text) >= len(old.text)
     if new.kind == "tool":
         # A settled outcome supersedes a live one; the reverse never does.
@@ -342,8 +384,16 @@ def fold_transcript_entries(
                 )
             else:
                 label = "Subagent · replied" if details.get("reply_to") else "Subagent"
+                # Renders as an AssistantBlock, and a recorded communication is
+                # whole the moment it exists — it never streams — so it settles
+                # on arrival rather than waiting for the job.
                 folded.append(
-                    SubagentEntry(f"comm:{entry.id}", "subagent_message", text=f"{label}\n\n{body}")
+                    SubagentEntry(
+                        f"comm:{entry.id}",
+                        "subagent_message",
+                        text=f"{label}\n\n{body}",
+                        complete=True,
+                    )
                 )
             continue
         if entry.type != ENTRY_MESSAGE:
@@ -365,7 +415,11 @@ def fold_transcript_entries(
             continue
         if role == "assistant":
             if text:
-                folded.append(SubagentEntry(entry.id, "text", text=text))
+                # A durable row is a message the engine already committed to
+                # the transcript, so it is complete whatever the job is doing
+                # now. Saying so here is what stops a paged-in history message
+                # rendering with the streaming fold on a live page.
+                folded.append(SubagentEntry(entry.id, "text", text=text, complete=True))
             for raw_call in payload.get("tool_calls") or ():
                 if not isinstance(raw_call, Mapping):
                     continue
@@ -419,6 +473,10 @@ def fold_trajectory(events: Sequence[Any], *, settled: bool = False) -> list[Sub
     # represented separately; the set keeps the same first-seen contract in O(1).
     remembered: set[tuple[str, str]] = set()
     streams: dict[str, str] = {}
+    #: Message ids whose ``message_end`` arrived in THIS window. The child is
+    #: done writing them even while it goes on working, which is what lets the
+    #: page finalize them per row instead of waiting for the job to settle.
+    finished: set[str] = set()
     tools: dict[str, SubagentEntry] = {}
     notices: dict[str, SubagentEntry] = {}
 
@@ -464,6 +522,7 @@ def fold_trajectory(events: Sequence[Any], *, settled: bool = False) -> list[Sub
                 if message_id not in streams and not text:
                     continue
                 streams[message_id] = text
+                finished.add(message_id)
                 remember("text", message_id)
         elif etype == "tool_execution_start":
             # One normalisation for the whole pair. The lookup below used to
@@ -548,7 +607,18 @@ def fold_trajectory(events: Sequence[Any], *, settled: bool = False) -> list[Sub
         if kind == "text":
             text = strip_control_sequences(streams.get(key, "")).strip()
             if text:  # a tool-use message carries no prose — spend no row
-                rows.append(SubagentEntry(key=key, kind="text", text=text))
+                # `settled` finishes the LAST message too: a child killed
+                # mid-turn never sends its `message_end`, and that row is done
+                # growing for the only reason that matters — nothing is left
+                # to send it deltas.
+                rows.append(
+                    SubagentEntry(
+                        key=key,
+                        kind="text",
+                        text=text,
+                        complete=key in finished or settled,
+                    )
+                )
         elif kind == "tool":
             entry = tools[key]
             if settled and entry.outcome is None:
@@ -717,11 +787,17 @@ def entry_block(
     re-folds one frame later, which a reader sees as the row flashing narrow.
     Zero means "not supplied" and keeps the old fallback behaviour.
 
-    ``settled`` says whether this text row is done growing. A row that may
-    still receive deltas must NOT be finalized: a finalized ``AssistantBlock``
-    ignores ``update_text``, so finalizing on construction is what forced the
-    page to rebuild a streaming message instead of updating it — and a rebuild
-    discards the incremental markdown cache and re-lexes the whole message.
+    ``settled`` says whether the JOB has stopped. A text row is committed when
+    it is done growing, which is ``entry.complete or settled`` — the row's own
+    ``message_end`` if it had one, else the job stopping (the last message of a
+    child killed mid-turn never gets one). A row that may still receive deltas
+    must NOT be finalized: a finalized ``AssistantBlock`` ignores
+    ``update_text``, so finalizing on construction is what forced the page to
+    rebuild a streaming message instead of updating it — and a rebuild discards
+    the incremental markdown cache and re-lexes the whole message. Finalizing
+    per ROW rather than per PASS is what keeps a message that finished ten
+    tool calls ago from rendering with the streaming splice's fold, missing
+    its paragraph breaks, until the child eventually exits.
     """
     if entry.kind == "prompt":
         return InstructionBlock(entry.text)
@@ -732,7 +808,7 @@ def entry_block(
         if fold_width:
             block.set_fold_hint(fold_width)
         block.update_text(entry.text)
-        if settled:
+        if entry.complete or settled:
             block.finalize_text()
         return block
     if entry.kind == "notice":
@@ -832,15 +908,17 @@ def update_entry_block(
             return False
         if entry.text != previous.text:
             block.update_text(entry.text)
-        if settled:
-            # The child STOPPED, which is a change to this row even when its
-            # text did not move: a live block carries the streaming splice's
-            # concatenated fold, and committing re-renders the whole message
-            # once — which is what restores the blank row between paragraphs
-            # that the splice cannot produce mid-stream. Checked on every pass
-            # rather than only on a text change, because the refresh that
-            # observes a job settle usually carries no new text at all;
-            # `finalize_text` is itself idempotent, so this runs once.
+        if entry.complete or settled:
+            # This ROW stopped growing — its own `message_end` arrived, or the
+            # job stopped and nothing is left to send it deltas. Either is a
+            # change to the row even when its text did not move: a live block
+            # carries the streaming splice's concatenated fold, and committing
+            # re-renders the whole message once — which is what restores the
+            # blank row between paragraphs that the splice cannot produce
+            # mid-stream. Checked on every pass rather than only on a text
+            # change, because the refresh that observes a message end or a job
+            # settle usually carries no new text at all; `finalize_text` is
+            # itself idempotent, so this runs once.
             block.finalize_text()
         return True
     if entry == previous:
@@ -1145,6 +1223,16 @@ class SubagentView(Vertical):
         #: the container to mount.
         self._pending: list[SubagentEntry] = []
         self._pending_head: SubagentEntry | None = None
+        #: Refreshes the first reconcile may still wait for a laid-out body.
+        #: `on_mount` fires before the body has a region, so every width the
+        #: page could fold at reads 0 there and `fold_width` falls to its
+        #: 80-column fallback; `_sync_body` postpones instead and replays once
+        #: the body has a real width. It is a BUDGET rather than a flag
+        #: because one refresh is not always enough — the mount-then-fill
+        #: ordering needs two — and it is bounded rather than open so a body
+        #: that never gains a width degrades to the old fallback fold instead
+        #: of postponing the page's only content forever.
+        self._sync_layout_waits = SYNC_LAYOUT_WAITS
         #: Last painted title inputs. The spinner ticks eight times a second
         #: and everything else on the row moves once a second at most.
         self._chrome_state: tuple[Any, ...] | None = None
@@ -1640,7 +1728,18 @@ class SubagentView(Vertical):
                 # same body width every other block on this page does.
                 fold = self._body.scrollable_content_region.width
                 new_blocks = [entry_block(entry, fold_width=fold) for entry in new_entries]
-                self._body.insert_blocks(prefix, new_blocks, anchor_offset=anchor)
+                # TWO LISTS, ONE INDEX. `prefix` counts entries, which exclude
+                # the truncation note; `insert_blocks` indexes the BODY's list,
+                # which holds it at 0 because it is appended before any row
+                # (`_sync_body` mounts it outside the diffed sequence and keeps
+                # it out of `self._blocks`). Measured on a truncated
+                # trajectory: `view._blocks` 168 against a body of 169. Without
+                # the offset a history page prepended to a truncated child
+                # lands one row too high — above the note that is supposed to
+                # head the page. Both conditions are needed at once, which is
+                # why it survived unnoticed (review round 1, N1).
+                head_offset = 1 if self._head_block is not None else 0
+                self._body.insert_blocks(prefix + head_offset, new_blocks, anchor_offset=anchor)
                 self._blocks[prefix:prefix] = new_blocks
                 self._entries[prefix:prefix] = new_entries
                 self._pending = entries
@@ -1706,6 +1805,17 @@ class SubagentView(Vertical):
         rows.insert(1, getattr(self._breadcrumb, "renderable", ""))
         return [_plain(row) for row in rows]
 
+    def _replay_pending_sync(self) -> None:
+        """Reconcile the fold that was postponed for want of a laid-out width.
+
+        Runs one refresh after the deferral, by which point Textual has given
+        the body its region. It reads ``_pending`` rather than closing over the
+        entries it was scheduled with, so a refresh that lands in the gap wins:
+        the page paints what is CURRENT at the moment it can paint correctly,
+        never a snapshot that is already one tick stale.
+        """
+        self._sync_body(self._pending, self._pending_head)
+
     def _sync_body(self, entries: list[SubagentEntry], head: SubagentEntry | None) -> None:
         """Bring the mounted blocks into agreement with ``entries``.
 
@@ -1734,6 +1844,10 @@ class SubagentView(Vertical):
         scrolled up is not moved, because an in-place update mounts nothing;
         and no row is ever dropped, because the fold that produced ``entries``
         has already been through :func:`_supersedes`.
+
+        The FIRST pass is deferred by a frame when the body has not been laid
+        out yet — see the guard below. Reconciling into a zero-width body is
+        not cheaper than waiting, it is just wrong a frame earlier.
         """
         if not self._body.is_mounted:
             return  # `on_mount` replays the pending fold once the body exists
@@ -1743,9 +1857,40 @@ class SubagentView(Vertical):
         # DETACHED and would otherwise fold at 80 columns and re-fold a frame
         # later, visibly.
         fold = self._body.scrollable_content_region.width
+        if not fold and entries and self._sync_layout_waits > 0:
+            # MOUNTED IS NOT LAID OUT. `on_mount` runs before Textual has
+            # assigned this body a region, so every width the page could ask
+            # for — the body's size, its container, the view's own — reads 0,
+            # and a fold of 0 sends `fold_width` to its 80-column fallback.
+            # Measured over 20 opens at 140x34: 2 of them built the page's
+            # first blocks at 80 and re-folded them to 135 a frame later, and
+            # the compositor painted the 80-column build, which is the width
+            # flash on opening a page mid-stream.
+            #
+            # The screen's width is the one non-zero source here (138) and it
+            # is deliberately NOT used: it is the whole terminal, 3 cells wider
+            # than the body's 135, so a hint from it folds too wide and clips.
+            # Waiting one frame is the only way to build at a width that is
+            # RIGHT rather than merely non-zero. It costs a frame of empty
+            # body, not a reflow — the rows appear once, already correct,
+            # instead of appearing narrow and re-folding under the reader.
+            #
+            # A BUDGET, not a one-shot: the mount-then-fill ordering needs two
+            # refreshes before the body has a region, and a single deferral
+            # replayed into a still-zero width and folded at 80 anyway. Bounded
+            # so a body that never gains a width (a page closed under the
+            # deferral, a zero-height layout) falls through to the old fallback
+            # behaviour and paints SOMETHING rather than postponing forever.
+            self._sync_layout_waits -= 1
+            self.call_after_refresh(self._replay_pending_sync)
+            return
         # A row may still receive deltas while the child is working, so a text
-        # block is only committed once the job stops. Finalizing earlier is
-        # what made a streaming message unupdatable and therefore rebuilt.
+        # block is committed once the row itself is done — `entry.complete`,
+        # i.e. its `message_end` arrived — or once the job stops, which
+        # finishes the last message of a child that was killed mid-turn.
+        # Finalizing earlier is what made a streaming message unupdatable and
+        # therefore rebuilt; finalizing per PASS instead of per ROW is what
+        # left finished messages folded as if they were still streaming.
         settled = not self._running and not self._queued
         if head is not None and self._head_block is None:
             self._head_block = NoticeBlock(head.text, head.notice_kind)
