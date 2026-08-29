@@ -14,6 +14,10 @@ submit-on-Enter. The subclass inverts that and takes the terminal key idioms:
   buffer, and inside the text they keep their cursor-move meaning
 - ``Tab`` completes the highlighted command WITHOUT submitting
 - ``Esc`` dismisses the picker, leaving the typed text alone
+- ``Option+←``/``Option+→`` (``Ctrl+←``/``Ctrl+→`` off macOS) move the caret by
+  WORD, and the ``Shift`` variants select by word. Every encoding a terminal
+  can emit for that chord works, including the ``Esc``-prefixed one that used
+  to abort the turn; see :meth:`_on_key`'s escape-coalescing block
 - ``!`` on an EMPTY composer enters shell mode (the bang is consumed, not
   typed). Enter then runs the buffer as a local shell command instead of
   sending a prompt; Esc or backspace on an empty shell-mode buffer leaves
@@ -76,6 +80,7 @@ from rich.segment import Segment
 from rich.style import Style as RichStyle
 from textual import events
 from textual.actions import SkipAction
+from textual.binding import Binding
 from textual.content import Content
 from textual.expand_tabs import expand_tabs_inline
 from textual.geometry import Offset
@@ -662,6 +667,102 @@ SHELL_PLACEHOLDER = "Run a command… — esc to leave"
 class Editor(TextArea):
     """Multiline prompt editor with submit-on-Enter, history, slash-completion."""
 
+    #: Word-wise caret movement on the macOS chord, ADDED to the ``ctrl+arrow``
+    #: bindings ``TextArea`` already ships rather than replacing them: the ctrl
+    #: chord is the Linux/Windows convention and costs nothing to keep, so both
+    #: platforms' muscle memory works in the same build.
+    #:
+    #: This half only covers terminals that encode option+arrow as a CSI
+    #: sequence with modifier 3 (``\x1b[1;3D``), which Textual's parser resolves
+    #: to the ``alt+left`` key name. The other two encodings are handled
+    #: elsewhere: ``\x1bb``/``\x1bf`` (readline meta) already parse to
+    #: ``ctrl+left``/``ctrl+right`` and hit the inherited bindings, and the
+    #: ``Esc``-prefixed form arrives as two separate events and is coalesced in
+    #: :meth:`_on_key`. All three are pinned in
+    #: ``tests/unit/tui/test_word_caret.py``.
+    #:
+    #: ``show=False`` to match every other binding in this app — the footer is
+    #: not a key reference here (see ``OperatorApp.BINDINGS``).
+    #:
+    #: Textual MERGES a subclass's ``BINDINGS`` with its bases' rather than
+    #: overriding them, so declaring this attribute does not cost the editor any
+    #: inherited key (verified against textual 8.2.8: the instance's resolved
+    #: binding map holds ``alt+left`` AND ``ctrl+left``).
+    #: NOTE the vertical chords are deliberately ABSENT from this table. They
+    #: are handled in :meth:`_on_key` by :attr:`VERTICAL_CHORD_KEYS` instead,
+    #: because a ``Binding`` fires through the action system and never enters
+    #: ``_on_key`` — which is exactly how a previous revision destroyed a typed
+    #: slash command (code round 2 F5, ux round 2 U6). See that table.
+    BINDINGS = [
+        Binding("alt+left", "cursor_word_left", "Cursor word left", show=False),
+        Binding("alt+right", "cursor_word_right", "Cursor word right", show=False),
+        Binding("alt+shift+left", "cursor_word_left(True)", "Select word left", show=False),
+        Binding("alt+shift+right", "cursor_word_right(True)", "Select word right", show=False),
+    ]
+
+    #: The CSI-modifier spelling of every vertical option chord, mapped to the
+    #: plain key it must be INDISTINGUISHABLE from.
+    #:
+    #: Vertical chords are normalised to their plain arrow at the top of
+    #: :meth:`_on_key` rather than bound as actions, and the distinction is
+    #: load-bearing. ``up``/``down`` are claimed by FOUR handlers in this widget
+    #: — the model picker, the command picker, history navigation, and finally
+    #: TextArea's caret move — and every one of them lives inside ``_on_key``
+    #: and gates on the literal key name. A ``Binding`` bypasses ``_on_key``
+    #: entirely, so ``alt+up`` reached only a reimplementation of the last two
+    #: rungs and silently closed an open picker, overwriting a half-typed slash
+    #: command with a history entry on exactly the terminals where the key had
+    #: previously been a harmless no-op.
+    #:
+    #: Rewriting the key is therefore not a shortcut but the correctness
+    #: argument: there is ONE implementation of what ``up`` means, and the chord
+    #: cannot drift from it because it does not have its own. Anything added to
+    #: the plain-arrow path in future is inherited for free.
+    VERTICAL_CHORD_KEYS = {
+        "alt+up": "up",
+        "alt+down": "down",
+        "alt+shift+up": "shift+up",
+        "alt+shift+down": "shift+down",
+    }
+
+    #: Every key that, arriving on the message pump turn after an ``escape``,
+    #: proves that escape was the first half of an option+arrow chord rather
+    #: than a press of its own. Maps the key to what the chord should DO.
+    #:
+    #: ``None`` means "cancel the escape and let the key through to its ordinary
+    #: handler". The vertical arrows use it: ``⌥↑``/``⌥↓`` is a real macOS chord
+    #: (move by paragraph), so a user who has just learned ``⌥←`` works will try
+    #: it, and on an Esc-prefixed terminal that used to stop the turn AND
+    #: overwrite the draft from history — strictly worse than the bug this class
+    #: set out to fix (ux round 1, U2). They map to ``None`` rather than to a
+    #: paragraph action deliberately: this composer's ``up``/``down`` already
+    #: carry history navigation and caret movement, and inventing a paragraph
+    #: motion here would be a second, competing meaning for the same physical
+    #: key. Cancelling the stop and passing the key through gives ``⌥↑`` exactly
+    #: the behaviour of ``↑``, which is the conservative reading and never
+    #: destroys a turn or a draft.
+    #:
+    #: An earlier revision excluded the vertical arrows entirely, reasoning that
+    #: swallowing an Esc for them would lose a stop. That was written when the
+    #: deferral was a 100 ms wall-clock window; at one pump turn the race is
+    #: microseconds wide and the same argument that admits ``left``/``right``
+    #: admits these.
+    #:
+    #: Values are UNBOUND METHODS, not action-name strings. A string went
+    #: through ``getattr(self, f"action_{name}")`` and could only fail at
+    #: keypress time if an action were ever renamed (code round 1, F4); a
+    #: direct reference fails at import instead.
+    ESCAPE_CHORD_KEYS: dict[str, tuple[Callable[..., None], bool] | None] = {
+        "left": (TextArea.action_cursor_word_left, False),
+        "right": (TextArea.action_cursor_word_right, False),
+        "shift+left": (TextArea.action_cursor_word_left, True),
+        "shift+right": (TextArea.action_cursor_word_right, True),
+        "up": None,
+        "down": None,
+        "shift+up": None,
+        "shift+down": None,
+    }
+
     #: Maximum remembered prompts.
     HISTORY_LIMIT = 200
 
@@ -798,6 +899,13 @@ class Editor(TextArea):
         # BEFORE ``super().__init__`` because TextArea's constructor loads the
         # initial document through ``load_text`` → ``_sync_picker``.
         self._suspend_picker_sync = False
+        # The escape action held for one pump turn, or ``None`` when no escape
+        # is in flight (the resting state). See the escape-coalescing block
+        # below :meth:`_on_key` for why an escape is ever held at all.
+        # Typed as returning ``object`` because the actions held here are
+        # usually ``post_message`` calls, which return ``bool``; the return is
+        # discarded either way.
+        self._pending_escape: Callable[[], object] | None = None
         # tab_behavior="indent": Tab NEVER moves focus (TUI-013). Command
         # completion consumes the key first; otherwise it indents.
         super().__init__(placeholder=placeholder, soft_wrap=True, tab_behavior="indent")
@@ -1314,6 +1422,74 @@ class Editor(TextArea):
     async def _on_key(self, event: events.Key) -> None:
         """Handle chat keys before TextArea's insert path sees them."""
         key = event.key
+        # A CSI-modifier vertical chord IS its plain arrow, and is rewritten to
+        # one here so that every handler below — both pickers, history, the
+        # caret — sees the key it already gates on. This is the whole fix for
+        # F5/U6: the alternative (binding `alt+up` to an action) skips `_on_key`
+        # and therefore skips the pickers, which is how `⌥↑` came to close an
+        # open list and overwrite a half-typed slash command from history.
+        #
+        # The Esc-prefixed encoding needs no rewrite: `ESCAPE_CHORD_KEYS` maps
+        # its arrows to a pass-through, so it arrives here already spelled
+        # `up`/`down`. Both encodings therefore converge on ONE implementation
+        # of what the arrow means, which is the property that stops them
+        # drifting apart again.
+        #
+        # THE INVARIANT, stated because getting it wrong has now caused a defect
+        # in three consecutive rounds, each time on the encoding the previous
+        # fix did not touch:
+        #
+        #   A key that arrived as its own SELF-CONTAINED chord must never be
+        #   treated as the tail of an escape chord.
+        #
+        # The two encodings carry the same intent in structurally different
+        # shapes. `\x1b[1;3A` is ONE event that already means "option+up";
+        # `\x1b\x1b[A` is TWO events whose first is indistinguishable from a
+        # real Escape until the second arrives. Only the second kind is
+        # evidence about a pending escape. `self_contained` records which kind
+        # this was BEFORE the rewrite erases the distinction, because after the
+        # rewrite both spellings read as `up` and the difference is
+        # unrecoverable (code round 3, F8).
+        self_contained = key in self.VERTICAL_CHORD_KEYS
+        if self_contained:
+            key = self.VERTICAL_CHORD_KEYS[key]
+        # FIRST, ahead of every other branch: an arrow completing a held escape
+        # is the second half of an option+arrow chord, and it must be read as
+        # that before any picker or history handler claims it. See the
+        # escape-coalescing block below `_on_key` for the whole rationale.
+        #
+        # `not self_contained` is the invariant above doing its work. Without
+        # it a rewritten `alt+up` landing while an escape was held was read as
+        # that escape's second half and CANCELLED it, silently dropping every
+        # meaning Esc has — the turn kept running, bang-mode stayed on, an open
+        # list refused to dismiss. The horizontal chords never had the bug only
+        # because `alt+left` is not rewritten and so was never in this table.
+        if (
+            self._pending_escape is not None
+            and not self_contained
+            and key in self.ESCAPE_CHORD_KEYS
+        ):
+            chord = self.ESCAPE_CHORD_KEYS[key]
+            # The escape is DROPPED, not run: the user pressed one chord, so
+            # whatever that escape would have done — stop the turn, leave shell
+            # mode, dismiss a list — must not also happen.
+            self._cancel_escape()
+            if chord is None:
+                # A chord with no motion of its own (the vertical arrows): the
+                # key carries on to its ordinary handler below, so `⌥↑` behaves
+                # exactly like `↑`. Not consumed, deliberately.
+                pass
+            else:
+                action, select = chord
+                action(self, select)
+                event.stop()
+                event.prevent_default()
+                return
+        # Any other key ends the chord window: the escape stood alone, so its
+        # action is owed now and must land BEFORE this key is handled (an Esc
+        # then a typed character must stop the turn, then type the character).
+        if self._pending_escape is not None:
+            self._flush_escape()
         # An advertised answer key, while a question is up and the buffer is
         # empty, answers the question instead of being typed.
         #
@@ -1358,7 +1534,11 @@ class Editor(TextArea):
             if key == "escape":
                 # Esc closes the LIST, not the command: the text survives so a
                 # user who wanted to type the id by hand can carry on.
-                self._model_picker.close()
+                #
+                # Deferred like every other escape meaning, so `⌥←` with the
+                # model list open moves by word instead of closing the list and
+                # nudging one character (ux round 1, U3).
+                self._defer_escape(self._model_picker.close)
                 event.stop()
                 event.prevent_default()
                 return
@@ -1399,13 +1579,13 @@ class Editor(TextArea):
             # gate DROPPED the Esc: the user dismissed the list and then watched
             # it appear anyway. Dismissing an empty argument list records the
             # query, which is what the arriving rows are checked against.
-            self._picker.dismiss()
+            self._defer_escape(self._picker.dismiss)
             event.stop()
             event.prevent_default()
             return
         if self._picker.is_open():
             if key == "escape":
-                self._picker.dismiss()
+                self._defer_escape(self._picker.dismiss)
                 event.stop()
                 event.prevent_default()
                 return
@@ -1488,7 +1668,17 @@ class Editor(TextArea):
             # a prompt, and a user who entered the mode by accident is one
             # keystroke from the resting composer. Stop is one Esc away after.
             if self._shell_mode:
-                self.set_shell_mode(False)
+                # Deferred, and this is the branch where it matters most.
+                # Bang-mode is a full-width editable buffer with a visible
+                # caret, so fixing a typo in a half-typed command is exactly why
+                # someone reaches for `⌥←`. Running this synchronously ejected
+                # the user from shell mode on an Esc-prefixed terminal, and the
+                # ejection is INVISIBLE — the mode's only indicator is the
+                # placeholder, which is hidden the moment the buffer has text.
+                # The user saw an identical frame and their next Enter sent the
+                # command to the model as a prompt instead of running it
+                # (code round 1 F1, ux round 1 U1).
+                self._defer_escape(lambda: self.set_shell_mode(False))
                 event.stop()
                 event.prevent_default()
                 return
@@ -1498,7 +1688,14 @@ class Editor(TextArea):
             # keystrokes went nowhere) and only a LATER press, once focus had
             # already left, reached the app's stop. Consuming the key here keeps
             # focus put and gives Esc one meaning — stop what the agent is doing.
-            self.post_message(StopRequested())
+            #
+            # DEFERRED, not posted: on an Esc-prefixed terminal this same
+            # `escape` may be the first half of an option+arrow chord, and
+            # stopping the turn because the user moved the caret by a word is
+            # issue #370. The key is still consumed immediately (focus stays
+            # put); only the message is held. See the escape-coalescing block
+            # below `_on_key` for the window, the terminals, and the limits.
+            self._defer_escape(lambda: self.post_message(StopRequested()))
             event.stop()
             event.prevent_default()
             return
@@ -1569,7 +1766,179 @@ class Editor(TextArea):
             event.stop()
             event.prevent_default()
             return
+        if key != event.key:
+            # A rewritten vertical chord that no branch above claimed. It cannot
+            # be handed to ``super()``, which would resolve the ORIGINAL
+            # `alt+up` against TextArea's bindings and find nothing — the silent
+            # no-op this rewrite exists to remove. Run the plain arrow's own
+            # action instead, which is where TextArea's `up`/`down` bindings
+            # would have landed anyway.
+            moves = {
+                "up": self.action_cursor_up,
+                "down": self.action_cursor_down,
+                "shift+up": lambda: self.action_cursor_up(True),
+                "shift+down": lambda: self.action_cursor_down(True),
+            }
+            move = moves.get(key)
+            if move is not None:
+                # `_restart_blink` for the same reason the rest of this method
+                # exists: `TextArea._on_key` calls it on every cursor key, and
+                # the whole correctness argument for the rewrite is that a
+                # chord is INDISTINGUISHABLE from its plain arrow. Inert today
+                # — this composer ships `cursor_blink = False`, so there is no
+                # timer to reset — but leaving it out would make that claim
+                # true only by accident of a setting somewhere else, and the
+                # divergence would surface as `⌥↑` parking the caret mid-blink
+                # where `↑` leaves it solid (ux round 3, U10).
+                self._restart_blink()
+                move()
+                event.stop()
+                event.prevent_default()
+                return
         await super()._on_key(event)
+
+    # -- escape/arrow chord coalescing ---------------------------------------
+    #
+    # WHY THIS EXISTS. There is no single byte sequence for option+arrow. Three
+    # encodings are in the field and which one a user gets is a terminal
+    # preference, not a platform fact:
+    #
+    #   \x1b[1;3D   CSI with modifier 3  -> parses to `alt+left`
+    #               (Ghostty, kitty, WezTerm, iTerm2 in CSI mode)
+    #   \x1bb       readline meta-b      -> parses to `ctrl+left`
+    #               (iTerm2's default ⌥← preset, Terminal.app "Option as Meta")
+    #   \x1b\x1b[D  Esc-prefixed         -> parses to TWO events: `escape`,
+    #               then `left` (iTerm2 and Terminal.app "Esc+", a very common
+    #               setting; also what the CSI form degrades to whenever
+    #               TEXTUAL_DISABLE_KITTY_KEY is set)
+    #
+    # The first two reach a binding on their own. The third does not, and before
+    # this code it was actively DESTRUCTIVE: the composer saw a bare `escape`,
+    # ran its escape action — which at the bottom of `_on_key` posts
+    # `StopRequested` — and then moved the caret one character. On that terminal
+    # config, pressing ⌥← to fix a typo ABORTED THE AGENT'S TURN (issue #370).
+    #
+    # THE KEY INSIGHT: THE PARSER HAS ALREADY RESOLVED THE TIMING AMBIGUITY.
+    # This widget does not need a wall-clock window at all, because by the time
+    # a key reaches `_on_key` the question "was anything typed after that Esc?"
+    # is settled. Measured against textual 8.2.8's `XTermParser.feed`:
+    #
+    #   feed("\x1b")       -> []                      nothing emitted at all
+    #   feed("\x1b\x1b[D") -> escape @+0.030ms,       both from ONE parse pass,
+    #                         left   @+0.060ms        ~30 MICROseconds apart
+    #
+    # A lone `\x1b` emits NOTHING until the parser has waited out its own
+    # `ESCAPE_DELAY` and concluded that no sequence followed. So a bare `escape`
+    # arriving here is already proof that nothing came after it. Conversely the
+    # chord's `escape` and `left` are emitted together and land on the message
+    # queue back to back, in order — when `_on_key` handles that `escape`, the
+    # `left` is ALREADY QUEUED behind it.
+    #
+    # Therefore the escape action is deferred by exactly ONE message-pump turn
+    # (`call_later`), not by a duration. That is sufficient by construction: a
+    # queued arrow overtakes the deferred callback and cancels it, and if no
+    # arrow was queued the callback runs on the very next turn. Esc-to-stop
+    # costs one loop turn instead of 100 ms of wall clock — measured at 9 ms
+    # mean / 14 ms worst case even with the event loop under sustained load,
+    # against 37 ms / 197 ms for `call_after_refresh`, which waits for a repaint
+    # and was rejected for exactly that reason. `set_timer(0, ...)` is not an
+    # option: it raises ZeroDivisionError in this version of Textual.
+    #
+    # WHAT BREAKS IF THE DEFERRAL IS REMOVED: ⌥←/⌥→ goes back to stopping the
+    # agent on every Esc-prefixed terminal. Replacing it with a wall-clock delay
+    # is a regression in the opposite direction — it makes the app's stop key
+    # perceptibly late to buy certainty the parser already provides for free.
+    #
+    # THE INHERENT LIMIT, stated plainly: a user who presses Esc and then an
+    # arrow so quickly that both land in one pump turn is byte-indistinguishable
+    # from the chord, and is read as the chord. That is a far tighter race than
+    # the old window (one event-loop turn, not a tenth of a second) and cannot
+    # realistically be hit by hand.
+    #
+    # EVERY ESCAPE MEANING IS DEFERRED, not just the bottom one. An earlier
+    # revision deferred only the stop-the-turn branch and let the picker-dismiss,
+    # model-picker-close and shell-mode-exit branches run synchronously, arguing
+    # that a visible list closing late would read as lag and that those presses
+    # were unambiguous anyway. Both halves of that argument were wrong:
+    #
+    #   - The lag argument was sized against a 100 ms wall-clock window. At one
+    #     pump turn the delay is ~4 ms and measurably inside the noise of the
+    #     synchronous path, so there is no perceptible cost to paying it
+    #     everywhere.
+    #   - The unambiguity argument does not survive contact with shell mode,
+    #     which is a full-width editable buffer with a visible caret — the state
+    #     where word movement is MOST useful, not least. It left `⌥←` ejecting
+    #     the user from bang-mode with an identical frame, flipping what Enter
+    #     does (F1/U1). The picker case was the same defect with visible
+    #     feedback (U3).
+    #
+    # Deferring uniformly also removes a whole class of future bug: any escape
+    # meaning added later is covered by default instead of silently becoming the
+    # next uncovered branch. The cost is that an escape's effect lands one pump
+    # turn later than the keypress, which is not observable to a user.
+
+    def _defer_escape(self, action: Callable[[], object]) -> None:
+        """Hold ``action`` for one pump turn, in case a queued arrow follows.
+
+        A second escape arriving while one is pending FLUSHES the first
+        immediately rather than replacing it: two presses must produce two
+        actions (Esc-Esc is the subagent-cancel escalation ladder, where
+        collapsing the pair would silently drop a rung).
+        """
+        self._flush_escape()
+        self._pending_escape = action
+        # `call_later`, not `call_after_refresh`: both order correctly behind a
+        # queued arrow, but `call_after_refresh` waits for a repaint, which under
+        # a busy loop pushed the stop out to ~197 ms — reintroducing the very
+        # latency this mechanism exists to avoid.
+        self.call_later(self._flush_escape)
+
+    def _flush_escape(self) -> None:
+        """Run a held escape action now, if one is still pending.
+
+        Safe to call more than once, and safe to call after
+        :meth:`_cancel_escape` has already dropped the action: the queued
+        ``call_later`` callback cannot be unscheduled, so it always arrives and
+        finds the pending slot empty when the chord claimed it.
+        """
+        action = self._pending_escape
+        # Cleared BEFORE the action runs: the action can post messages that
+        # re-enter the composer, and a half-cleared pending state would let the
+        # same escape fire twice.
+        self._pending_escape = None
+        if action is not None:
+            action()
+
+    def _cancel_escape(self) -> None:
+        """Drop a held escape action without running it — the chord case."""
+        self._pending_escape = None
+
+    # NO ``super()`` CALL IN EITHER HOOK BELOW, deliberately. Textual dispatches
+    # EVERY matching handler it finds walking the MRO (see
+    # ``MessagePump._get_dispatch_methods``), so ``Widget._on_blur`` already runs
+    # on its own — calling it here as well runs the base handler TWICE, which
+    # posts a second ``DescendantBlur`` and left the app mis-tracking focus (it
+    # showed "session is still starting" for a booted session). These override
+    # points ADD behaviour; they do not chain.
+
+    def _on_blur(self, event: events.Blur) -> None:
+        # A held escape must not outlive the composer's focus. Losing focus
+        # means the arrow that would have completed the chord is never coming,
+        # so the press was a real Esc and its action is owed now — a deferral
+        # resolving later would stop a turn the user started after looking away.
+        self._flush_escape()
+
+    def _on_unmount(self) -> None:
+        # Teardown drops the action rather than flushing it: there is no surface
+        # left for a stop, a steer-recall or a mode exit to act on.
+        #
+        # In practice this is a BACKSTOP, not the usual path. A real
+        # ``remove()`` blurs the widget first, so ``_on_blur`` has already
+        # flushed by the time this runs; only an unfocused teardown reaches here
+        # with something still pending. Kept because the invariant it guarantees
+        # — the slot is always settled by teardown, so no queued ``call_later``
+        # can fire into a widget that is gone — must not depend on focus state.
+        self._cancel_escape()
 
     # -- submit -------------------------------------------------------------
     def _submit(self) -> None:
