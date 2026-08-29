@@ -419,8 +419,22 @@ def _find_tool(
 def make_mcp_resolver(
     manager: McpResourceManager,
     activate: Callable[[str, str], None],
+    *,
+    deny_activation_reason: str | None = None,
 ) -> Callable[[str], str | None]:
-    """Create a ``read`` resolver that activates exactly one selected tool."""
+    """Create a ``read`` resolver that activates exactly one selected tool.
+
+    ``deny_activation_reason`` splits DISCOVERY from ACTIVATION for a caller
+    that may read the catalogue but must not mint new tool schemas — a
+    tool-restricted subagent role (see
+    :func:`local_operator.harness.subagent._child_mcp_wiring`). Index and
+    server listings are pure reads and stay available; a tool URL renders the
+    reason instead of enabling anything, so the agent LEARNS why and reports
+    it rather than re-reading the same URL waiting for a schema that will
+    never arrive. The split lives here because this is the module that parses
+    ``mcp://`` URLs, and a caller re-deriving "is this a tool URL?" would be a
+    second parser to keep in step with this one.
+    """
 
     def resolver(url: str) -> str | None:
         if not url.startswith(MCP_SCHEME):
@@ -448,6 +462,13 @@ def make_mcp_resolver(
             )
 
         raw_name, tool = found
+        if deny_activation_reason is not None:
+            return "\n".join(
+                [
+                    f"# MCP tool not enabled: {server_name}/{raw_name}",
+                    deny_activation_reason,
+                ]
+            )
         activate(server_name, raw_name)
         description = _compact(tool.description, MAX_TOOL_DETAIL_CHARS) or "No description."
         return "\n".join(
