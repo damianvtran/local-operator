@@ -33,6 +33,7 @@ import io
 import random
 import threading
 import time
+from contextlib import contextmanager
 
 import pytest
 from PIL import Image
@@ -46,7 +47,6 @@ from local_operator.tui.widgets.editor import (
     Editor,
     EditorPasteAttached,
     EditorPasteEmpty,
-    EditorPasteReading,
 )
 
 
@@ -54,6 +54,22 @@ def _png_bytes(width: int = 1568, height: int = 200) -> bytes:
     buffer = io.BytesIO()
     Image.new("RGB", (width, height), (30, 30, 40)).save(buffer, "PNG")
     return buffer.getvalue()
+
+
+@contextmanager
+def monkeypatch_context(target, name, value):
+    """Patch an attribute for a block, restoring it afterwards.
+
+    pytest's `monkeypatch` unwinds at teardown, which is too late for a test
+    that has to leave the patch in place only while the app is running and then
+    assert on samples taken during it.
+    """
+    original = getattr(target, name)
+    setattr(target, name, value)
+    try:
+        yield
+    finally:
+        setattr(target, name, original)
 
 
 class Host(App[None]):
@@ -64,7 +80,10 @@ class Host(App[None]):
         super().__init__()
         self.empty_notices: list[EditorPasteEmpty] = []
         self.attached_notices: list[EditorPasteAttached] = []
-        self.reading_notices: list[EditorPasteReading] = []
+        #: Samples of the reading card's state, as ``(raised, when)``. The Host
+        #: stands in for the app hook the composer calls; see
+        #: `Editor.PASTE_READING_HOOK`.
+        self.reading_calls: list[bool] = []
 
     def compose(self) -> ComposeResult:
         yield Editor()
@@ -75,8 +94,8 @@ class Host(App[None]):
     def on_editor_paste_attached(self, message: EditorPasteAttached) -> None:
         self.attached_notices.append(message)
 
-    def on_editor_paste_reading(self, message: EditorPasteReading) -> None:
-        self.reading_notices.append(message)
+    def show_clipboard_reading_notice(self, reading: bool) -> None:
+        self.reading_calls.append(reading)
 
 
 async def _paste(app: App[None], pilot, text: str) -> None:
@@ -1216,6 +1235,11 @@ async def test_a_slow_read_says_it_is_working_and_a_fast_one_stays_silent(monkey
     read the user can perceive owes them an explanation — but the fast read is
     the common one and a card flickering through the shared slot on every
     paste is worse than the pause it describes (ux round 1, U3).
+
+    The card must also be RETIRED on the way out, on every shape. Text is the
+    one that used to leak: it raises no `EditorPasteAttached`, so nothing
+    withdrew the progress card and it sat over a completed paste for its full
+    duration (design round 2, D7).
     """
     monkeypatch.setattr(editor_module, "PASTE_READING_NOTICE_DELAY_S", 0.05)
 
@@ -1229,7 +1253,10 @@ async def test_a_slow_read_says_it_is_working_and_a_fast_one_stays_silent(monkey
         app.query_one(Editor).focus()
         await pilot.pause()
         await _ctrl_v(app, pilot)
-        assert len(app.reading_notices) == 1, "a slow read must acknowledge itself"
+        assert app.reading_calls == [True, False], (
+            "a slow read must raise the card and then retire it; a trailing "
+            "True is a progress card left over a finished paste (D7)"
+        )
 
     _stub_clipboard(monkeypatch, text="quick")
     app = Host()
@@ -1237,7 +1264,119 @@ async def test_a_slow_read_says_it_is_working_and_a_fast_one_stays_silent(monkey
         app.query_one(Editor).focus()
         await pilot.pause()
         await _ctrl_v(app, pilot)
-        assert app.reading_notices == [], "a fast read must not flash a card"
+        assert app.reading_calls == [], "a fast read must not flash a card"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "contents",
+    [
+        pytest.param(ClipboardContents(text="late"), id="text"),
+        pytest.param(ClipboardContents(), id="empty"),
+        pytest.param(ClipboardContents(timed_out=True), id="timeout"),
+        pytest.param(ClipboardContents(refused_remote=True), id="remote"),
+    ],
+)
+async def test_every_outcome_retires_the_reading_card(monkeypatch, contents) -> None:
+    """A progress card is retired by ANY outcome, not only by ones that
+    contradict it.
+
+    The image and file-URL routes were always clean because they post
+    `EditorPasteAttached`, which withdraws the shared card. Text, empty,
+    timeout and remote post no such message, and text — the commonest ctrl+v
+    shape — left "Reading the clipboard…" on screen over a completed paste
+    (design round 2, D7). Retirement now lives on the one path every outcome
+    passes through, so this is parametrised over all of them rather than
+    pinning the single branch that was reported.
+    """
+    monkeypatch.setattr(editor_module, "PASTE_READING_NOTICE_DELAY_S", 0.05)
+
+    def slow(*args, **kwargs):
+        time.sleep(0.3)
+        return contents
+
+    monkeypatch.setattr(editor_module, "read_clipboard", slow)
+    app = Host()
+    async with app.run_test() as pilot:
+        app.query_one(Editor).focus()
+        await pilot.pause()
+        await _ctrl_v(app, pilot)
+
+        assert app.reading_calls and app.reading_calls[0] is True
+        assert app.reading_calls[-1] is False, "the card outlived its own read"
+
+
+@pytest.mark.asyncio
+async def test_the_reading_card_is_on_screen_while_the_read_is_still_running() -> None:
+    """THE TEST THAT WOULD HAVE CAUGHT U3, and the reason it is shaped this way.
+
+    The previous version asserted the notice was RECEIVED
+    (`len(reading_notices) == 1`). That was true while the card was invisible
+    to every user: `ctrl+v` is an awaited binding action holding the Editor's
+    message pump, so a message posted from the timer could not be delivered
+    until the action returned, and the card entered the DOM 2-3 ms before the
+    paste it was meant to narrate (ux round 2, U3/U8). Asserting delivery
+    proved the branch works once entered, not that the user ever reaches it —
+    the same shape of gap that let #376 ship.
+
+    So this samples the REAL `Toast` in the REAL `OperatorApp` from inside the
+    clipboard read itself — the one place that is genuinely concurrent with the
+    stall, because the read runs on a worker thread while the action awaits it.
+    Sampling from a timer does not work and that is itself the finding: every
+    scheduled callback on either pump is queued behind the blocked handler, so
+    a timer-based sample reports the post-read state no matter when it was
+    scheduled.
+
+    It fails if the card is not up while the read is running, whatever the
+    delivery mechanism, which is precisely what the old
+    `len(reading_notices) == 1` assertion could not detect.
+    """
+    from local_operator.tui.app import CLIPBOARD_READING_NOTICE, OperatorApp
+    from local_operator.tui.widgets.toast import Toast
+    from tests.unit.tui.test_app_pilot import FakeSession, _factory
+
+    read_seconds = 0.6
+    samples: list[tuple[float, bool, str]] = []
+    toast_box: list[Toast] = []
+
+    def slow(*args, **kwargs):
+        # Runs on the worker thread `asyncio.to_thread` hands the read to, so
+        # this executes WHILE the action is suspended. Reading the widget's
+        # attributes is safe: `show` has already mutated them synchronously on
+        # the loop thread before this sampling window opens.
+        started = time.monotonic()
+        while time.monotonic() - started < read_seconds:
+            time.sleep(0.1)
+            toast = toast_box[0]
+            samples.append((round(time.monotonic() - started, 2), toast.display, toast.message))
+        return ClipboardContents(text="done")
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        editor.focus()
+        toast_box.append(app.query_one(Toast))
+        with (
+            monkeypatch_context(editor_module, "read_clipboard", slow),
+            monkeypatch_context(editor_module, "PASTE_READING_NOTICE_DELAY_S", 0.05),
+        ):
+            await pilot.press("ctrl+v")
+            for _ in range(40):
+                await pilot.pause()
+
+    assert samples, "the read never sampled the card"
+    # The first sample is taken at ~0.1 s, before the 0.05 s delay has been
+    # crossed by the timer on some runs, so the assertion is that the card is
+    # up for the REST of the stall rather than from its first instant.
+    during = [sample for sample in samples if sample[0] >= 0.25]
+    assert during, "no sample landed inside the stall"
+    for at, visible, message in during:
+        assert visible and message == CLIPBOARD_READING_NOTICE, (
+            f"at {at}s of a {read_seconds}s read the card was {message!r} "
+            f"(visible={visible}); it must be on screen DURING the stall, not "
+            "delivered after the read it explains has finished"
+        )
 
 
 @pytest.mark.asyncio
@@ -1365,3 +1504,142 @@ async def test_ctrl_v_and_the_empty_paste_produce_the_same_marker(monkeypatch) -
             return editor.text
 
     assert await marker_for(True) == await marker_for(False)
+
+
+@pytest.mark.asyncio
+async def test_the_composer_names_ctrl_v_until_the_key_has_been_used(monkeypatch) -> None:
+    """The one affordance that reaches the STRANDED user (design/ux round 2, U1).
+
+    The reported journey is mid-session: the user has been working, takes a
+    screenshot, presses `Cmd+V` and gets a beep. The terminal delivers zero
+    bytes for that gesture, so no app code runs and no reactive notice is
+    possible — whatever teaches the key has to be on screen already.
+    `welcome.TIPS` is not: `WelcomeView` is hidden after the first prompt, and
+    with animation disabled its rotation never runs at all. The composer
+    placeholder is visible in exactly the empty-composer state a user is in
+    when they reach for a paste.
+
+    It retires on first successful use, so it teaches once instead of nagging.
+    """
+    _stub_clipboard(monkeypatch, text="pasted")
+    app = Host()
+    async with app.run_test() as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+
+        assert editor.placeholder == editor_module.PASTE_HINT_PLACEHOLDER
+        assert "ctrl+v" in str(editor.placeholder)
+
+        await _ctrl_v(app, pilot)
+
+        assert editor.placeholder == editor_module.DEFAULT_PLACEHOLDER, (
+            "the hint must retire once the user has used the key, or a one-time "
+            "affordance becomes standing nag copy"
+        )
+        assert editor.resting_placeholder == editor_module.DEFAULT_PLACEHOLDER
+
+
+@pytest.mark.asyncio
+async def test_a_failed_paste_keeps_the_hint_up(monkeypatch) -> None:
+    """Retirement is keyed on the key having WORKED, not on it having been
+    pressed. A user whose clipboard was empty has learned nothing about
+    pasting an image, so the placeholder still owes them the key."""
+    _stub_clipboard(monkeypatch)
+    app = Host()
+    async with app.run_test() as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await _ctrl_v(app, pilot)
+
+        assert editor.placeholder == editor_module.PASTE_HINT_PLACEHOLDER
+
+
+@pytest.mark.asyncio
+async def test_a_mode_placeholder_is_not_overwritten_by_the_paste_hint(monkeypatch) -> None:
+    """A mode that owns the composer is showing its own voice, and returning to
+    rest must ask what the resting copy currently is rather than assume.
+
+    Hardcoding `DEFAULT_PLACEHOLDER` on a mode exit silently retires a hint the
+    user has not used yet, which is why `resting_placeholder` is the single
+    authority every restore path goes through.
+    """
+    _stub_clipboard(monkeypatch, text="pasted")
+    app = Host()
+    async with app.run_test() as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+
+        editor.set_shell_mode(True)
+        assert editor.placeholder == editor_module.SHELL_PLACEHOLDER
+        editor.set_shell_mode(False)
+        assert (
+            editor.placeholder == editor_module.PASTE_HINT_PLACEHOLDER
+        ), "leaving a mode must not retire an unused hint"
+
+        await _ctrl_v(app, pilot)
+        editor.set_shell_mode(True)
+        editor.set_shell_mode(False)
+        assert (
+            editor.placeholder == editor_module.DEFAULT_PLACEHOLDER
+        ), "and must not resurrect a hint the user has already acted on"
+
+
+@pytest.mark.asyncio
+async def test_over_budget_clipboard_text_names_its_own_cause(monkeypatch) -> None:
+    """A user who copied a huge log and pressed ctrl+v was told the clipboard
+    was empty (code round 2, F7). Declining the payload is deliberate — a
+    silently truncated paste is damage nobody sees until they read back what
+    they sent — but the report has to name what happened."""
+    monkeypatch.setattr(
+        editor_module,
+        "read_clipboard",
+        lambda *a, **k: ClipboardContents(text_too_large=True),
+    )
+    app = Host()
+    async with app.run_test() as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await _ctrl_v(app, pilot)
+
+        assert editor.text == ""
+        assert [notice.reason for notice in app.empty_notices] == ["too_large"]
+
+
+@pytest.mark.asyncio
+async def test_every_paste_notice_fits_the_toast_on_one_line() -> None:
+    """Every card this feature can raise must fit the toast's content box.
+
+    Two of them did not: `unattachable` (59 cells) and `unreadable` (64)
+    wrapped to two lines and clipped the ASCII logo behind the card — the same
+    defect D4 was raised for on the SSH copy. They were left in round 1 as
+    untouched copy, but this PR is what made them REACHABLE: on base both were
+    raised only from the zero-byte paste path that never fires outside cmux
+    (design round 2, D8).
+
+    Pinned as a property of the whole family rather than as three string
+    assertions, so a future notice cannot reintroduce the wrap.
+    """
+    from rich.cells import cell_len
+
+    from local_operator.tui.app import CLIPBOARD_READING_NOTICE, OperatorApp
+    from local_operator.tui.widgets.toast import Toast
+    from tests.unit.tui.test_app_pilot import FakeSession, _factory
+
+    reasons = ["nothing", "too_large", "timeout", "remote", "unattachable", "unreadable"]
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        toast = app.query_one(Toast)
+        budget = toast.content_cells
+        for reason in reasons:
+            app.on_editor_paste_empty(EditorPasteEmpty(reason=reason))
+            await pilot.pause()
+            assert cell_len(toast.message) <= budget, (
+                f"{reason!r} notice is {cell_len(toast.message)} cells against a "
+                f"{budget}-cell box: it wraps and clips the logo behind it"
+            )
+        assert cell_len(CLIPBOARD_READING_NOTICE) <= budget

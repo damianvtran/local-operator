@@ -239,6 +239,14 @@ MODEL_SETUP = "setup"
 #: The few affordances a first-time user actually needs. ``/`` and ``/help``
 #: are kept separate on purpose: one is the inline picker, the other prints the
 #: full two-column list — a user who has met neither cannot infer the other.
+#:
+#: ``ctrl+v`` is deliberately NOT here, though it was tried. A fourth row costs
+#: the splash a whole terminal row (the full block goes 23 -> 24), and the
+#: height ladder pins that budget: at 28 rows the mark is the section that
+#: loses. Trading the logo for a key reference is the wrong trade when the key
+#: has a surface that reaches further for free — the composer placeholder,
+#: which is on screen mid-session where this splash is not (design/ux round 2,
+#: U1). See :data:`~local_operator.tui.widgets.editor.DEFAULT_PLACEHOLDER`.
 HINTS: tuple[tuple[str, str], ...] = (
     ("/", "command picker"),
     ("/help", "all commands"),

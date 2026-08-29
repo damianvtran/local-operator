@@ -141,7 +141,6 @@ from local_operator.tui.widgets.ask_picker import AskPickerScreen
 from local_operator.tui.widgets.assistant import AssistantBlock
 from local_operator.tui.widgets.editor import (
     ASIDE_PLACEHOLDER,
-    DEFAULT_PLACEHOLDER,
     READ_ONLY_PLACEHOLDER,
     SHELL_PLACEHOLDER,
     ArgumentHighlightChanged,
@@ -152,7 +151,6 @@ from local_operator.tui.widgets.editor import (
     EditorCopyStale,
     EditorPasteAttached,
     EditorPasteEmpty,
-    EditorPasteReading,
     EditorQuit,
     EditorSubmitted,
     InlineCommandRequested,
@@ -1149,6 +1147,13 @@ COMPOSER_COPY = object()
 #: holding `[Image #1, 1568x200]`, several seconds later, with no keypress to
 #: explain it.
 COMPOSER_PASTE_NOTICE = object()
+
+#: What the composer says while a clipboard read is in flight. 22 cells, so it
+#: fits the toast's 58-cell content box at every width (design round 2, D4's
+#: measurement). Named here rather than inlined because the tests assert the
+#: user-visible string, and a card whose copy only exists inside a method body
+#: can drift from what the test pins.
+CLIPBOARD_READING_NOTICE = "Reading the clipboard…"
 
 
 class Chrome(Static):
@@ -5110,26 +5115,42 @@ class OperatorApp(App[None]):
         """
         self.query_one(Toast).withdraw(COMPOSER_COPY)
 
-    def on_editor_paste_reading(self, message: EditorPasteReading) -> None:
-        """A clipboard read is taking long enough to need explaining.
+    def show_clipboard_reading_notice(self, reading: bool) -> None:
+        """Raise or retire the in-flight clipboard-read card.
 
-        The composer does not process input while `ctrl+v`'s read is in
-        flight, and on a loaded machine that is 1.3-2.0 s of apparent
-        unresponsiveness with nothing on screen saying why (ux round 1, U3).
-        This card is the acknowledgement.
+        **Called DIRECTLY by the composer, not driven by a message, and the
+        difference is the whole fix.** `ctrl+v` is an awaited binding action on
+        the Editor's own message pump, so a message posted while that action is
+        suspended cannot be delivered until it returns: the card was measured
+        arriving 2-3 ms before the paste it was meant to narrate, at every read
+        duration (ux round 2, U3). The event loop is not blocked, so a timer
+        callback that calls this method runs on time and the card is on screen
+        while the read is still in flight. See `Editor.PASTE_READING_HOOK`.
 
-        A COURTESY, not a failure: the user just pressed a key and this is
-        news about their own gesture, so `yield_to_actionable` keeps it from
-        evicting an MCP error they have not read. It takes the same owner as
-        the paste notices, so whichever outcome lands next
-        (`EditorPasteAttached` or `EditorPasteEmpty`) replaces or withdraws it
-        rather than leaving "Reading the clipboard…" on screen behind a
-        finished paste.
+        `reading=False` retires it, and the composer calls that on EVERY
+        outcome rather than leaving each branch to clean up. The text branch
+        raises no `EditorPasteAttached` — it attaches nothing, so there is no
+        failure claim to falsify — and so used to leave this card sitting over
+        a completed paste for its full duration on the commonest ctrl+v shape
+        (design round 2, D7).
+
+        A COURTESY, not a failure: the user just pressed a key and this is news
+        about their own gesture, so `yield_to_actionable` keeps it from
+        evicting an MCP error they have not read. It takes the paste notices'
+        owner, so a later outcome replaces or withdraws it through the
+        machinery those notices already use.
         """
         from local_operator.tui.widgets.toast import TOAST_DEFAULT_MS
 
-        self.query_one(Toast).show(
-            "Reading the clipboard…",
+        toast = self.query_one(Toast)
+        if not reading:
+            # `withdraw` refuses any card that is not ours, so an MCP failure
+            # that took the slot while the read ran is never pulled out from
+            # under the user.
+            toast.withdraw(COMPOSER_PASTE_NOTICE)
+            return
+        toast.show(
+            CLIPBOARD_READING_NOTICE,
             duration_ms=TOAST_DEFAULT_MS,
             yield_to_actionable=True,
             owner=COMPOSER_PASTE_NOTICE,
@@ -5193,7 +5214,15 @@ class OperatorApp(App[None]):
             # same bounding tail, so a refusal caused by the IMAGE cannot be
             # cured by changing how it is delivered, and the retry fails
             # silently because the path branch raises no notice (round 2, D10).
-            text = "Couldn't attach that image. It may be too large or corrupt."
+            # 45 cells. The previous copy was 59 against the toast's 58-cell
+            # content box, so it wrapped to two lines and clipped the logo -
+            # the identical defect D4 was raised for on the SSH notice. It was
+            # left alone in round 1 as untouched copy; the reachability is what
+            # changed, and this PR is what changed it (design round 2, D8): on
+            # base this branch was reachable only from the zero-byte paste path
+            # that never fires outside cmux, and ctrl+v now reaches it for
+            # every user.
+            text = "Couldn't attach that image. Too large or corrupt."
         elif message.reason == "unreadable":
             # States the outcome, not a cause. This one branch is reached by
             # five different failures — a non-image file, a HEIC, an
@@ -5204,7 +5233,16 @@ class OperatorApp(App[None]):
             # PNG, the only remedy it suggests is converting a PNG to a PNG
             # (round 3, D12). Same discipline as D2/U2: name what happened,
             # never guess why.
-            text = "Couldn't attach that file. It may be too large, or not an image."
+            # 48 cells, down from 64 and the widest of the family. Same D8
+            # reasoning as the branch above, and it keeps the two causes the
+            # branch can honestly name without asserting which one applies.
+            text = "Couldn't attach that file. Too large, or not an image."
+        elif message.reason == "too_large":
+            # Names the payload, not the clipboard. The bound is deliberate -
+            # truncating a paste is invisible damage - so the honest report is
+            # what was declined and why, which is also what tells the user the
+            # retry that works (paste less, or use a file).
+            text = "That clipboard text is too large to paste."
         elif message.reason == "timeout":
             # NOT "nothing". The read was cut short, so this card cannot say
             # what was on the clipboard, and the previous copy said it was
@@ -9895,7 +9933,10 @@ class OperatorApp(App[None]):
         elif editor.shell_mode:
             editor.placeholder = SHELL_PLACEHOLDER
         else:
-            editor.placeholder = DEFAULT_PLACEHOLDER
+            # ASKED, not assumed: the resting copy still names `ctrl+v` until
+            # the user has pasted with it once, and hardcoding the plain
+            # placeholder here would retire that hint on an unrelated mode exit.
+            editor.placeholder = editor.resting_placeholder
         # Not focusable while inert: a caret in a field that refuses every key
         # is the most misleading thing this mode could paint, and ↑↓ have to
         # reach the transcript that the hint says they scroll. The caret is
@@ -13181,7 +13222,7 @@ class OperatorApp(App[None]):
         # the common case (the aside was opened from the resting composer) —
         # and then the aside's own placeholder would stay on screen. The mode
         # decides the voice either way.
-        editor.placeholder = SHELL_PLACEHOLDER if editor.shell_mode else DEFAULT_PLACEHOLDER
+        editor.placeholder = SHELL_PLACEHOLDER if editor.shell_mode else editor.resting_placeholder
         editor.load_text(draft or "")
         # AFTER `load_text`: adoption re-keys onto the markers now in the
         # buffer, so the text has to be there first.

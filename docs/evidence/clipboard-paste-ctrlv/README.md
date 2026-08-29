@@ -115,3 +115,60 @@ python3 probe2.py /tmp/out.bin 10
 # put a PNG on the pasteboard
 osascript -e 'set the clipboard to (read (POSIX file "…/shot-source.png") as «class PNGf»)'
 ```
+
+
+## 7. Round 2 review fixes
+
+**U3 — the progress card now paints DURING the read.** Round 2 measured the
+card arriving 2-3 ms before the paste at every read duration: the timer fired
+on time (0.351 s) but the handler ran at `t_done`, because
+`action_system_paste` is an awaited binding action holding the Editor's message
+pump and `post_message` enqueues onto that same blocked queue. Posting to the
+App's pump does not help either (measured: handler at 1.512 s against a 1.5 s
+read). The event loop is fine throughout, so the card is now raised by a timer
+callback that CALLS the app directly instead of enqueuing anything.
+
+| artifact | what it shows |
+|---|---|
+| `terminal-card-during-read.png` | **1.6 s into a 3.5 s read**: "Reading the clipboard…" is on screen. This is the exact frame round 2 captured as blank. |
+| `terminal-card-retired.png` | after the read: card gone, `[Image #1, 900x600]` attached |
+| `terminal-text-card-retired.png` | **D7**: the text route, 5.5 s after the paste, with no stale card. It used to sit for the full 5 s. |
+
+The first frame also shows the U1 placeholder (`ctrl+v pastes an image`), and
+the third shows it retired after the key has been used once.
+
+Measured directly, before and after:
+
+```
+BEFORE  read=2.0s  handler ran at 2.012s  action returned at 2.013s
+AFTER   card visible at 0.4s, 0.7s and 1.0s of a 1.3s read
+```
+
+**U8 — the test now fails if the card never paints.** The old assertion was
+`len(reading_notices) == 1`, which was true while the card was invisible to
+every user. `test_the_reading_card_is_on_screen_while_the_read_is_still_running`
+samples the real `Toast` in the real `OperatorApp` from inside the clipboard
+read itself (the one place genuinely concurrent with the stall). Verified by
+regressing the fix deliberately:
+
+```
+with the direct call      : PASSED
+with the call deferred    : FAILED - "at 0.32s of a 0.6s read the card was ''"
+```
+
+Sampling from a timer does not work, and that is itself the finding: every
+scheduled callback on either pump is queued behind the blocked handler.
+
+**U1 — the affordance now reaches the mid-session user.** Verified the
+designer's measurement first: with `LOCAL_OPERATOR_NO_SHIMMER=1`,
+`_sync_tip_timer` creates no timer at all, `_tip_index` holds at 0 forever, and
+the `ctrl+v` tip is unreachable on any launch for those users. The tip stays
+(it is right for the splash) but is no longer the only surface: the composer
+placeholder now reads `Message Local Operator…  ctrl+v pastes an image` until
+the key has been used once. That is on screen in exactly the empty-composer
+state a user is in when they reach for a paste, mid-session, where
+`WelcomeView` is not displayed at all.
+
+Adding a fourth `welcome.HINTS` row was tried and reverted: it costs the splash
+a whole terminal row (the block goes 23 -> 24) and the height ladder spends
+that row on the logo.

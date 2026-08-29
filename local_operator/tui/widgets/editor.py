@@ -94,6 +94,7 @@ import base64
 import re
 import shlex
 import time
+from functools import partial
 from bisect import bisect_right
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
@@ -154,6 +155,23 @@ MAX_ATTACHMENT_BYTES = 4 * 1024 * 1024
 #: instant and below the fastest real read observed, so a healthy idle-machine
 #: paste (0.26 s) still says nothing at all.
 PASTE_READING_NOTICE_DELAY_S = 0.35
+
+#: How long the in-flight card stays up once raised, however fast the read then
+#: finishes.
+#:
+#: Without it a read landing just past the delay above shows the card for the
+#: few milliseconds between the timer firing and the read returning \u2014 measured
+#: at ~42 ms for reads near 400 ms (design round 2, D10). A card that appears
+#: and vanishes inside one frame reads as a glitch rather than as an
+#: explanation, which is worse than never showing it: the user cannot read it,
+#: but they do see something flicker.
+#:
+#: 400 ms is long enough for the card to be legible at a glance and short
+#: enough that it is gone before a user who pasted successfully looks away from
+#: their own text. It only ever DELAYS the retirement, never the paste itself:
+#: the marker or text lands the instant the read returns, and only the card
+#: lingers.
+PASTE_READING_NOTICE_MIN_S = 0.4
 
 #: A paste is treated as paths only if EVERY segment looks like one. Requiring
 #: a separator is what keeps prose out: "see screenshot.png" splits into two
@@ -489,29 +507,29 @@ class EditorCopyStale(Message):
         super().__init__()
 
 
-class EditorPasteReading(Message):
-    """Posted when a clipboard read is taking long enough for the user to notice.
-
-    ``Ctrl+V`` is an awaited binding action, so the composer does not process
-    input again until the read returns. The read itself is threaded, but the
-    ACTION is not fire-and-forget, and on this machine an ordinary screenshot
-    measures 1.3-2.0 s (0.26 s on an idle box, 1.44 s for a full-screen
-    capture). For that window the composer simply stops with nothing on screen
-    saying why, which reads as a hung app rather than as a pause (ux round 1,
-    U3).
-
-    Posted only after :data:`PASTE_READING_NOTICE_DELAY_S`, so the common fast
-    read stays silent. A card that flashed up and vanished on every paste would
-    be worse than the pause it explains: the notice slot is shared, and a
-    routine gesture must not flicker through it (the same discipline
-    :class:`EditorPasteEmpty` follows in yielding to actionable notices).
-
-    Carries nothing. "A read is in flight" needs no payload, and the app owns
-    the wording the same way it owns every other card in this family.
-    """
-
-    def __init__(self) -> None:
-        super().__init__()
+#: Name of the app hook the composer calls to raise and retire the in-flight
+#: read card. Looked up with ``getattr`` so a host without one (the widget
+#: tests, any embedder) simply has no progress card rather than an error.
+#:
+#: **A DIRECT CALL, NOT A MESSAGE, AND THAT IS THE WHOLE POINT.** The first
+#: revision posted an ``EditorPasteReading`` message from the timer, which is
+#: the idiom every other notice in this widget uses \u2014 and it could not work
+#: here. ``action_system_paste`` is an awaited binding action running on this
+#: widget's own message pump, and a pump fully awaits one handler before
+#: dequeuing the next message, so a message posted while the action is
+#: suspended cannot be delivered until the action returns. Measured: the timer
+#: fired on time at 0.351 s in every run, but the handler ran at 2.018 s for a
+#: 2.0 s read and 5.020 s for a 5.0 s read \u2014 tracking the read duration exactly
+#: and landing 2-3 ms before the paste itself. The card entered the DOM at the
+#: instant the pause it describes ended (ux round 2, U3).
+#:
+#: Posting to the App's pump does not fix it either; that was measured too
+#: (handler at 1.512 s against a 1.5 s read). The event loop is NOT blocked \u2014
+#: timers keep firing throughout \u2014 so the fix is to do the work IN the timer
+#: callback rather than to enqueue anything: a callback that touches the Toast
+#: directly runs at 0.202 s against a 1.5 s read, and the card is verifiably on
+#: screen at 0.4 s, 0.7 s and 1.0 s of a 1.3 s read.
+PASTE_READING_HOOK = "show_clipboard_reading_notice"
 
 
 class EditorPasteAttached(Message):
@@ -576,6 +594,11 @@ class EditorPasteEmpty(Message):
       rule) and so does the advice that would help (round 2, D10).
     * ``"remote"`` — the read was refused because the session is remote. Not a
       statement about the clipboard at all.
+    * ``"too_large"`` — the clipboard held TEXT past the paste budget. Declined
+      rather than truncated, because a silently shortened paste is damage the
+      user cannot see until they read back what they sent; named rather than
+      collapsed into ``"nothing"``, because the clipboard was not empty (code
+      round 2, F7).
     * ``"timeout"`` — the clipboard did not answer inside
       :data:`~local_operator.clipboard.CLIPBOARD_TIMEOUT_S`. Also not a
       statement about what was on it. Split out of ``"nothing"`` because the
@@ -778,6 +801,38 @@ class ArgumentHighlightChanged(Message):
 #: swaps it for :data:`READ_ONLY_PLACEHOLDER` while the full-page subagent
 #: view is open and has to be able to put this one back.
 DEFAULT_PLACEHOLDER = "Message Local Operator…"
+
+#: The resting placeholder with the paste key named, shown until the user has
+#: pasted something with it once.
+#:
+#: THE ONLY AFFORDANCE THAT REACHES THE STRANDED USER. The reported journey is
+#: mid-session: the user has been working, takes a screenshot, presses `Cmd+V`
+#: and gets a beep. The terminal delivers ZERO bytes for that gesture (see
+#: :mod:`local_operator.clipboard`), so no app code runs and no reactive notice
+#: is possible — the affordance has to be something already on screen. Every
+#: other surface fails that test:
+#:
+#: * ``welcome.TIPS`` — `WelcomeView.display` goes False on the first prompt,
+#:   so it is absent mid-session by construction. Measured on the splash it is
+#:   also weak: median 84 s to first sighting, P(seen within 30 s) = 0.18, and
+#:   0% for a user who types straight away. With animation disabled
+#:   `_sync_tip_timer` creates no timer at all and the row holds at `TIPS[0]`
+#:   forever, so those users never meet it (design/ux round 2, D9/U1).
+#: * ``welcome.HINTS`` — static, so it survives the animation gate, but still
+#:   splash-only AND a fourth row costs the splash a terminal row, which the
+#:   height ladder spends on the logo.
+#: * ``/help`` — a reference for someone who already suspects the key exists,
+#:   not a discovery path.
+#:
+#: The composer placeholder is visible in exactly the state a user is in when
+#: they reach for a paste: mid-session, composer empty, about to type. It costs
+#: no layout (the row is already painted) and no width tier.
+#:
+#: RETIRED ON FIRST USE, which is what keeps it from being nag copy. Once the
+#: user has pasted with `ctrl+v` the key is learned and the placeholder returns
+#: to :data:`DEFAULT_PLACEHOLDER` for the rest of the session. It teaches once
+#: and then gets out of the way.
+PASTE_HINT_PLACEHOLDER = "Message Local Operator…  ctrl+v pastes an image"
 
 #: What the composer says while it refuses input. It names the state AND the
 #: consequence, because the only useful thing to tell someone whose keys are
@@ -996,7 +1051,7 @@ class Editor(TextArea):
 
     def __init__(
         self,
-        placeholder: str = DEFAULT_PLACEHOLDER,
+        placeholder: str = PASTE_HINT_PLACEHOLDER,
         commands: list[SlashCommand] | None = None,
     ) -> None:
         # Built BEFORE super().__init__: TextArea's constructor loads its
@@ -1193,6 +1248,12 @@ class Editor(TextArea):
         #: the near-miss pair described in `_on_click`. Only ever read to decide
         #: whether two singles were one gesture; it never makes a selection.
         self._single_click_at: tuple[float, Offset] | None = None
+        #: Whether `ctrl+v` has successfully pasted in this session, which is
+        #: what retires the placeholder that teaches it. Set once and never
+        #: cleared: the key is learned, and re-teaching it after the composer
+        #: happens to pass through another mode would make a one-time
+        #: affordance into recurring nag copy. See `PASTE_HINT_PLACEHOLDER`.
+        self._paste_hint_used = False
         #: Bang-mode: Enter runs a local shell command instead of sending a
         #: prompt. Owned here because it is a property of the COMPOSER (the
         #: same way the slash picker is), not of the app: the key that enters
@@ -1662,7 +1723,7 @@ class Editor(TextArea):
         if self._shell_mode == active:
             return
         self._shell_mode = active
-        self.placeholder = SHELL_PLACEHOLDER if active else DEFAULT_PLACEHOLDER
+        self.placeholder = SHELL_PLACEHOLDER if active else self.resting_placeholder
         self.post_message(ShellModeChanged(active))
 
     def set_allows_shell(self, allowed: bool) -> None:
@@ -3562,6 +3623,20 @@ class Editor(TextArea):
         self._copied = True
         self.post_message(EditorCopied(text))
 
+    @property
+    def resting_placeholder(self) -> str:
+        """The placeholder for a composer in no special mode.
+
+        THE ONE AUTHORITY on that question, because there are now two answers.
+        Until the user has pasted with `ctrl+v` the resting copy names the key
+        (:data:`PASTE_HINT_PLACEHOLDER`); afterwards it is the plain
+        :data:`DEFAULT_PLACEHOLDER`. Every caller that returns the composer to
+        rest — leaving bang-mode, closing the aside, handing the composer back
+        from the subagent page — has to ask rather than assume, or it silently
+        retires a hint the user has not used yet.
+        """
+        return DEFAULT_PLACEHOLDER if self._paste_hint_used else PASTE_HINT_PLACEHOLDER
+
     def watch_selection(self, selection: Selection) -> None:
         """Retire the copy receipt's GESTURE claim when the highlight changes.
 
@@ -3798,18 +3873,60 @@ class Editor(TextArea):
         # `PASTE_READING_NOTICE_DELAY_S` gets a card explaining the pause
         # rather than leaving the composer looking hung (ux round 1, U3).
         #
-        # A timer rather than an unconditional post, because the fast read is
+        # The card is raised by CALLING THE APP DIRECTLY from the timer, not by
+        # posting a message: a message cannot be delivered while this action
+        # holds the pump, so it arrived only after the pause it described had
+        # ended. See `PASTE_READING_HOOK` for the measurements.
+        #
+        # A timer rather than an unconditional call, because the fast read is
         # the common one and a card that appears and vanishes on every paste is
-        # worse than the pause it describes. `set_timer` is cancelled in the
-        # `finally`, so a read that beats the delay never posts at all.
-        reading_notice = self.set_timer(
-            PASTE_READING_NOTICE_DELAY_S,
-            lambda: self.post_message(EditorPasteReading()),
-        )
+        # worse than the pause it explains. `set_timer` is stopped in the
+        # `finally`, so a read that beats the delay never raises anything.
+        notice: Callable[[bool], None] | None = getattr(self.app, PASTE_READING_HOOK, None)
+        raised = False
+        raised_at = 0.0
+        reading_notice = None
+
+        def _raise_reading_notice(show: Callable[[bool], None]) -> None:
+            # Nonlocal rather than a return value: a timer callback's result
+            # goes nowhere, and the `finally` below has to know whether there
+            # is a card to retire. Retiring one that was never raised would
+            # withdraw whatever else happens to hold the shared slot.
+            nonlocal raised, raised_at
+            raised = True
+            raised_at = time.monotonic()
+            show(True)
+
+        if notice is not None:
+            # `notice` is bound as an argument rather than closed over, so the
+            # narrowing this branch establishes survives into the callback.
+            reading_notice = self.set_timer(
+                PASTE_READING_NOTICE_DELAY_S, partial(_raise_reading_notice, notice)
+            )
         try:
             contents = await asyncio.to_thread(read_clipboard)
         finally:
-            reading_notice.stop()
+            if reading_notice is not None:
+                reading_notice.stop()
+            if raised and notice is not None:
+                # RETIRED HERE, on every outcome, rather than by each branch
+                # below. The text branch posts no `EditorPasteAttached` (it
+                # attaches nothing to falsify a failure claim) and so left the
+                # progress card sitting over a completed paste for its full 5 s
+                # on the most common ctrl+v shape there is (design round 2,
+                # D7). A progress card is retired by ANY outcome, not only by
+                # outcomes that contradict it, so the retirement belongs on the
+                # one path every outcome passes through.
+                #
+                # Held for `PASTE_READING_NOTICE_MIN_S` from when it was
+                # RAISED, so a read that finishes just past the delay does not
+                # flash the card for a few milliseconds (D10). Scheduled rather
+                # than slept: the paste must land now, and only the card waits.
+                shown_for = time.monotonic() - raised_at
+                if shown_for >= PASTE_READING_NOTICE_MIN_S:
+                    notice(False)
+                else:
+                    self.set_timer(PASTE_READING_NOTICE_MIN_S - shown_for, lambda: notice(False))
         if contents.image is not None:
             markers = await self._attach_image_bytes([contents.image.data])
             if markers is not None:
@@ -3854,6 +3971,13 @@ class Editor(TextArea):
             return contents.text
         if contents.refused_remote:
             reason = "remote"
+        elif contents.text_too_large:
+            # Checked before "nothing" for the same reason as the timeout: the
+            # clipboard was NOT empty, it held text the composer declined, and
+            # reporting an empty clipboard sent a user who had copied several
+            # megabytes looking for a clipboard problem they did not have
+            # (code round 2, F7).
+            reason = "too_large"
         elif contents.timed_out:
             # Checked BEFORE "nothing": a read that never finished cannot
             # report what was on the clipboard, and saying it was empty is a
@@ -3923,6 +4047,16 @@ class Editor(TextArea):
         result = self._replace_via_keyboard(pasted, *self.selection)
         if result is not None:
             self.move_cursor(result.end_location)
+        # THE HINT HAS DONE ITS JOB. `PASTE_HINT_PLACEHOLDER` names this key
+        # because nothing else on screen can (the terminal swallows `Cmd+V`
+        # whole), and a user who has now pasted with it does not need telling
+        # again — leaving it up would turn a one-time affordance into standing
+        # nag copy. Only the RESTING placeholder is replaced: a mode that owns
+        # the composer (bang-mode, the aside, read-only) is showing its own
+        # voice and must not have it overwritten by this.
+        self._paste_hint_used = True
+        if self.placeholder == PASTE_HINT_PLACEHOLDER:
+            self.placeholder = self.resting_placeholder
 
     async def _attach_pasted_images(self, pasted: str) -> str | None:
         """Load every path in ``pasted`` as an attachment; return the markers.

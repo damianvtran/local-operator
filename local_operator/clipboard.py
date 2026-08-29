@@ -653,10 +653,16 @@ def _read_macos(max_bytes: int, deadline: _Deadline) -> ClipboardContents:
             #
             # The decode is the shared one so the platforms cannot disagree
             # about the bound or about invalid UTF-8.
-            raw = _read_bounded(dest, min(max_bytes, MAX_CLIPBOARD_TEXT_BYTES))
+            # Read at the IMAGE ceiling so an over-budget payload is still
+            # seen and can be reported; the text bound is then applied by the
+            # shared decode. Reading at the smaller bound would make an
+            # oversized clipboard look like an unreadable file (F7).
+            raw = _read_bounded(dest, max_bytes)
             if raw is None:
                 return ClipboardContents()
-            return ClipboardContents(text=_decode_clipboard_text(raw))
+            oversized: list[bool] = []
+            text = _decode_clipboard_text(raw, oversized=oversized)
+            return ClipboardContents(text=text, text_too_large=bool(oversized))
     return ClipboardContents(paths=tuple(p for p in verdict.split("\x00") if p.strip()))
 
 
@@ -688,7 +694,9 @@ def _read_bounded(path: Path, max_bytes: int) -> bytes | None:
 TEXT_MIME_PREFERENCE = ("text/plain;charset=utf-8", "text/plain", "UTF8_STRING", "STRING")
 
 
-def _read_wayland(max_bytes: int, deadline: _Deadline) -> tuple[ClipboardImage | None, str]:
+def _read_wayland(
+    max_bytes: int, deadline: _Deadline, oversized: list[bool] | None = None
+) -> tuple[ClipboardImage | None, str]:
     """Wayland: ONE ``--list-types`` listing, then at most one real read.
 
     Image types first, then text, and NEITHER is read speculatively: a type the
@@ -735,13 +743,17 @@ def _read_wayland(max_bytes: int, deadline: _Deadline) -> tuple[ClipboardImage |
                 max_bytes=max_bytes,
             ),
             max_bytes,
+            oversized,
         )
-        if text:
+        if text or oversized:
+            # `oversized` ends the loop too: the compositor offered this type
+            # and it was too big, so trying the next spelling of "plain text"
+            # would read the same payload again and report the same refusal.
             return None, text
     return None, ""
 
 
-def _read_x11_text(max_bytes: int, deadline: _Deadline) -> str:
+def _read_x11_text(max_bytes: int, deadline: _Deadline, oversized: list[bool] | None = None) -> str:
     """X11: the clipboard's plain text, or ``""``.
 
     ``-t UTF8_STRING`` rather than bare ``-o``: without a target ``xclip``
@@ -755,11 +767,17 @@ def _read_x11_text(max_bytes: int, deadline: _Deadline) -> str:
             ["xclip", "-selection", "clipboard", "-t", "UTF8_STRING", "-o"],
             deadline,
             max_bytes=max_bytes,
-        )
+        ),
+        None,
+        oversized,
     )
 
 
-def _decode_clipboard_text(data: bytes | None, max_bytes: int | None = None) -> str:
+def _decode_clipboard_text(
+    data: bytes | None,
+    max_bytes: int | None = None,
+    oversized: list[bool] | None = None,
+) -> str:
     """Clipboard bytes as text, or ``""`` — the one decode every backend uses.
 
     ``errors="replace"`` and never a raise: this runs on a keystroke, and a
@@ -772,12 +790,23 @@ def _decode_clipboard_text(data: bytes | None, max_bytes: int | None = None) -> 
     insert (code round 1, F3). It is enforced in addition to any caller's
     `max_bytes`, which is the image INGEST ceiling and far too large to bound
     text - see the constant for the measurement.
+
+    ``oversized`` is a one-element list the caller passes in to LEARN THAT THE
+    BOUND FIRED. Returning ``""`` for over-budget text is indistinguishable
+    from an empty clipboard, so the composer reported "nothing on the
+    clipboard" to a user who had copied several megabytes (code round 2, F7).
+    An out-parameter rather than a richer return type because every one of the
+    four backends calls this and returns a plain ``str``; threading a tuple
+    through all of them to carry one bit would be a wider change than the
+    finding, and the flag is set in exactly one place.
     """
     if not data:
         return ""
     if max_bytes is not None and len(data) > max_bytes:
         return ""
     if len(data) > MAX_CLIPBOARD_TEXT_BYTES:
+        if oversized is not None:
+            oversized.append(True)
         return ""
     return data.decode("utf-8", errors="replace")
 
@@ -883,7 +912,9 @@ try {
 """
 
 
-def _read_windows_text(max_bytes: int, deadline: _Deadline) -> str:
+def _read_windows_text(
+    max_bytes: int, deadline: _Deadline, oversized: list[bool] | None = None
+) -> str:
     """Windows: the clipboard's text, or ``""``.
 
     ``-STA`` for the same reason the image backend needs it: the Windows
@@ -914,6 +945,7 @@ def _read_windows_text(max_bytes: int, deadline: _Deadline) -> str:
                 max_bytes=max_bytes,
             ),
             max_bytes,
+            oversized,
         )
 
 
@@ -1013,6 +1045,17 @@ class ClipboardContents:
     #: be the server's. Not a failure to find an image, and must not be
     #: reported as one.
     refused_remote: bool = False
+    #: The clipboard held TEXT that was too large to paste, so this result
+    #: describes a payload that was declined, not a clipboard that was empty.
+    #:
+    #: Same discipline as ``timed_out`` and for the same reason: over-budget
+    #: text returned ``""``, which is indistinguishable from an empty
+    #: clipboard, so a user who copied a 5 MB log and pressed ctrl+v was told
+    #: there was nothing to paste (code round 2, F7). Declining the payload is
+    #: right — truncating it would be damage the user cannot see — but the
+    #: report has to name what happened, which is the wrong-diagnosis class
+    #: ``timed_out`` was added to eliminate.
+    text_too_large: bool = False
     #: The budget ran out before the clipboard answered, so this result
     #: describes a read that was CUT SHORT, not a clipboard that was empty.
     #:
@@ -1070,25 +1113,34 @@ def read_clipboard(
         # out, so the flag is only attached to an empty-handed result. Reporting
         # "the read timed out" beside an attached image would be a notice about
         # a failure that did not happen.
-        if contents.image is None and not contents.paths and not contents.text:
+        if (
+            contents.image is None
+            and not contents.paths
+            and not contents.text
+            and not contents.text_too_large
+        ):
             return replace(contents, timed_out=deadline.hit)
         return contents
 
     image: ClipboardImage | None = None
     text = ""
+    # Carries "the clipboard held text we refused as too large" back out of
+    # whichever backend ran, so an over-budget payload is reported as itself
+    # rather than as an empty clipboard (code round 2, F7).
+    oversized: list[bool] = []
     if system == "win32":
         image = _read_windows_image(max_bytes, deadline)
         if image is None:
-            text = _read_windows_text(max_bytes, deadline)
+            text = _read_windows_text(max_bytes, deadline, oversized)
     elif system.startswith("linux") or "bsd" in system:
         if source.get("WAYLAND_DISPLAY"):
             # One call for both shapes: the compositor's type listing answers
             # the image question and the text question together.
-            image, text = _read_wayland(max_bytes, deadline)
+            image, text = _read_wayland(max_bytes, deadline, oversized)
         elif source.get("DISPLAY"):
             image = _read_x11_image(max_bytes, deadline)
             if image is None:
-                text = _read_x11_text(max_bytes, deadline)
+                text = _read_x11_text(max_bytes, deadline, oversized)
         # A headless Linux box (a container, a bare tty) has no clipboard at
         # all, and shelling out to discover that costs a subprocess per paste.
     # The text read is skipped when an image was found, so the common
@@ -1105,8 +1157,13 @@ def read_clipboard(
     # `timed_out` only when the read came back EMPTY-HANDED: a wedged type read
     # that still yielded an image is a success, and a notice claiming a timeout
     # beside an attached image would describe a failure that did not happen.
+    empty_handed = image is None and not text
     return ClipboardContents(
         image=image,
         text=text,
-        timed_out=deadline.hit if image is None and not text else False,
+        text_too_large=bool(oversized),
+        # `text_too_large` wins over `timed_out` when both are somehow set: the
+        # payload was found and named, which is a more specific answer than a
+        # budget that also expired.
+        timed_out=deadline.hit if empty_handed and not oversized else False,
     )

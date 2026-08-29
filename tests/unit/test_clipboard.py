@@ -1073,6 +1073,63 @@ def test_the_timeout_flag_is_reported_off_macos_too(
     assert contents.timed_out is True
 
 
+def test_over_budget_text_is_reported_as_too_large_not_as_an_empty_clipboard(
+    monkeypatch, which_all
+) -> None:
+    """Declining the payload is right; reporting it as an empty clipboard is not.
+
+    Over-budget text returned `""`, which is byte-identical to what an empty
+    clipboard returns, so a user who copied a 5 MB log and pressed ctrl+v was
+    told there was nothing to paste (code round 2, F7). That is the same
+    wrong-diagnosis class `timed_out` was added to eliminate, so it takes the
+    same shape: a flag the composer can word honestly.
+    """
+    oversized = b"x" * (MAX_CLIPBOARD_TEXT_BYTES + 1)
+    _install(monkeypatch, {"xclip": lambda argv, kwargs: oversized})
+    contents = read_clipboard(BIG, platform="linux", env={"DISPLAY": ":0"})
+    assert contents.text == "", "an over-budget payload must not reach the composer"
+    assert contents.text_too_large is True
+    assert contents.timed_out is False, "a refused payload is not a timeout"
+
+
+def test_a_genuinely_empty_clipboard_is_not_reported_as_too_large(monkeypatch, which_all) -> None:
+    """The other half: an empty clipboard must not borrow the oversized
+    remedy ("paste less"), which answers a problem it does not have."""
+    _install(monkeypatch, {"xclip": lambda argv, kwargs: b""})
+    contents = read_clipboard(BIG, platform="linux", env={"DISPLAY": ":0"})
+    assert contents.text == "" and contents.text_too_large is False
+
+
+@pytest.mark.parametrize(
+    "platform,env,binary",
+    [
+        ("darwin", {}, "osascript"),
+        ("linux", {"DISPLAY": ":0"}, "xclip"),
+        ("win32", {}, "pwsh"),
+    ],
+)
+def test_the_too_large_flag_is_reported_on_every_platform(
+    platform: str, env: dict[str, str], binary: str, monkeypatch, which_all, tmp_path
+) -> None:
+    """Every platform is a peer on this, the same as the timeout flag: a
+    refusal only one backend could report would leave the others with the
+    wrong diagnosis the flag exists to remove."""
+    oversized = b"y" * (MAX_CLIPBOARD_TEXT_BYTES + 1)
+
+    def answer(argv, kwargs):
+        if binary == "osascript":
+            # The macOS script writes its payload to the destination file and
+            # prints the verdict.
+            Path(argv[2]).write_bytes(oversized)
+            return b"text"
+        return oversized
+
+    _install(monkeypatch, {binary: answer})
+    contents = read_clipboard(BIG, platform=platform, env=env)
+    assert contents.text == ""
+    assert contents.text_too_large is True
+
+
 def test_clipboard_text_is_bounded_by_the_paste_budget_not_the_image_ceiling(
     monkeypatch, which_all
 ) -> None:
