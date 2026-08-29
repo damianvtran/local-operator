@@ -728,13 +728,29 @@ class AssistantBlock(TranscriptBlock):
         if content:
             # Source LINES, not rows: a paragraph that wraps is one line painted
             # as several, and a phrase dragged across that fold is as much a
-            # sub-line take as one inside a single row. A row ``align`` cannot
-            # place contributes nothing, which leaves the conservative answer
-            # (glyphs are always truthful) if alignment itself ever regresses.
-            sources = {
-                mapping[i] for i, _ in content if i < len(mapping) and mapping[i] is not None
-            }
-            if len(sources) <= 1:
+            # sub-line take as one inside a single row.
+            #
+            # An UNPLACED row (``align`` returned ``None``) is absence of
+            # evidence, not agreement. Dropping it from the set let a selection
+            # spanning an unplaced row and a placed one collapse to one element
+            # and read as a single-source-line take it never was: two lines of a
+            # fenced block were then rejoined into ONE RUNNABLE COMMAND (review
+            # round 3, R3-2; design round 3, D3-2). It now disqualifies the gate,
+            # sending the take down the markdown path, which states a multi-line
+            # selection as multiple lines.
+            #
+            # MIXED evidence is what disqualifies: when some rows are placed and
+            # others are not, nothing can say whether the unplaced ones belong to
+            # the placed one's line, so a single-element set is not agreement.
+            # When NO row is placed the situation is different in kind rather
+            # than in degree -- there is no line-boundary evidence at all, which
+            # is ordinary for a CJK paragraph where no anchor word survives, and
+            # the markdown path has nothing to offer either. That case keeps the
+            # glyph answer (review round 2, R2-2).
+            row_sources = [mapping[i] if i < len(mapping) else None for i, _ in content]
+            sources = {source for source in row_sources if source is not None}
+            mixed = bool(sources) and None in row_sources
+            if not mixed and len(sources) <= 1:
                 first_index, (first_start, _) = content[0]
                 last_index, (_, last_end) = content[-1]
                 # ``rstrip()`` is the only honest measure of the row's actual
@@ -790,36 +806,157 @@ class AssistantBlock(TranscriptBlock):
             # composer bug ``_put_on_clipboard`` already fixed (design round 1,
             # D2). Once rejoined the receipt falls into the character branch by
             # itself, so the unit needs no separate fix.
-            # The separators are decided from the FULL rows of the source line,
-            # not from the clipped ends the reader highlighted. The walk that
-            # replaced the old substring test is positional and end-anchored, so
-            # it needs the same text Rich painted: a trimmed first row cannot be
-            # located in the source line, and a partial take is exactly where a
-            # membership test used to guess wrong (review round 2, R2-1).
+            # The separators are decided from EVERY row of the source line, not
+            # from the rows the reader's drag happened to touch. The walk is
+            # end-anchored: it asks the rows to consume the line's whole visible
+            # content, so handing it a selection-shaped subset violates its
+            # precondition and it cannot place them. That is what a drag stopping
+            # one row short of a paragraph's end used to do, and the guess it
+            # fell to put a space through a URL and a filesystem path (review
+            # round 3, R3-1; design round 3, D3-1). Supplying the full row set
+            # makes the precondition hold BY CONSTRUCTION rather than by hope --
+            # the mapping already knows every row of the line.
+            # A single-row take has no fold inside it, so it needs no evidence
+            # about what a fold consumed. Asking anyway would make an unplaceable
+            # line degrade a take that was never at risk.
             source_line = self._source_line(mapping, content[0][0])
-            full_rows = [
-                rows[index][self._furniture_width(rows, mapping, index, content) :].rstrip()
-                for index, _ in content
-            ]
-            separators = _copy_markdown.wrap_separators(full_rows, source_line)
+            fold_rows, first_offset = self._source_line_rows(rows, mapping, content)
+            separators: list[str] | None = []
+            if len(trimmed) > 1:
+                separators = _copy_markdown.wrap_separators(fold_rows, source_line)
+
+            # ``None`` is a refusal, not a separator: the walk could not place
+            # these rows, so nothing here knows what the fold consumed. Inventing
+            # a plausible character is precisely the failure of the last three
+            # rounds, so the take falls back to the markdown source, which is
+            # truthful without needing to know the fold.
+            if separators is None:
+                # No placement, so this code does not know what the fold
+                # consumed. There are two ways to be in that position and they
+                # have DIFFERENT safe answers:
+                #
+                # * ``align`` placed the rows but the walk could not consume the
+                #   line (a clipped or unusual selection). The markdown source
+                #   is still available and is truthful, so use it.
+                # * ``align`` placed NOTHING, which is ordinary for a CJK
+                #   paragraph where no anchor word survives. There is no
+                #   markdown to fall back to, so the rendered glyphs are the
+                #   only truthful answer and the script heuristic decides the
+                #   fold -- chosen explicitly here rather than fallen into.
+                if source_line is None:
+                    # Look for the evidence directly before assuming there is
+                    # none: a line the walk CAN place these rows against is proof
+                    # they came from it. Only when no line places them, or
+                    # several do, is there genuinely nothing to know.
+                    source_line = _copy_markdown.locate_source_line(fold_rows, self._full_text)
+                    if source_line is not None:
+                        separators = _copy_markdown.wrap_separators(fold_rows, source_line)
+
+                if separators is None:
+                    if source_line is not None or self._may_hide_a_line_boundary():
+                        copied = self._markdown_for_rows(mapping, selected[0][0], selected[-1][0])
+                        if copied:
+                            return copied, "\n"
+                        return super().get_selection(selection)
+                    separators = _copy_markdown.separators_without_source(fold_rows)
 
             joined = trimmed[0]
             for offset, text in enumerate(trimmed[1:]):
                 if not text:
                     continue
-                separator = separators[offset] if offset < len(separators) else " "
+                # Indexed against the FULL row set, so the reader's first row is
+                # at ``first_offset``. No length guard with a ``" "`` default:
+                # that default is the same invented character in miniature, and a
+                # skew here is a bug to surface, not to paper over (review round
+                # 3, R3-3). The slice above guarantees the index is in range.
+                separator = separators[first_offset + offset]
                 joined = f"{joined}{separator}{text}" if joined else text
             return joined, "\n"
 
         # Widened to whole source lines on purpose — see the accepted cost
         # above. The bounds come from ``selected`` rather than ``content`` so
         # the markdown path spans exactly the rows it has always spanned.
-        first_row = selected[0][0]
-        last_row = selected[-1][0]
-        copied = _copy_markdown.slice_markdown(self._full_text, mapping, first_row, last_row)
+        copied = self._markdown_for_rows(mapping, selected[0][0], selected[-1][0])
         if not copied:
             return super().get_selection(selection)
         return copied, "\n"
+
+    def _markdown_for_rows(self, mapping: list[int | None], first_row: int, last_row: int) -> str:
+        """Markdown for ``first_row..last_row``, widened over UNPLACED edge rows.
+
+        :func:`_copy_markdown.slice_markdown` collects source lines through the
+        mapping, so a row ``align`` could not place contributes nothing. When
+        such a row is at the EDGE of the selection its source line is dropped
+        entirely and content the reader lit vanishes from the clipboard --
+        reachable on the continuation rows of an over-long line inside a fence,
+        which is where R3-2's welded shell command was found.
+
+        Widening each end out to the nearest placed row recovers those lines
+        through the existing gap fill. It errs toward copying MORE than was
+        highlighted, which is this path's already-accepted cost (design round 1,
+        D3) and the only safe direction: a paste with an extra line is one the
+        reader can see and trim, a silently missing or welded line is not.
+        """
+        first, last = first_row, last_row
+        while first > 0 and (first >= len(mapping) or mapping[first] is None):
+            first -= 1
+        while last < len(mapping) - 1 and mapping[last] is None:
+            last += 1
+        return _copy_markdown.slice_markdown(self._full_text, mapping, first, last)
+
+    def _may_hide_a_line_boundary(self) -> bool:
+        """Could an unplaced run of rows straddle TWO source lines?
+
+        The script heuristic in :func:`_copy_markdown.separators_without_source`
+        answers what a FOLD consumed, which is only a meaningful question if the
+        rows really are folds of one line. When the message has a single
+        non-blank source line that is certain by construction -- the ordinary CJK
+        paragraph, where no anchor word survives for ``align`` to place.
+
+        With several source lines it is not certain, and assuming it welded three
+        lines of a fenced block into one (review round 3, R3-2). Then the answer
+        must come from the markdown source, which needs no fold knowledge.
+        """
+        return len([line for line in self._full_text.split("\n") if line.strip()]) > 1
+
+    def _source_line_rows(
+        self,
+        rows: list[str],
+        mapping: list[int | None],
+        content: list[tuple[int, tuple[int, int]]],
+    ) -> tuple[list[str], int]:
+        """Every rendered row of the selected source line, and the drag's offset.
+
+        :func:`_copy_markdown.wrap_separators` is end-anchored, so it can only
+        place rows that are the WHOLE of the source line. The selection is not
+        that: a reader highlighting exactly a URL stops before the paragraph's
+        last row, and handing those clipped rows to the walk is what made it
+        give up and fall to a guess that split the URL (review round 3, R3-1).
+
+        The mapping already knows which rows belong to the line, so the full set
+        is recovered from it rather than inferred from the drag. The second
+        element is the index of the reader's FIRST row within that set, which is
+        what lets the caller read the separator for its own folds out of the
+        full-line answer.
+
+        The gate above guarantees a single source line and no unplaced content
+        rows, so ``content`` cannot straddle two lines here.
+        """
+        source = mapping[content[0][0]] if content[0][0] < len(mapping) else None
+        indices = [i for i, mapped in enumerate(mapping) if mapped == source and rows[i].strip()]
+        if not indices:
+            indices = [index for index, _ in content]
+        first_offset = indices.index(content[0][0]) if content[0][0] in indices else 0
+        # Furniture is measured against the FULL row set, not the selection:
+        # ``opens_line`` asks whether the previous content row came from another
+        # source line, and answering that from the drag's rows would call a
+        # continuation row a marker row whenever the reader started mid-line.
+        span = [(index, (0, -1)) for index in indices]
+        full_rows = [
+            rows[index][self._furniture_width(rows, mapping, index, span) :].rstrip()
+            for index in indices
+        ]
+        return full_rows, first_offset
 
     def _source_line(self, mapping: list[int | None], row: int) -> str | None:
         """The source line rendered row ``row`` came from, or ``None``.

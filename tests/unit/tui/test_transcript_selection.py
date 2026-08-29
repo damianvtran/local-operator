@@ -3181,3 +3181,277 @@ async def test_a_bullet_inside_a_quote_leaks_neither_the_bar_nor_the_dot() -> No
         assert (
             len(set(answers.values())) == 1
         ), f"the paste format flips with the drag's start cell: {answers}"
+
+
+# -- the oracle sweep --------------------------------------------------------
+#: Ordinary assistant output, not a minimised repro. Three rounds of findings
+#: were each correct on the case the previous round named and wrong on a
+#: neighbouring one, so the corpus is deliberately BROAD rather than pointed:
+#: every construct this app actually emits, and the inline shapes (long tokens,
+#: trailing markup, intraword punctuation) whose interaction with a fold is what
+#: the walk has to get right.
+ORACLE_CORPUS: dict[str, str] = {
+    "prose_inline_markup": (
+        "The **frontend** cache lives at `/var/lib/local-operator/cache.sqlite3` "
+        "and is managed by the *supervisor* process, see [the docs](https://d.io/x)."
+    ),
+    "prose_trailing_code": (
+        "The cache lives at /var/lib/local-operator/sessions/cache-index.sqlite3 "
+        "managed by `lop`"
+    ),
+    "prose_trailing_bold": (
+        "Download https://github.com/damianvtran/local-operator/releases/latest/"
+        "download/bundle.tgz now **today**"
+    ),
+    "snake_and_kebab": (
+        "Set database_connection_pool_max_size_in_the_config and the "
+        "some-very-long-kebab-case-flag-name-here before the deploy runs."
+    ),
+    "compound_open_and_closed": (
+        "The run time of the runtime is fine, and the set up of the setup, the "
+        "log in of the login, and the back end of the backend all check out."
+    ),
+    "bullets": (
+        "- a plain bullet item that is long enough to wrap across several rows\n"
+        "- another bullet mentioning /Users/somebody/Library/Application Support/x\n"
+        "  - a nested bullet that also wraps because it is quite long indeed"
+    ),
+    "ordered": (
+        "1. the first step which is long enough that it wraps at narrow widths\n"
+        "2. the second step, running `systemctl restart ingest-worker` for real\n"
+        "   1. a nested ordered step that is also long enough to fold somewhere"
+    ),
+    "quote": (
+        "> a quoted paragraph that is long enough to wrap across several rows\n"
+        "> and continues here with https://example.com/a/long/path?x=1 inside it"
+    ),
+    "nested_quote": (
+        "> outer quote text that wraps because it is long enough to do so\n"
+        ">> an inner nested quote that also wraps at the widths swept here"
+    ),
+    "quote_in_list": (
+        "- a bullet holding a quote\n"
+        "  > the quoted line inside the bullet, long enough that it folds\n"
+    ),
+    "list_in_quote": (
+        "> - a bullet inside a quote that is long enough to wrap somewhere\n"
+        "> - a second such bullet with a_snake_case_identifier_in_it here"
+    ),
+    "table": (
+        "| name | score | notes |\n"
+        "| --- | --- | --- |\n"
+        "| alpha | 0.91 | the first row with some longer note text here |\n"
+        "| beta | 0.72 | the second row, also with a reasonably long note |"
+    ),
+    "cjk": "这是一个中文段落，用于验证在终端宽度下折行之后复制粘贴不会插入多余的空格字符。",
+    "cjk_ja": "これは日本語の段落です。この行は端末の幅で折り返されますので、コピーの境界を検証します。",
+    "cjk_mixed": ("この API は runtime を使います。The server は port 8080 で listen します。"),
+    "emoji": "The report 🚀 is ready 🎉 and the summary 📊 follows with more text to wrap here.",
+}
+
+#: Fences are swept separately: every indent 0-8, inside list items, and with
+#: bodies whose lines LOOK structural. D2-1 was a deleted first character here
+#: and R3-2 a weld between two body lines, so the shape earns its own corpus.
+ORACLE_FENCE_CORPUS: dict[str, str] = {
+    f"fence_indent_{indent}": (
+        "Run these in order:\n\n"
+        f"{' ' * indent}```sh\n"
+        f"{' ' * indent}cd /srv/ingest\n"
+        f"{' ' * indent}psql -h db.internal -U ingest -c 'select count(*) from staging.rows'\n"
+        f"{' ' * indent}systemctl restart ingest-worker\n"
+        f"{' ' * indent}```\n\nThen check the dashboard.\n"
+    )
+    for indent in range(0, 9)
+} | {
+    "fence_in_list": (
+        "1. Run the check:\n\n"
+        "    ```sh\n"
+        "    ./scripts/check --verbose --with-a-long-flag-name --and-another one\n"
+        "    ```\n"
+    ),
+    "fence_structural_body": (
+        "```text\n"
+        "- this line looks like a bullet but is code and must stay verbatim\n"
+        "> this line looks like a quote but is code and must stay verbatim\n"
+        "3. this line looks ordered but is code and must stay verbatim here\n"
+        "```\n"
+    ),
+}
+
+
+async def _oracle_truth(text: str) -> list[str]:
+    """The rendered rows at a width so wide that NOTHING folds.
+
+    The oracle is independent of the code under test: it is the same renderer,
+    asked a question with no wrapping in it. A take at a narrow width has to be
+    findable in this, because folding is the only thing that changed.
+    """
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(400, 120)) as pilot:
+        block = AssistantBlock()
+        await _mounted(app, block)
+        block.update_text(text)
+        block.finalize_text()
+        await pilot.pause()
+        return [row.rstrip() for row in _rendered_rows(block) if row.strip()]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", sorted(ORACLE_CORPUS | ORACLE_FENCE_CORPUS))
+async def test_every_take_is_a_contiguous_substring_of_the_source(name: str) -> None:
+    """THE STRUCTURAL TEST: sweep widths, and assert no take invents or deletes.
+
+    Every previous round's tests pinned the SYMPTOM that round reported, and
+    every round the next defect landed in the neighbouring case nobody had named
+    while the whole suite stayed green. This test pins the PROPERTY instead: a
+    copy must be text the reader could find in their own document.
+
+    A single invariant catches all four failure modes seen so far without
+    predicting which one to look for -- an invented space (R3-1) breaks it, a
+    weld across two source lines (R2-1, R3-2) breaks it, a deleted leading
+    character (D2-1) breaks it, and a space put into CJK (R2-2) breaks it.
+
+    Swept broadly rather than sampled, because every defect so far was reachable
+    at ordinary widths and missed by sampling.
+    """
+    text = (ORACLE_CORPUS | ORACLE_FENCE_CORPUS)[name]
+    truth = await _oracle_truth(text)
+
+    for width in range(30, 90, 2):
+        app = StyledTranscriptApp()
+        async with app.run_test(size=(width, 120)) as pilot:
+            block = AssistantBlock()
+            await _mounted(app, block)
+            block.update_text(text)
+            block.finalize_text()
+            await pilot.pause()
+
+            rows = _rendered_rows(block)
+            content = [i for i, row in enumerate(rows) if row.strip()]
+            if len(content) < 2:
+                continue
+
+            # A drag from just inside the first content row, ending both AT the
+            # last row's end and SHORT of it. Stopping short is the natural
+            # gesture for highlighting exactly a URL, and it is the case that
+            # violates the walk's end-anchored precondition -- sweeping only
+            # full-coverage drags reports all clear while the defect is live.
+            last_row = content[-1]
+            end_columns = {len(rows[last_row].rstrip()), 20, 10}
+            for start_column in (1, 2):
+                for end_column in sorted(e for e in end_columns if e > 0):
+                    selection = Selection.from_offsets(
+                        Offset(x=start_column, y=content[0]),
+                        Offset(x=end_column, y=last_row),
+                    )
+                    copied = block.get_selection(selection)
+                    if copied is None:
+                        continue
+                    for line in copied[0].split("\n"):
+                        stripped = line.strip()
+                        if not stripped:
+                            continue
+                        # TWO truthful answers, and exactly two. The glyph path
+                        # claims to be what was PAINTED, so it must be findable in
+                        # the unfolded frame; the markdown path claims to be what
+                        # the model WROTE, so it must be findable in the source.
+                        # Anything in neither is a character this code invented.
+                        # Testing against both is what keeps the oracle honest
+                        # without a marker blacklist -- a blacklist would be the
+                        # same guess-rather-than-know shape the fix removes.
+                        if any(stripped in row for row in truth):
+                            continue
+                        if stripped in text:
+                            continue
+                        raise AssertionError(
+                            f"{name} at width {width}, start column {start_column}: "
+                            f"copied a line that is in neither the rendered frame nor "
+                            f"the source.\n  copied: {line!r}\n  truth : {truth!r}"
+                        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", sorted(ORACLE_FENCE_CORPUS))
+async def test_no_two_fenced_lines_are_ever_welded_into_one(name: str) -> None:
+    """Two commands in a fence must never arrive as one runnable line (R3-2).
+
+    The sharpest payload found so far: ``align`` cannot place the continuation
+    rows of an over-long fence body line, the sub-line gate DROPPED those
+    ``None`` mapping entries rather than treating them as absence of evidence,
+    and a take spanning one collapsed to a single-source-line judgement it never
+    was. The clipboard then joined two shell commands with a space.
+
+    Asserted against the source's own line boundaries rather than against a
+    rendered row, because the harm is specifically that a line boundary the
+    document has went missing.
+    """
+    text = ORACLE_FENCE_CORPUS[name]
+    body = [
+        line.strip()
+        for line in text.split("\n")
+        if line.strip() and not line.strip().startswith("```")
+    ]
+
+    for width in range(40, 76, 2):
+        app = StyledTranscriptApp()
+        async with app.run_test(size=(width, 120)) as pilot:
+            block = AssistantBlock()
+            await _mounted(app, block)
+            block.update_text(text)
+            block.finalize_text()
+            await pilot.pause()
+
+            rows = _rendered_rows(block)
+            content = [i for i, row in enumerate(rows) if row.strip()]
+            for first in content:
+                for last in content:
+                    if last <= first:
+                        continue
+                    # Ends SHORT of the last row as well as covering it. The
+                    # weld is only reachable on a sub-line take, and a take that
+                    # covers every row fully goes down the markdown path -- so a
+                    # sweep of full-coverage drags alone reports all clear while
+                    # the defect is live. That is precisely how three rounds of
+                    # sampled tests stayed green.
+                    ends = {len(rows[last].rstrip()), 20, 8}
+                    for end_column in sorted(e for e in ends if e > 0):
+                        selection = Selection.from_offsets(
+                            Offset(x=0, y=first), Offset(x=end_column, y=last)
+                        )
+                        copied = block.get_selection(selection)
+                        if copied is None:
+                            continue
+                        for line in copied[0].split("\n"):
+                            # Any output line containing two DISTINCT source body
+                            # lines is a weld: the boundary between them is gone.
+                            hits = [b for b in body if b and b in line and b != line.strip()]
+                            assert len(hits) < 2, (
+                                f"{name} at width {width}, rows {first}..{last}: welded "
+                                f"two source lines into one.\n  copied line: {line!r}\n"
+                                f"  welded    : {hits!r}"
+                            )
+
+
+def test_a_fence_marker_in_indented_code_reads_as_a_fence_on_purpose() -> None:
+    """The knowingly-accepted `_FENCE_RE` trade-off, pinned (review round 3, R3-4).
+
+    Widening the pattern past three leading spaces is what lets ``classify`` see
+    the fence under a list item, which is routine in this app's output. The cost
+    is that a literal ```` ``` ```` inside a FOUR-SPACE indented code block now
+    reads as a fence marker too.
+
+    That cost is accepted because the failure directions are not symmetric:
+    over-recognising a fence makes the copy VERBATIM, which is the conservative
+    answer for a clipboard, while under-recognising one deletes characters from
+    the user's code (design round 2, D2-1). Pinned so the next person to narrow
+    the pattern learns the widening was deliberate rather than reading this as a
+    bug to fix, and so the conservative DIRECTION is checked rather than assumed.
+    """
+    lines = ["Text:", "", "    ```", "    still indented code", "    ```", ""]
+    covered, markers = _copy_markdown.classify(lines)
+
+    # The accepted consequence, stated as the assertion rather than in prose.
+    assert markers == {2, 4}, f"the indented backticks did not read as markers: {markers}"
+    # ...and the direction that makes it acceptable: content stays covered, so
+    # the copy is verbatim rather than losing a leading character.
+    assert 3 in covered, f"the indented code line lost its fence cover: {covered}"

@@ -419,14 +419,37 @@ def furniture_width(row: str, source_line: str | None, *, opens_line: bool, fenc
 _INLINE_MARKUP = "*_`~"
 
 
+def _is_word_char(char: str) -> bool:
+    """A character CommonMark counts as word-interior for emphasis purposes."""
+    return bool(char) and (char.isalnum() or char == "_")
+
+
+def _is_intraword_underscore(source: str, i: int) -> bool:
+    """``_`` at ``i`` sits inside a word, so CommonMark paints it LITERALLY.
+
+    CommonMark deliberately exempts ``_`` from intraword emphasis so that
+    ``snake_case`` survives, which ``*`` does not need. Treating such an
+    underscore as a dropped marker made the walk unable to place a row that
+    BEGINS on one -- exactly what Rich produces when it folds a long
+    ``some_very_long_identifier_name`` mid-token -- so the line fell to the
+    guess and every fold on it gained a space (review round 3, R3-2).
+    """
+    before = source[i - 1] if i else ""
+    after = source[i + 1] if i + 1 < len(source) else ""
+    return _is_word_char(before) and _is_word_char(after)
+
+
 def _skip_inline_markup(source: str, i: int) -> int:
     """Advance past inline markers at ``i`` that render as nothing.
 
     Handles emphasis/code runs and a link's ``](target)`` tail, whose label is
-    painted while the target is not.
+    painted while the target is not. An intraword ``_`` is content, not a
+    marker, and is left for the literal comparison to consume.
     """
     while i < len(source):
         char = source[i]
+        if char == "_" and _is_intraword_underscore(source, i):
+            break
         if char in _INLINE_MARKUP or char == "[":
             i += 1
             continue
@@ -438,6 +461,34 @@ def _skip_inline_markup(source: str, i: int) -> int:
             continue
         break
     return i
+
+
+def _skip_painted_nothing(source: str, i: int) -> tuple[int, bool]:
+    """Advance past everything at ``i`` that paints NO glyph.
+
+    Returns the new offset and whether any WHITESPACE was among what was
+    skipped -- at a fold that is the whole question, since the consumed space
+    is the character a rejoin has to put back.
+
+    One definition of "paints as nothing" serves both places the walk needs it:
+    the gap between two rows, and the tail after the last one. They were
+    written separately, and the tail test compared the RAW residual, so a line
+    ending in `` ` ``, ``**`` or ``](url)`` left a marker standing after the
+    final row, failed to place, and fell to the guess -- which is how a
+    mid-token fold on such a line gained a space that split a URL or a
+    filesystem path (review round 3, R3-1; design round 3, D3-1).
+    """
+    saw_space = False
+    while i < len(source):
+        if source[i].isspace():
+            saw_space = True
+            i += 1
+            continue
+        nxt = _skip_inline_markup(source, i)
+        if nxt == i:
+            break
+        i = nxt
+    return i, saw_space
 
 
 def _match_visible(source: str, start: int, text: str) -> int | None:
@@ -462,19 +513,61 @@ def _match_visible(source: str, start: int, text: str) -> int | None:
     return i
 
 
-def _separator_for_scripts(left: str, right: str) -> str:
-    """Fallback separator judged from the characters either side of a fold.
+def locate_source_line(row_texts: list[str], source: str) -> str | None:
+    """The one source line these rows are the full wrapping of, or ``None``.
 
-    Only reached when the positional walk could not place the rows. A terminal
-    breaks CJK between any two characters because those scripts do not write
-    spaces, so a space there is never something the user had; Latin text breaks
-    at a space it then consumes, so one has to go back. Asking the adjacent
-    characters is a HEURISTIC, but a far narrower one than assuming a space
-    everywhere: it is what stops a Chinese or Japanese paragraph gaining an
-    invented space at every fold (review round 2, R2-2; design round 2, D2-3),
-    while leaving Latin prose — emoji and double-width cells included, which are
-    placed by the walk and never reach here — rejoining with the space it lost.
+    Used when :func:`align` placed none of the rows. That is absence of evidence
+    from the aligner, not proof the rows share a line, so instead of loosening
+    the rule the evidence is sought DIRECTLY: a line that the end-anchored walk
+    can place these rows against is a line they demonstrably came from.
+
+    ``None`` when no line places them or when several do -- an ambiguous answer
+    is still no answer, and the caller must fall back to something that does not
+    need to know. Without this, a selection over rows the aligner could not place
+    was judged a single-line take on no evidence at all, which welded three
+    separate lines of a fenced block into one (review round 3, R3-2).
     """
+    if len(row_texts) < 2:
+        return None
+    found: str | None = None
+    for line in source.split("\n"):
+        if not line.strip():
+            continue
+        if _walk_folds([text.rstrip() for text in row_texts], line) is None:
+            continue
+        if found is not None:
+            return None
+        found = line
+    return found
+
+
+def separators_without_source(row_texts: list[str]) -> list[str]:
+    """Last-resort separators when there is NO source line to walk at all.
+
+    Reachable only when ``align`` placed none of the selected rows, so the
+    markdown path has nothing to offer either and the rendered glyphs are the
+    only truthful answer available. The name states the precondition that
+    :func:`wrap_separators` refuses to guess past: this function is chosen
+    deliberately by a caller that has checked there is no evidence, never
+    reached by falling through.
+
+    A terminal breaks CJK between any two characters because those scripts do
+    not write spaces, so a space there is never something the user had; Latin
+    text breaks at a space it then consumes, so one has to go back. Asking the
+    adjacent characters IS a heuristic, and it is kept only for the case where
+    the alternative is refusing to copy anything: it is what stops a Chinese or
+    Japanese paragraph gaining an invented space at every fold (review round 2,
+    R2-2; design round 2, D2-3).
+    """
+    stripped = [text.strip() for text in row_texts]
+    return [
+        _separator_for_scripts(stripped[i][-1:], stripped[i + 1][:1])
+        for i in range(max(len(stripped) - 1, 0))
+    ]
+
+
+def _separator_for_scripts(left: str, right: str) -> str:
+    """One fold's separator judged from the characters meeting at it."""
     for char in (left, right):
         if not char or unicodedata.east_asian_width(char) not in ("W", "F"):
             continue
@@ -489,7 +582,7 @@ def _separator_for_scripts(left: str, right: str) -> str:
     return " "
 
 
-def wrap_separators(row_texts: list[str], source_line: str | None) -> list[str]:
+def wrap_separators(row_texts: list[str], source_line: str | None) -> list[str] | None:
     """What the terminal CONSUMED at each fold between rows of ONE source line.
 
     Returns one separator per fold, so ``len(row_texts) - 1`` entries.
@@ -515,25 +608,31 @@ def wrap_separators(row_texts: list[str], source_line: str | None) -> list[str]:
     an early partial match stand. ``row_texts`` must therefore be the FULL rows
     of the source line, not a selection's clipped ends.
 
-    When the walk cannot place the rows the answer falls to
-    :func:`_separator_for_scripts`, and that fallback IS a heuristic — stated
-    plainly here because an earlier version of this docstring claimed the
-    source-asking approach was exact when it was not (design round 2, D2-2).
+    **``None`` means "I cannot know", and is not a separator.** When the rows
+    cannot be placed against the line there is no evidence about what the fold
+    consumed, and every previous attempt to answer anyway shipped a defect:
+    guessing ``" "`` split a URL and a filesystem path, guessing from the
+    adjacent scripts welded a compound, and both were silent because a
+    plausible character looks like an answer. Three rounds of findings
+    (R2-1, R2-2, R3-1, R3-2) are one root cause — the precondition above was
+    documented but not enforced, so the caller's clipped or unplaced rows
+    reached a fallback that invented a character rather than refusing.
+    Refusing hands the decision back to the caller, which has a truthful
+    answer available (the markdown source) that this function does not.
     """
     folds = max(len(row_texts) - 1, 0)
     if not folds:
+        # No fold, nothing to rejoin: knowable without any evidence at all, so
+        # a single-row sub-line take never depends on the walk.
         return []
 
-    stripped = [text.strip() for text in row_texts]
-    if source_line is not None:
-        walked = _walk_folds(stripped, source_line)
-        if walked is not None:
-            return walked
-
-    # No placement, so decide each fold from the scripts meeting at it. This is
-    # also the branch an unplaceable row takes (``align`` returned ``None``),
-    # where returning ``" "`` unconditionally is what put a space into CJK.
-    return [_separator_for_scripts(stripped[i][-1:], stripped[i + 1][:1]) for i in range(folds)]
+    if source_line is None:
+        return None
+    # Rows keep their LEADING whitespace on purpose. When a fold's space does not
+    # fit at the end of a row Rich moves it to the start of the next one instead
+    # of consuming it, so that space is still on screen and still on the
+    # clipboard; adding a separator too would double it.
+    return _walk_folds([text.rstrip() for text in row_texts], source_line)
 
 
 def _walk_folds(row_texts: list[str], source_line: str) -> list[str] | None:
@@ -552,17 +651,17 @@ def _walk_folds(row_texts: list[str], source_line: str) -> list[str] | None:
             # consumed, plus any inline marker that paints nothing. Whether that
             # run held WHITESPACE is the whole question — that is the character
             # the rejoin has to put back.
-            gap = cursor
-            saw_space = False
-            while gap < len(source_line):
-                if source_line[gap].isspace():
-                    saw_space = True
-                    gap += 1
-                    continue
-                nxt = _skip_inline_markup(source_line, gap)
-                if nxt == gap:
-                    break
-                gap = nxt
+            # LITERAL FIRST, the same order :func:`_match_visible` uses and for
+            # the same reason: a row that already carries the fold's whitespace
+            # at its start consumed nothing, so the rejoin must add nothing.
+            # Only when the row cannot be matched where the cursor stands is the
+            # gap skipped and its whitespace put back.
+            end = _match_visible(source_line, cursor, text)
+            if end is not None:
+                separators.append("")
+                cursor = end
+                continue
+            gap, saw_space = _skip_painted_nothing(source_line, cursor)
             end = _match_visible(source_line, gap, text)
             if end is None:
                 separators = []
@@ -570,7 +669,12 @@ def _walk_folds(row_texts: list[str], source_line: str) -> list[str] | None:
             separators.append(" " if saw_space else "")
             cursor = end
         else:
-            if source_line[cursor:].strip() == "":
+            # End-anchor on the VISIBLE residual. Markers that paint nothing are
+            # not content the rows failed to cover, so a line closing on
+            # `` `code` ``, ``**bold**`` or ``[label](url)`` must still count as
+            # fully consumed (review round 3, R3-1).
+            tail, _ = _skip_painted_nothing(source_line, cursor)
+            if source_line[tail:].strip() == "":
                 return separators
     return None
 
