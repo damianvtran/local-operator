@@ -122,6 +122,7 @@ from local_operator.harness.intent import (
     batch_activity,
     tool_activity,
 )
+from local_operator.harness.jobs import TRAJECTORY_SEQ_KEY
 from local_operator.harness.types import (
     AgentEndEvent,
     AgentEvent,
@@ -797,10 +798,24 @@ def _make_relay(
     the moment one call of three settled, with two still running.
     """
     running: dict[str, str] = {}
+    #: Events relayed by this job so far. Counts RELAYS, not retained entries,
+    #: so it keeps rising past the cap and never reissues a number an evicted
+    #: event already used — see :data:`TRAJECTORY_SEQ_KEY`.
+    relayed = 0
 
     async def relay(event: AgentEvent) -> None:
+        nonlocal relayed
         if job is not None and job.trajectory is not None:
-            job.trajectory.append(event.model_dump(mode="json"))
+            record = event.model_dump(mode="json")
+            # Stamped BEFORE the append and never revised, because this is the
+            # identity the subagent page keys its rows by and the eviction two
+            # lines below is precisely what makes list position unusable for
+            # that (see TRAJECTORY_SEQ_KEY). Overwritten unconditionally rather
+            # than defaulted, so an event that somehow already carries the key
+            # cannot inject a duplicate identity into its parent's page.
+            record[TRAJECTORY_SEQ_KEY] = relayed
+            relayed += 1
+            job.trajectory.append(record)
             overflow = len(job.trajectory) - TRAJECTORY_CAP
             if overflow > 0:
                 del job.trajectory[:overflow]

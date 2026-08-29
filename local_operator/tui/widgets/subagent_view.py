@@ -48,7 +48,9 @@ down.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import math
+import reprlib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Callable, Literal
@@ -64,7 +66,7 @@ from textual.widgets import Static
 
 from local_operator.ansi import strip_control_sequences
 from local_operator.harness.comms import HUB_COMMUNICATION_CUSTOM_TYPE, HUB_MESSAGE_TYPE
-from local_operator.harness.jobs import CANCELLED_BEFORE_START
+from local_operator.harness.jobs import CANCELLED_BEFORE_START, TRAJECTORY_SEQ_KEY
 from local_operator.session.transcript import (
     CUSTOM_KIND_CUSTOM,
     ENTRY_CUSTOM,
@@ -212,6 +214,160 @@ def _content_text(payload: Any) -> str:
     return "".join(parts)
 
 
+#: Characters of any single value the content fingerprint takes from each end.
+#: Bounds the cost of the unstamped identity path, which runs once a second
+#: over a 500-event window against payloads that have no size limit (a tool
+#: result, a long error, a streamed delta). Generous enough that ordinary
+#: values are fingerprinted whole. See :func:`_digest`.
+_DIGEST_VALUE_CHARS = 512
+
+#: Characters taken from the END of an over-long value, in addition to its
+#: head. Small because it only has to break ties the head cannot: the
+#: distinguishing detail of a long agent error (the exception type, the
+#: offending field) sits at the end of a shared stack trace. See :func:`_digest`.
+_DIGEST_TAIL_CHARS = 64
+
+#: Total characters fed to the hash per event, across all of its fields.
+_DIGEST_TOTAL_CHARS = 4096
+
+#: Bounds the repr of a NON-string value. ``repr`` builds its whole result
+#: before anything can slice it, so a 20 KB payload nested inside ``message``
+#: or ``args`` was materialized in full on every fold even though only the
+#: first characters were ever hashed (review round 2, F5). ``reprlib`` stops
+#: building instead of building-then-cutting, and its own elision markers keep
+#: the result stable for equal inputs, which is all identity requires.
+_VALUE_REPR = reprlib.Repr()
+_VALUE_REPR.maxstring = _DIGEST_VALUE_CHARS
+_VALUE_REPR.maxother = _DIGEST_VALUE_CHARS
+_VALUE_REPR.maxlevel = 6
+for _name in ("maxdict", "maxlist", "maxtuple", "maxset", "maxfrozenset", "maxarray", "maxdeque"):
+    setattr(_VALUE_REPR, _name, 16)
+
+
+def _digest(event: Mapping[str, Any]) -> str:
+    """A short, stable fingerprint of one event's CONTENT.
+
+    Used only for events with no :data:`TRAJECTORY_SEQ_KEY` stamp, where the
+    content is the only intrinsic thing left to identify a row by. Keys are
+    visited in sorted order so two equal events fingerprint equally regardless
+    of insertion order.
+
+    BOUNDED, because this runs once a second over a 500-event window against
+    payloads with no size limit: fingerprinting whole events measured 133 ms
+    per fold on a window of 20 KB notices. The bound is applied while BUILDING
+    the hashed string — serializing and then truncating measured *worse*
+    (256 ms), since the cost is the serialization, not the hashing.
+
+    WHAT THE BOUND MUST NOT COST is identity. A head-only cut is not safe here,
+    and the failure is not theoretical: two different agent errors from one
+    deep stack, or one upstream 5xx differing only in request id, share
+    hundreds of leading characters and differ only at the END. Keying both to
+    one fingerprint made the page DROP the second error outright — notices
+    never supersede, so the later event collided with the surviving key and
+    was discarded, showing the reader one stale failure where two had happened
+    (review round 2, F4/D5). That is content loss in the opposite direction
+    from the duplicate rows this module exists to prevent, and strictly worse.
+
+    So a value contributes its LENGTH and its TAIL as well as its head. All
+    three are O(1) on a ``str`` — a slice of a string is a view, not a copy of
+    the payload — so the cost the bound bought is kept (measured 0.9 ms →
+    1.1 ms per fold on that same window) while events that differ anywhere in
+    length or in their last :data:`_DIGEST_TAIL_CHARS` are told apart.
+
+    Collision is REDUCED, not eliminated: any bounded fingerprint has inputs
+    that alias, and two values agreeing on length, head and tail while
+    differing in the middle still share a key. The residual is not a silent
+    row loss the way an unqualified head cut was, because the fields that vary
+    in real events (an exception line, a field path, a request id) vary at the
+    end or in length. Identity for anything a current engine relays comes from
+    :data:`TRAJECTORY_SEQ_KEY`, not from here; this path exists only for
+    events retained across an upgrade from a release that predates the stamp.
+    """
+    parts: list[str] = []
+    budget = _DIGEST_TOTAL_CHARS
+    try:
+        for key in sorted(event, key=str):
+            if budget <= 0:
+                break
+            value = event[key]
+            # ``str`` of a string IS the string, so the slices below are views
+            # rather than copies. Everything else goes through the bounded
+            # repr, which stops building rather than building then cutting.
+            rendered = value if isinstance(value, str) else _VALUE_REPR.repr(value)
+            head = min(_DIGEST_VALUE_CHARS, budget)
+            chunk = f"{key}={len(rendered)}:{rendered[:head]}"
+            if len(rendered) > head:
+                # Only when the head was actually cut: an untruncated value is
+                # already fully represented, and appending its own tail again
+                # would make the digest depend on how the budget happened to
+                # fall rather than on the content.
+                chunk += f"~{rendered[-_DIGEST_TAIL_CHARS:]}"
+            budget -= len(chunk)
+            parts.append(chunk)
+        payload = "\x1f".join(parts)
+    except Exception:  # pragma: no cover - exotic producer data only
+        payload = repr(event)[:_DIGEST_TOTAL_CHARS]
+    return hashlib.blake2s(payload.encode("utf-8", "replace"), digest_size=8).hexdigest()
+
+
+class _Anchors:
+    """Eviction-proof identities for the rows that have no id of their own.
+
+    THE CONSTRAINT, and the reason this exists: ``AsyncJob.trajectory`` evicts
+    from the FRONT (``harness/subagent._make_relay``), so an event's offset in
+    the folded window drops by one on every later append. The view accumulates
+    rows by key and never removes them (:meth:`SubagentView.show`), so any key
+    derived from that offset re-spells itself as the child works and mounts a
+    NEW identical row each refresh — one error notice became a dozen stacked
+    copies of itself. An identity here must come from something intrinsic to
+    the event, never from where it currently sits.
+
+    Preferred source is the writer's monotonic stamp, assigned at append time
+    and the one property eviction cannot touch. Absent it — events retained by
+    an older release, or a hand-built fixture — the content fingerprint stands
+    in, qualified by how many identical events precede it so two genuinely
+    distinct notices with the same wording still occupy two rows. That ordinal
+    counts over CONTENT, not over offsets, so appending cannot renumber it.
+
+    Resolved LAZILY, per event, because the fold runs once a second over a
+    500-event window and the overwhelming majority of those events carry a
+    message id or a ``tool_call_id`` and never ask for an anchor at all.
+    Fingerprinting the whole window up front measured ~11 ms per fold on a full
+    window of id-less events, spent almost entirely on rows that then discarded
+    it; the ordinal still has to be counted in window order, which is why this
+    is a small stateful object rather than a plain function.
+    """
+
+    def __init__(self) -> None:
+        self._seen: dict[str, int] = {}
+
+    def of(self, event: Mapping[str, Any]) -> str:
+        stamp = event.get(TRAJECTORY_SEQ_KEY)
+        # ``bool`` is an ``int`` in Python and would alias seq 0 and 1; a
+        # producer that ever writes one is malformed, not authoritative.
+        if isinstance(stamp, int) and not isinstance(stamp, bool):
+            return f"s{stamp}"
+        # CEILING of the unstamped path, and it is deliberate: the ordinal
+        # counts occurrences within the CURRENT window, so the number of rows
+        # one wording can ever occupy is the most that were ever resident at
+        # once, not the number of times it truly happened. Repeats spread far
+        # enough apart that no two co-exist all resolve to ordinal 0 and fold
+        # into the row the page already holds — five such failures render as
+        # one row (design round 1, D2).
+        #
+        # Left as-is because the alternative is worse: a window-independent
+        # counter would have to persist across folds, and any counter that
+        # rises on re-reading the SAME event reintroduces exactly the
+        # duplicate-row defect this module was fixed for. Under-reporting a
+        # legacy trajectory is the safe direction; over-reporting is the bug.
+        # Only reachable for events retained across an upgrade from a release
+        # older than TRAJECTORY_SEQ_KEY, since every relayed event is stamped.
+        fingerprint = _digest(event)
+        ordinal = self._seen.get(fingerprint, 0)
+        self._seen[fingerprint] = ordinal + 1
+        return f"d{fingerprint}.{ordinal}"
+
+
 def _first_line(text: str) -> str:
     """First non-empty line — what a failed tool card shows as its error."""
     for line in text.splitlines():
@@ -239,11 +395,18 @@ class SubagentEntry:
     """One row of the folded child transcript.
 
     A value, not a widget. ``key`` is the row's IDENTITY across folds — the
-    child's message id, its ``tool_call_id``, or the event's position for a
-    notice — and everything else is the row's current content. The view merges
-    successive folds by key and diffs by value, so a row has to be able to
-    answer both "am I the same row" and "have I changed" without consulting
+    child's message id, its ``tool_call_id``, or an eviction-proof anchor
+    (:class:`_Anchors`) for a notice and for anything the child sent
+    without an id — and everything else is the row's current content. The view
+    merges successive folds by key and diffs by value, so a row has to be able
+    to answer both "am I the same row" and "have I changed" without consulting
     the DOM.
+
+    The key may NOT be derived from the event's position in the retained
+    window. That window slides as the engine evicts from its front, so a
+    positional key renames a surviving row on every refresh, and because the
+    view only ever adds rows, each new spelling mounted another copy of the
+    same notice.
     """
 
     key: str
@@ -479,6 +642,7 @@ def fold_trajectory(events: Sequence[Any], *, settled: bool = False) -> list[Sub
     finished: set[str] = set()
     tools: dict[str, SubagentEntry] = {}
     notices: dict[str, SubagentEntry] = {}
+    anchors = _Anchors()
 
     def remember(kind: str, key: str) -> None:
         identity = (kind, key)
@@ -486,9 +650,12 @@ def fold_trajectory(events: Sequence[Any], *, settled: bool = False) -> list[Sub
             remembered.add(identity)
             ordered.append(identity)
 
-    def note(index: int, text: str, kind: NoticeKind) -> None:
-        notices[f"n{index}"] = _notice(f"n{index}", text, kind)
-        remember("notice", f"n{index}")
+    def note(event: Mapping[str, Any], text: str, kind: NoticeKind) -> None:
+        # Keyed by the event's own anchor, never by its position: a notice is
+        # the row this whole mechanism exists for (see :class:`_Anchors`).
+        key = f"n{anchors.of(event)}"
+        notices[key] = _notice(key, text, kind)
+        remember("notice", key)
 
     try:
         raw_events = list(events)
@@ -501,14 +668,16 @@ def fold_trajectory(events: Sequence[Any], *, settled: bool = False) -> list[Sub
     # N are the ones that still exist; slicing from the front would freeze the
     # page at event 500 the moment the two caps ever diverge — while the note
     # above it claims to be showing the latest.
-    for index, raw in enumerate(raw_events[-TRAJECTORY_MAX_EVENTS:]):
+    for raw in raw_events[-TRAJECTORY_MAX_EVENTS:]:
         event = _as_dict(raw)
         etype = event.get("type")
         if etype in ("message_start", "message_update", "message_end"):
             message = event.get("message")
             if not isinstance(message, Mapping) or message.get("role") != "assistant":
                 continue
-            message_id = str(message.get("id") or f"m{index}")
+            # ``or`` short-circuits, so the anchor is only resolved for a
+            # message the child sent without an id — the uncommon case.
+            message_id = str(message.get("id") or f"m{anchors.of(event)}")
             if etype == "message_start":
                 streams[message_id] = ""
                 remember("text", message_id)
@@ -531,7 +700,7 @@ def fold_trajectory(events: Sequence[Any], *, settled: bool = False) -> list[Sub
             # reads. An id-less call still cannot be correlated with its end —
             # its card stays unsettled by design, which is a degraded row
             # rather than a wrong one.
-            call_id = str(event.get("tool_call_id") or f"t{index}")
+            call_id = str(event.get("tool_call_id") or f"t{anchors.of(event)}")
             args = event.get("args")
             intent = event.get("intent")
             tools[call_id] = SubagentEntry(
@@ -569,16 +738,16 @@ def fold_trajectory(events: Sequence[Any], *, settled: bool = False) -> list[Sub
         elif etype == "notice":
             kind = str(event.get("kind") or "info")
             note(
-                index,
+                event,
                 str(event.get("text") or ""),
                 kind if kind in ("info", "note", "success", "warning", "error") else "info",
             )
         elif etype == "compaction_start":
-            note(index, "compacting context…", "info")
+            note(event, "compacting context…", "info")
         elif etype == "compaction_end":
             done = bool(event.get("success"))
             note(
-                index,
+                event,
                 "context compacted" if done else "compaction failed",
                 "info" if done else "warning",
             )
@@ -586,7 +755,7 @@ def fold_trajectory(events: Sequence[Any], *, settled: bool = False) -> list[Sub
             body = f"retry {event.get('attempt', 1)}: {event.get('error', '')}".strip()
             if event.get("fallback_model"):
                 body += f" → falling back to {event.get('fallback_model')}"
-            note(index, body, "warning")
+            note(event, body, "warning")
         elif etype == "model_change":
             # Route notices narrate the edge once; this event only keeps model
             # labels and context limits truthful elsewhere in the subagent UI.
@@ -598,9 +767,9 @@ def fold_trajectory(events: Sequence[Any], *, settled: bool = False) -> list[Sub
             # the parent's. Without it a failed subagent's page simply stopped,
             # and the reason lived only on the band row the reader had left.
             if event.get("error"):
-                note(index, str(event.get("error")), "error")
+                note(event, str(event.get("error")), "error")
             elif event.get("aborted"):
-                note(index, "interrupted", "warning")
+                note(event, "interrupted", "warning")
 
     rows: list[SubagentEntry] = []
     for kind, key in ordered:
