@@ -1330,9 +1330,20 @@ async def test_grandchild_cannot_fan_out_but_polls_its_own_background_bash(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_restricted_child_cannot_fall_through_to_parent_mcp(tmp_path, monkeypatch):
-    """A restricted role keeps guide/skill resolution but cannot list or
-    activate MCP through the parent's combined resolver chain."""
+async def test_restricted_child_may_discover_mcp_but_never_activate_it(tmp_path, monkeypatch):
+    """A restricted role reads the MCP catalogue and cannot enable a new tool.
+
+    The boundary an allowlist draws is around CHANGE, not around reach, so
+    discovery (a pure read) resolves. Activation does not: a server's tools are
+    minted ``approval_tier="exec"`` because their side effects are unknowable
+    from here, so a restricted child must not be able to widen its own surface
+    past the parent that delegated to it. It is told WHY rather than handed a
+    bare ``None``, because a child that only sees "no" re-reads the same URL.
+
+    The parent's own resolver chain also ends in an MCP resolver bound to the
+    PARENT's inventory; falling through to it would activate on the wrong
+    session as well as route around this denial, so ``mcp://`` never falls
+    through while ``guide://`` still does."""
     from local_operator.agent_profiles import AgentProfile
     from local_operator.harness import subagent as subagent_mod
     from local_operator.mcp.resources import make_mcp_resolver
@@ -1370,8 +1381,12 @@ async def test_restricted_child_cannot_fall_through_to_parent_mcp(tmp_path, monk
     )
 
     assert resolve(child, "guide://safe") == "safe guide"
-    assert resolve(child, "mcp://slack") is None
-    assert resolve(child, "mcp://slack/post_message") is None
+    # Discovery answers: reading the catalogue enables nothing.
+    index = resolve(child, "mcp://slack")
+    assert index is not None and "post_message" in index
+    # Activation is refused, with the reason, and enables nothing anywhere.
+    denied = resolve(child, "mcp://slack/post_message")
+    assert denied is not None and "cannot enable new ones" in denied
     assert parent_activations == []
     assert all(not tool.name.startswith("mcp__") for tool in child._tools)
     await child.dispose()
@@ -1379,12 +1394,252 @@ async def test_restricted_child_cannot_fall_through_to_parent_mcp(tmp_path, monk
 
 
 @pytest.mark.asyncio
+async def test_restricted_child_inherits_the_mcp_tools_the_parent_enabled(tmp_path, monkeypatch):
+    """What the restricted child DOES get: the parent's already-active tools.
+
+    Withholding MCP wholesale from every allowlisted role cost a reviewer or
+    scout the reads its role is made of — the ticket, the design doc, the log
+    are frequently only reachable through a server. Inheriting is the honest
+    line: the parent is unrestricted, it activated these tools for the very
+    task it is now delegating, and it stays accountable for them. The child
+    still cannot ADD to the set (asserted above)."""
+    from local_operator.agent_profiles import AgentProfile
+    from local_operator.harness import subagent as subagent_mod
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    manager = FakeMcpManager({"linear": ["list_issues", "create_issue"]})
+    parent = make_session(tmp_path, OneShotStream())
+    attach_manager(parent, manager)
+    # Only ``list_issues`` is live on the parent, which is what "the set the
+    # parent already enabled" means — the child must not receive the rest.
+    parent.refresh_tools(
+        list(parent._tools) + [t for t in manager.get_tools() if t.name.endswith("list_issues")]
+    )
+
+    child = await subagent_mod._build_child_session(
+        label="scout",
+        prompt="find the ticket",
+        parent_session=parent,
+        model_spec=None,
+        job_id="job-inherit",
+        agent="scout",
+        profile=AgentProfile(name="scout", tools=("read", "grep")),
+    )
+
+    names = {tool.name for tool in child._tools}
+    assert "mcp__linear_list_issues" in names
+    assert "mcp__linear_create_issue" not in names
+    await child.dispose()
+    await parent.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_grandchild_cannot_activate_what_its_restricted_ancestor_was_refused(
+    tmp_path, monkeypatch
+):
+    """The MCP denial is STICKY DOWNWARD, checked at depth 2.
+
+    Review round 1 (R1). Restriction used to be computed from the child's own
+    profile alone, so a delegating restricted role had a trivial escape: the
+    packaged ``manager`` carries an allowlist AND ``delegate: yes``, keeps
+    ``task``, and is handed the parent's live MCP manager. Its child rebuilt
+    with ``profile=None``, computed ``restricted=False``, and activated freely
+    into that shared manager -- so a manager refused ``delete_issue`` could
+    spawn a plain child and have IT enable the tool, an ``approval_tier="exec"``
+    write obtained one hop below the boundary that refused it.
+
+    Driven off the REAL packaged seed rather than a synthetic profile, because
+    the finding is that a SHIPPED role reaches the escape: a hand-written
+    profile in this test could drift from what the seed actually grants and the
+    regression would silently stop being covered."""
+    from local_operator.agent_profiles import load_seed
+    from local_operator.harness import subagent as subagent_mod
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    manager_seed = load_seed("manager")
+    assert manager_seed is not None
+    # The two properties that make this role the vector. If a future edit drops
+    # either, this test would pass while covering nothing.
+    assert manager_seed.tools, "the manager seed must carry an allowlist"
+    assert manager_seed.may_delegate, "the manager seed must be able to delegate"
+
+    manager = FakeMcpManager({"linear": ["list_issues", "delete_issue"]})
+    parent = make_session(tmp_path, OneShotStream())
+    attach_manager(parent, manager)
+    # The top-level parent enabled ONLY list_issues; delete_issue is the write.
+    parent.refresh_tools(
+        list(parent._tools) + [t for t in manager.get_tools() if t.name.endswith("list_issues")]
+    )
+
+    child = await subagent_mod._build_child_session(
+        label="mgr",
+        prompt="coordinate the work",
+        parent_session=parent,
+        model_spec=None,
+        job_id="job-mgr",
+        agent="manager",
+        profile=manager_seed,
+    )
+    denied = resolve(child, "mcp://linear/delete_issue")
+    assert denied is not None and "cannot enable new ones" in denied
+    # It really can delegate -- otherwise there is no depth 2 to test.
+    assert "task" in {tool.name for tool in child._tools}
+
+    # The manager delegates an ordinary full child: no profile, no role.
+    grandchild = await subagent_mod._build_child_session(
+        label="worker",
+        prompt="do the thing",
+        parent_session=child,
+        model_spec=None,
+        job_id="job-worker",
+        agent="task",
+        profile=None,
+    )
+
+    escalated = resolve(grandchild, "mcp://linear/delete_issue")
+    assert escalated is not None and "cannot enable new ones" in escalated
+    names = {tool.name for tool in grandchild._tools}
+    assert "mcp__linear_delete_issue" not in names
+    # It still INHERITS what the lineage legitimately held.
+    assert "mcp__linear_list_issues" in names
+    await grandchild.dispose()
+    await child.dispose()
+    await parent.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_resumed_child_keeps_the_denial_it_inherited(tmp_path, monkeypatch):
+    """The denial survives a resume, end to end (review round 2, R5).
+
+    ``hub op='resume'`` rebuilds a settled child against the comms-owning ROOT
+    session rather than the child's real parent, and the child that leaks is a
+    plain ``task`` grandchild whose own role says "unrestricted" -- so neither
+    the role nor the parent session can re-derive the denial and it has to be
+    carried forward from the persisted record. Before the carry, a grandchild
+    correctly refused ``delete_issue`` while live came back from a resume with
+    that ``approval_tier="exec"`` write in its inventory.
+
+    This asserts the CONSEQUENCE on a really-built session; the plumbing that
+    feeds ``restricted`` in from the record is asserted at the comms seam in
+    ``tests/unit/harness/test_comms.py``."""
+    from local_operator.agent_profiles import load_seed
+    from local_operator.harness import subagent as subagent_mod
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    manager_seed = load_seed("manager")
+    assert manager_seed is not None
+
+    manager = FakeMcpManager({"linear": ["list_issues", "delete_issue"]})
+    root = make_session(tmp_path, OneShotStream())
+    attach_manager(root, manager)
+    root.refresh_tools(
+        list(root._tools) + [t for t in manager.get_tools() if t.name.endswith("list_issues")]
+    )
+
+    mgr = await subagent_mod._build_child_session(
+        label="mgr",
+        prompt="coordinate",
+        parent_session=root,
+        model_spec=None,
+        job_id="job-mgr",
+        agent="manager",
+        profile=manager_seed,
+    )
+    grandchild = await subagent_mod._build_child_session(
+        label="worker",
+        prompt="work",
+        parent_session=mgr,
+        model_spec=None,
+        job_id="job-gc",
+        agent="task",
+        profile=None,
+    )
+    assert getattr(grandchild, subagent_mod.MCP_DENIED_ATTR, False) is True
+    resume_dir = grandchild._transcript.directory
+
+    # The resume: rebuilt against the ROOT (unrestricted) with no profile,
+    # exactly as ``SubagentComms.resume`` does, carrying only the flag the
+    # record persisted.
+    resumed = await subagent_mod._build_child_session(
+        label="worker",
+        prompt="continue",
+        parent_session=root,
+        model_spec=None,
+        job_id="job-gc2",
+        resume_dir=resume_dir,
+        agent="task",
+        profile=None,
+        restricted=True,
+    )
+
+    denied = resolve(resumed, "mcp://linear/delete_issue")
+    assert denied is not None and "cannot enable new ones" in denied
+    names = {tool.name for tool in resumed._tools}
+    assert "mcp__linear_delete_issue" not in names
+    assert "mcp__linear_list_issues" in names
+    # The restriction is re-stamped, so a further delegation from the resumed
+    # child inherits it too rather than starting clean.
+    assert getattr(resumed, subagent_mod.MCP_DENIED_ATTR, False) is True
+    await resumed.dispose()
+    await grandchild.dispose()
+    await mgr.dispose()
+    await root.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_unrestricted_lineage_still_activates_at_depth_two(tmp_path, monkeypatch):
+    """The counter-check to the sticky denial: it must not over-apply.
+
+    Restriction propagates from a restricted ancestor only. A plain ``task``
+    lineage has no allowlist anywhere in it, so activation must keep working at
+    every depth -- otherwise the R1 fix would have closed the escape by
+    breaking ordinary delegation, which no test above would have caught."""
+    from local_operator.harness import subagent as subagent_mod
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    manager = FakeMcpManager({"linear": ["list_issues"]})
+    parent = make_session(tmp_path, OneShotStream())
+    attach_manager(parent, manager)
+
+    child = await subagent_mod._build_child_session(
+        label="c",
+        prompt="p",
+        parent_session=parent,
+        model_spec=None,
+        job_id="job-c",
+        agent="task",
+        profile=None,
+    )
+    grandchild = await subagent_mod._build_child_session(
+        label="g",
+        prompt="p",
+        parent_session=child,
+        model_spec=None,
+        job_id="job-g",
+        agent="task",
+        profile=None,
+    )
+
+    rendered = resolve(grandchild, "mcp://linear/list_issues")
+    assert rendered is not None and "Enabled MCP tool" in rendered
+    assert "mcp__linear_list_issues" in {tool.name for tool in grandchild._tools}
+    await grandchild.dispose()
+    await child.dispose()
+    await parent.dispose()
+
+
+@pytest.mark.asyncio
 async def test_scout_child_is_read_only_and_cannot_delegate(tmp_path, monkeypatch):
-    """The scout tier: tool inventory filtered to lookups (allowlist, not
-    tier — no bash, no eval-style execution, no MCP calls, no delegation),
-    its prompt stamped with the scout preamble, and the capability tools
-    pruned entirely: a read-only agent that delegates autonomous work is not
-    read-only."""
+    """The scout tier: tool inventory filtered to retrieval (allowlist, not
+    tier — no bash, no eval-style execution, no delegation), its prompt
+    stamped with the scout preamble, and the capability tools pruned entirely:
+    a read-only agent that delegates autonomous work is not read-only.
+
+    Read-only means it CHANGES nothing, not that it reaches nothing. The web
+    tools are in the surface because a scout launched to research a question
+    on the web otherwise reports that it has no network access and greps the
+    local disk for facts that were never on it — the failure this tier exists
+    to perform well."""
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
     parent = make_session(tmp_path, OneShotStream())
 
@@ -1393,8 +1648,18 @@ async def test_scout_child_is_read_only_and_cannot_delegate(tmp_path, monkeypatc
     names = {tool.name for tool in child._tools}
     # hub survives the allowlist: it is the child's ONLY way to answer a
     # parent question, and it cannot edit, write or execute anything.
-    assert names <= {"read", "glob", "grep", "list_variables", "read_variable", "hub"}
+    assert names <= {
+        "read",
+        "glob",
+        "grep",
+        "list_variables",
+        "read_variable",
+        "web_search",
+        "web_fetch",
+        "hub",
+    }
     assert "hub" in names
+    assert {"web_search", "web_fetch"} <= names
     assert {"bash", "edit", "write", "task", "wait", "jobs", "wake"}.isdisjoint(names)
     assert (
         "scout mode" in getattr(child._context.messages[0], "text", "")
@@ -1437,7 +1702,19 @@ async def test_a_tool_restricted_role_keeps_hub_so_it_can_answer(tmp_path, monke
     )
 
     names = {tool.name for tool in child._tools}
-    assert names <= {"read", "glob", "grep", "bash", "todo", "hub", "jobs"}
+    assert names <= {
+        "read",
+        "glob",
+        "grep",
+        "bash",
+        "todo",
+        "hub",
+        "jobs",
+        # Floored in regardless of what the allowlist names — see
+        # ``test_a_stale_role_allowlist_still_gets_the_network_floor``.
+        "web_search",
+        "web_fetch",
+    }
     assert "hub" in names
     # It keeps ``bash`` with ``background``, so it must keep ``jobs`` to poll
     # and cancel that background job — otherwise the bash receipt's advice to
@@ -1446,6 +1723,84 @@ async def test_a_tool_restricted_role_keeps_hub_so_it_can_answer(tmp_path, monke
     # The boundary itself is intact: nothing the allowlist denies survived,
     # and a role that must not fan out still has no spawn/persist tools.
     assert {"edit", "write", "eval", "task", "wait", "wake"}.isdisjoint(names)
+    await child.dispose()
+    await parent.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_stale_role_allowlist_still_gets_the_network_floor(tmp_path, monkeypatch):
+    """The registry-row case, which is the one that actually broke a machine.
+
+    ``resolve_profile`` is REGISTRY-FIRST, and installing a role freezes its
+    allowlist into a ``tools:a,b,c`` tag. A ``scout`` installed before the web
+    tools joined the read-only surface therefore keeps an allowlist that names
+    neither of them, and editing the packaged seed reaches it never. The floor
+    is applied at child construction so such a row regains the network without
+    the harness rewriting the operator's profile behind their back.
+
+    The profile below is spelled out as the literal pre-fix tag list rather
+    than derived from a constant: the point of the test is that a list frozen
+    on disk in the past still works, so it must not track today's constant."""
+    from local_operator.agent_profiles import AgentProfile
+    from local_operator.harness import subagent as subagent_mod
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    parent = make_session(tmp_path, OneShotStream())
+
+    stale = AgentProfile(
+        name="scout",
+        description="installed before the network tools existed",
+        tools=("read", "glob", "grep", "list_variables", "read_variable"),
+    )
+    child = await subagent_mod._build_child_session(
+        label="research",
+        prompt="what does the vendor's API return for a 429?",
+        parent_session=parent,
+        model_spec=None,
+        job_id="job-stale",
+        agent="scout",
+        profile=stale,
+    )
+
+    names = {tool.name for tool in child._tools}
+    assert {"web_search", "web_fetch"} <= names
+    # A FLOOR, not a widening: every write/execution denial the stale row drew
+    # is still in force, which is what keeps a reviewer unable to edit its diff.
+    assert {"edit", "write", "bash", "eval", "browser", "task"}.isdisjoint(names)
+    await child.dispose()
+    await parent.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_network_floor_stays_empty_when_web_tools_are_disabled(tmp_path, monkeypatch):
+    """The floor re-admits tools from the session's OWN inventory, so a machine
+    with web search/fetch turned off in config contributes nothing to floor and
+    the child simply has no network tools — the floor must not mint a tool the
+    operator disabled."""
+    from local_operator.agent_profiles import AgentProfile
+    from local_operator.harness import subagent as subagent_mod
+
+    config = tmp_path / "config"
+    config.mkdir(parents=True, exist_ok=True)
+    (config / "config.yml").write_text(
+        "version: '1.0'\nvalues:\n  web_search:\n    enabled: false\n"
+        "  web_fetch:\n    enabled: false\n"
+    )
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+    parent = make_session(tmp_path, OneShotStream())
+
+    child = await subagent_mod._build_child_session(
+        label="research",
+        prompt="research the thing",
+        parent_session=parent,
+        model_spec=None,
+        job_id="job-nonet",
+        agent="scout",
+        profile=AgentProfile(name="scout", tools=("read", "grep")),
+    )
+
+    names = {tool.name for tool in child._tools}
+    assert {"web_search", "web_fetch"}.isdisjoint(names)
     await child.dispose()
     await parent.dispose()
 

@@ -83,12 +83,40 @@ MAX_INSTRUCTIONS_CHARS = 8_000
 #: the ``agent`` tool; required by :func:`resolve_profile`.
 ROLE_TAG = "role"
 
+#: The tools a read-only role may reach the NETWORK with, and the floor every
+#: allowlisted role keeps (see
+#: :func:`local_operator.harness.subagent._with_network_floor`). Both are
+#: ``approval_tier="read"``: they retrieve a remote document and produce no
+#: side effect beyond a bounded cache under ``config_dir()``, which is the same
+#: promise ``read`` makes about the disk.
+#:
+#: They are named separately from :data:`READ_ONLY_TOOLS` because the two lists
+#: answer different questions. ``READ_ONLY_TOOLS`` is "what does this role
+#: start with"; this tuple is "what can never be taken away from it", and a
+#: registry row written before these tools existed has to be repaired against
+#: the second list, not the first.
+READ_ONLY_NETWORK_TOOLS = ("web_search", "web_fetch")
+
 #: Tool names a read-only role is filtered to. Allowlist, not a tier filter:
-#: approval tiers drift as tools are added, and these roles promise "no side
-#: effects at all", which is narrower than "nothing marked write". ``browser``
+#: approval tiers drift as tools are added, and these roles promise no LOCAL
+#: side effects, which is narrower than "nothing marked write". ``browser``
 #: drives the user's real browser and ``eval`` executes code, so both are
 #: excluded by NAME even where a tier check alone would admit them.
-READ_ONLY_TOOLS = ("read", "glob", "grep", "list_variables", "read_variable")
+#:
+#: Read-only means "changes nothing", NOT "reaches nothing". Omitting the
+#: network tools here was a capability bug, not a safety property: a ``scout``
+#: launched to research a question on the web reported "I have no network
+#: access in this session" and fell back to grepping the local disk for facts
+#: that were never on it, burning its whole budget to produce nothing. A role
+#: whose entire purpose is research cannot be structurally incapable of it, and
+#: retrieving a page mutates no more than reading a file does.
+READ_ONLY_TOOLS = (
+    "read",
+    "glob",
+    "grep",
+    "list_variables",
+    "read_variable",
+) + READ_ONLY_NETWORK_TOOLS
 
 
 class NameTakenError(RuntimeError):

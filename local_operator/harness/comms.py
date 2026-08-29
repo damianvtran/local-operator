@@ -270,6 +270,24 @@ class _ChildRecord:
     launch_message_id: str = ""
     agent_role: str = ""
     effort: str = ""
+    #: Whether this child was built under an MCP activation denial. Persisted
+    #: HERE because the flag lives on the child Session as in-memory state and
+    #: a resume constructs a NEW session: ``agent_role`` alone cannot re-derive
+    #: it, since a denial is inherited from the lineage rather than declared by
+    #: the child's own role (the leaking case is precisely a plain ``task``
+    #: child of a restricted ``manager`` — its role says "unrestricted"). And
+    #: :meth:`SubagentComms.resume` rebuilds against ``self._session``, the
+    #: comms-owning ROOT rather than the child's real parent, so the parent
+    #: read in ``_build_child_session`` finds an unrestricted session and a
+    #: correctly-denied grandchild came back able to activate the writes it had
+    #: been refused (review round 2, R5).
+    #:
+    #: Carried by :meth:`SubagentComms.snapshot`/:meth:`restore` like
+    #: ``agent_role``, so it outlives the PROCESS and not merely this map.
+    #: Holding it only in memory left it with the same lifetime as the Session
+    #: attribute it was added to outlast, and a child that settled hours ago is
+    #: normally resumed after a restart (review round 3, R6).
+    restricted: bool = False
     #: The child's transcript directory. Set at attach; the whole basis of
     #: resume, and the reason a record outlives the job row.
     session_dir: Path | None = None
@@ -464,6 +482,13 @@ class SubagentComms:
             record.parent_job_id = prior.parent_job_id
             record.agent_role = prior.agent_role
             record.effort = prior.effort
+            # Carried across the fold like the role, and for the same reason:
+            # this record REPLACES a settled attempt, so dropping the denial
+            # here would let the second resume of a restricted child come back
+            # wider than the first. The live stamp below still wins when it is
+            # truthy, so a fold can only ever preserve a denial, never clear
+            # one.
+            record.restricted = record.restricted or prior.restricted
             record.attempt_aliases = list(
                 dict.fromkeys([*prior.attempt_aliases, prior.job_id, *record.attempt_aliases])
             )
@@ -483,6 +508,16 @@ class SubagentComms:
             self._aliases[alias] = job_id
         record.child = child
         record.session_dir = session_dir
+        # Imported here, not at module scope: ``subagent`` imports this module
+        # for its comms types, so a top-level import closes the cycle. Same
+        # reason ``resume`` imports ``run_subagent`` locally.
+        from local_operator.harness.subagent import MCP_DENIED_ATTR
+
+        # Read off the live child, which ``_build_child_session`` has already
+        # stamped, rather than recomputed from the role: the denial is a
+        # property of the LINEAGE (see the field's own note), and this is the
+        # one moment the built session and its durable record are both in hand.
+        record.restricted = record.restricted or bool(getattr(child, MCP_DENIED_ATTR, False))
         jobs = self._jobs()
         bind = getattr(jobs, "bind_logical_identity", None) if jobs is not None else None
         if callable(bind):
@@ -769,6 +804,16 @@ class SubagentComms:
                     "launch_message_id": record.launch_message_id,
                     "agent_role": record.agent_role,
                     "effort": record.effort,
+                    # Rides with the role because it is the half the role
+                    # CANNOT express (see the field). Losing it here would
+                    # leave the flag alive only for the process, which is the
+                    # lifetime the in-memory marker already had and precisely
+                    # what persisting it was meant to fix: a child that settled
+                    # hours ago is normally resumed AFTER a restart, so this row
+                    # is the only thing standing between a restricted lineage
+                    # and a resumed grandchild that can activate the writes it
+                    # was refused (review round 3, R6).
+                    "restricted": record.restricted,
                     "session_dir": str(record.session_dir),
                     "outcome": record.outcome,
                     "result_text": record.result_text,
@@ -849,6 +894,12 @@ class SubagentComms:
                 launch_message_id=str(row.get("launch_message_id") or ""),
                 agent_role=str(row.get("agent_role") or ""),
                 effort=str(row.get("effort") or ""),
+                # Missing defaults to False, which is right for a sidecar
+                # written before this field existed: it reproduces today's
+                # behaviour for old rows and cannot invent a denial that was
+                # never recorded. A denial can only ever be ADDED afterwards,
+                # by the attach stamp or the live computation.
+                restricted=bool(row.get("restricted")),
                 session_dir=session_dir,
                 settled=True,
                 settled_at=row.get("settled_at"),
@@ -1492,10 +1543,19 @@ class SubagentComms:
         # returns decides the tool allowlist. That allowlist is a CAPABILITY
         # BOUNDARY rather than advice (see ``_build_child_session``): resumed
         # without it, a reviewer regains ``edit``/``write`` and can "helpfully"
-        # fix the very code it was asked to review, a scout loses its
-        # read-only promise, and the MCP tools restricted roles are denied
-        # come back wholesale. It also re-stamps ``origin.json`` with the
+        # fix the very code it was asked to review, and a scout loses its
+        # read-only promise. It also re-stamps ``origin.json`` with the
         # agent, so a defaulted resume overwrites the real role on disk.
+        #
+        # ``restricted`` rides alongside for the half the role CANNOT express.
+        # A denial is inherited from the lineage, so the leaking child is a
+        # plain ``task`` one whose own role says "unrestricted" — and this
+        # rebuild passes ``parent_session=self._session``, the comms-owning
+        # ROOT rather than the child's real parent, so the parent read in
+        # ``_build_child_session`` cannot recover it either. Without carrying
+        # the flag, a grandchild of a restricted ``manager`` that was correctly
+        # refused ``delete_issue`` while live came back from a resume able to
+        # activate it (review round 2, R5).
         # ``run_subagent`` defaults ``agent`` to ``"task"``, so omitting these
         # silently downgraded every resumed child to a generic no-role one.
         agent = record.agent_role or "task"
@@ -1527,6 +1587,7 @@ class SubagentComms:
             resume_dir=record.session_dir,
             agent=agent,
             effort=effort,
+            restricted=record.restricted,
         )
         # The pause is over the moment its continuation exists. Left set, the
         # old record would keep advertising ``paused`` in the roster forever

@@ -14,6 +14,8 @@ import pytest
 
 from local_operator.agent_profiles import (
     MAX_INSTRUCTIONS_CHARS,
+    READ_ONLY_NETWORK_TOOLS,
+    READ_ONLY_TOOLS,
     AgentProfile,
     filter_tools,
     install_seed,
@@ -32,7 +34,19 @@ class _Tool:
 
 ALL_TOOLS: list[_Tool] = [
     _Tool(name)
-    for name in ("bash", "read", "write", "edit", "glob", "grep", "eval", "todo", "browser")
+    for name in (
+        "bash",
+        "read",
+        "write",
+        "edit",
+        "glob",
+        "grep",
+        "eval",
+        "todo",
+        "browser",
+        "web_search",
+        "web_fetch",
+    )
 ]
 
 
@@ -102,10 +116,44 @@ def test_the_reviewer_cannot_edit_but_can_run_the_tests() -> None:
     assert "bash" in names and "read" in names
 
 
-def test_a_read_only_role_gets_no_side_effect_tools() -> None:
+def test_a_read_only_role_changes_nothing_but_can_still_reach_the_web() -> None:
+    """Read-only is a promise about CHANGE, not about reach.
+
+    A scout whose surface omitted the network tools reported "I have no
+    network access in this session" and fell back to grepping the local disk
+    for facts it had been asked to find on the web. Retrieval mutates no more
+    than reading a file does, so it belongs in a surface that is defined by
+    making no local change — while ``bash``, ``eval``, ``browser``, ``write``
+    and ``edit`` stay out by name, tier check or not."""
     names = {tool.name for tool in filter_tools(ALL_TOOLS, seed("scout"))}
-    assert names <= {"read", "glob", "grep"}
+    assert names <= {"read", "glob", "grep", "web_search", "web_fetch"}
+    assert {"web_search", "web_fetch"} <= names
     assert not names & {"bash", "eval", "browser", "write", "edit"}
+
+
+def test_every_allowlisted_seed_carries_the_read_only_network_tools() -> None:
+    """The three specifications of the read-only surface — ``READ_ONLY_TOOLS``,
+    the scout fallback allowlist, and the seed frontmatter — must agree, and
+    they are three separate files that drifted before. A seed that restricts
+    tools at all is a role that would otherwise be silently offline."""
+    for name in list_seeds():
+        profile = seed(name)
+        if not profile.tools:
+            continue  # no allowlist: the role already has the full inventory
+        assert set(READ_ONLY_NETWORK_TOOLS) <= set(profile.tools), name
+
+
+def test_the_scout_fallback_allowlist_matches_the_read_only_surface() -> None:
+    """``SCOUT_TOOL_ALLOWLIST`` is the no-profile SAFETY fallback (a stripped
+    install, an unreadable registry), so it must still exist — and it must not
+    be a second hand-maintained copy that can disagree with the constant, which
+    is how the packaged seed and the fallback came to differ on the network
+    tools in the first place."""
+    from local_operator.harness.subagent import SCOUT_TOOL_ALLOWLIST
+
+    assert SCOUT_TOOL_ALLOWLIST == frozenset(READ_ONLY_TOOLS)
+    assert set(READ_ONLY_NETWORK_TOOLS) <= SCOUT_TOOL_ALLOWLIST
+    assert SCOUT_TOOL_ALLOWLIST.isdisjoint({"bash", "eval", "browser", "write", "edit"})
 
 
 def test_a_role_without_an_allowlist_keeps_the_full_inventory() -> None:

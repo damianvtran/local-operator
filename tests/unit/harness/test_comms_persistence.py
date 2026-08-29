@@ -332,3 +332,91 @@ def test_restore_skips_an_id_that_is_already_live(tmp_path) -> None:
     # The live record's label and transcript survive the stale restore.
     assert comms.label_of("dup") == "live child"
     assert comms.session_dir_of("dup") == tmp_path / "live"
+
+
+def test_a_capability_denial_survives_the_snapshot_round_trip(tmp_path) -> None:
+    """The MCP activation denial crosses the process boundary (round 3, R6).
+
+    ``restricted`` was added to ``_ChildRecord`` as the durable half of the
+    denial, but ``snapshot``/``restore`` did not carry it, so it lived exactly
+    as long as the process -- the same lifetime as the in-memory marker it was
+    added to outlast. That is the reachable case rather than the exotic one: a
+    child that settled hours ago is normally resumed AFTER a restart, and
+    ``session.py`` round-trips this snapshot through the roster sidecar at every
+    boot.
+
+    This goes through the REAL ``snapshot()`` -> ``restore()`` pair rather than
+    a hand-built row, because the defect was precisely that the real serializer
+    omitted a field a hand-built record would have carried.
+    """
+    from local_operator.harness.subagent import MCP_DENIED_ATTR
+
+    jobs = FakeJobs()
+    comms = _comms_with_settled_child(tmp_path, jobs)
+    # Stamp the record the way ``attach`` does for a child built under a denial.
+    comms._records["job1"].restricted = True
+
+    rows = comms.snapshot()
+    assert rows and rows[0]["restricted"] is True, "the denial must reach the sidecar"
+
+    restored = SubagentComms(FakeParent(FakeJobs()))  # type: ignore[arg-type]
+    restored.restore(rows)
+
+    assert restored._records["job1"].restricted is True
+    # And it is the value a resume actually reads: an unrestricted record must
+    # not come back denied, or every ordinary resumed child silently loses MCP.
+    assert MCP_DENIED_ATTR  # the marker the stamp above mirrors
+
+
+def test_an_unrestricted_record_round_trips_as_unrestricted(tmp_path) -> None:
+    """The counter-check: persistence must not invent a denial.
+
+    A serializer that wrote a truthy constant, or a restore that defaulted to
+    True, would strip MCP activation from every resumed ordinary child -- a
+    silent capability loss no assertion about the restricted case would catch.
+    """
+    comms = _comms_with_settled_child(tmp_path, FakeJobs())
+
+    rows = comms.snapshot()
+    assert rows[0]["restricted"] is False
+
+    restored = SubagentComms(FakeParent(FakeJobs()))  # type: ignore[arg-type]
+    restored.restore(rows)
+    assert restored._records["job1"].restricted is False
+    # A sidecar written before the field existed has no key at all; it must
+    # read as "no denial recorded" rather than raising or defaulting True.
+    legacy = {key: value for key, value in rows[0].items() if key != "restricted"}
+    legacy_comms = SubagentComms(FakeParent(FakeJobs()))  # type: ignore[arg-type]
+    legacy_comms.restore([legacy])
+    assert legacy_comms._records["job1"].restricted is False
+
+
+def test_every_security_relevant_record_field_is_persisted() -> None:
+    """A field that gates a capability must not be addable without persisting it.
+
+    This is the guard for the CLASS of defect R6 was, not just that instance.
+    ``restricted`` was added to ``_ChildRecord`` beside ``agent_role`` and
+    ``effort`` -- and the two neighbours it was written to ride with are both
+    persisted -- but it was left out of ``snapshot``, so the boundary it
+    protects silently ended at the process edge. Nothing failed.
+
+    The list is explicit rather than derived from the dataclass, because most of
+    ``_ChildRecord`` is deliberately NOT persisted (futures, subscriptions, the
+    live child handle), so "every field" would be wrong. Adding a field that
+    decides what a resumed child may DO means adding it here and to
+    ``snapshot``/``restore`` -- and this test failing is the reminder.
+    """
+    import inspect
+
+    from local_operator.harness.comms import SubagentComms as _Comms
+
+    source = inspect.getsource(_Comms.snapshot)
+    for field in ("agent_role", "effort", "restricted"):
+        assert f'"{field}"' in source, (
+            f"{field!r} gates a resumed child's capabilities but snapshot() "
+            "does not persist it; the denial or role would die at the process "
+            "boundary"
+        )
+    restore_source = inspect.getsource(_Comms.restore)
+    for field in ("agent_role", "effort", "restricted"):
+        assert f'"{field}"' in restore_source, f"restore() drops {field!r}"
