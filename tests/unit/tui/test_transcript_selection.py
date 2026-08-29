@@ -4319,6 +4319,55 @@ ORACLE_SUBSTITUTION_CORPUS: dict[str, str] = {
         "| 1 | first row whose note mentions row 2 explicitly and keeps going a while |\n"
         "| 2 | the second row, also with a reasonably long note that folds too |"
     ),
+    # R3-1, and the shape whose absence let it ship. Every entry above has a
+    # WORD-led header (``| name | score |``, ``| id | notes |``), so none of them
+    # exercises the case where the header's own row word is forced into lookahead
+    # -- and the substring match the word path used until R3-1 was therefore
+    # invisible to 221 green tests. ``_row_word`` reads a leading bare number as
+    # an ordered-list marker, so a numeric header takes its word from the SECOND
+    # cell (``10``), which matches NOTHING on its own line and can only match by
+    # looking ahead into a body row (``'10' in '100'``). The reader lit the
+    # header and was handed a body row. The numeric path cannot rescue this --
+    # ``table_column`` is still None on the first row, so ``_number_opens_row``
+    # correctly refuses -- which is precisely why the branch beside it has to be
+    # an OPENER test rather than a containment test.
+    #
+    # The cells are WIDE on purpose. This oracle skips any row lighting fewer
+    # than 12 characters, and a ``| 1 | 10 |`` header paints only 7 -- so the
+    # narrow form of this shape reproduces the defect in the mapping but is
+    # invisible HERE, which would make the corpus entry look like cover it does
+    # not provide. Sized so the header row clears the floor and the oracle
+    # actually sees the substitution.
+    "numeric_header_rank": (
+        "| 1024 | 20481 |\n| --- | --- |\n"
+        "| 204810 | the first ranked entry whose note is long enough to wrap at widths |\n"
+        "| 204811 | the second ranked entry, also with a note that folds across rows |"
+    ),
+    # The same numeric-header hole with a score-shaped table, which folds at
+    # different widths: the header word ``5001`` reaching into a body row's
+    # ``50010`` by containment.
+    "step_score_table": (
+        "| 10015 | 50017 |\n| --- | --- |\n"
+        "| 500170 | the first step whose note is long enough that it wraps at widths |\n"
+        "| 500171 | the second step, also with a note long enough to fold over rows |"
+    ),
+    # Prefix-SHARING first cells, the non-numeric half of R3-1. A continuation
+    # carrying the word ``at`` matched ``api-gateway`` by containment (via
+    # ``g-at-eway``) and copied that row entire; ``api`` is also a genuine prefix
+    # of ``api-gateway``, so this fixture pins BOTH failure directions -- the
+    # substring hit and any ungated prefix relaxation of the fix for it.
+    "service_table_shared_prefix": (
+        "| service | notes |\n| --- | --- |\n"
+        "| api | the gateway service whose note is long enough to wrap at narrow widths |\n"
+        "| api-gateway | the second service, also with a note that folds across rows |"
+    ),
+    # The same prefix-sharing trap on a longer stem (``mon`` inside
+    # ``monitoring``), which places the shared prefix at a different fold column.
+    "monitoring_table_shared_prefix": (
+        "| component | notes |\n| --- | --- |\n"
+        "| mon | the collector component whose note is long enough to wrap on narrow widths |\n"
+        "| monitoring | the dashboard component, also with a note that folds across rows |"
+    ),
 }
 
 
@@ -4384,6 +4433,19 @@ async def test_a_fully_covered_row_is_never_replaced_by_a_different_line(name: s
                 flatten = str.maketrans({"|": " "})
                 haystack = " ".join(copied[0].translate(flatten).split())
                 needle = " ".join(lit.translate(flatten).split())[:12]
+                # A cell too wide for its column is painted TRUNCATED (``api-
+                # gate…``) while the markdown answer spells it whole, so the lit
+                # glyphs are a PREFIX of the correct answer and a plain substring
+                # test reports a substitution that did not happen -- the same
+                # measurement artifact the round-3 escape-aware re-measure found
+                # on ``table_escaped_pipe``. Cutting the needle at the ellipsis
+                # compares the part Rich actually painted in full. This does not
+                # blunt the invariant: the truncated stem still has to appear in
+                # the copy, so a genuinely substituted row fails exactly as
+                # before (verified by restoring the pre-fix predicate, where all
+                # four new fixtures fail).
+                if "…" in needle:
+                    needle = needle.split("…", 1)[0]
                 assert needle in haystack, (
                     f"{name} at width {width}, row {index}: the fully highlighted row is "
                     f"not in the copy -- a different line was substituted for it.\n"

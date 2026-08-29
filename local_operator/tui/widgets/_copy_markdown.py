@@ -340,14 +340,41 @@ def align(source: str, rendered_rows: list[str]) -> list[int | None]:
                 # reads as "assume nothing" and answers with the lit glyphs.
                 if "|" in line and (word or (_is_table_row(line) and _row_number(row))):
                     first_cell = _first_cell(line)
-                    # Rich truncates a long cell with ``…``, so a truncated stem
-                    # matches too: the rendered word is the cell's PREFIX, not a
-                    # substring of the full line (the F4 review finding).
+                    # Compared against the cell's FIRST WORD, and by EQUALITY.
+                    # Containment is not evidence that this row opens the line:
+                    # a first cell is short, so a word from one cell is easily a
+                    # substring of a DIFFERENT row's cell -- ``'10' in '100'``,
+                    # ``'at' in 'api-gateway'``, ``'on' in 'monitoring'`` -- and
+                    # the row that matched was then copied whole, handing back a
+                    # line the reader never lit. That is #399's payload one
+                    # mechanism over, and it is sharpest on a NUMERIC header
+                    # (``| 1 | 10 |``): ``_row_word`` reads a leading bare number
+                    # as an ordered-list marker, so the header's word comes from
+                    # its SECOND cell and cannot match its own line at all --
+                    # leaving a lookahead substring hit as the only match it can
+                    # make (R3-1).
+                    #
+                    # Prefix, not equality, ONLY when Rich actually truncated the
+                    # rendered word: a cell too wide for its column is painted
+                    # with a trailing ``…`` and the row word is then a genuine
+                    # PREFIX of the cell (the F4 review finding). Gating on that
+                    # ellipsis is what keeps the relaxation from re-admitting the
+                    # substitutions above -- ``'10'`` is not a truncation of
+                    # ``'100'``, so an ungated prefix test would still place the
+                    # numeric header on a body row.
+                    #
+                    # ``_first_word`` rather than the raw cell because the cell
+                    # is MARKDOWN and the row is what Rich PAINTED: ``**alpha**``
+                    # and ``` `reload` ``` and ``--quiet`` all render without
+                    # their markup, so a raw comparison fails on the very rows it
+                    # is meant to place.
+                    head = _first_word(first_cell)
                     stem = word.rstrip("…")
+                    truncated = stem != word
                     matched = (
-                        bool(first_cell)
+                        bool(head)
                         and bool(word)
-                        and (word in first_cell or (stem and stem in first_cell))
+                        and (head == word or (truncated and bool(stem) and head.startswith(stem)))
                     )
                     # A numeric first column (``| 1 | step |``, ids, ranks,
                     # years) is invisible to ``word``: ``_row_word`` skips a
@@ -507,6 +534,18 @@ def _number_opens_row(rendered_row: str, first_cell: str, table_column: int | No
     Without a known column the answer is REFUSED rather than guessed. Losing the
     markdown answer is truthful and the copy path already answers such a row
     with the lit glyphs; substituting a different row is not.
+
+    **The column is not always available, and the refusal above is the whole
+    answer when it is not.** It is learned from a row ALREADY placed on one of
+    this table's source lines, so on the FIRST row of a table it is still
+    ``None`` and this returns False (R3-2). For a word-led header that is
+    invisible — the header places itself through the word path and seeds the
+    column for every row after it. For a NUMERIC-led header nothing ever seeds
+    it, because ``_row_word`` reads the leading bare number as an ordered-list
+    marker and the header's word comes from a later cell. Such a table keeps the
+    lit glyphs instead of its markdown, which is the safe direction of the trade
+    and deliberately left that way: the alternative is guessing a row from a bare
+    number, which is exactly the substitution R2-1 removed.
     """
     if table_column is None:
         return False  # no positional evidence; refuse rather than guess
