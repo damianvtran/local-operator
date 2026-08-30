@@ -113,17 +113,20 @@ class FrozenMapping:
         if depth > MAX_METADATA_DEPTH:
             raise ValueError(f"{path} exceeds maximum nesting depth {MAX_METADATA_DEPTH}")
         snapshot = tuple(values.items())
-        keys = [key for key, _value in snapshot]
-        if len(keys) != len(set(keys)):
-            raise ValueError("metadata mapping contains duplicate keys")
-        frozen_items: list[tuple[str, Any]] = []
-        for key, value in snapshot:
+        # Validate type and syntax before hashing keys for duplicate detection;
+        # a hostile mapping may yield an unhashable non-string such as a list.
+        for key, _value in snapshot:
             if not isinstance(key, str):
                 raise ValueError(f"{path} object keys must be strings")
             if _METADATA_KEY_RE.fullmatch(key) is None:
                 raise ValueError(
                     f"{path} keys must match [A-Za-z0-9_.:-]{{1,{MAX_IDENTIFIER_LENGTH}}}"
                 )
+        keys = [key for key, _value in snapshot]
+        if len(keys) != len(set(keys)):
+            raise ValueError("metadata mapping contains duplicate keys")
+        frozen_items: list[tuple[str, Any]] = []
+        for key, value in snapshot:
             frozen_items.append(
                 (
                     key,

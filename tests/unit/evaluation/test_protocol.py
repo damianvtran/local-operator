@@ -414,6 +414,43 @@ def test_observation_snapshots_top_level_and_nested_mappings_once() -> None:
     assert observation.to_canonical_json() == before
 
 
+def test_unhashable_nonstring_mapping_keys_fail_with_controlled_validation_errors() -> None:
+    class UnhashableKeyMapping(Mapping[object, int]):
+        def __iter__(self):
+            return iter(([],))
+
+        def __len__(self) -> int:
+            return 1
+
+        def __getitem__(self, key: object) -> int:
+            return 1
+
+    hostile = UnhashableKeyMapping()
+    with pytest.raises(ValueError, match="object keys must be strings"):
+        FrozenMapping(hostile)  # type: ignore[arg-type]
+    with pytest.raises(ValidationError, match="object keys must be strings"):
+        Observation.model_validate({**_observation().model_dump(), "metadata": hostile})
+
+
+def test_invalid_string_keys_fail_before_duplicate_detection() -> None:
+    class InvalidStringMapping(Mapping[str, int]):
+        def __iter__(self):
+            return iter(("bad key", "bad key"))
+
+        def __len__(self) -> int:
+            return 2
+
+        def __getitem__(self, key: str) -> int:
+            return 1
+
+    with pytest.raises(ValueError, match="keys must match"):
+        FrozenMapping(InvalidStringMapping())
+    with pytest.raises(ValidationError, match="keys must match"):
+        Observation.model_validate(
+            {**_observation().model_dump(), "metadata": InvalidStringMapping()}
+        )
+
+
 def test_observation_rejects_duplicate_keys_from_hostile_mapping() -> None:
     class DuplicateMapping(Mapping[str, int]):
         def __iter__(self):
