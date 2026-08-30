@@ -1204,10 +1204,21 @@ async def test_the_non_role_refusal_names_an_escape_that_runs(context, registry)
 async def test_show_prints_what_it_tells_an_unrecorded_reader_to_apply(context) -> None:
     """U13: the closing line said "apply the packaged values yourself" while the
     body rendered a DIFF, which carries only the changed lines and cannot be
-    applied. What the reader is told to do decides what they are shown."""
-    _legacy_role_row(context.agent_registry, "manager", instructions="MY OWN REWRITE")
+    applied. What the reader is told to do decides what they are shown.
+
+    The fixture must be a SMALL edit to the packaged body, not a short unrelated
+    string. `_instruction_diff` falls back to the full body whenever the diff
+    would not be shorter, so a one-line instruction reaches that fallback on its
+    own and passes this test no matter what the provenance branch does —
+    pinning nothing. This seeds the packaged text with one line changed, which
+    is exactly the input that makes a diff the *cheaper* rendering and so forces
+    the branch under test to be the thing that decides.
+    """
     packaged = load_seed("manager")
     assert packaged is not None
+    lines = packaged.instructions.strip().splitlines()
+    edited = "\n".join([lines[0], "I ALSO IMPLEMENT WHEN I FEEL LIKE IT.", *lines[1:]])
+    _legacy_role_row(context.agent_registry, "manager", instructions=edited)
 
     body = await call(context, op="show", name="manager")
 
