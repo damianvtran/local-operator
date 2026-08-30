@@ -106,7 +106,7 @@ async def test_bool_toggle_writes_and_survives_reopen(tmp_path: Path) -> None:
     page reads it back — a page that only changed its own memory would pass any
     assertion made against the frame alone.
 
-    Driven through ``action_toggle`` (`space`) since #440: `enter` opens the
+    Driven through ``action_toggle_bool`` (`space`) since #440: `enter` opens the
     two-choice expansion instead of writing, and `space` is the in-place
     accelerator that kept the one-keystroke flip. The end-to-end claim is
     unchanged — this is still "a bool reaches config.yml and survives a
@@ -119,7 +119,7 @@ async def test_bool_toggle_writes_and_survives_reopen(tmp_path: Path) -> None:
         view = app.query_one(SettingsView)
         await pilot.pause()
         _select(view, "display.shimmer")
-        view.action_toggle()
+        view.action_toggle_bool()
         await pilot.pause()
         assert _values(tmp_path)["display.shimmer"] is False
 
@@ -242,7 +242,7 @@ async def test_esc_is_a_ladder(tmp_path: Path) -> None:
 async def test_reset_restores_the_default(tmp_path: Path) -> None:
     """Immediate-write's one real cost is undo; this is the mitigation.
 
-    The flip goes through ``action_toggle`` since #440 (see
+    The flip goes through ``action_toggle_bool`` since #440 (see
     ``test_bool_toggle_writes_and_survives_reopen``), which also puts the row
     OFF-default — the state `r` is now the only one offered in, so this test
     exercises the gating rather than being blocked by it.
@@ -254,7 +254,7 @@ async def test_reset_restores_the_default(tmp_path: Path) -> None:
         view = app.query_one(SettingsView)
         await pilot.pause()
         _select(view, "display.terminal_title")
-        view.action_toggle()
+        view.action_toggle_bool()
         await pilot.pause()
         assert _values(tmp_path)["display.terminal_title"] is False
         view.action_reset()
@@ -3054,9 +3054,7 @@ _ANCHOR_ROWS = (
 @pytest.mark.parametrize("key", _ANCHOR_ROWS)
 @pytest.mark.parametrize("gesture", _NON_ENTER_KEYS)
 @pytest.mark.asyncio
-async def test_no_gesture_but_enter_ever_writes(
-    tmp_path: Path, key: str, gesture: str
-) -> None:
+async def test_no_gesture_but_enter_ever_writes(tmp_path: Path, key: str, gesture: str) -> None:
     """THE ANCHOR TEST for #440. One fresh app per gesture, and a gesture that
     is not `enter` must leave config.yml's bytes exactly as it found them.
 
@@ -3104,8 +3102,7 @@ async def test_no_gesture_but_enter_ever_writes(
         await pilot.pause()
         after = _config_bytes(tmp_path)
         assert after == before, (
-            f"`{gesture}` on an open {key} changed config.yml: "
-            f"{before!r} -> {after!r}"
+            f"`{gesture}` on an open {key} changed config.yml: " f"{before!r} -> {after!r}"
         )
 
 
@@ -3257,9 +3254,9 @@ async def test_wheel_and_arrow_agree_about_leaving_an_edit(tmp_path: Path) -> No
             view._cancel_edit()
             view._repaint()
 
-    assert outcomes["arrow"] == outcomes["wheel"], (
-        f"the arrows and the wheel still disagree about an open edit: {outcomes}"
-    )
+    assert (
+        outcomes["arrow"] == outcomes["wheel"]
+    ), f"the arrows and the wheel still disagree about an open edit: {outcomes}"
     assert outcomes["arrow"] is None, "leaving an edit wrote config.yml"
 
 
@@ -3364,9 +3361,9 @@ async def test_activation_reveals_an_offscreen_cursor_before_acting(tmp_path: Pa
             await pilot.press(gesture)
             await pilot.pause()
             # Whatever the key did, the row it did it to is on screen for it.
-            assert _cursor_on_screen(view), (
-                f"`{gesture}` acted on a row that was never brought into view"
-            )
+            assert _cursor_on_screen(
+                view
+            ), f"`{gesture}` acted on a row that was never brought into view"
             if gesture == "enter":
                 assert _config_bytes(tmp_path) == before, "`enter` wrote off screen"
                 await pilot.press("escape")
@@ -3402,9 +3399,9 @@ async def test_the_cascade_row_never_opens_a_text_editor(tmp_path: Path) -> None
             await pilot.press(gesture)
             await pilot.pause()
             chains = settings_io.read_chains(view._manager)
-            assert chains == {"cheap": ["openrouter/qwen3"]}, (
-                f"`{gesture}` on the cascade row destroyed the chains: {chains}"
-            )
+            assert chains == {
+                "cheap": ["openrouter/qwen3"]
+            }, f"`{gesture}` on the cascade row destroyed the chains: {chains}"
 
 
 @pytest.mark.asyncio
@@ -3426,7 +3423,9 @@ async def test_r_is_not_offered_and_writes_nothing_on_a_default_row(tmp_path: Pa
         _select(view, "retry.maxRetries")
         await pilot.pause()
 
-        assert settings_io.is_default(view._manager, settings_io.resolve_key("retry.maxRetries"))
+        premise = settings_io.resolve_key("retry.maxRetries")
+        assert premise is not None, "premise: the row is in the shipped registry"
+        assert settings_io.is_default(view._manager, premise)
         assert not view._reset_hint.display, "`r` is advertised on a row it cannot act on"
 
         await pilot.press("r")
@@ -3491,9 +3490,7 @@ async def test_previewing_a_theme_writes_nothing_and_esc_restores_it(tmp_path: P
 
 @pytest.mark.parametrize("exit_route", ("move-off", "leave-page", "click-elsewhere"))
 @pytest.mark.asyncio
-async def test_a_theme_preview_reverts_on_every_exit_route(
-    tmp_path: Path, exit_route: str
-) -> None:
+async def test_a_theme_preview_reverts_on_every_exit_route(tmp_path: Path, exit_route: str) -> None:
     """The risk table's High row: "preview leaves the app in a theme the file
     disagrees with". Every way out of the expansion — not just `esc`, which
     `test_previewing_a_theme_writes_nothing_and_esc_restores_it` covers — has
@@ -3545,9 +3542,9 @@ async def test_a_theme_preview_reverts_on_every_exit_route(
             _click_row(view, outside)
         await pilot.pause()
 
-        assert theme_mod.current_theme() == opened_on, (
-            f"leaving the expansion by {exit_route} kept the previewed theme"
-        )
+        assert (
+            theme_mod.current_theme() == opened_on
+        ), f"leaving the expansion by {exit_route} kept the previewed theme"
         assert _config_bytes(tmp_path) is None
 
 
@@ -3598,9 +3595,9 @@ async def test_display_keys_stay_flat_through_the_choice_path(tmp_path: Path) ->
 
         values = _values(tmp_path)
         assert values["display.shimmer"] is False, "the flat dotted key was nested"
-        assert "display" not in values or not isinstance(values.get("display"), dict), (
-            f"the choice path nested a flat dotted key: {values}"
-        )
+        assert "display" not in values or not isinstance(
+            values.get("display"), dict
+        ), f"the choice path nested a flat dotted key: {values}"
 
 
 @pytest.mark.asyncio
@@ -3669,9 +3666,9 @@ async def test_layout_stability_across_choosing_and_preview() -> None:
         await pilot.pause()
         geometry["reverted"] = _chrome()
 
-        assert len(set(geometry.values())) == 1, (
-            f"the page's chrome moves between states, reflowing under the reader: {geometry}"
-        )
+        assert (
+            len(set(geometry.values())) == 1
+        ), f"the page's chrome moves between states, reflowing under the reader: {geometry}"
 
 
 @pytest.mark.asyncio
@@ -3705,9 +3702,9 @@ async def test_the_footer_teaches_the_state_it_is_in(tmp_path: Path) -> None:
         await pilot.pause()
         painted = view.rendered_hints()
         assert "choose" in painted, f"the choosing footer does not name enter: {painted!r}"
-        assert "back to conversation" not in painted, (
-            f"`esc` is advertised as leaving the page while it cancels: {painted!r}"
-        )
+        assert (
+            "back to conversation" not in painted
+        ), f"`esc` is advertised as leaving the page while it cancels: {painted!r}"
 
 
 @pytest.mark.asyncio
@@ -3731,9 +3728,9 @@ async def test_the_first_discarded_edit_of_a_session_says_so_once(tmp_path: Path
             await pilot.press(char)
         await pilot.press("down")
         await pilot.pause()
-        assert "discarded" in view.notice_text, (
-            f"the first discarded edit said nothing: {view.notice_text!r}"
-        )
+        assert (
+            "discarded" in view.notice_text
+        ), f"the first discarded edit said nothing: {view.notice_text!r}"
         assert view.error_text == "", "the migration notice was painted as an error"
 
         # The SECOND one is silent. The rule has been stated; repeating it on
@@ -3744,9 +3741,9 @@ async def test_the_first_discarded_edit_of_a_session_says_so_once(tmp_path: Path
             await pilot.press(char)
         await pilot.press("down")
         await pilot.pause()
-        assert "discarded" not in view.notice_text, (
-            f"the migration notice fired twice: {view.notice_text!r}"
-        )
+        assert (
+            "discarded" not in view.notice_text
+        ), f"the migration notice fired twice: {view.notice_text!r}"
 
 
 @pytest.mark.parametrize("size", [(140, 40), (100, 30), (80, 24)])

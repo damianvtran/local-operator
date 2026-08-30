@@ -228,7 +228,7 @@ class SettingsView(Vertical):
         # does exactly what `enter` does, so the accelerator adds one shortcut
         # rather than a second contract. The footer never advertises it, which
         # is what keeps discovery on the safe path.
-        Binding("space", "toggle", "Toggle", show=False),
+        Binding("space", "toggle_bool", "Toggle", show=False),
         # left/right switch the side pane's tab. They do NOT move within a row:
         # every editable row here is either a list to expand or a field to type
         # into, so a horizontal cursor would have nothing to travel along.
@@ -754,7 +754,7 @@ class SettingsView(Vertical):
         used to toggle and store on one keystroke, which is the gesture pressed
         exploratorily, and `retry.enabled` or `web_fetch.allow_private` flipping
         because someone wanted to see what the row did is the complaint this
-        redesign answers. :meth:`action_toggle` keeps the fast path for a user
+        redesign answers. :meth:`action_toggle_bool` keeps the fast path for a user
         who already knows the row.
         """
         row = self._current()
@@ -884,8 +884,14 @@ class SettingsView(Vertical):
             return
         self._begin_edit(row)
 
-    def action_toggle(self) -> None:
+    def action_toggle_bool(self) -> None:
         """``space`` — flip a BOOL in place; anything else, act like ``enter``.
+
+        Named ``action_toggle_bool`` rather than ``action_toggle`` because
+        ``DOMNode`` already defines ``action_toggle(attribute_name)`` — a
+        framework action for flipping a bool ATTRIBUTE on a node. Taking that
+        name would override it with an incompatible signature, which pyright
+        rejects and which would break any future caller expecting Textual's.
 
         The accelerator #440 §2.5 keeps, and the concession that makes the
         bool-as-expansion decision cheap rather than pedantic. `enter` opens the
@@ -1361,7 +1367,11 @@ class SettingsView(Vertical):
             return
         self._rows = self._build_rows()
         settled = next(
-            (index for index, candidate in enumerate(self._rows) if candidate.identity == row.identity),
+            (
+                index
+                for index, candidate in enumerate(self._rows)
+                if candidate.identity == row.identity
+            ),
             None,
         )
         if settled is not None:
@@ -3134,9 +3144,7 @@ class SettingsView(Vertical):
         # shedding it back to `back` would restore the very ambiguity D7 is
         # about.
         narrow = (
-            "cancel"
-            if self._confirm_delete is not None or self._expanded is not None
-            else "back"
+            "cancel" if self._confirm_delete is not None or self._expanded is not None else "back"
         )
         # The narrower rungs are DERIVED from what this row actually offers,
         # dropping one hint at a time from the right, rather than restating the
