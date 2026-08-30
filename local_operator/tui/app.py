@@ -15605,8 +15605,21 @@ class OperatorApp(App[None]):
         cfg = get_config(name)
         if cfg is None:
             return f"MCP server {name!r} is not configured — see /mcp"
-        auth = getattr(cfg, "auth", None)
-        if auth is None or getattr(auth, "type", None) != "oauth":
+        # NOT a static ``auth.type == 'oauth'`` check any more. A config
+        # imported from a foreign tool (Codex, issue #367) carries only a
+        # ``url`` — that tool holds its grants elsewhere, so its format has no
+        # auth block to copy — and this refusal used to tell the user that the
+        # very command which fixes their 401 "does not use OAuth login". The
+        # test now also accepts a server we hold a grant for, or one observed
+        # to answer an OAuth challenge, so the gate follows what the server
+        # actually does rather than what the config happened to declare.
+        from local_operator.mcp.auth import server_is_oauth_capable
+        from local_operator.mcp.config import MCPServerConfig
+
+        # ``get_config`` is read off a duck-typed manager (a follower's facade
+        # implements the same accessor), so its return is untyped here; the
+        # helper only reads ``auth``/``url`` off it.
+        if not server_is_oauth_capable(cast(MCPServerConfig, cfg), deliberate=True):
             return f"MCP server {name!r} does not use OAuth login."
         return manager, cfg
 

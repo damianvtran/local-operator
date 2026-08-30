@@ -52,7 +52,7 @@ from local_operator.harness.types import (
     ToolContext,
     ToolResult,
 )
-from local_operator.mcp.auth import McpAuthRequiredError
+from local_operator.mcp.auth import McpAuthChallengeError, McpAuthRequiredError
 from local_operator.mcp.config import (
     MCPHttpServerConfig,
     MCPServerConfig,
@@ -754,6 +754,43 @@ class McpSession(Protocol):
         ...
 
 
+class _AuthChallengeWatcher:
+    """Records whether an HTTP MCP server answered 401/403 on this attempt.
+
+    Installed as an httpx ``response`` event hook on the transport's client.
+    It exists because the status code is destroyed downstream: the SDK turns a
+    401 it cannot resolve into ``MCPError(-32603, 'Server returned an error
+    response')`` — no status, no headers — which is the opaque text the user
+    reported. Observing at the transport keeps the one fact the message needs.
+
+    The hook is deliberately passive: it never raises and never reads the body
+    (the body is a lazily-streamed SSE payload, and touching it here would
+    consume the stream the SDK is about to parse). The connect's error path
+    decides what to do with the observation.
+    """
+
+    def __init__(self, server_url: str) -> None:
+        self.server_url = server_url
+        self.status_code: int | None = None
+
+    async def observe(self, response: Any) -> None:
+        """Note a 401/403 on a request to the MCP endpoint itself.
+
+        Only responses from the MCP URL count. The same client also carries
+        the OAuth provider's discovery and token requests, and a 401 from a
+        metadata probe is a normal part of discovery rather than the server
+        refusing us.
+        """
+        try:
+            if response.status_code not in (401, 403):
+                return
+            if str(response.request.url).split("?")[0] != self.server_url.split("?")[0]:
+                return
+            self.status_code = response.status_code
+        except Exception:  # noqa: BLE001 — an observer must never break a connect
+            logger.debug("auth challenge observation failed", exc_info=True)
+
+
 @dataclass
 class ServerConnection:
     """One live MCP connection: session plus the resources that own it."""
@@ -768,6 +805,9 @@ class ServerConnection:
     stack: AsyncExitStack | None = None
     closed_event: asyncio.Event = field(default_factory=asyncio.Event)
     source: str = ""
+    #: Set for HTTP transports only: the hook that saw the real response
+    #: statuses before the SDK flattened them into a generic ``MCPError``.
+    auth_challenge: "_AuthChallengeWatcher | None" = None
 
     @property
     def live_session(self) -> McpSession:
@@ -1140,11 +1180,13 @@ class McpManager:
             task = tasks[name]
             try:
                 conn = task.result()
-            except McpAuthRequiredError as exc:
+            except (McpAuthRequiredError, McpAuthChallengeError) as exc:
                 # Actionable, not raw: the startup toast is where a user first
-                # learns a server needs a login, and "run /mcp login <name>" is
-                # the one thing they can do about it.
-                message = self._auth_required_text(name, exc)
+                # learns a server needs a login, and the command that fixes it
+                # is the one thing they can do about it. A server that REFUSED
+                # us (McpAuthChallengeError) lands here too, so the opaque
+                # "Server returned an error response" never reaches the splash.
+                message = self._auth_failure_text(name, exc)
                 result.errors[name] = message
                 self._startup_failures[name] = message
                 logger.info("MCP server %r needs authorization: %s", name, exc)
@@ -1241,7 +1283,7 @@ class McpManager:
             return None
         try:
             conn = await self._connect_server(name, cfg)
-        except McpAuthRequiredError as exc:
+        except (McpAuthRequiredError, McpAuthChallengeError) as exc:
             logger.info("Manual MCP reconnect needs authorization for %r", name)
             self._fire_auth_required(name, exc)
             return None
@@ -1346,9 +1388,22 @@ class McpManager:
         # both methods below are then no-ops by construction rather than by a
         # branch someone has to keep in step with the transport list.
         stderr_log = McpServerStderr(name)
+        # One watcher per connect ATTEMPT, for the same reason the stderr
+        # collector is: a retry must never quote the previous attempt's 401 as
+        # this one's reason. Owned here rather than inside the transport helper
+        # because the error path below — which is where the opaque failure has
+        # to be re-labelled — cannot reach the connection object on failure.
+        url = getattr(cfg, "url", None)
+        challenge_watcher = _AuthChallengeWatcher(url) if isinstance(url, str) and url else None
         try:
             conn = await self._open_transport_and_session(
-                stack, name, cfg, timeout_s, stderr_log, interactive=interactive
+                stack,
+                name,
+                cfg,
+                timeout_s,
+                stderr_log,
+                interactive=interactive,
+                challenge_watcher=challenge_watcher,
             )
             tools = await self._list_all_tools(conn.live_session)
         except BaseException as exc:
@@ -1429,6 +1484,16 @@ class McpManager:
                 raise  # a real cancellation (dispose/esc): never converted
             if not isinstance(exc, Exception):
                 raise  # KeyboardInterrupt & co. propagate unchanged
+            # An authorization refusal the SDK flattened into opaque transport
+            # text ("Server returned an error response" / "unauthorized
+            # access"). Only converted when the hook ACTUALLY saw a 401/403 on
+            # the MCP endpoint, so a genuinely down server, a DNS failure or a
+            # TLS error keeps reporting as the network problem it is \u2014
+            # mislabelling an outage as "run /mcp login" would be worse than
+            # the opaque message this replaces.
+            challenge = await self._challenge_error(cfg, challenge_watcher)
+            if challenge is not None:
+                raise challenge from exc
             stderr_log.report_failure(f"failed to connect: {exc}")
             raise stderr_log.explain(exc) from exc
 
@@ -1446,6 +1511,7 @@ class McpManager:
         stderr_log: McpServerStderr,
         *,
         interactive: bool = False,
+        challenge_watcher: "_AuthChallengeWatcher | None" = None,
     ) -> ServerConnection:
         """Enter the transport + ClientSession context managers on ``stack``.
 
@@ -1479,6 +1545,16 @@ class McpManager:
                 headers=dict(cfg.headers) or None,
                 auth=oauth_provider,
             )
+            # Watch the RESPONSE status directly. By the time a 401 reaches us
+            # through ``session.initialize()`` the SDK has replaced it with a
+            # generic ``MCPError(-32603, 'Server returned an error response')``
+            # carrying no status code at all, so this hook is the only place
+            # the authorization failure is still identifiable. It records the
+            # observation and raises nothing; the connect's error path reads
+            # what it saw (see ``_challenge_status``).
+            if challenge_watcher is not None:
+                conn.auth_challenge = challenge_watcher
+                http_client.event_hooks["response"].append(challenge_watcher.observe)
             streams_cm = streamable_http_client(cfg.url, http_client=http_client)
         elif isinstance(cfg, MCPSseServerConfig):
             from mcp.client.sse import sse_client
@@ -1526,15 +1602,30 @@ class McpManager:
     def _build_oauth_auth(
         self, url: str, cfg: MCPServerConfig, *, interactive: bool = False
     ) -> OAuthClientProvider | None:
-        """Build an ``OAuthClientProvider`` for configs with ``auth.type=oauth``.
+        """Build an ``OAuthClientProvider`` for a server that can authenticate.
 
         ``interactive`` decides whether the flow may open a browser (only an
         explicit login). The provider is primed with the endpoints the
         proactive refresh discovered, so a mid-session in-flow refresh targets
         the real token endpoint.
+
+        ``interactive`` ALSO widens which servers qualify: an explicit
+        ``/mcp login`` is a deliberate instruction to authorize this server, so
+        a remote config that has not yet been seen to challenge still gets a
+        provider. A background connect stays strict, so boot neither discovers
+        nor authenticates against servers that never asked it to.
         """
-        auth = cfg.auth
-        if auth is None or auth.type != "oauth":
+        # NOT ``cfg.auth.type == 'oauth'`` any more. A config imported from a
+        # foreign tool (Codex, issue #367) carries only a ``url`` — that tool
+        # keeps its grants elsewhere, so its format has no auth block to copy.
+        # Gating on the static block alone meant those servers connected with
+        # no credentials and got a 401 they could not act on. The capability
+        # test is transport-level (explicit block, OR a stored grant, OR an
+        # observed OAuth challenge) so it names no config source and every
+        # format benefits equally.
+        from local_operator.mcp.auth import server_is_oauth_capable
+
+        if not server_is_oauth_capable(cfg, self._effective_auth_store(), deliberate=interactive):
             return None
         try:
             from local_operator.mcp.auth import build_oauth_provider
@@ -1563,6 +1654,47 @@ class McpManager:
             self._oauth_flows[url] = flow
         return provider
 
+    async def _challenge_error(
+        self,
+        cfg: MCPServerConfig,
+        watcher: "_AuthChallengeWatcher | None",
+    ) -> McpAuthChallengeError | None:
+        """Turn an OBSERVED 401/403 into an actionable error, or ``None``.
+
+        ``None`` for every failure the watcher did not see a challenge on, so
+        an unreachable host, a DNS failure or a TLS error keeps its own
+        message. That conservatism is the point: routing a network outage into
+        "run /mcp login" would be a worse error than the opaque one.
+
+        On a real challenge this runs metadata discovery once to learn whether
+        an OAuth authorization server actually exists. Discovery is only paid
+        on a connect that has ALREADY failed, so the happy path and the
+        no-auth-needed server (which never challenges) add no latency. The
+        answer is recorded in the challenge ledger, which is what lets the NEXT
+        connect and ``/mcp login`` treat this server as auth-capable.
+        """
+        if watcher is None or watcher.status_code is None:
+            return None
+        url = watcher.server_url
+        from local_operator.mcp.auth import (
+            discover_oauth_endpoints,
+            record_oauth_challenge,
+            server_has_stored_grant,
+        )
+
+        oauth_available = False
+        try:
+            oauth_available = await discover_oauth_endpoints(url) is not None
+        except Exception:  # noqa: BLE001 — discovery is best-effort; wording degrades, not the flow
+            logger.debug("challenge discovery failed for %s", url, exc_info=True)
+        record_oauth_challenge(url, oauth_available=oauth_available)
+        return McpAuthChallengeError(
+            url,
+            status_code=watcher.status_code,
+            oauth_available=oauth_available,
+            has_stored_grant=server_has_stored_grant(url, self._effective_auth_store()),
+        )
+
     async def _ensure_oauth_fresh(self, name: str, cfg: MCPServerConfig) -> None:
         """Proactively refresh an OAuth grant before connecting (best-effort).
 
@@ -1573,9 +1705,16 @@ class McpManager:
         non-interactive redirect handler is what turns the resulting grant
         attempt into an actionable error instead of a login tab.
         """
-        auth = getattr(cfg, "auth", None)
         url = getattr(cfg, "url", None)
-        if auth is None or getattr(auth, "type", None) != "oauth" or not url:
+        if not url:
+            return
+        # Same widened test as ``_build_oauth_auth``, and for the same reason:
+        # a server whose OAuth-ness we learned from a stored grant or a live
+        # challenge deserves the proactive refresh too, or its first connect
+        # after a restart spends a browser grant it did not need.
+        from local_operator.mcp.auth import server_is_oauth_capable
+
+        if not server_is_oauth_capable(cfg, self._effective_auth_store()):
             return
         try:
             from local_operator.mcp.auth import ensure_mcp_oauth_fresh
@@ -1588,7 +1727,7 @@ class McpManager:
             self._oauth_endpoints[url] = endpoints
 
     @staticmethod
-    def _auth_required_text(name: str, exc: McpAuthRequiredError) -> str:
+    def _auth_required_text(name: str, exc: "McpAuthRequiredError | McpAuthChallengeError") -> str:
         """The startup-toast wording for a server that needs an OAuth login.
 
         Leads with the COMMAND that fixes it rather than the diagnosis. The
@@ -1600,10 +1739,76 @@ class McpManager:
         ``—`` only, so the composed line is not a chain of dashes (D4). The same
         string lands in the durable transcript notice and in ``/mcp``, so one
         helper keeps all three surfaces agreeing.
+
+        ``login`` vs ``reauth`` is decided by whether a credential row exists,
+        not guessed. Reaching this error at all means the stored grant could
+        not be refreshed non-interactively, so a server we DO hold a row for is
+        holding a stale one: telling that user to ``login`` points them at a
+        command that leaves the dead credential in place, while ``reauth``
+        replaces it. A server with no row has simply never been authorized.
         """
+        from local_operator.mcp.auth import server_has_stored_grant
+
+        # The real store, deliberately: this is a durable fact about the
+        # machine, and it must read the same row every future process will.
+        if server_has_stored_grant(exc.server_url):
+            return f"run /mcp reauth {name} — authorization expired"
         return f"run /mcp login {name} to authorize"
 
-    def _fire_auth_required(self, name: str, exc: McpAuthRequiredError) -> None:
+    @staticmethod
+    def _auth_challenge_text(name: str, exc: McpAuthChallengeError) -> str:
+        """The wording for a server that REFUSED us with 401/403.
+
+        Same constraints as :meth:`_auth_required_text`, which this deliberately
+        mirrors: it renders after a ``failed: <name> — `` prefix and is clamped
+        to the toast card width, so the actionable command leads and the
+        diagnosis trails where truncation can eat it (D1). One ``—`` at most, so
+        the composed line is not a chain of dashes (D4).
+
+        Two honest cases, and the distinction is the whole point — the previous
+        text ("Server returned an error response") named no action at all:
+
+        - the server advertises OAuth, so the user is sent at the command that
+          grants it. Which verb is decided exactly as
+          :meth:`_auth_required_text` decides it, by DELEGATING to it: the two
+          shapes describe the same situation to the user (this server will not
+          talk to us until it is authorized), so wording them differently would
+          be a distinction without a difference. It also keeps the status code
+          out of the line — a wrapped ``(401)`` orphaned onto its own row was
+          visible in the rendered frame, and the number tells the user nothing
+          the verb does not.
+        - a challenge with NO discoverable OAuth endpoint (a real shape —
+          Datadog answers 401 with no ``WWW-Authenticate`` at all) must not
+          promise a login that cannot work. It says what is true and names the
+          one thing that can carry auth for such a server, its config headers.
+          There is no command to lead with here, so the status code earns its
+          place as the concrete fact the user can act on.
+        """
+        if not exc.oauth_available:
+            return (
+                f"{name} rejected our credentials ({exc.status_code}) — "
+                "set its API key or headers"
+            )
+        return McpManager._auth_required_text(name, exc)
+
+    @classmethod
+    def _auth_failure_text(cls, name: str, exc: BaseException) -> str:
+        """Actionable wording for EITHER auth failure shape.
+
+        One dispatcher so the startup toast, the durable transcript notice, the
+        incident sink and ``/mcp`` never drift apart on what a user is told to
+        run — the two shapes reach the same surfaces by different routes
+        (a configured grant that needs a browser vs a server that refused us).
+        """
+        if isinstance(exc, McpAuthChallengeError):
+            return cls._auth_challenge_text(name, exc)
+        if isinstance(exc, McpAuthRequiredError):
+            return cls._auth_required_text(name, exc)
+        return str(exc)
+
+    def _fire_auth_required(
+        self, name: str, exc: "McpAuthRequiredError | McpAuthChallengeError"
+    ) -> None:
         """Notify the UI that ``name`` needs an OAuth login (best-effort).
 
         Fired for auth failures that land OUTSIDE the startup gate (the common
@@ -1619,7 +1824,7 @@ class McpManager:
         if sink is None:
             return
         try:
-            sink(name, self._auth_required_text(name, exc))
+            sink(name, self._auth_failure_text(name, exc))
             self._auth_toasted.add(name)
         except Exception:  # noqa: BLE001 — UI hooks must never break the manager
             logger.debug("on_auth_required sink raised", exc_info=True)
@@ -1706,14 +1911,17 @@ class McpManager:
             # startup toast. Fire the incident sink so the failure is recorded
             # durably and the agent knows the tools are gone until a login.
             auth_exc = _unwrap_auth_required(exc)
-            if isinstance(auth_exc, McpAuthRequiredError):
+            if isinstance(auth_exc, (McpAuthRequiredError, McpAuthChallengeError)):
                 sink = getattr(self, "on_incident", None)
                 if sink is not None:
                     try:
+                        # The model-visible incident carries the SAME actionable
+                        # command the user is shown, so the agent stops calling
+                        # the server's tools and can name the fix if asked.
                         sink(
                             name,
-                            f"OAuth authorization expired; run /mcp login {name} to "
-                            "restore its tools",
+                            "MCP authorization failed; "
+                            f"{self._auth_failure_text(name, auth_exc)}",
                         )
                     except Exception:  # noqa: BLE001 — incidents must never break the manager
                         logger.debug("mcp incident sink raised", exc_info=True)
@@ -1735,8 +1943,8 @@ class McpManager:
                 # requirement as its actionable text, else the raw reason) and
                 # settle this deferred server BEFORE firing tools-changed, so the
                 # front end that re-reports on settle sees the complete map.
-                if isinstance(auth_exc, McpAuthRequiredError):
-                    self._startup_failures[name] = self._auth_required_text(name, auth_exc)
+                if isinstance(auth_exc, (McpAuthRequiredError, McpAuthChallengeError)):
+                    self._startup_failures[name] = self._auth_failure_text(name, auth_exc)
                 else:
                     self._startup_failures[name] = str(exc)
             # Re-fetch the waiter: a reload during the await may have swapped
@@ -2213,11 +2421,11 @@ class McpManager:
             self._connect_futures[name] = future
         try:
             conn = await self._connect_server(name, cfg)
-        except McpAuthRequiredError as exc:
+        except (McpAuthRequiredError, McpAuthChallengeError) as exc:
             # An expired grant will not heal by retrying: auto-reconnect is
             # non-interactive by design, so further attempts would only burn the
-            # breaker window. Abandon with an actionable reason; ``/mcp login``
-            # (which resets the breaker) is the recovery path.
+            # breaker window. Abandon with an actionable reason; the login
+            # command (which resets the breaker) is the recovery path.
             logger.info("MCP reconnect needs authorization for %r", name)
             # Model-visible incident: the agent must know the server's tools are
             # gone until a login, or it hammers them. Same fire-and-forget guard
@@ -2227,8 +2435,7 @@ class McpManager:
                 try:
                     sink(
                         name,
-                        f"OAuth authorization expired; run /mcp login {name} to "
-                        "restore its tools",
+                        f"MCP authorization failed; {self._auth_failure_text(name, exc)}",
                     )
                 except Exception:  # noqa: BLE001 — incidents must never break the manager
                     logger.debug("mcp incident sink raised", exc_info=True)
@@ -2281,7 +2488,7 @@ class McpManager:
         await self._teardown_connection(name)
         try:
             conn = await self._connect_server(name, cfg)
-        except McpAuthRequiredError as exc:
+        except (McpAuthRequiredError, McpAuthChallengeError) as exc:
             logger.info("MCP call-site reconnect needs authorization for %r", name)
             self._fire_auth_required(name, exc)
             return None

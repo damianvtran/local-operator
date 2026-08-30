@@ -1,0 +1,8 @@
+===== AFTER — cold boot (first connect, nothing observed) =====
+  ✓ MCP openaiDeveloperDocs: connected
+  × MCP datadog failed: run /mcp login datadog — not authorized (401)
+  × MCP gitlab failed: run /mcp reauth gitlab — authorization expired
+  × MCP launchdarkly failed: run /mcp login launchdarkly — not authorized (401)
+  × MCP minerva-qa failed: run /mcp login minerva-qa — not authorized (401)
+
+===== AFTER — warm (reload/reconnect: challenge already observed) =====

@@ -1,0 +1,5 @@
+gitlab                 discovery=OK  auth_server=https://gitlab.com  token_endpoint=https://gitlab.com/oauth/token  prm=yes
+launchdarkly           discovery=OK  auth_server=https://mcp.launchdarkly.com/mcp/launchdarkly  token_endpoint=https://app.launchdarkly.com/trust/oauth/token  prm=yes
+minerva-qa             discovery=OK  auth_server=https://mcp.qa.gominerva.com  token_endpoint=https://mcp.qa.gominerva.com/oauth/token  prm=yes
+datadog                discovery=OK  auth_server=https://mcp.us3.datadoghq.com/v1/mcp  token_endpoint=https://us3.datadoghq.com/api/v2/oauth2/token  prm=yes
+openaiDeveloperDocs    discovery=None (no ASM)

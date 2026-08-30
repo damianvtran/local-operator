@@ -17,6 +17,7 @@ from typing import Any
 
 import pytest
 
+from local_operator.mcp import auth as auth_mod
 from local_operator.mcp.auth import (
     DEFAULT_CALLBACK_PATH,
     DEFAULT_CALLBACK_PORT,
@@ -30,7 +31,12 @@ from local_operator.mcp.auth import (
     parse_oauth_callback_input,
     wire_oauth_auth,
 )
-from local_operator.mcp.config import MCPAuthConfig, MCPHttpServerConfig, MCPOAuthConfig
+from local_operator.mcp.config import (
+    MCPAuthConfig,
+    MCPHttpServerConfig,
+    MCPOAuthConfig,
+    MCPStdioServerConfig,
+)
 from local_operator.providers.auth_store import StoredCredential
 
 
@@ -2814,3 +2820,87 @@ class TestCloseAbandonedLockFd:
         with contextlib.suppress(asyncio.CancelledError):
             await cancelled_task
         auth_mod._close_abandoned_lock_fd(cancelled_task)  # must not raise
+
+
+class TestTransportLevelOAuthCapability:
+    """The gate that makes a foreign-tool import authenticable (issue #367).
+
+    Codex's remote entries carry ONLY a ``url``: that tool holds its OAuth
+    grants elsewhere, so its config has no auth block to copy. Gating the
+    auth-capable paths on ``auth.type == "oauth"`` therefore connected those
+    servers unauthenticated and refused ``/mcp login`` for them. The rule is
+    transport-level and names no config source.
+    """
+
+    URL = "https://srv.example/mcp"
+
+    def setup_method(self) -> None:
+        # The observed-challenge ledger is process-global; a leaked entry would
+        # make an unrelated test's server look OAuth-capable.
+        auth_mod.OAUTH_CHALLENGES.clear()
+
+    teardown_method = setup_method
+
+    def _codex_shaped(self) -> MCPHttpServerConfig:
+        """A remote server exactly as a Codex import produces it: url, no auth."""
+        return MCPHttpServerConfig(url=self.URL)
+
+    def test_url_only_server_is_not_oauth_capable_until_something_says_so(self) -> None:
+        """A background connect must not attach a provider on speculation.
+
+        This is what keeps a genuinely public MCP server connecting with no
+        discovery, no prompt and no added startup latency.
+        """
+        assert auth_mod.server_is_oauth_capable(self._codex_shaped(), FakeAuthStore()) is False
+
+    def test_an_observed_oauth_challenge_makes_it_capable(self) -> None:
+        auth_mod.record_oauth_challenge(self.URL, oauth_available=True)
+        assert auth_mod.server_is_oauth_capable(self._codex_shaped(), FakeAuthStore()) is True
+
+    def test_a_challenge_without_discoverable_oauth_does_not(self) -> None:
+        """A 401 with no discoverable authorization server (Datadog's shape)
+        is still an auth failure, but attaching an OAuth provider to it would
+        promise a grant that cannot be performed."""
+        auth_mod.record_oauth_challenge(self.URL, oauth_available=False)
+        assert auth_mod.server_is_oauth_capable(self._codex_shaped(), FakeAuthStore()) is False
+
+    def test_a_true_observation_is_never_downgraded(self) -> None:
+        """Discovery is a network call that can fail transiently; forgetting
+        that a server is OAuth-capable would put the user back on the dead end."""
+        auth_mod.record_oauth_challenge(self.URL, oauth_available=True)
+        auth_mod.record_oauth_challenge(self.URL, oauth_available=False)
+        assert auth_mod.OAUTH_CHALLENGES[self.URL] is True
+
+    def test_a_stored_grant_survives_the_restart_the_ledger_does_not(self) -> None:
+        """The ledger is per-process. Without this durable signal a restart
+        would connect unauthenticated again and ignore a good stored token."""
+        store = FakeAuthStore()
+        McpTokenStorage(self.URL, store)._write({"tokens": {"access_token": "a"}})
+        assert auth_mod.server_is_oauth_capable(self._codex_shaped(), store) is True
+
+    def test_a_bare_client_registration_is_not_a_grant(self) -> None:
+        """``client_info`` is written when the SDK merely DISCOVERS a server,
+        long before any user authorizes. Counting it would tell a user who had
+        never logged in that their authorization had expired."""
+        store = FakeAuthStore()
+        McpTokenStorage(self.URL, store).seed_client_info("client-1")
+        assert auth_mod.server_has_stored_grant(self.URL, store) is False
+
+    def test_deliberate_login_accepts_a_remote_server_with_no_evidence_yet(self) -> None:
+        """``/mcp login`` on a fresh Codex import is the dead end this fixes:
+        whether a server needs OAuth cannot be known without a round trip, and
+        the SDK's provider only starts a grant in response to a real 401."""
+        assert (
+            auth_mod.server_is_oauth_capable(self._codex_shaped(), FakeAuthStore(), deliberate=True)
+            is True
+        )
+
+    def test_deliberate_login_still_refuses_stdio(self) -> None:
+        """A stdio server has no transport that can carry a bearer token."""
+        cfg = MCPStdioServerConfig(command="echo")
+        assert auth_mod.server_is_oauth_capable(cfg, FakeAuthStore(), deliberate=True) is False
+
+    def test_an_explicit_auth_block_still_wins(self) -> None:
+        """The local-operator format's own signal keeps working unchanged."""
+        cfg = MCPHttpServerConfig(url=self.URL, auth=MCPAuthConfig(type="oauth"))
+        assert auth_mod.server_is_oauth_capable(cfg, FakeAuthStore()) is True

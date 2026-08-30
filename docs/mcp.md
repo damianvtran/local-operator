@@ -61,8 +61,19 @@ in a build script.
 
 ## OAuth
 
-HTTP/SSE servers with `auth.type: oauth` use the SDK's
-`OAuthClientProvider` (PKCE + RFC 7591 dynamic registration built in).
+HTTP/SSE servers use the SDK's `OAuthClientProvider` (PKCE + RFC 7591 dynamic
+registration built in) when any of three things is true: the config declares
+`auth.type: oauth`, a grant for that URL is already stored, or the server has
+been observed answering a request with a `401`/`403` whose metadata discovery
+found an authorization server.
+
+The last two matter for configs imported from another tool. A Codex remote
+entry carries only a `url` — Codex holds its OAuth grants elsewhere, so its
+format has no auth block to copy — and a purely static gate would connect such
+a server unauthenticated forever. The rule is deliberately transport-level and
+names no config source, so every format benefits. A server that needs no auth
+never challenges, so it keeps connecting unauthenticated with no discovery and
+no added startup latency.
 Tokens and client registrations persist in the shared `auth.db` under
 provider `mcp-oauth`, one row per server URL. Supplying a `client_id` in
 config pins the client: the registration is pre-seeded and dynamic client
@@ -82,8 +93,18 @@ each other.
 
 Ordinary startup and auto-reconnect are **non-interactive**: they never open a
 browser. If the stored grant cannot be refreshed, the connect fails with an
-actionable message instead of popping a login tab. Re-authorize deliberately
-with:
+actionable message instead of popping a login tab.
+
+That message names the command that fixes it, and picks the verb from what is
+actually stored: a server holding a token payload that could not be refreshed
+is told to `reauth` (a plain `login` would leave the dead credential in place),
+while one that has never been authorized is told to `login`. A server that
+refuses us with a `401`/`403` but advertises **no** discoverable OAuth endpoint
+is not promised a login it cannot complete — it is told to set its API key or
+headers. Failures that are not authorization failures (a down server, DNS, TLS)
+keep reporting as themselves.
+
+Re-authorize deliberately with:
 
 ```
 /mcp login <name>          # inside the TUI

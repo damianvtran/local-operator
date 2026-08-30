@@ -11,6 +11,7 @@ from collections import deque
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest import mock
 
 import pytest
 from mcp.types import CallToolResult, ListToolsResult, TextContent, Tool
@@ -1768,3 +1769,128 @@ class TestAuthRequiredHandling:
         assert stored is not None and stored.timeout is None
         assert conn.config.timeout is None
         await manager.disconnect_all()
+
+
+class TestAuthChallengeMessaging:
+    """A 401/403 must name the command that fixes it (issue #367 follow-up).
+
+    The SDK erases the status code: a 401 it cannot resolve arrives from
+    ``session.initialize()`` as ``MCPError(-32603, 'Server returned an error
+    response')`` — which is exactly what the user saw on the splash. The
+    watcher observes the response before that happens.
+    """
+
+    def _exc(self, *, oauth_available: bool = True, has_stored_grant: bool = False) -> Any:
+        from local_operator.mcp.auth import McpAuthChallengeError
+
+        return McpAuthChallengeError(
+            "https://srv.example/mcp",
+            status_code=401,
+            oauth_available=oauth_available,
+            has_stored_grant=has_stored_grant,
+        )
+
+    def test_a_challenge_with_oauth_names_the_login_command(self) -> None:
+        text = McpManager._auth_failure_text("gitlab", self._exc())
+        assert "/mcp login gitlab" in text
+
+    def test_no_discoverable_oauth_does_not_promise_a_login(self) -> None:
+        """Datadog's shape: a 401 with no WWW-Authenticate. Claiming OAuth is
+        available when discovery found none sends the user at a dead command."""
+        text = McpManager._auth_failure_text("datadog", self._exc(oauth_available=False))
+        assert "/mcp login" not in text
+        assert "401" in text
+
+    def test_a_stale_stored_grant_says_reauth_not_login(self) -> None:
+        """The operator's ask: reaching this error means the stored grant could
+        not be refreshed, so a server we hold a row for is holding a dead one.
+        ``login`` would leave that credential in place."""
+        from local_operator.mcp.auth import McpAuthRequiredError
+
+        exc = McpAuthRequiredError("https://srv.example/mcp")
+        with mock.patch("local_operator.mcp.auth.server_has_stored_grant", return_value=True):
+            text = McpManager._auth_failure_text("gitlab", exc)
+        assert "/mcp reauth gitlab" in text
+        assert "/mcp login" not in text
+
+    def test_never_authorized_says_login_not_reauth(self) -> None:
+        from local_operator.mcp.auth import McpAuthRequiredError
+
+        exc = McpAuthRequiredError("https://srv.example/mcp")
+        with mock.patch("local_operator.mcp.auth.server_has_stored_grant", return_value=False):
+            text = McpManager._auth_failure_text("gitlab", exc)
+        assert "/mcp login gitlab" in text
+
+    def test_the_actionable_command_survives_a_narrow_terminal(self) -> None:
+        """Design constraint D1: the toast clamps to the card width and the
+        TAIL is what truncates, so the command has to lead."""
+        text = McpManager._auth_failure_text("launchdarkly", self._exc())
+        assert text.startswith("run /mcp login launchdarkly")
+        assert text.count("—") <= 1  # D4: not a chain of dashes
+
+    @pytest.mark.asyncio
+    async def test_a_401_on_the_mcp_endpoint_is_observed(self) -> None:
+        from local_operator.mcp.manager import _AuthChallengeWatcher
+
+        watcher = _AuthChallengeWatcher("https://srv.example/mcp")
+        await watcher.observe(
+            SimpleNamespace(
+                status_code=401,
+                request=SimpleNamespace(url="https://srv.example/mcp"),
+            )
+        )
+        assert watcher.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_a_401_from_a_metadata_probe_is_not_the_server_refusing_us(
+        self,
+    ) -> None:
+        """The same client carries the provider's discovery requests; a 401
+        from one of those is part of discovery, not the connect being denied."""
+        from local_operator.mcp.manager import _AuthChallengeWatcher
+
+        watcher = _AuthChallengeWatcher("https://srv.example/mcp")
+        await watcher.observe(
+            SimpleNamespace(
+                status_code=401,
+                request=SimpleNamespace(
+                    url="https://srv.example/.well-known/oauth-protected-resource"
+                ),
+            )
+        )
+        assert watcher.status_code is None
+
+    @pytest.mark.asyncio
+    async def test_a_non_auth_failure_is_never_relabelled_as_an_auth_problem(
+        self, tmp_path: Path
+    ) -> None:
+        """Routing a network outage into "run /mcp login" would be a worse
+        error than the opaque one this change replaces. No observed challenge
+        means no conversion."""
+        from local_operator.mcp.config import MCPHttpServerConfig
+        from local_operator.mcp.manager import _AuthChallengeWatcher
+
+        manager = McpManager(str(tmp_path))
+        cfg = MCPHttpServerConfig(url="https://srv.example/mcp")
+        watcher = _AuthChallengeWatcher("https://srv.example/mcp")  # nothing observed
+        assert await manager._challenge_error(cfg, watcher) is None
+        assert await manager._challenge_error(cfg, None) is None
+
+    @pytest.mark.asyncio
+    async def test_connect_round_reports_a_challenge_actionably(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """End to end through the surface the user screenshotted: the splash
+        notice reads from ``startup_failures``."""
+        from local_operator.mcp.config import MCPHttpServerConfig
+
+        manager = McpManager(str(tmp_path))
+        cfg = MCPHttpServerConfig(url="https://srv.example/mcp")
+
+        async def fake_connect(name: str, cfg: Any, **_: Any) -> ServerConnection:
+            raise self._exc()
+
+        monkeypatch.setattr(manager, "_connect_server", fake_connect)
+        result = await manager._connect_round({"gitlab": cfg}, {"gitlab": "codex"})
+        assert "/mcp login gitlab" in result.errors["gitlab"]
+        assert "Server returned an error response" not in result.errors["gitlab"]
