@@ -84,7 +84,7 @@ PortableMetadataValue = TypeAliasType(
 )
 
 
-class FrozenMapping(Mapping[str, JsonValue]):
+class FrozenMapping:
     """A recursively immutable mapping that remains copy and pickle friendly.
 
     ``MappingProxyType`` protects writes but cannot be deep-copied or pickled,
@@ -156,6 +156,21 @@ class FrozenMapping(Mapping[str, JsonValue]):
     def __len__(self) -> int:
         return len(self._items)
 
+    def keys(self) -> tuple[str, ...]:
+        return tuple(key for key, _value in self._items)
+
+    def items(self) -> tuple[tuple[str, Any], ...]:
+        return self._items
+
+    def values(self) -> tuple[Any, ...]:
+        return tuple(value for _key, value in self._items)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
     def __repr__(self) -> str:
         return f"FrozenMapping({_thaw_json(self)!r})"
 
@@ -164,7 +179,7 @@ class FrozenMapping(Mapping[str, JsonValue]):
         # equality rules (notably True == 1). Interoperability is canonical JSON,
         # so Python equality is deliberately closed to this immutable value type.
         if not isinstance(other, FrozenMapping):
-            return NotImplemented
+            return False
         return _typed_json_key(self) == _typed_json_key(other)
 
     def __hash__(self) -> int:
@@ -342,7 +357,7 @@ class Observation(ProtocolModel):
         return frozen
 
     @field_serializer("metadata")
-    def _serialize_metadata(self, metadata: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
+    def _serialize_metadata(self, metadata: FrozenMapping) -> dict[str, JsonValue]:
         # Pydantic knows JsonValue but not MappingProxyType. Thaw only for wire
         # output; the model continues to expose recursively immutable values.
         thawed = _thaw_json(metadata)
@@ -661,6 +676,9 @@ def _validate_metadata(value: Any, *, path: str = "metadata", depth: int = 0) ->
         for index, item in enumerate(value):
             _validate_metadata(item, path=f"{path}[{index}]", depth=depth + 1)
         return
+    if isinstance(value, FrozenMapping):
+        _validate_metadata_items(value.items(), path=path, depth=depth)
+        return
     if isinstance(value, Mapping):
         # Dynamic keys use an ASCII subset whose code-point and UTF-16 sort
         # orders are identical across Python and JavaScript adapters.
@@ -685,6 +703,8 @@ def _freeze_metadata_value(value: Any, *, path: str, depth: int) -> Any:
             _freeze_metadata_value(item, path=f"{path}[{index}]", depth=depth + 1)
             for index, item in enumerate(value)
         )
+    if isinstance(value, FrozenMapping):
+        return value
     if isinstance(value, Mapping):
         return FrozenMapping._from_mapping(value, path=path, depth=depth)
     raise ValueError(f"{path} contains unsupported value type {type(value).__name__}")
@@ -695,6 +715,8 @@ def _freeze_json(value: Any) -> Any:
 
 
 def _thaw_json(value: Any) -> JsonValue:
+    if isinstance(value, FrozenMapping):
+        return {key: _thaw_json(item) for key, item in value.items()}
     if isinstance(value, Mapping):
         return {key: _thaw_json(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
@@ -712,6 +734,11 @@ def _typed_json_key(value: Any) -> tuple[Any, ...]:
         return ("integer", value)
     if isinstance(value, str):
         return ("string", value)
+    if isinstance(value, FrozenMapping):
+        return (
+            "object",
+            tuple((key, _typed_json_key(item)) for key, item in value.items()),
+        )
     if isinstance(value, Mapping):
         return (
             "object",

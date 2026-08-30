@@ -7,6 +7,7 @@ import json
 import pickle
 import subprocess
 import sys
+from collections import UserDict
 from collections.abc import Mapping
 from pathlib import Path
 from types import MappingProxyType
@@ -311,14 +312,43 @@ def test_frozen_mapping_equality_preserves_recursive_json_scalar_types() -> None
 
 
 def test_frozen_mapping_never_equals_ordinary_or_custom_mappings() -> None:
-    frozen = FrozenMapping({"value": True})
-    ordinary = {"value": True}
-    custom = MappingProxyType(ordinary)
-    assert not frozen == ordinary
-    assert not ordinary == frozen
-    assert not frozen == custom
-    assert not custom == frozen
-    assert FrozenMapping.__eq__(frozen, ordinary) is NotImplemented
+    class CustomMapping(Mapping[str, object]):
+        def __init__(self, value: object) -> None:
+            self.value = value
+
+        def __iter__(self):
+            return iter(("value",))
+
+        def __len__(self) -> int:
+            return 1
+
+        def __getitem__(self, key: str) -> object:
+            if key != "value":
+                raise KeyError(key)
+            return self.value
+
+    frozen_true = FrozenMapping({"value": True})
+    frozen_one = FrozenMapping({"value": 1})
+    adversaries = (
+        {"value": True},
+        MappingProxyType({"value": True}),
+        UserDict({"value": True}),
+        CustomMapping(True),
+        CustomMapping(1),
+    )
+    for other in adversaries:
+        assert not frozen_true == other
+        assert not other == frozen_true
+        assert FrozenMapping.__eq__(frozen_true, other) is False
+    assert frozen_true != frozen_one
+    assert len({frozen_true, frozen_one}) == 2
+    frozen_set = {frozen_true, frozen_one}
+    assert frozen_true in frozen_set and frozen_one in frozen_set
+    # An untyped mapping may bridge True and 1 internally, but it cannot create
+    # transitivity through the closed FrozenMapping equality relation.
+    assert UserDict({"value": True}) == UserDict({"value": 1})
+    assert frozen_true != UserDict({"value": True})
+    assert UserDict({"value": 1}) != frozen_one
 
 
 def test_frozen_mapping_snapshots_stateful_mapping_exactly_once() -> None:
