@@ -316,7 +316,23 @@ MODEL_SWITCH_MID_TURN_NOTICE = "applies from the next step — this one finishes
 #: The turn ended without ever reaching a boundary to drain at — interrupted,
 #: failed, or simply answered with no further tool calls. ONE string for all
 #: three, because they are one fact from the user's side: the message is waiting
-#: and goes with their next message, and what they do about it is identical.
+#: and goes with whatever prompt opens the next turn, and what they do about it
+#: is identical.
+#:
+#: `that next message`, not `your next message` (design round 2, D6). The turn
+#: that drains this row need not be one the user started: an idle wake, a peer
+#: `lop send` and a background job result each open their own turn and drain the
+#: steering queue, so the promise named a message that need not exist. The
+#: settle one state over (`DEFERRED_SENT_STEER_NOTICE`) was corrected for
+#: exactly this in round 1, and leaving the promise saying `your` above a settle
+#: saying `that` reads as a considered distinction rather than the oversight it
+#: was. Promise and settle now share the deictic, so the row visibly restates
+#: itself instead of switching pronouns mid-story.
+#:
+#: Geometry-neutral, measured rather than assumed — this is the REFERENCE height
+#: every other receipt string is matched against, so a change here moves the
+#: whole set. `scripts/steer_receipt_transitions.py` over 20-90 columns reports
+#: the same pre-existing `q->d` band and `d->ds` still clean at every width.
 #:
 #: An earlier version named the interrupt in the row ("the turn was stopped"),
 #: which cost 22 cells to restate the `! interrupted` notice sitting one row
@@ -328,7 +344,61 @@ MODEL_SWITCH_MID_TURN_NOTICE = "applies from the next step — this one finishes
 #:
 #: Dropping it also stops the row being WRONG on the error path, where the turn
 #: was not stopped by anyone: it failed, and its own error notice says so.
-DEFERRED_STEER_NOTICE = "still queued — sends with your next message"
+DEFERRED_STEER_NOTICE = "still queued — sends with that next message"
+#: The settle for a row that was DEFERRED, where `SENT_STEER_NOTICE` is the
+#: settle for one delivered inside the turn it was queued against. Two strings
+#: for one transition, which #132 spent two rounds arguing against, so the case
+#: for the fourth is made here rather than assumed.
+#:
+#: It says something the shared string cannot (design round 1, D5). A deferred
+#: row promised `sends with your next message`; the user then typed that
+#: message and watched an older row flip to `sent — the agent has it now`, with
+#: no way to tell whether their steered text rode along with what they just
+#: sent or arrived separately — and the receipt sits ABOVE the message it
+#: travelled with, so the only cue is spatial and reads backwards. `it rode
+#: along` names the association the layout cannot.
+#:
+#: The shared string could not simply be re-worded to say this, which is what
+#: forces a fourth: `SENT_STEER_NOTICE` also settles the SAME-TURN case, the
+#: common path, where the message went at a tool boundary during the turn the
+#: user was watching. Any mention of a `next message` there is plainly wrong —
+#: there is no next message. The two settles are genuinely two facts.
+#:
+#: Its LENGTH is load-bearing, and this is the second reason it exists (design
+#: round 1, D1/D2). A notice's height is a step function of its wrap points, so
+#: a settle that shortens the text can shorten the ROW, pulling everything
+#: below it up at a moment the user did nothing — and with the transcript
+#: scrolled up the offset stays put while the extent drops, so the viewport
+#: appears to scroll itself. Measured on the real block
+#: (`scripts/steer_receipt_transitions.py`), the shared 27-character string
+#: shrank the deferred row at every width from 28 to 52 columns. At 43
+#: characters this renders to the SAME height as `DEFERRED_STEER_NOTICE` at
+#: every width from 28 to 80 (`scripts/steer_receipt_candidates.py`), so the
+#: cross-turn settle now rewrites the row in place without moving a thing.
+#:
+#: Chosen by MEASUREMENT, not by character count: the round-1 candidate `sent
+#: with your next message` was picked as "27 → 28 characters" and is in fact 27,
+#: identical to the string it replaced, and moved no wrap point at all. Any
+#: future edit to this line has to re-run the sweep — a word added or dropped
+#: here silently reintroduces the reflow.
+#:
+#: `that next message`, not `your next message` (design round 1, D1). The turn
+#: that drains this row need not be one the user started: an idle wake
+#: (`Session._fire_wake` spawns its own turn for a wake that lands while the
+#: session is idle), a peer `lop send` and a background job result each open a
+#: turn that drains the steering queue. A row asserting the user sent something
+#: is then simply FALSE — the same class of defect as the dropped fact this
+#: string exists to fix, one state over. `that` names the message the steer
+#: travelled with without claiming who wrote it, and stays true on the common
+#: path where the user did write it.
+#:
+#: The alternative `the message below` was measured and rejected: it reflows at
+#: 22 and 24 columns. The binding constraint is WORD SHAPE, not length — every
+#: candidate here is 43 characters, but the row count follows the wrap points,
+#: and only a tail breaking like `with · your/that · next · message` tracks
+#: `DEFERRED_STEER_NOTICE` at every width. That is precisely why the sweep, and
+#: not the character count, is the instrument.
+DEFERRED_SENT_STEER_NOTICE = "sent — it rode along with that next message"
 #: The one row a recall decline prints (design round 1, D1): a silent Esc over
 #: a half-typed draft reads as a dropped keystroke, so the decline names the
 #: obstacle and the recovery. Named because the SUCCESSFUL recall retires its
@@ -1765,6 +1835,26 @@ class OperatorApp(App[None]):
         #: The two together are the FIFO the engine drains: these rows were
         #: queued first, so they settle first (see `on_steering_delivered`).
         self._deferred_steer_notices: list[NoticeBlock] = []
+        #: Controllers that were replaced by a swap which KEPT the transcript,
+        #: so a steer receipt still in flight from one of them is about a row
+        #: this app is still holding and must still settle it (review round 1,
+        #: F3). Only `_adopt_takeover_session` adds to this: a takeover is a
+        #: transport rotation, not a conversation change. `/reload` and `/new`
+        #: deliberately do NOT, because they clear the rows and the messages
+        #: those receipts describe left with the old session.
+        #:
+        #: A set of controllers rather than a flag: several rotations can be in
+        #: flight, and identity is the same discriminator the guard itself uses.
+        #: Membership here goes through ``__hash__``/``__eq__`` rather than the
+        #: ``is not`` the guard uses on the live controller, so it is identity
+        #: only because :class:`EventController` inherits both from ``object``
+        #: — the same property the two `NoticeBlock` sets rely on. A controller
+        #: that ever defines either must revisit this lookup, or a superseded
+        #: controller could be spoofed into the allowance.
+        #:
+        #: Cleared wherever the rows are, since an entry outliving the rows it
+        #: was protecting would re-open the very race the guard closes.
+        self._superseded_steer_controllers: set[EventController] = set()
         #: User messages this TUI has ALREADY painted (or deliberately declined
         #: to paint) whose ``MessageStartEvent`` from the session is still
         #: coming. ``on_user_message_start`` consumes a matching entry instead
@@ -2557,6 +2647,17 @@ class OperatorApp(App[None]):
         """
         remote = self._session
         if self._controller is not None:
+            # A takeover KEEPS the conversation, so it also keeps the receipt's
+            # right to settle (review round 1, F3). The steer-delivery guard
+            # drops events from a superseded controller because a `/reload`
+            # cleared the rows they would have settled — but here the rows are
+            # deliberately still on screen and their messages are still the
+            # same session's, so a drain already in flight across the swap is
+            # about a row this app is still holding. Recording the outgoing
+            # controller as still-honoured is what keeps that receipt landing
+            # instead of leaving the row stuck on `queued` after the message
+            # actually went.
+            self._superseded_steer_controllers.add(self._controller)
             self._controller.dispose()
             self._controller = None
         if remote is not None:
@@ -3804,6 +3905,11 @@ class OperatorApp(App[None]):
         # watch the other front end paint it while this one stays silent.
         self._pending_user_echoes.clear()
         self._held_steer_blocks.clear()
+        # And the takeover allowance, which only ever protects rows: with the
+        # rows gone there is nothing left for a superseded controller's receipt
+        # to settle, and an entry outliving them would re-open the very race
+        # the guard closes (review round 1, F3).
+        self._superseded_steer_controllers.clear()
         # The per-call accrual belongs to a turn on the session being replaced.
         # Left standing, the NEXT session's first `agent_end` would subtract the
         # dead conversation's already-billed calls from its own turn total and
@@ -7970,6 +8076,9 @@ class OperatorApp(App[None]):
         self._queued_steer_notices.clear()
         self._deferred_steer_notices.clear()
         self._held_steer_blocks.clear()
+        # Same reason as the swap path: the allowance exists only to let a
+        # takeover's in-flight receipt reach a row that is still on screen.
+        self._superseded_steer_controllers.clear()
         # ``ends_empty_state=False``: the receipt reports on the CLEAR, so the
         # session has not started talking and the splash the clear just restored
         # must survive it. Going through ``_append_block`` rather than straight to
@@ -17572,7 +17681,35 @@ class OperatorApp(App[None]):
         rows" and "the messages that went" are the same set — across BOTH held
         lists, which is why they concatenate here; see
         `_deferred_steer_notices` for why deferred rows lead.
+
+        Gated on the delivery coming from the controller this app is CURRENTLY
+        listening to (issue #160, F3). `/reload` disposes the old controller,
+        but a `steering_delivered` it had already dispatched is a queued Textual
+        message that unsubscribing cannot recall, and it is handled after the
+        swap cleared these lists — so a user quick enough to steer into the
+        replacement session had that new row settled by the dead session's
+        drain. The emptiness check below is not sufficient for exactly that
+        window: the lists are non-empty again, holding a row about a message
+        this event says nothing about.
+
+        The premise is "the swap cleared the rows", NOT "the controller
+        changed", and those come apart on the takeover path (review round 1,
+        F3): `_adopt_takeover_session` rotates the transport while deliberately
+        keeping the transcript and the held rows, so a drain in flight across
+        that swap is still about a row this app holds and must still settle it.
+        Those controllers are recorded as still-honoured rather than the guard
+        being loosened for everyone, which would give the `/reload` race back.
         """
+        origin = getattr(message, "origin", None)
+        if (
+            origin is not None
+            and origin is not self._controller
+            and origin not in self._superseded_steer_controllers
+        ):
+            # A receipt from a conversation that is no longer on screen. Its
+            # rows went with the swap that cleared them, so there is nothing
+            # here it could honestly settle.
+            return
         if not self._deferred_steer_notices and not self._queued_steer_notices:
             return  # a delivery for rows this app is no longer holding
         # Defensive bounds: a producer that omits `count` (or sends a nonsense
@@ -17599,6 +17736,13 @@ class OperatorApp(App[None]):
         held = self._deferred_steer_notices + self._queued_steer_notices
         taken = max(1, min(count, len(held)))
         settled, remaining = held[:taken], held[taken:]
+        # WHICH settle each row gets, captured before the lists are rewritten
+        # below. A row from the deferred list travelled with the user's next
+        # message and says so (`DEFERRED_SENT_STEER_NOTICE`); a row from the
+        # queued list went inside the turn it was queued against and takes the
+        # plain `SENT_STEER_NOTICE`. Identity again, for the reason the
+        # membership split below states.
+        was_deferred = set(self._deferred_steer_notices)
         # Split back apart by MEMBERSHIP rather than by arithmetic on `taken`:
         # the lists were concatenated for ordering only, and each survivor goes
         # back to whichever list it came from, because the two mean different
@@ -17622,7 +17766,10 @@ class OperatorApp(App[None]):
         ]
         for block in settled:
             try:
-                block.restate(SENT_STEER_NOTICE, "success")
+                block.restate(
+                    (DEFERRED_SENT_STEER_NOTICE if block in was_deferred else SENT_STEER_NOTICE),
+                    "success",
+                )
             except Exception:  # a receipt must never take the app down
                 logger.debug("queued-steer notice could not be settled", exc_info=True)
         # Delivered entries can never be recalled: drop their held blocks so

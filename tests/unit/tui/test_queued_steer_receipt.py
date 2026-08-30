@@ -30,6 +30,7 @@ from local_operator.harness.types import ModelSpec, SteeringDeliveredEvent
 from local_operator.session.session import Session
 from local_operator.session.transcript import Transcript
 from local_operator.tui.app import (
+    DEFERRED_SENT_STEER_NOTICE,
     DEFERRED_STEER_NOTICE,
     QUEUED_STEER_NOTICE,
     SENT_STEER_NOTICE,
@@ -37,7 +38,11 @@ from local_operator.tui.app import (
 )
 from local_operator.tui.events import SteeringDelivered, TurnEnded
 from local_operator.tui.widgets.editor import Editor
-from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView
+from local_operator.tui.widgets.transcript import (
+    NoticeBlock,
+    NoticeKind,
+    TranscriptView,
+)
 
 from .test_app_pilot import FakeSession, _factory
 
@@ -77,6 +82,50 @@ def _notice_blocks(app: OperatorApp) -> list[NoticeBlock]:
 def _notice_texts(app: OperatorApp) -> list[str]:
     """Every notice row's text, in transcript order."""
     return [block._text for block in _notice_blocks(app)]
+
+
+async def _settled_notice_height(cols: int, text: str, kind: NoticeKind) -> int:
+    """The row count ``text`` renders to at ``cols`` columns, read once, settled.
+
+    One block in a FRESH app, rather than one block measured before and after a
+    restate. Two things make that the reliable protocol:
+
+    * The pre-restate reading of a restated block is racy — the region is not
+      always settled after a fixed number of pauses, so it comes back one row
+      short intermittently (review round 1, F2, measured at 1 in 12 at 52
+      columns). Here there is no baseline reading to slip: each string is
+      rendered independently and compared as a number.
+    * A second notice mounted beside the first is given a gap row by adaptive
+      spacing when its neighbour is multi-row, so two blocks in one app differ
+      in ``virtual_region`` for reasons that have nothing to do with the copy.
+
+    The height is taken from the block's OWN wrap of its own text at its own
+    measured width, not from ``virtual_region``. That is what makes it
+    deterministic: ``virtual_region`` is assigned by the compositor, so reading
+    it races the layout pass no matter how many frames are waited — polling it
+    for stability merely trades a fixed pause count for an unsettled plateau,
+    which is the same flake one step removed (observed at a width that moved
+    between runs). ``_rows`` is a pure function of the text and the body width,
+    it is the very computation that decides the row count, and it is what
+    ``_build`` itself calls, so it answers the question the test is actually
+    asking: how many rows does this string occupy here.
+
+    The width is still read from the mounted block, so the transcript's real
+    padding and scrollbar are in the number rather than assumed.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(cols, 24)) as pilot:
+        await pilot.pause()
+        block = NoticeBlock(text, kind)
+        app._append_block(block)
+        await pilot.pause()
+        await pilot.pause()
+        # Mirrors `NoticeBlock._build`: the block reserves a fixed glyph field
+        # and wraps the remainder, so the body is the block's width less that
+        # gutter. Read from the live block rather than recomputed from `cols`.
+        width = max((block.size.width or 80) - 2, 12)
+        body = max(width - block.GLYPH_COLS, 8)
+        return len(block._rows(body))
 
 
 async def _submit(pilot: Any, app: OperatorApp, text: str) -> None:
@@ -235,6 +284,14 @@ async def test_an_interrupted_turn_retires_the_promise_it_can_no_longer_keep() -
         # it was lost — the user would retype and the agent would get it twice.
         assert "not sent" not in DEFERRED_STEER_NOTICE
         assert "still queued" in DEFERRED_STEER_NOTICE
+        # And it must not claim the user will send that message (design round 2,
+        # D6). A wake that lands while idle, a peer `lop send` and a background
+        # job result each open their own turn and drain the queue, so the turn
+        # this row is waiting on need not be one the user started. The promise
+        # and the settle share the deictic for that reason; `your` in either is
+        # the same false authorship claim one state apart.
+        assert "your" not in DEFERRED_STEER_NOTICE
+        assert "your" not in DEFERRED_SENT_STEER_NOTICE
 
 
 @pytest.mark.asyncio
@@ -303,7 +360,11 @@ async def test_a_deferred_row_is_settled_by_the_delivery_it_was_waiting_for() ->
         await pilot.pause()
 
         texts = _notice_texts(app)
-        assert texts.count(SENT_STEER_NOTICE) == 1
+        # The DEFERRED settle, not the shared one: this row promised to go with
+        # the user's next message and it did, which is the one fact the
+        # same-turn string cannot carry (issue #160, D5).
+        assert texts.count(DEFERRED_SENT_STEER_NOTICE) == 1
+        assert SENT_STEER_NOTICE not in texts
         assert DEFERRED_STEER_NOTICE not in texts, "the kept promise still reads as waiting"
         assert QUEUED_STEER_NOTICE not in texts
         assert app._deferred_steer_notices == []
@@ -336,7 +397,7 @@ async def test_a_deferred_row_settles_before_one_queued_against_the_new_turn() -
         app.post_message(SteeringDelivered(1))
         await pilot.pause()
 
-        assert older._text == SENT_STEER_NOTICE, "the older message was the one that went"
+        assert older._text == DEFERRED_SENT_STEER_NOTICE, "the older message was the one that went"
         assert newer._text == QUEUED_STEER_NOTICE, "the newer row must keep promising"
         assert app._deferred_steer_notices == []
         assert app._queued_steer_notices == [newer]
@@ -378,7 +439,7 @@ async def test_a_surviving_deferred_row_stays_deferred_and_is_not_restated_again
         app.post_message(garbled)
         await pilot.pause()
 
-        assert older._text == SENT_STEER_NOTICE
+        assert older._text == DEFERRED_SENT_STEER_NOTICE
         assert younger._text == DEFERRED_STEER_NOTICE
         # The survivor is still DEFERRED. Landing in the queued list instead
         # would be invisible here and wrong on the next turn end, below.
@@ -660,3 +721,233 @@ async def test_an_interrupt_spends_the_loud_ink_once() -> None:
         assert "interrupted" in alarms[0]
         # And the settled row is present, quiet, and says the message survives.
         assert any(DEFERRED_STEER_NOTICE in row for row in rows), rows
+
+
+@pytest.mark.asyncio
+async def test_a_dead_sessions_delivery_cannot_settle_the_new_sessions_row() -> None:
+    """Issue #160, F3: the receipt is guarded by SESSION, not only by turn.
+
+    `/reload` disposes the outgoing controller, but an event it had ALREADY
+    dispatched is a Textual message sitting in the app's queue, and
+    unsubscribing cannot recall one. It is handled after the swap cleared the
+    held lists — and a user quick enough to steer into the replacement session
+    has a row held again by then, so the dying session's drain settled a row
+    about a message it knows nothing about.
+
+    Driven by racing dispose deliberately, because nothing else reaches it: the
+    outgoing controller's handler is invoked while it is still subscribed (the
+    engine emitting on its way down) and the resulting message is left to be
+    handled after the swap, which is exactly the real ordering.
+    """
+    outgoing = _Streaming()
+    app = OperatorApp(lambda: _factory(outgoing))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        # The controller is installed by the boot WORKER, so waiting on the
+        # condition rather than on a frame count is what keeps this
+        # deterministic on a loaded machine — the same race `_submit` documents.
+        for _ in range(200):
+            if app._controller is not None:
+                break
+            await pilot.pause()
+            await asyncio.sleep(0.01)
+        assert app._controller is not None, "the session never booted"
+        dying_controller = app._controller
+
+        # The swap.
+        replacement = _Streaming()
+        app._session_factory = lambda: _factory(replacement)  # type: ignore[assignment]
+        await app._reload_session()
+        for _ in range(4):
+            await pilot.pause()
+        assert app._controller is not dying_controller, "the swap must install a new controller"
+
+        # The user steers into the REPLACEMENT session, so a row is held again.
+        await _submit(pilot, app, "an instruction for the new session")
+        assert QUEUED_STEER_NOTICE in _notice_texts(app)
+        (new_row,) = app._queued_steer_notices
+
+        # NOW the dying session's drain is handled. This is the ordering the
+        # race produces and the reason the emptiness check cannot catch it: the
+        # outgoing controller emitted on its way down, its message sat in the
+        # app's queue behind the swap, and by the time it is handled the lists
+        # are non-empty again — holding a row about a DIFFERENT conversation's
+        # message. Dispatched through the dead controller's own handler so the
+        # message carries exactly the stamp the production path gives it.
+        dying_controller._handle_steering_delivered(SteeringDeliveredEvent(count=1))
+        await pilot.pause()
+        await pilot.pause()
+
+        # The dead session's receipt must not settle it: that message went into
+        # a conversation the user cannot see, and this row is still promising a
+        # delivery that has not happened.
+        assert new_row._text == QUEUED_STEER_NOTICE
+        assert SENT_STEER_NOTICE not in _notice_texts(app)
+        assert DEFERRED_SENT_STEER_NOTICE not in _notice_texts(app)
+        assert app._queued_steer_notices == [new_row]
+
+        # And the LIVE session's own delivery still settles it, so the guard
+        # refuses the stale event rather than the event type.
+        assert app._controller is not None
+        app._controller._handle_steering_delivered(SteeringDeliveredEvent(count=1))
+        await pilot.pause()
+        assert new_row._text == SENT_STEER_NOTICE
+
+
+@pytest.mark.asyncio
+async def test_the_cross_turn_settle_does_not_change_the_rows_height() -> None:
+    """Issue #160, D1/D2: settling a deferred row must not reflow the transcript.
+
+    A notice's height is a step function of its wrap points, so a settle that
+    shortens the text can shorten the ROW — pulling everything below it up at a
+    moment the user did not act, and, with the transcript scrolled up, leaving
+    `scroll_offset` on a viewport that now shows different text. Measured on
+    base, the shared 27-character settle shrank the deferred row at every width
+    from 28 to 52 columns (`scripts/steer_receipt_transitions.py`).
+
+    `DEFERRED_SENT_STEER_NOTICE` is sized to match, which is the whole reason it
+    is 43 characters. This pins that: a word added or dropped from either string
+    moves a wrap point at some width and silently brings the jump back, and the
+    character counts alone cannot tell you — the round-1 candidate was chosen by
+    counting and turned out to be the same length as the string it replaced.
+
+    Every width from 20 up, because the crossovers are not where arithmetic on
+    the string lengths puts them: the transcript's own padding and scrollbar are
+    in the block's usable width and not in the raw character count. The binding
+    constraint is WORD SHAPE rather than length — all three receipt strings in
+    play are 43 characters, and `sent — it rode along with the message below`
+    still reflows at 22 and 24 because its tail breaks differently.
+
+    Each string is measured in its OWN app, read once through
+    `_settled_notice_height`, rather than by reading one block before and after
+    a restate. That protocol was racy (review round 1, F2): the pre-restate
+    reading is taken while the block's region may not have settled, so it came
+    back one row short about once in twelve at 52 columns — and over 33 widths
+    that made a red run likely, reporting a copy regression that did not exist.
+    The post-restate reading was never wrong; only the baseline slipped.
+    """
+    for cols in range(20, 91):
+        deferred = await _settled_notice_height(cols, DEFERRED_STEER_NOTICE, "note")
+        settled = await _settled_notice_height(cols, DEFERRED_SENT_STEER_NOTICE, "success")
+        # Naming both strings, because the failure a future reader will hit is
+        # "somebody edited the copy", and the message has to point at that
+        # rather than at the transcript.
+        assert deferred == settled, (
+            f"at {cols} columns the receipt strings render to different heights "
+            f"({deferred} vs {settled} rows), so the cross-turn settle reflows "
+            f"the transcript. The copy was edited and its wrap point moved:\n"
+            f"  deferred={DEFERRED_STEER_NOTICE!r}\n"
+            f"  settled ={DEFERRED_SENT_STEER_NOTICE!r}\n"
+            f"Re-run scripts/steer_receipt_candidates.py to pick a replacement."
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_settling_deferred_row_leaves_a_scrolled_up_reader_alone() -> None:
+    """The symptom D2 describes, driven end to end rather than measured statically.
+
+    With the transcript scrolled up mid-history, a shrinking row drops
+    `virtual_size` while `scroll_offset` stays put, so the same offset shows
+    different text and the viewport appears to scroll itself. 52 columns is the
+    width at which base was worst (measured: virtual_size 51 -> 49, 8 of 24
+    viewport rows changed with nothing the user did).
+
+    The assertion is on the FRAME, not on the string: what the user is promised
+    is that nothing below the receipt moves, and a future copy change that
+    reintroduces the reflow has to fail here even if it keeps every word this
+    test could otherwise look for.
+    """
+    session = _Streaming()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(52, 24)) as pilot:
+        await pilot.pause()
+        await _submit(pilot, app, "and use the staging credentials")
+        # History below the receipt, so there is something for a reflow to move
+        # and somewhere for the reader to scroll away from the tail.
+        for index in range(20):
+            app._append_block(NoticeBlock(f"history row {index}", "info"))
+        app.post_message(TurnEnded(True, None))
+        await pilot.pause()
+        await pilot.pause()
+
+        view = app.query_one(TranscriptView)
+        view.scroll_to(y=8, animate=False, immediate=True)
+        await pilot.pause()
+        await pilot.pause()
+
+        before_extent = view.virtual_size.height
+        before_offset = view.scroll_offset.y
+        before_rows = [strip.text.rstrip() for strip in app.screen._compositor.render_strips()]
+
+        app.post_message(SteeringDelivered(1))
+        await pilot.pause()
+        await pilot.pause()
+
+        assert view.virtual_size.height == before_extent, "the settle moved the scrollable extent"
+        assert view.scroll_offset.y == before_offset
+        changed = [
+            (index, before, after)
+            for index, (before, after) in enumerate(
+                zip(
+                    before_rows,
+                    [strip.text.rstrip() for strip in app.screen._compositor.render_strips()],
+                )
+            )
+            if before != after
+        ]
+        # EXACTLY the receipt's own rows change. Anything else is content the
+        # user did not touch moving under them, which is the report.
+        assert all(
+            DEFERRED_STEER_NOTICE.split(" — ")[0] in before
+            or DEFERRED_SENT_STEER_NOTICE.split(" — ")[0] in after
+            or "message" in before
+            or "message" in after
+            for _, before, after in changed
+        ), changed
+
+
+@pytest.mark.asyncio
+async def test_a_takeover_still_settles_the_rows_it_deliberately_kept() -> None:
+    """Review round 1, F3: the guard's premise is "the rows went", not "the
+    controller changed", and the two come apart on takeover.
+
+    `_adopt_takeover_session` rotates the transport when the remote facade wins
+    the transcript lease. Unlike `/reload` it is NOT a conversation change: the
+    transcript, the held steer rows and the engine's queue all survive, and its
+    docstring says so. So a drain already in flight across that swap is about a
+    row this app is still holding, and dropping it leaves the receipt stuck on
+    `queued` after the message really went — the exact stale promise #151 and
+    #157 exist to prevent, reintroduced by a guard that over-generalised.
+    """
+    session = _Streaming()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        for _ in range(200):
+            if app._controller is not None:
+                break
+            await pilot.pause()
+            await asyncio.sleep(0.01)
+        assert app._controller is not None, "the session never booted"
+        outgoing_controller = app._controller
+
+        await _submit(pilot, app, "steered just before the lease changed hands")
+        assert QUEUED_STEER_NOTICE in _notice_texts(app)
+        (row,) = app._queued_steer_notices
+
+        # The takeover: a new session object, same conversation, transcript and
+        # held rows deliberately kept.
+        await app._adopt_takeover_session(_Streaming())
+        await pilot.pause()
+        assert app._controller is not outgoing_controller
+        assert app._queued_steer_notices == [row], "takeover must keep the held rows"
+
+        # The drain that was already in flight when the lease changed hands.
+        outgoing_controller._handle_steering_delivered(SteeringDeliveredEvent(count=1))
+        await pilot.pause()
+        await pilot.pause()
+
+        assert row._text == SENT_STEER_NOTICE, (
+            "a takeover keeps the conversation, so the receipt for a message "
+            "that really went must still settle its row"
+        )

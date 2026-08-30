@@ -37,6 +37,7 @@ import pytest
 
 from local_operator.harness.types import ImageContent
 from local_operator.tui.app import (
+    DEFERRED_SENT_STEER_NOTICE,
     DEFERRED_STEER_NOTICE,
     LOOP_PROMPT,
     SENT_STEER_NOTICE,
@@ -361,7 +362,10 @@ async def test_a_deferred_steer_is_settled_not_repainted_by_the_next_turns_echo(
         app.post_message(UserMessageStart("deferred across the turn", 0, steer_id))
         await pilot.pause()
         texts = _notice_texts(app)
-        assert SENT_STEER_NOTICE in texts and DEFERRED_STEER_NOTICE not in texts
+        # A row deferred ACROSS the turn takes the cross-turn settle: it went
+        # with the message this echo is about (issue #160, D5).
+        assert DEFERRED_SENT_STEER_NOTICE in texts and DEFERRED_STEER_NOTICE not in texts
+        assert SENT_STEER_NOTICE not in texts
         assert len(_user_blocks(app, "deferred across the turn")) == 1
 
 
