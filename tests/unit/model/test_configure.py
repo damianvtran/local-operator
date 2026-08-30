@@ -372,6 +372,30 @@ def _anthropic_tier_capped_usage(five_hour_used: float, fable_used: float) -> Us
     )
 
 
+def _anthropic_tier_only_usage(fable_used: float) -> UsageReport:
+    """A scoped tier cap with NO shared window reported beside it.
+
+    The F8 shape: the only observation about the account is that its Fable
+    weekly is spent. ``usage_health`` for a fable model therefore returns a
+    ``scope="model"`` verdict binding the ``fable`` family alone, and nothing
+    in the report speaks to what the account can still do for other models.
+    """
+    return UsageReport(
+        provider="anthropic",
+        limits=[
+            UsageLimit(
+                id="anthropic:7d:fable",
+                label="7 day (Fable)",
+                amount=UsageAmount(used=fable_used, limit=100.0, unit="percent"),
+                window="7d",
+                shared=False,
+                tier="fable",
+                resets_at_ms=10**15,
+            ),
+        ],
+    )
+
+
 def _anthropic_tier_spent_shared_remains(extra_used: float, shared_used: float) -> UsageReport:
     """A spent per-tier cap that leaves the account under an ACCOUNT-scope
     verdict while shared quota still remains.
@@ -1409,6 +1433,114 @@ async def test_preflight_skips_a_fully_spent_fallback_to_the_next_usable(tmp_pat
             await stream.preflight_usage(model)
 
         assert stream._route_state.active == FallbackTarget("xai/grok-4.6")
+    finally:
+        await stream.close()
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_one_boundary_walk_probes_each_fallback_provider_once(tmp_path) -> None:
+    """Review F7: the fallback quota memo belongs to the WALK, not the call.
+
+    Three exhausted Anthropic accounts make preflight rotate three times, and
+    each rotation consults the fallback chain. With the memo scoped per call,
+    every rotation re-hit Kimi's and Z.AI's usage endpoints — six network
+    probes to answer a question whose answer cannot change inside one
+    boundary, against endpoints that rate-limit per source IP. One probe per
+    provider+model now serves the whole walk, and the route it picks is
+    unchanged.
+    """
+    store = AuthStore(tmp_path / "auth.db")
+    for suffix in ("a", "b", "c"):
+        store.upsert_credential("anthropic", _oauth(f"oauth-{suffix}", f"account-{suffix}"))
+    store.upsert_credential("kimi", {"key": "sk-kimi", "source": "login"})
+    store.upsert_credential("zai", {"key": "sk-zai", "source": "login"})
+    stream = create_stream_fn(
+        store,
+        {
+            "retry": {
+                "usageAwareFallback": True,
+                "usageReservePercent": 10,
+                "fallbackChains": {"default": ["kimi/k3", "zai/glm-5.3"]},
+            }
+        },
+        session_id=_session_hashing_to_first_row(3),
+    )
+    model = ModelSpec(provider="anthropic", model_id="claude-opus-5")
+    probed: list[str] = []
+
+    async def usage_for_access(_client, provider, **_kwargs):
+        probed.append(provider)
+        if provider == "anthropic":
+            return _anthropic_usage(100.0)  # every account spent: rotate
+        if provider == "kimi":
+            return _kimi_usage(100.0)  # depleted: the walk continues past it
+        return _kimi_usage(20.0)  # zai has headroom and takes the route
+
+    try:
+        with patch("local_operator.providers.usage.fetch_usage", side_effect=usage_for_access):
+            await stream.preflight_usage(model)
+
+        assert probed.count("kimi") == 1
+        assert probed.count("zai") == 1
+        # The saving must not have changed where the session lands.
+        assert stream._route_state.active == FallbackTarget("zai/glm-5.3")
+    finally:
+        await stream.close()
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_a_tier_depletion_leaves_other_models_on_the_account(tmp_path) -> None:
+    """Review F8: a spent model-tier window must not strand other models.
+
+    Three accounts whose ONLY reported window is a ``7 day (Fable)`` cap at
+    100%. Routing ``claude-fable-5`` is therefore a pure model-tier
+    depletion: nothing observed says these accounts cannot serve
+    ``claude-opus-5``. The verdict is recorded as a ``model:fable``-scoped
+    block (see ``_write_quota_block``), so Fable stops and opus keeps every
+    account. An account-wide block here is the regression this pins — it
+    would take the pool out of service for every model until the Fable
+    weekly reset, days away.
+    """
+    store = AuthStore(tmp_path / "auth.db")
+    rows = [
+        store.upsert_credential("anthropic", _oauth(f"oauth-{s}", f"account-{s}"))
+        for s in ("a", "b", "c")
+    ]
+    store.upsert_credential("kimi", {"key": "sk-kimi", "source": "login"})
+    stream = create_stream_fn(
+        store,
+        {
+            "retry": {
+                "usageAwareFallback": True,
+                "usageReservePercent": 10,
+                "fallbackChains": {"default": ["kimi/k3"]},
+            }
+        },
+        session_id=_session_hashing_to_first_row(3),
+    )
+
+    async def usage_for_access(_client, provider, **_kwargs):
+        if provider == "anthropic":
+            return _anthropic_tier_only_usage(100.0)
+        return _kimi_usage(20.0)
+
+    try:
+        with patch("local_operator.providers.usage.fetch_usage", side_effect=usage_for_access):
+            await stream.preflight_usage(ModelSpec(provider="anthropic", model_id="claude-fable-5"))
+
+        for row in rows:
+            # Never account-wide: that is what strands the other models.
+            assert not store.is_blocked(row.id, "anthropic")
+            assert not store.is_blocked_for_model(row.id, "anthropic", "claude-opus-5")
+        # Opus still resolves on this provider rather than falling to Kimi.
+        opus = await store.get_oauth_access("anthropic", "session-opus", model_id="claude-opus-5")
+        assert opus is not None
+        # The Fable cap itself is still honoured on the rotated accounts.
+        assert any(
+            store.is_blocked_for_model(row.id, "anthropic", "claude-fable-5") for row in rows
+        )
     finally:
         await stream.close()
         store.close()

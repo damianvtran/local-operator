@@ -53,29 +53,60 @@ def _read_text_capped(path: Path) -> str:
     return raw.decode("utf-8", errors="replace")
 
 
-def _list_directory(directory: Path) -> str:
+def _contained(child: Path, base_resolved: Path) -> bool:
+    """True when ``child``'s RESOLVED target stays inside ``base_resolved``.
+
+    This is the containment predicate ``_resolve_child`` enforces on read,
+    factored out so every listing surface can answer the same question the
+    resolver will. A listing that disagrees with it produces the
+    advertise-then-reject failure mode: a name the model is invited to read
+    and then refused.
+    """
+    try:
+        return child.resolve().is_relative_to(base_resolved)
+    except OSError:
+        return False
+
+
+def _list_directory(directory: Path, base_resolved: Path) -> str:
     """Render a directory listing: ``name/ (dir)`` for dirs, plain names for
     files, deterministic alphabetical order. Dotfiles are skipped (they are
     unlisted and unreadable by design) and the listing is capped at
     ``_MAX_LISTING_ENTRIES`` with an overflow marker. Names are
     percent-encoded the same way as the bare-read reference listing, so a
     name copied from here into a ``skill://<name>/<path>`` URL survives
-    ``urlsplit``/``unquote`` even when it contains ``%``, ``#`` or ``?``."""
+    ``urlsplit``/``unquote`` even when it contains ``%``, ``#`` or ``?``.
+
+    ``base_resolved`` is the resource root, already resolved by the caller.
+    A symlink whose target escapes it is omitted, because ``_resolve_child``
+    rejects a read of it: this is the child-path listing the bare-read
+    overflow marker routes to, so without the check the overflow path hands
+    back names that cannot be read (R3-2). Only symlinks are checked, the
+    same gate ``_reference_listing`` uses — ``_resolve_child`` resolves the
+    whole child path before calling here, so a non-symlink entry of an
+    already-contained directory cannot escape and does not need the stat.
+    Escaped entries are excluded from the overflow count too: the marker
+    promises "more entries" the caller can reach by listing a directory, and
+    an unreadable name is not one of them."""
     lines: list[str] = []
     try:
         entries = sorted(directory.iterdir(), key=lambda p: (p.name.lower(), p.name))
     except OSError:
         return "(unreadable directory)"
+    listable = [
+        entry
+        for entry in entries
+        if not entry.name.startswith(".")
+        and (not entry.is_symlink() or _contained(entry, base_resolved))
+    ]
     shown = 0
-    for entry in entries:
-        if entry.name.startswith("."):
-            continue
+    for entry in listable:
         if shown >= _MAX_LISTING_ENTRIES:
             break
         encoded = quote(entry.name, safe="")
         lines.append(f"{encoded}/ (dir)" if entry.is_dir() else encoded)
         shown += 1
-    hidden = sum(1 for entry in entries if not entry.name.startswith(".")) - shown
+    hidden = len(listable) - shown
     if hidden > 0:
         lines.append(f"[... {hidden} more entries not shown ...]")
     return "\n".join(lines) if lines else "(empty directory)"
@@ -109,7 +140,7 @@ def _resolve_child(
     if not target.exists():
         raise ValueError(f"{label.title()} path not found: {scheme}://{resource.name}/{relative}")
     if target.is_dir():
-        return _list_directory(target)
+        return _list_directory(target, base)
     return _read_text_capped(target)
 
 
@@ -128,8 +159,12 @@ def _reference_listing(resource: Skill, *, scheme: str) -> str:
     next move.
 
     Constraints, matching the resolver's own rules (``_resolve_child``) so
-    the listing never advertises a path a follow-up read would then reject,
-    and never hides one it would accept:
+    the listing never advertises a path a follow-up read would then reject.
+    The converse does not hold in one narrow case: deduplication can list
+    ONE route to a file the resolver would accept by several names (see the
+    symlink bullet), so a readable alias may be absent from the listing. No
+    reachable CONTENT is hidden — every listed route reads, and every
+    omitted route is a duplicate of a listed one:
 
     - dotfiles and dot-directories are skipped (unlisted and unreadable by
       design);
@@ -140,7 +175,16 @@ def _reference_listing(resource: Skill, *, scheme: str) -> str:
       resolver applies on read — and resolved directories are visited at
       most once so a link cycle cannot grow the walk. Deduplication means
       one ROUTE per directory is listed when an alias and its target both
-      appear; every route stays readable through the resolver either way;
+      appear; every route stays readable through the resolver either way.
+      HARDLINKS are the deliberate exception: a hardlink of the body file,
+      or of another reference, is listed as its own entry because resolved-
+      path equality cannot see one — telling them apart needs a per-entry
+      ``st_dev``/``st_ino`` stat on every walked file. That cost is paid on
+      every bare skill read to suppress a duplicate that (a) is readable
+      and correct if followed, and (b) essentially never occurs in an
+      authored skill tree, where references are ordinary files and symlinks.
+      Redundancy is the cheaper failure, so this is not worth fixing (R3-3);
+      revisit only if hardlinked skill trees become real;
     - names are percent-encoded exactly as ``_resolve_child``'s ``unquote``
       expects, so a filename containing ``%``, ``#`` or ``?`` survives the
       URL round-trip instead of being listed in a form ``urlsplit`` mangles;
@@ -171,15 +215,6 @@ def _reference_listing(resource: Skill, *, scheme: str) -> str:
     overflow = False
     visited: set[str] = set()
 
-    def _contained(child: Path) -> bool:
-        """True when the child's resolved target stays inside base_dir — the
-        same check ``_resolve_child`` applies, so listing and read agree on
-        every symlink."""
-        try:
-            return child.resolve().is_relative_to(base_resolved)
-        except OSError:
-            return False
-
     def _walk(directory: Path, depth: int) -> None:
         nonlocal overflow
         if depth > _MAX_REFERENCE_DEPTH or overflow:
@@ -201,14 +236,14 @@ def _reference_listing(resource: Skill, *, scheme: str) -> str:
             if child.name.startswith("."):
                 continue
             if child.is_dir():
-                if child.is_symlink() and not _contained(child):
+                if child.is_symlink() and not _contained(child, base_resolved):
                     continue
                 _walk(child, depth + 1)
             elif child.is_file():
                 if child == body_file:
                     continue
                 if child.is_symlink():
-                    if not _contained(child):
+                    if not _contained(child, base_resolved):
                         continue
                     try:
                         if child.resolve() == body_resolved:

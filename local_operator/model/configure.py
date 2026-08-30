@@ -2132,6 +2132,7 @@ class SessionStreamFn:
         *,
         different_provider: bool = False,
         reserve_percent: float = 10.0,
+        quota_cache: dict[str, str] | None = None,
     ) -> Any | None:
         """The first configured fallback with working auth, bench- and quota-aware.
 
@@ -2157,12 +2158,26 @@ class SessionStreamFn:
         configured fallback" to a user who has several, and the stream
         walk's own retry machinery is the right place to discover which
         bench has expired.
+
+        ``quota_cache`` is the memo of provider+model availability verdicts.
+        It belongs to the CALLER's boundary walk, not to one invocation: a
+        preflight that rotates through several accounts calls this once per
+        rotation step, and a per-call cache re-probed every fallback
+        provider's usage endpoint on each of them — a three-account
+        Anthropic pool re-asked Kimi three times for one message boundary
+        (review F7). The verdicts cannot disagree within a walk anyway: they
+        are derived from usage reports fetched over a few hundred
+        milliseconds, and ``_provider_quota_availability`` enumerates blocked
+        rows too, so the recovery walk lifting a block mid-boundary does not
+        change what a re-probe would answer. ``None`` keeps the standalone
+        contract for a caller with no walk of its own.
         """
         from local_operator.providers.failover import parse_selector
 
         first_benched: Any | None = None
         first_depleted: Any | None = None
-        quota_cache: dict[str, str] = {}
+        if quota_cache is None:
+            quota_cache = {}
         for target in self._fallback_targets(model):
             provider, target_model = parse_selector(target.selector)
             if different_provider and provider == model.provider:
@@ -2344,6 +2359,13 @@ class SessionStreamFn:
             return
 
         attempted_ids: set[int] = set()
+        # One memo for the WHOLE boundary walk. Rotating through this
+        # provider's accounts re-enters the loop, and each pass may consult
+        # the fallback chain; scoping the memo per call re-probed every
+        # fallback provider's usage endpoint once per rotation step (review
+        # F7). See ``_first_available_fallback`` for why a verdict is stable
+        # across one walk.
+        quota_cache: dict[str, str] = {}
         while True:
             try:
                 access = await self._auth_store.get_oauth_access(
@@ -2378,6 +2400,7 @@ class SessionStreamFn:
                             tier_binding,
                             retry,
                             attempted_ids,
+                            quota_cache,
                         ):
                             continue
                         return
@@ -2385,6 +2408,7 @@ class SessionStreamFn:
                         model,
                         different_provider=True,
                         reserve_percent=retry.usage_reserve_percent,
+                        quota_cache=quota_cache,
                     )
                     if fallback is not None:
                         await self._route_state.activate(
@@ -2525,6 +2549,7 @@ class SessionStreamFn:
                             recovered[2],
                             retry,
                             attempted_ids,
+                            quota_cache,
                         ):
                             continue
                         return
@@ -2569,6 +2594,7 @@ class SessionStreamFn:
                 fallback = await self._first_available_fallback(
                     model,
                     reserve_percent=retry.usage_reserve_percent,
+                    quota_cache=quota_cache,
                 )
                 if fallback is None:
                     # Deduped per condition: the quota is spent and nothing can
@@ -2599,6 +2625,7 @@ class SessionStreamFn:
                 tier_binding,
                 retry,
                 attempted_ids,
+                quota_cache,
             ):
                 continue
             return
@@ -2613,11 +2640,16 @@ class SessionStreamFn:
         tier_binding: bool,
         retry: Any,
         attempted_ids: set[int],
+        quota_cache: dict[str, str] | None = None,
     ) -> bool:
         """Act on a low/depleted account-scope verdict.
 
         Returns True when the caller should re-resolve credentials (a sibling
         account took over), False when the routing decision is final.
+
+        ``quota_cache`` is the caller's boundary-walk memo of fallback
+        availability, threaded through so the chain is probed once per
+        boundary rather than once per account rotation (review F7).
 
         The binding windows that produced ``health`` can be scoped to a model
         tier while the shared windows still hold quota (Anthropic's
@@ -2666,6 +2698,7 @@ class SessionStreamFn:
             # but it can preserve reserve quota by reducing token spend.
             different_provider=health.state == "depleted",
             reserve_percent=retry.usage_reserve_percent,
+            quota_cache=quota_cache,
         )
         if not siblings and health.state == "reserve":
             # Last account on this provider, still holding spendable quota.
@@ -2757,6 +2790,7 @@ class SessionStreamFn:
                     recovered[2],
                     retry,
                     attempted_ids,
+                    quota_cache,
                 )
 
         if not siblings and fallback is None:

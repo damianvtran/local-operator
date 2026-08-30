@@ -471,5 +471,87 @@ class TestReferenceListing:
         assert resolve_skill_url("skill://alpha/references", skills) == "one.md"
 
 
+class TestDirectoryListingContainment:
+    """R3-2: the child-path listing must agree with the resolver on symlinks.
+
+    ``_list_directory`` is where the bare-read overflow marker sends the
+    model, so a name it prints is an invitation to read. Printing one whose
+    resolved target escapes ``base_dir`` is the advertise-then-reject failure
+    mode R1-1 fixed on the bare-read listing, reproduced on this second
+    surface.
+    """
+
+    def test_escaping_symlinked_file_not_listed(self, tmp_path: Path) -> None:
+        skill = _make_skill(tmp_path, "gamma")
+        refs = skill.base_dir / "references"
+        refs.mkdir()
+        (refs / "real.md").write_text("real", encoding="utf-8")
+        outside = tmp_path / "outside.md"
+        outside.write_text("SECRET", encoding="utf-8")
+        (refs / "escape.md").symlink_to(outside)
+        skills = {"gamma": skill}
+
+        listing = resolve_skill_url("skill://gamma/references", skills)
+        assert listing is not None
+        assert listing.splitlines() == ["real.md"]
+        # And the resolver still refuses the path, so nothing became readable.
+        with pytest.raises(ValueError, match="escapes"):
+            resolve_skill_url("skill://gamma/references/escape.md", skills)
+
+    def test_escaping_symlinked_directory_not_listed(self, tmp_path: Path) -> None:
+        skill = _make_skill(tmp_path, "delta")
+        refs = skill.base_dir / "references"
+        refs.mkdir()
+        (refs / "real.md").write_text("real", encoding="utf-8")
+        outside = tmp_path / "outside-dir"
+        outside.mkdir()
+        (outside / "leak.md").write_text("SECRET", encoding="utf-8")
+        (refs / "escape").symlink_to(outside, target_is_directory=True)
+        skills = {"delta": skill}
+
+        listing = resolve_skill_url("skill://delta/references", skills)
+        assert listing is not None
+        assert listing.splitlines() == ["real.md"]
+        with pytest.raises(ValueError, match="escapes"):
+            resolve_skill_url("skill://delta/references/escape", skills)
+
+    def test_internal_symlink_still_listed(self, tmp_path: Path) -> None:
+        # The containment check must not cost the readable case: a symlink
+        # resolving INSIDE base_dir stays listed and stays readable.
+        skill = _make_skill(tmp_path, "epsilon")
+        refs = skill.base_dir / "references"
+        refs.mkdir()
+        (refs / "real.md").write_text("real", encoding="utf-8")
+        (refs / "alias.md").symlink_to(refs / "real.md")
+        skills = {"epsilon": skill}
+
+        listing = resolve_skill_url("skill://epsilon/references", skills)
+        assert listing is not None
+        assert listing.splitlines() == ["alias.md", "real.md"]
+        assert resolve_skill_url("skill://epsilon/references/alias.md", skills) == "real"
+
+    def test_escaped_entries_do_not_inflate_the_overflow_count(self, tmp_path: Path) -> None:
+        # The marker promises entries the caller can still reach. Counting an
+        # unlistable symlink in "N more entries not shown" would promise a
+        # name that does not exist for any follow-up read.
+        skill = _make_skill(tmp_path, "zeta")
+        refs = skill.base_dir / "references"
+        refs.mkdir()
+        outside = tmp_path / "outside.md"
+        outside.write_text("SECRET", encoding="utf-8")
+        for i in range(protocol._MAX_LISTING_ENTRIES + 5):
+            (refs / f"ref-{i:04d}.md").write_text("r", encoding="utf-8")
+        (refs / "zzz-escape.md").symlink_to(outside)
+        skills = {"zeta": skill}
+
+        listing = resolve_skill_url("skill://zeta/references", skills)
+        assert listing is not None
+        lines = listing.splitlines()
+        assert "zzz-escape.md" not in lines
+        # 5 overflowed real files, not 6: the escaping symlink is not one the
+        # caller could reach by listing this directory again.
+        assert lines[-1] == "[... 5 more entries not shown ...]"
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
