@@ -884,7 +884,24 @@ Screen.boot TranscriptView {
  * margin, and past a hundred cells the fill IS the frame. The `100%` guard it
  * replaces is not lost: the class is only applied where the resolved width leaves
  * at least 8 cells of box, and the geometry suite measures every rendered row
- * against the terminal at 16 and 20 cells, where the floor would overflow. */
+ * against the terminal at 16 and 20 cells, where the floor would overflow.
+ *
+ * A LIVE PROMPT withholds the class too, and for a reason about COMPOSITION
+ * rather than width. This selector clamps `#input-shell` alone; the prompt
+ * docked directly above it is `width: 1fr`, and the note on `AskPickerScreen`
+ * says why that must stay the ONLY statement of how wide the question is. So
+ * the two cannot be clamped together without reintroducing the second width
+ * owner that rule was written to remove — and unclamped beside a clamped
+ * composer, `Ctrl+L` under a live `ask` hung the question 58 cells past the
+ * input it is docked to at 160 columns. The card composition is the empty-state
+ * splash resting on the composer, and a question the turn is parked on is about
+ * work that already happened, so it is not part of that composition.
+ * `OperatorApp._sync_boot_card` is still the one place that decides, so this
+ * stays a single condition rather than a counter-rule here.
+ *
+ * (Issue numbers are spelled out in prose in this file rather than as `#NNN`:
+ * the minimalism suite reads that shape as a literal hex colour and rejects the
+ * sheet. The Python side carries the numeric references.) */
 Screen.boot.boot-card #input-shell {
     width: 70%;
     min-width: 75;

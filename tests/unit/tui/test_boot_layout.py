@@ -28,6 +28,7 @@ what the terminal is actually sent.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import re
 from collections.abc import Callable, Sequence
 from pathlib import Path
@@ -39,7 +40,12 @@ from rich.text import Text
 from textual.css.query import NoMatches
 from textual.screen import Screen
 
-from local_operator.harness.types import AgentMessage, ImageContent
+from local_operator.harness.types import (
+    AgentMessage,
+    AskOption,
+    AskQuestion,
+    ImageContent,
+)
 from local_operator.session.naming import ConversationName
 from local_operator.session.protocol import CompactionOutcome
 from local_operator.tui import theme as theme_mod
@@ -50,6 +56,7 @@ from local_operator.tui.app import (
     Band,
     OperatorApp,
 )
+from local_operator.tui.widgets.ask_picker import AskPickerScreen
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.transcript import (
     BOOT_COLUMN_CLASS,
@@ -1188,3 +1195,99 @@ async def test_a_late_splash_resize_does_not_crash_a_torn_down_app() -> None:
         stack.append(screen)
         app.on_welcome_view_block_resized(WelcomeView.BlockResized())
         assert app.screen.has_class(BOOT_CARD_CLASS) == card_up_before
+
+
+# -- a live prompt stands the card down (#168) --------------------------------
+
+
+async def _raise_ask(app: OperatorApp, pilot) -> asyncio.Task:  # type: ignore[no-untyped-def]
+    """Park a real `ask` on the dock and wait for the card to lay out."""
+    question = AskQuestion(
+        id="rollout",
+        question="Which rollout should the stale-row migration take?",
+        options=[
+            AskOption(label="Drop the rows", description="nothing reads the column"),
+            AskOption(label="Backfill from the audit log", description="keeps history"),
+        ],
+        recommended=1,
+    )
+    task = asyncio.create_task(app.request_user_choice([question]))
+    for _ in range(10):
+        await pilot.pause()
+    return task
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [(160, 40), (120, 36), (100, 30)])
+async def test_a_live_prompt_is_never_wider_than_the_composer_it_is_docked_to(
+    size: tuple[int, int],
+) -> None:
+    """#168: the clamp reached ``#input-shell`` and not the prompt above it.
+
+    ``AskPickerScreen`` is ``width: 1fr`` and has been since the picker moved
+    into the dock, so a boot layout restored under a live question clamped the
+    composer to the card while the question kept the full width. Measured on the
+    pre-fix tree at 160 columns: ``card=156 shell=98``, the question hanging 58
+    cells past the input it belongs to.
+
+    Asserted against the COMPOSER rather than against a width constant: the
+    property is that the question and the input it is docked to share an edge,
+    whatever the clamp resolves to at this size.
+    """
+    width, _ = size
+    app = _make_app()
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        await _settle(pilot)
+        assert app.screen.has_class(BOOT_CARD_CLASS), "this size must get a card at all"
+
+        task = await _raise_ask(app, pilot)
+        shell = app.query_one("#input-shell")
+        card = app.query_one(AskPickerScreen)
+
+        # Ctrl+L is the confirmed path, but the bug is reachable through any
+        # call that restores the splash under a mounted prompt.
+        await pilot.press("ctrl+l")
+        for _ in range(10):
+            await pilot.pause()
+
+        assert app.screen.has_class(BOOT_LAYOUT_CLASS), "the splash is back"
+        assert card.region.right == shell.region.right, (card.region, shell.region)
+        assert card.region.width == shell.region.width, (card.region, shell.region)
+        # And nothing gained the ability to overflow the terminal doing it.
+        for index, row in enumerate(_rows(app)):
+            assert cell_len(row) <= width, (index, repr(row))
+
+        task.cancel()
+        with contextlib.suppress(BaseException):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_the_boot_card_comes_back_once_the_question_is_answered() -> None:
+    """The stand-down is only safe if it is temporary.
+
+    A card suppressed while a prompt is live and never restored would be a
+    permanently full-width boot layout — the splash composition silently lost to
+    the first `ask` of the session. The condition is re-derived from the host on
+    every pass (``_prompt_is_live``) precisely so it cannot latch.
+    """
+    app = _make_app()
+    async with app.run_test(size=(160, 40)) as pilot:
+        await pilot.pause()
+        await _settle(pilot)
+        clamped = app.query_one("#input-shell").region.width
+        assert app.screen.has_class(BOOT_CARD_CLASS)
+
+        task = await _raise_ask(app, pilot)
+        assert not app.screen.has_class(BOOT_CARD_CLASS), "a live question stands it down"
+        assert app.query_one("#input-shell").region.width > clamped
+
+        await pilot.press("enter")
+        for _ in range(12):
+            await pilot.pause()
+
+        assert app.screen.has_class(BOOT_CARD_CLASS), "answered, so the composition returns"
+        assert app.query_one("#input-shell").region.width == clamped
+        with contextlib.suppress(BaseException):
+            await asyncio.wait_for(task, timeout=2)
