@@ -7,19 +7,35 @@
  * The list of selectable themes is read from the palette modules themselves
  * so adding a palette file makes it selectable without touching this file.
  */
+import { alucard } from "./themes/alucard";
+import { ayuDark } from "./themes/ayu";
+import { ayuLight } from "./themes/ayu-light";
+import { ayuMirage } from "./themes/ayu-mirage";
+import { catppuccinFrappe } from "./themes/catppuccin-frappe";
+import { catppuccinMacchiato } from "./themes/catppuccin-macchiato";
 import { dracula } from "./themes/dracula";
 import { dune } from "./themes/dune";
+import { duskfox } from "./themes/duskfox";
+import { everforest } from "./themes/everforest";
+import { everforestLight } from "./themes/everforest-light";
+import { gruvboxLight } from "./themes/gruvbox-light";
 import { iceberg } from "./themes/iceberg";
+import { kanagawaLotus } from "./themes/kanagawa-lotus";
+import { kanagawaWave } from "./themes/kanagawa-wave";
 import { localOperatorDark, localOperatorLight } from "./themes/local-operator";
 import { monokai } from "./themes/monokai";
 import { neon } from "./themes/neon";
+import { nightfox } from "./themes/nightfox";
 import { obsidian } from "./themes/obsidian";
+import { oneLight } from "./themes/one-light";
 import type { ThemeDefinition } from "./themes/palette-contract";
+import { palenight } from "./themes/palenight";
 import { radient } from "./themes/radient";
 import { rosePine, rosePineDawn, rosePineMoon } from "./themes/rose-pine";
 import { sage } from "./themes/sage";
 import { synth } from "./themes/synth";
 import { tokyoNight } from "./themes/tokyo-night";
+import { tokyoNightDay } from "./themes/tokyo-night-day";
 
 export const DEFAULT_THEME = "localOperatorDark";
 
@@ -39,6 +55,22 @@ export const THEMES: ThemeDefinition[] = [
 	sage,
 	synth,
 	tokyoNight,
+	alucard,
+	ayuDark,
+	ayuLight,
+	ayuMirage,
+	catppuccinFrappe,
+	catppuccinMacchiato,
+	duskfox,
+	everforest,
+	everforestLight,
+	gruvboxLight,
+	kanagawaLotus,
+	kanagawaWave,
+	nightfox,
+	oneLight,
+	palenight,
+	tokyoNightDay,
 ].sort((a, b) => a.name.localeCompare(b.name));
 
 const KEY = "lo-mobile-theme";
