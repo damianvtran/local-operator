@@ -1125,10 +1125,15 @@ class _PendingUserEcho(NamedTuple):
     different id and is therefore painted, where the previous text match
     swallowed it (issue #228).
 
-    Empty when this surface could not know the id in advance — a session whose
-    ``prompt`` predates the ``message_id`` seam mints the id internally. Such an
-    entry keeps the historical text match, so an older or third-party session
-    behaves exactly as it did rather than double-painting every row.
+    Empty when this surface could not hand the id over — ``message_id`` is
+    OPTIONAL on ``SessionProtocol``, and a session without it mints the id
+    internally, so registering one here would key the entry to an id no
+    announcement can carry and paint every row twice. Such an entry keeps the
+    historical text match, limit included. Both in-tree sessions accept the
+    keyword (``Session``, and ``RemoteSession`` — the class an attached
+    follower TUI drives, which kept the #228 swallow until it did); the
+    fallback covers implementations outside the protocol's guarantee, not a
+    shipping path.
     """
 
     message_id: str
@@ -1775,10 +1780,11 @@ class OperatorApp(App[None]):
         #: the old session's queue.
         #:
         #: The text is retained as the FALLBACK key for a session that cannot
-        #: take a caller-supplied id (`prompt()` without the `message_id`
-        #: seam — older or third-party implementations mint their own), and as
-        #: the key the two retire-on-failure sites already use. Those entries
-        #: keep the historical by-text behaviour, limit included.
+        #: take a caller-supplied id (`message_id` is optional on
+        #: `SessionProtocol`; an implementation without it mints its own), and
+        #: as the key the two retire-on-failure sites already use. Those
+        #: entries keep the historical by-text behaviour, limit included. Both
+        #: in-tree sessions take the keyword, so no shipping path relies on it.
         self._pending_user_echoes: list[_PendingUserEcho] = []
         #: Wake receipts painted LIVE this session, as ``(wake_id, occurrence)``
         #: keys. ``on_wake_delivered`` records each; the history replay skips a
@@ -8627,9 +8633,20 @@ class OperatorApp(App[None]):
             # The row is already on screen — registered here so that event is
             # recognised as our own echo rather than painted again.
             #
-            # No probe on this path: `steer_message` queues the very object
-            # built above, so the announced message IS `steer_message` and its
-            # id is authoritative for every session implementation.
+            # No probe on this path, because there is no keyword to probe for:
+            # `steer_message` takes the Message OBJECT, so the id is carried by
+            # the thing queued rather than offered alongside it. Both in-tree
+            # sessions preserve it — `Session` announces the queued object
+            # itself at the drain, and `RemoteSession` sends
+            # `command_id=message.id`, which the owner adopts as the Message id.
+            #
+            # That is the contract this registration relies on, and it is
+            # stronger than what `SessionProtocol` writes down: an
+            # implementation that RE-MINTED the id while queueing would announce
+            # something this entry could never match and paint the steer twice.
+            # No such implementation exists in tree, and unlike the prompt path
+            # there is no signature to probe — a re-minting host would have to
+            # be caught by its own tests (round 1, F2).
             self._register_user_echo(text, message_id=steer_message.id)
             # Held with the notice so Esc can lift the whole steer — the queued
             # row, the user row and its image blocks — back out of the
@@ -8705,9 +8722,11 @@ class OperatorApp(App[None]):
         # The id is minted HERE and pushed into the session rather than read
         # back from it: `prompt()` returns only when the whole turn is over,
         # long after the announcement, so the correlation key has to travel
-        # outward. A session without the `message_id` seam (older or
-        # third-party) mints its own id, so the entry registers without one and
-        # falls back to matching by text.
+        # outward. The keyword is optional on `SessionProtocol`, so a session
+        # without it mints its own id and the entry registers id-less, falling
+        # back to text. Both in-tree sessions accept it -- `RemoteSession`
+        # included, which is what an attached follower TUI drives and which
+        # swallowed cross-surface prompts until it did (round 1, F1).
         echo = self._register_user_echo(text, message_id=self._echo_message_id(session.prompt))
         # A turn STARTING ends any barren click gesture: from here Ctrl+C means
         # "stop this turn", and a claim raised before the turn existed cannot
