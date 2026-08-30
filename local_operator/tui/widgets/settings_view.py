@@ -390,12 +390,24 @@ class SettingsView(Vertical):
 
     # -- movement -----------------------------------------------------------
     def action_move(self, delta: int) -> None:
-        """Move the cursor by ``delta`` selectable rows, WRAPPING.
+        """Move the cursor by ``delta`` selectable rows, CLAMPED.
 
-        Wrapping because an arrow key is a discrete, deliberate press: a user
-        holding ``down`` at the bottom of a list expects to come round, and the
-        alternative (silently stopping) reads as a stuck key. Page and wheel
-        clamp instead — see :meth:`action_section` and the scroll handlers.
+        This page is the documented EXCEPTION to the repo's wrap-vs-clamp rule
+        (AGENTS.md, "Wrapping vs clamping"), which has arrow keys wrap because a
+        press is deliberate. That reasoning holds for a short picker, where the
+        whole list is on screen and coming round is a shortcut to a row the user
+        can already see. It does not hold here: the settings are a long,
+        sectioned, SCROLLED list (60-odd rows against a viewport of 14 at
+        100x30), so the bottom is a destination travelled to rather than a place
+        stumbled onto, and wrapping teleported the reader from the section they
+        were working in to the top of the page with the viewport jumping with
+        them. Reported against v0.43.0: the bottom is expected to hold.
+
+        Clamping also makes the page agree with ITSELF. The wheel
+        (:meth:`_scroll_rows`) and paging (:meth:`action_section`) already
+        clamp, so `down` and a wheel notch on the same last row disagreed about
+        what the end of the list means — worse than either rule applied
+        uniformly.
         """
         if not self._selectable():
             return
@@ -415,7 +427,7 @@ class SettingsView(Vertical):
         if not indices:
             return
         position = self._position_of(identity, indices)
-        self._selected = indices[(position + delta) % len(indices)]
+        self._selected = indices[min(max(position + delta, 0), len(indices) - 1)]
         self._repaint()
         self._scroll_to_selection()
 
@@ -510,6 +522,14 @@ class SettingsView(Vertical):
         # key the footer advertises that is not `d` or `esc` cancels the ask.
         self._confirm_delete = None
         panes = [_PANE_TEAMS, _PANE_AGENTS]
+        # CYCLES, and stays cycling while the list movement above clamps. This
+        # is not the same gesture: two tabs, both labelled and both on screen,
+        # are a closed cycle rather than a list with ends — there is no "bottom"
+        # to travel to and nothing scrolls, so `→` on the last tab has no
+        # meaning other than the first one. Clamping it would make the second
+        # press of a two-tab toggle silently dead, which is the stuck key the
+        # wrap convention exists to avoid. The clamp on `action_move` is about
+        # losing your place in a long scrolled list; neither term applies here.
         position = (panes.index(self._pane) + delta) % len(panes)
         self._pane = panes[position]
         self._repaint()
@@ -1261,11 +1281,12 @@ class SettingsView(Vertical):
         self._scroll_rows(-1)
 
     def _scroll_rows(self, delta: int) -> None:
-        """Wheel movement — CLAMPED, unlike the wrapping arrows.
+        """Wheel movement — CLAMPED, like every other movement on this page.
 
-        The convention this repo states in AGENTS.md: arrows wrap because a
-        press is deliberate, wheel and page clamp because a gesture that
-        teleports to the other end of the list reads as the list resetting.
+        A gesture that teleports to the other end of the list reads as the list
+        resetting itself. The arrows clamp here too, which is this page's
+        documented exception to the repo's wrap-vs-clamp convention — see
+        :meth:`action_move` for why a long scrolled list earns it.
         """
         indices = self._selectable()
         if not indices:

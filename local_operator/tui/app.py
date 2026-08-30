@@ -7814,7 +7814,7 @@ class OperatorApp(App[None]):
         self._welcome_visible = visible
         if self._welcome is not None:
             self._welcome.set_visible(visible)
-        self.screen.set_class(visible, BOOT_LAYOUT_CLASS)
+        self._sync_boot_layout_class()
         if not visible:
             # The card is gone for good once the conversation starts, so every
             # boot notice sheds the column back to the spine NOW rather than on
@@ -7823,6 +7823,53 @@ class OperatorApp(App[None]):
             self.screen.remove_class(BOOT_CARD_CLASS)
             self._sync_boot_column_width(max(0, self.size.width - SCREEN_INSET))
         self._sync_boot_layout()
+
+    def _sync_boot_layout_class(self) -> None:
+        """Put ``Screen.boot`` on only while no full-page MODE is up.
+
+        ``Screen.boot`` is not a decoration on the conversation layout, it is a
+        WHOLE SECOND LAYOUT: the input is a docked, centred, width-clamped card,
+        the transcript is bottom-aligned under it, and the app reserves rows
+        below the card in the dock's own padding (``_sync_boot_composition``).
+        A full-page mode replaces the transcript region and expects the dock to
+        be the plain bottom bar the conversation layout gives it, so with both
+        classes live the page got the leftovers above a card still holding its
+        clamp and its reserve — ``/settings`` opened from the splash rendered
+        into 26 of 38 rows with the card floating mid-screen (the v0.43.0
+        report).
+
+        SUPPRESSED here rather than overridden in the stylesheet, deliberately.
+        The tcss note above ``Screen.boot TranscriptView`` states that the class
+        is "the whole switch" and that "Two layouts, ONE condition" is what keeps
+        a centred boot card off a populated screen; a ``Screen.settings.boot``
+        counter-rule would be exactly the second condition that warns against,
+        and it could not win anyway — the composition's lift is written as an
+        INLINE style (``_reserve_boot_rows`` sets ``dock.styles.padding``), which
+        outranks any stylesheet rule. So the condition stays single and this is
+        the one place that resolves it: the boot layout is up when the session
+        is empty AND the user is looking at the conversation.
+
+        Nothing is remembered across the mode. The class is re-derived from the
+        two live facts every time, so leaving a mode restores the boot layout
+        exactly (splash, clamp, and reserve) without a saved copy that could go
+        stale while the page was open — a ``/clear`` or a session swap behind
+        the page moves ``_welcome_visible`` under it.
+
+        Scoped to ``/settings`` on purpose. Its two sibling modes — the org
+        chart and the subagent view — mount the same way and are compressed by
+        the same collision when opened over the splash (measured; the subagent
+        view takes 21 of 28 rows at 100x30). They are NOT changed here because
+        the report and the fix were scoped to this page; extending the
+        suppression to them is one more term in this condition and no other
+        edit, and it wants its own frames before it ships. ``/resume``,
+        ``/analytics`` and the ask card are unaffected either way: they are
+        pushed screens or toast-layer cards, so the boot layout beneath them is
+        still the layout being looked at and must stay. ``/failovers`` is not a
+        mode at all — it appends a transcript block, which retires the splash
+        through the ordinary content path.
+        """
+        boot = bool(self._welcome_visible) and self._settings_view is None
+        self.screen.set_class(boot, BOOT_LAYOUT_CLASS)
 
     def _start_terminal_title(self) -> None:
         """Take over the window/tab title and hand it to the status band.
@@ -9639,6 +9686,13 @@ class OperatorApp(App[None]):
         self._transcript_view().display = False
         self.screen.mount(view, before=self.query_one("#input-dock"))
         self.screen.add_class(SETTINGS_LAYOUT_CLASS)
+        # The boot layout is a SECOND layout, not a decoration, and this mode
+        # replaces the region it lays out — see ``_sync_boot_layout_class``.
+        # Ordered after the mount so the sync sees the view it keys on, and
+        # ``_sync_boot_layout`` runs from inside it to drop the composition's
+        # reserve out of the dock in the same pass.
+        self._sync_boot_layout_class()
+        self._sync_boot_layout()
         self._set_composer_read_only(True)
         # Seeded BEFORE the deferred mount-time repaint lands, the same
         # deliberate ordering ``_open_org_chart_view`` documents: ``mount``
@@ -9713,6 +9767,12 @@ class OperatorApp(App[None]):
         view.remove()
         self.screen.remove_class(SETTINGS_LAYOUT_CLASS)
         self._transcript_view().display = True
+        # Re-derived, never restored from a copy: the splash may have been
+        # retired or brought back (a ``/clear``, a session swap) while the page
+        # was up, so the two live facts are what decide, and the composition's
+        # reserve is recomputed for the region the transcript gets back.
+        self._sync_boot_layout_class()
+        self._sync_boot_layout()
         self._set_composer_read_only(False)
         restore = self._settings_focus_restore
         self._settings_focus_restore = None

@@ -36,6 +36,13 @@ STATE selects what the page is showing:
                free-text editor, ENUM expands the registry's themes as choices
     frames     TWO consecutive frames (OUT.svg and OUT.frame2.svg) to prove the
                opening layout settles rather than reflowing after paint
+    boot       the page opened from the BOOT/splash state, with NO conversation
+               seeded, plus OUT.splash.svg taken immediately after leaving it.
+               The boot layout is a whole second layout (docked centred card,
+               bottom-aligned transcript), so a settings frame captured over a
+               populated transcript cannot show what it does to this page — and
+               the splash frame is what proves leaving puts the composition
+               back rather than approximating it.
 """
 
 from __future__ import annotations
@@ -130,12 +137,15 @@ async def main() -> None:
         await pilot.pause()
         # Seed a conversation, so "does leaving the page put my transcript
         # back?" is an answerable question rather than an empty-screen no-op —
-        # the same reason ask_shot.py seeds one.
-        for turn in range(1, 4):
-            app._append_block(UserBlock(f"Turn {turn}: can I change the default model?"))
-            prose = AssistantBlock()
-            prose.update_text(f"Answer {turn}: yes — /settings has it under Model.")
-            app._append_block(prose)
+        # the same reason ask_shot.py seeds one. The `boot` state deliberately
+        # seeds NOTHING: its whole subject is the layout the splash puts up,
+        # and one appended block retires it.
+        if state != "boot":
+            for turn in range(1, 4):
+                app._append_block(UserBlock(f"Turn {turn}: can I change the default model?"))
+                prose = AssistantBlock()
+                prose.update_text(f"Answer {turn}: yes — /settings has it under Model.")
+                app._append_block(prose)
         await pilot.pause()
 
         app._open_settings_view()
@@ -143,7 +153,32 @@ async def main() -> None:
         view.load(teams=TEAMS, agents=AGENTS, providers=PROVIDERS)
         await pilot.pause()
 
-        if state == "frames":
+        geometry: str | None = None
+        if state == "boot":
+            # Opened over the splash. The second frame is taken AFTER leaving,
+            # because the failure this state exists to photograph has two
+            # halves: the page has to take the screen, and the composition it
+            # displaced has to come back whole (splash, card clamp, and the
+            # rows `_sync_boot_composition` reserves below the card).
+            app.save_screenshot(out)
+            # Measured while the page is still up: the geometry line below is
+            # the numbers behind THIS frame, and the view is unmounted a
+            # moment from now.
+            geometry = _geometry(app, view, state, size)
+            app._close_settings_view()
+            await pilot.pause()
+            await pilot.pause()
+            app.save_screenshot(out.replace(".svg", ".splash.svg"))
+            welcome = app._welcome
+            geometry += (
+                " || after leaving: "
+                f"boot={app.screen.has_class('boot')} "
+                f"boot-card={app.screen.has_class('boot-card')} "
+                f"welcome.display={welcome.display if welcome is not None else None} "
+                f"welcome.height={welcome.size.height if welcome is not None else None} "
+                f"dock.height={app.query_one('#input-dock').size.height}"
+            )
+        elif state == "frames":
             # CONSECUTIVE frames. A two-pane layout inside a mode is exactly
             # where a post-paint reflow shows: if frame 1 differs from frame 2,
             # the user sees motion on open whether or not anyone intended it.
@@ -211,22 +246,35 @@ async def main() -> None:
         else:
             app.save_screenshot(out)
 
-        # The geometry behind the pixels (AGENTS.md step 4). A scrollbar on the
-        # SCREEN is always a bug on this app — the body scrolls, the dock is
-        # docked — and it costs two cells of width silently.
-        screen = app.screen
-        print(
-            f"state={state} size={size} "
-            f"screen.size={tuple(screen.size)} "
-            f"screen.virtual_size={tuple(screen.virtual_size)} "
-            f"screen.show_vertical_scrollbar={screen.show_vertical_scrollbar} "
-            f"body.size={tuple(view._body.size)} "
-            f"body.virtual_size={tuple(view._body.virtual_size)} "
-            f"body.show_vertical_scrollbar={view._body.show_vertical_scrollbar} "
-            f"pane.size={tuple(view._pane_view.size)} "
-            f"rows={len(view._rows)} "
-            f"hints={view.rendered_hints()!r}"
-        )
+        print(geometry if geometry is not None else _geometry(app, view, state, size))
+
+
+def _geometry(app: OperatorApp, view: SettingsView, state: str, size: tuple[int, int]) -> str:
+    """The numbers behind the pixels (AGENTS.md step 4).
+
+    A scrollbar on the SCREEN is always a bug on this app — the body scrolls,
+    the dock is docked — and it costs two cells of width silently. The dock and
+    view heights are here because a mode that fails to take the screen shows up
+    as arithmetic (view + dock < screen) before it shows up as a pixel anyone
+    notices.
+    """
+    screen = app.screen
+    dock = app.query_one("#input-dock")
+    return (
+        f"state={state} size={size} "
+        f"screen.size={tuple(screen.size)} "
+        f"screen.virtual_size={tuple(screen.virtual_size)} "
+        f"screen.show_vertical_scrollbar={screen.show_vertical_scrollbar} "
+        f"boot={screen.has_class('boot')} "
+        f"dock.display={dock.display} dock.height={dock.size.height} "
+        f"view.height={view.size.height} "
+        f"body.size={tuple(view._body.size)} "
+        f"body.virtual_size={tuple(view._body.virtual_size)} "
+        f"body.show_vertical_scrollbar={view._body.show_vertical_scrollbar} "
+        f"pane.size={tuple(view._pane_view.size)} "
+        f"rows={len(view._rows)} "
+        f"hints={view.rendered_hints()!r}"
+    )
 
 
 def _select(view: SettingsView, key: str) -> None:
