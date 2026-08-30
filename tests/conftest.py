@@ -92,11 +92,41 @@ def warm_tiktoken_encoding() -> None:
     worker is its own process and runs this fixture itself; only the first pays
     the download, because the disk cache is shared.
 
-    Session-scoped and best-effort: a sandboxed or offline machine must still
-    run the suite, so a failure here is swallowed. Such a box pays the cold
-    cost inside whichever test hits the tokenizer first, which is the status
-    quo this fixture improves on rather than a new failure mode.
+    WHY THIS CHECKS THE CACHE FILE INSTEAD OF JUST CATCHING THE FAILURE. An
+    earlier version wrapped the call in ``except Exception: pass``, reasoning
+    that an offline box would simply fall through. It does not: with the
+    network unreachable, ``_get_encoding()`` blocks for **75.7 s** (measured,
+    via a dead proxy) inside urllib's retry ladder before giving up and
+    returning ``None``. Swallowing the exception makes the fixture free only
+    once it has already cost every offline test session more than a minute.
+    tiktoken has no connect timeout to configure here, so the fix is not to
+    catch the failure faster but to avoid attempting the download at all.
+
+    So: derive the cache path exactly as tiktoken does — SHA-1 of the BPE URL,
+    under ``TIKTOKEN_CACHE_DIR`` / ``DATA_GYM_CACHE_DIR`` / ``<tmp>/
+    data-gym-cache`` — and warm ONLY when the file is already there. A machine
+    with a cold cache and no network skips instantly and keeps the chars/4
+    fallback it would have used anyway. A machine with a cold cache and a
+    working network is the one case still paying the download, and it pays it
+    inside whichever test touches the tokenizer first, exactly as before this
+    fixture existed.
+
+    ``LOCAL_OPERATOR_WARM_TIKTOKEN=1`` forces the download for a CI image that
+    wants to populate the cache deliberately.
     """
+    import hashlib
+    import tempfile
+
+    bpe_url = "https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken"
+    cache_dir = (
+        os.environ.get("TIKTOKEN_CACHE_DIR")
+        or os.environ.get("DATA_GYM_CACHE_DIR")
+        or os.path.join(tempfile.gettempdir(), "data-gym-cache")
+    )
+    cached = os.path.join(cache_dir, hashlib.sha1(bpe_url.encode()).hexdigest())
+    if not os.path.exists(cached) and os.environ.get("LOCAL_OPERATOR_WARM_TIKTOKEN") != "1":
+        return
+
     try:
         from local_operator.compaction.tokens import _get_encoding
 
