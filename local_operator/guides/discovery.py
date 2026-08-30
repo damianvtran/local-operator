@@ -69,6 +69,14 @@ def make_guide_resolver(guides: Mapping[str, Skill]):
 
     Resolver errors are returned as content so the model sees the available
     names and can self-correct in one tool round, matching ``skill://``.
+
+    ``OSError`` is caught for the same reason ``make_skill_resolver`` catches
+    it, and the two must stay in step: both adapters share
+    :func:`resolve_resource_url`, so any filesystem failure reachable through
+    one is reachable through the other (a GUIDE.md deleted or chmod-000'd
+    between discovery and the read). Catching only ``ValueError`` here let a
+    ``PermissionError`` escape a resolver whose contract is "never raises",
+    on the one surface that is packaged with the harness (review F7).
     """
 
     def resolver(url: str) -> str | None:
@@ -76,7 +84,7 @@ def make_guide_resolver(guides: Mapping[str, Skill]):
             return None
         try:
             return resolve_resource_url(url, guides, scheme="guide", label="guide")
-        except ValueError as exc:
+        except (ValueError, OSError) as exc:
             return str(exc)
 
     return resolver

@@ -53,29 +53,115 @@ def _read_text_capped(path: Path) -> str:
     return raw.decode("utf-8", errors="replace")
 
 
-def _list_directory(directory: Path) -> str:
+def _contained(child: Path, base_resolved: Path) -> bool:
+    """True when ``child``'s RESOLVED target stays inside ``base_resolved``.
+
+    This is the containment predicate ``_resolve_child`` enforces on read,
+    factored out so every listing surface can answer the same question the
+    resolver will. A listing that disagrees with it produces the
+    advertise-then-reject failure mode: a name the model is invited to read
+    and then refused.
+
+    ``RuntimeError`` is caught beside ``OSError`` because ``resolve()`` does
+    not report a symlink loop the same way across supported interpreters: on
+    3.12/3.13 ``pathlib`` translates ELOOP into ``RuntimeError("Symlink loop
+    from ...")``, while on 3.14 it delegates to ``os.path.realpath`` and
+    returns the unresolved path instead. An uncaught loop would propagate out
+    of a LISTING, turning a link an author can create into a crash rather than
+    an omitted line. Measured on both, not assumed — and the divergence is why
+    the loop cases are covered by tests rather than by inspection.
+    """
+    try:
+        return child.resolve().is_relative_to(base_resolved)
+    except (OSError, RuntimeError):
+        return False
+
+
+def _resolver_would_accept(child: Path, base_resolved: Path) -> bool:
+    """True when ``_resolve_child`` would serve ``child`` rather than raise.
+
+    The resolver refuses a child path on two grounds a listing can check
+    cheaply, and both must hold or the listing advertises a name that errors
+    on read: containment (:func:`_contained`) and existence. Existence is a
+    SEPARATE question because ``Path.resolve()`` is non-strict — a dangling
+    link and a self-referential loop both resolve to a path inside the base
+    and satisfy containment, so only the ``exists()`` call (which follows the
+    link, and is therefore False for both) rejects them.
+
+    ``exists()`` swallows its own ELOOP/ENOENT, so it needs no loop handling
+    of its own; :func:`_contained` carries that, and this call is reached only
+    after it. ``RuntimeError`` is caught here anyway so the pair degrades
+    identically under any interpreter that grows the same translation.
+    """
+    if not _contained(child, base_resolved):
+        return False
+    try:
+        return child.exists()
+    except (OSError, RuntimeError):
+        return False
+
+
+def _list_directory(directory: Path, base_resolved: Path) -> str:
     """Render a directory listing: ``name/ (dir)`` for dirs, plain names for
     files, deterministic alphabetical order. Dotfiles are skipped (they are
     unlisted and unreadable by design) and the listing is capped at
     ``_MAX_LISTING_ENTRIES`` with an overflow marker. Names are
     percent-encoded the same way as the bare-read reference listing, so a
     name copied from here into a ``skill://<name>/<path>`` URL survives
-    ``urlsplit``/``unquote`` even when it contains ``%``, ``#`` or ``?``."""
+    ``urlsplit``/``unquote`` even when it contains ``%``, ``#`` or ``?``.
+
+    ``base_resolved`` is the resource root, already resolved by the caller.
+    A SYMLINK is listed only when the resolver would also accept it, on the
+    two grounds ``_resolve_child`` can refuse: its resolved target must stay
+    inside ``base_resolved`` (R3-2), and it must actually exist (review F1).
+    The second is not implied by the first, and WHICH check rejects a broken
+    link is version-dependent (review F4). On 3.13+ ``resolve()`` is
+    non-strict, so a dangling link and a self-referential loop both resolve to
+    a path INSIDE the base, pass containment, and are caught by ``exists()``
+    — which follows the link and is therefore False for both. On 3.12 a LOOP
+    never reaches ``exists()`` at all: ``pathlib`` converts ELOOP into
+    ``RuntimeError``, which :func:`_contained` catches, so containment is what
+    rejects it there. Both orderings end at the same listing, which is the
+    point; do not simplify either guard on the strength of one interpreter.
+    The bare-read listing already drops both shapes (its walk tests
+    ``is_file()``/``is_dir()``, which a broken link fails), so this brings the
+    two surfaces to parity rather than inventing a rule.
+
+    Only symlinks are checked, the same gate ``_reference_listing`` uses.
+    ``_resolve_child`` has already resolved AND existence-checked the whole
+    child path before calling here, so a plain entry of an already-contained
+    directory can neither escape nor dangle: the extra stat would buy nothing
+    on the overwhelmingly common all-plain-files listing. Omitted entries are
+    excluded from the overflow count too: the marker promises "more entries"
+    the caller can reach by listing a directory, and an unreadable name is
+    not one of them.
+
+    The parity is over REACHABILITY, not over every read failure. A file that
+    exists but denies permission (``chmod 000``, whether named directly or
+    through a link) is still listed and still fails the read with
+    ``PermissionError`` — pre-existing on both surfaces, and deliberately left
+    (review F5): the check would be a per-entry ``access()`` on every plain
+    file, the answer can change between listing and read anyway, and the
+    adapter degrades it to a message rather than a crash."""
     lines: list[str] = []
     try:
         entries = sorted(directory.iterdir(), key=lambda p: (p.name.lower(), p.name))
     except OSError:
         return "(unreadable directory)"
+    listable = [
+        entry
+        for entry in entries
+        if not entry.name.startswith(".")
+        and (not entry.is_symlink() or _resolver_would_accept(entry, base_resolved))
+    ]
     shown = 0
-    for entry in entries:
-        if entry.name.startswith("."):
-            continue
+    for entry in listable:
         if shown >= _MAX_LISTING_ENTRIES:
             break
         encoded = quote(entry.name, safe="")
         lines.append(f"{encoded}/ (dir)" if entry.is_dir() else encoded)
         shown += 1
-    hidden = sum(1 for entry in entries if not entry.name.startswith(".")) - shown
+    hidden = len(listable) - shown
     if hidden > 0:
         lines.append(f"[... {hidden} more entries not shown ...]")
     return "\n".join(lines) if lines else "(empty directory)"
@@ -102,14 +188,29 @@ def _resolve_child(
             f"Invalid {label} path '{raw_path}': dotfiles are not listed and cannot be read"
         )
 
-    base = resource.base_dir.resolve()
-    target = (resource.base_dir / relative).resolve()
+    try:
+        # The BASE is resolved inside the guard too (review F6): a resource
+        # whose own base_dir is reached through a looping symlink raises here
+        # exactly as the child path does, and an escape from this line is the
+        # same uncaught RuntimeError on 3.12, just one statement earlier.
+        base = resource.base_dir.resolve()
+        target = (resource.base_dir / relative).resolve()
+    except (OSError, RuntimeError):
+        # A looping symlink is a bad PATH, not a broken resolver: on 3.12/3.13
+        # ``resolve()`` raises RuntimeError("Symlink loop from ...") for ELOOP
+        # while 3.14 returns the unresolved path and fails the ``exists()``
+        # below. Without this the same URL crashed the read on one interpreter
+        # and reported "path not found" on another. Degrade to the not-found
+        # error either way, matching what the listings now do by omitting it.
+        raise ValueError(
+            f"{label.title()} path not found: {scheme}://{resource.name}/{relative}"
+        ) from None
     if not target.is_relative_to(base):
         raise ValueError(f"Invalid {label} path '{raw_path}': escapes the {label} directory")
     if not target.exists():
         raise ValueError(f"{label.title()} path not found: {scheme}://{resource.name}/{relative}")
     if target.is_dir():
-        return _list_directory(target)
+        return _list_directory(target, base)
     return _read_text_capped(target)
 
 
@@ -128,8 +229,12 @@ def _reference_listing(resource: Skill, *, scheme: str) -> str:
     next move.
 
     Constraints, matching the resolver's own rules (``_resolve_child``) so
-    the listing never advertises a path a follow-up read would then reject,
-    and never hides one it would accept:
+    the listing never advertises a path a follow-up read would then reject.
+    The converse does not hold in one narrow case: deduplication can list
+    ONE route to a file the resolver would accept by several names (see the
+    symlink bullet), so a readable alias may be absent from the listing. No
+    reachable CONTENT is hidden — every listed route reads, and every
+    omitted route is a duplicate of a listed one:
 
     - dotfiles and dot-directories are skipped (unlisted and unreadable by
       design);
@@ -140,7 +245,31 @@ def _reference_listing(resource: Skill, *, scheme: str) -> str:
       resolver applies on read — and resolved directories are visited at
       most once so a link cycle cannot grow the walk. Deduplication means
       one ROUTE per directory is listed when an alias and its target both
-      appear; every route stays readable through the resolver either way;
+      appear; every route stays readable through the resolver either way.
+      HARDLINKS are the deliberate exception: a hardlink of the body file,
+      or of another reference, is listed as its own entry because resolved-
+      path equality cannot see one. Redundancy is the cheaper failure here,
+      so this is not worth fixing (R3-3); revisit only if hardlinked skill
+      trees become real.
+
+      That verdict is about WHAT THE STAT BUYS, not about stats being
+      expensive, since the containment/existence checks above are stats too
+      (review F2 read the two as inconsistent). Three things separate them.
+      They are paid by different entries: the checks above run only on
+      symlinks, so a listing of ordinary files skips them, while telling a
+      hardlink apart needs ``st_dev``/``st_ino`` on EVERY walked file.  They
+      buy different things: the checks above remove a name that ERRORS on
+      read, a correctness defect the model sees as a broken invitation,
+      whereas the hardlink check removes a name that reads correctly and is
+      merely redundant.  And they are wrong in different directions: an
+      unchecked escape or dangle is a promise the resolver breaks, while an
+      unchecked hardlink is one extra true line. Measured on this machine
+      over a 2000-entry directory, listing all plain files costs 7.4 ms
+      before this change and 18.1 ms after; an (unrealistic) all-symlink
+      directory costs 8.8 ms and 439 ms. The pathological arm is expensive,
+      but it is bounded by how many symlinks an author writes into one
+      references directory, and correctness is worth it there in a way
+      tidiness is not;
     - names are percent-encoded exactly as ``_resolve_child``'s ``unquote``
       expects, so a filename containing ``%``, ``#`` or ``?`` survives the
       URL round-trip instead of being listed in a form ``urlsplit`` mangles;
@@ -158,27 +287,22 @@ def _reference_listing(resource: Skill, *, scheme: str) -> str:
     base = resource.base_dir
     try:
         base_resolved = base.resolve()
-    except OSError:
+    except (OSError, RuntimeError):
+        # RuntimeError beside OSError for the same reason as ``_contained``
+        # (review F6): on 3.12/3.13 a looping base_dir raises RuntimeError
+        # here, and this listing rides a BARE READ whose body has already been
+        # returned — an escape would turn a successful read into a traceback.
         return ""
     body_file = resource.file_path
     try:
         # Resolved once so a symlink ALIAS of the body file is excluded too:
         # the caller just returned that content, whatever name it wears.
         body_resolved = body_file.resolve()
-    except OSError:
+    except (OSError, RuntimeError):
         body_resolved = body_file
     entries: list[str] = []
     overflow = False
     visited: set[str] = set()
-
-    def _contained(child: Path) -> bool:
-        """True when the child's resolved target stays inside base_dir — the
-        same check ``_resolve_child`` applies, so listing and read agree on
-        every symlink."""
-        try:
-            return child.resolve().is_relative_to(base_resolved)
-        except OSError:
-            return False
 
     def _walk(directory: Path, depth: int) -> None:
         nonlocal overflow
@@ -186,7 +310,10 @@ def _reference_listing(resource: Skill, *, scheme: str) -> str:
             return
         try:
             key = str(directory.resolve())
-        except OSError:
+        except (OSError, RuntimeError):
+            # Same version-dependent ELOOP handling as everywhere else in this
+            # module (review F6): an unresolvable directory is skipped, never
+            # raised out of a listing.
             return
         if key in visited:
             return
@@ -201,19 +328,19 @@ def _reference_listing(resource: Skill, *, scheme: str) -> str:
             if child.name.startswith("."):
                 continue
             if child.is_dir():
-                if child.is_symlink() and not _contained(child):
+                if child.is_symlink() and not _contained(child, base_resolved):
                     continue
                 _walk(child, depth + 1)
             elif child.is_file():
                 if child == body_file:
                     continue
                 if child.is_symlink():
-                    if not _contained(child):
+                    if not _contained(child, base_resolved):
                         continue
                     try:
                         if child.resolve() == body_resolved:
                             continue
-                    except OSError:
+                    except (OSError, RuntimeError):
                         continue
                 if len(entries) >= _MAX_REFERENCE_ENTRIES:
                     overflow = True

@@ -471,5 +471,218 @@ class TestReferenceListing:
         assert resolve_skill_url("skill://alpha/references", skills) == "one.md"
 
 
+class TestDirectoryListingContainment:
+    """R3-2: the child-path listing must agree with the resolver on symlinks.
+
+    ``_list_directory`` is where the bare-read overflow marker sends the
+    model, so a name it prints is an invitation to read. Printing one whose
+    resolved target escapes ``base_dir`` is the advertise-then-reject failure
+    mode R1-1 fixed on the bare-read listing, reproduced on this second
+    surface.
+    """
+
+    def test_escaping_symlinked_file_not_listed(self, tmp_path: Path) -> None:
+        skill = _make_skill(tmp_path, "gamma")
+        refs = skill.base_dir / "references"
+        refs.mkdir()
+        (refs / "real.md").write_text("real", encoding="utf-8")
+        outside = tmp_path / "outside.md"
+        outside.write_text("SECRET", encoding="utf-8")
+        (refs / "escape.md").symlink_to(outside)
+        skills = {"gamma": skill}
+
+        listing = resolve_skill_url("skill://gamma/references", skills)
+        assert listing is not None
+        assert listing.splitlines() == ["real.md"]
+        # And the resolver still refuses the path, so nothing became readable.
+        with pytest.raises(ValueError, match="escapes"):
+            resolve_skill_url("skill://gamma/references/escape.md", skills)
+
+    def test_escaping_symlinked_directory_not_listed(self, tmp_path: Path) -> None:
+        skill = _make_skill(tmp_path, "delta")
+        refs = skill.base_dir / "references"
+        refs.mkdir()
+        (refs / "real.md").write_text("real", encoding="utf-8")
+        outside = tmp_path / "outside-dir"
+        outside.mkdir()
+        (outside / "leak.md").write_text("SECRET", encoding="utf-8")
+        (refs / "escape").symlink_to(outside, target_is_directory=True)
+        skills = {"delta": skill}
+
+        listing = resolve_skill_url("skill://delta/references", skills)
+        assert listing is not None
+        assert listing.splitlines() == ["real.md"]
+        with pytest.raises(ValueError, match="escapes"):
+            resolve_skill_url("skill://delta/references/escape", skills)
+
+    def test_internal_symlink_still_listed(self, tmp_path: Path) -> None:
+        # The containment check must not cost the readable case: a symlink
+        # resolving INSIDE base_dir stays listed and stays readable.
+        skill = _make_skill(tmp_path, "epsilon")
+        refs = skill.base_dir / "references"
+        refs.mkdir()
+        (refs / "real.md").write_text("real", encoding="utf-8")
+        (refs / "alias.md").symlink_to(refs / "real.md")
+        skills = {"epsilon": skill}
+
+        listing = resolve_skill_url("skill://epsilon/references", skills)
+        assert listing is not None
+        assert listing.splitlines() == ["alias.md", "real.md"]
+        assert resolve_skill_url("skill://epsilon/references/alias.md", skills) == "real"
+
+    def test_dangling_symlink_not_listed(self, tmp_path: Path) -> None:
+        # Review F1: the same advertise-then-reject class as R3-2, reached
+        # through EXISTENCE rather than containment. `resolve()` is
+        # non-strict, so a link to a missing sibling resolves INSIDE base_dir
+        # and passes the containment check, then fails the resolver's
+        # `exists()`.
+        skill = _make_skill(tmp_path, "eta")
+        refs = skill.base_dir / "references"
+        refs.mkdir()
+        (refs / "real.md").write_text("real", encoding="utf-8")
+        (refs / "dangling.md").symlink_to(refs / "never-created.md")
+        skills = {"eta": skill}
+
+        listing = resolve_skill_url("skill://eta/references", skills)
+        assert listing is not None
+        assert listing.splitlines() == ["real.md"]
+        with pytest.raises(ValueError, match="not found"):
+            resolve_skill_url("skill://eta/references/dangling.md", skills)
+
+    def test_looping_symlinks_not_listed(self, tmp_path: Path) -> None:
+        # A self-loop and a mutual loop both resolve to themselves — inside
+        # base_dir, so containment passes — and are ELOOP on read.
+        skill = _make_skill(tmp_path, "theta")
+        refs = skill.base_dir / "references"
+        refs.mkdir()
+        (refs / "real.md").write_text("real", encoding="utf-8")
+        (refs / "selfloop.md").symlink_to(refs / "selfloop.md")
+        (refs / "loop-a.md").symlink_to(refs / "loop-b.md")
+        (refs / "loop-b.md").symlink_to(refs / "loop-a.md")
+        skills = {"theta": skill}
+
+        listing = resolve_skill_url("skill://theta/references", skills)
+        assert listing is not None
+        assert listing.splitlines() == ["real.md"]
+        for name in ("selfloop.md", "loop-a.md", "loop-b.md"):
+            with pytest.raises(ValueError):
+                resolve_skill_url(f"skill://theta/references/{name}", skills)
+
+    def test_a_looping_symlink_never_escapes_as_a_runtimeerror(self, tmp_path: Path) -> None:
+        """Reading a looping link is a ValueError on every supported version.
+
+        Caught by CI, not by inspection: ``Path.resolve()`` reports ELOOP
+        differently across the interpreters this project supports. On 3.12 and
+        3.13 pathlib translates it into ``RuntimeError("Symlink loop from
+        ...")``; on 3.14 it delegates to ``os.path.realpath``, returns the
+        unresolved path, and the failure surfaces at ``exists()`` instead. The
+        listing and the resolver both catch it, so the same URL behaves the
+        same way on all of them instead of crashing on one and reporting a
+        clean error on another.
+        """
+        skill = _make_skill(tmp_path, "lambda_")
+        (skill.base_dir / "selfloop.md").symlink_to(skill.base_dir / "selfloop.md")
+        (skill.base_dir / "a.md").symlink_to(skill.base_dir / "b.md")
+        (skill.base_dir / "b.md").symlink_to(skill.base_dir / "a.md")
+        skills = {"lambda_": skill}
+
+        for name in ("selfloop.md", "a.md", "b.md"):
+            with pytest.raises(ValueError, match="not found"):
+                resolve_skill_url(f"skill://lambda_/{name}", skills)
+
+        # And a loop anywhere in the tree never breaks the listings that walk
+        # past it -- the bare read still returns its body, not a traceback.
+        body = resolve_skill_url("skill://lambda_", skills)
+        assert body is not None and "# Test skill body" in body
+
+    def test_looping_directory_symlink_does_not_break_a_listing(self, tmp_path: Path) -> None:
+        # The directory arm of the same problem: `_list_directory` stats every
+        # entry, so a self-referential DIRECTORY link is on the walk's path.
+        skill = _make_skill(tmp_path, "mu")
+        refs = skill.base_dir / "references"
+        refs.mkdir()
+        (refs / "real.md").write_text("real", encoding="utf-8")
+        (refs / "dirloop").symlink_to(refs / "dirloop", target_is_directory=True)
+        skills = {"mu": skill}
+
+        assert resolve_skill_url("skill://mu/references", skills) == "real.md"
+        body = resolve_skill_url("skill://mu", skills)
+        assert body is not None
+        assert "references/real.md" in body
+
+    def test_live_symlinks_survive_the_existence_check(self, tmp_path: Path) -> None:
+        # The existence check must not cost a working link. A file alias and
+        # a directory alias both resolve, exist, and stay readable.
+        skill = _make_skill(tmp_path, "iota")
+        refs = skill.base_dir / "references"
+        refs.mkdir()
+        (refs / "real.md").write_text("real", encoding="utf-8")
+        (refs / "alias.md").symlink_to(refs / "real.md")
+        (refs / "sub").mkdir()
+        (refs / "sub" / "deep.md").write_text("deep", encoding="utf-8")
+        (refs / "dirlink").symlink_to(refs / "sub", target_is_directory=True)
+        skills = {"iota": skill}
+
+        listing = resolve_skill_url("skill://iota/references", skills)
+        assert listing is not None
+        assert listing.splitlines() == [
+            "alias.md",
+            "dirlink/ (dir)",
+            "real.md",
+            "sub/ (dir)",
+        ]
+        assert resolve_skill_url("skill://iota/references/alias.md", skills) == "real"
+        assert resolve_skill_url("skill://iota/references/dirlink", skills) == "deep.md"
+
+    def test_every_listed_name_reads(self, tmp_path: Path) -> None:
+        # The invariant behind R3-2 and F1 stated directly, over every shape
+        # the resolver can refuse: whatever the listing prints, a read of it
+        # succeeds. Guards against a future third refusal ground being added
+        # to `_resolve_child` without the listing learning about it.
+        skill = _make_skill(tmp_path, "kappa")
+        refs = skill.base_dir / "references"
+        refs.mkdir()
+        outside = tmp_path / "outside.md"
+        outside.write_text("SECRET", encoding="utf-8")
+        outside_dir = tmp_path / "outside-dir"
+        outside_dir.mkdir()
+        (refs / "real.md").write_text("real", encoding="utf-8")
+        (refs / "alias.md").symlink_to(refs / "real.md")
+        (refs / "escape.md").symlink_to(outside)
+        (refs / "escape-dir").symlink_to(outside_dir, target_is_directory=True)
+        (refs / "dangling.md").symlink_to(refs / "gone.md")
+        (refs / "selfloop.md").symlink_to(refs / "selfloop.md")
+        skills = {"kappa": skill}
+
+        listing = resolve_skill_url("skill://kappa/references", skills)
+        assert listing is not None
+        names = [line.removesuffix("/ (dir)") for line in listing.splitlines()]
+        assert names == ["alias.md", "real.md"]
+        for name in names:
+            assert resolve_skill_url(f"skill://kappa/references/{name}", skills) is not None
+
+    def test_escaped_entries_do_not_inflate_the_overflow_count(self, tmp_path: Path) -> None:
+        # The marker promises entries the caller can still reach. Counting an
+        # unlistable symlink in "N more entries not shown" would promise a
+        # name that does not exist for any follow-up read.
+        skill = _make_skill(tmp_path, "zeta")
+        refs = skill.base_dir / "references"
+        refs.mkdir()
+        outside = tmp_path / "outside.md"
+        outside.write_text("SECRET", encoding="utf-8")
+        for i in range(protocol._MAX_LISTING_ENTRIES + 5):
+            (refs / f"ref-{i:04d}.md").write_text("r", encoding="utf-8")
+        (refs / "zzz-escape.md").symlink_to(outside)
+        skills = {"zeta": skill}
+
+        listing = resolve_skill_url("skill://zeta/references", skills)
+        assert listing is not None
+        lines = listing.splitlines()
+        assert "zzz-escape.md" not in lines
+        # 5 overflowed real files, not 6: the escaping symlink is not one the
+        # caller could reach by listing this directory again.
+        assert lines[-1] == "[... 5 more entries not shown ...]"
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

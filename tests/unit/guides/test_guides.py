@@ -15,6 +15,7 @@ from local_operator.session_factory import (
     _registered_agent_hints,
     _select_knowledge_block,
 )
+from local_operator.skills.discovery import Skill
 from local_operator.skills.embeddings import LocalEmbedder
 from local_operator.skills.index import SkillIndex, render_block
 
@@ -222,3 +223,66 @@ def test_system_prompt_demands_a_guide_read_before_acting() -> None:
 
     assert "guide://<name>" in text
     assert "MUST" in text
+
+
+def test_the_guide_resolver_never_raises_on_an_unreadable_body(tmp_path: Path) -> None:
+    """The adapter's contract is "never raises", on both resource surfaces.
+
+    ``guide://`` and ``skill://`` share ``resolve_resource_url``, so every
+    filesystem failure reachable through one is reachable through the other.
+    This adapter caught only ``ValueError``, so a GUIDE.md that exists but
+    denies permission (deleted or chmod-000'd between discovery and the read)
+    escaped as a ``PermissionError`` out of a resolver the read tool trusts not
+    to raise — while the identical skill URL returned the message as content
+    (review F7). The two must stay in step.
+    """
+    base = tmp_path / "packaged"
+    base.mkdir()
+    body = base / "GUIDE.md"
+    body.write_text("# body\n", encoding="utf-8")
+    body.chmod(0o000)
+    guide = Skill(
+        name="demo",
+        description="d" * 60,
+        file_path=body,
+        base_dir=base,
+        source=str(tmp_path),
+        resource_type="guide",
+    )
+
+    resolver = make_guide_resolver({"demo": guide})
+    try:
+        result = resolver("guide://demo")
+    finally:
+        body.chmod(0o600)  # let tmp_path cleanup remove it
+
+    # Returned AS CONTENT, not raised: the model sees why and can self-correct.
+    assert result is not None
+    assert "Permission denied" in result
+
+
+def test_a_looping_guide_base_dir_does_not_escape_the_resolver(tmp_path: Path) -> None:
+    """A looping ``base_dir`` is a bad resource, not a crash (review F6).
+
+    ``Path.resolve()`` reports ELOOP as ``RuntimeError`` on 3.12/3.13 and as a
+    non-strict success on 3.14, so the guards around it must catch both or the
+    behaviour forks by interpreter. Driven through the guide adapter because
+    that is where the "never raises" contract lives.
+    """
+    loop = tmp_path / "loopbase"
+    loop.symlink_to(tmp_path / "loopbase", target_is_directory=True)
+    guide = Skill(
+        name="demo",
+        description="d" * 60,
+        file_path=loop / "GUIDE.md",
+        base_dir=loop,
+        source=str(tmp_path),
+        resource_type="guide",
+    )
+
+    resolver = make_guide_resolver({"demo": guide})
+
+    # Neither the child listing nor the bare read may raise; both report.
+    child = resolver("guide://demo/references")
+    assert child is not None and "not found" in child
+    assert resolver("guide://demo") is not None
