@@ -2131,3 +2131,136 @@ async def test_begin_edit_refuses_a_kind_that_is_not_edited_as_text(tmp_path: Pa
         index = _select(view, "retry.maxRetries")
         view._begin_edit(view._rows[index])
         assert view._editing == "retry.maxRetries"
+
+
+#: The exact bytes v0.43.10 left in a victim's `config.yml`. The pre-#440 page
+#: seeded its free-text editor with `str(mapping)`, so what got stored is the
+#: mapping's Python repr with whatever the user typed appended — reproduced
+#: here through the page's own writer rather than hand-written into YAML, so
+#: this pins the state the shipped bug actually produced.
+_CORRUPT_CASCADE = "{'default': ['anthropic/claude-opus-5', 'openrouter/deepseek']}x"
+
+
+def _corrupt_the_cascade(tmp_path: Path) -> None:
+    """Store the #440 wreckage the way the shipped bug stored it.
+
+    Goes through `settings_io.coerce` + `write_setting` — the exact pair
+    `_commit_edit` calls — because a test that wrote the string straight into
+    `config.yml` would prove nothing about whether that state is reachable.
+    `coerce` returns the text unchanged for a kind it has no parser for, and
+    `validate` has no `Kind.CASCADE` arm, which together are why a repr could be
+    committed over a mapping in the first place.
+    """
+    setting = settings_io.resolve_key("retry.fallbackChains")
+    assert setting is not None
+    manager = ConfigManager(tmp_path)
+    settings_io.write_setting(manager, setting, settings_io.coerce(setting, _CORRUPT_CASCADE))
+    assert _values(tmp_path)["retry"]["fallbackChains"] == _CORRUPT_CASCADE
+
+
+@pytest.mark.asyncio
+async def test_r_clears_a_malformed_cascade_and_the_frame_does_not_contradict_itself(
+    tmp_path: Path,
+) -> None:
+    """A user already hit by #440 can recover, and the page stops lying to them.
+
+    Two halves of one defect (UX round 1, U1). The page showed the corrupt
+    Python repr in the VALUE column while the group line directly underneath
+    read `no cascade configured` — two contradictory statements one row apart,
+    from which a user cannot tell whether their chains exist. And `r`, which
+    the footer advertises on this row and which is the page's documented
+    mitigation for immediate-write having no undo, returned before
+    `reset_setting`: the corrupt string survived and the notice told the user
+    to delete a chain with `d` on a row that is not painted, because
+    `read_chains` returns `{}` for an unreadable value.
+    """
+    _corrupt_the_cascade(tmp_path)
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 32)) as pilot:
+        await pilot.pause()
+        app._open_settings_view()
+        view = app.query_one(SettingsView)
+        await pilot.pause()
+
+        _select(view, "retry.fallbackChains")
+        view._scroll_to_selection()
+        await pilot.pause()
+
+        # Half one: the frame. Read as EXPORTED, so this asserts about what the
+        # compositor actually painted rather than about a model string.
+        corrupt_frame = _painted_frame(app)
+        assert "{'default'" not in corrupt_frame, (
+            "the value column still paints the corrupt Python repr as if it were the "
+            f"setting's value:\n{corrupt_frame}"
+        )
+        assert "no cascade configured" not in corrupt_frame, (
+            "the page says `no cascade configured` under a row whose value column is "
+            f"showing something — the two halves of the row disagree:\n{corrupt_frame}"
+        )
+        assert "malformed cascade" in corrupt_frame, (
+            "nothing on the page says the stored value is malformed, so a victim of "
+            f"#440 has no way to know why their chains vanished:\n{corrupt_frame}"
+        )
+
+        # Half two: `r` — the key the footer lights on this row — repairs it.
+        await pilot.press("r")
+        await pilot.pause()
+
+        view._manager.reload()
+        stored = _values(tmp_path).get("retry", {})
+        assert "fallbackChains" not in stored, (
+            "`r` left the corrupt value in place, so the page's own documented "
+            f"mitigation cannot fix the config it is describing: {stored!r}"
+        )
+        assert settings_io.read_chains(view._manager) == {}
+        assert (
+            "malformed" in view.notice_text
+        ), f"`r` cleared the value without saying so: {view.notice_text!r}"
+        assert view.error_text == "", "clearing a malformed value is not an error"
+
+        # And the recovered page reads as an ordinary empty cascade, not as a
+        # third state with its own vocabulary. The detail row still REPORTS
+        # what `r` just did — that is the answer to the keypress and it dies
+        # with the cursor — but the row and its group line are back to the
+        # unset wording.
+        healed_frame = _painted_frame(app)
+        assert (
+            "no cascade configured" in healed_frame
+        ), f"the cleared cascade does not read as an empty one:\n{healed_frame}"
+        assert "press r to clear it" not in healed_frame, (
+            "the row still warns about a malformed value it no longer holds, and offers "
+            f"a key that would now do nothing:\n{healed_frame}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_r_on_a_healthy_cascade_still_explains_itself_without_writing(
+    tmp_path: Path,
+) -> None:
+    """The malformed carve-out must not turn `r` destructive on a real cascade.
+
+    A healthy cascade has no shipped default to restore — the chains are
+    entirely the user's own — so `r` explains rather than deletes (UX round 1,
+    U5). Asserted on the config BYTES, because "the chains are still there"
+    would also pass if `r` had rewritten the file with the same content.
+    """
+    chains = {"default": ["anthropic/claude-opus-5", "openrouter/deepseek"]}
+    settings_io.write_chains(ConfigManager(tmp_path), dict(chains))
+    before = (tmp_path / "config.yml").read_bytes()
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 32)) as pilot:
+        await pilot.pause()
+        app._open_settings_view()
+        view = app.query_one(SettingsView)
+        await pilot.pause()
+
+        _select(view, "retry.fallbackChains")
+        await pilot.press("r")
+        await pilot.pause()
+
+        assert (tmp_path / "config.yml").read_bytes() == before, "`r` wrote to a healthy cascade"
+        view._manager.reload()
+        assert settings_io.read_chains(view._manager) == chains
+        assert "delete a chain with d" in view.notice_text

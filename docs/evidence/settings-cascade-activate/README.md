@@ -26,6 +26,10 @@ env -u NO_COLOR TERM=xterm-256color .venv/bin/python \
 # the cascade's own editor, which this fix routes `enter` into
 env -u NO_COLOR TERM=xterm-256color .venv/bin/python \
     scripts/settings_shot.py OUT.svg 100x30 cascade
+# a config the SHIPPED bug already destroyed (OUT.svg), then `r` on it
+# (OUT.cleared.svg)
+env -u NO_COLOR TERM=xterm-256color .venv/bin/python \
+    scripts/settings_shot.py OUT.svg 100x30 cascade-corrupt
 ```
 
 The stored-value half of the reproduction — the part the pixels cannot show —
@@ -59,6 +63,44 @@ The after-frame has no editor. The cursor has travelled into the cascade's own
 group and sits on the first chain (`› ▸ cheap  1 hop`), the detail line reads
 `enter opens the chain · d deletes it`, and the footer keeps the page's normal
 contract (`enter change`). `Failover cascade` still reads `3 chains`.
+
+## A config the shipped bug already destroyed
+
+These four frames are the UX round 1 U1 remediation, and they are the only
+ones whose scratch config carries the **wreckage** rather than a healthy
+cascade: `retry.fallbackChains` holds the repr string a v0.43.10 user was left
+with. Both sides were captured from the same base, and the capture scrolls the
+setting row's whole GROUP into frame on purpose, because the defect is a
+contradiction between the value column and the line under it and a frame
+showing only one of them proves nothing.
+
+| before — the page contradicts itself | after — one honest statement |
+|---|---|
+| ![before](before-cascade-corrupt-100x30.svg) | ![after](after-cascade-corrupt-100x30.svg) |
+
+The before-frame says two things at once: the value column paints the corrupt
+Python repr (`{'default': ['anthropic/c…`) as if it were the setting's value,
+while the group line directly underneath reads `no cascade configured`. A user
+cannot tell from it whether their chains exist. The after-frame reads `—` in
+the value column, and the line below names the fault and the key that fixes it:
+`malformed cascade — press r to clear it`.
+
+| before — `r` pressed | after — `r` pressed |
+|---|---|
+| ![before](before-cascade-corrupt-100x30.cleared.svg) | ![after](after-cascade-corrupt-100x30.cleared.svg) |
+
+`r` is the page's documented mitigation for immediate-write having no undo and
+the footer lights `r default` on this row. Before, it left the repr in place
+and answered `r resets one setting; delete a chain with d on its row` — advice
+naming a row that is not painted, because `read_chains` returns `{}` for an
+unreadable value. After, the key is deleted, the row reads `0 chains` over an
+ordinary `no cascade configured`, and the detail row reports `cleared a
+malformed cascade`.
+
+The stored-value half is in `tests/unit/tui/test_settings_view.py::
+test_r_clears_a_malformed_cascade_and_the_frame_does_not_contradict_itself`,
+which builds the corrupt config through the page's own writer and asserts on
+`config.yml` rather than on the frame alone.
 
 ## The cascade's own editor still works
 

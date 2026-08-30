@@ -30,6 +30,12 @@ STATE selects what the page is showing:
                the cascade's Python repr, and committing that repr destroyed
                every chain, so a still of the resting row alone cannot show
                the fix
+    cascade-corrupt  the page as a #440 VICTIM sees it (OUT.svg), then after
+               pressing `r` (OUT.cleared.svg). The scratch config is seeded
+               with the repr string the shipped bug stored, so this is the one
+               state that photographs the aftermath rather than the bug: the
+               value column and the group line under it used to state
+               contradictory things, and `r` used to refuse to help
     confirm    `d` on a chain row, asking before it deletes the whole chain
     confirm-long  the same ask on a 26-character chain name, which is what
                shows whether the ask is budgeted against the row it is
@@ -70,6 +76,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 _SCRATCH = tempfile.mkdtemp(prefix="lo-settings-shot-")
 os.environ["LOCAL_OPERATOR_CONFIG_DIR"] = _SCRATCH
 
+from local_operator import settings_io  # noqa: E402
 from local_operator.config import ConfigManager  # noqa: E402
 from local_operator.tui.app import OperatorApp  # noqa: E402
 from local_operator.tui.widgets.assistant import AssistantBlock  # noqa: E402
@@ -214,6 +221,30 @@ async def main() -> None:
             view.action_activate()
             await pilot.pause()
             app.save_screenshot(out)
+        elif state == "cascade-corrupt":
+            # TWO frames of the RECOVERY, not of the bug. The corrupt value is
+            # written through the page's own writer (see `_corrupt_cascade`) so
+            # the frame shows a state a real config can be in, and the second
+            # frame is what `r` leaves behind — which is the half a still of
+            # the broken page alone cannot show.
+            _corrupt_cascade()
+            view._manager.reload()
+            _select(view, "retry.fallbackChains")
+            await pilot.pause()
+            view._repaint()
+            # The GROUP has to be in frame, not just the cursor. U1 is a
+            # contradiction BETWEEN the value column and the line under it, so
+            # a frame scrolled to the setting row alone — which is where
+            # `_scroll_to_selection` stops, since the row is already visible —
+            # photographs one half of it and proves nothing.
+            _scroll_to_show_group(view)
+            await pilot.pause()
+            app.save_screenshot(out)
+            geometry = _geometry(app, view, state, size)
+            view.action_reset()
+            await pilot.pause()
+            app.save_screenshot(out.replace(".svg", ".cleared.svg"))
+            geometry += f" || after r: notice={view.notice_text!r}"
         elif state == "cascade-row":
             # TWO frames, for the reason the `theme` state takes two: the bug
             # is in what ACTIVATION does, not in how the row rests. Before the
@@ -321,6 +352,41 @@ def _geometry(app: OperatorApp, view: SettingsView, state: str, size: tuple[int,
         f"pane.size={tuple(view._pane_view.size)} "
         f"rows={len(view._rows)} "
         f"hints={view.rendered_hints()!r}"
+    )
+
+
+def _scroll_to_show_group(view: SettingsView) -> None:
+    """Put the highlighted row AND the rows it owns inside the viewport.
+
+    ``_scroll_to_selection`` stops as soon as the CURSOR is visible, which for
+    a row near the bottom edge leaves its group below the fold. The cascade's
+    frames need both, so this scrolls until the last row of the group fits and
+    then keeps the owning row on screen.
+    """
+    last = view._selected
+    for index in range(view._selected + 1, len(view._rows)):
+        if view._rows[index].kind not in ("empty", "chain", "hop", "hop_add", "chain_add"):
+            break
+        last = index
+    height = view._body.size.height
+    view._body.scroll_to(y=max(0, min(view._selected - 1, last - height + 2)), animate=False)
+
+
+def _corrupt_cascade() -> None:
+    """Store the wreckage #440 left in a real user's ``config.yml``.
+
+    Written through ``settings_io``'s own writer rather than into the YAML by
+    hand, so the captured frame shows a state the page itself can produce: the
+    pre-fix editor seeded its buffer with ``str(mapping)`` and committing that
+    repr stored it as a STRING, which is exactly what this writes.
+    """
+    setting = settings_io.resolve_key("retry.fallbackChains")
+    if setting is None:  # the row is in the shipped registry
+        raise SystemExit("no cascade setting")
+    settings_io.write_setting(
+        ConfigManager(Path(_SCRATCH)),
+        setting,
+        "{'default': ['anthropic/claude-opus-5', 'openrouter/deepseek']}x",
     )
 
 
