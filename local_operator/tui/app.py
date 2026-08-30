@@ -329,6 +329,46 @@ MODEL_SWITCH_MID_TURN_NOTICE = "applies from the next step — this one finishes
 #: Dropping it also stops the row being WRONG on the error path, where the turn
 #: was not stopped by anyone: it failed, and its own error notice says so.
 DEFERRED_STEER_NOTICE = "still queued — sends with your next message"
+#: The settle for a row that was DEFERRED, where `SENT_STEER_NOTICE` is the
+#: settle for one delivered inside the turn it was queued against. Two strings
+#: for one transition, which #132 spent two rounds arguing against, so the case
+#: for the fourth is made here rather than assumed.
+#:
+#: It says something the shared string cannot (design round 1, D5). A deferred
+#: row promised `sends with your next message`; the user then typed that
+#: message and watched an older row flip to `sent — the agent has it now`, with
+#: no way to tell whether their steered text rode along with what they just
+#: sent or arrived separately — and the receipt sits ABOVE the message it
+#: travelled with, so the only cue is spatial and reads backwards. `it rode
+#: along` names the association the layout cannot.
+#:
+#: The shared string could not simply be re-worded to say this, which is what
+#: forces a fourth: `SENT_STEER_NOTICE` also settles the SAME-TURN case, the
+#: common path, where the message went at a tool boundary during the turn the
+#: user was watching. Any mention of a `next message` there is plainly wrong —
+#: there is no next message. The two settles are genuinely two facts.
+#:
+#: Its LENGTH is load-bearing, and this is the second reason it exists (design
+#: round 1, D1/D2). A notice's height is a step function of its wrap points, so
+#: a settle that shortens the text can shorten the ROW, pulling everything
+#: below it up at a moment the user did nothing — and with the transcript
+#: scrolled up the offset stays put while the extent drops, so the viewport
+#: appears to scroll itself. Measured on the real block
+#: (`scripts/steer_receipt_transitions.py`), the shared 27-character string
+#: shrank the deferred row at every width from 28 to 52 columns. At 43
+#: characters this renders to the SAME height as `DEFERRED_STEER_NOTICE` at
+#: every width from 28 to 80 (`scripts/steer_receipt_candidates.py`), so the
+#: cross-turn settle now rewrites the row in place without moving a thing.
+#:
+#: Chosen by MEASUREMENT, not by character count: the round-1 candidate `sent
+#: with your next message` was picked as "27 → 28 characters" and is in fact 27,
+#: identical to the string it replaced, and moved no wrap point at all. Any
+#: future edit to this line has to re-run the sweep — a word added or dropped
+#: here silently reintroduces the reflow.
+#:
+#: Past tense, and the message named as the one already sent: by the time this
+#: is painted the user's next message is the message they just sent.
+DEFERRED_SENT_STEER_NOTICE = "sent — it rode along with your next message"
 #: The one row a recall decline prints (design round 1, D1): a silent Esc over
 #: a half-typed draft reads as a dropped keystroke, so the decline names the
 #: obstacle and the recovery. Named because the SUCCESSFUL recall retires its
@@ -17572,7 +17612,23 @@ class OperatorApp(App[None]):
         rows" and "the messages that went" are the same set — across BOTH held
         lists, which is why they concatenate here; see
         `_deferred_steer_notices` for why deferred rows lead.
+
+        Gated on the delivery coming from the controller this app is CURRENTLY
+        listening to (issue #160, F3). `/reload` disposes the old controller,
+        but a `steering_delivered` it had already dispatched is a queued Textual
+        message that unsubscribing cannot recall, and it is handled after the
+        swap cleared these lists — so a user quick enough to steer into the
+        replacement session had that new row settled by the dead session's
+        drain. The emptiness check below is not sufficient for exactly that
+        window: the lists are non-empty again, holding a row about a message
+        this event says nothing about.
         """
+        origin = getattr(message, "origin", None)
+        if origin is not None and origin is not self._controller:
+            # A receipt from a session that is no longer on screen. Its rows
+            # went with the swap that cleared them, so there is nothing here it
+            # could honestly settle.
+            return
         if not self._deferred_steer_notices and not self._queued_steer_notices:
             return  # a delivery for rows this app is no longer holding
         # Defensive bounds: a producer that omits `count` (or sends a nonsense
@@ -17599,6 +17655,13 @@ class OperatorApp(App[None]):
         held = self._deferred_steer_notices + self._queued_steer_notices
         taken = max(1, min(count, len(held)))
         settled, remaining = held[:taken], held[taken:]
+        # WHICH settle each row gets, captured before the lists are rewritten
+        # below. A row from the deferred list travelled with the user's next
+        # message and says so (`DEFERRED_SENT_STEER_NOTICE`); a row from the
+        # queued list went inside the turn it was queued against and takes the
+        # plain `SENT_STEER_NOTICE`. Identity again, for the reason the
+        # membership split below states.
+        was_deferred = set(self._deferred_steer_notices)
         # Split back apart by MEMBERSHIP rather than by arithmetic on `taken`:
         # the lists were concatenated for ordering only, and each survivor goes
         # back to whichever list it came from, because the two mean different
@@ -17622,7 +17685,10 @@ class OperatorApp(App[None]):
         ]
         for block in settled:
             try:
-                block.restate(SENT_STEER_NOTICE, "success")
+                block.restate(
+                    (DEFERRED_SENT_STEER_NOTICE if block in was_deferred else SENT_STEER_NOTICE),
+                    "success",
+                )
             except Exception:  # a receipt must never take the app down
                 logger.debug("queued-steer notice could not be settled", exc_info=True)
         # Delivered entries can never be recalled: drop their held blocks so

@@ -364,11 +364,22 @@ class SteeringDelivered(Message):
     the app settles that row against this instead of leaving a promise about the
     future standing after the future arrived. ``count`` is how many messages
     went in at the one boundary.
+
+    ``origin`` is the controller that posted it, and it is what makes the
+    receipt safe across a session swap (issue #160, F3). A generation number
+    cannot answer this hazard: generations are per-controller, and the stale
+    event comes from a DIFFERENT controller with its own counter, so the two
+    numbers are not comparable. Identity is, and the app drops a delivery whose
+    origin is no longer the controller it is listening to — see
+    ``OperatorApp.on_steering_delivered``. ``None`` means "unstamped, treat as
+    current": a hand-posted message in a test is simulating the live session,
+    and only a stamped origin can be PROVEN stale.
     """
 
-    def __init__(self, count: int) -> None:
+    def __init__(self, count: int, origin: Any | None = None) -> None:
         super().__init__()
         self.count = count
+        self.origin = origin
 
 
 class SubagentStarted(Message):
@@ -677,11 +688,25 @@ class EventController:
         self._post(PeerMessageDelivered(event.body, dict(event.sender), event.message_id))
 
     def _handle_steering_delivered(self, event: SteeringDeliveredEvent) -> None:
-        # No generation guard, deliberately: the drain belongs to whichever turn
-        # is running, and the app settles a row it is holding a direct reference
-        # to rather than looking one up by turn. A late event finds nothing held
-        # and does nothing.
-        self._post(SteeringDelivered(getattr(event, "count", 1)))
+        # No TURN guard, deliberately: the drain belongs to whichever turn is
+        # running, and the app settles a row it is holding a direct reference to
+        # rather than looking one up by turn. Within one session a late event
+        # finds nothing held and does nothing.
+        #
+        # A SESSION guard, though, because that reasoning stops holding at a
+        # swap (issue #160, F3). `/reload` disposes this controller, but a
+        # `steering_delivered` already dispatched is a Textual message sitting
+        # in the app's queue, and unsubscribing cannot recall it. It is handled
+        # after the swap cleared the held lists — by which time the user may
+        # have steered into the REPLACEMENT session, whose row is then held and
+        # would be falsely settled by the dying session's drain.
+        #
+        # Stamped with `self`, not with a generation: generations are
+        # per-controller counters, so the outgoing controller's number is not
+        # comparable with the incoming one's and could collide with it outright.
+        # The app compares against the controller it currently listens to, which
+        # is the question actually being asked.
+        self._post(SteeringDelivered(getattr(event, "count", 1), origin=self))
 
     def _handle_compaction_start(self, event: CompactionStartEvent) -> None:
         self._post(CompactionStarted(event.reason))
