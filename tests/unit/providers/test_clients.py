@@ -1468,6 +1468,93 @@ class TestOpaqueAggregator400:
         )
         assert (other_message.kind, other_message.retryable) == ("request", False)
 
+    def test_nested_error_object_sentinel_is_transient(self) -> None:
+        """``_openrouter_upstream_text`` unwraps a nested ``error`` object, so a
+        structurally-richer body whose CONTENT is still the bare word carries no
+        more information than the flat sentinel and matches too. Documented as a
+        deliberate widening rather than left to chance."""
+        body = self._openrouter_body(json.dumps({"error": {"message": "ERROR"}}))
+        error = self._error(httpx.Response(400, json=body))
+        assert (error.kind, error.retryable) == ("transient", True)
+
+    def test_unbalanced_quote_runs_stay_request(self) -> None:
+        """Only MATCHED quote pairs are peeled. ``str.strip`` would take any run
+        of either character and reduce this to the sentinel; an unbalanced body
+        is malformed rather than empty, so it keeps its ``request`` answer."""
+        error = self._error(httpx.Response(400, json=self._openrouter_body("'''ERROR\"\"")))
+        assert (error.kind, error.retryable) == ("request", False)
+
+    def test_opaque_5xx_shape_is_unchanged(self) -> None:
+        """The predicate only widens 400s: a 5xx carrying the same opaque body
+        was already retryable by status and must stay that way."""
+        body = self._openrouter_body("ERROR")
+        body["error"]["code"] = 502
+        error = self._error(httpx.Response(502, json=body))
+        assert (error.kind, error.retryable) == ("transient", True)
+
+
+class TestOpaqueAggregator400InBand:
+    """The aggregator's OTHER relay channel for the identical upstream failure.
+
+    Once the gateway has committed HTTP 200 it cannot use the status line, so it
+    delivers the same opaque body as an in-band error chunk (the shape
+    ``test_openai_compat_mid_stream_error_chunk_unwraps_upstream_raw`` pins for a
+    502). Classified from ``code`` alone that body was ``request``/not-retryable
+    and killed the turn, so the fix had to reach both channels: which relay the
+    aggregator picks is not something the caller can influence, and the two must
+    agree."""
+
+    @staticmethod
+    def _chunk(raw: str, code: int = 400) -> dict[str, Any]:
+        return {
+            "id": "gen-1",
+            "error": {
+                "code": code,
+                "message": "Provider returned error",
+                "metadata": {"raw": raw, "provider_name": "Stealth"},
+            },
+            "choices": [{"index": 0, "delta": {"content": ""}, "finish_reason": "error"}],
+        }
+
+    async def _stream_error(self, chunk: dict[str, Any]) -> ProviderError:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                content=_sse([chunk]),
+                headers={"content-type": "text/event-stream"},
+            )
+
+        client = OpenAICompatClient(
+            "https://api.test.example/v1",
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        )
+        with pytest.raises(ProviderError) as excinfo:
+            await _collect(
+                client.stream(ChatRequest(model=_spec(), messages=[Message.user("hi")]), "sk-test")
+            )
+        return excinfo.value
+
+    async def test_in_band_sentinel_is_transient(self) -> None:
+        """The reported body, delivered mid-stream instead of pre-stream."""
+        error = await self._stream_error(self._chunk("ERROR"))
+        assert error.status == 400
+        assert (error.kind, error.retryable) == ("transient", True)
+        assert "Provider returned error" in str(error)
+
+    async def test_in_band_actionable_diagnostics_stay_request(self) -> None:
+        """Real upstream diagnostics in-band are still an answer, not weather."""
+        chunk = self._chunk(json.dumps({"error": {"message": "context length exceeded"}}))
+        error = await self._stream_error(chunk)
+        assert (error.kind, error.retryable) == ("request", False)
+        assert "context length exceeded" in str(error)
+
+    async def test_in_band_other_400s_are_untouched(self) -> None:
+        """A different outer message keeps the status-only classification."""
+        chunk = self._chunk("ERROR")
+        chunk["error"]["message"] = "Provider error"
+        error = await self._stream_error(chunk)
+        assert (error.kind, error.retryable) == ("request", False)
+
 
 class TestRetryAfter:
     """ "try again in 40s" is the single most actionable fact in a rate-limit

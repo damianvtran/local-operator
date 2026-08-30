@@ -283,6 +283,25 @@ _OPAQUE_AGGREGATOR_MESSAGE = "provider returned error"
 _OPAQUE_RAW_SENTINELS = frozenset({"error"})
 
 
+def _strip_quote_pair(text: str) -> str:
+    """Peel MATCHED surrounding quote pairs off ``text``.
+
+    ``str.strip('"\'')`` would take any leading/trailing run of either
+    character, so unbalanced junk like ``\'\'\'ERROR""`` would reduce to the
+    sentinel and be treated as no-information. That only ever widens the match,
+    but the widening should be a decision rather than an accident of the API —
+    so pairs are peeled one at a time and an unbalanced body keeps its quotes
+    and stays ``request``.
+
+    A pair is peeled repeatedly because ``raw`` is a JSON-encoded string that
+    has occasionally been double-encoded upstream (``"\\"ERROR\\""`` parses back
+    to a quoted quote).
+    """
+    while len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
+        text = text[1:-1].strip()
+    return text
+
+
 def _is_opaque_aggregator_400(error: Mapping[str, Any]) -> bool:
     """An aggregator 400 carrying NO actionable upstream diagnostics.
 
@@ -293,18 +312,38 @@ def _is_opaque_aggregator_400(error: Mapping[str, Any]) -> bool:
     (observed: ``"ERROR"``, from a provider named "Stealth"), the body says
     nothing a caller could fix, and the status line is the aggregator's relay
     choice rather than evidence the request was wrong. Those are classified
-    transient so the failover cascade runs; the driver's server-fault budget
-    bounds the retries, and a genuinely broken request just burns a little of
-    it before surfacing — strictly better than aborting a turn that rotation
-    or a fallback could have served.
+    transient so the failover cascade runs.
+
+    Two deliberate widenings, both toward "treat no-information as transient":
+
+    - The outer message is matched after trimming and case-folding, so
+      ``"Provider returned error "`` matches too. The casing and padding on the
+      wire are the aggregator's formatting, not part of the signal.
+    - :func:`_openrouter_upstream_text` unwraps a nested ``error`` object, so
+      ``{"error": {"message": "ERROR"}}`` resolves to the same bare sentinel and
+      also matches. A body that structurally tried to say something but whose
+      content is still the word "error" carries no more actionable information
+      than the flat sentinel. This is the case most likely to shadow a real
+      upstream error whose message happens to be that single word; the cost of
+      that collision is bounded retries, and the cost of the opposite mistake
+      is a dead turn.
+
+    The price is latency, not correctness, and it is not small: a genuinely
+    broken request now saturates the driver's server-fault budget (12 requests
+    per target) before surfacing. Measured against the default 500ms base delay
+    and the 8s backoff cap, that is 64-76s of sleep on a single target and
+    roughly 4-5 minutes across a 3-target fallback chain. A user hitting a
+    PERSISTENT aggregator 400 therefore waits minutes for a failure that
+    previously surfaced immediately. That is the accepted trade: this shape is
+    by construction unattributable, so the alternative is killing a turn that
+    rotation or a fallback could have served — but it is a real cost, not the
+    rounding error an earlier draft of this docstring implied.
     """
     message = _first_text(error.get("message"))
     if message.lower() != _OPAQUE_AGGREGATOR_MESSAGE:
         return False
     upstream = _openrouter_upstream_text(error)
-    # Strip quote pairs too: ``raw`` is defined as a JSON-encoded string, so a
-    # sentinel can arrive as ``"\"ERROR\""`` and parse straight back to quotes.
-    return upstream.strip().strip("\"'").lower() in _OPAQUE_RAW_SENTINELS
+    return _strip_quote_pair(upstream.strip()).lower() in _OPAQUE_RAW_SENTINELS
 
 
 def _compat_stream_error(chunk: Mapping[str, Any]) -> ProviderError:
@@ -333,6 +372,7 @@ def _compat_stream_error(chunk: Mapping[str, Any]) -> ProviderError:
     error = chunk.get("error")
     status: int | None = None
     error_type = ""
+    opaque_aggregator_400 = False
     if isinstance(error, Mapping):
         message = _first_text(error.get("message"), error.get("detail"), error.get("msg"))
         upstream = _openrouter_upstream_text(error)
@@ -348,6 +388,13 @@ def _compat_stream_error(chunk: Mapping[str, Any]) -> ProviderError:
         metadata = error.get("metadata")
         if isinstance(metadata, Mapping):
             error_type = str(metadata.get("error_type") or "")
+        # The SAME opaque relay body arrives on this channel whenever the
+        # gateway had already committed HTTP 200 before the upstream failed, so
+        # it has to classify the same way here as in `raise_for_status` -- a
+        # turn must not die on the relay channel the aggregator happened to
+        # pick. Judged on the chunk's `code` rather than a status line, because
+        # in-band that is where the 400 lives.
+        opaque_aggregator_400 = status == 400 and _is_opaque_aggregator_400(error)
     else:
         message = _first_text(error)
     if not message:
@@ -357,7 +404,7 @@ def _compat_stream_error(chunk: Mapping[str, Any]) -> ProviderError:
     return ProviderError(
         status,
         _capped(message),
-        retryable=status is None or status == 429 or status >= 500,
+        retryable=(opaque_aggregator_400 or status is None or status == 429 or status >= 500),
         auth_error=status in (401, 403),
     )
 
