@@ -6,7 +6,7 @@ and is byte-stable per build, so no cache breakpoint moves. Contract is
 
   .venv/bin/python scripts/bench_cache_rate.py --turns 4
 
-## BEFORE (origin/main @ a892aaf5)
+## BEFORE (origin/main @ 2c4ebc77)
 structural prefix stability: 98.8% (contract: >= 90%)
 live cache rate: skipped (no OPENROUTER_API_KEY)
 PASS

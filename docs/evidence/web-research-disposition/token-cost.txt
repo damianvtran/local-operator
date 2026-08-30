@@ -4,20 +4,25 @@ Basis is scripts/bench_role_overhead.py's: system prompt = tokens of the
 rendered markdown, tool = tokens of {name, description, parameters} as
 JSON (what rides the provider tools array). Tokenizer cl100k_base.
 
-Reproduce in a worktree of each ref with the snippet in this directory.
+Reproduce in a worktree of each ref with token_probe.py in this directory.
 
-## BEFORE (origin/main @ a892aaf5)
+## BEFORE (origin/main @ 2c4ebc77)
 {
-  "always_on_total": 9865,
-  "system_prompt": 3022,
+  "always_on_total": 9974,
+  "system_prompt": 3131,
   "tool_inventory": 1022,
   "tools_array": 5821
 }
 
 ## AFTER (dev-web-research-disposition)
 {
-  "always_on_total": 10025,
-  "system_prompt": 3182,
+  "always_on_total": 10134,
+  "system_prompt": 3291,
   "tool_inventory": 1022,
   "tools_array": 5821
 }
+
+Delta: +160 always-on tokens (+1.60%). tool_inventory and tools_array
+are unchanged, which is the point: the guidance went into the prompt,
+not into the two web tools' descriptions, where it would have been
+billed twice (provider tools array + rendered inventory).
