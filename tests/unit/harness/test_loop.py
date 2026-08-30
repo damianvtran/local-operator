@@ -209,6 +209,64 @@ async def test_full_turn_text_tool_text():
 
 
 @pytest.mark.asyncio
+async def test_a_tool_only_turn_carries_no_empty_text_block() -> None:
+    """A turn that calls a tool and says nothing must keep ``content == []``.
+
+    Anthropic rejects a message carrying an empty text block outright:
+
+        HTTP 400: messages: text content blocks must be non-empty
+
+    and it is the NEXT request of the turn that fails, so the run dies after
+    the tool has already run. "Call the tool, say nothing" is an ordinary
+    model turn — it is what most tool steps look like — so this is not an
+    edge case.
+
+    The assembly used to live inside the delta loop, where it was simply
+    unreachable when no text delta arrived. Hoisting it out of the loop (to
+    stop the per-delta rebuild being quadratic in response length) made it run
+    unconditionally, which turned "no text" into an empty text block rather
+    than no content at all. The guard is what keeps the optimization from
+    changing what a silent turn sends.
+    """
+
+    executed: list[str] = []
+    stream = ScriptedStream(
+        [
+            # No StreamTextDelta at all: tool call only.
+            [
+                tool_call_delta(0, id="call_1", name="echo"),
+                tool_call_delta(0, args='{"text":"hi"}'),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    context = LoopContext(system_blocks=["sys"], tools=[echo_tool(executed)])
+    loop = AgentLoop()
+
+    events = []
+    async for event in loop.run([Message.user("go")], context, make_config(stream), None):
+        events.append(event)
+
+    final = events[-1]
+    assert isinstance(final, AgentEndEvent)
+    assistant = final.messages[0]
+    assert isinstance(assistant, Message)
+    assert assistant.content == [], "a silent turn must not carry a text block"
+    assert len(assistant.tool_calls) == 1
+    assert executed == ["echo"]
+
+    # The regression is only observable on the SECOND request, which is the one
+    # that carries the first assistant message back to the provider.
+    replayed = stream.requests[1].messages
+    assert not any(
+        getattr(block, "text", None) == ""
+        for message in replayed
+        for block in (message.content or [])
+    ), "an empty text block reached the provider"
+
+
+@pytest.mark.asyncio
 async def test_a_tool_result_is_redacted_before_it_reaches_the_model() -> None:
     """The ``read`` path the reviewer reproduced: a credential written by one
     tool and read by another must not survive into the tool message."""
