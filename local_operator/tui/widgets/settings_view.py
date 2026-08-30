@@ -465,14 +465,6 @@ class SettingsView(Vertical):
         # which reads as the arrow key being dead (review round 2, U13).
         # `_close_chain` already resolves its target this way for the same
         # reason, and this is that pattern applied to movement.
-        # An arrow after the wheel has scrolled the cursor off screen spends
-        # itself bringing the cursor BACK into view rather than moving it, so
-        # the row that moves is always one the user can see. Without it, `down`
-        # from a viewport 40 rows away moves a cursor nobody is looking at and
-        # then teleports the view to it, which is the bounce wearing a
-        # different hat (see `_reorient`).
-        if self._reorient():
-            return
         anchor = self._current()
         identity = anchor.identity if anchor is not None else None
         if not self._leave_row():
@@ -615,48 +607,6 @@ class SettingsView(Vertical):
         self._pane = panes[position]
         self._repaint()
 
-    def _cursor_visible(self) -> bool:
-        """Is the highlighted row inside the viewport right now?
-
-        The wheel moves the VIEWPORT and leaves the cursor where it is (see
-        :meth:`_scroll_rows`), so the two can legitimately disagree — which is
-        the whole point of that model, and also its one hazard. This is the
-        predicate the acting keys gate on so that hazard cannot become a write.
-        """
-        try:
-            height = self._body.size.height
-        except Exception:
-            return True
-        if height <= 0:
-            return True
-        offset = self._body.scroll_offset.y
-        return offset <= self._selected < offset + height
-
-    def _reorient(self) -> bool:
-        """Bring an off-screen cursor back into view WITHOUT acting. True if it did.
-
-        The safety interlock for the wheel-scrolls-the-viewport model. Letting
-        the wheel leave the cursor behind is what makes a scrollbar honest, but
-        it re-opens the exact defect ``_body.can_focus = False`` was set for
-        (UX round 3, U19): a user looking at rows 24-37 with the cursor stranded
-        on row 1 presses ``enter`` on the row they can SEE and writes a setting
-        they never chose. There the viewport moved because focus had silently
-        shifted; here it moves because the user asked it to — but the blind
-        write at the end is identical, and this page writes config immediately
-        with no undo beyond ``r``.
-
-        So no key ACTS on a row that is not on screen. The first press spends
-        itself putting the cursor back in view, the second one acts, and the
-        row being acted on is always a row the user is looking at. Deliberately
-        does NOT commit anything — it is a pure viewport move, so it stays
-        correct regardless of when a value is taken to commit.
-        """
-        if self._cursor_visible():
-            return False
-        self._scroll_to_selection()
-        self._repaint()
-        return True
-
     def _scroll_to_selection(self) -> None:
         """Keep the cursor row inside the scrolled viewport.
 
@@ -706,13 +656,6 @@ class SettingsView(Vertical):
         """
         row = self._current()
         if row is None:
-            return
-        # `enter` NEVER writes a row that is off screen. The wheel can leave the
-        # cursor behind by design, and this page writes config immediately, so
-        # an activate aimed at "the row I can see" must not land on the row the
-        # cursor happens to still be on — the U19 defect exactly. The press
-        # reorients instead, and the next one acts on a visible row.
-        if self._editing is None and self._reorient():
             return
         # Any action that is not `d` or `esc` DISARMS a pending delete. The ask
         # was cleared by a cursor move and by `esc`, but not by a key acting on
@@ -879,10 +822,6 @@ class SettingsView(Vertical):
         # instead of cancelling and `d` re-armed instead of confirming. Safe in
         # the destructive direction, but the same "model changed, paint did not"
         # class as the hint clipping in D16 (UX round 4, follow-up).
-        # Same interlock as `action_activate`, and for the same reason: `r`
-        # writes the config, so it may not act on a row the user cannot see.
-        if self._reorient():
-            return
         disarmed = self._confirm_delete is not None
         self._confirm_delete = None
         row = self._current()
@@ -1446,19 +1385,11 @@ class SettingsView(Vertical):
             if key in ("d", "delete"):
                 event.stop()
                 event.prevent_default()
-                # The interlock `action_activate` and `action_reset` carry, on
-                # the page's DESTRUCTIVE key: `d` deletes a hop outright, so an
-                # off-screen cursor must cost a reorientation press rather than
-                # a chain the user never looked at.
-                if self._reorient():
-                    return
                 self._delete_hop()
                 return
             if key in ("shift+up", "shift+down") and row.kind == "hop":
                 event.stop()
                 event.prevent_default()
-                if self._reorient():
-                    return
                 self._move_hop(-1 if key == "shift+up" else 1)
                 return
 
@@ -1479,9 +1410,7 @@ class SettingsView(Vertical):
         Deliberately does NOT scroll. A click names a row the user is already
         looking at, so moving the cursor there can never put it off screen —
         and a view that re-centred on every click would jump under the pointer
-        for no gain. This is also why the click path needs no ``_reorient``
-        guard: it cannot select an invisible row, and the activate-on-second-
-        click branch below therefore always acts on a visible one.
+        for no gain.
         """
         if getattr(event, "button", 1) != 1:
             return

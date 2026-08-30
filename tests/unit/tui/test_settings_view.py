@@ -18,6 +18,7 @@ from typing import Any
 import pytest
 import yaml
 from rich.cells import cell_len
+from textual import events
 
 from local_operator import settings_io
 from local_operator.config import ConfigManager
@@ -2366,3 +2367,259 @@ async def test_the_text_editable_kinds_allow_list_is_pinned(tmp_path: Path) -> N
         ), f"the providers editor is not seeded with comma-separated text: {view._buffer!r}"
         await pilot.press("escape")
         await pilot.pause()
+
+
+def _cursor_on_screen(view: SettingsView) -> bool:
+    """Is the highlighted row inside the body's viewport, by GEOMETRY?
+
+    Computed here from the container's own offset and height rather than
+    through ``SettingsView._cursor_visible``, so these tests assert the
+    behaviour and not the existence of a helper: run against a tree without the
+    fix they must fail on where the cursor and the viewport actually are, not
+    on an ``AttributeError``.
+    """
+    offset = view._body.scroll_offset.y
+    return offset <= view._selected < offset + view._body.size.height
+
+
+def _wheel(widget, *, down: bool):
+    """A real ``MouseScrollDown``/``Up`` aimed at ``widget``.
+
+    Posted rather than calling the handler directly, the way
+    ``test_session_picker`` does it: the wiring under test is Textual's own
+    dispatch, and the defect these tests cover lives in that dispatch — the
+    body's ``ScrollableContainer`` consumes the wheel and stops the event while
+    it can still scroll, so a direct call to ``_scroll_rows`` exercises a path a
+    real pointer only reaches at the very end of the list.
+    """
+    kind = events.MouseScrollDown if down else events.MouseScrollUp
+    return kind(
+        widget=widget,
+        x=1,
+        y=1,
+        delta_x=0,
+        delta_y=1 if down else -1,
+        button=0,
+        shift=False,
+        meta=False,
+        ctrl=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_wheel_at_the_bottom_of_the_list_does_not_bounce_back() -> None:
+    """The viewport HOLDS at the bottom under one more wheel notch.
+
+    The v0.43.10 report: "you can scroll down to the bottom but then your
+    selected option row is still somewhere above the top of the screen which
+    ends up scrolling back up". The page held two positions for one view — the
+    body container's scroll offset, which the wheel and the scrollbar drive, and
+    the cursor, from which ``_scroll_to_selection`` re-derived the viewport.
+
+    The bounce needs the container AT its limit, because that is the only state
+    in which the wheel reaches the view at all: Textual stops the event on the
+    container while it still has somewhere to go. At 100x30 (viewport 14,
+    virtual 60, ``max_scroll_y=46``) the 24th notch moved the cursor 1 -> 2 and
+    yanked the viewport from 46 back to 2.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._open_settings_view()
+        view = app.query_one(SettingsView)
+        await pilot.pause()
+        body = view._body
+
+        # Premise: the list is several times its viewport, or there is no
+        # bottom to arrive at and the test proves nothing.
+        assert body.max_scroll_y > 0, "premise: the body scrolls"
+        parked = view._selected
+
+        # Scroll the CONTAINER to the bottom, the way a scrollbar drag does.
+        body.scroll_to(y=body.max_scroll_y, animate=False, immediate=True)
+        await pilot.pause()
+        assert body.scroll_offset.y == body.max_scroll_y
+
+        # One more notch, delivered as a real event over the list.
+        view._list.post_message(_wheel(view._list, down=True))
+        await pilot.pause()
+
+        assert body.scroll_offset.y == body.max_scroll_y, (
+            "the viewport bounced away from the bottom of the list: "
+            f"scroll_y={body.scroll_offset.y} of {body.max_scroll_y}"
+        )
+        assert view._selected == parked, "the wheel moved the cursor instead of the view"
+
+
+@pytest.mark.asyncio
+async def test_the_wheel_scrolls_the_same_way_wherever_the_pointer_sits() -> None:
+    """One page, one scroll model.
+
+    The wheel used to scroll the VIEWPORT over the list (the container consumed
+    it) and move the CURSOR over the title, the detail row and the side pane
+    (nothing consumed it, so it bubbled to the view). Same gesture, two
+    behaviours, chosen by where the pointer happened to be.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._open_settings_view()
+        view = app.query_one(SettingsView)
+        await pilot.pause()
+        body = view._body
+
+        travelled: dict[str, int] = {}
+        for name, target in (
+            ("list", view._list),
+            ("body", body),
+            ("pane", view._pane_view),
+            ("detail", view._detail),
+            ("title", view._title),
+            ("view", view),
+        ):
+            body.scroll_to(y=0, animate=False, immediate=True)
+            view._selected = view._selectable()[0]
+            view._repaint()
+            await pilot.pause()
+            for _ in range(3):
+                target.post_message(_wheel(target, down=True))
+            await pilot.pause()
+            travelled[name] = body.scroll_offset.y
+            assert view._selected == view._selectable()[0], (
+                f"the wheel over the {name} moved the cursor"
+            )
+
+        assert len(set(travelled.values())) == 1, (
+            f"the wheel travels different distances by pointer position: {travelled}"
+        )
+        assert travelled["list"] > 0, "the wheel did not scroll at all"
+
+
+@pytest.mark.asyncio
+async def test_the_wheel_leaves_the_cursor_where_the_user_put_it(tmp_path: Path) -> None:
+    """The wheel moves the VIEW only: it never moves, and never acts on, a row.
+
+    The deliberate consequence of the model is that the cursor and the viewport
+    can diverge — the user scrolls away and the highlighted row goes off screen,
+    exactly as it does in an editor. What must NOT follow is a write: a wheel
+    gesture is a look, so it may not toggle a bool, open an editor, or reset
+    anything, and the config file is the assertion that proves it.
+
+    KNOWN GAP, deliberately not closed here. Once the cursor is off screen, a
+    subsequent `enter` or `r` still acts on it rather than on the row the user
+    is looking at — the U19 hazard, reachable now by scrolling instead of by
+    the focus slip that motivated `_body.can_focus = False`. The obvious guard
+    ("the first press re-centres, the second acts") lands squarely on the
+    activate/commit paths that the incoming edit-mode redesign rewrites, so it
+    belongs there rather than as a second, competing rule this PR would leave
+    behind. Pinned as a gap so the redesign inherits a statement of it instead
+    of a surprise.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._open_settings_view()
+        view = app.query_one(SettingsView)
+        await pilot.pause()
+
+        parked = view._selected
+        for _ in range(15):
+            view._list.post_message(_wheel(view._list, down=True))
+        await pilot.pause()
+
+        assert view._selected == parked, "the wheel moved the cursor"
+        assert not _cursor_on_screen(view), (
+            "premise: enough wheel travel to carry the cursor off screen"
+        )
+        assert view.editing_key is None, "the wheel opened an editor"
+        assert _values(tmp_path) == {}, "a wheel gesture wrote to the config"
+
+        # And back up: the view returns, the cursor never having moved.
+        for _ in range(15):
+            view._list.post_message(_wheel(view._list, down=False))
+        await pilot.pause()
+        assert view._body.scroll_offset.y == 0
+        assert view._selected == parked
+        assert _values(tmp_path) == {}
+
+
+@pytest.mark.asyncio
+async def test_the_arrows_still_scroll_the_cursor_into_view() -> None:
+    """The cursor keeps its own claim on the viewport, for the keys that move it.
+
+    The wheel handing the viewport to the container must not cost the arrows
+    their cursor-following: a ``down`` that moved the cursor below the fold
+    without scrolling would hide the row it just selected.
+
+    A PRESERVATION guard, not a regression test — it passes at base too, which
+    is the point: this is the behaviour the scroll change had to leave intact.
+    Each press is settled with a ``pause`` before the assertion, because the
+    scroll is applied on the next refresh and asserting mid-flight measures a
+    frame no user is ever shown (it reports a false off-screen at row 37).
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._open_settings_view()
+        view = app.query_one(SettingsView)
+        await pilot.pause()
+
+        # Held `down` the length of the list, checking the cursor stays visible
+        # the WHOLE way rather than only at the end — a viewport that followed
+        # in jumps would pass an end-state assertion.
+        for _ in range(len(view._selectable()) + 5):
+            await pilot.press("down")
+            await pilot.pause()
+            assert _cursor_on_screen(view), (
+                f"`down` walked the cursor off screen at row {view._selected}"
+            )
+        assert view._selected == view._selectable()[-1]
+
+        await pilot.press("home")
+        await pilot.pause()
+        assert _cursor_on_screen(view)
+        assert view._body.scroll_offset.y == 0
+
+        await pilot.press("end")
+        await pilot.pause()
+        assert _cursor_on_screen(view), "`end` did not scroll the cursor into view"
+
+
+@pytest.mark.asyncio
+async def test_paging_lands_on_the_true_end_of_the_list() -> None:
+    """`pagedown` reaches the SAME last row `end` and held `down` reach.
+
+    ``action_section`` is section-scoped, so paging clamped on the last HEADER
+    and settled on that section's first row with five selectable rows still
+    below it — the page having two answers for where it ends (#425, UX round 1,
+    U3). Pinned here across sizes and with an enum expanded, because the row
+    count changes with both and a fix that only holds at one size is not one.
+    """
+    for size in ((100, 30), (140, 40), (80, 24)):
+        app = OperatorApp(lambda: _factory(FakeSession()))
+        async with app.run_test(size=size) as pilot:
+            await pilot.pause()
+            app._open_settings_view()
+            view = app.query_one(SettingsView)
+            await pilot.pause()
+
+            await pilot.press("home")
+            await pilot.pause()
+            for _ in range(25):
+                await pilot.press("pagedown")
+            await pilot.pause()
+
+            last = view._selectable()[-1]
+            assert view._selected == last, (
+                f"at {size} pagedown settled on row {view._selected}, "
+                f"but the last selectable row is {last}"
+            )
+            assert view._body.scroll_offset.y == view._body.max_scroll_y, (
+                "paging reached the last row without reaching the bottom of the view"
+            )
+
+            # And back: `pageup` reaches the first row the same way.
+            for _ in range(25):
+                await pilot.press("pageup")
+            await pilot.pause()
+            assert view._selected == view._selectable()[0]
