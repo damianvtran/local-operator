@@ -12,6 +12,8 @@ from __future__ import annotations
 import json
 import math
 import string
+from collections.abc import Mapping
+from types import MappingProxyType
 from typing import Annotated, Any, ClassVar, Literal, Self, TypeAlias
 
 from pydantic import (
@@ -20,6 +22,7 @@ from pydantic import (
     Field,
     JsonValue,
     TypeAdapter,
+    field_serializer,
     field_validator,
     model_validator,
 )
@@ -28,6 +31,8 @@ PROTOCOL_VERSION = "1.0"
 MAX_IDENTIFIER_LENGTH = 256
 MAX_TEXT_LENGTH = 100_000
 MAX_METADATA_BYTES = 64_000
+MAX_METADATA_DEPTH = 16
+MAX_SAFE_JSON_INTEGER = 2**53 - 1
 MAX_BATCH_SIZE = 64
 MAX_DIMENSION = 1_000_000
 MAX_COORDINATE = 1_000_000
@@ -60,8 +65,8 @@ class ProtocolModel(BaseModel):
     @classmethod
     def from_canonical_json(cls, payload: bytes | str) -> Self:
         """Parse only canonical bytes so signatures and digests cannot disagree."""
-        raw = payload.encode("utf-8") if isinstance(payload, str) else payload
-        parsed = cls.model_validate_json(raw, strict=True)
+        raw, decoded = _decode_canonical_json(payload)
+        parsed = cls.model_validate(decoded, strict=True)
         if parsed.to_canonical_json() != raw:
             raise ValueError("payload is valid JSON but is not canonical protocol JSON")
         return parsed
@@ -98,19 +103,24 @@ class PixelPoint(ProtocolModel):
 class FrameGeometry(ProtocolModel):
     """Native capture geometry and the exact resized frame shown to the model.
 
-    Conversion scales each axis independently, rounds toward negative infinity,
-    then clamps to the destination's inclusive pixel bounds. Clamping makes an
-    adapter boundary safe, but action validation still rejects out-of-frame
-    model coordinates so malformed model output is never silently repaired.
+    Each directed conversion scales an input pixel coordinate by
+    ``destination_size / source_size``, rounds toward negative infinity, then
+    clamps to the destination's inclusive pixel bounds. The methods are not
+    mathematical inverses when dimensions differ: downscaling merges pixels and
+    floor rounding can move a round trip toward the top-left. Clamping makes a
+    conversion boundary safe, but action validation rejects out-of-frame model
+    coordinates rather than silently repairing model output.
     """
 
     native: FrameSize
     model_visible: FrameSize
 
     def model_to_native(self, x: int | float, y: int | float) -> PixelPoint:
+        """Map from this frame's model-visible pixels into its native pixels."""
         return self._convert(x, y, source=self.model_visible, destination=self.native)
 
     def native_to_model(self, x: int | float, y: int | float) -> PixelPoint:
+        """Map from this frame's native pixels into its model-visible pixels."""
         return self._convert(x, y, source=self.native, destination=self.model_visible)
 
     @staticmethod
@@ -151,7 +161,7 @@ class Observation(ProtocolModel):
     observation_id: Identifier
     text: str | None = Field(default=None, min_length=1, max_length=MAX_TEXT_LENGTH, pattern=r"\S")
     frames: tuple[FrameRef, ...] = Field(default=(), max_length=32)
-    metadata: dict[str, JsonValue] = Field(default_factory=dict)
+    metadata: Mapping[str, JsonValue] = Field(default_factory=dict)
 
     @field_validator("frames", mode="before")
     @classmethod
@@ -160,14 +170,32 @@ class Observation(ProtocolModel):
         # strict mode continues to reject strings, iterators, and coercions.
         return tuple(frames) if isinstance(frames, list) else frames
 
+    @field_validator("metadata", mode="before")
+    @classmethod
+    def _validate_wire_metadata(cls, metadata: Any) -> Any:
+        # IEEE-754 implementations disagree with Python about formatting and
+        # exactness outside this subset. Restricting metadata to strings,
+        # booleans, null, and signed safe integers makes the existing sorted,
+        # compact UTF-8 encoding portable without an RFC 8785 dependency.
+        _validate_metadata(metadata)
+        return metadata
+
     @field_validator("metadata")
     @classmethod
-    def _bounded_finite_metadata(cls, metadata: dict[str, JsonValue]) -> dict[str, JsonValue]:
-        _validate_metadata(metadata)
-        encoded = json.dumps(metadata, allow_nan=False, ensure_ascii=False, separators=(",", ":"))
-        if len(encoded.encode("utf-8")) > MAX_METADATA_BYTES:
-            raise ValueError(f"metadata exceeds {MAX_METADATA_BYTES} encoded bytes")
-        return metadata
+    def _freeze_metadata(cls, metadata: Mapping[str, JsonValue]) -> Mapping[str, JsonValue]:
+        frozen = _freeze_json(metadata)
+        canonical = _canonical_json_value(_thaw_json(frozen))
+        if len(canonical) > MAX_METADATA_BYTES:
+            raise ValueError(f"metadata exceeds {MAX_METADATA_BYTES} canonical bytes")
+        return frozen
+
+    @field_serializer("metadata")
+    def _serialize_metadata(self, metadata: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
+        # Pydantic knows JsonValue but not MappingProxyType. Thaw only for wire
+        # output; the model continues to expose recursively immutable values.
+        thawed = _thaw_json(metadata)
+        assert isinstance(thawed, dict)
+        return thawed
 
     @model_validator(mode="after")
     def _unique_frames(self) -> Self:
@@ -315,7 +343,9 @@ ComputerAction: TypeAlias = Annotated[
 class ObservationEnvelope(ProtocolModel):
     """Versioned adapter message carrying one environment observation."""
 
-    protocol_version: Literal["1.0"] = PROTOCOL_VERSION
+    # RPC senders must declare their version; accepting an omitted default
+    # would make version negotiation ambiguous during rolling upgrades.
+    protocol_version: Literal["1.0"]
     kind: Literal["observation"] = "observation"
     observation: Observation
 
@@ -323,7 +353,7 @@ class ObservationEnvelope(ProtocolModel):
 class ActionBatch(ProtocolModel):
     """Versioned ordered actions selected from exactly one observation."""
 
-    protocol_version: Literal["1.0"] = PROTOCOL_VERSION
+    protocol_version: Literal["1.0"]
     kind: Literal["action_batch"] = "action_batch"
     task_id: Identifier
     episode_id: Identifier
@@ -383,19 +413,89 @@ _ENVELOPE_ADAPTER = TypeAdapter(ProtocolEnvelope, config=ConfigDict(strict=True)
 
 
 def parse_envelope(payload: bytes | str) -> ProtocolEnvelope:
-    """Strictly parse a versioned RPC envelope without accepting unknown kinds."""
-    return _ENVELOPE_ADAPTER.validate_json(payload, strict=True)
+    """Parse one exact, explicitly versioned canonical RPC envelope.
+
+    Decoding with an object-pairs hook rejects duplicate names at every nesting
+    level before model validation can normalize them away. Re-encoding catches
+    other noncanonical representations as well as action validators that
+    normalize a value (for example, a lowercase named key).
+    """
+    raw, decoded = _decode_canonical_json(payload)
+    parsed = _ENVELOPE_ADAPTER.validate_python(decoded, strict=True)
+    if parsed.to_canonical_json() != raw:
+        raise ValueError("payload is valid JSON but is not canonical protocol JSON")
+    return parsed
 
 
-def _validate_metadata(value: JsonValue, *, path: str = "metadata") -> None:
-    """Keep recursively nested JSON finite and its object keys bounded."""
-    if isinstance(value, float) and not math.isfinite(value):
-        raise ValueError(f"{path} contains a non-finite number")
+def _decode_canonical_json(payload: bytes | str) -> tuple[bytes, Any]:
+    raw = payload.encode("utf-8") if isinstance(payload, str) else payload
+
+    def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"duplicate JSON object key: {key!r}")
+            result[key] = value
+        return result
+
+    decoded = json.loads(
+        raw,
+        object_pairs_hook=reject_duplicate_keys,
+        parse_constant=lambda value: (_ for _ in ()).throw(
+            ValueError(f"nonstandard JSON constant: {value}")
+        ),
+    )
+    return raw, decoded
+
+
+def _validate_metadata(value: Any, *, path: str = "metadata", depth: int = 0) -> None:
+    """Enforce the portable, resource-bounded JSON subset at the RPC boundary."""
+    if depth > MAX_METADATA_DEPTH:
+        raise ValueError(f"{path} exceeds maximum nesting depth {MAX_METADATA_DEPTH}")
+    if value is None or isinstance(value, (str, bool)):
+        return
+    if isinstance(value, int):
+        if not -MAX_SAFE_JSON_INTEGER <= value <= MAX_SAFE_JSON_INTEGER:
+            raise ValueError(f"{path} integer exceeds the portable JSON-safe range")
+        return
+    if isinstance(value, float):
+        raise ValueError(f"{path} floats are not supported; use a string or integer")
     if isinstance(value, list):
         for index, item in enumerate(value):
-            _validate_metadata(item, path=f"{path}[{index}]")
-    elif isinstance(value, dict):
+            _validate_metadata(item, path=f"{path}[{index}]", depth=depth + 1)
+        return
+    if isinstance(value, dict):
         for key, item in value.items():
+            if not isinstance(key, str):
+                raise ValueError(f"{path} object keys must be strings")
             if not key or len(key) > MAX_IDENTIFIER_LENGTH:
                 raise ValueError(f"{path} contains an empty or overlong key")
-            _validate_metadata(item, path=f"{path}.{key}")
+            _validate_metadata(item, path=f"{path}.{key}", depth=depth + 1)
+        return
+    raise ValueError(f"{path} contains unsupported value type {type(value).__name__}")
+
+
+def _freeze_json(value: Any) -> Any:
+    if isinstance(value, dict):
+        return MappingProxyType({key: _freeze_json(item) for key, item in value.items()})
+    if isinstance(value, list):
+        return tuple(_freeze_json(item) for item in value)
+    return value
+
+
+def _thaw_json(value: Any) -> JsonValue:
+    if isinstance(value, Mapping):
+        return {key: _thaw_json(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw_json(item) for item in value]
+    return value
+
+
+def _canonical_json_value(value: JsonValue) -> bytes:
+    return json.dumps(
+        value,
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")

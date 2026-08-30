@@ -12,6 +12,8 @@ from pydantic import ValidationError
 
 from local_operator.evaluation.protocol import (
     MAX_BATCH_SIZE,
+    MAX_METADATA_DEPTH,
+    MAX_SAFE_JSON_INTEGER,
     ActionBatch,
     ArtifactRef,
     AskUserAction,
@@ -65,6 +67,7 @@ def _observation() -> Observation:
 def _batch(*actions: object, observation_id: str = "observation-7") -> ActionBatch:
     return ActionBatch.model_validate(
         {
+            "protocol_version": "1.0",
             "task_id": "task-1",
             "episode_id": "episode-1",
             "observation_id": observation_id,
@@ -125,6 +128,23 @@ def test_geometry_conversion_has_explicit_floor_and_clamp_policy() -> None:
             geometry.model_to_native(invalid, 1)
 
 
+def test_geometry_conversion_edges_and_round_trip_are_directional() -> None:
+    single = FrameGeometry(
+        native=FrameSize(width=1, height=1),
+        model_visible=FrameSize(width=1, height=1),
+    )
+    assert single.model_to_native(99, -99) == PixelPoint(x=0, y=0)
+    asymmetric = FrameGeometry(
+        native=FrameSize(width=1_000_000, height=1),
+        model_visible=FrameSize(width=3, height=999),
+    )
+    assert asymmetric.model_to_native(1, 998) == PixelPoint(x=333333, y=0)
+    point = asymmetric.native_to_model(999999, 0)
+    assert point == PixelPoint(x=2, y=0)
+    # Scaling with floor is intentionally lossy, not an inverse transform.
+    assert asymmetric.model_to_native(point.x, point.y) == PixelPoint(x=666666, y=0)
+
+
 def test_observation_is_strict_ordered_and_forbids_extras() -> None:
     observation = _observation()
     assert [frame.frame_id for frame in observation.frames] == ["frame-1"]
@@ -138,12 +158,68 @@ def test_observation_is_strict_ordered_and_forbids_extras() -> None:
         )
 
 
-@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
-def test_observation_metadata_rejects_nonfinite_numbers_at_any_depth(value: float) -> None:
-    with pytest.raises(ValidationError, match="non-finite"):
+@pytest.mark.parametrize(
+    "value",
+    [
+        -0.0,
+        1e-6,
+        float("nan"),
+        float("inf"),
+        float("-inf"),
+        MAX_SAFE_JSON_INTEGER + 1,
+        -MAX_SAFE_JSON_INTEGER - 1,
+    ],
+)
+def test_observation_metadata_rejects_nonportable_numbers_at_any_depth(value: float | int) -> None:
+    with pytest.raises(ValidationError):
         Observation.model_validate(
             {**_observation().model_dump(), "metadata": {"nested": [1, {"bad": value}]}}
         )
+
+
+def test_metadata_accepts_bool_and_safe_integer_boundaries() -> None:
+    observation = Observation.model_validate(
+        {
+            **_observation().model_dump(),
+            "metadata": {
+                "yes": True,
+                "no": False,
+                "minimum": -MAX_SAFE_JSON_INTEGER,
+                "maximum": MAX_SAFE_JSON_INTEGER,
+            },
+        }
+    )
+    assert observation.model_dump(mode="json")["metadata"] == {
+        "yes": True,
+        "no": False,
+        "minimum": -MAX_SAFE_JSON_INTEGER,
+        "maximum": MAX_SAFE_JSON_INTEGER,
+    }
+
+
+def test_metadata_is_recursively_immutable_and_serializes_canonically() -> None:
+    observation = _observation()
+    before = observation.to_canonical_json()
+    with pytest.raises(TypeError):
+        observation.metadata["new"] = 1  # type: ignore[index]
+    nested = observation.metadata["nested"]
+    with pytest.raises(TypeError):
+        nested["ready"] = False  # type: ignore[index]
+    values = Observation.model_validate(
+        {**observation.model_dump(), "metadata": {"items": [1, {"ready": True}]}}
+    )
+    with pytest.raises(AttributeError):
+        values.metadata["items"].append(float("nan"))  # type: ignore[union-attr]
+    assert observation.to_canonical_json() == before
+    assert Observation.from_canonical_json(before) == observation
+
+
+def test_metadata_depth_is_bounded_before_recursive_model_validation() -> None:
+    metadata: dict[str, object] = {"leaf": 1}
+    for _ in range(MAX_METADATA_DEPTH + 1):
+        metadata = {"nested": metadata}
+    with pytest.raises(ValidationError, match="maximum nesting depth"):
+        Observation.model_validate({**_observation().model_dump(), "metadata": metadata})
 
 
 def test_action_union_is_closed_and_has_no_command_escape_hatches() -> None:
@@ -206,6 +282,34 @@ def test_batch_validate_for_rejects_stale_identity_and_bad_frame_coordinates() -
                 y=719,
             )
         ).validate_for(observation)
+
+
+def test_batch_validates_each_action_against_its_own_frame_geometry() -> None:
+    observation = Observation(
+        task_id="task-1",
+        episode_id="episode-1",
+        sequence=0,
+        observation_id="observation-7",
+        frames=(
+            _frame(frame_id="large"),
+            FrameRef(
+                frame_id="small",
+                artifact=_artifact(),
+                geometry=FrameGeometry(
+                    native=FrameSize(width=20, height=20),
+                    model_visible=FrameSize(width=10, height=10),
+                ),
+            ),
+        ),
+    )
+    valid = _batch(
+        ClickAction(observation_id="observation-7", frame_id="large", x=100, y=100),
+        ClickAction(observation_id="observation-7", frame_id="small", x=9, y=9),
+    )
+    valid.validate_for(observation)
+    invalid = _batch(ClickAction(observation_id="observation-7", frame_id="small", x=100, y=100))
+    with pytest.raises(ValueError, match="outside model-visible frame 10x10"):
+        invalid.validate_for(observation)
 
 
 def test_terminal_actions_are_isolated_and_empty_batches_are_invalid() -> None:
@@ -298,7 +402,7 @@ def test_batch_preserves_action_order_across_canonical_round_trip() -> None:
 
 
 def test_canonical_observation_fixture_is_stable_and_requires_exact_encoding() -> None:
-    envelope = ObservationEnvelope(observation=_observation())
+    envelope = ObservationEnvelope(protocol_version="1.0", observation=_observation())
     expected = (
         '{"kind":"observation","observation":{"episode_id":"episode-1","frames":'
         '[{"artifact":{"byte_count":1234,"media_type":"image/png","sha256":"'
@@ -316,6 +420,38 @@ def test_canonical_observation_fixture_is_stable_and_requires_exact_encoding() -
     noncanonical = json.dumps(json.loads(expected), ensure_ascii=False).encode()
     with pytest.raises(ValueError, match="not canonical"):
         ObservationEnvelope.from_canonical_json(noncanonical)
+    with pytest.raises(ValueError, match="not canonical"):
+        parse_envelope(noncanonical)
+
+
+def test_generic_parser_requires_explicit_version_and_rejects_normalized_actions() -> None:
+    batch = ActionBatch(
+        protocol_version="1.0",
+        task_id="task-1",
+        episode_id="episode-1",
+        observation_id="observation-7",
+        actions=(KeyAction(observation_id="observation-7", keys=("ENTER",)),),
+    )
+    canonical = batch.to_canonical_json()
+    without_version = json.loads(canonical)
+    del without_version["protocol_version"]
+    with pytest.raises(ValidationError):
+        parse_envelope(json.dumps(without_version, separators=(",", ":"), sort_keys=True).encode())
+    lowercase_key = canonical.replace(b'"ENTER"', b'"enter"')
+    with pytest.raises(ValueError, match="not canonical"):
+        parse_envelope(lowercase_key)
+
+
+def test_generic_parser_rejects_duplicate_keys_at_any_depth() -> None:
+    envelope = ObservationEnvelope(protocol_version="1.0", observation=_observation())
+    canonical = envelope.to_canonical_json()
+    duplicate_top = canonical.replace(
+        b'{"kind":"observation",', b'{"kind":"observation","kind":"observation",', 1
+    )
+    duplicate_nested = canonical.replace(b'{"attempt":1,', b'{"attempt":1,"attempt":1,', 1)
+    for payload in (duplicate_top, duplicate_nested):
+        with pytest.raises(ValueError, match="duplicate JSON object key"):
+            parse_envelope(payload)
 
 
 @pytest.mark.parametrize("module", ["local_operator.cli", "local_operator.session_factory"])
