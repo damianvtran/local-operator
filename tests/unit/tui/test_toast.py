@@ -25,7 +25,9 @@ from local_operator.tui.widgets.toast import (
     TOAST_DEFAULT_MS,
     TOAST_FAILURE_MS,
     TOAST_MAX_WIDTH,
+    TOAST_MIN_CARD_WIDTH,
     TOAST_MIN_WIDTH,
+    TOAST_PADDING_CELLS,
     Toast,
     format_mcp_startup,
     toast_max_width,
@@ -247,6 +249,31 @@ def test_the_floor_never_outgrows_the_screen_it_paints_on() -> None:
     assert toast_max_width(0) == 1
 
 
+def _row_leads(app: App[None], toast: Toast) -> list[int]:
+    """Leading blank cells of each painted row of the card, from the real frame.
+
+    Read off the compositor rather than from the message string: the question is
+    where the ink LANDS inside the card, which is what alignment decides.
+    """
+    region = toast.region
+    strips = app.screen._compositor.render_strips()
+    leads: list[int] = []
+    for row in range(region.y, min(region.y + region.height, len(strips))):
+        text = strips[row].text[region.x : region.x + region.width]
+        if not text.strip():
+            continue
+        leads.append(len(text) - len(text.lstrip()))
+    return leads
+
+
+def _card_padding(app: App[None], toast: Toast) -> tuple[int, int]:
+    """``(leading, trailing)`` blank cells around the ink on a one-line card."""
+    region = toast.region
+    strips = app.screen._compositor.render_strips()
+    text = strips[region.y].text[region.x : region.x + region.width]
+    return len(text) - len(text.lstrip()), len(text) - len(text.rstrip())
+
+
 # -- lifecycle ---------------------------------------------------------------
 
 
@@ -356,6 +383,208 @@ async def test_the_card_stays_inside_a_terminal_narrower_than_the_floor() -> Non
             await pilot.pause()
             assert toast.region.right <= width - 1, width
             assert toast.region.x >= 1, width
+
+
+@pytest.mark.asyncio
+async def test_consecutive_receipts_of_different_digit_counts_share_one_edge() -> None:
+    """#170: the card is right-anchored and fits its text, so a digit crossing
+    9→10 moved the left border a cell between two receipts seconds apart
+    (``copied 8 characters`` at x=58 w=21, then ``copied 60 characters`` at
+    x=57 w=22). The floor holds the whole routine receipt family — one to four
+    digits of characters, and every ``copied N lines`` — to a single edge.
+
+    The RIGHT edge is asserted too: an anchor that drifted right would hide a
+    left-edge twitch behind a compensating move rather than remove it.
+    """
+    receipts = [
+        "copied 1 character",
+        "copied 8 characters",
+        "copied 60 characters",
+        "copied 600 characters",
+        "copied 6000 characters",
+        "copied 2 lines",
+        "copied 120 lines",
+    ]
+    async with ToastApp().run_test(size=(80, 24)) as pilot:
+        toast = pilot.app.query_one(Toast)
+        seen = set()
+        for message in receipts:
+            toast.show(message, duration_ms=60_000)
+            await pilot.pause()
+            await pilot.pause()
+            seen.add((toast.region.x, toast.region.right))
+        assert len(seen) == 1, sorted(seen)
+
+
+@pytest.mark.asyncio
+async def test_a_message_past_the_floor_still_sizes_to_its_own_text() -> None:
+    """The floor is a MINIMUM, not a fixed width. A startup summary is wider
+    than any receipt, and pinning every card to the floor would truncate it."""
+    async with ToastApp().run_test(size=(80, 24)) as pilot:
+        toast = pilot.app.query_one(Toast)
+        long_message = "\u2299 MCP ready: 2 servers, 9 tools"
+        toast.show(long_message, duration_ms=60_000)
+        await pilot.pause()
+        await pilot.pause()
+        assert toast.region.width == cell_len(long_message) + 2
+        assert toast.region.width > TOAST_MIN_CARD_WIDTH
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("width", [16, 20, 21, 22, 23, 24, 25, 26])
+async def test_the_floor_never_beats_the_screen_box(width: int) -> None:
+    """The constraint the floor had to respect (#170). ``TOAST_MIN_CARD_WIDTH``
+    is 24, so every width below 26 asks for a card wider than the box — the
+    same shape as the bug ``toast_max_width``'s own floor already caused, where
+    a 20-cell floor painted two cells past an 18-cell box and the compositor
+    clipped the ellipsis off the truncated text.
+
+    ``min_width`` is the specific hazard: it BEATS ``max_width`` in Textual, so
+    a floor written raw onto the widget would overflow whatever the cap said.
+    """
+    async with ToastApp().run_test(size=(width, 12)) as pilot:
+        toast = pilot.app.query_one(Toast)
+        toast.show("copied 8 characters", duration_ms=60_000)
+        await pilot.pause()
+        await pilot.pause()
+        assert toast.region.right <= width - 1, (width, toast.region)
+        assert toast.region.x >= 1, (width, toast.region)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("width", [16, 20, 21, 22, 23, 24, 25, 26, 40, 80])
+async def test_the_floor_never_asks_for_more_than_the_box(width: int) -> None:
+    """The floor's own clamp, asserted where it is decided rather than where it
+    is painted.
+
+    ``_refit`` writes ``min_width = min(TOAST_MIN_CARD_WIDTH, cap)``. Asserting
+    only the rendered region cannot see whether that ``min`` is there: on the
+    pinned Textual (8.2.8) ``max_width`` beats ``min_width``, so the engine
+    clips an over-wide floor anyway and the geometry is identical either way —
+    a mutant that drops the clamp survives every region-based test in this file,
+    including the one named for the constraint.
+
+    So this reads the resolved style. It is the assertion that fails the moment
+    the floor is allowed to ask for more than the screen box, whichever way the
+    engine's precedence happens to fall.
+    """
+    async with ToastApp().run_test(size=(width, 12)) as pilot:
+        toast = pilot.app.query_one(Toast)
+        toast.show("copied 8 characters", duration_ms=60_000)
+        await pilot.pause()
+        await pilot.pause()
+        cap = toast_max_width(width)
+        min_width = toast.styles.min_width
+        assert min_width is not None
+        assert min_width.value <= cap, (width, min_width.value, cap)
+        assert min_width.value == min(TOAST_MIN_CARD_WIDTH, cap), (width, min_width.value)
+
+
+@pytest.mark.asyncio
+async def test_the_floors_slack_is_split_rather_than_left_trailing() -> None:
+    """The floor's padding is balanced, not all on one side (design round 1, D3).
+
+    Left-aligned, a floored card put every spare cell after the text — ``copied
+    2 lines`` came out 1 left / 9 right — which reads as text that failed to
+    fill its box rather than as a card sized on purpose.
+    """
+    async with ToastApp().run_test(size=(80, 24)) as pilot:
+        toast = pilot.app.query_one(Toast)
+        toast.show("copied 2 lines", duration_ms=60_000)
+        await pilot.pause()
+        await pilot.pause()
+        lead, trail = _card_padding(pilot.app, toast)
+        assert abs(lead - trail) <= 1, (lead, trail)
+
+
+#: Messages that paint on more than one row, one per WAY of getting there. The
+#: parametrisation is the point: the guard must key on the rendered rows, not on
+#: whichever cause a test happened to pick (review round 2, F4).
+MULTI_ROW_MESSAGES = [
+    # An explicit newline: the MCP startup summary, a head plus a detail line.
+    pytest.param("\u2299 MCP: 1 of 2 up\nfailed: gh", 80, id="explicit-newline"),
+    pytest.param(
+        "\u2299 MCP: 1 of 2 servers up\nfailed: slack \u2014 command not found",
+        80,
+        id="newline-long",
+    ),
+    # WRAPPING, from a real caller. `OperatorApp.on_auth_required` builds this
+    # untruncated from a server name, so it crosses the card's text budget even
+    # for a two-letter name. This is the case an implementation-shaped test
+    # missed: it has no newline in it at all.
+    pytest.param(
+        "\u2299 MCP gh needs authorization \u2014 run /mcp auth to reconnect it",
+        120,
+        id="wrapped-short-name",
+    ),
+    pytest.param(
+        "\u2299 MCP github-enterprise-server needs authorization \u2014 run /mcp auth"
+        " to reconnect it",
+        120,
+        id="wrapped-long-name",
+    ),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("message,width", MULTI_ROW_MESSAGES)
+async def test_a_card_that_paints_more_than_one_row_is_never_centred(
+    message: str, width: int
+) -> None:
+    """Any multi-row card keeps its rows on one left edge, however it got them.
+
+    Asserted against the INTENT rather than against the guard's condition. The
+    first version of this test passed an explicit ``\n``, so it only exercised
+    ``"\n" not in message`` \u2014 it restated the implementation, and a message that
+    reached two rows by WRAPPING sailed straight past it and staggered (F4, and
+    the same shape as F1 in round 1). The rows are counted in the painted frame,
+    so how the card came by them is not part of the assertion.
+    """
+    async with ToastApp().run_test(size=(width, 24)) as pilot:
+        toast = pilot.app.query_one(Toast)
+        toast.show(message, duration_ms=60_000)
+        await pilot.pause()
+        await pilot.pause()
+        leads = _row_leads(pilot.app, toast)
+        assert len(leads) > 1, f"this case must actually paint >1 row: {leads}"
+        assert len(set(leads)) == 1, leads
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal_width", [66, 80, 120, 200])
+async def test_the_centring_boundary_is_the_cards_own_text_budget(
+    terminal_width: int,
+) -> None:
+    """The wrap/centre THRESHOLD, not just the branch (review round 3, F5).
+
+    ``test_a_card_that_paints_more_than_one_row_is_never_centred`` pins that a
+    wrapped card is left-aligned, but every message it uses is comfortably past
+    the budget \u2014 so an off-by-one in the threshold itself survives it. Widening
+    the clause by a single cell (``<= budget + 1``) leaves that test green and
+    staggers the one message that lands exactly on the boundary.
+
+    So this walks the boundary directly: the last width that still fits one row
+    is centred, and the first that does not is left. Asserted on the PAINTED
+    rows rather than on the style alone, because the property is "the card the
+    user sees is not staggered" and the style is only how it is achieved.
+    """
+    async with ToastApp().run_test(size=(terminal_width, 14)) as pilot:
+        toast = pilot.app.query_one(Toast)
+        budget = toast_max_width(terminal_width) - TOAST_PADDING_CELLS
+
+        toast.show("x" * budget, duration_ms=60_000)
+        await pilot.pause()
+        await pilot.pause()
+        assert len(_row_leads(pilot.app, toast)) == 1, "the budget must still be one row"
+        assert str(toast.styles.text_align) == "center"
+
+        toast.show("x" * (budget + 1), duration_ms=60_000)
+        await pilot.pause()
+        await pilot.pause()
+        leads = _row_leads(pilot.app, toast)
+        assert len(leads) > 1, "one cell past the budget must wrap"
+        assert len(set(leads)) == 1, leads
+        assert str(toast.styles.text_align) == "left"
 
 
 @pytest.mark.asyncio

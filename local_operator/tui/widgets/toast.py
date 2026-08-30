@@ -58,6 +58,30 @@ TOAST_MAX_WIDTH = 60
 TOAST_WIDTH_RESERVE = 6
 TOAST_MIN_WIDTH = 20
 
+#: Narrowest the card is ever DRAWN, so consecutive receipts share one left
+#: edge (#170). The card is right-anchored and fits itself to its text, so
+#: without a floor a digit crossing 9→10 moved the border a cell between two
+#: cards seconds apart: ``copied 8 characters`` is 21 cells and ``copied 60
+#: characters`` is 22, and the user saw the card twitch rather than the number
+#: change.
+#:
+#: 24 is measured from the receipt family rather than chosen for roundness. The
+#: widest routine receipt is ``copied 6000 characters``: 22 cells of text, which
+#: needs a 24-cell CARD once ``TOAST_PADDING_CELLS`` is added. So the floor and
+#: the widest member coincide exactly rather than the floor clearing it with room
+#: to spare — every other receipt (character counts of one to four digits, and
+#: every ``copied N lines``) is narrower and is held to the same edge. Five
+#: digits would twitch again; a copy that large is not a gesture anyone repeats
+#: back to back, which is the case a shared edge is worth paying padding for.
+#:
+#: SUBORDINATE TO THE BOX, always. It is applied inside the
+#: :func:`toast_max_width` clamp, never beside it: a floor that beat the screen
+#: is the exact bug ``test_the_card_stays_inside_a_terminal_narrower_than_the
+#: _floor`` pins, where a 20-cell floor painted two cells past an 18-cell box
+#: and the compositor clipped the ellipsis off the truncated text. On any
+#: terminal below 26 cells this floor simply does not apply.
+TOAST_MIN_CARD_WIDTH = 24
+
 #: The card's own left+right padding (see the tcss rule), subtracted to get the
 #: cells actually available to text.
 TOAST_PADDING_CELLS = 2
@@ -431,7 +455,11 @@ class Toast(Static):
         if not self._message:
             return cap
         longest = max(cell_len(line) for line in self._message.split("\n"))
-        return max(1, min(cap, longest + TOAST_PADDING_CELLS))
+        # The floor is raised INSIDE the cap, so the screen box still has the
+        # last word on width (#170, and see ``TOAST_MIN_CARD_WIDTH``): a card
+        # wider than the terminal is hard-clipped by the compositor, which eats
+        # the ellipsis that says the text was cut.
+        return max(1, min(cap, max(TOAST_MIN_CARD_WIDTH, longest + TOAST_PADDING_CELLS)))
 
     def _refit(self) -> None:
         """Clamp the card, then pull its HOST over to hug it.
@@ -444,7 +472,64 @@ class Toast(Static):
         the notice actually occupies.
         """
         width = self._card_width()
-        self.styles.max_width = toast_max_width(self.app.size.width)
+        cap = toast_max_width(self.app.size.width)
+        self.styles.max_width = cap
+        # Where the floor's slack goes (design round 1, D3). The floor buys a
+        # stable left edge and pays for it in padding, and left-aligned that
+        # padding is ALL trailing: `copied 2 lines` came out 1 left / 9 right and
+        # read as text that failed to fill its box rather than as a sized card.
+        # Centring splits it (5/5) and costs nothing on a message that already
+        # fills the card, where there is no slack to divide.
+        #
+        # ONE-ROW messages only, which is the whole reason this is computed here
+        # rather than declared as `text-align: center` in the tcss. A card that
+        # paints more than one row is read as a block down a shared left edge —
+        # the MCP startup summary is a head plus a `failed: …` detail line — and
+        # centring each row against its own length staggers them, which is worse
+        # than the trailing slack this fixes.
+        #
+        # A message reaches two rows two ways, and the test is on the ROWS rather
+        # than on either cause. An explicit newline is the obvious one. WRAPPING
+        # is the one that bit: `\n not in message` let any message past the text
+        # budget take the centred branch and stagger, and it is reachable from a
+        # real caller — the MCP auth notice (`OperatorApp.on_auth_required`) is
+        # built untruncated from a server name, so `⊙ MCP <name> needs
+        # authorization — run /mcp auth to reconnect it` crosses 58 cells even
+        # for a two-letter name (measured `leads=[1, 29]`, and `[2, 17]` for
+        # `github-enterprise-server`). That is the failure variant, held for
+        # `TOAST_FAILURE_MS` precisely because the user has to read a command out
+        # of it (review round 2, F4).
+        #
+        # The budget is the card's own text box, so this asks the same question
+        # the wrap will: does the longest line fit on one row of THIS card?
+        text_cells = max(
+            (cell_len(line) for line in self._message.split("\n")),
+            default=0,
+        )
+        one_row = "\n" not in self._message and text_cells <= cap - TOAST_PADDING_CELLS
+        self.styles.text_align = "center" if one_row else "left"
+        # The floor is written onto the WIDGET as well, and it has to be: the
+        # card is `width: auto`, so Textual sizes it to its text and `_card_width`
+        # alone would only move the offset — widening the gap on the left while
+        # the right edge crept in, which is the same twitch mirrored (#170).
+        # `min_width` makes the card itself hold the floor, and the offset above
+        # is then computed from the same number, so the two cannot disagree.
+        #
+        # Clamped by `cap` rather than set raw, so the floor can never ASK for
+        # more than the screen box allows. This is deliberately belt-and-braces:
+        # measured on the pinned Textual (8.2.8), `max_width` already wins over
+        # `min_width` — `min_width=24, max_width=18` renders 18 — so the raw
+        # constant would in fact be clipped correctly today, and the load-bearing
+        # clamp is the `min(cap, ...)` inside `_card_width`, which decides the
+        # offset. The clamp stays because that precedence is an undocumented
+        # implementation detail of the layout engine rather than a promise: if it
+        # ever inverts, an unclamped floor paints past the screen's edge padding
+        # on a terminal narrower than 26 cells, which is exactly the failure
+        # `test_the_card_stays_inside_a_terminal_narrower_than_the_floor` pins.
+        # `test_the_floor_never_asks_for_more_than_the_box` asserts this
+        # resolved value directly, because a rendered-region assertion cannot
+        # see the difference while the engine is masking it.
+        self.styles.min_width = min(TOAST_MIN_CARD_WIDTH, cap)
         parent = self.parent
         # The HOST is offset, never the screen: a Toast mounted straight onto the
         # screen would otherwise shift the whole app sideways, which is a far
