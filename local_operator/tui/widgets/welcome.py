@@ -243,10 +243,11 @@ MODEL_SETUP = "setup"
 #: ``ctrl+v`` is deliberately NOT here, though it was tried. A fourth row costs
 #: the splash a whole terminal row (the full block goes 23 -> 24), and the
 #: height ladder pins that budget: at 28 rows the mark is the section that
-#: loses. Trading the logo for a key reference is the wrong trade when the key
-#: has a surface that reaches further for free — the composer placeholder,
-#: which is on screen mid-session where this splash is not (design/ux round 2,
-#: U1). See :data:`~local_operator.tui.widgets.editor.DEFAULT_PLACEHOLDER`.
+#: loses. Trading the logo for a key reference is the wrong trade for a key
+#: most users never need to learn: the native ``Cmd+V`` now works wherever the
+#: terminal forwards it, and ``/help`` names ``ctrl+v`` as the fallback for the
+#: terminals that do not (Terminal.app). The composer placeholder carried this
+#: hint for one release and no longer does.
 HINTS: tuple[tuple[str, str], ...] = (
     ("/", "command picker"),
     ("/help", "all commands"),
@@ -294,9 +295,12 @@ HINT_KEY_WIDTH_TIGHT = max(cell_len(key) for key, _ in HINTS) + 1
 #: seeing the ones that change how the app is used. The copy entry took the slot
 #: held by "Type as the agent works" rather than growing the ring past that
 #: bound: nothing user-facing named the composer's copy KEY, and Mac users reach
-#: for cmd+C, which the terminal eats before the app can see it (Ghostty binds
-#: `super+c` itself), so the gesture failed in total silence and the Ctrl+C
-#: pressed next cleared the draft (design round 1, D4). The tip it replaced
+#: for cmd+C, which Terminal.app eats before the app can see it, so the gesture
+#: failed in total silence there and the Ctrl+C pressed next cleared the draft
+#: (design round 1, D4). cmd+C now works wherever the terminal forwards it (a
+#: kitty-protocol terminal sends `super+c`, which the composer binds), but the
+#: tip still names ctrl+c because that is the chord true of EVERY terminal and
+#: the row has one clause to spend. The tip it replaced
 #: describes behaviour a user discovers by doing it — typing mid-turn works
 #: whether or not anyone said so — whereas an unadvertised key is unreachable
 #: by experiment.
@@ -320,13 +324,15 @@ HINT_KEY_WIDTH_TIGHT = max(cell_len(key) for key, _ in HINTS) + 1
 #: entry made, and it is the strongest case in the pool for that trade. A slash
 #: command is reachable a second way: type `/` and the picker lists it, or open
 #: `/help` and read the table. A KEY is not — and ctrl+v is worse off than
-#: ctrl+c was, because the gesture a user actually tries is not merely
+#: ctrl+c was, because on the terminal where the gesture fails it is not merely
 #: unadvertised but UNOBSERVABLE: `Cmd+V` on an image pasteboard makes
-#: Terminal.app and Ghostty deliver ZERO bytes and beep, so the app never runs
-#: a line of code and cannot teach the key at the moment it fails, however the
-#: notice is worded (measured; see :mod:`local_operator.clipboard`, and
-#: design/ux round 1, D1/U1, where a notice-based hint was found to fire only
-#: in cmux, where `Cmd+V` already works). An ambient surface is not the
+#: Terminal.app deliver ZERO bytes and beep, so the app never runs a line of
+#: code and cannot teach the key at the moment it fails, however the notice is
+#: worded (measured; see :mod:`local_operator.clipboard`, and design/ux round
+#: 1, D1/U1, where a notice-based hint was found to fire only in cmux, where
+#: `Cmd+V` already works). A kitty-protocol terminal instead forwards the chord
+#: and the composer now handles it, so this argument is specifically about the
+#: terminals that swallow it. An ambient surface is not the
 #: cheapest option here, it is the only one. `/analytics` gives up the least:
 #: `/usage` is one row above it and answers the same "what am I spending"
 #: question, so the capability keeps a row in the ring.

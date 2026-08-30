@@ -28,6 +28,7 @@ from local_operator.tui.app import RESIZE_REFIT_DELAY_S, OperatorApp
 from local_operator.tui.widgets.aside_panel import AsidePanel, AsideTurn
 from local_operator.tui.widgets.editor import (
     ASIDE_PLACEHOLDER,
+    DEFAULT_PLACEHOLDER,
     SHELL_PLACEHOLDER,
     Editor,
 )
@@ -495,7 +496,7 @@ async def test_the_aside_yields_to_anything_that_acts_on_the_conversation(
 
         assert not app.query_one(AsidePanel).is_open
         editor = app.query_one(Editor)
-        assert editor.placeholder == editor.resting_placeholder
+        assert editor.placeholder == DEFAULT_PLACEHOLDER
         assert not app._transcript_view().styles.inline.has_rule("padding")
 
 
@@ -536,7 +537,7 @@ async def test_escape_restores_the_main_chat_and_its_half_typed_prompt() -> None
 
         assert not app.query_one(AsidePanel).is_open
         assert editor.text == "port the compaction gate to"
-        assert editor.placeholder == editor.resting_placeholder
+        assert editor.placeholder == DEFAULT_PLACEHOLDER
         assert session.prompts == []
 
 

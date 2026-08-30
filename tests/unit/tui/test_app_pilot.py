@@ -47,6 +47,7 @@ from local_operator.tui.widgets.approval import ApprovalPrompt
 from local_operator.tui.widgets.assistant import AssistantBlock
 from local_operator.tui.widgets.editor import (
     ASIDE_PLACEHOLDER,
+    DEFAULT_PLACEHOLDER,
     SHELL_PLACEHOLDER,
     Editor,
 )
@@ -1931,7 +1932,7 @@ async def test_bang_inside_a_draft_is_just_a_character() -> None:
         await pilot.pause()
         assert editor.shell_mode is False
         assert editor.text == "hi!"
-        assert editor.placeholder == editor.resting_placeholder
+        assert editor.placeholder == DEFAULT_PLACEHOLDER
 
 
 @pytest.mark.asyncio
@@ -1952,7 +1953,7 @@ async def test_escape_and_empty_backspace_leave_shell_mode() -> None:
         await pilot.pause()
         assert editor.shell_mode is False
         assert editor.text == "ls"
-        assert editor.placeholder == editor.resting_placeholder
+        assert editor.placeholder == DEFAULT_PLACEHOLDER
         assert not app.query_one("#input-dock").has_class(COMPOSER_SHELL_CLASS)
         assert session.aborts == []
 
@@ -7211,6 +7212,68 @@ def test_help_mentions_the_window_title_toggle() -> None:
     assert "lop config edit display.terminal_title false" in text
     assert "LOCAL_OPERATOR_NO_TERMINAL_TITLE" in text
     assert "lo ›" in text and "lo ⣾" in text and "lo !" in text
+
+
+@pytest.mark.asyncio
+async def test_the_paste_key_rows_do_not_wrap_at_eighty_columns() -> None:
+    """Both key-reference rows fit on ONE line at the commonest terminal width.
+
+    This defect has now shipped twice. `paste_note`'s copy was shortened from
+    77 cells for it (#402, design round 1 D2), and the `cmd+v` row added beside
+    it reintroduced it at 75 cells — caught independently by all three round-1
+    reviewers (D1/F1/U2). Neither occurrence had a test, which is why the
+    second one was possible.
+
+    The failure shape is what makes it worth pinning rather than eyeballing:
+    these notes `ljust(name_width)` the FIRST line only and have no
+    continuation indent, so an overflowing description wraps to column 0 — the
+    KEY gutter — and the tail reads as another key row rather than as the rest
+    of a sentence. At 80 columns the user saw `Terminal.app)` sitting where a
+    keybinding belongs.
+
+    Asserted against the REAL PAINTED FRAME, not against a string length. The
+    gutter is `name_width`, which is derived from the longest command name, so
+    the budget shrinks whenever a command with a longer name is added: a test
+    pinning today's copy to today's arithmetic would keep passing while the
+    row silently wrapped again. Reading the compositor asks the only question
+    that matters — is this row one line or two.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(80, 44)) as pilot:
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        editor.load_text("/help")
+        await pilot.pause()
+        await pilot.press("enter")
+        for _ in range(40):
+            await pilot.pause()
+
+        painted = [
+            "".join(segment.text for segment in strip).rstrip()
+            for strip in app.screen._compositor.render_strips()
+        ]
+
+    # The whole description has to be ON the key's own row. A wrap is visible
+    # as the row losing its tail, so assert the last word of each note is
+    # present on the same line the key opens — the shape a hanging continuation
+    # breaks by construction.
+    for key, tail in (
+        ("ctrl+v", "system clipboard"),
+        ("cmd+v", "not Terminal.app"),
+    ):
+        row = next(
+            (row for row in painted if row.strip().startswith(f"{key} ")),
+            None,
+        )
+        assert row is not None, f"the {key} row is missing from /help"
+        assert tail in row, (
+            f"the {key} help row wrapped at 80 columns: {row.strip()!r} does not "
+            f"carry {tail!r}, so the tail hangs at column 0 in the KEY gutter "
+            "where it reads as another key row (design round 1 D2, again as "
+            "D1/F1/U2)"
+        )
 
 
 @pytest.mark.asyncio

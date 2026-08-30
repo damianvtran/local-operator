@@ -1,0 +1,69 @@
+import os, pty, re, select, subprocess, sys, time
+KEYS = {"super+v": b"\x1b[118;9u", "super+c": b"\x1b[99;9u",
+        "ctrl+v": b"\x1b[118;5u", "ctrl+c": b"\x1b[99;5u",
+        "shift+left": b"\x1b[1;2D"}
+def drain(fd, secs):
+    out, end = [], time.time()+secs
+    while time.time() < end:
+        r,_,_ = select.select([fd],[],[],0.2)
+        if not r: continue
+        try: c = os.read(fd, 65536)
+        except OSError: break
+        if not c: break
+        out.append(c.decode("utf-8","replace"))
+    return "".join(out)
+def vis(s): return re.sub(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07\x1b]*(\x07|\x1b\\)", "", s)
+def boot():
+    m,s = pty.openpty()
+    env = {**os.environ, "TERM":"xterm-256color","COLUMNS":"100","LINES":"30",
+           "LOCAL_OPERATOR_NO_TERMINAL_TITLE":"1"}
+    env.pop("NO_COLOR", None)
+    p = subprocess.Popen([sys.executable,"-m","local_operator.cli"],
+                         stdin=s,stdout=s,stderr=s,env=env,close_fds=True)
+    os.close(s); drain(m, 15.0); return m,p
+def find(txt, needle): return needle in txt
+
+# 1. Cmd+V with an image on the clipboard
+subprocess.run(["osascript","-e",'set the clipboard to (read (POSIX file "/tmp/lop-cmd/static/mobile-session-view.png") as JPEG picture)'],capture_output=True)
+m,p = boot()
+try:
+    os.write(m, KEYS["super+v"]); time.sleep(3.0)
+    o = vis(drain(m, 3.0))
+    print("1 Cmd+V image  ->", "[Image #" in o, [l.strip() for l in o.splitlines() if "[Image #" in l][:1])
+finally:
+    p.terminate(); p.wait(timeout=10); os.close(m)
+
+# 2. Ctrl+V with an image (regression)
+m,p = boot()
+try:
+    os.write(m, KEYS["ctrl+v"]); time.sleep(3.0)
+    o = vis(drain(m, 3.0))
+    print("2 Ctrl+V image ->", "[Image #" in o)
+finally:
+    p.terminate(); p.wait(timeout=10); os.close(m)
+
+# 3. Cmd+C with NO selection must not copy; draft survives. NOTE the chord:
+#    for CTRL+C with no selection "must not copy" would be wrong — that is the
+#    interrupt rung. super+c carries no interrupt meaning, so doing nothing is
+#    its correct behaviour (ux round 2, U4).
+subprocess.run(["pbcopy"], input=b"")
+m,p = boot()
+try:
+    os.write(m, b"draft must survive"); time.sleep(1.5); drain(m,1.0)
+    os.write(m, KEYS["super+c"]); time.sleep(1.5)
+    o = vis(drain(m, 2.0))
+    print("3 Cmd+C no-sel ->", "no copy:", "copied" not in o, "| draft kept:", "draft must survive" in o)
+finally:
+    p.terminate(); p.wait(timeout=10); os.close(m)
+
+# 4. Ctrl+C copy route with a live selection (regression)
+m,p = boot()
+try:
+    os.write(m, b"regression check"); time.sleep(1.5); drain(m,1.0)
+    for _ in range(5): os.write(m, KEYS["shift+left"]); time.sleep(0.25)
+    drain(m,1.0)
+    os.write(m, KEYS["ctrl+c"]); time.sleep(1.5)
+    o = vis(drain(m, 2.0))
+    print("4 Ctrl+C copy  ->", "copied" in o)
+finally:
+    p.terminate(); p.wait(timeout=10); os.close(m)

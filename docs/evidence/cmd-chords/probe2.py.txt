@@ -1,0 +1,45 @@
+"""Capture raw stdin bytes with kitty keyboard protocol + bracketed paste on.
+
+Uses select() rather than non-blocking polling: the earlier probe set
+O_NONBLOCK on a tty shared with the shell, and the shell's own reader raced it
+for the bytes, so keystrokes were consumed elsewhere and the capture came back
+empty even for plain characters.
+
+Usage: probe2.py <outfile> [seconds]
+"""
+
+import os
+import select
+import sys
+import termios
+import time
+import tty
+
+out = sys.argv[1] if len(sys.argv) > 1 else "/tmp/kprobe/out.bin"
+secs = float(sys.argv[2]) if len(sys.argv) > 2 else 15.0
+
+fd = sys.stdin.fileno()
+old = termios.tcgetattr(fd)
+buf = b""
+try:
+    tty.setraw(fd)
+    os.write(1, b"\x1b[>13u")  # kitty: disambiguate + alternates + all-keys
+    os.write(1, b"\x1b[?2004h")  # bracketed paste
+    os.write(1, b"PROBE READY\r\n")
+    end = time.time() + secs
+    while True:
+        left = end - time.time()
+        if left <= 0:
+            break
+        r, _, _ = select.select([fd], [], [], min(0.2, left))
+        if r:
+            b = os.read(fd, 8192)
+            if b:
+                buf += b
+    os.write(1, b"\x1b[<u")
+    os.write(1, b"\x1b[?2004l")
+finally:
+    termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+open(out, "wb").write(buf)
+sys.stdout.write("\r\nCAPTURED %d bytes: %r\r\n" % (len(buf), buf[:300]))
