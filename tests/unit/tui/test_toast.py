@@ -26,6 +26,7 @@ from local_operator.tui.widgets.toast import (
     TOAST_FAILURE_MS,
     TOAST_MAX_WIDTH,
     TOAST_MIN_CARD_WIDTH,
+    TOAST_PADDING_CELLS,
     TOAST_MIN_WIDTH,
     Toast,
     format_mcp_startup,
@@ -547,6 +548,43 @@ async def test_a_card_that_paints_more_than_one_row_is_never_centred(
         leads = _row_leads(pilot.app, toast)
         assert len(leads) > 1, f"this case must actually paint >1 row: {leads}"
         assert len(set(leads)) == 1, leads
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal_width", [66, 80, 120, 200])
+async def test_the_centring_boundary_is_the_cards_own_text_budget(
+    terminal_width: int,
+) -> None:
+    """The wrap/centre THRESHOLD, not just the branch (review round 3, F5).
+
+    ``test_a_card_that_paints_more_than_one_row_is_never_centred`` pins that a
+    wrapped card is left-aligned, but every message it uses is comfortably past
+    the budget \u2014 so an off-by-one in the threshold itself survives it. Widening
+    the clause by a single cell (``<= budget + 1``) leaves that test green and
+    staggers the one message that lands exactly on the boundary.
+
+    So this walks the boundary directly: the last width that still fits one row
+    is centred, and the first that does not is left. Asserted on the PAINTED
+    rows rather than on the style alone, because the property is "the card the
+    user sees is not staggered" and the style is only how it is achieved.
+    """
+    async with ToastApp().run_test(size=(terminal_width, 14)) as pilot:
+        toast = pilot.app.query_one(Toast)
+        budget = toast_max_width(terminal_width) - TOAST_PADDING_CELLS
+
+        toast.show("x" * budget, duration_ms=60_000)
+        await pilot.pause()
+        await pilot.pause()
+        assert len(_row_leads(pilot.app, toast)) == 1, "the budget must still be one row"
+        assert str(toast.styles.text_align) == "center"
+
+        toast.show("x" * (budget + 1), duration_ms=60_000)
+        await pilot.pause()
+        await pilot.pause()
+        leads = _row_leads(pilot.app, toast)
+        assert len(leads) > 1, "one cell past the budget must wrap"
+        assert len(set(leads)) == 1, leads
+        assert str(toast.styles.text_align) == "left"
 
 
 @pytest.mark.asyncio
