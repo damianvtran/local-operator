@@ -263,8 +263,27 @@ def test_key_validation_and_historical_double_click_are_explicit() -> None:
         DoubleClickAction(observation_id="observation-7", frame_id="frame-1", x=10, y=20).kind
         == "double_click"
     )
+    with pytest.raises(ValidationError):
+        DoubleClickAction(
+            observation_id="observation-7",
+            frame_id="frame-1",
+            x=10,
+            y=20,
+            button="right",  # type: ignore[arg-type]
+        )
     with pytest.raises(ValidationError, match="unknown key"):
         KeyAction(observation_id="observation-7", keys=("NOT_A_KEY",))
+
+
+def test_user_facing_strings_and_identifiers_reject_whitespace_only_values() -> None:
+    with pytest.raises(ValidationError):
+        TypeAction(observation_id="observation-7", text="   ")
+    with pytest.raises(ValidationError):
+        AskUserAction(observation_id="observation-7", request_id="   ", question="Which one?")
+    with pytest.raises(ValidationError):
+        AskUserAction(observation_id="observation-7", request_id="request-1", question="\n")
+    with pytest.raises(ValidationError):
+        FinishAction(observation_id="observation-7", status="failed", reason="\t")
 
 
 def test_batch_preserves_action_order_across_canonical_round_trip() -> None:

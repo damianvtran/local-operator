@@ -149,7 +149,7 @@ class Observation(ProtocolModel):
     episode_id: Identifier
     sequence: int = Field(ge=0, le=2**63 - 1)
     observation_id: Identifier
-    text: str | None = Field(default=None, max_length=MAX_TEXT_LENGTH)
+    text: str | None = Field(default=None, min_length=1, max_length=MAX_TEXT_LENGTH, pattern=r"\S")
     frames: tuple[FrameRef, ...] = Field(default=(), max_length=32)
     metadata: dict[str, JsonValue] = Field(default_factory=dict)
 
@@ -197,15 +197,20 @@ class ClickAction(_PointerAction):
     kind: Literal["click"] = "click"
 
 
-class DoubleClickAction(_PointerAction):
+class DoubleClickAction(_FrameAction):
     """A distinct action retained because existing compilers emit double-click."""
 
     kind: Literal["double_click"] = "double_click"
+    x: Coordinate
+    y: Coordinate
+    # Historical compilers only emit left-button double clicks; closing this
+    # now avoids inventing adapter semantics that no implementation has proved.
+    button: Literal["left"] = "left"
 
 
 class TypeAction(_Action):
     kind: Literal["type"] = "type"
-    text: str = Field(min_length=1, max_length=MAX_TEXT_LENGTH)
+    text: str = Field(min_length=1, max_length=MAX_TEXT_LENGTH, pattern=r"\S")
 
 
 _NAMED_KEYS = frozenset(
@@ -283,7 +288,7 @@ class FinishAction(_Action):
 
     kind: Literal["finish"] = "finish"
     status: Literal["done", "failed", "infeasible"]
-    reason: str = Field(min_length=1, max_length=10_000)
+    reason: str = Field(min_length=1, max_length=10_000, pattern=r"\S")
 
 
 class AskUserAction(_Action):
@@ -291,7 +296,7 @@ class AskUserAction(_Action):
 
     kind: Literal["ask_user"] = "ask_user"
     request_id: Identifier
-    question: str = Field(min_length=1, max_length=10_000)
+    question: str = Field(min_length=1, max_length=10_000, pattern=r"\S")
 
 
 ComputerAction: TypeAlias = Annotated[
