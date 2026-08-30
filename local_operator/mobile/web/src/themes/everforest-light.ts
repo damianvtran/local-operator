@@ -48,8 +48,11 @@ export const everforestLight: ThemeDefinition = {
 		// Upstream blue #3A94C5 is 2.33:1 on `sunken`; darkened on-hue and
 		// taken to 5.25:1 so `accentActive` still clears 4.5.
 		accent: "#566201",
-		accentHover: "#1B445A",
-		accentActive: "#276283",
+		accentHover: "#465001",
+		// Same M1 fix as the dark variant: these were still the old blue after
+		// accent moved to green, a 140 degree hue jump on hover. A light theme
+		// has room below its accent, so these are ordinary value steps.
+		accentActive: "#373E01",
 		accentWash: "#D9DDCE",
 		onAccent: "#FDF6E3",
 

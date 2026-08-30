@@ -49,8 +49,14 @@ export const everforest: ThemeDefinition = {
 		// the canonical green (4.70:1 worst ground) and `info` takes the
 		// canonical blue-teal (5.20:1), matching the TUI palette.
 		accent: "#A7C080",
-		accentHover: "#B1D6D1",
-		accentActive: "#85BFB6",
+		accentHover: "#B7D28C",
+		// Active is a SATURATION step, not a darker one: the green is already at
+		// 4.70:1 on its worst ground, so a value step down lands at 4.09 and
+		// breaks the floor. Deepening the chroma at the same lightness keeps
+		// hue 83 and reads as pressed (design review M1 — hover/active were
+		// left on the old blue when accent moved to green, so the button
+		// changed hue by 63 degrees on hover).
+		accentActive: "#A0C06D",
 		accentWash: "#3A4448",
 		onAccent: "#2D353B",
 

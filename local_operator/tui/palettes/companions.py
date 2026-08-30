@@ -137,12 +137,12 @@ PALETTES: list[ThemeSpec] = [
             "danger": "#9d0006",  # canonical faded_red
             "string": "#427b58",  # canonical faded_aqua
             # faded_aqua, not faded_orange. The first solve gave `signal` the
-            # orange #af3a03, which sits only 15.9 dE from danger #9d0006 —
+            # orange #af3a03, which sits only ΔE00 10.79 from danger #9d0006 —
             # both dark red-orange on cream, and in the rendered frame the
             # failed row's message and the inline code were the same colour to
             # the eye, so "error" stopped being a distinguishable state
             # (design review D5). Aqua is equally canonical, clears the floor
-            # on both grounds (4.40:1 / 4.11:1), and lands 89.7 dE off danger.
+            # on both grounds (4.40:1 / 4.11:1), and lands ΔE00 55.15 off danger.
             "signal": "#427b58",  # canonical faded_aqua
             "label": "#8f3f71",  # canonical faded_purple
             "tint-danger": "#f6e2c2",

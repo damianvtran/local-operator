@@ -70,7 +70,7 @@ export const gruvboxLight: ThemeDefinition = {
 		dangerBorder: "#BC0007",
 
 		// faded_orange. Kept distinct from `warning`'s darkened yellow so a
-		// faded_aqua, not faded_orange. The orange sat only 15.9 dE from
+		// faded_aqua, not faded_orange. The orange sat only ΔE00 10.79 from
 		// `danger`'s faded_red — both dark red-orange on cream, so an error
 		// message and an informational path read as one colour (design
 		// review D5). Aqua is equally canonical; darkened one step from

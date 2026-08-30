@@ -114,13 +114,13 @@ PALETTES: list[ThemeSpec] = [
         tokens={
             "bg": "#FDF6E3",  # canonical bg0
             "surface": "#F4F0D9",  # canonical bg1
-            "raised": "#EFEBD4",  # canonical bg2
-            # Canonical bg3 #E6E2CC is only ΔE 3.17 from bg2, and on paper that
-            # top step reads as no step at all (design review D2: the last two
-            # elevation rungs were indistinguishable in the frame). Taken to
-            # the SOFT variant's bg3 instead — still an upstream everforest
-            # ground, ΔE 6.94 from raised, so a dialog reads as lifted.
-            "overlay": "#DDD8BE",  # canonical bg3 (soft); medium's is ΔE 3.17
+            "raised": "#E6E2CC",  # canonical bg3 (bg2 sits ΔE00 1.06 from surface)
+            # Canonical bg2 #EFEBD4 sits only ΔE00 1.06 from bg1, and on paper that
+            # middle step reads as no step at all (design review D2: elevation
+            # rungs were indistinguishable in the frame). `raised` takes bg3
+            # and `overlay` the SOFT variant's bg3 — both upstream everforest
+            # grounds — for an even 2.72 / 3.02 / 2.68 ΔE00 ladder.
+            "overlay": "#DDD8BE",  # canonical bg3 (soft variant)
             "sunken": "#F8F2DC",  # a hair below bg0 — light polarity has no well
             # Canonical fg #5C6A72 is 5.18:1 on bg0 (< 7); darkened on-hue.
             "fg": "#465157",
@@ -348,7 +348,7 @@ PALETTES: list[ThemeSpec] = [
         tokens={
             # Upstream ayu light defines three near-identical whites for its
             # panel chrome: editor.bg #FCFCFC, ui.panel.bg #FAFAFA and ui.bg
-            # #F8F9FA sit within dE 0.7 of each other. In an EDITOR that is
+            # #F8F9FA sit within ΔE00 0.73 of each other. In an EDITOR that is
             # fine — the panels are separated by borders and the code area is
             # the only large field. This UI has no borders on a tool row: the
             # ledger's rows are told apart by their GROUND alone, so those
@@ -356,12 +356,13 @@ PALETTES: list[ThemeSpec] = [
             # page (design review D1 — only the danger row was locatable).
             #
             # So bg keeps the canonical editor white and the rungs above it
-            # are re-solved on ayu's own cool grey axis at ~dE 2.9 per step,
-            # just past the ~2 the eye needs. Deviating here is the only way
+            # are re-solved on ayu's own cool grey axis at ΔE00 1.77 / 1.81 per
+            # step — the same separation catppuccin-latte ships (1.77) and
+            # wider than solarized-light's (1.37). Deviating here is the only way
             # this theme can show a tool row at all.
             "bg": "#FCFCFC",  # canonical editor.bg
-            "surface": "#F3F4F5",  # canonical ui.panel.bg #FAFAFA: dE 0.40 (invisible)
-            "raised": "#EAECEE",  # canonical ui.bg #F8F9FA: dE 0.73 from surface
+            "surface": "#F3F4F5",  # canonical ui.panel.bg #FAFAFA: ΔE00 0.40 (invisible)
+            "raised": "#EAECEE",  # canonical ui.bg #F8F9FA: ΔE00 0.73 from surface
             "overlay": "#DDE1E4",  # deepened from surface.sunk #EBEEF0 for the last step
             "sunken": "#F7F8F9",
             # Canonical editor.fg #5C6166 is 6.10:1 on the paper (< 7);
@@ -371,7 +372,8 @@ PALETTES: list[ThemeSpec] = [
             # enough from `bg` to be SEEN costs contrast on everything
             # measured against it. At canonical #FAFAFA the inks cleared
             # comfortably and no tool row was visible; at a surface the eye
-            # can find, `fg` fell to 6.74:1 and six state hues to ~3.85:1.
+            # can find, `fg` fell to 6.74:1 ON SURFACE (the ground the gate
+            # checks) and six state hues to ~3.85:1.
             # Deepening the ink is what buys the ladder — the alternative was
             # a theme that passes the gate and shows no ledger.
             "fg": "#4D5256",
