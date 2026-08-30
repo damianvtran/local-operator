@@ -94,9 +94,12 @@ def resolve_hosting_model(
             # second literal here drifts from it the first time either is
             # reworded. Imported lazily to keep this off the session_factory
             # stack until the rare no-default path is actually hit.
-            from local_operator.session_factory import _no_model_message
+            from local_operator.session_factory import (
+                ModelNotConfiguredError,
+                _no_model_message,
+            )
 
-            raise ValueError(_no_model_message(hosting))
+            raise ModelNotConfiguredError(_no_model_message(hosting), hosting)
     return hosting, model_name
 
 

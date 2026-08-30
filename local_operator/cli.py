@@ -2133,11 +2133,54 @@ def _preflight_hosting_model(
     """
     from local_operator.session_factory import (
         HostingNotConfiguredError,
+        HostingUnknownError,
+        ModelNotConfiguredError,
         resolve_hosting_model,
     )
 
     try:
         hosting, _model_name = resolve_hosting_model(current_agent, args, config_manager)
+    except ModelNotConfiguredError as exc:
+        # Hosting is a real provider but has no resolvable model -- the state
+        # `/login <provider-with-no-default>` writes on purpose. Recoverable on
+        # the interactive path in EXACTLY the way an unknown hosting is: the
+        # setup state's `/model` picker writes the missing value, so the app
+        # opens rather than refusing to launch. Ordered before its base class
+        # for the same reason the HostingUnknownError branch is: it is a
+        # subclass and would otherwise be swallowed by that handler, which
+        # would print the first-run quickstart and never mention the model.
+        if allow_setup_state:
+            return None
+        # Non-interactive paths keep fail-fast with the informative message: a
+        # scripted or CI run has nobody to answer a picker, and limping along
+        # on a model nobody chose is how a cron job silently bills a different
+        # provider. Same shape as the ValueError branch below, which this
+        # branch now shadows for the resolver's own raise.
+        from local_operator.cli_style import ERROR, paint
+
+        print(paint(f"Error: {exc}", ERROR, stream=sys.stderr), file=sys.stderr)
+        return 1
+    except HostingUnknownError as exc:
+        # Hosting names a provider the registry does not own (a typo, a
+        # hand-edited config, an id dropped by an upgrade). Recoverable in
+        # EXACTLY the way "nothing configured" is -- the user fixes it with
+        # `/login` or `/provider` from inside the app -- so the interactive TUI
+        # path opens in the same setup state rather than dying at preflight.
+        # Ordered before the HostingNotConfiguredError branch because it is a
+        # subclass of it and would otherwise be swallowed by that handler, which
+        # would print the first-run quickstart and never name the bad value.
+        if allow_setup_state:
+            return None
+        # Non-interactive paths (headless REPL, exec, non-tty) keep fail-fast:
+        # a scripted run must not limp along with no usable model. The message
+        # names the offending value AND the remedy, following
+        # `_print_first_run_quickstart`'s "name everything at once" principle --
+        # the quickstart itself is wrong here, because it says "nothing is
+        # configured" when something IS configured, just not to a real provider.
+        from local_operator.cli_style import ERROR, paint
+
+        print(paint(f"Error: {exc}", ERROR, stream=sys.stderr), file=sys.stderr)
+        return 1
     except HostingNotConfiguredError:
         # No hosting resolved. On the interactive TUI path this is not an error:
         # the app opens in a setup state so the user can `/login` from inside it.

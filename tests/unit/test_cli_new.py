@@ -1008,6 +1008,94 @@ def test_main_preflight_missing_hosting_tty_enters_setup(
     assert seen.get("on_config_changed") is not None
 
 
+def _bad_hosting_config_manager(*args, **kwargs) -> MagicMock:
+    """ConfigManager stand-in whose hosting names no real provider.
+
+    Mirrors the corrupted `config.yml` that motivated the fix: a typo'd hosting
+    beside a perfectly valid model name, which is why the failure surfaced as
+    "Unsupported hosting platform" rather than as a missing-model error.
+    """
+    values = {"hosting": "anthropicxyq", "model_name": "claude-sonnet-4-5"}
+    return MagicMock(get_config_value=lambda key, *a: values.get(key, False))
+
+
+def test_main_preflight_unknown_hosting_tty_enters_setup(
+    tmp_home: Path, quiet_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """tty + a hosting the registry does not own -> the app OPENS (setup state).
+
+    The hotfix: this configuration used to fail preflight/boot outright, so the
+    user got a red "session failed to start" and, with no session, could not
+    use `/login` or `/model` to escape it either. It is now classified exactly
+    like the nothing-configured case, which is the state the in-app remedies
+    work from.
+    """
+    seen: dict[str, Any] = {}
+
+    async def fake_create_session(*args, **kwargs):
+        seen["factory_called"] = True
+        return object()
+
+    monkeypatch.setattr("local_operator.cli.create_session", fake_create_session)
+
+    fake_tui = types.ModuleType("local_operator.tui")
+
+    async def fake_run_tui(
+        session_factory,
+        theme_name: str = "dark",
+        provider_controller=None,
+        resume_factory=None,
+        on_config_changed=None,
+    ) -> int:
+        seen["launched"] = True
+        return 0
+
+    setattr(fake_tui, "run_tui", fake_run_tui)
+    monkeypatch.setitem(sys.modules, "local_operator.tui", fake_tui)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr("local_operator.cli.ConfigManager", _bad_hosting_config_manager)
+    monkeypatch.setattr("local_operator.cli.CredentialManager", MagicMock())
+    monkeypatch.setattr("local_operator.agents.AgentRegistry", MagicMock())
+
+    with patch("sys.argv", ["program"]):
+        assert main() == 0
+    assert seen.get("launched") is True
+
+
+def test_main_preflight_unknown_hosting_non_tty_fails_fast_naming_the_value(
+    tmp_home: Path, quiet_env: None, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """Non-tty keeps fail-fast, with a message naming the value AND the remedy.
+
+    A scripted/CI run must not limp along with no usable model. It must also
+    not be told "nothing is configured" (the first-run quickstart), because
+    something IS configured -- just not to a real provider, and the user needs
+    to know WHICH word in their config is wrong.
+    """
+    called: dict[str, bool] = {"factory": False}
+
+    async def fake_create_session(*args, **kwargs):
+        called["factory"] = True
+        return MagicMock()
+
+    monkeypatch.setattr("local_operator.cli.create_session", fake_create_session)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: False)
+    monkeypatch.setattr("local_operator.cli.ConfigManager", _bad_hosting_config_manager)
+    monkeypatch.setattr("local_operator.cli.CredentialManager", MagicMock())
+    monkeypatch.setattr("local_operator.agents.AgentRegistry", MagicMock())
+
+    with patch("sys.argv", ["program"]):
+        assert main() == 1
+    err = capsys.readouterr().err
+    assert "anthropicxyq" in err
+    assert "not a known provider" in err
+    # The remedy, not just the diagnosis.
+    assert "config edit hosting" in err or "login <provider>" in err
+    # NOT the first-run quickstart: it would contradict the user's own file.
+    assert "not configured yet" not in err
+    assert called["factory"] is False
+
+
 def test_main_interactive_missing_api_key_warns_and_starts(
     tmp_home: Path,
     quiet_env: None,
