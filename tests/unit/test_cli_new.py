@@ -1505,3 +1505,28 @@ def test_soft_death_sigterm_handler_reaps_then_chains(monkeypatch):
         assert prior_calls == [signal.SIGTERM]
     finally:
         signal.signal(signal.SIGTERM, original_term)
+
+
+def test_agents_list_hides_the_seed_provenance_marker(capsys) -> None:
+    """F9: `seed:<name>` records that a role was installed from a packaged
+    starter, so `agent op='reset'` knows it may restore it. It is bookkeeping
+    this listing's reader cannot act on, and it does not belong in a
+    human-facing inventory beside tags they wrote."""
+    registry = MagicMock()
+    agent = MagicMock()
+    agent.name = "reviewer"
+    agent.id = "r-1"
+    agent.created_date = "now"
+    agent.version = "1.0.0"
+    agent.hosting = ""
+    agent.model = ""
+    agent.description = "Reviewing a merge request"
+    agent.tags = ["role", "seed:reviewer", "tools:read,grep"]
+    agent.categories = ["role"]
+    registry.list_agents.return_value = [agent]
+
+    assert agents_list_command(argparse.Namespace(page=1, perpage=10), registry) == 0
+
+    output = capsys.readouterr().out
+    assert "seed:reviewer" not in output
+    assert "Tags: role, tools:read,grep" in output, "the tags a human set still show"

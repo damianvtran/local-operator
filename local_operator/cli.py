@@ -46,6 +46,7 @@ from importlib.metadata import version
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
+from local_operator.agent_profiles import SEED_ORIGIN_PREFIX
 from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
 from local_operator.env import get_env_config
@@ -1549,8 +1550,15 @@ def agents_list_command(args: argparse.Namespace, agent_registry: "AgentRegistry
         print(f"\033[1;32m{left_bar}   • Model: {agent.model or 'default'}\033[0m")
         if agent.description:
             print(f"\033[1;32m{left_bar}   • Description: {agent.description}\033[0m")
-        if agent.tags:
-            print(f"\033[1;32m{left_bar}   • Tags: {', '.join(agent.tags)}\033[0m")
+        # The `seed:` provenance marker is bookkeeping this listing's reader
+        # cannot act on: it records that a role was installed from a packaged
+        # starter so `agent op='reset'` knows it may restore it. Hiding it
+        # keeps a machine-only tag out of a human-facing inventory.
+        shown_tags = [
+            tag for tag in agent.tags if not str(tag).strip().lower().startswith(SEED_ORIGIN_PREFIX)
+        ]
+        if shown_tags:
+            print(f"\033[1;32m{left_bar}   • Tags: {', '.join(shown_tags)}\033[0m")
         if agent.categories:
             print(f"\033[1;32m{left_bar}   • Categories: {', '.join(agent.categories)}\033[0m")
         if not is_last:
