@@ -1046,13 +1046,13 @@ def _should_compact(
 _ADVISOR_MIN_RECLAIM_FRACTION = 0.10
 
 #: How many ``keep_recent_tokens`` the preserve window may grow to
-#: (:meth:`Session._advisor_floor_cap`, which carries the full derivation).
-#: Sized by the MEASURED active-task spans at ``compaction/cutpoint.py``
-#: ``task_boundary_floor`` (p50 32k, p90 99k against a 20,000 default): 5x is
-#: the smallest whole multiple that clears that p90, so an ordinary long
-#: agentic turn is kept whole and only the outliers are clipped. 4x (80,000)
-#: would clip the p90 itself. A MULTIPLE rather than an absolute, so the cap
-#: tracks a user who configures a wider verbatim window.
+#: (:meth:`Session._advisor_floor_cap`, which carries the full derivation and
+#: the limits of the evidence for this exact value). Sized against 17 measured
+#: active-task spans, which are bimodal: thirteen under 54k and four between
+#: 113k and 132k. 5x the 20,000 default lands the bound at 100,000 — above
+#: every ordinary task, below the outlier cluster that drove 35-41% retention.
+#: A MULTIPLE rather than an absolute, so the cap tracks a user who configures
+#: a wider verbatim window.
 _TASK_FLOOR_KEEP_MULTIPLE = 5
 
 
@@ -6224,19 +6224,26 @@ class Session:
             # estimator. Subtracting a local saving from a provider total
             # (the previous ``context_tokens - (tokens_before -
             # history_after)``) silently assumes those two rulers agree
-            # 1-for-1. They do not. Fitting ``provider = a * local + b`` inside
-            # contiguous model-homogeneous runs of a real 10-pass session gives
-            # a slope of 1.65-1.73 on Anthropic (117 points at slope 1.728 with
-            # a mean fit error of 241 tokens — structural, not noise) against
-            # 1.03 for an OpenAI control in the SAME session with the same tool
-            # schemas. So the divergence is the provider's tokenizer on
-            # code/JSON-dense content, not content we failed to count (the wire
-            # body tokenizes to 295k against the estimator's 304k). Every
-            # locally-measured token the old form subtracted was therefore
-            # worth ~1.7 provider tokens, and the receipt understated each pass
-            # by ~140k: the screenshot that motivated this read "546.5k →
-            # 419.0k (23% smaller)" for a pass whose true after-figure was
-            # 311.2k, a 43% reduction.
+            # 1-for-1. They do not. Fitting ``provider = a * local + b`` over a
+            # real 10-pass session (``docs/evidence/compaction-ruler/
+            # slope_fit.py``) puts ``claude-opus-5`` at slope 1.685 and
+            # ``claude-opus-4-8`` at 1.622, against 1.036 for an OpenAI control
+            # and 1.019 for GLM in the SAME session with the same tool schemas.
+            # The per-request ratio on opus-5 runs 1.75-1.90. So the divergence
+            # is the provider's tokenizer on code/JSON-dense content, not
+            # content we failed to count.
+            #
+            # It is a per-MODEL property, which is the reason this code carries
+            # no slope constant. The same fit run per EPOCH shows the three
+            # single-model stretches fitting tightly (mean error 419 / 653 /
+            # 1,415 tokens) while every model-switching stretch does not
+            # (9,913 to 71,026) — one line cannot describe two tokenizers.
+            #
+            # Every locally-measured token the old form subtracted was
+            # therefore worth ~1.7 provider tokens on Anthropic, and the
+            # receipt understated each pass by ~140k: the screenshot that
+            # motivated this read "546.5k → 419.0k (23% smaller)" for a pass
+            # whose true after-figure was 311.2k, a 43% reduction.
             #
             # Scaling PROPORTIONALLY fixes that without either ruler's
             # constants having to be known. History shrank to ``history_after /
@@ -6254,14 +6261,14 @@ class Session:
             # the overhead too, though a pass never removes a system block or
             # a tool schema. That biases the estimate LOW by
             # ``overhead * (1 - history_after / history_before)``. It is
-            # dominated by the tokenizer skew it corrects — on a session whose
-            # history runs 300-500k the overhead is a few percent — and the
-            # measured residual is in fact biased slightly HIGH (+6k to +16k on
-            # eight of ten passes), so subtracting a separately-estimated
+            # dominated by the tokenizer skew it corrects, and the measured
+            # residual is in fact biased slightly HIGH (+4.3k to +16.2k on
+            # eight of the ten passes), so subtracting a separately-estimated
             # overhead here would make the answer worse, not better. The
             # overhead is also not separable: it is the intercept ``b`` of the
-            # fit above, which is not identifiable across a session that
-            # switches models.
+            # fit above, and the per-epoch table shows ``b`` swinging from
+            # -119,224 to +122,208 across model-mixed stretches — not a
+            # quantity this code could pin down and subtract.
             #
             # A tuned-slope variant (``context_tokens - slope * (before -
             # after)``) was measured and is strictly worse even at its best
@@ -7054,22 +7061,30 @@ class Session:
         history where the other nine passes of the same session retained
         3.7-8.1%.
 
-        ``_TASK_FLOOR_KEEP_MULTIPLE`` is 5, not 4, and the derivation is the
-        measured active-task spans recorded at ``cutpoint.task_boundary_floor``
-        (p50 32k, **p90 99k**, over a 7-pass session). p90 is the binding
-        constraint: 4x the 20,000 default is 80,000, which clips that p90 span
-        and starts severing the long agentic turns the floor exists to protect.
-        5x (100,000) is the smallest whole multiple that clears it, and it
-        still bounds the pathological pass above to ~31.4% retention instead
-        of 41.3%.
+        ``_TASK_FLOOR_KEEP_MULTIPLE`` is 5, sized against every active-task
+        span measured on real sessions: the seven recorded at
+        ``cutpoint.task_boundary_floor`` plus the ten in
+        ``docs/evidence/compaction-ruler/retention_real2.txt``. Pooled, those
+        17 spans run p50 47.4k, p75 53.7k, p90 125.9k, max 131.4k. The
+        distribution is bimodal — thirteen spans under 54k, four between 113k
+        and 132k — so the choice is really "where between the two clusters
+        does the bound sit".
 
-        That the cap CLIPS some spans is the point, not a defect: the later
-        10-pass session measured above has a p90 near 130k, and its three
-        widest spans (113,835 / 129,660 / 131,376) are exactly the passes that
-        retained 35-41% of history. Clipping those to 100,000 is the bound
-        doing its job. What 5x buys over 4x is that the clip starts above the
-        typical long task rather than inside it — the other seven passes
-        (469 to 53,732 tokens) are untouched by either multiple.
+        5x the 20,000 default puts it at 100,000: comfortably above the entire
+        lower cluster (the longest ordinary task is 53,732, so the cap has
+        roughly 2x headroom over it) and below the upper cluster, which is
+        exactly the set of passes that retained 35-41% of history where every
+        other pass retained 4-19%. Clipping those four is the bound doing its
+        job, not a regression.
+
+        **Honest limit of the evidence for this exact value.** Because the gap
+        between the clusters is wide, every multiple from 3x to 5x clips the
+        same four spans — no measurement here separates them, and the reason to
+        prefer 5 is margin over the observed ordinary maximum rather than a
+        different outcome. What the data DOES settle is the upper bound: 6x
+        (120,000) lets the 113,835 span through, and 7x lets all four through,
+        so the multiple must not be raised without new evidence. The full table
+        is ``docs/evidence/compaction-ruler/span_percentiles.txt``.
 
         The old ``max(keep_recent_tokens, ...)`` guard is gone because a
         MULTIPLE cannot fall below its own base the way ``threshold // 2``

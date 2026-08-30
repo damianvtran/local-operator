@@ -6,6 +6,8 @@ contains ten real compaction passes across three models.
 
 | File | What it shows |
 |---|---|
+| `slope_fit.txt` | The provider-vs-local token slope, fitted per model and per epoch — the measurement the whole PR rests on |
+| `span_percentiles.txt` | Pooled active-task spans and what each candidate cap multiple would clip — the basis for choosing 5 |
 | `validate_fix.txt` | Receipt accuracy per pass, shipped formula vs proportional, against the provider's own next-reported context |
 | `retention_real2.txt` | Active-task spans per pass and the retention the preserve-window cap allows, old cap vs new |
 | `controlflow_real.txt` | Whether the three `tokens_after` consumers change any DECISION under the fix |
@@ -15,9 +17,11 @@ All three tables are the verbatim stdout of the committed scripts beside them
 and need no credential (they read a local transcript):
 
 ```sh
+.venv/bin/python docs/evidence/compaction-ruler/slope_fit.py
 .venv/bin/python docs/evidence/compaction-ruler/validate_fix.py
 .venv/bin/python docs/evidence/compaction-ruler/retention_real2.py
 .venv/bin/python docs/evidence/compaction-ruler/controlflow_real.py
+.venv/bin/python docs/evidence/compaction-ruler/span_percentiles.py   # no transcript needed
 env -u NO_COLOR TERM=xterm-256color .venv/bin/python \
   docs/evidence/compaction-ruler/shot_compaction.py out.svg <repo-root>
 ```
@@ -26,22 +30,49 @@ env -u NO_COLOR TERM=xterm-256color .venv/bin/python \
 
 The local estimator (`compaction/tokens.py`, cl100k_base) and a provider's
 reported `context_tokens` are not the same scale. Fitting
-`provider = a * local + b` inside contiguous model-homogeneous runs of this
-session:
+`provider = a * local + b` per model over this session (`slope_fit.py`):
 
 ```
-run          model                      n    slope   intercept   mean fit err
-7740-7975    anthropic/claude-opus-5   117   1.728     48,341        241
-8990-9400    anthropic/claude-opus-5   202   1.649     32,731        320
-4670-5430    anthropic/claude-opus-4-8 259   1.633     43,193      1,354
-4670-5430    openai/gpt-5.6-sol         50   1.030     37,065         59
+  anthropic/claude-opus-5            n= 32 slope= 1.685 inter=   24,341 err=   7,173 ratio p50=1.82
+  anthropic/claude-opus-4-8          n= 24 slope= 1.622 inter=   49,623 err=   5,151 ratio p50=1.96
+  openai/gpt-5.6-sol                 n= 20 slope= 1.036 inter=   32,758 err=   6,972 ratio p50=1.15
+  zai/glm-5.3                        n= 11 slope= 1.019 inter=    8,854 err=     297 ratio p50=1.06
+  openrouter/z-ai/glm-5.3            n=  5 slope= 1.030 inter=    5,835 err=      87 ratio p50=1.05
 ```
 
-A mean fit error of 241 tokens over 117 points is structural, not noise, and
-the OpenAI control in the same session with the same tool schemas sits at
-1.03 where Anthropic sits at ~1.7. It is genuine provider-side tokenizer
-divergence on code/JSON-dense content, not content the estimator fails to see:
-the wire body tokenizes to 295k here against a provider-reported 304k.
+Anthropic sits at ~1.65 where OpenAI and GLM sit at ~1.03, in the same session
+with the same tool schemas. That is provider-side tokenizer divergence on
+code/JSON-dense content, not content the estimator fails to see.
+
+**The slope is a per-model property, not a session constant**, which is why the
+fix scales proportionally instead of baking in a number. The same fit run per
+inter-compaction epoch is the identifiability check:
+
+```
+       epoch    n  slope  fiterr  models present
+   1051-2123   15  1.634     653  HOMOGENEOUS: None/None x15
+   2124-2929   15  0.806  18,999  HOMOGENEOUS: None/None x15
+   2930-3998   15  1.054   9,913  MIXED(3): zai/glm-5.3 x7, openai/gpt-5.6-sol x6, xai/grok-4.6 x2
+   3999-4660   15  0.919  47,197  MIXED(2): anthropic/claude-opus-4-8 x9, openai/gpt-5.6-sol x6
+   4661-5439   15  1.384  44,716  MIXED(3): anthropic/claude-opus-4-8 x12, openai/gpt-5.6-sol x2, kimi/k3 x1
+   5440-6865   14  0.913  39,031  MIXED(4): alibaba-token-plan/qwen3.8-max x4, openai/gpt-5.6-sol x4, ...
+   6866-7979   14  1.860  71,026  MIXED(4): openrouter/z-ai/glm-5.3 x5, zai/glm-5.3 x4, anthropic/claude-opus-5 x3, ...
+   7980-8982   14  1.622   1,415  HOMOGENEOUS: anthropic/claude-opus-5 x14
+   8983-9954   15  1.638     419  HOMOGENEOUS: anthropic/claude-opus-5 x15
+```
+
+Every tight fit (419 / 653 / 1,415) is a single-model stretch; every loose one
+(9,913 to 71,026) switches models mid-epoch, because one line cannot describe
+two tokenizers. The intercept swings from -119,224 to +122,208 across those
+mixed stretches, which is the concrete reason the provider's fixed overhead is
+not a quantity this code could estimate and subtract.
+
+**Provenance note.** An earlier draft of this PR quoted a narrow-window fit
+(117 points at slope 1.728, mean error 241) and a "wire body tokenizes to 295k
+against 304k" comparison. Both were dropped: the narrow-window fit is
+collinear in (slope, intercept) over a 15% span, and the wire figure needs a
+request capture not reproducible from the transcript. Every number now in the
+code comments and in this README is the output of a script committed beside it.
 
 ## 1. The receipt understated every pass by ~140k tokens
 
@@ -81,13 +112,35 @@ Three of ten passes retained 35-41% of history where the other seven retained
 4-19%. Expressing the cap in `keep_recent` units (`* 5` = 100,000 at the
 20,000 default) bounds those three and leaves the other seven untouched.
 
-**Why 5 and not 4.** The multiple is sized by the measured active-task spans
-recorded at `cutpoint.task_boundary_floor` (p50 32k, p90 99k over an earlier
-7-pass session): 4x is 80,000, which clips that p90 and starts severing the
-long agentic turns the floor exists to protect; 5x is the smallest whole
-multiple clearing it. On this later 10-pass session both 4x and 5x clip the
-same three outlier spans, so the choice costs nothing here and buys headroom
-on the p90 case.
+**Why 5.** Pooling these ten spans with the seven recorded at
+`cutpoint.task_boundary_floor` gives 17 measurements: p50 47.4k, p75 53.7k,
+p90 125.9k, max 131.4k. The distribution is **bimodal** — thirteen spans under
+54k, four between 113k and 132k — so the real question is where between the
+clusters the bound sits. 5x the 20,000 default puts it at 100,000: about 2x
+headroom over the longest ordinary task (53,732) and below the outlier cluster,
+which is precisely the set of passes that retained 35-41% of history.
+
+**The evidence does not separate 5 from 4, and the code says so.** 4x (80,000)
+clips the same four pooled spans; the case for 5 is margin over the observed
+ordinary maximum, not a different clipping outcome. 6x (120,000) *would* differ
+— it lets the 113,835 span through, which is one of the passes this fix exists
+to bound — so the multiple should not be raised without new evidence
+(`span_percentiles.txt`):
+
+```
+candidate multiples against the pooled spans:
+  3x -> cap  60,000  clips  4/17 [113835, 123400, 129660, 131376]
+  4x -> cap  80,000  clips  4/17 [113835, 123400, 129660, 131376]
+  5x -> cap 100,000  clips  4/17 [113835, 123400, 129660, 131376]
+  6x -> cap 120,000  clips  3/17 [123400, 129660, 131376]  <- lets an OUTLIER through
+  7x -> cap 140,000  clips  0/17 []  <- lets an OUTLIER through
+```
+
+An
+earlier draft justified 5 as "the smallest multiple clearing a p90 of 99k";
+that p90 does not reproduce from the cited spans (they give 78.8k interpolated
+or 123.4k nearest-rank, and a p50 of 46.9k rather than 32k), so the argument
+was replaced with the one above rather than restated.
 
 ## 3. No decision changes — only the printed number
 

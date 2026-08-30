@@ -1057,17 +1057,20 @@ async def test_the_preserve_cap_is_measured_in_keep_recent_units(tmp_path):
     It bounds ``task_boundary_floor``, whose span is summed with the local
     cl100k estimator (``cutpoint.py``), so a cap derived from
     ``resolve_threshold_tokens`` — a PROVIDER-scale number — compared two
-    rulers that diverge by ~1.65-1.73x on Anthropic. On a 1M window that made
-    the cap 300,000 local tokens; the pass documented in the fix retained
-    41.3% of history against 3.7-8.1% for the other nine passes of the same
-    session.
+    rulers that diverge by ~1.6-1.7x on Anthropic. On a 1M window that made
+    the cap 300,000 local tokens, and three of ten measured passes then
+    retained 35-41% of history against 4-19% for the other seven.
 
-    5 rather than 4 is load-bearing and comes from the measured active-task
-    spans at ``cutpoint.task_boundary_floor`` (p50 32k, p90 99k): 4x the
-    20,000 default is 80,000, which clips that p90 and severs the long turns
-    the floor exists to protect. This test pins BOTH the multiple and the
-    property that made the old form wrong — the cap must not move when the
-    context window does.
+    The multiple is sized against 17 measured active-task spans (the seven at
+    ``cutpoint.task_boundary_floor`` plus the ten in
+    ``docs/evidence/compaction-ruler/retention_real2.txt``), which are
+    bimodal: thirteen under 54k and four between 113k and 132k. 5x the 20,000
+    default puts the bound at 100,000, between the clusters. See
+    ``_advisor_floor_cap`` for why the evidence does not separate 5 from 4,
+    and why 6 would be wrong.
+
+    This test pins BOTH the multiple and the property that made the old form
+    wrong — the cap must not move when the context window does.
     """
     from local_operator.session.session import _TASK_FLOOR_KEEP_MULTIPLE
 
@@ -1084,8 +1087,10 @@ async def test_the_preserve_cap_is_measured_in_keep_recent_units(tmp_path):
     )
     # Production's default: 100,000, where the old form gave 300,000.
     assert session._advisor_floor_cap(settings) == 100_000
-    # p90 of the measured active-task spans is 99k, so the cap must clear it.
-    assert session._advisor_floor_cap(settings) > 99_000
+    # Clears the whole lower cluster of measured task spans (max 53,732) with
+    # margin, and stays under the outlier cluster the cap exists to bound
+    # (min 113,835), so an ordinary long turn is never clipped.
+    assert 53_732 < session._advisor_floor_cap(settings) < 113_835
 
     # The cap tracks the CONFIGURED verbatim window, never the window size:
     # the same settings on a model with a 40x smaller context answer the same.

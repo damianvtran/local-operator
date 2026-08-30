@@ -19,13 +19,16 @@ This estimator is a RULER OF ITS OWN, not a prediction of the bill
 ------------------------------------------------------------------
 ``cl100k_base`` is OpenAI's tokenizer, and Anthropic's differs measurably on
 the code/JSON-dense content an agent session is made of. Fitting
-``provider = a * local + b`` inside contiguous model-homogeneous runs of a
-real 10-pass session put the slope at **1.65-1.73 for Anthropic** (117 points
-at 1.728, mean fit error 241 tokens — structural, not noise) against **1.03
-for an OpenAI control in the same session with the same tool schemas**. It is
-genuine tokenizer divergence rather than content this module fails to see:
-the wire body of that session tokenizes to 295k here against a provider-
-reported 304k for the same bytes.
+``provider = a * local + b`` over a real 10-pass session
+(``docs/evidence/compaction-ruler/slope_fit.py``) puts **``claude-opus-5`` at
+slope 1.685 and ``claude-opus-4-8`` at 1.622**, against **1.036 for an OpenAI
+control and 1.019 for GLM in the same session with the same tool schemas**.
+Per-request, an opus-5 context bills 1.75-1.90x this module's estimate.
+
+The slope is a per-MODEL property, not a session constant: fitted per epoch,
+the three single-model stretches fit tightly (mean error 419 / 653 / 1,415
+tokens) while every model-switching stretch does not (9,913 to 71,026), since
+one line cannot describe two tokenizers.
 
 So a number from this module may be compared against ANOTHER number from this
 module, never against a provider figure. Mixing the two is a real bug that has
