@@ -2153,9 +2153,30 @@ async def test_the_loop_stays_responsive_while_several_subagents_run(tmp_path, m
     enough that the gate's tokenizer pass is expensive, because that is the
     stretch under test; at a smaller size both variants pass and the test
     proves nothing. Measured on this workload against the pre-fix tree and
-    this one: worst stall 1353 ms before, 139 ms after. The 1 s bound sits an
-    order of magnitude above the fixed behaviour (so a loaded CI box does not
-    flake it) and comfortably below the broken one.
+    this one: worst stall 1353 ms before, 139 ms after.
+
+    WHY THIS ASSERTS ON A PERCENTILE AND NOT ON `max()`. The original bound
+    was `max(lateness) < 1.0`, and it flaked: a single sample crossing 1 s
+    failed the run, and on a shared CI runner one sample routinely does. It
+    was observed red at 1029, 1033, 1167, 1169, 1337, 1446 and 1503 ms —
+    including on `main` commits that changed nothing near the loop, and with
+    the same commit both passing and failing across reruns, which is the
+    definition of a flake rather than a regression.
+
+    A single outlier is the wrong statistic anyway. The starvation this
+    guards is a SUSTAINED synchronous stretch: the pre-fix tree put 116 of
+    121 samples inside the tokenizer, so the broken behaviour is visible
+    across the whole distribution, not in one spike. One late wake on a
+    contended box is the OS scheduler, not a starved sibling.
+
+    So the bound is on the 99th percentile, which stays tiny when the loop is
+    healthy and explodes when it is starved. Measured healthy on this
+    workload: p50 1 ms, p95 3-24 ms, p99 88-163 ms, with only 2-4 of ~250
+    samples above 100 ms. The pre-fix tree drove the majority of samples into
+    the hundreds of ms, so a 500 ms p99 sits an order of magnitude above
+    healthy noise and far below the regression. `max()` is still reported in
+    the failure message, because when this does fire the worst stall is the
+    number a human wants to see.
     """
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
     parent = make_session(tmp_path, LongStream())
@@ -2187,10 +2208,15 @@ async def test_the_loop_stays_responsive_while_several_subagents_run(tmp_path, m
         await watcher
 
     assert lateness, "the watchdog never ran — the measurement itself is broken"
-    worst = max(lateness)
-    assert worst < 1.0, (
-        f"the event loop stalled for {worst * 1000:.0f} ms while subagents ran; "
-        "a synchronous stretch is starving concurrent children"
+    ordered = sorted(lateness)
+    # Nearest-rank p99, floored to the last index so a short sample run cannot
+    # index past the end.
+    p99 = ordered[min(len(ordered) - 1, int(len(ordered) * 0.99))]
+    worst = ordered[-1]
+    assert p99 < 0.5, (
+        f"the event loop stalled for {p99 * 1000:.0f} ms at p99 "
+        f"(worst {worst * 1000:.0f} ms, {len(ordered)} samples) while subagents "
+        "ran; a synchronous stretch is starving concurrent children"
     )
     await parent.dispose()
 
