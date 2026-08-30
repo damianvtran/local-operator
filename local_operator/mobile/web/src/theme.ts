@@ -16,6 +16,7 @@ import { neon } from "./themes/neon";
 import { obsidian } from "./themes/obsidian";
 import type { ThemeDefinition } from "./themes/palette-contract";
 import { radient } from "./themes/radient";
+import { rosePine, rosePineDawn, rosePineMoon } from "./themes/rose-pine";
 import { sage } from "./themes/sage";
 import { synth } from "./themes/synth";
 import { tokyoNight } from "./themes/tokyo-night";
@@ -32,6 +33,9 @@ export const THEMES: ThemeDefinition[] = [
 	neon,
 	obsidian,
 	radient,
+	rosePine,
+	rosePineDawn,
+	rosePineMoon,
 	sage,
 	synth,
 	tokyoNight,
