@@ -38,7 +38,11 @@ from local_operator.tui.app import (
 )
 from local_operator.tui.events import SteeringDelivered, TurnEnded
 from local_operator.tui.widgets.editor import Editor
-from local_operator.tui.widgets.transcript import NoticeBlock, NoticeKind, TranscriptView
+from local_operator.tui.widgets.transcript import (
+    NoticeBlock,
+    NoticeKind,
+    TranscriptView,
+)
 
 from .test_app_pilot import FakeSession, _factory
 

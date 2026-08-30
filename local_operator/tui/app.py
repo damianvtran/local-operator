@@ -1845,9 +1845,16 @@ class OperatorApp(App[None]):
         #:
         #: A set of controllers rather than a flag: several rotations can be in
         #: flight, and identity is the same discriminator the guard itself uses.
+        #: Membership here goes through ``__hash__``/``__eq__`` rather than the
+        #: ``is not`` the guard uses on the live controller, so it is identity
+        #: only because :class:`EventController` inherits both from ``object``
+        #: — the same property the two `NoticeBlock` sets rely on. A controller
+        #: that ever defines either must revisit this lookup, or a superseded
+        #: controller could be spoofed into the allowance.
+        #:
         #: Cleared wherever the rows are, since an entry outliving the rows it
         #: was protecting would re-open the very race the guard closes.
-        self._superseded_steer_controllers: set[Any] = set()
+        self._superseded_steer_controllers: set[EventController] = set()
         #: User messages this TUI has ALREADY painted (or deliberately declined
         #: to paint) whose ``MessageStartEvent`` from the session is still
         #: coming. ``on_user_message_start`` consumes a matching entry instead
