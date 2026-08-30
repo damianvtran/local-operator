@@ -464,6 +464,25 @@ class SettingsView(Vertical):
         # not wrap to the first. A page gesture is travel, and travel that
         # teleports across the whole document is how a reader loses their place.
         target = min(max(position + delta, 0), len(headers) - 1)
+        # ...but the LAST section is not the last row, and paging has to be able
+        # to reach the end the other gestures reach. Held `down` and `end` both
+        # finish on the final row; `pagedown` settled on the last section's
+        # first row and stopped with five rows still below it, so the page had
+        # two different answers for where it ends (UX round 1, U3). Once paging
+        # can advance no further by section it finishes the journey to the last
+        # row. `pageup` needs no counterpart: the first section's first row IS
+        # the first selectable row, so travelling up already terminates there.
+        if delta > 0 and target == position:
+            indices = self._selectable()
+            if indices and self._selected != indices[-1]:
+                if not self._leave_row():
+                    return
+                indices = self._selectable()
+                if indices:
+                    self._selected = indices[-1]
+                    self._repaint()
+                    self._scroll_to_selection()
+            return
         wanted = self._rows[headers[target]].section
         if not self._leave_row():
             return
@@ -550,8 +569,20 @@ class SettingsView(Vertical):
         if height <= 0:
             return
         offset = self._body.scroll_offset.y
-        if self._selected < offset:
-            self._body.scroll_to(y=self._selected, animate=False)
+        # Scroll far enough to show the row's own SECTION HEADER, not just the
+        # row. Headers are unselectable, so travelling to the first row of the
+        # page settled at `scroll_y=1` with the `Model` header one line off the
+        # top edge: a highlighted row whose section title is missing and a
+        # scrollbar thumb not quite at the start of its track. The bottom end
+        # reads as arrival and the top did not, and the clamp is what made
+        # users dwell there long enough to notice (UX round 1, U1). Only the
+        # contiguous run of headers directly above the row is included, so this
+        # reveals the row's own title and never scrolls past unrelated content.
+        top = self._selected
+        while top > 0 and self._rows[top - 1].kind == "header":
+            top -= 1
+        if top < offset:
+            self._body.scroll_to(y=top, animate=False)
         elif self._selected >= offset + height:
             self._body.scroll_to(y=self._selected - height + 1, animate=False)
 
@@ -2163,6 +2194,18 @@ class SettingsView(Vertical):
         self._rule.update(self._rule_text)
         self._paint_hints()
 
+    def _current_is_readonly(self) -> bool:
+        """Is the highlighted row a retired setting that no key can act on?
+
+        Only while nothing is in progress: an open editor or an armed delete
+        owns the footer's wording (it teaches `enter save` / `esc cancel`), and
+        neither state can be entered from a read-only row anyway.
+        """
+        if self._editing is not None or self._confirm_delete is not None:
+            return False
+        row = self._current()
+        return row is not None and row.setting is not None and row.setting.kind is Kind.READONLY
+
     def _title_room(self) -> int:
         """Cells left for the config path after the ``settings ·`` lead."""
         try:
@@ -2219,19 +2262,32 @@ class SettingsView(Vertical):
         # key does nothing is the "nothing happens when I click" bug one step
         # earlier — the same rule `HintButton.set_actionable` states.
         leads: list[_Hint] = [move, enter, reset]
+        # The same rule applied to the ROW: on a retired setting neither key
+        # does anything — `enter` only reports that it cannot be changed and `r`
+        # returns without resetting — so neither is offered. The last six rows
+        # of the page are read-only, and the clamp turned the bottom from a
+        # waypoint into a place users park, under a footer promising `enter
+        # change · r default` on a row that honours neither (UX round 1, U2).
+        # The detail line already says WHY the row is retired; the footer's job
+        # is only to stop advertising keys that will not act.
+        if self._current_is_readonly():
+            leads = [move]
         if self._pane_fits():
             leads.append(pane)
         # The narrow rungs shed to a one-word `esc` label, except in the
         # confirm state where `cancel` IS the one word and shedding it back to
         # `back` would restore the very ambiguity D7 is about.
         narrow = "cancel" if self._confirm_delete is not None else "back"
+        # The narrower rungs are DERIVED from what this row actually offers,
+        # dropping one hint at a time from the right, rather than restating the
+        # full ladder: a hardcoded `[move, enter, reset]` rung would put the
+        # keys back on a read-only row as soon as the terminal got narrow
+        # enough to shed the pane hint.
+        shed = [rung(leads[:count], narrow) for count in range(len(leads) - 1, -1, -1)]
         rungs = [
             rung(leads, exit_label),
             rung(leads, narrow),
-            rung([move, enter, reset], narrow),
-            rung([move, enter], narrow),
-            rung([move], narrow),
-            rung([], narrow),
+            *shed,
         ]
         width = max(self.size.width - 2, 1)
         chosen = rungs[-1]
