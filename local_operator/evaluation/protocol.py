@@ -338,14 +338,16 @@ class Observation(ProtocolModel):
     @field_validator("metadata", mode="before")
     @classmethod
     def _validate_wire_metadata(cls, metadata: Any) -> Any:
-        # IEEE-754 implementations disagree with Python about formatting and
-        # exactness outside this subset. Restricting metadata to strings,
-        # booleans, null, and signed safe integers makes the existing sorted,
-        # compact UTF-8 encoding portable without an RFC 8785 dependency.
-        _validate_metadata(metadata)
-        # JsonValue accepts concrete dict/list values only. Normalize safe
-        # Mapping/tuple inputs for Pydantic, then freeze the validated result.
-        return _thaw_json(metadata)
+        # Snapshot and freeze arbitrary caller mappings before Pydantic sees
+        # them. The resulting owned value is the sole source for normalization,
+        # so a stateful mapping cannot change between validation and storage.
+        if not isinstance(metadata, (FrozenMapping, Mapping)):
+            raise ValueError("metadata must be a mapping")
+        frozen = metadata if isinstance(metadata, FrozenMapping) else FrozenMapping(metadata)
+        # The portable subset excludes floats because runtimes disagree about
+        # formatting and exactness. Pydantic then validates only this normalized
+        # copy, never the caller-owned mapping or any nested mapping again.
+        return _thaw_json(frozen)
 
     @field_validator("metadata")
     @classmethod

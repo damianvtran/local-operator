@@ -377,6 +377,58 @@ def test_frozen_mapping_snapshots_stateful_mapping_exactly_once() -> None:
     assert copy.deepcopy(frozen) is frozen
 
 
+def test_observation_snapshots_top_level_and_nested_mappings_once() -> None:
+    class ChangingMapping(Mapping[str, object]):
+        def __init__(self, first: dict[str, object], later: dict[str, object]) -> None:
+            self.first = first
+            self.later = later
+            self.iterations = 0
+
+        @property
+        def current(self) -> dict[str, object]:
+            return self.first if self.iterations == 1 else self.later
+
+        def __iter__(self):
+            self.iterations += 1
+            return iter(self.current)
+
+        def __len__(self) -> int:
+            return len(self.current)
+
+        def __getitem__(self, key: str) -> object:
+            return self.current[key]
+
+    nested = ChangingMapping({"safe": True}, {"changed": float("nan")})
+    top = ChangingMapping(
+        {"items": [nested, (MappingProxyType({"stable": 1}),)]},
+        {"changed": float("nan")},
+    )
+    observation = Observation.model_validate({**_observation().model_dump(), "metadata": top})
+    assert top.iterations == 1
+    assert nested.iterations == 1
+    assert observation.model_dump(mode="json")["metadata"] == {
+        "items": [{"safe": True}, [{"stable": 1}]]
+    }
+    before = observation.to_canonical_json()
+    assert observation.model_copy(update={"metadata": observation.metadata}) == observation
+    assert observation.to_canonical_json() == before
+
+
+def test_observation_rejects_duplicate_keys_from_hostile_mapping() -> None:
+    class DuplicateMapping(Mapping[str, int]):
+        def __iter__(self):
+            return iter(("same", "same"))
+
+        def __len__(self) -> int:
+            return 2
+
+        def __getitem__(self, key: str) -> int:
+            return 1
+
+    with pytest.raises(ValidationError, match="duplicate keys"):
+        Observation.model_validate({**_observation().model_dump(), "metadata": DuplicateMapping()})
+
+
 def test_frozen_mapping_rejects_duplicate_keys_from_hostile_mapping() -> None:
     class DuplicateMapping(Mapping[str, int]):
         def __iter__(self):
