@@ -1,3 +1,4 @@
+from itertools import count
 from typing import Any, Dict
 from unittest.mock import MagicMock, patch
 
@@ -12,6 +13,28 @@ from local_operator.clients.fal import (
     FalRequestStatus,
     ImageSize,
 )
+
+
+def _fake_clock(step: float = 0.25):
+    """A monotonic clock that advances a fixed step per call.
+
+    The FAL polling loop is bounded by ``time.time()``, so a test that patches
+    only ``time.sleep`` turns a "wait one second" path into a busy-spin that
+    calls the mocked HTTP response hundreds of thousands of times. Each call is
+    retained in the MagicMock's call list, which is what made these tests the
+    heaviest in the suite (~400 MB peak each, one CPU-second each).
+
+    Advancing a fixed step per call bounds the loop to a handful of passes,
+    keeps the elapsed-time assertions meaningful, and makes the test
+    deterministic rather than dependent on how loaded the machine is.
+
+    The step is calibrated against how many times the loop consumes the clock
+    per iteration (``generate_image`` reads it for the ``while`` bound and again
+    for the half-timeout branch). Adding or removing a ``time.time()`` call in
+    that loop changes how many polls a given step produces, so a change there
+    should re-check the assertions here rather than assume the step still fits.
+    """
+    return (n * step for n in count())
 
 
 @pytest.fixture
@@ -444,14 +467,23 @@ def test_generate_image_timeout(
     # Set up the mocks
     with patch("requests.post", return_value=mock_submit_response):
         with patch("requests.get", return_value=mock_status_response):
-            # Properly mock time.sleep to avoid actual sleeping
+            # Drive BOTH clock functions, not just sleep. The polling loop is
+            # `while time.time() - start < max_wait_time`, so patching only
+            # time.sleep leaves the loop spinning at full CPU speed against a
+            # real wall clock: ~217k iterations in the one second of
+            # max_wait_time, each recording another call on the response
+            # MagicMock, which retains every one. That cost ~400 MB of RSS and
+            # a full second of CPU for a test that asserts a single timeout.
+            # A fake clock makes the loop take a fixed, tiny number of passes
+            # and keeps the test deterministic on a loaded machine.
             with patch("time.sleep") as mock_sleep:
-                # Use a very short timeout to speed up the test
-                with pytest.raises(RuntimeError) as exc_info:
-                    fal_client.generate_image(
-                        prompt="test prompt", sync_mode=True, max_wait_time=1, poll_interval=1
-                    )
-                assert "FAL API request timed out after 1 seconds" in str(exc_info.value)
+                with patch("time.time", side_effect=_fake_clock()):
+                    # Use a very short timeout to speed up the test
+                    with pytest.raises(RuntimeError) as exc_info:
+                        fal_client.generate_image(
+                            prompt="test prompt", sync_mode=True, max_wait_time=1, poll_interval=1
+                        )
+                    assert "FAL API request timed out after 1 seconds" in str(exc_info.value)
 
     # Verify that sleep was called
     mock_sleep.assert_called()
@@ -480,13 +512,16 @@ def test_generate_image_failed_status(
     # Set up the mocks
     with patch("requests.post", return_value=mock_submit_response):
         with patch("requests.get", return_value=mock_status_response):
-            # Properly mock time.sleep to avoid actual sleeping
+            # See test_generate_image_timeout: patching time.sleep alone leaves
+            # the poll loop spinning against a real wall clock, burning ~400 MB
+            # on retained mock calls. The fake clock bounds it.
             with patch("time.sleep") as mock_sleep:
-                # Use a very short timeout to speed up the test
-                with pytest.raises(RuntimeError) as exc_info:
-                    fal_client.generate_image(
-                        prompt="test prompt", max_wait_time=1, poll_interval=1
-                    )
+                with patch("time.time", side_effect=_fake_clock()):
+                    # Use a very short timeout to speed up the test
+                    with pytest.raises(RuntimeError) as exc_info:
+                        fal_client.generate_image(
+                            prompt="test prompt", max_wait_time=1, poll_interval=1
+                        )
                 # The current implementation raises a timeout error instead of a failed status error
                 # This is because the test is mocking a FAILED status but the code
                 # is checking for it in uppercase, so we need to update the assertion

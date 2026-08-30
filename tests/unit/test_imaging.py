@@ -404,7 +404,29 @@ def test_the_memo_cannot_grow_without_bound() -> None:
     by orders of magnitude — an entry count would bound the wrong quantity and
     let the map retain tens of MB for the life of the process."""
     _REBOUND_CACHE.clear()
-    for index in range(40):
+    # Derived, not the flat 40 this used to run. The cap saturates at 16
+    # entries / ~30.5 MB by roughly the 17th image; every iteration past that
+    # re-proves the same invariant while allocating another ~12 MB of
+    # incompressible RGB, and at 40 this was the heaviest test in the suite
+    # (1047 MB peak, 30 s). The count below still overshoots the saturation
+    # point comfortably (27 images, 11 evictions at the current cap), so it
+    # exercises eviction rather than merely filling the map, and the assertions
+    # are unchanged.
+    #
+    # Derived from the cap rather than hard-coded so the two cannot drift:
+    # "enough entries to fill the cap, plus a margin that forces evictions".
+    # Raising ``_REBOUND_CACHE_MAX_BYTES`` raises the workload with it instead
+    # of silently leaving the eviction assertion non-binding.
+    #
+    # The assumed entry size is rounded DOWN from the measured ~1.91 MB. Round
+    # it up and the derived count grows more slowly than the number of entries
+    # the cap can hold, so a large enough cap stops evicting and the assertion
+    # goes quiet again — the very failure this derivation removes. The margin
+    # scales with the cap for the same reason.
+    approx_entry_bytes = 3 * 1024 * 1024 // 2
+    entries_to_fill = _REBOUND_CACHE_MAX_BYTES // approx_entry_bytes
+    iterations = entries_to_fill + max(6, entries_to_fill // 4)
+    for index in range(iterations):
         # Distinct sizes, so every one is a distinct cache key. Photographic
         # noise, so each result is genuinely large rather than a flat PNG that
         # compresses to nothing and would never reach the cap.
@@ -413,6 +435,10 @@ def test_the_memo_cannot_grow_without_bound() -> None:
     retained = sum(len(data) for data, _ in _REBOUND_CACHE.values())
     assert retained <= _REBOUND_CACHE_MAX_BYTES
     assert _REBOUND_CACHE, "the cap evicted so aggressively that nothing is ever cached"
+    # The point of the bound is that it EVICTS. Without this the test would
+    # still pass if the cap were raised high enough to hold everything, which
+    # is the regression it exists to catch.
+    assert len(_REBOUND_CACHE) < iterations, "nothing was ever evicted; the cap is not binding"
 
 
 # ---------------------------------------------------------------------------

@@ -280,6 +280,29 @@ class AgentEventBridge:
         except Exception:  # noqa: BLE001 — a serialisation quirk must not kill the turn
             logger.warning("failed to serialise agent event for stream", exc_info=True)
             return
+        # Restore the running snapshot on delta frames.
+        #
+        # ``message.delta`` is documented (see ``sse.py``) to carry the
+        # increment AND a running snapshot, so a late or lossy consumer can
+        # repaint from any single frame. That snapshot used to ride along
+        # implicitly in ``message.content``, because the harness rebuilt it on
+        # every delta. The harness now assembles once at end of turn (that
+        # rebuild was quadratic in response length), so the serialised message
+        # is empty mid-stream and the guarantee would be silently lost.
+        #
+        # The bridge already tracks the accumulated text for the websocket
+        # record, so publish it explicitly instead of depending on a field the
+        # harness no longer maintains per delta. ``_raw`` runs BEFORE the record
+        # projection updates, so the stored value is the text as of the previous
+        # delta; this frame's increment is appended to make the snapshot
+        # inclusive of the delta it ships with, which is what "repaint from any
+        # single frame" requires.
+        if isinstance(event, MessageUpdateEvent):
+            message = event.message
+            message_id = getattr(message, "id", None)
+            record = self._streams.get(message_id) if message_id else None
+            prior = (record.message or "") if record is not None else ""
+            payload["snapshot"] = prior + event.delta
         _cap_stream_payload(payload)
         self._put(("agent_event", self._job_id, payload))
 
@@ -339,7 +362,25 @@ class AgentEventBridge:
             self._streams[message_id] = record
             self._ordered.append(record)
 
-        record.message = _message_text(message)
+        # Accumulate the delta here rather than re-reading the message.
+        #
+        # This bridge's contract (see the class docstring) is to re-broadcast
+        # the ACCUMULATED text on every delta, and it used to get that for free
+        # because the harness rebuilt ``message.content`` per delta. That
+        # rebuild was quadratic in response length, so the harness now assembles
+        # the text once when the turn ends and ``message.content`` is empty for
+        # the duration of the stream. Reading it here would broadcast "" on
+        # every delta and collapse streaming into one end-of-turn dump.
+        #
+        # Owning the accumulation keeps the wire behaviour identical while the
+        # harness stays linear: append what arrived, and adopt the harness's
+        # authoritative text at MessageEndEvent (which also covers the
+        # non-streamed case, where a start/end pair carries content with no
+        # deltas in between).
+        if isinstance(event, MessageUpdateEvent):
+            record.message = (record.message or "") + event.delta
+        else:
+            record.message = _message_text(message) or (record.message or "")
         if isinstance(event, MessageEndEvent):
             record.status = ProcessResponseStatus.SUCCESS
             record.is_complete = True
