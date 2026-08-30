@@ -66,9 +66,11 @@ TOAST_MIN_WIDTH = 20
 #: change.
 #:
 #: 24 is measured from the receipt family rather than chosen for roundness. The
-#: widest routine receipt is ``copied 6000 characters`` at 24 cells, and the
-#: rest — every character count from one to four digits, and every ``copied N
-#: lines`` — is narrower, so one floor holds them all to a single edge. Five
+#: widest routine receipt is ``copied 6000 characters``: 22 cells of text, which
+#: needs a 24-cell CARD once ``TOAST_PADDING_CELLS`` is added. So the floor and
+#: the widest member coincide exactly rather than the floor clearing it with room
+#: to spare — every other receipt (character counts of one to four digits, and
+#: every ``copied N lines``) is narrower and is held to the same edge. Five
 #: digits would twitch again; a copy that large is not a gesture anyone repeats
 #: back to back, which is the case a shared edge is worth paying padding for.
 #:
@@ -472,6 +474,20 @@ class Toast(Static):
         width = self._card_width()
         cap = toast_max_width(self.app.size.width)
         self.styles.max_width = cap
+        # Where the floor's slack goes (design round 1, D3). The floor buys a
+        # stable left edge and pays for it in padding, and left-aligned that
+        # padding is ALL trailing: `copied 2 lines` came out 1 left / 9 right and
+        # read as text that failed to fill its box rather than as a sized card.
+        # Centring splits it (5/5) and costs nothing on a message that already
+        # fills the card, where there is no slack to divide.
+        #
+        # ONE-LINE messages only, which is the whole reason this is computed here
+        # rather than declared as `text-align: center` in the tcss. The MCP
+        # startup summary is two lines — a head and a `failed: …` detail line —
+        # and they are read as a pair down a shared left edge. Centring each row
+        # against its own length staggers them (measured: lead 4 then lead 7 on
+        # the short variant), which is worse than the trailing slack this fixes.
+        self.styles.text_align = "center" if "\n" not in self._message else "left"
         # The floor is written onto the WIDGET as well, and it has to be: the
         # card is `width: auto`, so Textual sizes it to its text and `_card_width`
         # alone would only move the offset — widening the gap on the left while
@@ -479,10 +495,20 @@ class Toast(Static):
         # `min_width` makes the card itself hold the floor, and the offset above
         # is then computed from the same number, so the two cannot disagree.
         #
-        # Clamped by `cap` rather than set raw: `min_width` beats `max_width` in
-        # Textual, so an unclamped floor on a terminal narrower than it would
-        # paint straight past the screen's edge padding — the failure
+        # Clamped by `cap` rather than set raw, so the floor can never ASK for
+        # more than the screen box allows. This is deliberately belt-and-braces:
+        # measured on the pinned Textual (8.2.8), `max_width` already wins over
+        # `min_width` — `min_width=24, max_width=18` renders 18 — so the raw
+        # constant would in fact be clipped correctly today, and the load-bearing
+        # clamp is the `min(cap, ...)` inside `_card_width`, which decides the
+        # offset. The clamp stays because that precedence is an undocumented
+        # implementation detail of the layout engine rather than a promise: if it
+        # ever inverts, an unclamped floor paints past the screen's edge padding
+        # on a terminal narrower than 26 cells, which is exactly the failure
         # `test_the_card_stays_inside_a_terminal_narrower_than_the_floor` pins.
+        # `test_the_floor_never_asks_for_more_than_the_box` asserts this
+        # resolved value directly, because a rendered-region assertion cannot
+        # see the difference while the engine is masking it.
         self.styles.min_width = min(TOAST_MIN_CARD_WIDTH, cap)
         parent = self.parent
         # The HOST is offset, never the screen: a Toast mounted straight onto the

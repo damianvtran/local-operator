@@ -248,6 +248,31 @@ def test_the_floor_never_outgrows_the_screen_it_paints_on() -> None:
     assert toast_max_width(0) == 1
 
 
+def _row_leads(app: App[None], toast: Toast) -> list[int]:
+    """Leading blank cells of each painted row of the card, from the real frame.
+
+    Read off the compositor rather than from the message string: the question is
+    where the ink LANDS inside the card, which is what alignment decides.
+    """
+    region = toast.region
+    strips = app.screen._compositor.render_strips()
+    leads: list[int] = []
+    for row in range(region.y, min(region.y + region.height, len(strips))):
+        text = strips[row].text[region.x : region.x + region.width]
+        if not text.strip():
+            continue
+        leads.append(len(text) - len(text.lstrip()))
+    return leads
+
+
+def _card_padding(app: App[None], toast: Toast) -> tuple[int, int]:
+    """``(leading, trailing)`` blank cells around the ink on a one-line card."""
+    region = toast.region
+    strips = app.screen._compositor.render_strips()
+    text = strips[region.y].text[region.x : region.x + region.width]
+    return len(text) - len(text.lstrip()), len(text) - len(text.rstrip())
+
+
 # -- lifecycle ---------------------------------------------------------------
 
 
@@ -423,6 +448,72 @@ async def test_the_floor_never_beats_the_screen_box(width: int) -> None:
         await pilot.pause()
         assert toast.region.right <= width - 1, (width, toast.region)
         assert toast.region.x >= 1, (width, toast.region)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("width", [16, 20, 21, 22, 23, 24, 25, 26, 40, 80])
+async def test_the_floor_never_asks_for_more_than_the_box(width: int) -> None:
+    """The floor's own clamp, asserted where it is decided rather than where it
+    is painted.
+
+    ``_refit`` writes ``min_width = min(TOAST_MIN_CARD_WIDTH, cap)``. Asserting
+    only the rendered region cannot see whether that ``min`` is there: on the
+    pinned Textual (8.2.8) ``max_width`` beats ``min_width``, so the engine
+    clips an over-wide floor anyway and the geometry is identical either way —
+    a mutant that drops the clamp survives every region-based test in this file,
+    including the one named for the constraint.
+
+    So this reads the resolved style. It is the assertion that fails the moment
+    the floor is allowed to ask for more than the screen box, whichever way the
+    engine's precedence happens to fall.
+    """
+    async with ToastApp().run_test(size=(width, 12)) as pilot:
+        toast = pilot.app.query_one(Toast)
+        toast.show("copied 8 characters", duration_ms=60_000)
+        await pilot.pause()
+        await pilot.pause()
+        cap = toast_max_width(width)
+        min_width = toast.styles.min_width
+        assert min_width is not None
+        assert min_width.value <= cap, (width, min_width.value, cap)
+        assert min_width.value == min(TOAST_MIN_CARD_WIDTH, cap), (width, min_width.value)
+
+
+@pytest.mark.asyncio
+async def test_the_floors_slack_is_split_rather_than_left_trailing() -> None:
+    """The floor's padding is balanced, not all on one side (design round 1, D3).
+
+    Left-aligned, a floored card put every spare cell after the text — ``copied
+    2 lines`` came out 1 left / 9 right — which reads as text that failed to
+    fill its box rather than as a card sized on purpose.
+    """
+    async with ToastApp().run_test(size=(80, 24)) as pilot:
+        toast = pilot.app.query_one(Toast)
+        toast.show("copied 2 lines", duration_ms=60_000)
+        await pilot.pause()
+        await pilot.pause()
+        lead, trail = _card_padding(pilot.app, toast)
+        assert abs(lead - trail) <= 1, (lead, trail)
+
+
+@pytest.mark.asyncio
+async def test_a_two_line_notice_keeps_its_rows_on_one_left_edge() -> None:
+    """Centring is for single-line receipts only.
+
+    The MCP startup summary is a head plus a ``failed: …`` detail line, read as
+    a pair down a shared left edge. Centring each row against its own length
+    staggers them, which is a worse defect than the trailing slack D3 is about —
+    so the alignment is decided per message in ``_refit`` rather than declared
+    once in the stylesheet.
+    """
+    async with ToastApp().run_test(size=(80, 24)) as pilot:
+        toast = pilot.app.query_one(Toast)
+        toast.show("\u2299 MCP: 1 of 2 up\nfailed: gh", duration_ms=60_000)
+        await pilot.pause()
+        await pilot.pause()
+        leads = _row_leads(pilot.app, toast)
+        assert len(leads) == 2, leads
+        assert leads[0] == leads[1], leads
 
 
 @pytest.mark.asyncio
