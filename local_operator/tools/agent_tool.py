@@ -55,7 +55,7 @@ import logging
 from pathlib import Path
 from typing import Any, Callable, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from local_operator.agent_profiles import (
     MAX_INSTRUCTIONS_CHARS,
@@ -136,10 +136,24 @@ class AgentParams(BaseModel):
         default=None,
         description="create/update: restrict the profile to these tools. Omit for all.",
     )
-    effort: Literal["lo", "med", "hi", ""] | None = Field(
+    effort: Literal["lo", "med", "hi", "inherit"] | None = Field(
         default=None,
-        description="create/update: default model tier. '' clears it.",
+        description="create/update: default model tier. 'inherit' clears it.",
     )
+
+    @field_validator("effort", mode="before")
+    @classmethod
+    def _legacy_empty_effort(cls, value: Any) -> Any:
+        """Keep pre-sentinel callers working without advertising invalid schema.
+
+        Empty enum strings are rejected by Gemini function declarations. Older
+        callers may still send ``""`` to clear a pin, so normalize that legacy
+        wire value before the closed Literal validates while exposing the
+        explicit ``inherit`` spelling to models and providers.
+        """
+
+        return "inherit" if value == "" else value
+
     delegate: bool | None = Field(
         default=None,
         description=(
@@ -1013,9 +1027,14 @@ async def _op_write(
     else:
         tools = current.tools if current is not None else None
 
-    if params.effort is not None:
-        effort = params.effort.strip() or None
+    if params.effort == "inherit":
+        effort = None
+    elif params.effort is not None:
+        effort = params.effort
     else:
+        # Omission and JSON null both mean "leave unchanged"; only the explicit
+        # sentinel may remove a stored pin, so a model cannot clear configuration
+        # merely by filling an optional nullable field with its default.
         effort = current.effort if current is not None else None
 
     if params.delegate is not None:
