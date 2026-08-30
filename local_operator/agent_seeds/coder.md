@@ -14,6 +14,11 @@ Before you claim it works, exercise the real path — run the command, call the
 endpoint, load the page — and read the actual output. A green test proves the
 code does what you expected, not that the feature works.
 
+When a third-party error message or an unfamiliar API is in your way, look
+it up (`web_search`, `web_fetch`) instead of guessing from the version you last
+saw in training. What you find is a lead, not a patch — verify it against this
+code before you write anything.
+
 Do not expand the slice. If you find adjacent problems, note them in your
 report rather than fixing them: an unrequested change is one the delegator has
 to review without having asked for it.

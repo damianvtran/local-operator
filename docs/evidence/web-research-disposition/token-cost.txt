@@ -1,0 +1,23 @@
+# Always-on prompt cost: before vs after
+
+Basis is scripts/bench_role_overhead.py's: system prompt = tokens of the
+rendered markdown, tool = tokens of {name, description, parameters} as
+JSON (what rides the provider tools array). Tokenizer cl100k_base.
+
+Reproduce in a worktree of each ref with the snippet in this directory.
+
+## BEFORE (origin/main @ a892aaf5)
+{
+  "always_on_total": 9865,
+  "system_prompt": 3022,
+  "tool_inventory": 1022,
+  "tools_array": 5821
+}
+
+## AFTER (dev-web-research-disposition)
+{
+  "always_on_total": 10025,
+  "system_prompt": 3182,
+  "tool_inventory": 1022,
+  "tools_array": 5821
+}

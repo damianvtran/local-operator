@@ -1,0 +1,69 @@
+# A/B eval: research disposition, live agent runs
+
+14 scenarios x 3 runs x 2 arms = 84 live turns, anthropic/claude-opus-5.
+before = origin/main @ a892aaf5; after = dev-web-research-disposition.
+Both arms: isolated LOCAL_OPERATOR_CONFIG_DIR, ecosystem skills disabled,
+web_search provider = duckduckgo (credential-free).
+
+Command:
+  .venv/bin/python scripts/eval_research_disposition.py \
+      --before <base-worktree> --after <branch-worktree> --runs 3
+
+"researched" = reached the network at all (includes curl from bash/eval).
+"(Nw)" = of those, how many used web_search/web_fetch rather than improvising.
+
+=== per scenario: researched (of which via web tool) ===
+id    expect        before        after
+S1    search      2/3 (2w)     3/3 (3w)   dependency traceback (pydantic root_validator)
+S2    search      3/3 (3w)     3/3 (3w)   httpx proxies= removal
+S3    search      3/3 (2w)     3/3 (3w)   published advisory for requests 2.31.0
+S4    search      0/3 (0w)     3/3 (3w)   current wheel-build tooling
+S5    search      0/3 (0w)     3/3 (3w)   command-palette design patterns
+S6    search      3/3 (3w)     3/3 (3w)   Anthropic prompt-cache breakpoints
+S7    search      0/3 (0w)     0/3 (0w)   PEP 668 externally-managed-environment
+S8    search      3/3 (3w)     3/3 (3w)   Textual save_screenshot currency
+S9    search      0/3 (0w)     0/3 (0w)   WCAG contrast thresholds
+S10   search      3/3 (3w)     3/3 (3w)   HTTP 529
+S11   NO          0/3 (0w)     0/3 (0w)   local refactor question
+S12   NO          0/3 (0w)     0/3 (0w)   "how do I change custom instructions in lop"
+S13   NO          0/3 (0w)     0/3 (0w)   arithmetic
+S14   NO          0/3 (0w)     0/3 (0w)   directory listing
+
+SHOULD trigger:
+  before researched 17/30 (57%), via web tool 16/30 (53%)
+  after  researched 24/30 (80%), via web tool 24/30 (80%)
+
+SHOULD NOT:
+  before researched 0/12 (0%), via web tool 0/12 (0%)
+  after  researched 0/12 (0%), via web tool 0/12 (0%)
+
+## Reading the result
+
+The headline is S4 and S5: 0/3 -> 3/3 each. Both are the case the change was
+written for. S4 ("what does the ecosystem do now for building wheels") and S5
+("design patterns for a command palette") were answered entirely from recall on
+the base, with S4 making ZERO tool calls of any kind. Neither question has a
+local answer, and neither triggered a lookup until the prompt stopped defining
+verification as a local-only act.
+
+S1 (2/3 -> 3/3) and S3 (2 of 3 improvised via curl -> 3 of 3 on the web tools)
+are smaller moves in the same direction: the intent was already there, and what
+changed is that it now reaches the purpose-built tool instead of hand-rolling an
+HTTP call in bash.
+
+S7 and S9 did not move and are NOT counted as fixes. Both answered from stable
+knowledge and both answered CORRECTLY - PEP 668's marker file and mechanism,
+and WCAG 2.2's 4.5:1 / 3:1 thresholds, neither of which has changed. This is
+the desired shape of a miss: the trigger is "you notice you are guessing", and
+on these two the model was not guessing. Forcing a search here would buy
+latency and no accuracy.
+
+The negative half is the load-bearing half, and it held at 0/12 in both arms.
+S12 is the one to check by hand rather than by rate: the correct behaviour is
+to read guide://configuration, and the after arm did exactly that -
+
+  read {"path": "guide://configuration", "i": "Reading configuration guide"}
+
+so the new research bullet did not override the existing guide rule it sits
+55 lines below. S11 used grep, S13 used eval for arithmetic, S14 used bash.
+Nothing reached for the web where the answer was local.

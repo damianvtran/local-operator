@@ -1,0 +1,17 @@
+# Prompt-cache stability: unchanged by this change
+
+The insertions land in system block [0], which is rendered variable-free
+and is byte-stable per build, so no cache breakpoint moves. Contract is
+>= 90% (docs/VERIFICATION.md). Both arms measured with the same command:
+
+  .venv/bin/python scripts/bench_cache_rate.py --turns 4
+
+## BEFORE (origin/main @ a892aaf5)
+structural prefix stability: 98.8% (contract: >= 90%)
+live cache rate: skipped (no OPENROUTER_API_KEY)
+PASS
+
+## AFTER (dev-web-research-disposition)
+structural prefix stability: 98.8% (contract: >= 90%)
+live cache rate: skipped (no OPENROUTER_API_KEY)
+PASS

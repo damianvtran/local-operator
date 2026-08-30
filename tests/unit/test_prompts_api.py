@@ -177,6 +177,58 @@ def test_system_md_teaches_eval_digest_pipeline() -> None:
     assert "spill://" in text
 
 
+def test_system_md_frames_the_web_as_a_verification_surface() -> None:
+    """Verification must not be defined as a closed set of LOCAL actions.
+
+    The first working principle used to enumerate verification as "run the
+    command, read the file, search the workspace" — three members, all local
+    and complete-sounding. An agent following it faithfully never reaches the
+    web, because by the definition it was handed it has already verified. That
+    is why lookups only happened when a user asked for them explicitly.
+    Contract, not wording: the enumeration must keep a web member.
+    """
+    # Normalized: the source is hard-wrapped at 79 columns, so any asserted
+    # phrase may straddle a line break.
+    text = " ".join(render_template("system.md", {}).split())
+    # The persona paragraph enumerates the toolset and states when to use it.
+    # Both halves carried the closed-local framing, and this one is read FIRST
+    # — a later bullet asking for web research argues uphill against a persona
+    # that already scoped tool use to "the machine's state".
+    assert "searching the workspace and the web" in text
+    assert "or on something you would otherwise recall" in text
+    # The working principle's own enumeration of what verifying means.
+    assert "search the workspace, look it up on the web" in text
+
+
+def test_system_md_teaches_when_to_research_without_making_it_reflexive() -> None:
+    """The research bullet has to carry four clauses that pull against each
+    other, so all four are pinned as behaviour.
+
+    Naming the tools alone would produce an agent that searches on every task —
+    a latency and token cost paid on work that never needed it. The trigger is
+    deliberately self-observational ("you notice you are guessing") rather than
+    a topic list, because a topic list invites keyword matching and generalises
+    to nothing outside it. The last clause exists so a result informs the work
+    without becoming it.
+    """
+    text = " ".join(render_template("system.md", {}).split())
+    # 1. The tools are named as the answer to stale knowledge.
+    assert "`web_search`/`web_fetch`" in text
+    # 2. Staleness is the stated reason, not a preference.
+    assert "cutoff" in text
+    # 3. Not reflexive: a trigger the agent evaluates against itself, plus an
+    #    explicit brake. Stated trigger-then-brake so the agent learns what
+    #    fires the search before it learns what suppresses it.
+    assert "you notice you are guessing" in text
+    assert "not on every task" in text
+    # 4. Results inform, never dictate, are never copied wholesale, and — the
+    #    clause that is easy to miss — never bound the options considered. An
+    #    agent can honour "never the answer" and still weigh only the three
+    #    approaches a search surfaced.
+    assert "input, never the answer" in text
+    assert "never the edge of your options" in text
+
+
 def test_compaction_summary_renders_optional_sections() -> None:
     full = render_template(
         "compaction_summary.md",
