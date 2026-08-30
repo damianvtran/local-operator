@@ -345,6 +345,21 @@ class ProjectionFold:
         # have several at once (a parallel tool batch); the phone renders the
         # front one and a "1 of N" badge. See push_pending/pop_pending.
         self._pending_queue: list[PendingRequest] = []
+        # Optimistic user rows this fold painted whose MessageStartEvent has
+        # not arrived yet, keyed by the message id the handle handed the
+        # session. `absorb_user_event` pops the entry instead of scanning the
+        # transcript tail: a phone steer is announced at a LATER tool boundary,
+        # so assistant and tool rows push its echo out of any fixed window and
+        # the tail scan repainted it (issue #231, the mobile twin of the TUI's
+        # #227). Holds the TranscriptEntry itself, because the event's job is
+        # to upgrade that row in place (id and image refs) rather than to
+        # suppress a second one.
+        #
+        # An entry is retired by its own event, and otherwise by the wholesale
+        # `fold_history` rebuild — the rows it described are gone and the
+        # rebuilt tail carries the persisted messages instead, so a surviving
+        # entry would point at a row no longer in the transcript.
+        self._pending_user_echoes: dict[str, TranscriptEntry] = {}
 
     # -- history -----------------------------------------------------------
 
@@ -423,8 +438,12 @@ class ProjectionFold:
                         message.text,
                         result_details if isinstance(result_details, dict) else None,
                     )
-        # A resumed fold starts clean: no streaming row, no half-run tools.
+        # A resumed fold starts clean: no streaming row, no half-run tools, and
+        # no pending echoes — the rows those entries pointed at have just been
+        # replaced wholesale, and the persisted history already carries any
+        # message that was really delivered.
         self._open_message_id = None
+        self._pending_user_echoes.clear()
         self.projection.transcript = self._cap_tail(entries)
         # Prune the correlation maps to the surviving tail: a long history
         # pairs every historical tool call, and keeping ids whose rows were
@@ -618,21 +637,35 @@ class ProjectionFold:
 
     # -- user turns --------------------------------------------------------------
 
-    def note_user_message(self, text: str, *, steer: bool = False) -> None:
+    def note_user_message(
+        self, text: str, *, steer: bool = False, message_id: str | None = None
+    ) -> None:
         """Append the user's own message to the transcript. Called by the
         handle's prompt/steer path, because the harness only emits
         MessageStartEvent for ASSISTANT messages — a live user prompt never
         reaches the fold as an event, so without this the phone showed the
         agent's reply with no sign of what the human asked (and, for a
-        phone-sent prompt, no echo of the tap at all)."""
-        self._append(
-            TranscriptEntry(
-                id=f"user-{time.time_ns()}",
-                kind="steer" if steer else "user",
-                text=text,
-                final=True,
-            )
+        phone-sent prompt, no echo of the tap at all).
+
+        ``message_id`` is the id the handle handed the session for this very
+        message (the ``ContinuationCommand`` id, which becomes the ``Message``
+        id). Recorded in the pending-echo registry so :meth:`absorb_user_event`
+        recognises the eventual event as THIS row rather than guessing from the
+        transcript tail — see that method for why the guess was wrong. Omitted
+        by callers with no id to offer, which keeps the legacy tail match.
+        """
+        entry = TranscriptEntry(
+            # Synthetic id when the handle has none: the row still needs a
+            # unique key for the web client's list reconciliation, and the
+            # registry below is what carries the correlation instead.
+            id=message_id or f"user-{time.time_ns()}",
+            kind="steer" if steer else "user",
+            text=text,
+            final=True,
         )
+        self._append(entry)
+        if message_id:
+            self._pending_user_echoes[message_id] = entry
         self._bump()
 
     def note_peer_message(self, text: str, *, sender: dict[str, Any] | None = None) -> None:
@@ -659,23 +692,52 @@ class ProjectionFold:
         TUI→phone direction that was missing. Returns True when it added the
         row; False when the row was already there (the handle's optimistic
         ``note_user_message`` echo for a phone-sent prompt), so the same
-        message never appears twice on the phone."""
+        message never appears twice on the phone.
+
+        De-duped against an explicit registry keyed by MESSAGE ID, not by a
+        scan of the transcript tail (issue #231). A phone STEER is announced
+        only when the drain takes it, at a later tool boundary, so assistant
+        and tool rows land between the echo and its event and push the echo out
+        of any fixed-size window — the three-entry scan this replaces repainted
+        the steer the moment that happened. The id is exact and order-free,
+        which also fixes the mirror-image failure the window had: a genuinely
+        distinct message whose words collide with a recent row was swallowed.
+
+        The in-place UPGRADE is preserved and load-bearing: a phone-sent prompt
+        is echoed WITHOUT image refs (the handle holds only the wire images),
+        so when the real event arrives carrying the attachments the echoed row
+        takes the message's id and refs rather than being skipped — otherwise
+        the thumbnails never appear for the sender.
+        """
         if not isinstance(message, Message) or message.role != "user":
             return False
         text = message.text
         refs = _image_refs(message)
-        # De-dupe the optimistic echo: same text already sitting at the tail.
-        # A phone-sent prompt was echoed by note_user_message WITHOUT image
-        # refs (the handle has only the wire images, not a persisted id), so
-        # when the real MessageStartEvent arrives carrying the attachments,
-        # upgrade the echoed row's id and image refs in place rather than
-        # skipping it — otherwise the thumbnails never appear for the sender.
-        for entry in reversed(self.projection.transcript[-3:]):
-            if entry.kind in ("user", "steer") and entry.text == text:
-                if refs and not entry.images:
-                    entry.id = message.id
-                    entry.images = refs
-                return False
+        entry = self._pending_user_echoes.pop(message.id, None)
+        if entry is None:
+            # No registered echo: either this message came from ANOTHER surface
+            # (the TUI→phone direction this method exists to paint), or the
+            # handle had no id to register. Fall back to the historical tail
+            # scan ONLY for rows the registry does not own, so a legacy handle
+            # keeps its de-dup while a row with an exact event still coming is
+            # never consumed by a colliding neighbour's words.
+            owned = {held.id for held in self._pending_user_echoes.values()}
+            for candidate in reversed(self.projection.transcript[-3:]):
+                if (
+                    candidate.kind in ("user", "steer")
+                    and candidate.text == text
+                    and candidate.id not in owned
+                ):
+                    entry = candidate
+                    break
+        if entry is not None:
+            # Adopt the persisted identity either way: the row was keyed by the
+            # command id (or a synthetic one), and the message id is what later
+            # history folds and the web client's list reconciliation agree on.
+            entry.id = message.id
+            if refs and not entry.images:
+                entry.images = refs
+            return False
         self._append(
             TranscriptEntry(id=message.id, kind="user", text=text, images=refs, final=True)
         )
@@ -1072,6 +1134,20 @@ class ProjectionFold:
     def _append(self, entry: TranscriptEntry) -> None:
         self.projection.transcript.append(entry)
         self.projection.transcript = self._cap_tail(self.projection.transcript)
+        if self._pending_user_echoes:
+            # Drop echo entries whose row the cap just trimmed. Two reasons,
+            # both bounding: an entry pointing at a row no longer in the
+            # projection can only upgrade something invisible, and a steer the
+            # phone RECALLS is never announced, so without this its entry would
+            # sit in the dict for the life of the session. A trimmed row's
+            # event now paints at the tail, which is the honest rendering — the
+            # row it would have upgraded is gone.
+            live = {row.id for row in self.projection.transcript}
+            self._pending_user_echoes = {
+                message_id: row
+                for message_id, row in self._pending_user_echoes.items()
+                if row.id in live
+            }
 
     @staticmethod
     def _cap_tail(entries: list[TranscriptEntry]) -> list[TranscriptEntry]:

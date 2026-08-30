@@ -23,11 +23,13 @@ error`` status and can be retried with ``/reload`` (TUI-012).
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import os
 import re
 import sys
 import time
+import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from functools import partial
@@ -1114,6 +1116,33 @@ class NoticeFn(Protocol):
     def __call__(self, body: str, kind: NoticeKind = "info") -> None: ...
 
 
+class _PendingUserEcho(NamedTuple):
+    """One user row this TUI painted whose ``MessageStartEvent`` is still coming.
+
+    ``message_id`` is the id of the very ``Message`` the session will announce,
+    which is what makes the match EXACT rather than a guess: a distinct message
+    carrying identical words (a phone "yes" against a pending TUI "yes") has a
+    different id and is therefore painted, where the previous text match
+    swallowed it (issue #228).
+
+    Empty when this surface could not know the id in advance — a session whose
+    ``prompt`` predates the ``message_id`` seam mints the id internally. Such an
+    entry keeps the historical text match, so an older or third-party session
+    behaves exactly as it did rather than double-painting every row.
+    """
+
+    message_id: str
+    text: str
+
+    def prompt_kwargs(self) -> dict[str, Any]:
+        """The ``prompt()`` keyword that pins the announced message to this entry.
+
+        Empty for a session without the ``message_id`` seam, where the entry
+        falls back to matching by text.
+        """
+        return {"message_id": self.message_id} if self.message_id else {}
+
+
 class _ProviderRows(NamedTuple):
     """The provider list's rows, plus what to say when it could not be built.
 
@@ -1714,30 +1743,43 @@ class OperatorApp(App[None]):
         #: The two together are the FIFO the engine drains: these rows were
         #: queued first, so they settle first (see `on_steering_delivered`).
         self._deferred_steer_notices: list[NoticeBlock] = []
-        #: User-message texts this TUI has ALREADY painted (or deliberately
-        #: declined to paint) whose ``MessageStartEvent`` from the session is
-        #: still coming. ``on_user_message_start`` consumes a matching entry
-        #: instead of painting a second row. An explicit registry, not a scan
-        #: of the transcript tail: the session announces a STEER only when the
-        #: drain takes it, which is a later tool boundary, and every tool card
+        #: User messages this TUI has ALREADY painted (or deliberately declined
+        #: to paint) whose ``MessageStartEvent`` from the session is still
+        #: coming. ``on_user_message_start`` consumes a matching entry instead
+        #: of painting a second row. An explicit registry, not a scan of the
+        #: transcript tail: the session announces a STEER only when the drain
+        #: takes it, which is a later tool boundary, and every tool card
         #: mounted in between pushed the echo out of any fixed-size window —
         #: the tail scan this replaces painted every steered message twice the
         #: moment two blocks landed between the echo and its delivery.
         #:
-        #: Texts, not block references: the entry's job is to say "this event
-        #: is our own echo", and it must keep saying so after a `/clear` has
-        #: removed the block it described (the engine's queue survives the
-        #: clear, so the event still arrives). Cleared on a session swap, where
-        #: the messages died with the old session's queue and a stale entry
-        #: would swallow the next conversation's first identical prompt.
+        #: Entries carry the MESSAGE ID, not just the text (issue #228). The
+        #: id is minted here and handed to the session (`message_id=` on
+        #: `prompt`, the `Message` object itself on `steer_message`), so the
+        #: event that comes back names the very message this row was painted
+        #: for. That is what tells our own echo apart from a DISTINCT message
+        #: whose words collide: repeated "yes" / "continue" sent from the phone
+        #: while a TUI echo of the same words is pending used to consume that
+        #: entry, leaving the foreign message unpainted here even though the
+        #: model received it. An unknown id is by definition not ours, so it
+        #: paints.
         #:
-        #: Known limit, inherent to matching by text: a prompt arriving from
-        #: ANOTHER front end with words identical to a still-pending steer
-        #: consumes that steer's entry — the foreign message stays unpainted
-        #: here and the steer's own event later paints the row. Rare (same
-        #: words, same window, two surfaces) and self-healing, but not
-        #: hazard-free, and the reader deserves to know.
-        self._pending_user_echoes: list[str] = []
+        #: Matching stays by VALUE, never by position: events do NOT arrive in
+        #: registration order (a steer an aborted turn left in the queue is
+        #: announced inside the NEXT turn, after that turn's own prompt echo),
+        #: so the id lookup is a scan of the whole list rather than a peek at
+        #: either end. Ids, not block references: the entry must keep saying
+        #: "this event is ours" after a `/clear` has removed the block it
+        #: described (the engine's queue survives the clear, so the event still
+        #: arrives). Cleared on a session swap, where the messages died with
+        #: the old session's queue.
+        #:
+        #: The text is retained as the FALLBACK key for a session that cannot
+        #: take a caller-supplied id (`prompt()` without the `message_id`
+        #: seam — older or third-party implementations mint their own), and as
+        #: the key the two retire-on-failure sites already use. Those entries
+        #: keep the historical by-text behaviour, limit included.
+        self._pending_user_echoes: list[_PendingUserEcho] = []
         #: Wake receipts painted LIVE this session, as ``(wake_id, occurrence)``
         #: keys. ``on_wake_delivered`` records each; the history replay skips a
         #: persisted ``wake_prompt`` whose key is already here — otherwise a
@@ -8584,7 +8626,11 @@ class OperatorApp(App[None]):
             # when the drain actually takes it (the mobile→TUI echo channel).
             # The row is already on screen — registered here so that event is
             # recognised as our own echo rather than painted again.
-            self._pending_user_echoes.append(text)
+            #
+            # No probe on this path: `steer_message` queues the very object
+            # built above, so the announced message IS `steer_message` and its
+            # id is authoritative for every session implementation.
+            self._register_user_echo(text, message_id=steer_message.id)
             # Held with the notice so Esc can lift the whole steer — the queued
             # row, the user row and its image blocks — back out of the
             # transcript and into the composer (:meth:`_recall_queued_steers`).
@@ -8655,7 +8701,14 @@ class OperatorApp(App[None]):
         # so register it for `on_user_message_start` to consume rather than
         # repaint. Here rather than in `_submit_prompt`, because this is the
         # single dispatch point every prompt passes through, held or not.
-        self._pending_user_echoes.append(text)
+        #
+        # The id is minted HERE and pushed into the session rather than read
+        # back from it: `prompt()` returns only when the whole turn is over,
+        # long after the announcement, so the correlation key has to travel
+        # outward. A session without the `message_id` seam (older or
+        # third-party) mints its own id, so the entry registers without one and
+        # falls back to matching by text.
+        echo = self._register_user_echo(text, message_id=self._echo_message_id(session.prompt))
         # A turn STARTING ends any barren click gesture: from here Ctrl+C means
         # "stop this turn", and a claim raised before the turn existed cannot
         # speak for a press aimed at it (agent review round 3, R3-3). Belt and
@@ -8675,15 +8728,15 @@ class OperatorApp(App[None]):
         async def run_prompt() -> None:
             try:
                 async with self._turn_provider_lock:
-                    await session.prompt(text, images)
+                    await session.prompt(text, images, **echo.prompt_kwargs())
             except Exception as error:  # surface, never crash the app
                 self._append_block(NoticeBlock(str(error), "error"))
                 # A prompt that failed never announced itself, so its echo
                 # entry has no event coming. Left standing it would swallow
-                # the next identical prompt's event; `_consume_user_echo` is
+                # the next identical prompt's event; `_discard_user_echo` is
                 # safe because a delivered announcement has already consumed
                 # the entry.
-                self._consume_user_echo(text)
+                self._discard_user_echo(echo)
             finally:
                 # agent_end usually flips this first; a redundant update is a
                 # no-op, and this covers sessions that end without agent_end.
@@ -12104,14 +12157,16 @@ class OperatorApp(App[None]):
                 # prompt. Register it so the event is consumed silently instead
                 # of painting the loudest mark in the transcript for words the
                 # user never typed.
-                self._pending_user_echoes.append(LOOP_PROMPT)
+                echo = self._register_user_echo(
+                    LOOP_PROMPT, message_id=self._echo_message_id(session.prompt)
+                )
                 try:
-                    await session.prompt(LOOP_PROMPT)
+                    await session.prompt(LOOP_PROMPT, **echo.prompt_kwargs())
                 except Exception as error:  # surface and stop; never spin
                     notice(f"loop stopped: {error}", "error")
                     # Same stale-entry hazard as `_start_turn`: a failed
                     # prompt never announces, so take the entry back out.
-                    self._consume_user_echo(LOOP_PROMPT)
+                    self._discard_user_echo(echo)
                     break
                 finally:
                     if self._status is not None:
@@ -12205,20 +12260,23 @@ class OperatorApp(App[None]):
                 if self._status is not None:
                     self._status.update(streaming=True)
                 # Format ONCE and reuse the exact string for both the echo
-                # registration and the prompt: the echo registry matches on the
-                # submitted string byte-for-byte, so a second `.format` here
-                # could drift and leave the user MessageStartEvent unconsumed.
+                # registration and the prompt: an id-less entry (a session
+                # without the `message_id` seam) still matches on the submitted
+                # string byte-for-byte, so a second `.format` here could drift
+                # and leave the user MessageStartEvent unconsumed.
                 prompt = LOOP_GOAL_PROMPT.format(goal=goal)
-                self._pending_user_echoes.append(prompt)
+                echo = self._register_user_echo(
+                    prompt, message_id=self._echo_message_id(session.prompt)
+                )
                 try:
-                    await session.prompt(prompt)
+                    await session.prompt(prompt, **echo.prompt_kwargs())
                 except Exception as error:  # surface and stop; never spin
                     if self._status is not None:
                         self._status.update(streaming=False)
                     notice(f"loop stopped: {error}", "error")
                     # A failed prompt never announces, so take the stale echo
                     # entry back out (same hazard as numeric mode / `_start_turn`).
-                    self._consume_user_echo(prompt)
+                    self._discard_user_echo(echo)
                     break
                 # NOTE: the status is deliberately NOT reset to idle here — it
                 # stays in a working state across the judge call below so the
@@ -16467,31 +16525,100 @@ class OperatorApp(App[None]):
         every steered message twice once two tool cards landed in between
         (issue: duplicated steering messages).
 
-        Matching is by text, not by position: events do NOT always arrive in
-        registration order (a steer an aborted turn left in the queue is
-        announced inside the NEXT turn, after that turn's own prompt echo),
-        and entries with identical text are indistinguishable — which is
-        fine, because either one consumed is the right row suppressed.
-        Correctness comes from "every event for a painted echo finds an
+        Matched on the MESSAGE ID, never on position: the app minted the id it
+        registered and handed it to the session, so the announcement names the
+        exact row. This is what makes a distinct message with colliding words
+        paint (issue #228) — an id this surface never registered is not our
+        echo, however familiar the words. It is also why order does not matter:
+        events do NOT always arrive in registration order (a steer an aborted
+        turn left in the queue is announced inside the NEXT turn, after that
+        turn's own prompt echo), and an id lookup is order-free where a
+        positional one is not.
+
+        Falls back to the historical text match for an entry with no id — a
+        session whose ``prompt`` predates the ``message_id`` seam mints the id
+        internally, so this surface cannot know it in advance. Correctness for
+        those entries still comes from "every event for a painted echo finds an
         entry", not from any ordering guarantee."""
-        if self._consume_user_echo(message.prompt):
+        if self._consume_user_echo(message.prompt, message_id=message.message_id):
             return  # our own echo — the row is already painted
         self._append_block(UserBlock(message.prompt, message.image_count))
         self._append_image_blocks(list(message.images))
 
-    def _consume_user_echo(self, text: str) -> bool:
-        """Take one pending echo entry for ``text``; True if there was one.
+    @staticmethod
+    def _echo_message_id(prompt: Callable[..., Any]) -> str:
+        """A fresh correlation id, or "" when ``prompt`` cannot accept one.
 
-        The one spelling for the three sites that retire an entry: the
-        delivery handler (consume = suppress the repaint) and the two failed
-        ``prompt()`` paths (consume = drop an entry whose event is never
-        coming). ``remove``-by-value swallows the already-consumed case for
-        free."""
+        The id only correlates if the session actually USES it: a ``prompt``
+        without the ``message_id`` keyword mints its own id internally, and
+        registering ours would produce an entry no announcement can ever match
+        — every prompt would then paint twice. Probed rather than assumed
+        because `SessionProtocol` does not require the keyword and the mobile
+        handles already probe the same seam the same way (`owned.py`,
+        `tui_handle.py`); a session that cannot be introspected is treated as
+        the older shape, which is the safe direction.
+        """
         try:
-            self._pending_user_echoes.remove(text)
-            return True
-        except ValueError:
-            return False
+            supported = "message_id" in inspect.signature(prompt).parameters
+        except (TypeError, ValueError):  # builtins and C callables have no signature
+            supported = False
+        return uuid.uuid4().hex if supported else ""
+
+    def _register_user_echo(self, text: str, *, message_id: str = "") -> _PendingUserEcho:
+        """Record a row this TUI painted whose announcement is still coming.
+
+        Returns the entry so the caller can retire it by identity if the
+        message turns out never to be announced (a ``prompt()`` that raised, a
+        recalled steer). Identity rather than a re-lookup, because two
+        registrations can legitimately carry the same words and the caller must
+        take back exactly its own.
+        """
+        entry = _PendingUserEcho(message_id, text)
+        self._pending_user_echoes.append(entry)
+        return entry
+
+    def _discard_user_echo(self, entry: _PendingUserEcho) -> None:
+        """Drop an entry whose ``MessageStartEvent`` is never coming.
+
+        The failure half of the registry: a prompt that raised never announced
+        itself, and a recalled steer left the queue, so leaving either entry
+        standing would swallow the announcement of the RESEND. Silent when the
+        entry is already gone — a delivery may have consumed it first, and that
+        race is benign.
+        """
+        for index, held in enumerate(self._pending_user_echoes):
+            if held is entry:
+                del self._pending_user_echoes[index]
+                return
+
+    def _consume_user_echo(self, text: str, *, message_id: str = "") -> bool:
+        """Take one pending echo entry; True if there was one.
+
+        The one spelling for the sites that retire an entry: the delivery
+        handler (consume = suppress the repaint), the two failed ``prompt()``
+        paths and the steer recall (consume = drop an entry whose event is
+        never coming). A miss is not an error — an entry already consumed, or
+        never registered, is the common case.
+
+        ``message_id`` is preferred and decides alone when it matches: the id
+        came back from the session naming the very message a row was painted
+        for. Only when no entry carries that id does the search fall back to
+        text, and then only over entries with NO id of their own — an entry
+        that has one has an exact answer coming, so consuming it on a word
+        collision is precisely the #228 defect. The retire-on-failure callers
+        pass no id and reach the text branch by construction.
+        """
+        entries = self._pending_user_echoes
+        if message_id:
+            for index, entry in enumerate(entries):
+                if entry.message_id == message_id:
+                    del entries[index]
+                    return True
+        for index, entry in enumerate(entries):
+            if not entry.message_id and entry.text == text:
+                del entries[index]
+                return True
+        return False
 
     def on_assistant_message_start(self, message: AssistantMessageStart) -> None:
         """A message opened — but nothing is MOUNTED until text actually arrives.
@@ -16895,12 +17022,14 @@ class OperatorApp(App[None]):
         if stop_notice is not None and stop_notice.text() == RECALL_DECLINE_NOTICE:
             transcript.remove_block(stop_notice)
             self._stop_notice = None
-        # The steer branch registered its text as a pending user echo so the
-        # delivery's MessageStartEvent would not repaint it; the recall has
-        # removed the painted row, so the entry must go with it — left in
-        # place it would swallow the RESEND's echo and the resent message
-        # would never paint.
-        self._consume_user_echo(text)
+        # The steer branch registered a pending echo so the delivery's
+        # MessageStartEvent would not repaint it; the recall has removed the
+        # painted row, so the entry must go with it — left in place it would
+        # swallow the RESEND's echo and the resent message would never paint.
+        # By the message's OWN id, which is the key the steer registered under:
+        # `message` is the object `steer_message` queued, so this takes exactly
+        # this steer's entry and never a sibling with the same words.
+        self._consume_user_echo(text, message_id=message.id)
         for held in self._queued_steer_notices:
             if held is notice:
                 self._queued_steer_notices.remove(held)
