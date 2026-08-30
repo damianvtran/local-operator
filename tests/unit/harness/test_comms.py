@@ -51,13 +51,119 @@ from local_operator.tools.registry import create_tools
 MODEL = ModelSpec(provider="test", model_id="m", context_window=100_000)
 
 
-async def wait_for(predicate, timeout: float = 10.0) -> None:
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + timeout
-    while not predicate():
-        if loop.time() > deadline:
-            raise AssertionError("timed out waiting for condition")
+#: Ceiling for the signal-free pump below, counted in LOOP TURNS rather than
+#: in seconds. That unit is the whole point (#122): machine contention
+#: stretches how long a turn takes but not how many turns the awaited work
+#: needs, so a loaded box cannot exhaust this budget the way it exhausted the
+#: 10 s wall-clock deadline this replaced. It is a deadlock guard — reached
+#: only when the awaited thing is never going to happen — not a timing
+#: assumption, and raising it is never the fix for a failure here.
+MAX_PUMP_TURNS = 3000
+
+#: Same role for the signal-driven wait: a wedged test must fail rather than
+#: hang a CI job forever (this suite has no pytest-timeout). Generous because
+#: it can never be the discriminator — the success path blocks on an
+#: ``asyncio.Event`` set by the code under test and never compares elapsed
+#: time — so the only run that reaches it is one where the signal will not
+#: arrive at all.
+DEADLOCK_GUARD_S = 120.0
+
+
+class ChangeSignal:
+    """An edge fed by the code under test's OWN notifications.
+
+    The deterministic synchronisation point #122 asks for. A child's progress
+    is published twice over — ``SubagentComms.notify_detail_persisted`` fires
+    after each durable transcript append, and the parent's event stream
+    carries ``SubagentStartEvent``/``SubagentProgressEvent`` — so a test that
+    needs "the child got somewhere" can block on those publications instead of
+    re-reading the filesystem on a timer and betting the answer arrives before
+    a deadline.
+
+    Both sources are watched because neither alone covers every predicate:
+    the detail registry sees nested children the parent stream never routes,
+    and the parent stream carries the attach moment (``SubagentStartEvent`` is
+    emitted immediately after ``comms.attach``) that makes ``session_dir_of``
+    non-None before any transcript append has happened.
+
+    Level-triggered on purpose: :meth:`settle` clears the flag BEFORE the
+    caller re-tests its predicate, so a notification racing in between the
+    test and the wait is kept rather than lost.
+    """
+
+    def __init__(self) -> None:
+        self._event = asyncio.Event()
+        self._unsubscribes: list[Callable[[], None]] = []
+
+    def _fire(self, *_: Any) -> None:
+        self._event.set()
+
+    def watch_comms(self, comms) -> "ChangeSignal":
+        """Wake on every durable child-transcript append."""
+        self._unsubscribes.append(comms.subscribe_detail_changes(self._fire))
+        return self
+
+    def watch_session(self, session: Session) -> "ChangeSignal":
+        """Wake on every event the parent's stream carries."""
+        self._unsubscribes.append(session.subscribe(self._fire))
+        return self
+
+    def arm(self) -> None:
+        """Drop any pending edge so the next wait blocks on a NEW one."""
+        self._event.clear()
+
+    async def settle(self) -> None:
+        """Block until something publishes."""
+        await self._event.wait()
+        self._event.clear()
+
+    def close(self) -> None:
+        for unsubscribe in self._unsubscribes:
+            unsubscribe()
+        self._unsubscribes.clear()
+
+
+async def _await_signalled(predicate, signal: "ChangeSignal") -> None:
+    """Re-test ``predicate`` once per publication, forever. Bounded by caller."""
+    while True:
+        # Armed BEFORE the test, never after: a publication landing between
+        # the test and the wait is then still on the flag, so the edge that
+        # would satisfy the predicate can never be missed.
+        signal.arm()
+        if predicate():
+            return
+        await signal.settle()
+
+
+async def wait_for(predicate, *, signal: "ChangeSignal | None" = None) -> None:
+    """Block until ``predicate`` holds, on an event rather than on a clock.
+
+    With a ``signal``, each re-test follows a publication from the code under
+    test, so this waits exactly as long as the work takes and no longer: there
+    is no elapsed-time comparison anywhere on the success path. That is the
+    property #122 asks for, and it is why the integration cases below pass one.
+
+    Without one — the in-process cases over ``FakeChild``, where the awaited
+    step is a coroutine this test itself scheduled and there is nothing to
+    subscribe to — it pumps the loop and bounds itself by TURN COUNT. See
+    :data:`MAX_PUMP_TURNS` for why that unit survives contention where seconds
+    did not.
+    """
+    if signal is not None:
+        try:
+            await asyncio.wait_for(_await_signalled(predicate, signal), DEADLOCK_GUARD_S)
+        except asyncio.TimeoutError:
+            raise AssertionError(
+                "the code under test published no change satisfying the condition in "
+                f"{DEADLOCK_GUARD_S:.0f}s — it is wedged, not merely slow"
+            ) from None
+        return
+
+    for _ in range(MAX_PUMP_TURNS):
+        if predicate():
+            return
         await asyncio.sleep(0.01)
+    raise AssertionError(f"condition never held across {MAX_PUMP_TURNS} loop turns")
 
 
 def has_complete_tool_round(session_dir) -> bool:
@@ -1586,39 +1692,50 @@ async def test_a_resumed_child_replays_the_stopped_ones_transcript(tmp_path, mon
     await parent.async_init()
     job_id = parent._launch_subagent(label="docs", prompt="Update the docs.")
     comms = parent.subagent_comms
-    await wait_for(lambda: comms.session_dir_of(job_id) is not None)
-    # Let it finish real work before stopping it, and wait on THAT rather than
-    # on a duration: the child persists each tool round at its loop boundary
-    # (``Session._persist_progress``) roughly 0.29s after launch, so the fixed
-    # 0.3s sleep this replaced was inside one standard deviation of the thing
-    # it was betting against and lost the coin flip about a third of the time.
-    # Resume is only meaningful over a child that got somewhere, so the
-    # condition to wait for is a completed round, with seconds of headroom so
-    # this fails only if the child genuinely never runs a tool.
-    await wait_for(lambda: has_complete_tool_round(comms.session_dir_of(job_id)), timeout=30.0)
-    await comms.cancel(job_id)
-    await wait_for(lambda: status_of(parent, job_id) == "cancelled")
-    await wait_for(lambda: len(Transcript(comms.session_dir_of(job_id)).build_llm_history()) >= 2)
-    before = Transcript(comms.session_dir_of(job_id)).build_llm_history()
-    original = parent.jobs.get(job_id)
-    assert original is not None and original.launch_message_id == before[0].id
+    # Every wait below rides the child's own publications rather than a
+    # deadline (#122): both sources are watched because the parent stream
+    # carries attach and settle while the detail registry carries each durable
+    # transcript append, and this test waits on all three kinds of fact.
+    signal = ChangeSignal().watch_comms(comms).watch_session(parent)
+    try:
+        await wait_for(lambda: comms.session_dir_of(job_id) is not None, signal=signal)
+        # Let it finish real work before stopping it, and wait on THAT rather
+        # than on a duration: the child persists each tool round at its loop
+        # boundary (``Session._persist_progress``) roughly 0.29s after launch,
+        # so the fixed 0.3s sleep this originally replaced was inside one
+        # standard deviation of the thing it was betting against. Resume is
+        # only meaningful over a child that got somewhere, so the condition is
+        # a completed round — and it is now awaited on the append that creates
+        # it, so a loaded machine makes this slower, never red.
+        await wait_for(lambda: has_complete_tool_round(comms.session_dir_of(job_id)), signal=signal)
+        await comms.cancel(job_id)
+        await wait_for(lambda: status_of(parent, job_id) == "cancelled", signal=signal)
+        await wait_for(
+            lambda: len(Transcript(comms.session_dir_of(job_id)).build_llm_history()) >= 2,
+            signal=signal,
+        )
+        before = Transcript(comms.session_dir_of(job_id)).build_llm_history()
+        original = parent.jobs.get(job_id)
+        assert original is not None and original.launch_message_id == before[0].id
 
-    new_id, error = comms.resume(job_id, "You were interrupted. Wrap up.")
+        new_id, error = comms.resume(job_id, "You were interrupted. Wrap up.")
 
-    assert error is None and new_id is not None
-    continuation = parent.jobs.get(new_id)
-    assert continuation is not None and continuation.launch_message_id
-    assert continuation.launch_message_id != original.launch_message_id
-    await wait_for(lambda: status_of(parent, new_id) != "running")
-    assert comms.session_dir_of(new_id) == comms.session_dir_of(job_id)
-    after = Transcript(comms.session_dir_of(new_id)).build_llm_history()
-    assert len(after) > len(before)
-    assert any(message.id == continuation.launch_message_id for message in after)
-    resumed_node = comms.node(new_id)
-    assert resumed_node is not None
-    assert resumed_node.launch_message_id == continuation.launch_message_id
-    assert first_text(after) == first_text(before) == "Update the docs."
-    assert status_of(parent, new_id) == "completed"
+        assert error is None and new_id is not None
+        continuation = parent.jobs.get(new_id)
+        assert continuation is not None and continuation.launch_message_id
+        assert continuation.launch_message_id != original.launch_message_id
+        await wait_for(lambda: status_of(parent, new_id) != "running", signal=signal)
+        assert comms.session_dir_of(new_id) == comms.session_dir_of(job_id)
+        after = Transcript(comms.session_dir_of(new_id)).build_llm_history()
+        assert len(after) > len(before)
+        assert any(message.id == continuation.launch_message_id for message in after)
+        resumed_node = comms.node(new_id)
+        assert resumed_node is not None
+        assert resumed_node.launch_message_id == continuation.launch_message_id
+        assert first_text(after) == first_text(before) == "Update the docs."
+        assert status_of(parent, new_id) == "completed"
+    finally:
+        signal.close()
     await parent.dispose()
 
 
@@ -1633,15 +1750,23 @@ async def test_a_cancelled_child_keeps_the_work_it_had_already_done(tmp_path, mo
     await parent.async_init()
     job_id = parent._launch_subagent(label="docs", prompt="Update the docs.")
     comms = parent.subagent_comms
-    await wait_for(lambda: comms.session_dir_of(job_id) is not None)
-    # Wait for the round itself, not for how long a round usually takes. The
-    # assertions below are entirely about work the child had ALREADY completed
-    # before the cancel, so cancelling early does not fail loudly — it silently
-    # asserts over a transcript holding only the launch prompt.
-    await wait_for(lambda: has_complete_tool_round(comms.session_dir_of(job_id)), timeout=30.0)
+    signal = ChangeSignal().watch_comms(comms).watch_session(parent)
+    try:
+        await wait_for(lambda: comms.session_dir_of(job_id) is not None, signal=signal)
+        # Wait for the round itself, not for how long a round usually takes.
+        # The assertions below are entirely about work the child had ALREADY
+        # completed before the cancel, so cancelling early does not fail
+        # loudly — it silently asserts over a transcript holding only the
+        # launch prompt.
+        await wait_for(lambda: has_complete_tool_round(comms.session_dir_of(job_id)), signal=signal)
 
-    await comms.cancel(job_id)
-    await wait_for(lambda: len(Transcript(comms.session_dir_of(job_id)).build_llm_history()) > 1)
+        await comms.cancel(job_id)
+        await wait_for(
+            lambda: len(Transcript(comms.session_dir_of(job_id)).build_llm_history()) > 1,
+            signal=signal,
+        )
+    finally:
+        signal.close()
 
     history = Transcript(comms.session_dir_of(job_id)).build_llm_history()
     assert any(
@@ -2348,7 +2473,7 @@ async def test_a_question_buffered_past_the_grace_is_answered_once_it_attaches()
     # ``wait_for``'s default. (A 20 s budget would spend 10 s in the grace and
     # time the WAIT out, not the ask.)
     asking = asyncio.create_task(comms.ask("job-1", "stuck?", 4_000))
-    await wait_for(lambda: bool(comms._records["job-1"].pending), timeout=5.0)
+    await wait_for(lambda: bool(comms._records["job-1"].pending))
 
     comms.attach("job-1", child, tmp_dir())  # the window finally closes
     await wait_for(lambda: bool(child.asides))
@@ -2388,7 +2513,7 @@ async def test_a_stale_buffered_question_cannot_answer_the_next_asker():
 
     # 4 s budget -> 2 s attach grace, comfortably inside ``wait_for``.
     asking = asyncio.create_task(comms.ask("job-1", "NEW: are you blocked?", 4_000))
-    await wait_for(lambda: bool(comms._records["job-1"].pending), timeout=5.0)
+    await wait_for(lambda: bool(comms._records["job-1"].pending))
 
     comms.attach("job-1", child, tmp_dir())
     await wait_for(lambda: bool(child.asides))
@@ -2425,7 +2550,7 @@ async def test_a_second_question_is_refused_on_the_buffered_path_too():
 
     first = asyncio.create_task(comms.ask("job-1", "Q-A", 4_000))
     # Past the attach grace (half the budget, so 2 s here), where Q-A buffers.
-    await wait_for(lambda: bool(comms._records["job-1"].pending), timeout=5.0)
+    await wait_for(lambda: bool(comms._records["job-1"].pending))
     held = comms._records["job-1"].ask
 
     second = await comms.ask("job-1", "Q-B", 4_000)
