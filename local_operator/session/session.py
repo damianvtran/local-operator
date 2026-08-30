@@ -1045,6 +1045,16 @@ def _should_compact(
 #: residual came to be both "created headroom" and "reclaimed nothing".
 _ADVISOR_MIN_RECLAIM_FRACTION = 0.10
 
+#: How many ``keep_recent_tokens`` the preserve window may grow to
+#: (:meth:`Session._advisor_floor_cap`, which carries the full derivation).
+#: Sized by the MEASURED active-task spans at ``compaction/cutpoint.py``
+#: ``task_boundary_floor`` (p50 32k, p90 99k against a 20,000 default): 5x is
+#: the smallest whole multiple that clears that p90, so an ordinary long
+#: agentic turn is kept whole and only the outliers are clipped. 4x (80,000)
+#: would clip the p90 itself. A MULTIPLE rather than an absolute, so the cap
+#: tracks a user who configures a wider verbatim window.
+_TASK_FLOOR_KEEP_MULTIPLE = 5
+
 
 def _advisor_detail(hint: Any | None) -> str | None:
     """Receipt sentence for an advisor-triggered pass, or ``None``.
@@ -5788,10 +5798,18 @@ class Session:
             # ``preserve_tokens`` sums every intervening entry, so in a
             # tool-heavy session the widest legal anchor spans far more context
             # than the candidate list suggests. Measured at 2.7x the cap
-            # (800,340 tokens against a 300,000 cap), which was enough to turn
-            # a mandatory 800k-on-1M pass into ``nothing_to_compact`` — the
-            # exact failure the cap exists to prevent, arrived at through the
-            # guard meant to make hints safe (agent review round 1, major-1).
+            # (800,340 tokens against the 300,000 cap of the time), which was
+            # enough to turn a mandatory 800k-on-1M pass into
+            # ``nothing_to_compact`` — the exact failure the cap exists to
+            # prevent, arrived at through the guard meant to make hints safe
+            # (agent review round 1, major-1).
+            #
+            # That cap is now ``keep_recent * _TASK_FLOOR_KEEP_MULTIPLE``
+            # (100,000 on the shipped default, where the window-derived form
+            # gave 300,000), so the SAME hint is clamped harder than it was
+            # when the incident was recorded. The clamp therefore moves away
+            # from that failure, never toward it: a narrower cap can only
+            # leave the pass MORE to summarize.
             #
             # The clamp cannot narrow below the local floor: ``max`` is applied
             # against ``keep_recent``, which already carries the capped
@@ -6198,18 +6216,72 @@ class Session:
             # what just happened. omp quotes the provider figure for the same
             # reason (``calculateContextTokens(lastUsage)``).
             #
-            # But the SAVING is measured with one ruler. The provider figure is
-            # the full request (system blocks + tool schemas + history) while
-            # the local estimates cover history alone, so ``context_tokens -
-            # history_after`` would count the fixed overhead as if the pass had
-            # removed it — inflating the receipt's "% smaller" and collapsing
-            # the band (which subtracts before-after) to a figure that
-            # understates the next request by the whole overhead. The honest
-            # after-figure keeps the overhead on both sides:
-            # ``context_tokens - (history saving)``, floored at the history
-            # itself for the degenerate case where the plan's figures cross.
-            saved = max(0, plan.tokens_before - history_after)
-            tokens_after = max(history_after, plan.context_tokens - saved)
+            # The after-figure must stay on the SAME ruler as that before —
+            # and it cannot be reached by subtraction. The provider figure is
+            # the full request (system blocks + tool schemas + history) priced
+            # by the PROVIDER's tokenizer, while ``history_before``/
+            # ``history_after`` price history alone with the local cl100k
+            # estimator. Subtracting a local saving from a provider total
+            # (the previous ``context_tokens - (tokens_before -
+            # history_after)``) silently assumes those two rulers agree
+            # 1-for-1. They do not. Fitting ``provider = a * local + b`` inside
+            # contiguous model-homogeneous runs of a real 10-pass session gives
+            # a slope of 1.65-1.73 on Anthropic (117 points at slope 1.728 with
+            # a mean fit error of 241 tokens — structural, not noise) against
+            # 1.03 for an OpenAI control in the SAME session with the same tool
+            # schemas. So the divergence is the provider's tokenizer on
+            # code/JSON-dense content, not content we failed to count (the wire
+            # body tokenizes to 295k against the estimator's 304k). Every
+            # locally-measured token the old form subtracted was therefore
+            # worth ~1.7 provider tokens, and the receipt understated each pass
+            # by ~140k: the screenshot that motivated this read "546.5k →
+            # 419.0k (23% smaller)" for a pass whose true after-figure was
+            # 311.2k, a 43% reduction.
+            #
+            # Scaling PROPORTIONALLY fixes that without either ruler's
+            # constants having to be known. History shrank to ``history_after /
+            # history_before`` of itself on the local ruler; applying that same
+            # fraction to the provider's own total transports the provider's
+            # fixed overhead AND its tokenizer skew across the pass, because
+            # both ride along inside ``context_tokens``. It is self-calibrating:
+            # no per-provider slope is stored, so a model whose tokenizer
+            # differs tomorrow needs no change here. Measured over all 10 passes
+            # of that session, mean absolute error against the provider's next
+            # reported context falls from 139,406 tokens to 14,616.
+            #
+            # The approximation it makes, stated plainly: ``context_tokens``
+            # is ``overhead + history``, and scaling the whole thing shrinks
+            # the overhead too, though a pass never removes a system block or
+            # a tool schema. That biases the estimate LOW by
+            # ``overhead * (1 - history_after / history_before)``. It is
+            # dominated by the tokenizer skew it corrects — on a session whose
+            # history runs 300-500k the overhead is a few percent — and the
+            # measured residual is in fact biased slightly HIGH (+6k to +16k on
+            # eight of ten passes), so subtracting a separately-estimated
+            # overhead here would make the answer worse, not better. The
+            # overhead is also not separable: it is the intercept ``b`` of the
+            # fit above, which is not identifiable across a session that
+            # switches models.
+            #
+            # A tuned-slope variant (``context_tokens - slope * (before -
+            # after)``) was measured and is strictly worse even at its best
+            # value — 19,512 at slope 1.75 — while baking in a constant that
+            # rots the moment a provider retokenizes or the model mix changes.
+            # Do not reintroduce it.
+            #
+            # Both guards are load-bearing. The zero-guard makes the division
+            # total (a pass over empty history cannot divide). The
+            # ``history_after`` floor never binds on the measured data, but a
+            # receipt reading "0 tokens" is a worse lie than a stale one — the
+            # sibling incident on the status band is documented at
+            # ``tui/app.py`` ``_settle_context_reading``.
+            history_before = plan.tokens_before
+            if history_before > 0:
+                tokens_after = max(
+                    history_after, round(plan.context_tokens * history_after / history_before)
+                )
+            else:
+                tokens_after = history_after
             await self._emit(
                 CompactionEndEvent(
                     reason=reason,
@@ -6965,21 +7037,62 @@ class Session:
         """Cap for ``task_boundary_floor`` — the preserve window may not eat
         the whole context.
 
-        Half the resolved trigger: above that a "preserved" window leaves the
-        pass nothing to summarize, so ``find_cut_point`` answers ``None`` and
-        the protection turns into "never compact" — the failure the trigger
-        exists to prevent.
-        """
-        threshold = 0
-        try:
-            from local_operator.compaction import api as compaction_api
+        Above the cap a "preserved" window leaves the pass nothing to
+        summarize, so ``find_cut_point`` answers ``None`` and the protection
+        turns into "never compact" — the failure the trigger exists to prevent.
 
-            threshold = compaction_api.resolve_threshold_tokens(
-                self.effective_model.context_window, settings
-            )
-        except Exception:  # noqa: BLE001 — degrade to the recency rule
-            return int(settings.keep_recent_tokens)
-        return max(int(settings.keep_recent_tokens), threshold // 2)
+        The cap is expressed in ``keep_recent_tokens`` MULTIPLES because that
+        is the unit the thing being capped is measured in. It used to be half
+        the resolved trigger, which mixed two rulers exactly the way the
+        receipt did: ``task_boundary_floor`` sums a span with the local cl100k
+        estimator (``cutpoint.py``), while ``resolve_threshold_tokens`` returns
+        a PROVIDER-scale number, and the two diverge by ~1.65-1.73x on
+        Anthropic (see the slope measurement at the receipt in
+        :meth:`_run_compaction`). On a 1M window that made the cap 300,000
+        local tokens, and a pass whose last genuine user turn sat 131,376
+        tokens back widened ``keep_recent`` 20k → 131k and retained 41.3% of
+        history where the other nine passes of the same session retained
+        3.7-8.1%.
+
+        ``_TASK_FLOOR_KEEP_MULTIPLE`` is 5, not 4, and the derivation is the
+        measured active-task spans recorded at ``cutpoint.task_boundary_floor``
+        (p50 32k, **p90 99k**, over a 7-pass session). p90 is the binding
+        constraint: 4x the 20,000 default is 80,000, which clips that p90 span
+        and starts severing the long agentic turns the floor exists to protect.
+        5x (100,000) is the smallest whole multiple that clears it, and it
+        still bounds the pathological pass above to ~31.4% retention instead
+        of 41.3%.
+
+        That the cap CLIPS some spans is the point, not a defect: the later
+        10-pass session measured above has a p90 near 130k, and its three
+        widest spans (113,835 / 129,660 / 131,376) are exactly the passes that
+        retained 35-41% of history. Clipping those to 100,000 is the bound
+        doing its job. What 5x buys over 4x is that the clip starts above the
+        typical long task rather than inside it — the other seven passes
+        (469 to 53,732 tokens) are untouched by either multiple.
+
+        The old ``max(keep_recent_tokens, ...)`` guard is gone because a
+        MULTIPLE cannot fall below its own base the way ``threshold // 2``
+        could: a user who configures a wider verbatim window gets a
+        proportionally wider cap for free, so ``max(k, 5k)`` would be a
+        tautology rather than a guard. The same cap clamps the advisor hint
+        (see ``_plan_compaction``), so a wide-but-legal advisory is bounded by
+        the same rule — that clamp tightens from 300,000 to 100,000 on a 1M
+        window, which is a real change to the advisor path and is deliberate:
+        it moves further AWAY from the 800,340-against-300,000 hint that
+        motivated the clamp, not toward it.
+        """
+        try:
+            keep_recent = int(settings.keep_recent_tokens)
+        except Exception:  # noqa: BLE001 — degrade to plain recency
+            # A partial settings double (the same tolerance ``_offloaded``
+            # grants its rulers) must not break a pass. Cap 0 makes
+            # ``task_boundary_floor`` return 0 and the hint clamp 0, and both
+            # callers fold that through ``max(keep_recent, ...)`` — so the
+            # degraded answer is exactly the pre-floor recency behaviour,
+            # which is what the previous fallback also produced.
+            return 0
+        return keep_recent * _TASK_FLOOR_KEEP_MULTIPLE
 
     def _wire_legal_snapshot(self) -> list[AgentMessage]:
         """A copy of the live message list that a provider will actually accept.

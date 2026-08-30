@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import dataclasses
 
 import pytest
 
@@ -36,7 +37,11 @@ from local_operator.harness.types import (
     StreamTextDelta,
     TextContent,
 )
-from local_operator.session.session import Session, _render_compaction_marker
+from local_operator.session.session import (
+    Session,
+    _CompactionPlan,
+    _render_compaction_marker,
+)
 from local_operator.session.transcript import Transcript
 
 #: PNG signature. A replayed frame that does not start with it is our own
@@ -304,12 +309,12 @@ async def test_the_receipt_quotes_the_figure_the_gate_acted_on(tmp_path):
     made a pass that fired at a provider-reported 600k print "319.4k → …",
     which reads as the band and the receipt disagreeing about what happened.
 
-    The SAVING, though, is measured with one local ruler on both sides: the
-    provider figure includes system blocks and tool schemas the pass never
-    touches, so ``after`` must be ``before - (history saving)`` rather than
-    the bare history estimate — otherwise the receipt counts the fixed
-    overhead as removed and a band that subtracts the pair understates the
-    next request by exactly that overhead.
+    The "after" is then the SAME provider figure scaled by the ratio the
+    history actually shrank by, so both ends of the receipt stay on the
+    provider's ruler. It may not be reached by subtracting a locally-measured
+    saving from a provider total: the two rulers diverge by ~1.65-1.73x on
+    Anthropic, so that subtraction understated every pass by ~140k tokens
+    (see the arithmetic's comment in ``Session._run_compaction``).
     """
     from local_operator.harness.types import Usage
 
@@ -326,11 +331,114 @@ async def test_the_receipt_quotes_the_figure_the_gate_acted_on(tmp_path):
 
     assert outcome.ran is True
     assert outcome.tokens_before == 600_080
-    # The tiny fixture's whole history is a few hundred tokens, so the
-    # history-only saving is far below the provider figure: an after-figure
-    # anywhere near zero would prove the overhead was double-counted.
-    assert outcome.tokens_after > 590_000
-    assert outcome.tokens_after < outcome.tokens_before
+    # The receipt is PROPORTIONAL, so the after-figure is the provider's
+    # before-figure times the fraction of history the pass kept. Asserted as
+    # the ratio rather than a literal because the fixture's exact token counts
+    # are an implementation detail of the estimator.
+    ratio = outcome.tokens_after / outcome.tokens_before
+    assert 0 < ratio < 1
+    # A pass that compressed bulky assistant replies must show a real
+    # reduction; the pre-fix subtraction form put this at >0.98 (the whole
+    # provider overhead surviving as if untouched) and hid the saving.
+    assert ratio < 0.75
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_receipt_scales_the_provider_figure_by_the_history_ratio(tmp_path):
+    """The exact arithmetic, pinned: ``after == round(before * ha / hb)``.
+
+    The sibling test above asserts the PROPERTY (a real reduction on the
+    provider's ruler); this one pins the FORM, because the two candidate
+    formulas differ by ~140k tokens on real data and a property test passes
+    under both. ``tokens_before`` on the plan is the pure local estimate over
+    the pre-pass history, and the estimator is re-run here over the rebuilt
+    history, so both sides of the ratio come from the same ruler the
+    implementation uses.
+    """
+    from local_operator.compaction.tokens import estimate_messages_tokens
+    from local_operator.harness.types import Usage
+
+    stream = ScriptedStream(["assistant reply " * 60] * 4)
+    session = make_session(tmp_path, stream, model=TEXT_MODEL)
+    await talk(session, turns=4)
+    session._last_usage = Usage(input_tokens=1, context_tokens=600_080)
+
+    # The plan carries the local before-estimate the formula divides by.
+    plan = await session._plan_compaction(respect_threshold=False)
+    assert isinstance(plan, _CompactionPlan)
+    history_before = plan.tokens_before
+
+    outcome = await session._run_compaction(plan, reason="manual")
+
+    history_after = estimate_messages_tokens(session._render_for_compaction())
+    expected = max(history_after, round(600_080 * history_after / history_before))
+    assert outcome.tokens_after == expected
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_receipt_survives_an_empty_before_history(tmp_path):
+    """``history_before == 0`` must not divide by zero.
+
+    The zero-guard makes the proportional form total. It is not reachable
+    through a real pass (a plan needs summarizable history to exist at all),
+    so the branch is exercised directly on the arithmetic's own inputs — a
+    guard nothing can reach is still a guard a future edit can break.
+    """
+    from local_operator.harness.types import Usage
+
+    stream = ScriptedStream(["assistant reply " * 60] * 4)
+    session = make_session(tmp_path, stream, model=TEXT_MODEL)
+    await talk(session, turns=4)
+    session._last_usage = Usage(input_tokens=1, context_tokens=600_080)
+
+    plan = await session._plan_compaction(respect_threshold=False)
+    assert isinstance(plan, _CompactionPlan)
+    # A plan whose local before-estimate is zero: degenerate, but the division
+    # must still answer rather than raise. The plan is frozen, so this is a
+    # copy rather than a mutation.
+    plan = dataclasses.replace(plan, tokens_before=0)
+
+    outcome = await session._run_compaction(plan, reason="manual")
+
+    assert outcome.ran is True
+    # With no ratio to apply, the after-figure falls back to the history
+    # estimate itself rather than to zero or to the provider's before.
+    assert 0 < outcome.tokens_after < outcome.tokens_before
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_receipt_never_reports_zero_tokens(tmp_path):
+    """The ``history_after`` floor: a receipt reading "0 tokens" is a worse
+    lie than a stale one.
+
+    The floor never binds on measured data (the provider figure exceeds the
+    local estimate, so the scaled result exceeds the history estimate). It
+    binds when the provider figure is BELOW the local estimate — a state the
+    gate permits, since ``compaction_context_tokens`` takes ``max(provider,
+    local)`` only when a usage record exists. Driven here with a tiny provider
+    figure so the product rounds under the kept history, which is the
+    condition the floor exists for; the sibling incident on the status band is
+    at ``tui/app.py`` ``_settle_context_reading``.
+    """
+    from local_operator.compaction.tokens import estimate_messages_tokens
+
+    stream = ScriptedStream(["assistant reply " * 60] * 4)
+    session = make_session(tmp_path, stream, model=TEXT_MODEL)
+    await talk(session, turns=4)
+
+    plan = await session._plan_compaction(respect_threshold=False)
+    assert isinstance(plan, _CompactionPlan)
+    # Small enough that `context_tokens * ratio` rounds below the kept
+    # history, so the floor is the term that decides the answer.
+    plan = dataclasses.replace(plan, context_tokens=10)
+
+    outcome = await session._run_compaction(plan, reason="manual")
+
+    history_after = estimate_messages_tokens(session._render_for_compaction())
+    assert outcome.tokens_after == history_after > 0
     await session.dispose()
 
 

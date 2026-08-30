@@ -15,6 +15,33 @@ the ``len(text) // 4`` heuristic below, which is coarser but keeps compaction
 working — real usage from the provider still corrects the accounting after
 each request.
 
+This estimator is a RULER OF ITS OWN, not a prediction of the bill
+------------------------------------------------------------------
+``cl100k_base`` is OpenAI's tokenizer, and Anthropic's differs measurably on
+the code/JSON-dense content an agent session is made of. Fitting
+``provider = a * local + b`` inside contiguous model-homogeneous runs of a
+real 10-pass session put the slope at **1.65-1.73 for Anthropic** (117 points
+at 1.728, mean fit error 241 tokens — structural, not noise) against **1.03
+for an OpenAI control in the same session with the same tool schemas**. It is
+genuine tokenizer divergence rather than content this module fails to see:
+the wire body of that session tokenizes to 295k here against a provider-
+reported 304k for the same bytes.
+
+So a number from this module may be compared against ANOTHER number from this
+module, never against a provider figure. Mixing the two is a real bug that has
+shipped twice — the compaction receipt subtracted a local saving from a
+provider total, and ``Session._advisor_floor_cap`` capped a locally-summed
+span with a provider-scale threshold. Both are fixed by keeping each
+comparison on one ruler; neither is fixed by counting more here.
+
+Per-provider calibration was deliberately NOT added. The intercept is not
+identifiable across a model-heterogeneous session (the fit only holds inside
+contiguous single-model runs), and the compaction TRIGGER does not need it:
+``compaction_context_tokens`` already takes ``max(provider, local)`` on any
+request that carries a usage record, so the provider's own count drives when a
+pass fires. A multiplier table here would add a constant that rots on the next
+retokenization while fixing nothing the trigger depends on.
+
 Settle rule / cache contract
 ----------------------------
 The cache is a module-level dict keyed on the message's stable ``id``. Two
