@@ -100,6 +100,13 @@ _VALUE_COLUMN = 34
 #: owns them, which is what makes the expansion read as belonging to that row.
 _CHOICE_INDENT = _ROW_INDENT + 4
 
+#: Rows one wheel notch moves the VIEWPORT by. Matches Textual's own
+#: `App.scroll_sensitivity_y` (2.0), because the body's container handles the
+#: wheel directly over the list and this method handles it everywhere else on
+#: the page — a different step here would make one gesture travel at two speeds
+#: depending on where the pointer sat.
+_WHEEL_ROWS = 2
+
 #: Marker on the row the cursor is on. A glyph rather than a background sweep
 #: so the row's own changed/default ink survives the highlight.
 _CURSOR = "›"
@@ -458,6 +465,14 @@ class SettingsView(Vertical):
         # which reads as the arrow key being dead (review round 2, U13).
         # `_close_chain` already resolves its target this way for the same
         # reason, and this is that pattern applied to movement.
+        # An arrow after the wheel has scrolled the cursor off screen spends
+        # itself bringing the cursor BACK into view rather than moving it, so
+        # the row that moves is always one the user can see. Without it, `down`
+        # from a viewport 40 rows away moves a cursor nobody is looking at and
+        # then teleports the view to it, which is the bounce wearing a
+        # different hat (see `_reorient`).
+        if self._reorient():
+            return
         anchor = self._current()
         identity = anchor.identity if anchor is not None else None
         if not self._leave_row():
@@ -600,6 +615,48 @@ class SettingsView(Vertical):
         self._pane = panes[position]
         self._repaint()
 
+    def _cursor_visible(self) -> bool:
+        """Is the highlighted row inside the viewport right now?
+
+        The wheel moves the VIEWPORT and leaves the cursor where it is (see
+        :meth:`_scroll_rows`), so the two can legitimately disagree — which is
+        the whole point of that model, and also its one hazard. This is the
+        predicate the acting keys gate on so that hazard cannot become a write.
+        """
+        try:
+            height = self._body.size.height
+        except Exception:
+            return True
+        if height <= 0:
+            return True
+        offset = self._body.scroll_offset.y
+        return offset <= self._selected < offset + height
+
+    def _reorient(self) -> bool:
+        """Bring an off-screen cursor back into view WITHOUT acting. True if it did.
+
+        The safety interlock for the wheel-scrolls-the-viewport model. Letting
+        the wheel leave the cursor behind is what makes a scrollbar honest, but
+        it re-opens the exact defect ``_body.can_focus = False`` was set for
+        (UX round 3, U19): a user looking at rows 24-37 with the cursor stranded
+        on row 1 presses ``enter`` on the row they can SEE and writes a setting
+        they never chose. There the viewport moved because focus had silently
+        shifted; here it moves because the user asked it to — but the blind
+        write at the end is identical, and this page writes config immediately
+        with no undo beyond ``r``.
+
+        So no key ACTS on a row that is not on screen. The first press spends
+        itself putting the cursor back in view, the second one acts, and the
+        row being acted on is always a row the user is looking at. Deliberately
+        does NOT commit anything — it is a pure viewport move, so it stays
+        correct regardless of when a value is taken to commit.
+        """
+        if self._cursor_visible():
+            return False
+        self._scroll_to_selection()
+        self._repaint()
+        return True
+
     def _scroll_to_selection(self) -> None:
         """Keep the cursor row inside the scrolled viewport.
 
@@ -608,6 +665,10 @@ class SettingsView(Vertical):
         computed from the row index directly. Guarded because the container has
         no size until it is laid out, and a first movement before layout would
         divide by a zero height.
+
+        This is the CURSOR's claim on the viewport, and it runs only from a key
+        that moved the cursor. The wheel has its own claim and the two are kept
+        apart on purpose — see :meth:`_scroll_rows`.
         """
         try:
             height = self._body.size.height
@@ -645,6 +706,13 @@ class SettingsView(Vertical):
         """
         row = self._current()
         if row is None:
+            return
+        # `enter` NEVER writes a row that is off screen. The wheel can leave the
+        # cursor behind by design, and this page writes config immediately, so
+        # an activate aimed at "the row I can see" must not land on the row the
+        # cursor happens to still be on — the U19 defect exactly. The press
+        # reorients instead, and the next one acts on a visible row.
+        if self._editing is None and self._reorient():
             return
         # Any action that is not `d` or `esc` DISARMS a pending delete. The ask
         # was cleared by a cursor move and by `esc`, but not by a key acting on
@@ -811,6 +879,10 @@ class SettingsView(Vertical):
         # instead of cancelling and `d` re-armed instead of confirming. Safe in
         # the destructive direction, but the same "model changed, paint did not"
         # class as the hint clipping in D16 (UX round 4, follow-up).
+        # Same interlock as `action_activate`, and for the same reason: `r`
+        # writes the config, so it may not act on a row the user cannot see.
+        if self._reorient():
+            return
         disarmed = self._confirm_delete is not None
         self._confirm_delete = None
         row = self._current()
@@ -1374,11 +1446,19 @@ class SettingsView(Vertical):
             if key in ("d", "delete"):
                 event.stop()
                 event.prevent_default()
+                # The interlock `action_activate` and `action_reset` carry, on
+                # the page's DESTRUCTIVE key: `d` deletes a hop outright, so an
+                # off-screen cursor must cost a reorientation press rather than
+                # a chain the user never looked at.
+                if self._reorient():
+                    return
                 self._delete_hop()
                 return
             if key in ("shift+up", "shift+down") and row.kind == "hop":
                 event.stop()
                 event.prevent_default()
+                if self._reorient():
+                    return
                 self._move_hop(-1 if key == "shift+up" else 1)
                 return
 
@@ -1395,6 +1475,13 @@ class SettingsView(Vertical):
 
         Button 1 only: a right-click asking for a context menu and a
         middle-click paste must not be able to write a setting.
+
+        Deliberately does NOT scroll. A click names a row the user is already
+        looking at, so moving the cursor there can never put it off screen —
+        and a view that re-centred on every click would jump under the pointer
+        for no gain. This is also why the click path needs no ``_reorient``
+        guard: it cannot select an invisible row, and the activate-on-second-
+        click branch below therefore always acts on a visible one.
         """
         if getattr(event, "button", 1) != 1:
             return
@@ -1454,21 +1541,79 @@ class SettingsView(Vertical):
         self._scroll_rows(-1)
 
     def _scroll_rows(self, delta: int) -> None:
-        """Wheel movement — CLAMPED, like every other movement on this page.
+        """Wheel movement — the VIEWPORT moves and the cursor stays put.
 
-        A gesture that teleports to the other end of the list reads as the list
-        resetting itself. The arrows clamp here too, which is this page's
-        documented exception to the repo's wrap-vs-clamp convention — see
-        :meth:`action_move` for why a long scrolled list earns it.
+        ONE SOURCE OF TRUTH FOR THE VIEWPORT
+        ------------------------------------
+        This method used to move the CURSOR by a row and then call
+        ``_scroll_to_selection``, which re-derived the viewport from the cursor.
+        The body is a ``ScrollableContainer``, so the container ALSO owns a
+        scroll offset that the wheel and the scrollbar drive directly — two
+        positions for one view, each able to overwrite the other. The user-
+        visible result was a bounce, reported against v0.43.10 and reproduced at
+        100x30 (viewport 14, virtual 60, ``max_scroll_y=46``):
+
+            notch 23: scroll_y=46/46  selected=1   <- wheeled to the bottom
+            notch 24: scroll_y= 2/46  selected=2   <- BOUNCE, back to the top
+
+        The path is worth stating because it is NOT the obvious one. Textual
+        handles the wheel on the container first (``_scroll_down_for_pointer``)
+        and stops the event while it still has somewhere to go, so over the list
+        this method never ran at all. It ran only once the container hit its
+        limit and let the event bubble — at which point the cursor, still parked
+        on row 1 from before the gesture, moved one row and dragged the viewport
+        46 rows back with it. Wheeling to the bottom of a list is precisely how
+        a user arrives at that state, which is why the bug reads as the page
+        snapping back the moment you reach the end.
+
+        It also made the gesture POSITION-DEPENDENT: the same notch scrolled the
+        viewport over the list, and moved the cursor over the title, the detail
+        row or the side pane, because only the body region consumed the event.
+        One page, two scroll models, chosen by where the pointer happened to be.
+
+        So the wheel is now the container's gesture everywhere: it moves the
+        viewport, the cursor stays on the row the user put it on, and the cursor
+        is allowed to go off screen. That is the model list UIs and editors use,
+        it is the only model under which the scrollbar thumb tells the truth,
+        and it is what makes "scroll to the bottom" stay at the bottom. The
+        cursor keeps its own claim on the viewport for the KEYS that move it
+        (:meth:`_scroll_to_selection`), and the two claims can no longer fight
+        because only one of them is driven by any given gesture.
+
+        Clamping is unchanged and now comes from the container, which cannot
+        scroll past either end — so the wheel still never teleports to the other
+        end of the list (AGENTS.md, "Wrapping vs clamping").
+
+        No commit semantics are involved: this moves the view, never the cursor,
+        so it neither writes a value nor settles an open editor.
         """
-        indices = self._selectable()
-        if not indices:
+        try:
+            # Accumulated from `scroll_target_y`, NOT from `scroll_relative`.
+            # `scroll_relative` adds to the CURRENT offset, so several notches
+            # arriving before the next refresh each compute from the same stale
+            # position and collapse into one — 40 notches moved the viewport two
+            # rows. `scroll_target_y` is where the container is already headed,
+            # which is what Textual's own `_scroll_down_for_pointer` adds to, so
+            # a fast flick travels the same distance here as it does over the
+            # list. Textual clamps the target to `[0, max_scroll_y]`.
+            #
+            # `immediate=True` for the same reason: the default defers the move
+            # to `call_after_refresh`, so `scroll_target_y` still reads the old
+            # position for every notch that arrives before that refresh and the
+            # accumulation above collapses anyway. Textual's own wheel handler
+            # reaches `_scroll_to` synchronously; this is that path, spelled
+            # through the public API.
+            self._body.scroll_to(
+                y=self._body.scroll_target_y + delta * _WHEEL_ROWS,
+                animate=False,
+                immediate=True,
+            )
+        except Exception:
+            # The container has no size before layout; a wheel notch that
+            # arrives that early has no viewport to move and is dropped rather
+            # than falling back to moving the cursor, which is the behaviour
+            # this method exists to stop.
             return
-        position = indices.index(self._selected) if self._selected in indices else 0
-        self._selected = indices[min(max(position + delta, 0), len(indices) - 1)]
-        self._cancel_edit()
-        self._repaint()
-        self._scroll_to_selection()
 
     def _index_at(self, event) -> int | None:  # type: ignore[no-untyped-def]
         """Row index under a mouse event, or ``None`` outside the list.
