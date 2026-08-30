@@ -2155,28 +2155,42 @@ async def test_the_loop_stays_responsive_while_several_subagents_run(tmp_path, m
     proves nothing. Measured on this workload against the pre-fix tree and
     this one: worst stall 1353 ms before, 139 ms after.
 
-    WHY THIS ASSERTS ON A PERCENTILE AND NOT ON `max()`. The original bound
-    was `max(lateness) < 1.0`, and it flaked: a single sample crossing 1 s
-    failed the run, and on a shared CI runner one sample routinely does. It
-    was observed red at 1029, 1033, 1167, 1169, 1337, 1446 and 1503 ms —
-    including on `main` commits that changed nothing near the loop, and with
-    the same commit both passing and failing across reruns, which is the
-    definition of a flake rather than a regression.
+    WHY `max()`, AND WHY THE BOUND IS CALIBRATED RATHER THAN CONSTANT. Both
+    were got wrong once, so the measurements are recorded here.
 
-    A single outlier is the wrong statistic anyway. The starvation this
-    guards is a SUSTAINED synchronous stretch: the pre-fix tree put 116 of
-    121 samples inside the tokenizer, so the broken behaviour is visible
-    across the whole distribution, not in one spike. One late wake on a
-    contended box is the OS scheduler, not a starved sibling.
+    `max()` is the ONLY statistic that sees this regression. A synchronous
+    stall blocks the watchdog itself, so the whole stretch collapses into
+    exactly ONE oversized sample instead of spreading across the distribution.
+    Measured by forcing the compaction rulers back inline (reverting the seam
+    from 70e66526) and running this test unmodified: regressed max is
+    1372-1832 ms while regressed p99 is only 114-189 ms, against a HEALTHY p99
+    of 108-273 ms. A percentile bound is blind here because nearest-rank p99
+    discards the top 1% of samples and the top 1% is the entire evidence.
+    `sum(lateness)` overlaps too: 2.67-3.67 s regressed vs 1.17-2.64 s healthy.
 
-    So the bound is on the 99th percentile, which stays tiny when the loop is
-    healthy and explodes when it is starved. Measured healthy on this
-    workload: p50 1 ms, p95 3-24 ms, p99 88-163 ms, with only 2-4 of ~250
-    samples above 100 ms. The pre-fix tree drove the majority of samples into
-    the hundreds of ms, so a 500 ms p99 sits an order of magnitude above
-    healthy noise and far below the regression. `max()` is still reported in
-    the failure message, because when this does fire the worst stall is the
-    number a human wants to see.
+    The "116 of 121 samples inside the tokenizer" figure above is a PROFILER
+    attribution of where time was spent, not a count of late watchdog samples.
+    It is not evidence that the regression moves the whole distribution.
+
+    The bound cannot be a constant. The original `max() < 1.0` was correct on
+    a dev box (healthy peaks ~0.56 s, regression starts ~1.38 s) but sat
+    INSIDE the healthy noise of a shared CI runner, which was observed red at
+    1029, 1033, 1167, 1169, 1337, 1446 and 1503 ms on commits touching nothing
+    near the loop, and with the same commit both passing and failing across
+    reruns. Raising the constant far enough for CI (>=2 s) would make it miss
+    the real regression on the machine where the bug was found.
+
+    So the test times a fixed CPU quantum first and scales the bound by it.
+    `calib` is ~75 ms on a 2024 laptop, where the 1.0 s floor applies and
+    separates healthy from regressed 10/10. CI is roughly 2.7x slower, so
+    `calib` grows and 8x lifts the bound to ~1.6 s there — above that runner's
+    healthy noise, still below a regression, which scales with the hardware in
+    the same direction. The multiplier only engages on machines slow enough to
+    need it.
+
+    If this fires, read the reported calibration alongside the stall: a stall
+    close to the bound on an unusually large `calib` is a loaded runner, while
+    a stall several times the bound is the real thing.
     """
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
     parent = make_session(tmp_path, LongStream())
@@ -2192,7 +2206,23 @@ async def test_the_loop_stays_responsive_while_several_subagents_run(tmp_path, m
             lateness.append(loop.time() - before - 0.005)
 
     watcher = asyncio.create_task(watchdog())
-    await asyncio.sleep(0.05)
+
+    # CONTROL PHASE. Characterise THIS box before launching anything, so the
+    # bound is relative to the machine actually running the test rather than
+    # to a constant that only suits the author's laptop. The control does the
+    # same *kind* of work the subagent phase does — brief synchronous CPU on
+    # the loop, interleaved with awaits — so it captures scheduler noise,
+    # contention from parallel pytest workers, and a throttled CI core.
+    # CALIBRATION. Time a fixed CPU quantum on THIS box to learn how fast it
+    # is, then scale the bound by that. A GitHub runner is several times
+    # slower than a dev laptop, and its stalls scale with it, which is exactly
+    # why a hardcoded millisecond bound cannot hold on both: 1.0 s was inside
+    # CI's healthy noise while still above this machine's regressed signal.
+    calib_start = asyncio.get_running_loop().time()
+    for _ in range(20):
+        sum(i * i for i in range(150_000))
+        await asyncio.sleep(0)
+    calib = asyncio.get_running_loop().time() - calib_start
     lateness.clear()
 
     job_ids = [parent._launch_subagent(label=f"c{i}", prompt="do the work") for i in range(6)]
@@ -2208,15 +2238,24 @@ async def test_the_loop_stays_responsive_while_several_subagents_run(tmp_path, m
         await watcher
 
     assert lateness, "the watchdog never ran — the measurement itself is broken"
-    ordered = sorted(lateness)
-    # Nearest-rank p99, floored to the last index so a short sample run cannot
-    # index past the end.
-    p99 = ordered[min(len(ordered) - 1, int(len(ordered) * 0.99))]
-    worst = ordered[-1]
-    assert p99 < 0.5, (
-        f"the event loop stalled for {p99 * 1000:.0f} ms at p99 "
-        f"(worst {worst * 1000:.0f} ms, {len(ordered)} samples) while subagents "
-        "ran; a synchronous stretch is starving concurrent children"
+    worst = max(lateness)
+    # The bound scales with measured machine speed, with a floor.
+    #
+    # On a fast box `calib` is ~75 ms, so the 1.0 s FLOOR is what applies:
+    # healthy peaks at ~0.56 s and the regression starts at ~1.38 s, so 1.0 s
+    # sits in the middle of that gap and separates 10/10.
+    #
+    # On CI the same run is ~2.7x noisier (healthy max observed up to 1503 ms,
+    # which is why the old flat 1.0 s bound failed there). `calib` grows with
+    # the box, so 8x lifts the bound to ~1.6 s on that hardware — above CI's
+    # healthy noise, still below a regression that scales with the machine too.
+    # The multiplier only ever engages on hardware slow enough to need it.
+    allowed = max(calib * 8.0, 1.0)
+    assert worst < allowed, (
+        f"the event loop stalled for {worst * 1000:.0f} ms while subagents ran "
+        f"(bound {allowed * 1000:.0f} ms, from a {calib * 1000:.0f} ms CPU "
+        f"calibration on this machine, {len(lateness)} samples); "
+        "a synchronous stretch is starving concurrent children"
     )
     await parent.dispose()
 
