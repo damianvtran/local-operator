@@ -2308,3 +2308,61 @@ async def test_enter_into_the_cascade_does_not_carry_the_previous_row_notice(
         assert (
             "enter opens the chain" in detail
         ), f"the chain row's own contract is not on screen after `enter`: {detail!r}"
+
+
+@pytest.mark.asyncio
+async def test_the_text_editable_kinds_allow_list_is_pinned(tmp_path: Path) -> None:
+    """The guard's carve-out has to be asserted, not merely commented.
+
+    `_TEXT_EDITABLE_KINDS` is the belt-and-braces half of the #440 fix, and its
+    membership is a judgement about each kind's INTERACTION: `Kind.LIST` is in
+    it because `web_search.providers` genuinely edits as comma-separated text,
+    while `Kind.CASCADE` is out because it has no scalar at all. Deleting
+    `Kind.LIST` from the set left the whole settings suite green while the
+    ordered-providers row became uneditable (review round 1, M1), so the set is
+    pinned by NAME here and each member is exercised through the real editor
+    below — a membership assertion alone would pass on a kind that no longer
+    opens.
+    """
+    from local_operator.tui.widgets.settings_view import _TEXT_EDITABLE_KINDS
+
+    assert _TEXT_EDITABLE_KINDS == frozenset({Kind.INT, Kind.FLOAT, Kind.TEXT, Kind.LIST}), (
+        "the allow-list changed. Adding a kind here hands it to a free-text editor "
+        "seeded with `str(stored_value)`, which is what destroyed the cascade in #440; "
+        "removing one makes its row silently uneditable. Change this assertion only "
+        "with the reason written down."
+    )
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 32)) as pilot:
+        await pilot.pause()
+        app._open_settings_view()
+        view = app.query_one(SettingsView)
+        await pilot.pause()
+
+        # One real row per allowed kind, driven through the app's own `enter`
+        # binding. `web_search.providers` is named explicitly because it is the
+        # ONLY `Kind.LIST` row and therefore the entire justification for that
+        # member: it is the row that went uneditable with no test objecting.
+        for key in ("retry.maxRetries", "retry.usageReservePercent", "hosting"):
+            _select(view, key)
+            await pilot.press("enter")
+            await pilot.pause()
+            assert view.editing_key == key, f"{key} no longer opens a text editor"
+            await pilot.press("escape")
+            await pilot.pause()
+
+        _select(view, "web_search.providers")
+        await pilot.press("enter")
+        await pilot.pause()
+        assert view.editing_key == "web_search.providers", (
+            "the ordered-providers row is uneditable — `Kind.LIST` has been dropped from "
+            "the allow-list, which no other test in this file notices"
+        )
+        # It edits as the comma-separated text the LIST comment claims, not as
+        # a repr: the seed is what the guard's reasoning rests on.
+        assert (
+            "," in view._buffer and "[" not in view._buffer
+        ), f"the providers editor is not seeded with comma-separated text: {view._buffer!r}"
+        await pilot.press("escape")
+        await pilot.pause()
