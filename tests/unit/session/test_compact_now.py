@@ -624,3 +624,65 @@ async def test_a_failed_pass_reports_the_failure_and_ends_the_notice(tmp_path):
     # The context is untouched: a failed pass must not half-rewrite the history.
     assert not isinstance(session._context.messages[0], CustomMessage)
     await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_snapcompact_frame_correction_is_priced_once(tmp_path):
+    """The frame correction is added AFTER the ratio, not folded into it.
+
+    The receipt's proportional form is only sound while numerator and
+    denominator are on the same LOCAL ruler. The snapcompact path corrects
+    ``history_after`` by the difference between the provider's visual-token
+    price for a replayed archive frame and the local flat
+    ``IMAGE_TOKEN_ESTIMATE`` — a PROVIDER-scale addend. Folding it in before
+    dividing inflated the ratio and then multiplied that addend by the provider
+    total a second time (agent review round 1, major-2); the measured session
+    behind this fix has no snapcompact passes, so nothing in its evidence could
+    have caught it.
+
+    Pinned as an identity rather than a literal: the after-figure must equal
+    the proportional term computed on the UNCORRECTED local estimate, plus the
+    correction exactly once.
+    """
+    from local_operator.compaction.snapcompact import frame_token_estimate_for
+    from local_operator.compaction.tokens import estimate_messages_tokens
+    from local_operator.harness.types import Usage
+    from local_operator.session.session import IMAGE_TOKEN_ESTIMATE
+
+    stream = ScriptedStream(["reply"] * 8)
+    session = make_session(tmp_path, stream, model=VISION_MODEL)
+    # Past the plain-text edges (2 x HQ_EDGE_FRAMES x 13 916 chars), so the
+    # middle is actually imaged and the correction has frames to price. A
+    # smaller history stores an empty frames list and tests nothing.
+    for index in range(6):
+        await session.prompt(f"question {index} " + "detail " * 3000)
+    session._last_usage = Usage(input_tokens=1, context_tokens=600_080)
+
+    plan = await session._plan_compaction(respect_threshold=False)
+    assert isinstance(plan, _CompactionPlan)
+    history_before = plan.tokens_before
+
+    outcome = await session._run_compaction(plan, reason="manual")
+    assert outcome.strategy == "snapcompact"
+
+    entries = [e for e in session._transcript.entries() if e.type == "compaction"]
+    frames = entries[-1].payload["preserve_data"]["snapcompact"].get("frames") or []
+    per_frame = frame_token_estimate_for(session._model.provider, session._model.model_id)
+    correction = len(frames) * (per_frame - IMAGE_TOKEN_ESTIMATE)
+    assert correction > 0, "fixture produced no frames — the invariant is untested"
+
+    # The uncorrected local estimate of the rebuilt history: the ratio's real
+    # numerator.
+    history_after = estimate_messages_tokens(session._render_for_compaction())
+    expected = max(history_after, round(600_080 * history_after / history_before)) + correction
+    assert outcome.tokens_after == expected
+
+    # And the correction is not inside the ratio: had it been, the result
+    # would have been larger by roughly the addend times the provider/local
+    # ratio, which on this fixture is a visible gap.
+    folded = max(
+        history_after + correction,
+        round(600_080 * (history_after + correction) / history_before),
+    )
+    assert outcome.tokens_after < folded
+    await session.dispose()

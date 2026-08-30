@@ -8,6 +8,7 @@ contains ten real compaction passes across three models.
 |---|---|
 | `slope_fit.txt` | The provider-vs-local token slope, fitted per model and per epoch — the measurement the whole PR rests on |
 | `span_percentiles.txt` | Pooled active-task spans and what each candidate cap multiple would clip — the basis for choosing 5 |
+| `cap_by_window.txt` | The preserve cap across the registry's context windows: why the capacity term must stay (round 1, blocker-1) |
 | `validate_fix.txt` | Receipt accuracy per pass, shipped formula vs proportional, against the provider's own next-reported context |
 | `retention_real2.txt` | Active-task spans per pass and the retention the preserve-window cap allows, old cap vs new |
 | `controlflow_real.txt` | Whether the three `tokens_after` consumers change any DECISION under the fix |
@@ -22,6 +23,7 @@ and need no credential (they read a local transcript):
 .venv/bin/python docs/evidence/compaction-ruler/retention_real2.py
 .venv/bin/python docs/evidence/compaction-ruler/controlflow_real.py
 .venv/bin/python docs/evidence/compaction-ruler/span_percentiles.py   # no transcript needed
+.venv/bin/python docs/evidence/compaction-ruler/cap_by_window.py      # no transcript needed
 env -u NO_COLOR TERM=xterm-256color .venv/bin/python \
   docs/evidence/compaction-ruler/shot_compaction.py out.svg <repo-root>
 ```

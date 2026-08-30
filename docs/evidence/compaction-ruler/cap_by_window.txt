@@ -1,0 +1,13 @@
+keep_recent=20,000  task term = keep_recent x 5
+    window  threshold   shipped  flat-only   this PR  effect vs shipped
+    32,768     26,214    20,000    100,000    20,000  unchanged  <- flat cap EXCEEDS THE WINDOW
+    64,000     51,200    25,600    100,000    25,600  unchanged  <- flat cap EXCEEDS THE WINDOW
+   128,000    102,400    51,200    100,000    51,200  unchanged
+   131,072    104,857    52,428    100,000    52,428  unchanged
+   200,000    160,000    80,000    100,000    80,000  unchanged
+   256,000    204,800   102,400    100,000   100,000  tighter by 2,400 (the win)
+   400,000    320,000   160,000    100,000   100,000  tighter by 60,000 (the win)
+ 1,000,000    600,000   300,000    100,000   100,000  tighter by 200,000 (the win)
+
+registry context_window entries: 118  median=131,072
+below the crossover (capacity term binds): 77 (65%)  crossover ~= 200,000 tokens of window

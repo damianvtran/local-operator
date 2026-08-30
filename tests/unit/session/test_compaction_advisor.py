@@ -1051,67 +1051,83 @@ async def test_one_boundary_spawns_at_most_one_advisor_call(tmp_path, monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_the_preserve_cap_is_measured_in_keep_recent_units(tmp_path):
-    """The cap is ``keep_recent_tokens * 5``, NOT a fraction of the trigger.
+async def test_the_preserve_cap_is_the_smaller_of_a_task_and_a_capacity_bound(tmp_path):
+    """``min(keep_recent * 5, threshold // 2)``, floored at ``keep_recent``.
 
-    It bounds ``task_boundary_floor``, whose span is summed with the local
-    cl100k estimator (``cutpoint.py``), so a cap derived from
-    ``resolve_threshold_tokens`` — a PROVIDER-scale number — compared two
-    rulers that diverge by ~1.6-1.7x on Anthropic. On a 1M window that made
-    the cap 300,000 local tokens, and three of ten measured passes then
-    retained 35-41% of history against 4-19% for the other seven.
+    The TASK term is the fix. It bounds ``task_boundary_floor``, whose span is
+    summed with the local cl100k estimator (``cutpoint.py``), so a cap taken
+    from ``resolve_threshold_tokens`` alone — a PROVIDER-scale number —
+    compared two rulers that diverge by ~1.6-1.7x on Anthropic. On a 1M window
+    that made the cap 300,000 local tokens, and three of ten measured passes
+    then retained 35-41% of history against 4-19% for the other seven.
 
-    The multiple is sized against 17 measured active-task spans (the seven at
-    ``cutpoint.task_boundary_floor`` plus the ten in
-    ``docs/evidence/compaction-ruler/retention_real2.txt``), which are
-    bimodal: thirteen under 54k and four between 113k and 132k. 5x the 20,000
-    default puts the bound at 100,000, between the clusters. See
-    ``_advisor_floor_cap`` for why the evidence does not separate 5 from 4,
-    and why 6 would be wrong.
+    The CAPACITY term is why the task term cannot stand alone, and dropping it
+    was blocker-1 of agent review round 1. A cap in ``keep_recent`` multiples
+    alone is independent of the model: at the 20,000 default a flat 100,000
+    exceeds the entire context window of a 32k or 64k model, and 65% of the
+    shipped registry sits below the ~250k crossover. The measured consequence
+    was a 64k model refusing every over-threshold pass and a 128k model's
+    reclaim falling to 7%, under the fraction that permanently disables the
+    advisor — the exact "never compact" failure the cap exists to prevent.
 
-    This test pins BOTH the multiple and the property that made the old form
-    wrong — the cap must not move when the context window does.
+    So the cap must be BOTH: on the same ruler as the span it bounds, and
+    never large relative to the model's own capacity. This test pins the
+    crossover behaviour in both directions, which is what no test in the
+    original draft did.
     """
+    from local_operator.compaction.api import resolve_threshold_tokens
     from local_operator.session.session import _TASK_FLOOR_KEEP_MULTIPLE
 
     assert _TASK_FLOOR_KEEP_MULTIPLE == 5
 
     settings = CompactionSettings(keep_recent_tokens=20_000)
-    session = Session(
-        model=BIG_MODEL,
-        stream_fn=ScriptedStream(),
-        tools=[],
-        transcript=Transcript(tmp_path / "sess"),
-        system_blocks_provider=lambda: ["stable"],
-        compaction_settings=settings,
-    )
-    # Production's default: 100,000, where the old form gave 300,000.
-    assert session._advisor_floor_cap(settings) == 100_000
-    # Clears the whole lower cluster of measured task spans (max 53,732) with
-    # margin, and stays under the outlier cluster the cap exists to bound
-    # (min 113,835), so an ordinary long turn is never clipped.
-    assert 53_732 < session._advisor_floor_cap(settings) < 113_835
 
-    # The cap tracks the CONFIGURED verbatim window, never the window size:
-    # the same settings on a model with a 40x smaller context answer the same.
-    small = ModelSpec(provider="test", model_id="small", context_window=25_000)
-    small_session = Session(
-        model=small,
-        stream_fn=ScriptedStream(),
-        tools=[],
-        transcript=Transcript(tmp_path / "small"),
-        system_blocks_provider=lambda: ["stable"],
-        compaction_settings=settings,
-    )
-    assert small_session._advisor_floor_cap(settings) == 100_000
+    def cap_for(window: int, name: str, cap_settings=settings) -> int:
+        session = Session(
+            model=ModelSpec(provider="test", model_id=name, context_window=window),
+            stream_fn=ScriptedStream(),
+            tools=[],
+            transcript=Transcript(tmp_path / name),
+            system_blocks_provider=lambda: ["stable"],
+            compaction_settings=cap_settings,
+        )
+        return session._advisor_floor_cap(cap_settings)
 
-    # And a user who widens the verbatim window widens the cap with it, which
-    # is what makes the dropped ``max(keep_recent, ...)`` guard unnecessary
-    # rather than merely absent.
+    # ABOVE the crossover the task term binds: this is the win, 300,000 ->
+    # 100,000 on the 1M window where the pathological passes were measured.
+    assert cap_for(1_000_000, "big") == 100_000
+    assert cap_for(400_000, "mid") == 100_000
+    # It clears the whole lower cluster of measured task spans (max 53,732)
+    # and stays under the outlier cluster it exists to bound (min 113,835).
+    assert 53_732 < cap_for(1_000_000, "big2") < 113_835
+
+    # BELOW the crossover the capacity term binds, and the answer is exactly
+    # what shipped — this half of the assertion is a regression guard on
+    # blocker-1, not a description of new behaviour.
+    for window in (32_768, 64_000, 128_000, 131_072, 200_000):
+        shipped = max(20_000, resolve_threshold_tokens(window, settings) // 2)
+        assert cap_for(window, f"w{window}") == shipped, (
+            f"window {window:,}: cap moved off the shipped value {shipped:,} — "
+            "a capacity-independent cap is looser than today on 65% of the registry"
+        )
+
+    # The cap may never exceed the window it is capping within. A flat
+    # keep_recent multiple did, which is how the refusal state was reached.
+    for window in (32_768, 64_000):
+        assert cap_for(window, f"lt{window}") < window
+
+    # The outer max is a real guard again, not a tautology: on a small window
+    # ``threshold // 2`` falls below the configured verbatim window, and a cap
+    # under what the user asked to keep would silently narrow it.
+    assert resolve_threshold_tokens(32_768, settings) // 2 < 20_000
+    assert cap_for(32_768, "floored") == 20_000
+
+    # A user who widens the verbatim window widens the task term with it,
+    # still bounded by capacity.
     wide = CompactionSettings(keep_recent_tokens=250_000)
-    assert session._advisor_floor_cap(wide) == 1_250_000
-    await session.dispose()
-    await small_session.dispose()
+    assert cap_for(1_000_000, "wide", wide) == min(
+        250_000 * _TASK_FLOOR_KEEP_MULTIPLE, resolve_threshold_tokens(1_000_000, wide) // 2
+    )
 
 
 @pytest.mark.asyncio
@@ -1229,4 +1245,80 @@ async def test_the_preserve_cap_degrades_to_plain_recency(tmp_path):
         compaction_settings=CompactionSettings(keep_recent_tokens=KEEP_RECENT),
     )
     assert session._advisor_floor_cap(PartialSettings()) == 0
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_mid_sized_window_still_compacts_over_threshold(tmp_path, monkeypatch):
+    """A 128k model over its trigger must still find a cut — the case that
+    made blocker-1 invisible to the suite.
+
+    Every other cap test here runs on a 1M-context fixture, where the task
+    term is the tighter of the two and a capacity-independent cap looks
+    harmless. The damage was all below the ~250k crossover: with the cap at a
+    flat ``keep_recent * 5`` the preserve window on a 128k model becomes
+    100,000 against a 102,400 trigger, so ``find_cut_point`` has almost
+    nothing outside the kept window and the pass either refuses outright or
+    reclaims under ``_ADVISOR_MIN_RECLAIM_FRACTION`` — which permanently
+    disables the advisor for the session.
+
+    Driven through the REAL ``task_boundary_floor`` → ``find_cut_point`` path
+    with a task span wide enough that the cap is what decides, so this fails
+    against the capacity-free cap and passes with it.
+    """
+    settings = CompactionSettings(keep_recent_tokens=20_000, advisor_enabled=False)
+    mid = ModelSpec(provider="test", model_id="mid", context_window=128_000)
+    session = Session(
+        model=mid,
+        stream_fn=ScriptedStream(),
+        tools=[],
+        transcript=Transcript(tmp_path / "sess"),
+        system_blocks_provider=lambda: ["stable"],
+        compaction_settings=settings,
+    )
+    # Real history large enough that a ~51k preserve window still leaves
+    # older turns outside it. A short fixture would answer
+    # ``nothing_to_compact`` for a reason that has nothing to do with the cap.
+    for index in range(14):
+        await session.prompt(f"question {index} " + "detail " * 4_000)
+
+    threshold = compaction_api.resolve_threshold_tokens(128_000, settings)
+    # The cap must leave room to summarize: a preserve window at or above the
+    # trigger is the definition of "nothing left to compact".
+    cap = session._advisor_floor_cap(settings)
+    assert cap < threshold // 2 + 1, f"cap {cap:,} is not bounded by capacity on a 128k window"
+    assert cap * 2 <= threshold, (
+        f"cap {cap:,} leaves under half the {threshold:,} trigger to summarize — "
+        "this is the state where find_cut_point answers None"
+    )
+
+    captured: list[int] = []
+    real = compaction_api.find_cut_point
+
+    def spy(messages, keep_recent_tokens):
+        captured.append(int(keep_recent_tokens))
+        return real(messages, keep_recent_tokens)
+
+    monkeypatch.setattr(compaction_api, "find_cut_point", spy)
+    # A task span far wider than the cap, as in a long agentic turn: the floor
+    # asks for everything and the cap is the only thing bounding it.
+    monkeypatch.setattr(
+        compaction_api, "task_boundary_floor", lambda messages, ids, *, cap: min(500_000, cap)
+    )
+    # Over the trigger, so a pass is mandatory.
+    pin_measured_context(monkeypatch, threshold + 10_000)
+
+    planned = await session._plan_compaction(respect_threshold=True)
+
+    assert captured, "find_cut_point was never reached"
+    # 51,200 (the capacity term), not the 100,000 a flat multiple would give.
+    assert captured[-1] == threshold // 2
+    assert captured[-1] < 100_000, (
+        f"the preserve window is {captured[-1]:,} on a 128k model — a flat "
+        "keep_recent multiple has come back and exceeds this model's headroom"
+    )
+    assert isinstance(planned, _CompactionPlan), (
+        f"a mandatory pass on a 128k window was suppressed: {planned!r} — this is the "
+        "never-compact failure the capacity term prevents"
+    )
     await session.dispose()

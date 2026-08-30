@@ -303,9 +303,18 @@ def task_boundary_floor(
     session is task-shaped ("keep what this request has been working on").
     Measured on a real 8102-record session, the active-task span at the seven
     compaction passes was 0.3k / 46.9k / 48.8k / 30.0k / 19.8k / 123.4k /
-    49.1k tokens (p50 32k, p90 99k) against a ``keep_recent_tokens`` of 20k —
-    so five of the seven passes summarized away the first half of the task the
-    agent was still executing. That severance, not the token spend, is what
+    49.1k tokens (p50 46.9k; p90 78.8k interpolated, 123.4k nearest-rank)
+    against a ``keep_recent_tokens`` of 20k — so five of the seven passes
+    summarized away the first half of the task the agent was still executing.
+    A later 10-pass session measured spans of the same shape
+    (``docs/evidence/compaction-ruler/span_percentiles.txt``); pooled, the 17
+    are bimodal, thirteen under 54k and four between 113k and 132k.
+
+    (This docstring previously read "p50 32k, p90 99k". Neither follows from
+    the seven spans listed beside them, and the 99k figure was load-bearing in
+    a later argument about the preserve-window cap, so it is corrected here
+    rather than left to be re-derived — pre-existing, found while sizing
+    ``_TASK_FLOOR_KEEP_MULTIPLE``.) That severance, not the token spend, is what
     makes an EARLIER trigger dangerous; widening the preserve window to the
     task boundary is what makes it safe.
 

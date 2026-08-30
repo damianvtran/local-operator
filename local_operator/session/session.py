@@ -1045,14 +1045,16 @@ def _should_compact(
 #: residual came to be both "created headroom" and "reclaimed nothing".
 _ADVISOR_MIN_RECLAIM_FRACTION = 0.10
 
-#: How many ``keep_recent_tokens`` the preserve window may grow to
-#: (:meth:`Session._advisor_floor_cap`, which carries the full derivation and
-#: the limits of the evidence for this exact value). Sized against 17 measured
-#: active-task spans, which are bimodal: thirteen under 54k and four between
-#: 113k and 132k. 5x the 20,000 default lands the bound at 100,000 — above
-#: every ordinary task, below the outlier cluster that drove 35-41% retention.
-#: A MULTIPLE rather than an absolute, so the cap tracks a user who configures
-#: a wider verbatim window.
+#: Task-shaped term of the preserve-window cap: how many ``keep_recent_tokens``
+#: the window may grow to before the capacity ceiling is also applied
+#: (:meth:`Session._advisor_floor_cap` carries the full derivation, the limits
+#: of the evidence for this exact value, and why the capacity term must stay).
+#: Sized against 17 measured active-task spans, which are bimodal: thirteen
+#: under 54k and four between 113k and 132k. 5x the 20,000 default lands this
+#: term at 100,000 — above every ordinary task, below the outlier cluster that
+#: drove 35-41% retention. A MULTIPLE rather than an absolute, so it tracks a
+#: user who configures a wider verbatim window. It BINDS only above the ~250k
+#: window crossover; below that ``threshold // 2`` is the smaller term.
 _TASK_FLOOR_KEEP_MULTIPLE = 5
 
 
@@ -5804,12 +5806,16 @@ class Session:
             # prevent, arrived at through the guard meant to make hints safe
             # (agent review round 1, major-1).
             #
-            # That cap is now ``keep_recent * _TASK_FLOOR_KEEP_MULTIPLE``
-            # (100,000 on the shipped default, where the window-derived form
-            # gave 300,000), so the SAME hint is clamped harder than it was
-            # when the incident was recorded. The clamp therefore moves away
-            # from that failure, never toward it: a narrower cap can only
-            # leave the pass MORE to summarize.
+            # That cap is now ``min(keep_recent * _TASK_FLOOR_KEEP_MULTIPLE,
+            # threshold // 2)``. On a large window the task term binds and the
+            # clamp TIGHTENS (100,000 against the 300,000 of the incident), so
+            # the same hint is bounded harder than it was when the incident was
+            # recorded. Below the ~250k crossover the capacity term binds and
+            # the clamp is exactly what shipped. Either way it never loosens —
+            # which is the property this comment needs, and it is stated per
+            # window because the tightening is NOT universal (agent review
+            # round 1, blocker-1: an earlier draft dropped the capacity term
+            # and did loosen it on 65% of the registry).
             #
             # The clamp cannot narrow below the local floor: ``max`` is applied
             # against ``keep_recent``, which already carries the capped
@@ -6195,6 +6201,19 @@ class Session:
             # receipt prices the archive the way the next bill will. Measured on
             # the live session that motivated this: the uncorrected figure read
             # 60.1k against a provider-reported 137.5k on the next request.
+            #
+            # Computed HERE but applied AFTER the ratio below, and the order is
+            # load-bearing (agent review round 1, major-2). This addend is a
+            # PROVIDER-scale quantity; ``history_after`` and ``history_before``
+            # are both local estimates, and the receipt's proportionality
+            # argument holds only while numerator and denominator stay on that
+            # one ruler. Folding it into ``history_after`` before dividing
+            # would inflate the ratio and then multiply the addend by the
+            # provider total a second time — on a 6-frame archive against a
+            # 400k→60k pass, an after-figure of 144,900 where 105,000 plus the
+            # correction is right. Adding it afterwards prices the frames once,
+            # in the units the receipt is already reporting in.
+            frame_correction = 0
             snap_payload = (preserve_data or {}).get("snapcompact")
             if isinstance(snap_payload, dict):
                 try:
@@ -6204,7 +6223,7 @@ class Session:
 
                     frame_count = len(snap_payload.get("frames") or [])
                     per_frame = frame_token_estimate_for(self._model.provider, self._model.model_id)
-                    history_after += frame_count * (per_frame - IMAGE_TOKEN_ESTIMATE)
+                    frame_correction = frame_count * (per_frame - IMAGE_TOKEN_ESTIMATE)
                 except Exception:  # noqa: BLE001 - a receipt must not fail the pass
                     logger.debug("frame pricing correction failed", exc_info=True)
             # ``tokens_before`` is the figure the GATE acted on —
@@ -6278,10 +6297,14 @@ class Session:
             #
             # Both guards are load-bearing. The zero-guard makes the division
             # total (a pass over empty history cannot divide). The
-            # ``history_after`` floor never binds on the measured data, but a
-            # receipt reading "0 tokens" is a worse lie than a stale one — the
-            # sibling incident on the status band is documented at
-            # ``tui/app.py`` ``_settle_context_reading``.
+            # ``history_after`` floor never binds on the measured data, where
+            # the provider figure exceeds the local estimate; it binds whenever
+            # ``context_tokens < history_before``, which is the ordinary state
+            # for a provider whose tokenizer is COARSER than cl100k (the
+            # OpenAI control sits near that line at slope 1.036). A receipt
+            # reading "0 tokens" is a worse lie than a stale one — the sibling
+            # incident on the status band is documented at ``tui/app.py``
+            # ``_settle_context_reading``.
             history_before = plan.tokens_before
             if history_before > 0:
                 tokens_after = max(
@@ -6289,6 +6312,9 @@ class Session:
                 )
             else:
                 tokens_after = history_after
+            # The snapcompact frame correction, priced once and in the
+            # receipt's own units (see where it is computed above).
+            tokens_after += frame_correction
             await self._emit(
                 CompactionEndEvent(
                     reason=reason,
@@ -7012,6 +7038,26 @@ class Session:
                 for message in self._context.messages
                 if isinstance(message, Message) and message.role == "user"
             }
+            # ``floor_cap`` is the THIRD consumer of ``_advisor_floor_cap``,
+            # and the only one where the cap moves an ACCEPT/REJECT boundary
+            # rather than clamping a number (agent review round 1, major-1).
+            # ``validate_hint`` rejects a hint narrower than
+            # ``max(keep_recent_tokens, task_boundary_floor(..., cap))``, so a
+            # lower cap lowers that floor and admits hints it used to refuse:
+            # on a 1M window with a 131,376-token task span the floor drops
+            # 131,376 → 100,000, and a 120,000-token hint flips from
+            # "narrowing, rejected" to accepted.
+            #
+            # That is a widening of what the ADVISOR may propose, not of what a
+            # size pass keeps, and it is bounded on both sides: a hint below
+            # ``keep_recent_tokens`` is still rejected, and an accepted hint is
+            # still clamped by the same cap in ``_plan_compaction``. It can
+            # nonetheless make a pass fire that would not otherwise have
+            # fired — ``should_compact`` takes ``min(threshold,
+            # resolve_advisor_floor_tokens(...))`` once advice is usable — so
+            # "nothing changes when compaction fires" is true of the SIZE
+            # trigger only. The whole path is inert while ``advisor_enabled``
+            # is false, which is the shipped default.
             hint = compaction_api.validate_hint(
                 compaction_api.parse_hint(raw),
                 history,
@@ -7048,18 +7094,48 @@ class Session:
         summarize, so ``find_cut_point`` answers ``None`` and the protection
         turns into "never compact" — the failure the trigger exists to prevent.
 
-        The cap is expressed in ``keep_recent_tokens`` MULTIPLES because that
-        is the unit the thing being capped is measured in. It used to be half
-        the resolved trigger, which mixed two rulers exactly the way the
-        receipt did: ``task_boundary_floor`` sums a span with the local cl100k
-        estimator (``cutpoint.py``), while ``resolve_threshold_tokens`` returns
-        a PROVIDER-scale number, and the two diverge by ~1.65-1.73x on
-        Anthropic (see the slope measurement at the receipt in
-        :meth:`_run_compaction`). On a 1M window that made the cap 300,000
-        local tokens, and a pass whose last genuine user turn sat 131,376
-        tokens back widened ``keep_recent`` 20k → 131k and retained 41.3% of
-        history where the other nine passes of the same session retained
-        3.7-8.1%.
+        Two terms, and the cap is the SMALLER of them:
+
+        1. ``keep_recent_tokens * _TASK_FLOOR_KEEP_MULTIPLE`` — a task-shaped
+           bound, on the same local ruler as the span being capped.
+        2. ``threshold // 2`` — a capacity-shaped CEILING, so the cap can
+           never approach the model's own context window.
+
+        Term 1 is the fix. The cap used to be term 2 alone, which mixed two
+        rulers exactly the way the receipt did: ``task_boundary_floor`` sums a
+        span with the local cl100k estimator (``cutpoint.py``), while
+        ``resolve_threshold_tokens`` returns a PROVIDER-scale number, and the
+        two diverge by ~1.6-1.7x on Anthropic (see the slope measurement at the
+        receipt in :meth:`_run_compaction`). On a 1M window that made the cap
+        300,000 local tokens, and a pass whose last genuine user turn sat
+        131,376 tokens back widened ``keep_recent`` 20k → 131k and retained
+        41.3% of history where seven other passes of the same session retained
+        4-19%.
+
+        **Term 2 is retained deliberately, and dropping it was a bug caught in
+        agent review round 1 (blocker-1).** A cap expressed only in
+        ``keep_recent`` multiples is independent of the model's capacity, which
+        is worse than being on the wrong ruler: at the 20,000 default a flat
+        100,000 EXCEEDS the entire context window of a 32k or 64k model, and
+        65% of the shipped registry's 118 ``context_window`` entries sit below
+        the ~250k crossover where the flat term stops being the tighter of the
+        two (median model: 131,072). Measured on the real
+        ``task_boundary_floor`` → ``find_cut_point`` path, the flat-only cap
+        made a 64k model refuse EVERY over-threshold pass (47/47 samples, where
+        the capacity cap refused none) and dropped a 128k model's reclaim from
+        52% to 7% — under ``_ADVISOR_MIN_RECLAIM_FRACTION``, which permanently
+        disables the advisor for that session. That is precisely the
+        "never compact" failure named above, reached through the guard meant
+        to prevent it.
+
+        Term 2 is a provider-scale number bounding a local-scale span, so it is
+        a ruler mix — but as a one-sided CEILING it is a conservative one: it
+        can only ever make the preserve window SMALLER, and a too-small
+        preserve window costs task context while a too-large one costs the
+        ability to compact at all. The proportional receipt eliminated a ruler
+        mix that decided a REPORTED NUMBER; this one only bounds a safety
+        margin, and no figure shown to the user or used in an equality test
+        derives from it.
 
         ``_TASK_FLOOR_KEEP_MULTIPLE`` is 5, sized against every active-task
         span measured on real sessions: the seven recorded at
@@ -7086,28 +7162,49 @@ class Session:
         so the multiple must not be raised without new evidence. The full table
         is ``docs/evidence/compaction-ruler/span_percentiles.txt``.
 
-        The old ``max(keep_recent_tokens, ...)`` guard is gone because a
-        MULTIPLE cannot fall below its own base the way ``threshold // 2``
-        could: a user who configures a wider verbatim window gets a
-        proportionally wider cap for free, so ``max(k, 5k)`` would be a
-        tautology rather than a guard. The same cap clamps the advisor hint
-        (see ``_plan_compaction``), so a wide-but-legal advisory is bounded by
-        the same rule — that clamp tightens from 300,000 to 100,000 on a 1M
-        window, which is a real change to the advisor path and is deliberate:
-        it moves further AWAY from the 800,340-against-300,000 hint that
-        motivated the clamp, not toward it.
+        The outer ``max(keep_recent_tokens, ...)`` is kept, and with term 2
+        back it is a real guard again rather than the tautology a
+        multiple-only cap made of it: on a small window ``threshold // 2`` can
+        fall BELOW ``keep_recent_tokens`` (13,107 against a 20,000 default on a
+        32k model), and a cap under the verbatim window the user configured
+        would silently narrow what they asked to keep.
+
+        THREE call sites read this cap, not two:
+        ``task_boundary_floor`` in :meth:`_plan_compaction`, the advisor-hint
+        clamp beside it, and ``validate_hint``'s ``floor_cap``
+        (``compaction/advisor.py``) — see the note in :meth:`_run_advisor` for
+        the acceptance-boundary shift the third one implies. On a 1M window all
+        three tighten from 300,000 to 100,000; below the ~250k crossover all
+        three are unchanged from today, because term 2 binds there and term 2
+        is what shipped.
         """
         try:
             keep_recent = int(settings.keep_recent_tokens)
         except Exception:  # noqa: BLE001 — degrade to plain recency
             # A partial settings double (the same tolerance ``_offloaded``
             # grants its rulers) must not break a pass. Cap 0 makes
-            # ``task_boundary_floor`` return 0 and the hint clamp 0, and both
-            # callers fold that through ``max(keep_recent, ...)`` — so the
+            # ``task_boundary_floor`` return 0, the hint clamp 0 and
+            # ``validate_hint``'s local floor ``keep_recent_tokens``, and every
+            # caller folds that through ``max(keep_recent, ...)`` — so the
             # degraded answer is exactly the pre-floor recency behaviour,
             # which is what the previous fallback also produced.
             return 0
-        return keep_recent * _TASK_FLOOR_KEEP_MULTIPLE
+        task_cap = keep_recent * _TASK_FLOOR_KEEP_MULTIPLE
+        try:
+            from local_operator.compaction import api as compaction_api
+
+            capacity_cap = (
+                compaction_api.resolve_threshold_tokens(
+                    self.effective_model.context_window, settings
+                )
+                // 2
+            )
+        except Exception:  # noqa: BLE001 — no capacity term, keep the task one
+            # Losing the ceiling is safe in the direction that matters: the
+            # task term still bounds the window, and this is the same
+            # degradation the pre-existing implementation took here.
+            return max(keep_recent, task_cap)
+        return max(keep_recent, min(task_cap, capacity_cap))
 
     def _wire_legal_snapshot(self) -> list[AgentMessage]:
         """A copy of the live message list that a provider will actually accept.
