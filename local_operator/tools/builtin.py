@@ -2300,16 +2300,13 @@ async def execute_read(
                 "read",
                 f"Cannot resolve '{target}': the resolver does not handle this URL.",
             )
-        # A URL read is a re-read of one resource: a later read of the same
-        # URL describes its newer state, so the older text is dead weight.
-        # Declared explicitly (never inferred) because only this call site
-        # knows the result is the whole resource rather than one view of it.
-        return _text(
-            tool_call_id,
-            "read",
-            content,
-            details={"url": target, "supersede_key": target},
-        )
+        # Deliberately NO supersede_key here. This path serves internal URLs
+        # (skill://, guide://, mcp://), and skill reads are exempt from pruning
+        # anyway -- ``_is_prunable`` protects them because a pruned skill just
+        # gets re-read in a loop. Declaring a key would be inert for those and
+        # would add avoidable risk for the rest, since a resolver result is not
+        # always the same content under the same URL.
+        return _text(tool_call_id, "read", content, details={"url": target})
 
     cwd = _safe_cwd(context)
     path, inside, resolvable = _resolve_workspace_path(target, cwd)

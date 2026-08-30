@@ -238,6 +238,7 @@ def _cache_hit_result(
     ttl_seconds: int,
     tool_name: str,
     context: ToolContext | None,
+    variant: str | None = None,
 ) -> tuple[str, dict[str, Any]] | None:
     """Rebuild a result from a cache entry, or ``None`` when the hit is unusable.
 
@@ -278,7 +279,12 @@ def _cache_hit_result(
         "ok": http_ok,
         "http_error": not http_ok,
     }
-    preview, details, _handle = _shape_from_content(result_like, content, tool_name, context)
+    # Same declared supersede key as a fresh fetch: a cached re-read describes
+    # the same resource, so it must group with the fresh ones rather than
+    # escaping the supersede pass for having been served from cache.
+    preview, details, _handle = _shape_from_content(
+        result_like, content, tool_name, context, variant=variant
+    )
     return preview, details
 
 
@@ -347,7 +353,9 @@ async def run_fetch(
     if not refresh and settings.cache_ttl_seconds > 0:
         entry = read_cache_entry(normalized, variant)
         if entry is not None:
-            hit = _cache_hit_result(entry, settings.cache_ttl_seconds, tool_name, context)
+            hit = _cache_hit_result(
+                entry, settings.cache_ttl_seconds, tool_name, context, variant=variant
+            )
             if hit is not None:
                 preview, details = hit
                 return preview, details, False
