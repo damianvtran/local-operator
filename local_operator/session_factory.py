@@ -295,6 +295,47 @@ class HostingUnknownError(HostingNotConfiguredError):
         self.source = source
 
 
+class ModelNotConfiguredError(HostingNotConfiguredError):
+    """Raised when hosting is a real provider but no model can be resolved for it.
+
+    A SIBLING of :class:`HostingUnknownError` under the recoverable base, for the
+    same reason that class exists: the user's remedy is reachable only from
+    inside the app, so the condition has to reach the surface that offers it.
+    Raised as a bare ``ValueError`` it missed the ``isinstance`` gate in the
+    TUI's ``_on_boot_failed``, landed in the red "session failed to start" branch
+    with ``_session`` None and ``_setup_state`` False, and left every provider
+    command answering "session is still starting..." -- the exact terminal state
+    this error family was introduced to remove.
+
+    That is reachable through the app's OWN repair: logging in to a provider with
+    no known default model (``alibaba-token-plan``) writes a registry-VALID
+    hosting with an empty model, so the next boot arrives here. Before this
+    class the user was stuck HARDER after the repair than before it -- ``/login``
+    wrote nothing because hosting was now valid, and ``/model`` had no session to
+    talk to.
+
+    DISTINCT from ``HostingUnknownError`` rather than reusing it, because the
+    diagnosis differs and the surfaces say so: hosting is fine here, the MODEL is
+    missing, and telling a user whose provider is correct that it "is not a known
+    provider" sends them to fix the one thing that is not broken. The hosting is
+    carried for the same reason its sibling carries it -- so the UI can name it
+    without re-parsing a sentence.
+
+    Recoverable does NOT mean permissive: the non-interactive paths (headless
+    REPL, ``exec``, non-tty) still fail fast on this in ``_preflight_hosting_model``,
+    because a scripted run has no one to answer the prompt and must not limp
+    along picking a model nobody chose.
+    """
+
+    def __init__(self, message: str, hosting: str = "") -> None:
+        super().__init__(message)
+        #: The provider that resolved fine but has no model. Unlike its sibling
+        #: this needs no ``source``: hosting came from somewhere valid, and the
+        #: remedy (`/model`, which writes config) is the same wherever the empty
+        #: model came from.
+        self.hosting = hosting
+
+
 #: How the user changes a bad hosting value, per source. Keyed by
 #: :attr:`HostingUnknownError.source`, because the remedy genuinely differs: only
 #: the config case is fixed by `login`/`config edit`, and naming the wrong one
@@ -409,7 +450,16 @@ def resolve_hosting_model(
 
         model_name = default_model_for(hosting)
         if not model_name:
-            raise ValueError(_no_model_message(hosting))
+            # RECOVERABLE, not fatal: a provider with no known default is a
+            # config the user can still fix from inside the app (`/model`), and
+            # this is a config the app itself writes -- `/login` into a provider
+            # with no default clears the model deliberately. Raised as a plain
+            # ValueError it bypassed the TUI's recoverable-error gate and became
+            # the dead "session failed to start" state, which is what made the
+            # sanctioned repair leave the user worse off than the corruption it
+            # repaired. The message is unchanged -- it names concrete model ids,
+            # and the fail-fast paths still print exactly it.
+            raise ModelNotConfiguredError(_no_model_message(hosting), hosting)
     return hosting, model_name
 
 

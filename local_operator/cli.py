@@ -2126,11 +2126,32 @@ def _preflight_hosting_model(
     from local_operator.session_factory import (
         HostingNotConfiguredError,
         HostingUnknownError,
+        ModelNotConfiguredError,
         resolve_hosting_model,
     )
 
     try:
         hosting, _model_name = resolve_hosting_model(current_agent, args, config_manager)
+    except ModelNotConfiguredError as exc:
+        # Hosting is a real provider but has no resolvable model -- the state
+        # `/login <provider-with-no-default>` writes on purpose. Recoverable on
+        # the interactive path in EXACTLY the way an unknown hosting is: the
+        # setup state's `/model` picker writes the missing value, so the app
+        # opens rather than refusing to launch. Ordered before its base class
+        # for the same reason the HostingUnknownError branch is: it is a
+        # subclass and would otherwise be swallowed by that handler, which
+        # would print the first-run quickstart and never mention the model.
+        if allow_setup_state:
+            return None
+        # Non-interactive paths keep fail-fast with the informative message: a
+        # scripted or CI run has nobody to answer a picker, and limping along
+        # on a model nobody chose is how a cron job silently bills a different
+        # provider. Same shape as the ValueError branch below, which this
+        # branch now shadows for the resolver's own raise.
+        from local_operator.cli_style import ERROR, paint
+
+        print(paint(f"Error: {exc}", ERROR, stream=sys.stderr), file=sys.stderr)
+        return 1
     except HostingUnknownError as exc:
         # Hosting names a provider the registry does not own (a typo, a
         # hand-edited config, an id dropped by an upgrade). Recoverable in

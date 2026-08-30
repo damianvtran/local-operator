@@ -100,9 +100,23 @@ def plan_login_defaults(
       failure it cannot is strictly worse than the bug being repaired.
     - Clearing (rather than keeping) a model with no known default is what
       makes the repair safe for ``alibaba-token-plan``, which resolves to no
-      default at all. An empty ``model_name`` is a state the startup resolver
-      already handles and reports precisely; a model belonging to a provider
-      that never existed is not.
+      default at all. A model belonging to a provider that never existed is
+      strictly worse: it boots and then fails at stream time, where the app
+      cannot explain it.
+
+      An empty ``model_name`` is NOT a fully-configured state, and this module
+      must not pretend otherwise — an earlier version of this docstring claimed
+      the startup resolver "already handles" it, which was false and shipped a
+      dead end. What the resolver actually does is raise
+      ``ModelNotConfiguredError`` (``session_factory``), a RECOVERABLE member of
+      the ``HostingNotConfiguredError`` family: the TUI opens in the setup state
+      where ``/model`` supplies the missing value and boots the session, and the
+      non-interactive paths still fail fast with a message naming concrete model
+      ids. So the repair trades an unbootable config for one that needs one more
+      answer from the user, and the surface that asks for it is reachable —
+      which is the property that has to hold, and the reason the boot-level test
+      in ``tests/unit/tui/test_app_pilot.py`` asserts it end to end rather than
+      stopping at the config file.
     """
     if hosting and not is_unusable_hosting(hosting):
         return LoginDefaults(hosting=None, model_name=None, receipt=None, repairing=False)
@@ -112,6 +126,16 @@ def plan_login_defaults(
     # under the provider it authenticates, and that is what the app must point
     # at. This is also what gives the flavour a default model to inherit.
     resolved = credential_provider_id(provider_id)
+    # The module's entire purpose is "never write a hosting the registry does
+    # not own". `credential_provider_id` PASSES UNKNOWN ids through, so without
+    # this a careless caller (`plan_login_defaults("not-a-provider", ...)`)
+    # would write exactly the unusable hosting this planner exists to refuse.
+    # Both current front ends reach here only after a successful login against
+    # a registry-resolved definition, so this is a belt, not a currently-hit
+    # path -- and a no-op plan is the honest answer when there is nothing
+    # legitimate to write.
+    if get_provider_definition(resolved) is None:
+        return LoginDefaults(hosting=None, model_name=None, receipt=None, repairing=False)
     default_model = default_model_for(resolved) or ""
 
     if repairing:

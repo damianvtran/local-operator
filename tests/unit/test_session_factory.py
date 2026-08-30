@@ -189,10 +189,21 @@ def test_resolve_known_hosting_no_default_still_raises_for_model() -> None:
     ``DEFAULT_MODEL_NAMES``. The case previously used a fictional hosting id,
     which now trips the unknown-provider guard first and would assert the wrong
     error; the provider must be real for this to still be about the MODEL.
+
+    The type is ``ModelNotConfiguredError``, not a bare ``ValueError``: the TUI
+    and CLI preflight classify by ``isinstance`` against the recoverable family,
+    so a plain ValueError here is the dead "session failed to start" state (B1).
     """
+    from local_operator.session_factory import (
+        HostingNotConfiguredError,
+        ModelNotConfiguredError,
+    )
+
     config = cast("ConfigManager", FakeConfigManager({}))
-    with pytest.raises(ValueError, match="no default is known"):
+    with pytest.raises(ModelNotConfiguredError, match="no default is known") as caught:
         resolve_hosting_model(None, _args(hosting="ollama"), config)
+    assert isinstance(caught.value, HostingNotConfiguredError)
+    assert caught.value.hosting == "ollama"
 
 
 def test_resolve_unknown_hosting_is_recoverable_setup_not_a_crash() -> None:

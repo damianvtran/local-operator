@@ -76,8 +76,9 @@ def test_apply_login_defaults_leaves_existing_hosting_untouched(
         ("openai-device", "openai", "gpt-4o"),
         ("zai-oauth", "zai", "glm-5.3"),
         # No default model even after alias resolution: the stale model must be
-        # CLEARED, not kept. An empty model_name is a state the resolver handles
-        # and explains; a model from a provider that never existed is not.
+        # CLEARED, not kept. An empty model_name is a recoverable setup state
+        # (ModelNotConfiguredError), not a fully-configured boot; a model from
+        # a provider that never existed is worse (boots, then fails at stream).
         ("alibaba-token-plan", "alibaba-token-plan", ""),
         # Ordinary provider with a default: the baseline case.
         ("deepseek", "deepseek", "deepseek-chat"),
@@ -128,6 +129,23 @@ def test_plan_is_the_single_source_of_truth_for_both_login_front_ends() -> None:
         # The policy must not be re-implemented beside the call.
         assert "default_model_for" not in source
         assert "credential_provider_id" not in source
+
+
+def test_plan_refuses_to_write_an_unknown_provider_id() -> None:
+    """A bogus provider_id must not become a hosting the registry does not own.
+
+    `credential_provider_id` passes unknown ids through, so without a registry
+    check this planner -- whose purpose is "never write a hosting the engine
+    cannot boot" -- would write exactly that. Both current callers reach here
+    only after a successful login, so this is not reachable today; the no-op
+    is the honest answer when there is nothing legitimate to write (M1).
+    """
+    from local_operator.providers.login_defaults import plan_login_defaults
+
+    plan = plan_login_defaults("not-a-provider", "anthropicxyq", "stale")
+    assert plan.hosting is None
+    assert plan.model_name is None
+    assert plan.receipt is None
 
 
 def test_plan_leaves_a_usable_hosting_alone() -> None:

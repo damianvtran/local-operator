@@ -7,6 +7,7 @@ paints first, then awaits the session in a worker.
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import json
 import os
@@ -772,9 +773,22 @@ async def test_setup_state_when_hosting_names_an_unknown_provider() -> None:
         # LENGTH, not just order. The first version of this line ran to 141
         # characters, so at 80 and 100 columns it was cut mid-clause and at 60
         # the bad value never rendered at all -- the user was told to fix
-        # "this" without being told what "this" was. The splash paints a "! "
-        # prefix, so the budget is the terminal width minus that.
-        assert len(notice) <= 78, f"notice must survive an 80-col terminal: {len(notice)}"
+        # "this" without being told what "this" was.
+        #
+        # What this number actually buys (D6): the notice row paints into
+        # `terminal width - 6` cells, not `width - 2`. MEASURED against the real
+        # widget across widths 74..95, not derived from the "! " prefix: a
+        # 77-char notice first renders whole at 83 columns and a 78-char one
+        # needs 84. So 78 is a REGROWTH CEILING (it fails the 141-char
+        # regression it was written for), NOT a promise of 80-column survival --
+        # the budget for that is 74, and the line asserted here is 77, so it is
+        # cut by three cells on an 80-column terminal today. Stated plainly
+        # because the previous comment claimed the opposite, which is how a
+        # future notice written to "the limit" would be silently truncated while
+        # this suite stayed green. New notices should target 74; see
+        # `test_repaired_config_boots_into_an_escapable_state`, which holds its
+        # own line to that.
+        assert len(notice) <= 78, f"notice must not regrow past the 84-col ceiling: {len(notice)}"
         # The value must be inside the part that survives the narrowest
         # terminal we capture (60 cols), which is the whole point of naming it.
         assert notice.index("anthropicxyq") + len("anthropicxyq") <= 58
@@ -811,6 +825,9 @@ async def test_setup_state_does_not_promise_a_login_it_cannot_honour() -> None:
         assert "--hosting" in notice
         assert "anthropicxyq" in notice
         assert "/login" not in notice
+        # Regrowth ceiling, not an 80-column guarantee -- see the measured note
+        # on the sibling assertion above for what this number does and does not
+        # buy (D6).
         assert len(notice) <= 78
 
 
@@ -855,6 +872,222 @@ async def test_login_from_bad_provider_setup_state_repairs_the_config(
     # The model belonged to the provider that was replaced, so it is replaced
     # too -- otherwise a real provider is pointed at a model that never existed.
     assert repaired.get_config_value("model_name") == "deepseek-chat"
+
+
+@pytest.mark.parametrize(
+    "provider, expect_setup",
+    [
+        # The two loginable providers with no default model: `/login` here
+        # writes a registry-VALID hosting with a CLEARED model, which is the
+        # config the repair produces on purpose.
+        ("alibaba-token-plan", True),
+        ("alibaba-token-plan-oauth", True),
+        # Control: an ordinary provider brings its own default, so the repaired
+        # config boots straight through and must NOT land in setup. Without it
+        # this test would pass on a build that sent every login to setup.
+        ("deepseek", False),
+    ],
+)
+@pytest.mark.asyncio
+async def test_repaired_config_boots_into_an_escapable_state(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    provider: str,
+    expect_setup: bool,
+) -> None:
+    """A repaired config must BOOT, and its setup state must be escapable (B1).
+
+    The coverage gap this closes: every other assertion about the repair stops
+    at the plan or at the config file, and none asserted that the config the
+    repair writes can actually start a session. `alibaba-token-plan` has no
+    default model, so the repair clears the model deliberately — and the
+    resolver used to answer that with a plain `ValueError`, which misses the
+    recoverable-error gate in `_on_boot_failed` and painted the red "session
+    failed to start" with `_session=None` AND `_setup_state=False`. That is the
+    exact terminal state this PR exists to remove, reached by following the
+    PR's own remedy, so the user was stuck HARDER after the repair than before.
+
+    Asserted end to end (repair -> config -> boot -> recovery command) because
+    that is the only sequence in which the defect is visible: each step in
+    isolation looked correct, which is precisely how it shipped.
+
+    The DEFECT is what is pinned, not the mechanism: the assertions are "not the
+    dead state" and "the user can get out", so a different recoverable shape
+    still passes and a regression to a dead end cannot.
+    """
+    from local_operator.config import ConfigManager
+    from local_operator.paths import CONFIG_DIR_ENV
+    from local_operator.providers.login_defaults import plan_login_defaults
+    from local_operator.session_factory import resolve_hosting_model
+
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(tmp_path))
+    seed = ConfigManager(tmp_path)
+    seed.set_config_value("hosting", "anthropicxyq")
+    seed.set_config_value("model_name", "claude-sonnet-4-5")
+
+    # The repair the app performs on a successful `/login`, through the real
+    # planner rather than a hand-written config: the point is that this exact
+    # pair is what the product writes.
+    plan = plan_login_defaults(
+        provider, seed.get_config_value("hosting"), seed.get_config_value("model_name")
+    )
+    assert plan.hosting is not None
+    seed.set_config_value("hosting", plan.hosting)
+    if plan.model_name is not None:
+        seed.set_config_value("model_name", plan.model_name)
+
+    # The REAL startup resolver decides what the next boot does, so the boot
+    # error under test is the one the resolver actually raises.
+    boot_error: Exception | None = None
+    try:
+        resolve_hosting_model(
+            None, argparse.Namespace(hosting=None, model=None), ConfigManager(tmp_path)
+        )
+    except Exception as exc:  # noqa: BLE001 — the condition under test
+        boot_error = exc
+
+    if not expect_setup:
+        assert boot_error is None, f"control provider must boot: {boot_error}"
+        return
+
+    assert boot_error is not None
+    session = FakeSession()
+
+    async def _factory():
+        # Re-reads config every call, so the rebuild after the recovery sees
+        # what the recovery wrote rather than a value captured at construction.
+        if not ConfigManager(tmp_path).get_config_value("model_name"):
+            raise boot_error
+        return session
+
+    app = OperatorApp(_factory, provider_controller=FakeProviderController())
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _await_setup_state(app, pilot)
+
+        # NOT the dead state. Both halves are asserted: `_setup_state` False
+        # with `_session` None is the red branch, and it is the conjunction
+        # that made every recovery command answer "session is still starting…".
+        assert app._setup_state is True
+        assert app._status is not None
+        assert app._status._model_label == "setup"
+        assert app._status._model_label != "session error"
+
+        notice = app._splash_notice
+        assert notice is not None
+        # It names the provider and points at the command that can actually
+        # fix this. `/login` must NOT be promised: hosting is already
+        # registry-valid, so a login writes nothing and the user loops.
+        assert provider.startswith("alibaba")
+        assert "alibaba-token-plan" in notice
+        assert "/model" in notice
+        assert "failed" not in notice.lower()
+        # Budget check, same rule as the sibling splash assertions. The notice
+        # row paints into `terminal width - 6` cells (the splash's gutter and
+        # the "! " glyph), MEASURED against the real widget, so a line of 74
+        # renders whole at 80 columns and one of 78 needs 84. The guard is 74
+        # rather than 78 so a notice written to the old number is caught here
+        # instead of being silently cut on the terminal width most people use.
+        assert len(notice) <= 74, f"notice must survive an 80-col terminal: {len(notice)}"
+
+        # THE SUBSTANCE: the state must be escapable. A setup state you cannot
+        # leave is the same bug wearing a different colour.
+        app._cmd_model("deepseek/deepseek-chat", lambda body, kind="info": None)
+        for _ in range(200):
+            await pilot.pause()
+            if app._session is not None:
+                break
+            await asyncio.sleep(0.02)
+
+        assert app._session is session, "the recovery command must BUILD the session"
+        assert app._setup_state is False
+
+    # The escape persisted the pair, so the next launch does not return here.
+    recovered = ConfigManager(tmp_path)
+    assert recovered.get_config_value("hosting") == "deepseek"
+    assert recovered.get_config_value("model_name") == "deepseek-chat"
+
+
+@pytest.mark.asyncio
+async def test_missing_model_is_recoverable_not_fatal_on_every_surface() -> None:
+    """The no-model error must carry the recoverable ancestry, not bare ValueError.
+
+    The type is the fix: `_on_boot_failed` and the CLI preflight both classify by
+    `isinstance`, so a plain `ValueError` here bypassed the guided setup state no
+    matter how good its message was. Asserted at the type level as well as
+    through the app because that ancestry is load-bearing for two callers, and a
+    later "simplification" back to `ValueError` would silently restore the dead
+    end.
+    """
+    from local_operator.session_factory import (
+        HostingNotConfiguredError,
+        HostingUnknownError,
+        ModelNotConfiguredError,
+        resolve_hosting_model,
+    )
+
+    class _Cfg:
+        def get_config_value(self, key, default=None):
+            return {"hosting": "alibaba-token-plan", "model_name": ""}.get(key, default)
+
+    with pytest.raises(ModelNotConfiguredError) as caught:
+        resolve_hosting_model(
+            None,
+            argparse.Namespace(hosting=None, model=None),
+            cast(Any, _Cfg()),
+        )
+
+    error = caught.value
+    # Recoverable family, so the setup-state gate picks it up …
+    assert isinstance(error, HostingNotConfiguredError)
+    # … but DISTINCT from the unknown-provider case, whose wording would tell
+    # the user to fix the one part of their config that is correct.
+    assert not isinstance(error, HostingUnknownError)
+    # Legacy `except ValueError` callers keep working.
+    assert isinstance(error, ValueError)
+    # The informative text survives: it names concrete model ids, which is what
+    # the non-interactive paths print.
+    assert "alibaba-token-plan" in str(error)
+    assert "gpt-4o" in str(error)
+    assert error.hosting == "alibaba-token-plan"
+
+
+def test_non_interactive_preflight_still_fails_fast_without_a_model(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Recoverable in the TUI must NOT mean permissive in a script.
+
+    A scripted or CI run has nobody to answer a model picker, so limping along
+    on a model nobody chose is how a cron job silently bills a different
+    provider. `allow_setup_state` is the ONLY thing that separates the two, so
+    both directions are asserted here rather than trusting the flag's name.
+    """
+    from local_operator.cli import _preflight_hosting_model
+    from local_operator.config import ConfigManager
+
+    config = ConfigManager(tmp_path)
+    config.set_config_value("hosting", "alibaba-token-plan")
+    config.set_config_value("model_name", "")
+    args = argparse.Namespace(hosting=None, model=None)
+
+    # Non-interactive: fatal, with the message that names concrete model ids.
+    result = _preflight_hosting_model(
+        config, cast(Any, None), cast(Any, None), None, cast(Any, args)
+    )
+    assert result == 1
+    assert "no default is known" in capsys.readouterr().err
+
+    # Interactive TUI: opens, so the user can reach `/model`.
+    assert (
+        _preflight_hosting_model(
+            config,
+            cast(Any, None),
+            cast(Any, None),
+            None,
+            cast(Any, args),
+            allow_setup_state=True,
+        )
+        is None
+    )
 
 
 @pytest.mark.asyncio
