@@ -1122,7 +1122,26 @@ def recent_sessions(config_dir: Path, limit: int | None = None) -> list[tuple[st
     regardless, so a caller asking for all sessions costs the same as one
     asking for ten.
     """
-    rows: list[tuple[str, float]] = []
+    return [
+        (name, mtime) for name, mtime, _origin in _recent_sessions_with_origin(config_dir, limit)
+    ]
+
+
+def _recent_sessions_with_origin(
+    config_dir: Path, limit: int | None = None
+) -> list[tuple[str, float, str]]:
+    """:func:`recent_sessions`, plus the ``origin`` this scan already parsed.
+
+    The scan reads and parses every marker that exists in order to decide
+    visibility, then threw that verdict away — so a caller needing the origin
+    (the picker, to mark a fork) re-opened the same file per row. Returning it
+    costs nothing: the read has happened, and for the common unmarked session
+    the value is ``""`` with no syscall added at all.
+
+    Private because the public pair is what every other caller wants and the
+    CLI's recovery listing pins its shape.
+    """
+    rows: list[tuple[str, float, str]] = []
     try:
         scan = os.scandir(config_dir / "sessions")
     except OSError:
@@ -1198,7 +1217,11 @@ def recent_sessions(config_dir: Path, limit: int | None = None) -> list[tuple[st
                 # rather than in two places that can drift.
                 if origin and origin not in USER_ORIGINS:
                     continue
-            rows.append((entry.name, mtime))
+            else:
+                # No marker: the user's own session, and the cheap path this
+                # scan is careful to keep free of reads.
+                origin = ""
+            rows.append((entry.name, mtime, origin))
     merged = {
         name: entry for name, entry in cached.items() if name in seen and isinstance(entry, dict)
     }
@@ -1505,20 +1528,31 @@ def recent_session_rows(config_dir: Path, limit: int | None = None) -> list[Sess
     Uncapping is affordable because the scan underneath is limit-independent
     (see :func:`recent_sessions`) and the only per-row cost added is
     :func:`session_name`, one bounded head read.
+
+    **The fork mark costs nothing on an unmarked session.** The scan already
+    parsed every ``origin.json`` that exists, so the verdict is threaded out of
+    it (:func:`_recent_sessions_with_origin`) rather than re-read here; a
+    session with no marker — the overwhelming majority — adds no syscall at
+    all, and only a row already known to be a FORK pays the title probe. An
+    earlier revision asked ``wears_inherited_title`` per row unconditionally,
+    which attempted two reads per row on a store containing zero forks (the
+    absence was discovered from the ``OSError``) and measured +52% on a
+    3,000-session store, on this synchronous UI-thread path. That is the exact
+    "unmarked is the cheap path" property :func:`recent_sessions` documents at
+    length, and it must not be given back here.
     """
     rows: list[SessionRow] = []
-    for session_id, mtime in recent_sessions(config_dir, limit):
+    for session_id, mtime, origin in _recent_sessions_with_origin(config_dir, limit):
         session_dir = config_dir / "sessions" / session_id
-        # The origin marker was already READ for the visibility decision in
-        # ``recent_sessions`` (and memoised), so asking again here is cheap —
-        # and only for a session that actually carries one, which forks do and
-        # ordinary conversations do not.
         rows.append(
             SessionRow(
                 session_id,
                 mtime,
                 session_name(session_dir),
-                forked=wears_inherited_title(session_dir),
+                # Gated on the origin the scan ALREADY parsed. Non-forks — every
+                # ordinary conversation — short-circuit here without touching
+                # the disk again.
+                forked=origin == ORIGIN_FORK and wears_inherited_title(session_dir),
             )
         )
     return rows
@@ -1543,9 +1577,14 @@ def wears_inherited_title(session_dir: Path) -> bool:
         return False
     sidecar = _read_title_sidecar(session_dir)
     if sidecar is None or not sidecar.text:
-        # A fork of a never-named parent: nothing was inherited, so there is
-        # nothing borrowed to mark.
-        return False
+        # A fork of a NEVER-NAMED parent is still ambiguous, and this used to
+        # return False on the reasoning that nothing was inherited. That was
+        # wrong: ``session_name`` falls back to the transcript's opening
+        # message, and the clone copies the transcript — so the fork displays
+        # the identical opener beside its parent, which is exactly the
+        # duplicate-row confusion the mark exists to resolve. It has no title
+        # of its own yet by definition, so it is still borrowing.
+        return True
     try:
         stamped = (session_dir / TITLE_SIDECAR_NAME).stat().st_mtime
     except OSError:

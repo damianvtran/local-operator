@@ -99,11 +99,14 @@ async def main() -> None:
             # The REAL stash-and-flush path: the receipt is written before the
             # transition and re-emitted after adoption, which is what makes it
             # survive the ledger wipe.
+            # The stash carries the fork id it belongs to, so the flush can
+            # refuse to narrate a session it was not written about.
             app._pending_fork_receipt = (
+                FORK_ID,
                 f"switched to fork {FORK_ID} — the original is still there: "
-                "lop --resume 9f8e7d6c5b4a"
+                "lop --resume 9f8e7d6c5b4a",
             )
-            app._flush_fork_receipt()
+            app._flush_fork_receipt(FORK_ID)
             await pilot.pause()
             app.save_screenshot(out)
         elif state == "replaced":

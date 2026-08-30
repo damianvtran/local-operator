@@ -1963,11 +1963,19 @@ class OperatorApp(App[None]):
         # next substantive message retries, which is bounded by the user's own
         # sends and only ever fires while no name exists to displace.
         self._name_requested: bool = False
-        #: A receipt that must survive a session transition. `fork.mode=switch`
-        #: reboots onto the fork, which wipes the ledger about half a second
-        #: after the notice is written, so the copy naming the fork and the way
-        #: back to the parent is stashed here and re-emitted after adoption.
-        self._pending_fork_receipt: str = ""
+        #: A receipt that must survive a session transition, as
+        #: ``(fork_id, text)``. `fork.mode=switch` reboots onto the fork, which
+        #: wipes the ledger about half a second after the notice is written, so
+        #: the copy naming the fork and the way back to the parent is stashed
+        #: here and re-emitted after adoption.
+        #:
+        #: The ID is carried WITH the text because a transition can fail: an
+        #: unscoped stash survived a failed boot and then fired on the next
+        #: successful one, telling the user they had switched to a fork they
+        #: never reached, from a session that was neither. Flushing only when
+        #: the adopted session IS the fork makes that unconstructable rather
+        #: than relying on every adoption path remembering to clear it.
+        self._pending_fork_receipt: tuple[str, str] | None = None
         # The opener-derived label the band and the tab wear until the
         # generated title lands. Latched to the FIRST substantive message on
         # purpose: a conversation is identified by what it was opened for, and
@@ -2832,7 +2840,7 @@ class OperatorApp(App[None]):
                 task.cancel()
             raise
 
-    def _flush_fork_receipt(self) -> None:
+    def _flush_fork_receipt(self, session_id: str = "") -> None:
         """Re-emit a fork receipt that a session transition would have destroyed.
 
         `fork.mode = switch` prints its receipt and then reboots onto the fork,
@@ -2845,9 +2853,17 @@ class OperatorApp(App[None]):
         Consumed, not just read: a later `/reload` of this same session must not
         replay a receipt about a fork the user has long since moved past.
         """
-        receipt, self._pending_fork_receipt = self._pending_fork_receipt, ""
-        if receipt:
-            self._notice(receipt, "note")
+        stashed, self._pending_fork_receipt = self._pending_fork_receipt, None
+        if stashed is None:
+            return
+        fork_id, receipt = stashed
+        # Only for the session it was written about. A transition that failed,
+        # or that landed somewhere else entirely (`_attach_or_refuse`, a
+        # `/resume` to an unrelated conversation), drops it rather than
+        # narrating a switch that did not happen.
+        if session_id and fork_id and session_id != fork_id:
+            return
+        self._notice(receipt, "note")
 
     def _submit_boot_prompt(self, session: Any) -> None:
         """Run a fork's opening message, if this session was started with one.
@@ -3903,11 +3919,17 @@ class OperatorApp(App[None]):
                 # leave the previous conversation standing under an error that
                 # says there is no session at all.
                 carried_spend = self._reset_ledger_for_swap()
+                # The fork receipt goes with the transition that failed. The
+                # id-scoping in `_flush_fork_receipt` already stops it narrating
+                # the WRONG session, but a stash left set would sit there until
+                # some later boot happened to match the id — so the switch that
+                # did not happen drops its copy here.
+                self._pending_fork_receipt = None
                 self._on_boot_failed(error)
             else:
                 carried_spend = self._reset_ledger_for_swap()
                 self._adopt_session(session)
-                self._flush_fork_receipt()
+                self._flush_fork_receipt(getattr(session, "session_id", "") or "")
                 # The IN-PROCESS adoption path needs the boot prompt too, not
                 # just the cold-boot one. `/fork <message>` with
                 # `fork.mode = switch` swaps this terminal onto the fork rather
@@ -4727,10 +4749,13 @@ class OperatorApp(App[None]):
             # session IS the fork and can no longer name what it came from.
             parent_id = self._resumable_session_id()
             self._pending_fork_receipt = (
-                f"switched to fork {fork_id} — the original is still there: "
-                f"lop --resume {parent_id}"
-                if parent_id
-                else f"switched to fork {fork_id}"
+                fork_id,
+                (
+                    f"switched to fork {fork_id} — the original is still there: "
+                    f"lop --resume {parent_id}"
+                    if parent_id
+                    else f"switched to fork {fork_id}"
+                ),
             )
             self._resume_session(fork_id, self._notice)
             return

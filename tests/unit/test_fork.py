@@ -640,3 +640,137 @@ def _bare_session(tmp_path: Path):
     """A Session over an empty transcript, for the request/cancel bookkeeping."""
     _seed_parent(tmp_path, session_id="reqreqreqreq")
     return _build_session(tmp_path / "sessions" / "reqreqreqreq")
+
+
+class TestThePickerPaysNothingForSessionsThatAreNotForks:
+    """R6. The fork mark must not cost the picker's UI-thread path.
+
+    An earlier revision asked ``wears_inherited_title`` per row
+    unconditionally, which attempted two reads per row on a store containing
+    ZERO forks — absence was discovered from the OSError — and measured +52% on
+    a 3,000-session store. ``recent_sessions`` documents at length that
+    "unmarked is the cheap path"; this pins that the mark did not give it back.
+    """
+
+    def test_an_unmarked_store_costs_one_read_per_row(self, tmp_path: Path) -> None:
+        from unittest.mock import patch
+
+        from local_operator.resume import recent_session_rows
+
+        sessions = tmp_path / "sessions"
+        sessions.mkdir(parents=True)
+        for index in range(12):
+            directory = sessions / f"{index:012x}"
+            directory.mkdir()
+            (directory / TRANSCRIPT_NAME).write_text(
+                json.dumps(TRANSCRIPT_LINES[0]) + "\n", encoding="utf-8"
+            )
+
+        original = Path.read_text
+        calls: list[str] = []
+
+        def counting(self: Path, *args: object, **kwargs: object) -> str:
+            calls.append(self.name)
+            return original(self, *args, **kwargs)  # type: ignore[arg-type]
+
+        with patch.object(Path, "read_text", counting):
+            rows = recent_session_rows(tmp_path)
+
+        assert len(rows) == 12
+        # PER-ROW reads only: the store-wide origin-verdict cache is read once
+        # for the whole scan and is not a per-row cost, so it is excluded.
+        per_row = [name for name in calls if name != "origin-verdicts.json"]
+        # One bounded head read per row for the NAME, and nothing else. The
+        # origin verdict rides out of the scan that already parsed it, so no
+        # `origin.json` is opened here at all — that is the regression this
+        # pins, and the failing shape was 2.00 reads/row with `origin.json`
+        # in the set.
+        assert len(per_row) <= len(rows), f"{len(per_row) / len(rows):.2f} reads/row: {set(calls)}"
+        assert "origin.json" not in set(per_row)
+        assert not any(row.forked for row in rows)
+
+    def test_the_scan_threads_the_origin_it_already_parsed(self, tmp_path: Path) -> None:
+        """The mechanism the cost fix relies on, asserted directly."""
+        from local_operator.resume import _recent_sessions_with_origin
+
+        _seed_parent(tmp_path)
+        fork_id = fork_session(tmp_path, PARENT_ID)
+
+        origins = {row[0]: row[2] for row in _recent_sessions_with_origin(tmp_path)}
+        assert origins[fork_id] == ORIGIN_FORK
+        assert origins[PARENT_ID] == ""
+
+
+class TestAForkOfANeverNamedParentIsStillMarked:
+    """R8. A never-named parent still DISPLAYS a name — the transcript opener —
+    and the clone copies the transcript, so the fork shows the identical opener
+    beside it. That is the duplicate-row confusion the mark exists to resolve.
+    """
+
+    def test_the_opener_case_is_marked(self, tmp_path: Path) -> None:
+        import asyncio
+        import time as _time
+
+        from local_operator.resume import recent_session_rows
+        from local_operator.session.transcript import Transcript
+
+        parent = tmp_path / "sessions" / PARENT_ID
+        parent.mkdir(parents=True)
+
+        async def seed() -> None:
+            await Transcript(parent).append_message(_user("debug the flaky retention test"))
+
+        asyncio.run(seed())
+        _time.sleep(0.02)
+        fork_id = fork_session(tmp_path, PARENT_ID)
+
+        rows = {row.id: row for row in recent_session_rows(tmp_path)}
+        # Both display the same opener, which is exactly why the mark matters.
+        assert rows[fork_id].name == rows[PARENT_ID].name
+        assert rows[fork_id].forked is True
+        assert rows[PARENT_ID].forked is False
+
+
+class TestTheSwitchReceiptCannotNarrateTheWrongSession:
+    """R7. The stash survived a FAILED transition and fired on a later,
+    unrelated one — telling the user they had switched to a fork they never
+    reached, from a session that was neither.
+    """
+
+    def test_it_does_not_fire_for_a_different_session(self) -> None:
+        from local_operator.tui.app import OperatorApp
+
+        app = OperatorApp.__new__(OperatorApp)
+        app._pending_fork_receipt = ("forkaaaaaaaa", "switched to fork forkaaaaaaaa — …")
+        emitted: list[str] = []
+        app._notice = lambda body, kind="info": emitted.append(body)  # type: ignore[method-assign]
+
+        OperatorApp._flush_fork_receipt(app, "unrelatedbbb")
+
+        assert emitted == [], "the receipt narrated a session it was not about"
+        assert app._pending_fork_receipt is None, "a mismatched stash must not linger"
+
+    def test_it_fires_for_the_fork_it_was_written_about(self) -> None:
+        from local_operator.tui.app import OperatorApp
+
+        app = OperatorApp.__new__(OperatorApp)
+        app._pending_fork_receipt = ("forkaaaaaaaa", "switched to fork forkaaaaaaaa — …")
+        emitted: list[str] = []
+        app._notice = lambda body, kind="info": emitted.append(body)  # type: ignore[method-assign]
+
+        OperatorApp._flush_fork_receipt(app, "forkaaaaaaaa")
+
+        assert len(emitted) == 1
+        assert app._pending_fork_receipt is None, "the receipt must fire exactly once"
+
+    def test_a_failed_transition_drops_the_stash(self) -> None:
+        """The other half: the id gate stops a WRONG narration, and this stops
+        a stash from lingering until some later boot happens to match."""
+        import inspect
+
+        from local_operator.tui.app import OperatorApp
+
+        source = inspect.getsource(OperatorApp._reload_session)
+        assert (
+            "self._pending_fork_receipt = None" in source
+        ), "the failed-transition branch does not drop the fork receipt"
