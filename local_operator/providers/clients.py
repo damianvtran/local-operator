@@ -282,6 +282,12 @@ _OPAQUE_AGGREGATOR_MESSAGE = "provider returned error"
 #: actionable and must keep its ``request`` classification.
 _OPAQUE_RAW_SENTINELS = frozenset({"error"})
 
+#: How many matched quote pairs :func:`_strip_quote_pair` will peel. Real
+#: bodies use at most one or two layers; the cap exists so a body made of
+#: nothing but quotes cannot spend quadratic CPU (each peel copies the string)
+#: on a request that is already failing.
+_MAX_QUOTE_PEELS = 4
+
 
 def _strip_quote_pair(text: str) -> str:
     """Peel MATCHED surrounding quote pairs off ``text``.
@@ -293,11 +299,24 @@ def _strip_quote_pair(text: str) -> str:
     so pairs are peeled one at a time and an unbalanced body keeps its quotes
     and stays ``request``.
 
-    A pair is peeled repeatedly because ``raw`` is a JSON-encoded string that
-    has occasionally been double-encoded upstream (``"\\"ERROR\\""`` parses back
-    to a quoted quote).
+    The peel LOOPS rather than running once to cover a value that arrives
+    already wrapped more than once — e.g. ``'"ERROR"'`` — which costs nothing
+    to absorb and keeps the predicate insensitive to how many layers of
+    quoting an aggregator applied. Note this is NOT the JSON double-encoding
+    case: a truly double-encoded ``raw`` arrives backslash-escaped
+    (``"\\"ERROR\\""``), which :func:`_openrouter_upstream_text` has already
+    parsed away by the time this sees it, so that input never reaches the
+    loop.
+
+    ``_MAX_QUOTE_PEELS`` bounds the loop because slicing copies the string on
+    every pass: an adversarial body of a few MB of quotes would otherwise cost
+    quadratic time on a request that is already failing. Nothing legitimate
+    nests quotes more than a couple of layers deep, so a low cap costs real
+    traffic nothing and denies a hostile aggregator the CPU.
     """
-    while len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
+    for _ in range(_MAX_QUOTE_PEELS):
+        if not (len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'"):
+            break
         text = text[1:-1].strip()
     return text
 
