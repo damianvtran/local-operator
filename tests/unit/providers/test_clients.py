@@ -21,10 +21,12 @@ from local_operator.harness.types import (
     StreamUsageEvent,
     TextContent,
     ToolCall,
+    ToolContext,
     ToolResult,
 )
 from local_operator.providers.clients import (
     AnthropicClient,
+    GoogleClient,
     MockClient,
     OpenAICompatClient,
     _anthropic_stream_error,
@@ -33,6 +35,7 @@ from local_operator.providers.clients import (
     raise_for_status,
 )
 from local_operator.providers.failover import ProviderError
+from local_operator.tools.registry import create_tools
 
 pytestmark = pytest.mark.asyncio
 
@@ -743,7 +746,6 @@ async def test_mock_client_tool_branch() -> None:
 
 
 from local_operator.providers.auth_store import OAuthAccess  # noqa: E402
-from local_operator.providers.clients import GoogleClient  # noqa: E402
 
 
 async def test_anthropic_oauth_sends_bearer_and_beta_header() -> None:
@@ -949,6 +951,108 @@ async def test_openai_api_key_gpt5_uses_public_responses_end_to_end() -> None:
     # output_tokens_details.reasoning_tokens is the thinking slice of output.
     assert usage.reasoning_tokens == 4
     assert events[-1].stop_reason == "toolUse"
+
+
+def _enum_members(node: Any) -> list[Any]:
+    """Collect enum members from exactly the provider-bound JSON payload.
+
+    Walking the serialized body, rather than Pydantic models one by one, keeps
+    this guard on the path gateways inspect after the complete tool inventory
+    and the shared intent field have both been assembled.
+    """
+
+    members: list[Any] = []
+    if isinstance(node, dict):
+        enum = node.get("enum")
+        if isinstance(enum, list):
+            members.extend(enum)
+        for value in node.values():
+            members.extend(_enum_members(value))
+    elif isinstance(node, list):
+        for value in node:
+            members.extend(_enum_members(value))
+    return members
+
+
+def _default_tools_with_agent() -> list[AgentTool]:
+    """Build the real default inventory with the capability exposing ``agent``."""
+
+    return create_tools(ToolContext(cwd=".", agent_registry=object()))
+
+
+async def test_openrouter_gemini_full_tool_bundle_has_no_empty_enum_member() -> None:
+    """Exercise the real OpenRouter client and complete registry-built bundle."""
+
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            content=_sse([{"choices": [{"delta": {}, "finish_reason": "stop"}]}]),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    tools = _default_tools_with_agent()
+    assert "agent" in {tool.name for tool in tools}
+    spec = _spec(provider="openrouter", model_id="google/gemini-3.7-flash")
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = client_for_spec(spec, http_client=http)
+
+    await _collect(
+        client.stream(
+            ChatRequest(
+                model=spec,
+                messages=[Message.user("Use the tools if useful")],
+                tools=tools,
+            ),
+            "test-key",
+        )
+    )
+    await http.aclose()
+
+    assert "" not in _enum_members(captured["body"]["tools"])
+    agent = next(tool for tool in captured["body"]["tools"] if tool["function"]["name"] == "agent")
+    effort = agent["function"]["parameters"]["properties"]["effort"]
+    assert effort["anyOf"][0]["enum"] == ["lo", "med", "hi", "inherit"]
+
+
+def test_direct_google_full_tool_bundle_has_no_empty_enum_member() -> None:
+    tools = _default_tools_with_agent()
+    body = GoogleClient()._build_body(
+        ChatRequest(
+            model=_spec(provider="google", model_id="gemini-3.7-flash"),
+            messages=[Message.user("Use the tools if useful")],
+            tools=tools,
+        )
+    )
+
+    declarations = body["tools"][0]["function_declarations"]
+    assert "" not in _enum_members(declarations)
+    agent = next(declaration for declaration in declarations if declaration["name"] == "agent")
+    effort = agent["parameters"]["properties"]["effort"]
+    assert effort["anyOf"][0]["enum"] == ["lo", "med", "hi", "inherit"]
+
+
+@pytest.mark.parametrize(
+    ("provider", "model_id"),
+    [("openai", "gpt-5.4"), ("openrouter", "qwen/qwen3-coder")],
+)
+def test_openai_compatible_models_keep_agent_effort_semantics(provider: str, model_id: str) -> None:
+    """Ordinary OpenAI/Qwen routes receive every tier plus the clear sentinel."""
+
+    tools = _default_tools_with_agent()
+    request = ChatRequest(
+        model=_spec(provider=provider, model_id=model_id),
+        messages=[Message.user("clear it")],
+        tools=tools,
+    )
+    body = OpenAICompatClient("https://compat.example/v1")._build_body(request)
+    agent = next(tool for tool in body["tools"] if tool["function"]["name"] == "agent")
+    effort = agent["function"]["parameters"]["properties"]["effort"]
+
+    assert effort["anyOf"][0]["enum"] == ["lo", "med", "hi", "inherit"]
+    assert {branch["type"] for branch in effort["anyOf"]} == {"string", "null"}
 
 
 @pytest.mark.parametrize("provider", ["openrouter", "deepseek"])
