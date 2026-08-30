@@ -178,7 +178,7 @@ def fork_session(config_dir: Path, parent_id: str, *, message: str = "") -> str:
     # (a FileNotFoundError raised in a DIFFERENT process) is near-undiagnosable.
     # Imported function-locally to keep this module's import graph stdlib-only
     # for the CLI startup path the module docstring describes.
-    from local_operator.session.retention import claim_session
+    from local_operator.session.retention import claim_session, release_session
 
     try:
         claim_session(fork_dir)
@@ -206,6 +206,27 @@ def fork_session(config_dir: Path, parent_id: str, *, message: str = "") -> str:
     if message.strip():
         write_boot_prompt(fork_dir, message)
 
+    # RELEASE THE CLAIM. The claim above is held only for the instant between
+    # creating the directory and filling it, which is the window a concurrent
+    # retention sweep could otherwise reap; by here the transcript is on disk
+    # and the directory is no longer empty, so the claim has done its job.
+    #
+    # Releasing is NOT tidiness — leaving it is a correctness bug, and a
+    # spectacular one. ``claim_session`` stamps ``os.getpid()``, and this
+    # function runs inside the PARENT's TUI process, so the marker left behind
+    # names the parent as the fork's live owner. The fork's own boot then reads
+    # it through ``live_session_owner`` and either refuses outright ("session
+    # <id> is open in an older Local Operator process") or, when a discovery
+    # record exists, attaches the new window as a FOLLOWER of its parent
+    # instead of opening the branched conversation. That is exactly the failure
+    # the sidecar allow-list exists to prevent, arriving through a different
+    # door than ``copytree`` — the module docstring above describes the
+    # consequence, and the claim reintroduced the cause. Guarded by
+    # ``live_session_owner(config_dir, fork_id) is None`` in the tests, which is
+    # the property that actually matters; asserting the file's absence alone
+    # would not survive a future claim written by some other path.
+    release_session(fork_dir)
+
     # Provenance last. ``mark_session_origin`` preserves the directory's mtime,
     # which is moot here (the directory was just created) but means the ordering
     # of this call carries no constraint.
@@ -232,7 +253,7 @@ def write_boot_prompt(session_dir: Path, text: str) -> None:
     payload = {
         "version": BOOT_PROMPT_VERSION,
         "text": text,
-        "created_at": int(time.time()),
+        "created_at": time.time(),
     }
     try:
         (session_dir / BOOT_PROMPT_NAME).write_text(json.dumps(payload), encoding="utf-8")

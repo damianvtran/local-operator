@@ -31,11 +31,17 @@ from local_operator.spawn.types import EnvMap, ForkLaunch
 #: Terminal.app: ``do script`` with no ``in`` target opens a NEW window and runs
 #: the command in it. ``cd`` is part of the command because Terminal.app has no
 #: working-directory parameter on this verb.
+#:
+#: NO ``activate``. It is an extra line beyond what ``do script`` needs to open
+#: the window, and all it adds is raising Terminal.app over whatever the user is
+#: typing in — a fork is something they asked for while working somewhere else.
+#: iTerm2's script below does not activate either, so the two behave alike. A
+#: new OS window may still take focus on its own; that is the platform, and it
+#: is one more reason cmux placement is the better experience where cmux exists.
 TERMINAL_SCRIPT = """on run argv
 \tset launchCommand to item 1 of argv
 \ttell application "Terminal"
 \t\tdo script launchCommand
-\t\tactivate
 \tend tell
 end run
 """

@@ -42,6 +42,7 @@ from local_operator.resume import (
     TITLE_SIDECAR_NAME,
     TRANSCRIPT_NAME,
     is_user_session,
+    live_session_owner,
     mark_session_origin,
     recent_sessions,
     session_origin,
@@ -113,11 +114,42 @@ class TestTheCloneItself:
             ATTACHMENT_SIDECAR_NAME,
             TITLE_SIDECAR_NAME,
             "origin.json",  # written by the fork itself, not copied
-            ".session.pid",  # the FORK's own claim, with this process's pid
         }
-        # The claim is the fork's own, which is the difference between "claimed
-        # by the live process that made it" and "looks owned by the parent".
-        assert (fork_dir / ".session.pid").read_text(encoding="utf-8") == str(os.getpid())
+
+    def test_the_fork_is_left_unowned_so_its_own_boot_can_claim_it(self, tmp_path: Path) -> None:
+        """R1. The fork must have NO live owner when the clone returns.
+
+        ``fork_session`` runs inside the PARENT's process, so the transient
+        ``claim_session`` it takes to close the retention window stamps the
+        parent's pid. Left in place, the fork's own boot reads that marker and
+        either refuses ("session <id> is open in an older Local Operator
+        process") or attaches the new window as a FOLLOWER of its parent
+        instead of opening the branched conversation.
+
+        Asserted through ``live_session_owner`` rather than by checking that
+        the file is absent, deliberately: ownership is the property that
+        actually matters, and a future claim written by some other path would
+        slip past a filename assertion while breaking the boot exactly the same
+        way.
+        """
+        _seed_parent(tmp_path)
+        fork_id = fork_session(tmp_path, PARENT_ID)
+
+        assert live_session_owner(tmp_path, fork_id) is None
+        assert not (tmp_path / "sessions" / fork_id / ".session.pid").exists()
+
+    def test_the_parents_own_claim_is_untouched_by_a_fork(self, tmp_path: Path) -> None:
+        """Releasing the fork's claim must not release the PARENT's.
+
+        The parent is a live session that legitimately owns itself; a fork
+        taken from it must leave that ownership exactly as it found it.
+        """
+        parent = _seed_parent(tmp_path)
+        (parent / ".session.pid").write_text(str(os.getpid()), encoding="utf-8")
+
+        fork_session(tmp_path, PARENT_ID)
+
+        assert live_session_owner(tmp_path, PARENT_ID) == os.getpid()
 
     def test_a_missing_optional_sidecar_is_not_an_error(self, tmp_path: Path) -> None:
         """A young conversation has no title and no persona; forking still works."""
@@ -478,3 +510,46 @@ def _model_spec():
 async def _never_called_stream(*args, **kwargs):
     raise AssertionError("these tests must not reach a provider")
     yield  # pragma: no cover - generator shape only
+
+
+class TestTheBootPromptFiresInBothModes:
+    """R2. The injected message must be consumed exactly once, in EITHER mode.
+
+    `fork.mode = window` opens a new process, which reads the sidecar on its
+    cold boot. `fork.mode = switch` swaps this terminal onto the fork in
+    process, and that path has its own adoption site — so a sidecar consumed
+    only on the cold path is dropped in switch mode, and then fires on the
+    fork's next resume, which is the "restore-and-idle, never auto-continue"
+    rule broken in the other direction.
+    """
+
+    def test_the_sidecar_is_consumed_once_and_only_once(self, tmp_path: Path) -> None:
+        _seed_parent(tmp_path)
+        fork_id = fork_session(tmp_path, PARENT_ID, message="try the streaming parser")
+        fork_dir = tmp_path / "sessions" / fork_id
+
+        # Whichever mode ran, the first adoption reads it...
+        assert consume_boot_prompt(fork_dir) == "try the streaming parser"
+        # ...and a later resume of the same fork must find nothing to run.
+        assert consume_boot_prompt(fork_dir) == ""
+        assert not (fork_dir / BOOT_PROMPT_NAME).exists()
+
+    def test_both_adoption_sites_call_the_same_consumer(self) -> None:
+        """The property that makes the two modes agree, asserted structurally.
+
+        Both the cold-boot path (`_boot_session`) and the in-process swap path
+        (`_reload_session`) must call `_submit_boot_prompt`. A source assertion
+        rather than a pilot run because the swap path needs a real session
+        factory and a real transition; what can go wrong here is one of the two
+        sites being forgotten, which this catches directly.
+        """
+        import inspect
+
+        from local_operator.tui.app import OperatorApp
+
+        for method in ("_boot_session", "_reload_session"):
+            source = inspect.getsource(getattr(OperatorApp, method))
+            assert "_submit_boot_prompt" in source, (
+                f"{method} does not consume the fork boot prompt, so a "
+                f"/fork <message> in that mode silently drops the message"
+            )

@@ -3872,6 +3872,17 @@ class OperatorApp(App[None]):
             else:
                 carried_spend = self._reset_ledger_for_swap()
                 self._adopt_session(session)
+                # The IN-PROCESS adoption path needs the boot prompt too, not
+                # just the cold-boot one. `/fork <message>` with
+                # `fork.mode = switch` swaps this terminal onto the fork rather
+                # than opening a window, and without this the injected message
+                # was silently dropped: the user saw their `/fork <message>` row
+                # echoed, and no model was ever given it. Worse, the unconsumed
+                # sidecar then fired on the fork's NEXT cold resume, breaking
+                # the "restore-and-idle, never auto-continue" rule that
+                # `fork.consume_boot_prompt` promises to keep by construction.
+                # Consuming it here makes both modes read it exactly once.
+                self._submit_boot_prompt(session)
                 await self._preflight_usage(session)
         finally:
             self._swapping_session = False
@@ -4595,14 +4606,24 @@ class OperatorApp(App[None]):
             return
 
         # The callback fires from the session's drain, which runs on this same
-        # event loop (the clone's file I/O is the only part on a thread), so it
-        # calls straight through rather than hopping with `call_from_thread`.
+        # event loop. It only SCHEDULES the report: opening a window can block
+        # for seconds (see `_on_fork_complete`), and the drain happens at the
+        # parent's turn boundary — blocking there would stall the very turn this
+        # feature promises to leave running.
         request_fork(
             config_dir(),
             message=message,
-            on_complete=self._on_fork_complete,
+            on_complete=self._schedule_fork_report,
         )
         notice("forking at the next safe boundary…")
+
+    def _schedule_fork_report(self, fork_id: str, error: str) -> None:
+        """Run the fork's receipt-and-spawn off the caller's stack.
+
+        The session's drain calls this synchronously at a turn boundary, so the
+        work it starts must not run there.
+        """
+        self.run_worker(self._on_fork_complete(fork_id, error), exclusive=False)
 
     async def _fork_now(self, config_dir_path: "Path", session_id: str, message: str) -> None:
         """Clone immediately, off the event loop, then report. Idle path only."""
@@ -4613,14 +4634,14 @@ class OperatorApp(App[None]):
                 fork_session, config_dir_path, session_id, message=message
             )
         except ForkError as exc:
-            self._on_fork_complete("", str(exc))
+            await self._on_fork_complete("", str(exc))
             return
         except Exception as exc:  # noqa: BLE001 — a fork must never crash the TUI
-            self._on_fork_complete("", str(exc))
+            await self._on_fork_complete("", str(exc))
             return
-        self._on_fork_complete(fork_id, "")
+        await self._on_fork_complete(fork_id, "")
 
-    def _on_fork_complete(self, fork_id: str, error: str) -> None:
+    async def _on_fork_complete(self, fork_id: str, error: str) -> None:
         """Report the clone, then open the fork. Runs on the app's own loop.
 
         The two failure kinds are deliberately NOT reported the same way. A
@@ -4666,7 +4687,15 @@ class OperatorApp(App[None]):
             title=self._fork_window_title(),
         )
         try:
-            opened = backend.spawn(launch, os.environ)
+            # OFF THE LOOP. Three backends (cmux's surface placement, kitty and
+            # wezterm) run a bounded `subprocess.run` to learn whether their
+            # first-choice mechanism worked — up to CALL_TIMEOUT_S each, and a
+            # hung mux server or a cmux socket mid-restart spends all of it.
+            # Measured at 5.02 s of event-loop lag when run inline, which is a
+            # frozen TUI and, on the deferred path, a stalled parent turn. The
+            # environment is copied rather than passed live: it crosses a thread
+            # boundary, and `os.environ` is process-global mutable state.
+            opened = await asyncio.to_thread(backend.spawn, launch, dict(os.environ))
         except Exception:
             # A backend must not raise, but this path is the user's fork and not
             # the place to find out that one did.
