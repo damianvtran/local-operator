@@ -8,6 +8,7 @@ import pickle
 import subprocess
 import sys
 from pathlib import Path
+from types import MappingProxyType
 
 import pytest
 from pydantic import ValidationError
@@ -26,6 +27,7 @@ from local_operator.evaluation.protocol import (
     FrameGeometry,
     FrameRef,
     FrameSize,
+    FrozenMapping,
     KeyAction,
     Observation,
     ObservationEnvelope,
@@ -123,7 +125,7 @@ def test_geometry_conversion_has_explicit_floor_and_clamp_policy() -> None:
         model_visible=FrameSize(width=1280, height=720),
     )
     assert geometry.model_to_native(1, 1) == PixelPoint(x=1, y=1)
-    assert geometry.model_to_native(1279, 719) == PixelPoint(x=1918, y=1078)
+    assert geometry.model_to_native(1279, 719) == PixelPoint(x=1919, y=1079)
     assert geometry.model_to_native(-2, 9999) == PixelPoint(x=0, y=1079)
     assert geometry.native_to_model(1919, 1079) == PixelPoint(x=1279, y=719)
     for invalid in (float("nan"), float("inf"), float("-inf")):
@@ -144,8 +146,39 @@ def test_geometry_conversion_edges_and_round_trip_are_directional() -> None:
     assert asymmetric.model_to_native(1, 998) == PixelPoint(x=333333, y=0)
     point = asymmetric.native_to_model(999999, 0)
     assert point == PixelPoint(x=2, y=0)
-    # Scaling with floor is intentionally lossy, not an inverse transform.
-    assert asymmetric.model_to_native(point.x, point.y) == PixelPoint(x=666666, y=0)
+    # Endpoint clamping preserves boundary pixels even though interior
+    # downscale/upscale round trips remain lossy.
+    assert asymmetric.model_to_native(point.x, point.y) == PixelPoint(x=999999, y=0)
+
+
+@pytest.mark.parametrize("value", [-1e308, 1e308, -(10**400), 10**400])
+def test_geometry_clamps_huge_finite_values_before_scaling(value: int | float) -> None:
+    geometry = FrameGeometry(
+        native=FrameSize(width=1_000_000, height=1),
+        model_visible=FrameSize(width=3, height=999),
+    )
+    expected_native_x = 0 if value < 0 else 999_999
+    expected_model_y = 0 if value < 0 else 998
+    assert geometry.model_to_native(value, value) == PixelPoint(x=expected_native_x, y=0)
+    assert geometry.native_to_model(value, value) == PixelPoint(
+        x=0 if value < 0 else 2, y=expected_model_y
+    )
+
+
+def test_geometry_conversion_rejects_bool_and_nonfinite_but_clamps_boundaries() -> None:
+    geometry = FrameGeometry(
+        native=FrameSize(width=10, height=20),
+        model_visible=FrameSize(width=5, height=4),
+    )
+    assert geometry.model_to_native(0, 0) == PixelPoint(x=0, y=0)
+    assert geometry.model_to_native(4, 3) == PixelPoint(x=9, y=19)
+    assert geometry.native_to_model(9, 19) == PixelPoint(x=4, y=3)
+    for value in (True, False):
+        with pytest.raises(TypeError):
+            geometry.model_to_native(value, 0)
+    for value in (float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(ValueError, match="finite"):
+            geometry.native_to_model(value, 0)
 
 
 def test_observation_is_strict_ordered_and_forbids_extras() -> None:
@@ -229,6 +262,27 @@ def test_metadata_is_recursively_immutable_and_serializes_canonically() -> None:
     assert Observation.from_canonical_json(before) == observation
 
 
+def test_frozen_mapping_has_only_immutable_backing_and_is_hashable() -> None:
+    left = FrozenMapping({"z": [1, {"safe": True}], "a": "value"})
+    right = FrozenMapping({"a": "value", "z": (1, FrozenMapping({"safe": True}))})
+    assert left == right
+    assert hash(left) == hash(right)
+    assert {left: "found"}[right] == "found"
+    assert isinstance(left._items, tuple)
+    assert all(isinstance(pair, tuple) for pair in left._items)
+    assert not hasattr(left, "_data")
+    with pytest.raises(TypeError):
+        left._items[0] = ("a", "changed")  # type: ignore[index]
+    with pytest.raises(AttributeError):
+        left._items = ()  # type: ignore[misc]
+    observation = _observation()
+    assert hash(observation)
+    before = observation.to_canonical_json()
+    with pytest.raises(TypeError):
+        observation.metadata["nested"]["ready"] = False  # type: ignore[index]
+    assert observation.to_canonical_json() == before
+
+
 def test_metadata_survives_copy_deepcopy_pickle_and_validated_model_updates() -> None:
     observation = _observation()
     canonical = observation.to_canonical_json()
@@ -246,11 +300,49 @@ def test_metadata_survives_copy_deepcopy_pickle_and_validated_model_updates() ->
     with pytest.raises(TypeError):
         updated.metadata["items"][1]["safe"] = False  # type: ignore[index]
     assert updated.model_dump(mode="json")["metadata"] == {"items": [1, {"safe": True}]}
+    reused = observation.model_copy(update={"metadata": observation.metadata})
+    assert reused.metadata == observation.metadata
+    with pytest.raises(TypeError):
+        reused.metadata["new"] = 1  # type: ignore[index]
 
     with pytest.raises(ValidationError):
         observation.model_copy(update={"metadata": {"bad": [float("nan")]}})
     with pytest.raises(ValidationError):
         observation.model_copy(update={"sequence": MAX_SAFE_JSON_INTEGER + 1})
+
+
+def test_metadata_accepts_mapping_and_tuple_inputs_but_rejects_invalid_mapping_keys() -> None:
+    observation = Observation.model_validate(
+        {
+            **_observation().model_dump(),
+            "metadata": MappingProxyType({"items": (1, FrozenMapping({"safe": True}))}),
+        }
+    )
+    assert observation.model_dump(mode="json")["metadata"] == {"items": [1, {"safe": True}]}
+    for metadata in (
+        MappingProxyType({1: "bad"}),
+        MappingProxyType({"bad key": "bad"}),
+    ):
+        with pytest.raises(ValidationError):
+            Observation.model_validate({**_observation().model_dump(), "metadata": metadata})
+
+
+def test_model_copy_preserves_fields_set_and_exclude_unset_semantics() -> None:
+    minimal = Observation(
+        task_id="task-1",
+        episode_id="episode-1",
+        sequence=0,
+        observation_id="observation-0",
+    )
+    expected = {"task_id", "episode_id", "sequence", "observation_id"}
+    assert minimal.model_fields_set == expected
+    for copied in (minimal.model_copy(), minimal.model_copy(deep=True)):
+        assert copied.model_fields_set == expected
+        assert copied.model_dump(exclude_unset=True) == minimal.model_dump(exclude_unset=True)
+    updated = minimal.model_copy(update={"text": "hello"})
+    assert updated.model_fields_set == expected | {"text"}
+    assert updated.model_dump(exclude_unset=True)["text"] == "hello"
+    assert "metadata" not in updated.model_dump(exclude_unset=True)
 
 
 def test_metadata_depth_is_bounded_before_recursive_model_validation() -> None:
@@ -482,6 +574,25 @@ def test_canonical_observation_fixture_is_stable_and_requires_exact_encoding() -
             ObservationEnvelope.from_canonical_json(noncanonical)
         with pytest.raises(ValueError, match="not canonical"):
             parse_envelope(noncanonical)
+
+
+def test_metadata_schema_matches_portable_recursive_runtime_subset() -> None:
+    schema = Observation.model_json_schema()
+    metadata = schema["properties"]["metadata"]
+    assert metadata["propertyNames"]["pattern"] == r"^[A-Za-z0-9_.:-]{1,256}$"
+    assert "depth 16" in metadata["description"]
+    assert "64000 bytes" in metadata["description"]
+    value = schema["$defs"]["PortableMetadataValue"]
+    branches = value["anyOf"]
+    assert not any(branch.get("type") == "number" for branch in branches)
+    integer = next(branch for branch in branches if branch.get("type") == "integer")
+    assert integer == {
+        "type": "integer",
+        "minimum": -MAX_SAFE_JSON_INTEGER,
+        "maximum": MAX_SAFE_JSON_INTEGER,
+    }
+    object_branch = next(branch for branch in branches if branch.get("type") == "object")
+    assert object_branch["propertyNames"] == {"pattern": r"^[A-Za-z0-9_.:-]{1,256}$"}
 
 
 def test_metadata_keys_are_portable_ascii_and_values_remain_unicode() -> None:

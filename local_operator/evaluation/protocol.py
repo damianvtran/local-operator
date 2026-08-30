@@ -61,23 +61,34 @@ class FrozenMapping(Mapping[str, JsonValue]):
 
     ``MappingProxyType`` protects writes but cannot be deep-copied or pickled,
     both of which Pydantic callers reasonably use. This value object owns its
-    backing dictionary, exposes no mutable view, and reconstructs itself through
-    the same recursive freezer when unpickled.
+    canonical tuple of key/value pairs, exposes no mutable backing container,
+    and reconstructs itself through the same recursive freezer when unpickled.
     """
 
-    __slots__ = ("_data",)
+    __slots__ = ("_items",)
 
-    def __init__(self, values: Mapping[str, JsonValue]) -> None:
-        self._data = {key: _freeze_json(value) for key, value in values.items()}
+    def __init__(self, values: Mapping[str, Any]) -> None:
+        _validate_metadata(values)
+        object.__setattr__(
+            self,
+            "_items",
+            tuple((key, _freeze_json(value)) for key, value in sorted(values.items())),
+        )
+
+    def __setattr__(self, name: str, value: object) -> None:
+        raise AttributeError(f"{type(self).__name__} is immutable")
 
     def __getitem__(self, key: str) -> JsonValue:
-        return self._data[key]
+        for candidate, value in self._items:
+            if candidate == key:
+                return value
+        raise KeyError(key)
 
     def __iter__(self) -> Iterator[str]:
-        return iter(self._data)
+        return (key for key, _value in self._items)
 
     def __len__(self) -> int:
-        return len(self._data)
+        return len(self._items)
 
     def __repr__(self) -> str:
         return f"FrozenMapping({_thaw_json(self)!r})"
@@ -87,13 +98,16 @@ class FrozenMapping(Mapping[str, JsonValue]):
             return NotImplemented
         return _thaw_json(self) == _thaw_json(other)
 
+    def __hash__(self) -> int:
+        return hash(self._items)
+
     def __deepcopy__(self, memo: dict[int, Any]) -> "FrozenMapping":
         # Every reachable value is immutable, so identity is a valid deep copy.
         memo[id(self)] = self
         return self
 
-    def __reduce__(self) -> tuple[type["FrozenMapping"], tuple[dict[str, JsonValue]]]:
-        return type(self), (dict(self._data),)
+    def __reduce__(self) -> tuple[type["FrozenMapping"], tuple[dict[str, Any]]]:
+        return type(self), (dict(self._items),)
 
 
 class ProtocolModel(BaseModel):
@@ -135,10 +149,15 @@ class ProtocolModel(BaseModel):
         ``deep`` is accepted for API compatibility but immutability makes the
         reconstructed result safe either way.
         """
+        fields_set = self.model_fields_set | (set(update) if update else set())
         values = self.model_dump(mode="python", round_trip=True)
         if update:
             values.update(deepcopy(dict(update)) if deep else update)
-        return type(self).model_validate(values, strict=True)
+        copied = type(self).model_validate(values, strict=True)
+        # Validation applies defaults, so restore which fields the caller
+        # supplied to preserve exclude_unset and Pydantic's copy contract.
+        object.__setattr__(copied, "__pydantic_fields_set__", fields_set)
+        return copied
 
 
 class ArtifactRef(ProtocolModel):
@@ -200,16 +219,9 @@ class FrameGeometry(ProtocolModel):
         source: FrameSize,
         destination: FrameSize,
     ) -> PixelPoint:
-        for name, value in (("x", x), ("y", y)):
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
-                raise TypeError(f"{name} must be an integer or float")
-            if not math.isfinite(value):
-                raise ValueError(f"{name} must be finite")
-        converted_x = math.floor(x * destination.width / source.width)
-        converted_y = math.floor(y * destination.height / source.height)
         return PixelPoint(
-            x=min(destination.width - 1, max(0, converted_x)),
-            y=min(destination.height - 1, max(0, converted_y)),
+            x=_scale_clamped_axis(x, source.width, destination.width, name="x"),
+            y=_scale_clamped_axis(y, source.height, destination.height, name="y"),
         )
 
 
@@ -230,7 +242,18 @@ class Observation(ProtocolModel):
     observation_id: Identifier
     text: str | None = Field(default=None, min_length=1, max_length=MAX_TEXT_LENGTH, pattern=r"\S")
     frames: tuple[FrameRef, ...] = Field(default=(), max_length=32)
-    metadata: Mapping[str, JsonValue] = Field(default_factory=dict, validate_default=True)
+    metadata: Mapping[str, JsonValue] = Field(
+        default_factory=dict,
+        validate_default=True,
+        description=(
+            "Portable metadata: recursively strings, booleans, null, safe integers, arrays, "
+            f"and ASCII-keyed objects; maximum depth {MAX_METADATA_DEPTH} and canonical size "
+            f"{MAX_METADATA_BYTES} bytes."
+        ),
+        json_schema_extra={
+            "propertyNames": {"pattern": r"^[A-Za-z0-9_.:-]{1,256}$"},
+        },
+    )
 
     @field_validator("frames", mode="before")
     @classmethod
@@ -247,7 +270,9 @@ class Observation(ProtocolModel):
         # booleans, null, and signed safe integers makes the existing sorted,
         # compact UTF-8 encoding portable without an RFC 8785 dependency.
         _validate_metadata(metadata)
-        return metadata
+        # JsonValue accepts concrete dict/list values only. Normalize safe
+        # Mapping/tuple inputs for Pydantic, then freeze the validated result.
+        return _thaw_json(metadata)
 
     @field_validator("metadata")
     @classmethod
@@ -257,6 +282,16 @@ class Observation(ProtocolModel):
         if len(canonical) > MAX_METADATA_BYTES:
             raise ValueError(f"metadata exceeds {MAX_METADATA_BYTES} canonical bytes")
         return frozen
+
+    @classmethod
+    def model_json_schema(cls, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        schema = super().model_json_schema(*args, **kwargs)
+        portable = _portable_metadata_schema()
+        schema.setdefault("$defs", {})["PortableMetadataValue"] = portable
+        schema["properties"]["metadata"]["additionalProperties"] = {
+            "$ref": "#/$defs/PortableMetadataValue"
+        }
+        return schema
 
     @field_serializer("metadata")
     def _serialize_metadata(self, metadata: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
@@ -528,6 +563,26 @@ def _decode_canonical_json(payload: bytes | str) -> tuple[bytes, Any]:
     return raw, decoded
 
 
+def _scale_clamped_axis(
+    value: int | float,
+    source_size: int,
+    destination_size: int,
+    *,
+    name: str,
+) -> int:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(f"{name} must be an integer or float")
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError(f"{name} must be finite")
+    # Compare before multiplying. This prevents enormous ints and finite floats
+    # near 1e308 from overflowing while preserving exact integer comparisons.
+    if value <= 0:
+        return 0
+    if value >= source_size - 1:
+        return destination_size - 1
+    return math.floor(value * destination_size / source_size)
+
+
 def _validate_metadata(value: Any, *, path: str = "metadata", depth: int = 0) -> None:
     """Enforce the portable, resource-bounded JSON subset at the RPC boundary."""
     if depth > MAX_METADATA_DEPTH:
@@ -540,11 +595,11 @@ def _validate_metadata(value: Any, *, path: str = "metadata", depth: int = 0) ->
         return
     if isinstance(value, float):
         raise ValueError(f"{path} floats are not supported; use a string or integer")
-    if isinstance(value, list):
+    if isinstance(value, (list, tuple)):
         for index, item in enumerate(value):
             _validate_metadata(item, path=f"{path}[{index}]", depth=depth + 1)
         return
-    if isinstance(value, dict):
+    if isinstance(value, Mapping):
         for key, item in value.items():
             if not isinstance(key, str):
                 raise ValueError(f"{path} object keys must be strings")
@@ -573,6 +628,32 @@ def _thaw_json(value: Any) -> JsonValue:
     if isinstance(value, tuple):
         return [_thaw_json(item) for item in value]
     return value
+
+
+def _portable_metadata_schema() -> dict[str, Any]:
+    value_ref = {"$ref": "#/$defs/PortableMetadataValue"}
+    return {
+        "description": (
+            f"Recursive portable metadata value; runtime limits depth to {MAX_METADATA_DEPTH} "
+            f"and canonical metadata to {MAX_METADATA_BYTES} bytes."
+        ),
+        "anyOf": [
+            {"type": "string"},
+            {"type": "boolean"},
+            {"type": "null"},
+            {
+                "type": "integer",
+                "minimum": -MAX_SAFE_JSON_INTEGER,
+                "maximum": MAX_SAFE_JSON_INTEGER,
+            },
+            {"type": "array", "items": value_ref},
+            {
+                "type": "object",
+                "propertyNames": {"pattern": r"^[A-Za-z0-9_.:-]{1,256}$"},
+                "additionalProperties": value_ref,
+            },
+        ],
+    }
 
 
 def _canonical_json_value(value: JsonValue) -> bytes:
