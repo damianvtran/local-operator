@@ -58,12 +58,24 @@ the desired shape of a miss: the trigger is "you notice you are guessing", and
 on these two the model was not guessing. Forcing a search here would buy
 latency and no accuracy.
 
-The negative half is the load-bearing half, and it held at 0/12 in both arms.
-S12 is the one to check by hand rather than by rate: the correct behaviour is
-to read guide://configuration, and the after arm did exactly that -
+The negative half held at 0/12 in both arms, and the honest reading of that is
+NO REGRESSION ON EASY NEGATIVES - not "no reflexive searching". All four
+SHOULD-NOT scenarios also scored 0/3 on the BASE arm, and all four are
+unambiguously local (a repo function, a lop config question, arithmetic, a
+directory listing). A negative set the unmodified prompt already aces cannot
+discriminate between a brake that works and a brake that is inert. Building a
+negative set that CAN discriminate - trivial-but-web-adjacent prompts the base
+arm sometimes searches on - is the obvious follow-up, and it is the measurement
+this round does not have.
+
+What the negative half does establish is checked by hand rather than by rate.
+S12 is the one that matters: the correct behaviour is to read
+guide://configuration, and the after arm did exactly that -
 
   read {"path": "guide://configuration", "i": "Reading configuration guide"}
 
 so the new research bullet did not override the existing guide rule it sits
-55 lines below. S11 used grep, S13 used eval for arithmetic, S14 used bash.
-Nothing reached for the web where the answer was local.
+55 lines below - a rule it could plausibly have overridden, since "how do I
+change my custom instructions" is a question about a product whose docs are on
+the web. S11 used grep, S13 used eval for arithmetic, S14 used bash. Nothing
+reached for the web where the answer was local.

@@ -280,7 +280,9 @@ def _improvised_network(calls: list[tuple[str, str]]) -> list[str]:
     return hits
 
 
-def run_one(repo: Path, scenario: Scenario, timeout: int, home: Path) -> dict[str, Any]:
+def run_one(
+    repo: Path, scenario: Scenario, timeout: int, home: Path, home_root: Path
+) -> dict[str, Any]:
     """Run one scenario in one arm and report which tools it used.
 
     Runs in a scratch cwd so a scenario cannot accidentally edit the checkout,
@@ -298,6 +300,14 @@ def run_one(repo: Path, scenario: Scenario, timeout: int, home: Path) -> dict[st
         # arms; a skill that mentions research would then supply the behaviour
         # under test and the eval would credit it to the prompt change.
         env["LOCAL_OPERATOR_SKILL_EXTRA_ROOTS"] = ""
+        # HOME is redirected as well, and it is NOT redundant with the config
+        # dir. ``resolve_mcp_config`` reads ``Path.home() / ".local-operator" /
+        # "mcp.json"`` directly (``mcp/config.py:306``) and never consults
+        # LOCAL_OPERATOR_CONFIG_DIR, so an empty mcp.json in the scratch dir
+        # does NOT stop the operator's own MCP servers from connecting and
+        # putting their tool definitions in both arms' prompts. The first
+        # recorded run had exactly that leak in all 84 turns.
+        env["HOME"] = str(home_root)
         # ``--yolo`` and ``--run-in`` are GLOBAL flags and must precede the
         # subcommand; placed after ``exec`` argparse rejects them and the run
         # exits 2 having done nothing, which reads as "the agent chose not to
@@ -382,6 +392,11 @@ def _prepare_home(home: Path, hosting: str, model: str) -> Path:
     needs to reach a provider, and must NOT inherit the operator's standing
     instructions, MCP servers, skills or agent registry. Copying the whole home
     would measure this machine's configuration rather than what ships.
+
+    Callers pass a path INSIDE the fake HOME named ``.local-operator``, because
+    isolation needs both halves: ``LOCAL_OPERATOR_CONFIG_DIR`` covers code that
+    calls ``config_dir()``, and the HOME redirect covers code like
+    ``resolve_mcp_config`` that reads ``Path.home()`` itself.
     """
 
     home.mkdir(parents=True, exist_ok=True)
@@ -444,7 +459,12 @@ def main() -> int:
     parser.add_argument("--model", default="claude-opus-5")
     args = parser.parse_args()
 
-    home = _prepare_home(Path(args.home), args.hosting, args.model)
+    # The config dir lives INSIDE the fake HOME and is named ".local-operator",
+    # so the two isolation mechanisms agree: code reading
+    # LOCAL_OPERATOR_CONFIG_DIR and code reading Path.home() both land here.
+    home_root = Path(args.home)
+    home = _prepare_home(home_root / ".local-operator", args.hosting, args.model)
+    print(f"isolated HOME: {home_root}")
     print(f"isolated config dir: {home} (hosting={args.hosting} model={args.model})")
 
     wanted = {s.strip() for s in args.only.split(",") if s.strip()}
@@ -462,7 +482,7 @@ def main() -> int:
     for arm, repo in arms.items():
         for scenario in scenarios:
             for run_index in range(args.runs):
-                record = run_one(repo, scenario, args.timeout, home)
+                record = run_one(repo, scenario, args.timeout, home, home_root)
                 record["arm"] = arm
                 record["run"] = run_index
                 results.append(record)

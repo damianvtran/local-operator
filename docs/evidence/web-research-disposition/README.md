@@ -87,9 +87,32 @@ would have produced a confident wrong number:
 
 2. **The arms must be isolated from this machine.** Both run against a clean
    `LOCAL_OPERATOR_CONFIG_DIR` seeded with credentials only, with ecosystem
-   skill roots disabled. The operator's own `system_prompt.md`, MCP servers and
-   skills do not ship to users, and any of them could produce search behaviour
-   on its own and have it credited to the prompt change.
+   skill roots disabled. The operator's own `system_prompt.md` and skills do
+   not ship to users, and either could produce search behaviour on its own and
+   have it credited to the prompt change.
+
+   **The MCP half of that isolation does not work, and the runs recorded here
+   carry it.** `_prepare_home` writes an empty `mcp.json` into the scratch
+   config dir, but `resolve_mcp_config` reads `Path.home() / ".local-operator"
+   / "mcp.json"` directly (`local_operator/mcp/config.py:306`) and never
+   consults `LOCAL_OPERATOR_CONFIG_DIR`. So the operator's own MCP servers
+   (Notion, HubSpot, Slack, Datadog) were connected in all 84 runs, and their
+   tool definitions rode both arms' prompts.
+
+   Scope of the damage, checked rather than assumed: the leak is **symmetric**
+   (42 runs per arm) and **no `mcp__*` tool is called in any of the 84 runs** —
+   the only tools that appear are `bash`, `eval`, `glob`, `grep`, `read`,
+   `web_fetch`, `web_search`. The A/B contrast therefore stands. What is *not*
+   safe to read off these runs is any absolute prompt size, because both arms
+   carried MCP surface the `token-cost.txt` baseline does not include.
+   `token-cost.txt` is measured separately and offline, so it is unaffected.
+
+   The harness has since been fixed: it redirects `HOME` at the scratch dir as
+   well as `LOCAL_OPERATOR_CONFIG_DIR`, which covers both the code that calls
+   `config_dir()` and the code that reads `Path.home()` itself. Verified on a
+   spot run — no MCP traffic in either arm. The recorded `ab-eval.json` predates
+   that fix and is kept as captured rather than silently re-run, since the
+   contrast it reports is unaffected.
 
 The harness also fingerprints each arm's prompt text at start and end and
 refuses to report a run where it changed mid-flight — a full run takes over an
