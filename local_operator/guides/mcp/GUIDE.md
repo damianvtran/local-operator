@@ -77,7 +77,9 @@ Highest precedence first:
 1. `<cwd>/.local-operator/mcp.json`
 2. `<cwd>/.mcp.json`
 3. `~/.local-operator/mcp.json`
-4. Compatible imports from Claude, Cursor, and VS Code MCP files
+4. Compatible imports from Claude, Cursor, VS Code, and Codex CLI MCP files
+   (Codex is `~/.codex/config.toml`, TOML with `[mcp_servers.<name>]` tables,
+   and is read last, so it never overrides another tool's definition)
 
 Project values beat user values and imported values. `disabledServers` beats `enabledServers`, which beats a server's own `enabled: false` value.
 

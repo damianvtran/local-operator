@@ -354,7 +354,7 @@ lop mcp list
 
 Server configs are discovered from the project (`.local-operator/mcp.json`,
 `.mcp.json`), your home directory, and best-effort imports of Claude Code,
-Cursor, and VS Code configs — so servers you already configured
+Cursor, VS Code, and Codex CLI configs — so servers you already configured
 elsewhere just show up. See [docs/mcp.md](./docs/mcp.md) for the trust model
 before enabling project-supplied servers.
 
