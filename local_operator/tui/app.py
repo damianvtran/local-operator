@@ -5012,14 +5012,22 @@ class OperatorApp(App[None]):
         """Releasing a drag IS the copy. There is no key left to bind.
 
         Reported: "while I can highlight text from agent messages, pressing
-        cmd+C to copy does not copy to clipboard". It does not, and no change
-        to this app could make that keystroke arrive. Ghostty binds it itself —
-        ``ghostty +list-keybinds`` prints ``super+c=copy_to_clipboard:mixed``,
-        without the ``performable:`` prefix that would forward the key when the
-        action cannot run — so cmd+C is consumed by the terminal, which then
-        copies ITS selection. A Textual selection is painted by the app into
-        the alt screen; the terminal has no selection of its own and copies
-        nothing. Exactly the reported symptom.
+        cmd+C to copy does not copy to clipboard". Ghostty binds the chord
+        itself — ``ghostty +list-keybinds`` prints
+        ``super+c=copy_to_clipboard:mixed`` — so it copies the TERMINAL's
+        selection. A Textual selection is painted by the app into the alt
+        screen; the terminal has no selection of its own and copies nothing.
+        Exactly the reported symptom.
+
+        An earlier version of this docstring added "and no change to this app
+        could make that keystroke arrive". That is too strong and is false on
+        a kitty-protocol terminal, where the chord IS forwarded as ``super+c``
+        when the terminal's own action has nothing to act on — which is what
+        lets the composer bind it (see ``Editor._on_key``). It stays true of
+        Terminal.app, which delivers zero bytes for it. Either way the
+        release-copies rule below is what this screen relies on, because a
+        transcript drag has no key to press afterwards on the terminals where
+        the chord does not arrive.
 
         The keys that do arrive are all spoken for. Ctrl+C is the interrupt and
         the first rung of the exit ladder — Textual's stock Screen binding was
@@ -10062,9 +10070,11 @@ class OperatorApp(App[None]):
         elif editor.shell_mode:
             editor.placeholder = SHELL_PLACEHOLDER
         else:
-            # ASKED, not assumed: the resting copy still names `ctrl+v` until
-            # the user has pasted with it once, and hardcoding the plain
-            # placeholder here would retire that hint on an unrelated mode exit.
+            # ASKED, not assumed. The resting copy has one value again now that
+            # the composer no longer advertises the paste key, but every mode
+            # exit goes through the one authority rather than hardcoding a
+            # string here, so a second case cannot come back and leave this
+            # path painting a stale placeholder.
             editor.placeholder = editor.resting_placeholder
         # Not focusable while inert: a caret in a field that refuses every key
         # is the most misleading thing this mode could paint, and ↑↓ have to
@@ -14425,10 +14435,9 @@ class OperatorApp(App[None]):
             lines.append(line)
         # `ctrl+v` documented durably. It is not a slash command so it cannot
         # appear in the table above, and this app shows no key reference in the
-        # footer - yet outside cmux it is the ONLY way to attach a clipboard
-        # image, because the terminal swallows `Cmd+V` and sends the app
-        # nothing at all. The splash tip is where a user MEETS the key; this is
-        # where they can look it up later.
+        # footer - yet it is the one paste key that works on EVERY terminal.
+        # The splash tip is where a user MEETS the key; this is where they can
+        # look it up later.
         #
         # It sits directly under the command table and above the blank line
         # that opens the config-toggle block, rather than inside that block.
@@ -14454,6 +14463,55 @@ class OperatorApp(App[None]):
         # rows above answer, and the trailing notes below are a different
         # subject (see the placement note on `paste_note`).
         lines.append(paste_note)
+        # `cmd+v` gets its own row because the claim is CONDITIONAL and a
+        # conditional claim needs the words to qualify it. The chord reaches
+        # the app only where the terminal implements the kitty keyboard
+        # protocol and is swallowed whole by Terminal.app, so this is the one
+        # surface with room to say "works here, not there" — the composer
+        # placeholder is a single line and the splash tip is a one-clause row.
+        # Naming Terminal.app explicitly rather than hedging with "some
+        # terminals": a user in Terminal.app needs to know the key will not
+        # work FOR THEM, and a user anywhere else needs to know it will.
+        #
+        # MEASURED WIDTH, and THIS ROW HAS ZERO HEADROOM — read this before
+        # editing the string. At 80 columns the painted row may be at most 78
+        # cells (the screen's own 2-cell inset), and the block adds a further
+        # 2-cell spine indent, so the composed `name_width + description` must
+        # be <= 74. This row composes to EXACTLY 74. One more character wraps
+        # it. Measured from the painted compositor, not arithmetic:
+        #
+        #     W=81  painted 78  fits
+        #     W=80  painted 78  fits          <- exactly at the limit
+        #     W=79  painted 65  WRAPS         <- tail `Terminal.app` at col 0
+        #
+        # The first revision ran to 75 and so broke one width EARLIER, at 80 —
+        # the single most common terminal width — putting `Terminal.app)` at
+        # column 0 in the KEY gutter, where it reads as another key row. That
+        # is #402's design round 1 D2 verbatim, which is what `paste_note`
+        # above was shortened for, so this row reintroduced the defect its own
+        # neighbour exists as the fix for (design round 1 D1, code round 1 F1,
+        # ux round 1 U2 — all three reviewers found it independently).
+        #
+        # The semicolon reclaimed exactly ONE cell (55 -> 54: dropping two
+        # parens saves 2, the space before `not` costs 1 back), which was the
+        # single cell this row was over by. It did not buy slack — an earlier
+        # revision of this comment claimed four cells, and a reader who
+        # believes in four spare cells will add a word and wrap the row again
+        # (design round 2, D4).
+        #
+        # `name_width` is DERIVED from the longest command name, so the budget
+        # SHRINKS when a command with a longer name is added — this row is the
+        # first thing that breaks. `test_the_paste_key_rows_do_not_wrap_at_
+        # eighty_columns` in `tests/unit/tui/test_app_pilot.py` pins both rows
+        # against the real painted frame rather than against a fixed string,
+        # so that case fails the test instead of silently wrapping the row.
+        cmd_paste_note = Text()
+        cmd_paste_note.append("cmd+v".ljust(name_width), style=muted)
+        cmd_paste_note.append(
+            "same, where the terminal forwards it; not Terminal.app",
+            style=dim,
+        )
+        lines.append(cmd_paste_note)
         # Where the logs went. Console logging is off while the TUI owns the
         # terminal (see `local_operator.logger.file_logging`), so without this
         # line the file is unfindable without reading the source. `/help` and
