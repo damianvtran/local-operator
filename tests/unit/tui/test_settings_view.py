@@ -1889,10 +1889,18 @@ def _painted_frame(app: OperatorApp) -> str:
     import re
 
     svg = app.export_screenshot()
-    return " ".join(
+    text = " ".join(
         html.unescape(re.sub(r"<[^>]+>", "", match.group(1)))
         for match in re.finditer(r"<text[^>]*>(.*?)</text>", svg, re.S)
     )
+    # NON-BREAKING spaces, folded to ordinary ones. The exporter emits U+00A0
+    # between words so the SVG's text runs keep their spacing, which means every
+    # multi-word phrase a caller searches for is absent from the raw string —
+    # `"no cascade configured" not in frame` was TRUE of a frame containing that
+    # exact line. Folding here rather than at each call site, because the trap is
+    # the helper's and a caller cannot see it: the docstring promises what the
+    # user sees, and a user does not see the encoding.
+    return text.replace("\xa0", " ")
 
 
 @pytest.mark.asyncio
