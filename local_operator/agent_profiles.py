@@ -555,6 +555,14 @@ def install_seed(
     ``overwrite`` is set, so a concurrent second launch of the same role cannot
     duplicate the profile or clobber edits the operator has made.
 
+    ``overwrite`` restores the packaged copy wholesale — instructions, routing
+    description, and the role tags carrying the tool allowlist, effort and
+    delegate flag — and it also bypasses the :class:`NameTakenError` guard,
+    because the kwarg means "the caller has already decided". Both properties
+    make it unsafe to reach on an incidental install path: it is exposed to
+    users only through the ``agent`` tool's explicit ``op='reset'``, which does
+    its own non-role check and echoes the instructions it replaced.
+
     Raises :class:`NameTakenError` when the name belongs to an agent that is
     NOT a role. Returning that row (which is what this used to do) reported a
     successful install while writing nothing, so an operator recovering from a
@@ -585,44 +593,58 @@ def install_seed(
         return profile_from_agent(registry, existing), True
 
     tags = list(seed_tags(seed))
-    if existing is None:
+
+    # One field builder for both paths, so a create and an overwrite cannot
+    # drift into writing different subsets of what the seed owns.
+    def _fields(**overrides: Any) -> AgentEditFields:
         # Every other field is explicitly None so the profile inherits the
         # session's model and sampling settings: a seed pinning a model would
         # silently override the operator's provider choice. Spelled out rather
         # than defaulted because ``AgentEditFields`` is validated in strict
         # mode, which is the convention every other caller here follows.
-        agent = registry.create_agent(
-            AgentEditFields(
-                name=seed.name,
-                # ``when_to_use`` FIRST, and the order is load-bearing. The
-                # registry has one description field; a profile has two texts,
-                # and this one is the ROUTING text — it is what ``search``
-                # embeds and match against. Persisting ``description`` instead
-                # silently dropped the trigger phrasings on install, so a role
-                # that was discoverable as a packaged starter became
-                # undiscoverable the moment an operator installed it, and
-                # search then recommended a confidently wrong role rather than
-                # failing visibly ("check the UI looks right" -> manager).
-                description=seed.when_to_use or seed.description,
-                tags=tags,
-                categories=["role"],
-                security_prompt=None,
-                hosting=None,
-                model=None,
-                last_message=None,
-                temperature=None,
-                top_p=None,
-                top_k=None,
-                max_tokens=None,
-                stop=None,
-                frequency_penalty=None,
-                presence_penalty=None,
-                seed=None,
-                current_working_directory=None,
-            )
+        base: dict[str, Any] = dict(
+            name=None,
+            # ``when_to_use`` FIRST, and the order is load-bearing. The
+            # registry has one description field; a profile has two texts, and
+            # this one is the ROUTING text — it is what ``search`` embeds and
+            # matches against. Persisting ``description`` instead silently
+            # dropped the trigger phrasings on install, so a role that was
+            # discoverable as a packaged starter became undiscoverable the
+            # moment an operator installed it, and search then recommended a
+            # confidently wrong role rather than failing visibly ("check the UI
+            # looks right" -> manager).
+            description=seed.when_to_use or seed.description,
+            tags=tags,
+            categories=["role"],
+            security_prompt=None,
+            hosting=None,
+            model=None,
+            last_message=None,
+            temperature=None,
+            top_p=None,
+            top_k=None,
+            max_tokens=None,
+            stop=None,
+            frequency_penalty=None,
+            presence_penalty=None,
+            seed=None,
+            current_working_directory=None,
         )
+        base.update(overrides)
+        return AgentEditFields(**base)
+
+    if existing is None:
+        agent = registry.create_agent(_fields(name=seed.name))
     else:
         agent = existing
+        # An overwrite restores the seed's ROLE FIELDS too, not just its prose.
+        # This branch used to write only ``system_prompt``, which made a
+        # restore half a restore: an edited ``tools:`` tag survived, so a
+        # `reviewer` reset after someone widened its allowlist kept the full
+        # write inventory under the packaged guidance's name. The allowlist is
+        # a capability boundary rather than advice, so restoring the text
+        # without it fails OPEN while reporting success.
+        registry.update_agent(agent.id, _fields())
     registry.set_agent_system_prompt(agent.id, seed.instructions)
     return profile_from_agent(registry, agent), False
 

@@ -557,3 +557,163 @@ async def test_a_single_tool_role_is_not_labelled_one_tools(context) -> None:
     await call(context, op="create", name="one", description="d", instructions="i", tools=["read"])
     row = next(line for line in (await call(context, op="list")).splitlines() if "one" in line)
     assert "[1 tool]" in row and "1 tools" not in row
+
+
+@pytest.mark.asyncio
+async def test_show_prints_the_packaged_text_when_an_installed_role_diverged(
+    context, registry
+) -> None:
+    """#141, option 2: once a packaged role is installed and edited, the shipped
+    guidance is unreachable — `show` renders the edit and `update` asks the
+    reader to retype text they can no longer read. The reader's actual complaint
+    is that they cannot see what they lost."""
+    await call(context, op="install", name="reviewer")
+    await call(context, op="update", name="reviewer", instructions="ONLY CHECK THE MIGRATIONS.")
+
+    body = await call(context, op="show", name="reviewer")
+
+    assert "ONLY CHECK THE MIGRATIONS." in body, "their own text is still what runs"
+    assert "this role has been edited" in body
+    assert "You are an INDEPENDENT reviewer" in body, "the packaged text is readable again"
+    assert "op='reset' name='reviewer'" in body
+
+
+@pytest.mark.asyncio
+async def test_show_stays_quiet_when_an_installed_role_still_matches(context) -> None:
+    """The divergence block must be a signal, not decoration. `install_seed`
+    rewrites the registry description to the seed's routing text, so comparing
+    anything but the instruction body would flag every installed role."""
+    await call(context, op="install", name="reviewer")
+
+    body = await call(context, op="show", name="reviewer")
+
+    assert "this role has been edited" not in body
+    assert "op='reset'" not in body
+
+
+@pytest.mark.asyncio
+async def test_show_on_a_user_authored_role_never_offers_a_reset(context) -> None:
+    """A role with no packaged counterpart has nothing to be compared against,
+    let alone restored to."""
+    await call(context, op="create", name="mine", description="d", instructions="my guidance")
+
+    body = await call(context, op="show", name="mine")
+
+    assert "this role has been edited" not in body and "op='reset'" not in body
+
+
+@pytest.mark.asyncio
+async def test_reset_restores_the_packaged_role_and_reports_what_it_replaced(
+    context, registry
+) -> None:
+    """#141, option 1: the verb a reader looks for by name. It must also echo
+    the replaced text — a reset that silently discards operator guidance is a
+    data loss with a friendly message on it."""
+    await call(context, op="install", name="reviewer")
+    await call(context, op="update", name="reviewer", instructions="ONLY CHECK THE MIGRATIONS.")
+
+    body = await call(context, op="reset", name="reviewer")
+
+    assert "reset role 'reviewer'" in body
+    assert "ONLY CHECK THE MIGRATIONS." in body, "the overwrite stays recoverable by copy-paste"
+    profile = resolve_profile("reviewer", registry=registry)
+    packaged = load_seed("reviewer")
+    assert profile is not None and packaged is not None
+    assert "MIGRATIONS" not in profile.instructions
+    assert profile.instructions.strip() == packaged.instructions.strip()
+
+
+@pytest.mark.asyncio
+async def test_reset_keeps_the_role_launchable_with_its_packaged_tool_surface(
+    context, registry
+) -> None:
+    """A restored role must be the packaged role in every respect, not just its
+    prose: the tool allowlist is a capability boundary, so a reset that dropped
+    it would hand a reviewer the full write inventory."""
+    await call(context, op="install", name="reviewer")
+    await call(context, op="update", name="reviewer", tools=["read"], instructions="broken")
+
+    await call(context, op="reset", name="reviewer")
+
+    profile = resolve_profile("reviewer", registry=registry)
+    packaged = load_seed("reviewer")
+    assert profile is not None and packaged is not None
+    assert profile.tools == packaged.tools
+    assert profile.may_delegate == packaged.may_delegate
+
+
+@pytest.mark.asyncio
+async def test_reset_on_an_unedited_role_reports_the_no_op(context) -> None:
+    """Reporting a restore for a no-op is the exact misreport that `install`'s
+    message was fixed for (D14); the answer to "did it change?" has to be no."""
+    await call(context, op="install", name="reviewer")
+
+    body = await call(context, op="reset", name="reviewer")
+
+    assert "already matches the packaged version" in body and "nothing was changed" in body
+
+
+@pytest.mark.asyncio
+async def test_reset_refuses_a_user_authored_role_rather_than_deleting_it(
+    context, registry
+) -> None:
+    """A role nobody packaged has nothing to be restored TO, so a reset could
+    only mean deleting it — never what the word means here."""
+    await call(context, op="create", name="mine", description="d", instructions="my guidance")
+
+    body = await call(context, op="reset", name="mine")
+
+    assert "nothing to reset it to" in body and "nothing was changed" in body
+    assert "op='update'" in body, "it must name the command that does work"
+    profile = resolve_profile("mine", registry=registry)
+    assert profile is not None and profile.instructions == "my guidance"
+
+
+@pytest.mark.asyncio
+async def test_reset_on_an_unknown_name_lists_the_real_starters(context) -> None:
+    body = await call(context, op="reset", name="nope")
+    assert "no packaged starter named 'nope'" in body
+    assert "reviewer" in body and "architect" in body
+
+
+@pytest.mark.asyncio
+async def test_reset_needs_a_name(context) -> None:
+    assert "needs 'name'" in await call(context, op="reset")
+
+
+@pytest.mark.asyncio
+async def test_reset_on_a_never_installed_starter_installs_it_and_says_so(context) -> None:
+    """The end state the caller asked for is the one they get, but the report
+    must not claim it replaced guidance that never existed."""
+    body = await call(context, op="reset", name="scout")
+
+    assert "was not installed" in body and "installed the packaged version" in body
+    assert "It replaced" not in body
+
+
+@pytest.mark.asyncio
+async def test_reset_refuses_a_name_owned_by_a_non_role(context, registry) -> None:
+    """`install_seed(overwrite=True)` skips its own non-role guard by design (the
+    kwarg means "the caller has decided"), so this check is load-bearing: without
+    it a reset would rewrite an ordinary chat agent's prompt with role guidance."""
+    agent = registry.create_agent(_edit_fields(name="reviewer", description="my chat agent"))
+    registry.set_agent_system_prompt(agent.id, "Be agreeable.")
+
+    body = await call(context, op="reset", name="reviewer")
+
+    assert "not a role" in body and "nothing was reset" in body
+    assert registry.get_agent_system_prompt(agent.id) == "Be agreeable.", "must not overwrite"
+
+
+@pytest.mark.asyncio
+async def test_reinstall_names_reset_as_the_way_to_get_the_packaged_text_back(context) -> None:
+    """#141: the pre-fix message offered `show` (which rendered their own broken
+    text) and `update` (which asked them to retype what they could not read), so
+    both offered commands dead-ended."""
+    await call(context, op="install", name="reviewer")
+    await call(context, op="update", name="reviewer", instructions="ONLY CHECK THE MIGRATIONS.")
+
+    body = await call(context, op="install", name="reviewer")
+
+    assert "left as-is" in body, "install stays idempotent; that is what protects the edits"
+    assert "op='reset' name='reviewer'" in body

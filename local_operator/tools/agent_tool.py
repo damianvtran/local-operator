@@ -20,9 +20,23 @@ tool is how an agent works with them:
 - ``install`` — pull a packaged starter into the registry on first need, so a
   fresh machine can delegate to a ``reviewer`` without the operator having
   authored one.
+- ``reset`` — put the packaged starter back over an installed role that was
+  edited into a bad state, printing the text it replaced.
 - ``create`` / ``update`` — author a new role, or fix one whose instructions
   produced a bad run. ``when_to_use`` is stored as the routing description, so
   a role written today is discoverable by ``search`` tomorrow.
+
+INSTALL IS NOT A RESET, AND THAT SEPARATION IS DELIBERATE
+=========================================================
+
+``install`` is idempotent: an already-installed role is returned untouched, so
+a concurrent second launch of the same role cannot clobber operator edits. That
+guarantee holds only because ``install`` is something the harness does FOR the
+caller, incidentally, at delegation time — it must never be able to overwrite.
+``reset`` is the opposite: an explicit act by someone who has decided they want
+the shipped guidance back. It is a separate verb rather than a flag on
+``install`` precisely so the safe-by-default op stays safe, and it echoes the
+text it replaced so the overwrite is recoverable by copy-paste.
 
 CONTEXT DISCIPLINE
 ==================
@@ -75,11 +89,14 @@ logger = logging.getLogger(__name__)
 class AgentParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    op: Literal["list", "show", "search", "install", "create", "update"] = Field(
+    op: Literal["list", "show", "search", "install", "reset", "create", "update"] = Field(
         description=(
             "search: find a role by meaning; list/show: what exists and what it "
-            "says; install: add a packaged starter; create/update: author or fix "
-            "a role or a specialist profile."
+            "says (show also prints the packaged text when an installed role "
+            "has diverged from it); install: add a packaged starter; reset: "
+            "restore the packaged starter over an edited role, reporting what "
+            "it replaced; create/update: author or fix a role or a specialist "
+            "profile."
         )
     )
     # The no-spaces guidance is a modularity contract, not registry law: the
@@ -203,6 +220,30 @@ def _profile_line(profile: AgentProfile, *, installed: bool) -> str:
     return row if len(row) <= _ROW_CAP else row[: _ROW_CAP - 1].rstrip() + "…"
 
 
+def _divergent_seed(profile: AgentProfile) -> AgentProfile | None:
+    """The packaged seed behind an INSTALLED role whose text no longer matches.
+
+    Returns None for a role that is not installed (the seed IS what is being
+    shown), for a user-authored role with no packaged counterpart, and for an
+    installed role still carrying the shipped guidance verbatim — in all three
+    cases there is no second version worth printing.
+
+    Comparison is on the stripped instruction body alone. `install_seed`
+    rewrites the registry `description` to the seed's `when_to_use` on purpose
+    (that is the routing text `search` embeds), so a whole-profile comparison
+    would report every installed role as diverged and make the signal useless.
+    """
+
+    if not profile.agent_id:
+        return None
+    seed = load_seed(profile.name)
+    if seed is None:
+        return None
+    if seed.instructions.strip() == (profile.instructions or "").strip():
+        return None
+    return seed
+
+
 def _registry(context: ToolContext | None) -> Any:
     return getattr(context, "agent_registry", None) if context else None
 
@@ -314,14 +355,29 @@ async def _op_show(context: ToolContext | None, tool_call_id: str, name: str) ->
     if profile.effort:
         header.append(f"effort: {profile.effort}")
     body = "\n".join(header) + "\n\ninstructions:\n" + (profile.instructions or "(none)")
+    # Once a packaged role is installed and edited, the SHIPPED guidance is
+    # unreachable through every other op: `show` renders the registry copy and
+    # `update` asks the reader to retype text they can no longer read. So when
+    # the two diverge, print both — the reader's actual complaint is "I cannot
+    # see what I lost", and a diff they can copy from answers it without
+    # touching their edits. Only the instruction BODY is compared: `when_to_use`
+    # is deliberately rewritten on install (the routing text), so comparing the
+    # whole profile would call every installed role diverged.
+    divergent_seed = _divergent_seed(profile)
+    if divergent_seed is not None:
+        body += (
+            "\n\nthis role has been edited; the packaged version says:\n"
+            f"{divergent_seed.instructions or '(none)'}"
+        )
     # The highest-intent moment in the flow: someone has just read a role's
     # guidance and decided they want it. Every other op ends by naming the next
     # command; this one used to stop at "not installed" and leave them there.
-    body += (
-        f"\n\nlaunch with task(agent={profile.name!r})"
-        + ("" if profile.agent_id else f", or op='install' name={profile.name!r} to edit it")
-        + "."
-    )
+    body += f"\n\nlaunch with task(agent={profile.name!r})"
+    if not profile.agent_id:
+        body += f", or op='install' name={profile.name!r} to edit it"
+    elif divergent_seed is not None:
+        body += f", or op='reset' name={profile.name!r} to restore the packaged version"
+    body += "."
     text, spill = spill_truncate(body, "agent", context)
     return _text(tool_call_id, "agent", text, details=spill or None)
 
@@ -504,8 +560,9 @@ async def _op_install(context: ToolContext | None, tool_call_id: str, name: str)
             tool_call_id,
             "agent",
             f"role {profile.name!r} is already installed and was left as-is (your edits are "
-            f"kept): op='show' name={profile.name!r} to read it, or op='update' "
-            f"name={profile.name!r} to change it.",
+            f"kept): op='show' name={profile.name!r} to read it (it prints the packaged "
+            f"version too when yours has diverged), op='reset' name={profile.name!r} to put "
+            f"the packaged version back, or op='update' name={profile.name!r} to change it.",
         )
     return _text(
         tool_call_id,
@@ -513,6 +570,95 @@ async def _op_install(context: ToolContext | None, tool_call_id: str, name: str)
         f"installed role {profile.name!r}: launch with task(agent={profile.name!r}), "
         f"or change what it is told with op='update' name={profile.name!r}.",
     )
+
+
+async def _op_reset(context: ToolContext | None, tool_call_id: str, name: str) -> ToolResult:
+    """Restore a packaged seed over an installed role, echoing what it replaced.
+
+    Separate from ``install`` on purpose. ``install`` runs incidentally (a
+    delegation asking for a role the operator has never created materializes
+    it), so it must be unable to overwrite: its idempotence is what stops a
+    concurrent second launch from clobbering operator edits. ``reset`` is only
+    ever reached because a caller typed the word, which is the consent
+    ``install`` cannot infer. The one property the two share is that neither
+    may destroy work silently, so this prints the replaced instructions back:
+    the overwrite stays recoverable by copy-paste even though the registry now
+    holds the packaged text.
+    """
+
+    registry = _registry(context)
+    if registry is None:
+        return _error(
+            tool_call_id, "agent", "no agent registry attached to this session; cannot reset."
+        )
+    seed = load_seed(name)
+    if seed is None:
+        # Covers both failure shapes with one honest sentence: a name nobody
+        # has ever heard of, and a role the operator wrote themselves. The
+        # second is the dangerous one — a role with no packaged counterpart has
+        # nothing to be restored TO, so resetting it could only mean deleting
+        # it, which is never what the word means here.
+        return _error(
+            tool_call_id,
+            "agent",
+            f"no packaged starter named {name!r}, so there is nothing to reset it to; "
+            f"nothing was changed. Starters: {', '.join(list_seeds())}. A role you authored "
+            "yourself has no packaged version — edit it with op='update' instead.",
+        )
+
+    try:
+        existing = registry.get_agent_by_name(seed.name)
+    except Exception:  # noqa: BLE001 - a lookup failure must not overwrite blindly
+        logger.warning("agent registry lookup failed for %r", seed.name)
+        existing = None
+    # `install_seed(overwrite=True)` skips its own non-role guard, by design:
+    # the kwarg means "the caller has decided". That makes checking here
+    # load-bearing rather than defensive — without it, resetting a name that
+    # happens to belong to an ordinary conversational agent would rewrite that
+    # agent's system prompt with role guidance.
+    if existing is not None and not is_role(existing):
+        return _error(
+            tool_call_id,
+            "agent",
+            f"an agent named {seed.name!r} already exists and is not a role, so nothing was "
+            "reset. Rename that agent, or use a different name for the role.",
+        )
+
+    previous = profile_from_agent(registry, existing) if existing is not None else None
+    if previous is not None and (previous.instructions or "").strip() == seed.instructions.strip():
+        # Reporting a restore for a no-op is the exact misreport `install`'s
+        # message was fixed for; the answer to "did it change?" has to be no.
+        return _text(
+            tool_call_id,
+            "agent",
+            f"role {seed.name!r} already matches the packaged version; nothing was changed.",
+        )
+
+    try:
+        installed = install_seed(seed.name, registry=registry, overwrite=True)
+    except NameTakenError:  # pragma: no cover - guarded above, kept for safety
+        return _error(tool_call_id, "agent", _name_taken_message(seed.name, installing=True))
+    if installed is None:
+        return _error(tool_call_id, "agent", f"could not reset role {seed.name!r}")
+    profile, _ = installed
+
+    if previous is None:
+        # Reset on a starter that was never installed is not an error: the end
+        # state the caller asked for (registry holds the packaged text) is the
+        # one they got. Saying which of the two happened keeps the report true.
+        body = (
+            f"role {profile.name!r} was not installed; installed the packaged version. "
+            f"Launch with task(agent={profile.name!r})."
+        )
+        return _text(tool_call_id, "agent", body)
+    body = (
+        f"reset role {profile.name!r} to the packaged version. It replaced these "
+        f"instructions:\n{(previous.instructions or '(none)').strip()}\n\n"
+        f"Launch with task(agent={profile.name!r}), or op='update' name={profile.name!r} "
+        "to put your own guidance back."
+    )
+    text, spill = spill_truncate(body, "agent", context)
+    return _text(tool_call_id, "agent", text, details=spill or None)
 
 
 async def _op_write(
@@ -702,7 +848,7 @@ async def execute_agent(
     on_update: Callable[[AgentToolUpdate], None] | None = None,
     context: ToolContext | None = None,
 ) -> ToolResult:
-    """Discover, install, and author reusable agent role profiles.
+    """Discover, install, reset, and author reusable agent role profiles.
 
     ``@_guard`` for the same reason every sibling executor has it: the harness
     contract is that tools never throw into the loop, and this one has live
@@ -718,7 +864,10 @@ async def execute_agent(
     except ValidationError as exc:
         return _validation_error(tool_call_id, "agent", exc)
 
-    if params.op in {"show", "install", "create", "update"} and not (params.name or "").strip():
+    if (
+        params.op in {"show", "install", "reset", "create", "update"}
+        and not (params.name or "").strip()
+    ):
         return _error(tool_call_id, "agent", f"op={params.op!r} needs 'name'.")
     if params.op == "search" and not (params.query or "").strip():
         return _error(tool_call_id, "agent", "op='search' needs 'query'.")
@@ -731,6 +880,8 @@ async def execute_agent(
         return await _op_search(context, tool_call_id, str(params.query))
     if params.op == "install":
         return await _op_install(context, tool_call_id, str(params.name))
+    if params.op == "reset":
+        return await _op_reset(context, tool_call_id, str(params.name))
     return await _op_write(context, tool_call_id, params, creating=params.op == "create")
 
 
@@ -738,7 +889,7 @@ def build_agent_tool(context: ToolContext) -> AgentTool | None:
     """createIf: the tool exists only where a registry can back it.
 
     Without a registry the read-only ops would still work off packaged
-    starters, but ``install``/``create``/``update`` could not persist anything
+    starters, but ``install``/``reset``/``create``/``update`` could not persist anything
     — a tool that can show a role and never keep one is a worse surface than
     no tool, so it is not advertised at all.
     """
@@ -751,16 +902,20 @@ def build_agent_tool(context: ToolContext) -> AgentTool | None:
         description=(
             "Reusable agent profiles: delegation roles (reviewer, coder, "
             "architect, manager, designer, scout) and specialists with their "
-            "own instruction sets. Find, install, or author one; launch a role "
-            "with task(agent='<name>'). A specialist is the reusable base a "
-            "team layers collaboration and project briefs on top of."
+            "own instruction sets. Find, install, author, or reset one to its "
+            "packaged version; launch a role with task(agent='<name>'). A "
+            "specialist is the reusable base a team layers collaboration and "
+            "project briefs on top of."
         ),
         parameters=AgentParams.model_json_schema(),
         # Writes land in the user's own configuration directory, never in the
         # workspace, and are trivially reversible by editing the profile back.
         # Gating them behind an approval prompt would make an agent improving
         # its own reviewer guidance an interruption, which is exactly the
-        # friction that keeps the registry empty.
+        # friction that keeps the registry empty. ``reset`` stays inside that
+        # reasoning rather than escaping it: it is the one op that overwrites
+        # instructions the operator wrote, so it prints them back in its result
+        # and an op='update' with that text restores the prior state exactly.
         approval_tier="read",
         concurrency="exclusive",
         interruptible=False,

@@ -73,8 +73,9 @@ and do not use teardown as routine per-turn cleanup.
 Use the `agent` tool to work with roles and specialists:
 
 - `search` — which role fits a task, by meaning. Use it when you are about to delegate something specialized and are not sure a role exists.
-- `list` / `show` — what exists, and what a role actually says.
-- `install` — pull a packaged starter into the registry on first need.
+- `list` / `show` — what exists, and what a role actually says. When an installed role's instructions have diverged from the packaged starter of the same name, `show` prints the packaged text alongside yours, so you can read (and copy back) what an edit replaced.
+- `install` — pull a packaged starter into the registry on first need. It is idempotent: an already-installed role is left exactly as it is, so a concurrent second launch cannot clobber your edits. It is therefore NOT a restore.
+- `reset` — the restore verb. Puts the packaged starter back over an installed role that was edited into a bad state, and prints the instructions it replaced so the overwrite is recoverable by copy-paste. Only works for names that HAVE a packaged starter: a role you authored yourself has nothing to reset to and is refused rather than deleted.
 - `create` / `update` — author a role (`kind='role'`, the default) or a specialist (`kind='specialist'`), or FIX one whose guidance produced a bad run. Write `description` as the trigger condition ("reviewing a merge request"), not as a job title, because that text is what `search` matches. `instructions` are the reusable BASE behaviour; a team layers collaboration and project briefs on top without rewriting them.
 
 When a user asks for a named specialist — "create a User Dashboard Agent that knows our release practices" — that is `kind='specialist'` with a real instruction set, not a one-off prompt. Put it on a team roster later rather than baking the team into the agent.
