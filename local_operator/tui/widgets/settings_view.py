@@ -100,11 +100,16 @@ _VALUE_COLUMN = 34
 #: owns them, which is what makes the expansion read as belonging to that row.
 _CHOICE_INDENT = _ROW_INDENT + 4
 
-#: Rows one wheel notch moves the VIEWPORT by. Matches Textual's own
-#: `App.scroll_sensitivity_y` (2.0), because the body's container handles the
-#: wheel directly over the list and this method handles it everywhere else on
-#: the page — a different step here would make one gesture travel at two speeds
-#: depending on where the pointer sat.
+#: Fallback rows per wheel notch, used only when `App.scroll_sensitivity_y` is
+#: unreachable (before the widget is mounted). The live value is read from the
+#: app at every notch instead of copied here: the body's container handles the
+#: wheel directly over the list at `scroll_sensitivity_y`, and this method
+#: handles it everywhere else on the page, so a step that disagrees makes one
+#: gesture travel at two speeds depending on where the pointer sat. It is a
+#: per-instance attribute set in `App.__init__`, not a class constant, so a
+#: hardcoded 2 here silently desynchronises the moment anything changes it —
+#: measured at 4.0: `{list: 12, pane: 6}`, the exact position-dependence this
+#: page's scroll model exists to remove (review round 1, S1).
 _WHEEL_ROWS = 2
 
 #: Marker on the row the cursor is on. A glyph rather than a background sweep
@@ -1515,6 +1520,17 @@ class SettingsView(Vertical):
 
         No commit semantics are involved: this moves the view, never the cursor,
         so it neither writes a value nor settles an open editor.
+
+        BEHAVIOUR CHANGE, stated here because this is where the next reader
+        looks: the previous implementation called ``_cancel_edit()`` on every
+        notch, so wheeling away from a row with the inline editor open
+        discarded the edit. It does not any more, and that is deliberate under
+        this model — the wheel is a LOOK, and cancelling someone's half-typed
+        value because they glanced elsewhere would be the worse surprise. The
+        consequence to know about is that the editor stays live and
+        keyboard-reachable while scrolled off screen: keystrokes go on entering
+        it, and ``enter`` commits it, with nothing about it on the frame
+        (review round 1, S2).
         """
         try:
             # Accumulated from `scroll_target_y`, NOT from `scroll_relative`.
@@ -1532,8 +1548,12 @@ class SettingsView(Vertical):
             # accumulation above collapses anyway. Textual's own wheel handler
             # reaches `_scroll_to` synchronously; this is that path, spelled
             # through the public API.
+            # The LIVE sensitivity, not a copy of it: `scroll_sensitivity_y` is
+            # a per-instance attribute, so a constant here desynchronises this
+            # handler from the container's own (see `_WHEEL_ROWS`).
+            step = getattr(self.app, "scroll_sensitivity_y", _WHEEL_ROWS)
             self._body.scroll_to(
-                y=self._body.scroll_target_y + delta * _WHEEL_ROWS,
+                y=self._body.scroll_target_y + delta * step,
                 animate=False,
                 immediate=True,
             )

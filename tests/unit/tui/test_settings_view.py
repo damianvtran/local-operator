@@ -2623,3 +2623,49 @@ async def test_paging_lands_on_the_true_end_of_the_list() -> None:
                 await pilot.press("pageup")
             await pilot.pause()
             assert view._selected == view._selectable()[0]
+
+
+@pytest.mark.asyncio
+async def test_the_wheel_step_follows_the_apps_scroll_sensitivity() -> None:
+    """One gesture, one speed — at whatever sensitivity the app is set to.
+
+    The body's container handles the wheel over the list at
+    `App.scroll_sensitivity_y`; this view handles it everywhere else. That is a
+    per-INSTANCE attribute set in `App.__init__`, not a class constant, so a
+    hardcoded step here desynchronises silently. Measured at 4.0 before the fix:
+    `{list: 12, pane: 6, title: 6, detail: 6}` — the exact position-dependence
+    the scroll model exists to remove, back again (review round 1, S1).
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        # Deliberately NOT the 2.0 default, which is the value a copied constant
+        # happens to match — the drift is only observable off the default.
+        app.scroll_sensitivity_y = 4.0
+        app._open_settings_view()
+        view = app.query_one(SettingsView)
+        await pilot.pause()
+        body = view._body
+
+        travelled: dict[str, int] = {}
+        for name, target in (
+            ("list", view._list),
+            ("pane", view._pane_view),
+            ("detail", view._detail),
+            ("title", view._title),
+        ):
+            body.scroll_to(y=0, animate=False, immediate=True)
+            await pilot.pause()
+            for _ in range(3):
+                target.post_message(_wheel(target, down=True))
+            await pilot.pause()
+            travelled[name] = body.scroll_offset.y
+
+        assert len(set(travelled.values())) == 1, (
+            "at scroll_sensitivity_y=4.0 the wheel travels different distances "
+            f"by pointer position: {travelled}"
+        )
+        assert travelled["list"] == 12, (
+            "the container applies 4.0 rows per notch over the list; this view "
+            f"must match it rather than a constant: {travelled}"
+        )
