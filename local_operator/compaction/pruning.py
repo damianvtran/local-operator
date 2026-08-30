@@ -153,17 +153,20 @@ def _supersede_key(message: Message) -> str | None:
     range of the same file (they share not one line), while a full-file read
     supersedes every earlier range — handled in the pass below.
 
-    ``details['surface']`` is the same idea for tools that OBSERVE rather than
-    read: a screen, a page, a canvas. Each result describes the live state of
-    one surface, so a newer observation of the same surface supersedes every
-    older one completely -- the older text describes a screen that no longer
-    exists, exactly as a stale screenshot does.
+    ``details['supersede_key']`` lets a tool opt a result in explicitly, for
+    resources a path does not name: a URL, a page, a live surface. It is an
+    OPT-IN the emitting tool states, deliberately not inferred from ambient
+    fields like a url or a surface handle. Inference is unsafe here because a
+    single handle covers many DIFFERENT results: the browser tool stamps its
+    ``surface_id`` on every action, so keying on it made a 40-character
+    ``click`` blank the accessibility snapshot and console errors the agent had
+    just gathered to decide what to click. Only the tool knows which of its
+    results are re-reads of one thing and which are distinct observations of
+    it, so only the tool may say so.
 
-    Without this, a screen-driving agent accumulates every observation's text
-    forever. Measured on an OSWorld 2.0 episode: 374 tool results held ~71.5k
-    tokens of superseded observation text at cycle 371, most of it the task
-    instruction repeated verbatim in every single result, and the context had
-    grown to 133k with the compaction trigger still correctly far away.
+    The value must therefore identify the CONTENT, including any variant that
+    changes what comes back (a raw versus rendered fetch of one URL is two
+    different answers, not one superseding the other).
     """
     details = _details_of(message)
     if not message.tool_name:
@@ -171,36 +174,9 @@ def _supersede_key(message: Message) -> str | None:
     path = details.get("path")
     if isinstance(path, str) and path:
         return f"{message.tool_name}:{path}:{details.get('range') or 'full'}"
-    # A URL identifies a re-fetchable resource exactly as a path identifies a
-    # file: ``read <url>`` and ``web_fetch`` of the same address return the
-    # live state of one thing, so the newer answer supersedes the older.
-    url = details.get("url")
-    # A SURFACE is the same idea for tools that OBSERVE rather than fetch: a
-    # browser tab, a screen, a canvas. Each result describes the live state of
-    # that surface, so a newer view supersedes every older one -- the older
-    # text describes a page that no longer exists, exactly as a stale
-    # screenshot does. The browser tool names its handle ``surface_id``;
-    # ``surface`` is the generic spelling for other observers.
-    surface = details.get("surface") or details.get("surface_id")
-    if isinstance(surface, str) and surface:
-        # Scope to what is being observed THROUGH the surface: a tab that has
-        # navigated elsewhere is a different resource, and a selector-scoped
-        # read is not the whole page. Without this a read of the footer would
-        # blank an earlier read of the article body on the same tab.
-        # The parts are LENGTH-PREFIXED rather than joined by a separator.
-        # A bare separator collides on real input: url "https://a#body" with no
-        # selector and url "https://a" with selector "body" are different reads
-        # that would otherwise produce one key, so the newer would blank the
-        # older and lose content the model still needs. No delimiter can appear
-        # inside a length, so this is unambiguous for every input. Absent and
-        # None still share a key, which is correct -- they are the same absence.
-        scope_url = url if isinstance(url, str) else ""
-        selector = details.get("selector")
-        scope_selector = selector if isinstance(selector, str) else ""
-        scope = f"{len(scope_url)}:{scope_url}{len(scope_selector)}:{scope_selector}"
-        return f"{message.tool_name}:surface:{surface}:{scope}"
-    if isinstance(url, str) and url:
-        return f"{message.tool_name}:url:{url}:{details.get('range') or 'full'}"
+    declared = details.get("supersede_key")
+    if isinstance(declared, str) and declared:
+        return f"{message.tool_name}:declared:{declared}"
     return None
 
 

@@ -2300,7 +2300,16 @@ async def execute_read(
                 "read",
                 f"Cannot resolve '{target}': the resolver does not handle this URL.",
             )
-        return _text(tool_call_id, "read", content, details={"url": target})
+        # A URL read is a re-read of one resource: a later read of the same
+        # URL describes its newer state, so the older text is dead weight.
+        # Declared explicitly (never inferred) because only this call site
+        # knows the result is the whole resource rather than one view of it.
+        return _text(
+            tool_call_id,
+            "read",
+            content,
+            details={"url": target, "supersede_key": target},
+        )
 
     cwd = _safe_cwd(context)
     path, inside, resolvable = _resolve_workspace_path(target, cwd)

@@ -186,6 +186,7 @@ def _shape_from_content(
     content: str,
     tool_name: str,
     context: ToolContext | None,
+    variant: str | None = None,
 ) -> tuple[str, dict[str, Any], str | None]:
     """Build ``(preview_text, details, spill_handle)`` from full ``content``.
 
@@ -209,6 +210,14 @@ def _shape_from_content(
     body, spill_details = spill_truncate(content, tool_name, context)
     preview = f"{header}\n\n{body}" if body else header
     details = dict(result_like)
+    # A re-fetch of the same URL in the same rendition supersedes this result:
+    # both describe the live state of one resource. Scoped by ``cache_variant``
+    # for the same reason the cache is -- a raw fetch and a rendered fetch of
+    # one URL are different answers, and a byte-capped one is not the full
+    # body, so neither may blank the other.
+    url_for_key = result_like.get("final_url") or result_like.get("url")
+    if isinstance(url_for_key, str) and url_for_key and variant:
+        details["supersede_key"] = f"{url_for_key}\x00{variant}"
     details["lines"] = content.count("\n") + 1 if content else 0
     details["preview_chars"] = len(preview)
     if spill_details is not None:
@@ -382,7 +391,9 @@ async def run_fetch(
         "ok": http_ok,
         "http_error": not http_ok,
     }
-    preview, details, handle = _shape_from_content(result_like, result.content, tool_name, context)
+    preview, details, handle = _shape_from_content(
+        result_like, result.content, tool_name, context, variant=variant
+    )
 
     # Record the cache entry pointing at the spill handle (metadata only). Only
     # 2xx responses are cached (M4): a 4xx/5xx cached for the full TTL would

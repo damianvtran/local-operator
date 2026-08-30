@@ -6,7 +6,6 @@ from local_operator.compaction.pruning import (
     MIN_PRUNE_TOKENS,
     SUPERSEDED_NOTICE,
     USELESS_NOTICE,
-    _supersede_key,
     compute_suffix_tokens,
     prune_tool_outputs,
 )
@@ -287,90 +286,66 @@ def _first_text(message: Message) -> str:
     return next((b.text for b in blocks if isinstance(b, TextContent)), "")
 
 
-def test_re_observing_one_resource_supersedes_the_earlier_view() -> None:
-    """A URL or a browser surface identifies a live resource, like a path.
+def test_a_declared_key_supersedes_re_reads_of_one_resource() -> None:
+    """A tool may declare that its result is a re-read of one thing.
 
-    Only path-carrying reads superseded before this, so an agent that polled
-    one page -- watching a CI build, re-fetching a status endpoint, re-reading
-    a tab after acting on it -- carried every stale copy for the rest of the
-    session. Each of those results describes a page that no longer exists.
+    ``details['supersede_key']`` names the CONTENT, so a later result carrying
+    the same key describes the same resource in a newer state and the older one
+    is dead weight. Polling one endpoint is the common case.
     """
-    page = {"surface_id": "s:1", "url": "https://ci/build/9", "selector": "body"}
-    messages = [Message.user("watch it")] + [_observer(f"c{i}", "browser", page) for i in range(8)]
+    key = "https://api/status\x00rendered"
+    messages = [Message.user("poll")] + [
+        _observer(f"c{i}", "web_fetch", {"url": "https://api/status", "supersede_key": key})
+        for i in range(6)
+    ]
     before = _text_len(messages)
 
     pruned, changed = prune_tool_outputs(messages, now_ms=0, last_activity_ms=0)
 
     assert changed
-    after = _text_len(pruned)
-    assert after < before * 0.3, f"only saved {100 * (1 - after / before):.0f}%"
-    # The newest view must survive intact: it is the only one describing reality.
+    assert _text_len(pruned) < before * 0.35
+    # The newest result must survive intact: it alone describes reality.
     assert "x" * 1200 in _first_text(pruned[-1])
 
-    fetches = [Message.user("poll")] + [
-        _observer(f"f{i}", "web_fetch", {"url": "https://api/status"}) for i in range(6)
-    ]
-    pruned_fetches, changed_fetches = prune_tool_outputs(fetches, now_ms=0, last_activity_ms=0)
-    assert changed_fetches
-    assert _text_len(pruned_fetches) < _text_len(fetches[:1]) + 1200 * 2
 
-
-def test_distinct_observations_are_never_superseded() -> None:
+def test_a_declared_key_never_blanks_a_different_result() -> None:
     """The saving must come from redundancy only, never from real content.
 
-    Different pages, a tab that has navigated elsewhere, a differently-scoped
-    read of the same tab, and bare commands are all genuinely distinct results.
-    Blanking any of them would be data loss dressed up as an optimization.
+    This is the axis that makes inference unsafe and the opt-in necessary. A
+    browser stamps ONE surface handle on every action it performs, so a key
+    inferred from that handle collapses an accessibility snapshot, the console
+    log, a scroll and a click into a single group -- and a 40-character click
+    result then blanks the snapshot and the errors the agent gathered to decide
+    what to click. Only results the tool DECLARES to be the same content may be
+    grouped, and a differing declaration must keep them apart.
     """
-    cases = {
-        "different pages": [
-            _observer(f"p{i}", "browser", {"surface_id": "s:1", "url": f"https://s/{i}"})
-            for i in range(8)
-        ],
-        "same tab, navigated": [
-            _observer("n1", "browser", {"surface_id": "s:1", "url": "https://a"}),
-            _observer("n2", "browser", {"surface_id": "s:1", "url": "https://b"}),
-        ],
-        "same page, different selector": [
-            _observer(
-                "s1", "browser", {"surface_id": "s:1", "url": "https://a", "selector": "article"}
-            ),
-            _observer(
-                "s2", "browser", {"surface_id": "s:1", "url": "https://a", "selector": "footer"}
-            ),
-        ],
-        "bare commands": [_observer(f"b{i}", "bash", {}) for i in range(8)],
-    }
-    for label, messages in cases.items():
-        full = [Message.user("go")] + messages
-        before = _text_len(full)
-        pruned, _changed = prune_tool_outputs(full, now_ms=0, last_activity_ms=0)
-        after = _text_len(pruned)
-        assert after == before, f"{label}: blanked {before - after} chars of distinct content"
-
-
-def test_the_surface_key_cannot_confuse_a_fragment_with_a_selector() -> None:
-    """Distinct reads must never share a key, or blanking loses real content.
-
-    Joining url and selector with a bare separator collides: a read of
-    ``https://a#body`` with no selector and a read of ``https://a`` scoped to
-    selector ``body`` are different results that would produce one key, and the
-    newer would blank the older. Length-prefixing the parts removes the
-    ambiguity for every input, including empty and missing.
-    """
-    fragment = _observer("c1", "browser", {"surface_id": "s:1", "url": "https://a#body"})
-    scoped = _observer(
-        "c2", "browser", {"surface_id": "s:1", "url": "https://a", "selector": "body"}
+    surface = {"surface_id": "s:1", "url": "https://app/form", "title": "Form"}
+    flow = [
+        Message.user("fill the form"),
+        _observer("snapshot", "browser", dict(surface)),
+        _observer("console", "browser", dict(surface)),
+        _observer("scrolled", "browser", dict(surface)),
+        _observer("clicked", "browser", dict(surface), body="y" * 40),
+    ]
+    before = _text_len(flow)
+    pruned, _changed = prune_tool_outputs(flow, now_ms=0, last_activity_ms=0)
+    assert _text_len(pruned) == before, (
+        "a browser surface handle is stamped on every action, so it must not "
+        "group them; blanking here loses the snapshot the click depended on"
     )
-    assert _supersede_key(fragment) != _supersede_key(scoped)
 
-    # And the pass itself must leave both alive.
-    messages = [Message.user("go"), fragment, scoped]
-    before = _text_len(messages)
-    pruned, _changed = prune_tool_outputs(messages, now_ms=0, last_activity_ms=0)
-    assert _text_len(pruned) == before
+    # Renditions of one URL are different answers and must not blank each other.
+    raw = _observer("raw", "web_fetch", {"url": "https://a", "supersede_key": "https://a\x00raw"})
+    rendered = _observer(
+        "rendered", "web_fetch", {"url": "https://a", "supersede_key": "https://a\x00rendered"}
+    )
+    mixed = [Message.user("go"), raw, rendered]
+    before_mixed = _text_len(mixed)
+    pruned_mixed, _ = prune_tool_outputs(mixed, now_ms=0, last_activity_ms=0)
+    assert _text_len(pruned_mixed) == before_mixed
 
-    # Absent and None are the same absence, so they SHOULD share a key.
-    assert _supersede_key(
-        _observer("c3", "browser", {"surface_id": "s:1", "url": None, "selector": "body"})
-    ) == _supersede_key(_observer("c4", "browser", {"surface_id": "s:1", "selector": "body"}))
+    # And results with no declaration at all stay exempt, as before.
+    bare = [Message.user("go")] + [_observer(f"b{i}", "bash", {}) for i in range(8)]
+    before_bare = _text_len(bare)
+    pruned_bare, _ = prune_tool_outputs(bare, now_ms=0, last_activity_ms=0)
+    assert _text_len(pruned_bare) == before_bare
