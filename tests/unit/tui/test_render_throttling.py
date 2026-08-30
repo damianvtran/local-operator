@@ -679,3 +679,57 @@ async def test_a_blur_and_refocus_cycle_keeps_the_keyboard() -> None:
         await pilot.pause()
 
         assert app.screen.focused is focused_before, "refocus lost the keyboard"
+
+
+@pytest.mark.asyncio
+async def test_blurring_the_splash_repaints_it_to_its_resting_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Clearing the pulse/tip STATE is not enough; the screen must be redrawn.
+
+    Both stop methods reset their state so the next frame drawn is the defined
+    resting one — but with the timer stopped there IS no next frame, so the
+    terminal kept rendering whatever the animation was holding when focus went
+    away: a mark frozen mid-swell (a different brightness per window), and a
+    tip row showing an arbitrary entry that then swapped to ``TIPS[0]`` a
+    tenth of a second after refocus. Stale while nobody is looking and moving
+    exactly when someone is, in a change whose whole point is removing motion
+    (design review D1/D2).
+
+    Asserted through ``refresh``, because the defect is invisible in the
+    widget's own attributes — those were already correct.
+    """
+    monkeypatch.delenv("LOCAL_OPERATOR_NO_SHIMMER", raising=False)
+    monkeypatch.setattr("local_operator.tui.shimmer.settings_get", lambda *a, **k: True)
+    app = _running_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(80):
+            await pilot.pause()
+            if app._session is not None:
+                break
+        welcome = app.query_one(WelcomeView)
+        welcome.set_visible(True)
+        welcome._sync_pulse_timer()
+        welcome._sync_tip_timer()
+        await pilot.pause()
+
+        # Put both animations somewhere OTHER than their resting frame, which
+        # is the only state in which the missing repaint is observable.
+        welcome._mark_color = "#a08040"
+        welcome._tip_index = 2
+
+        repaints = 0
+        original = welcome.refresh
+
+        def counting_refresh(*args: Any, **kwargs: Any) -> Any:
+            nonlocal repaints
+            repaints += 1
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(welcome, "refresh", counting_refresh)
+        app._set_animation_focused(False)
+        await pilot.pause()
+
+        assert welcome._mark_color is None
+        assert welcome._tip_index == 0
+        assert repaints >= 1, "the splash never repainted, so the screen kept the stale frame"

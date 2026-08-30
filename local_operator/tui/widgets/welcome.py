@@ -1265,11 +1265,21 @@ class WelcomeView(Static):
         The colour is cleared with the timer so the next frame drawn after a
         stop is the resting one — a hidden view that comes back on ``/clear``
         must not flash the phase it happened to be paused at.
+
+        The repaint is what makes that true rather than merely intended. With
+        the timer stopped nothing else redraws the mark, so clearing the state
+        alone left the SCREEN holding whatever tint the pulse was mid-swell on
+        while the model believed it was at rest — measured at 48% up the
+        pulse's luminance range, and a different brightness per window
+        depending on where each one was when it lost focus (design review D1).
+        Cheap by construction: this runs on a focus change, not on a tick.
         """
         if self._pulse_timer is not None:
             self._pulse_timer.stop()
             self._pulse_timer = None
-        self._mark_color = None
+        if self._mark_color is not None:
+            self._mark_color = None
+            self.refresh()
 
     def _pulse_tick(self) -> None:
         """One glow frame: a colour, and a repaint only when it MOVED.
@@ -1334,12 +1344,23 @@ class WelcomeView(Static):
         The index is cleared with the timer for the reason the pulse clears its
         colour: a still frame must be the DEFINED still frame, not the entry the
         rotation happened to be paused on.
+
+        And, as with the pulse, the repaint is what delivers that. Without it
+        the row kept rendering whichever tip was showing when the timer stopped
+        and then swapped to ``TIPS[0]`` 0.12 s after refocus — stale while
+        nobody is looking, correcting itself exactly when someone is, which is
+        a first-frame-differs-from-settled reflow in prose (design review D2).
+        Doubly wrong in a change whose whole purpose is removing motion the
+        user did not ask for.
         """
         if self._tip_timer is not None:
             self._tip_timer.stop()
             self._tip_timer = None
+        changed = self._tip_index != 0
         self._tip_index = 0
         self._tip_resume = None
+        if changed:
+            self.refresh()
 
     def _tip_tick(self) -> None:
         """The next tip in the ring, and a repaint that cannot move a row.

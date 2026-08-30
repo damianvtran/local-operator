@@ -2585,8 +2585,18 @@ class SubagentView(Vertical):
     def _spinner_interval(self) -> float:
         # Motion, not colour, is how this app says "alive", at the cadence the
         # band and the status line already use: two speeds on one screen read
-        # as two different states. On a BLURRED terminal all of them slow to
-        # the same reduced cadence together, so that property still holds.
+        # as two different states. On a BLURRED terminal the three SPINNERS
+        # (this page, the dock and the band) step together at the reduced rate,
+        # so they still agree with each other.
+        #
+        # The working line is the deliberate exception and this comment used to
+        # overclaim by omitting it: it falls to its pre-existing static mode,
+        # where the glyph FREEZES and only the clock moves (design review D3).
+        # That is the shimmer-off frame this app already ships and already
+        # treats as legible, and a blurred screen therefore shows a still
+        # working line beside two stepping spinners. Left as-is rather than
+        # unified, because the alternative is inventing a fourth animation
+        # state for a window nobody is looking at.
         return SPINNER_INTERVAL_S if animation_focused() else BLURRED_SPINNER_INTERVAL_S
 
     def _start_spinner(self) -> None:
