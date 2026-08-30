@@ -20,7 +20,11 @@ import json
 import os
 import signal
 import subprocess
+import sys
+import threading
 import time
+
+import pytest
 
 from local_operator.tools import group_reaper
 from local_operator.tools.group_reaper import (
@@ -790,3 +794,89 @@ def test_ledger_lock_degrades_when_unavailable(tmp_path, monkeypatch):
     path = group_reaper._ledger_path(tmp_path, pid, token)
     pgids = {json.loads(x)["pgid"] for x in path.read_text().splitlines()}
     assert pgids == {55}  # compaction still happened without the lock
+
+
+# --------------------------------------------------------------------------- #
+# The ledger lock must never park the caller (regression: /reload freeze)
+# --------------------------------------------------------------------------- #
+def _hold_ledger_lock(config_dir, owner_pid):
+    """Hold this owner's ledger lock EXCLUSIVELY from another process.
+
+    Another process, not another thread, because that is the real failure: a
+    husk leaked by a SIGKILLed peer (or a sibling mid-compaction) holds the
+    flock with nobody left to release it. A same-process holder would prove
+    nothing, since flock is per open-file-description and the reaper's own fd
+    would be granted the lock immediately.
+
+    Returns (Popen, lock_path); the caller must kill the holder.
+    """
+    token = group_reaper._self_start_token(owner_pid)
+    assert token is not None
+    lock_path = group_reaper._lock_path(group_reaper._ledger_path(config_dir, owner_pid, token))
+    lock_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    holder = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import fcntl, os, sys, time\n"
+            "fd = os.open(sys.argv[1], os.O_CREAT | os.O_RDWR, 0o600)\n"
+            "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+            "print('held', flush=True)\n"
+            "time.sleep(300)\n",
+            str(lock_path),
+        ],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    assert holder.stdout is not None
+    assert holder.stdout.readline().strip() == "held"
+    return holder, lock_path
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX flock only")
+def test_ledger_lock_never_blocks_when_held_by_another_process(tmp_path):
+    """Every ledger-touching entry point returns promptly against a held lock.
+
+    This is the #401 bug shape in the reaper: the acquire used to be a bare
+    blocking ``flock``, so a lock held by anyone else parked the caller forever.
+    On ``/reload`` that lands in ``kill_own_groups()`` AFTER the TUI restored the
+    terminal, and on macOS a thread parked in ``flock(fd)`` also blocks the event
+    loop's ``os.close(fd)`` — the user gets a shell prompt, a live process that
+    never exits, and a Ctrl+C that only echoes.
+
+    NOTE the failure mode this test is built for: pre-fix it does not fail an
+    assertion, it HANGS. The bound below is therefore a real timeout, not a
+    performance assertion — each call runs on a daemon thread that the test
+    abandons rather than joins, so a regression surfaces as a failed
+    ``done.wait`` (and, under a wedged interpreter, as the suite's own timeout)
+    instead of deadlocking the runner.
+    """
+    pid = os.getpid()
+    register_group(101, "before", config_dir=tmp_path, owner_pid=pid)
+    holder, _ = _hold_ledger_lock(tmp_path, pid)
+    try:
+        for label, call in (
+            (
+                "register_group",
+                lambda: register_group(202, "x", config_dir=tmp_path, owner_pid=pid),
+            ),
+            ("unregister_group", lambda: unregister_group(101, config_dir=tmp_path, owner_pid=pid)),
+            ("kill_own_groups", lambda: kill_own_groups(config_dir=tmp_path, owner_pid=pid)),
+        ):
+            done = threading.Event()
+
+            def run(call=call, done=done):
+                call()
+                done.set()
+
+            # Daemon so a regression cannot keep the interpreter alive at exit.
+            threading.Thread(target=run, daemon=True).start()
+            started = time.monotonic()
+            assert done.wait(timeout=5.0), f"{label} parked on the contended ledger lock"
+            elapsed = time.monotonic() - started
+            # Generous vs the 0.3s bound (CI schedulers are noisy) but far below
+            # the 5s hang threshold: this asserts BOUNDED, not fast.
+            assert elapsed < 3.0, f"{label} took {elapsed:.1f}s against a held lock"
+    finally:
+        holder.kill()
+        holder.wait(timeout=5)

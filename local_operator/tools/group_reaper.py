@@ -67,6 +67,7 @@ import logging
 import os
 import subprocess
 import sys
+import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -96,6 +97,26 @@ _REAPING_IS_SUPPORTED = _PLATFORM != "win32"
 #: First N chars of the command, stored for the LOG LINE only. Never a decision
 #: input. Bounded so a pathological one-line command cannot bloat the ledger.
 _CMD_LOG_CHARS = 120
+
+#: Hard bound on how long a ledger-lock acquire may retry before degrading to
+#: running unlocked. Deliberately SHORT: this is a best-effort hygiene lock on
+#: the teardown path, not a correctness-critical one (losing it costs at worst
+#: the pre-existing lost-append, never a wrong kill — see ``_ledger_lock``), and
+#: the contended case is a leaked husk from a SIGKILLed peer that will never
+#: release. A generous timeout here would not fix anything, it would only move
+#: the freeze: ``/reload`` runs ``kill_own_groups()`` AFTER the TUI has restored
+#: the terminal, so every second spent waiting is a second the user stares at a
+#: dead shell prompt. Contention is rare and momentary in the honest case (a
+#: sibling append mid-compaction, microseconds), so a few hundred ms buys the
+#: entire realistic win.
+_LOCK_ACQUIRE_TIMEOUT_S = 0.3
+
+#: Retry cadence for the non-blocking acquire, with the same gentle geometric
+#: backoff as the MCP OAuth refresh lock: fast pickup for the common
+#: released-in-a-moment case, then fewer wakeups once the holder is evidently
+#: not finishing within our bound.
+_LOCK_RETRY_SLEEP_S = 0.01
+_LOCK_RETRY_SLEEP_MAX_S = 0.05
 
 
 @dataclass(frozen=True)
@@ -351,6 +372,68 @@ def unregister_group(
     _rewrite_without_pgid(path, pgid)
 
 
+def _try_lock_ledger(fd: int, *, exclusive: bool) -> bool:
+    """ONE non-blocking attempt at the ledger lock. True when taken.
+
+    Mirrors :func:`local_operator.mcp.auth._try_lock_exclusive` — the same idiom
+    for the same reason — but keeps this module's readers/writer distinction:
+    ``exclusive`` selects ``LOCK_EX`` for a compacting rewrite and ``LOCK_SH``
+    for an append, so concurrent appends still proceed together.
+
+    Non-blocking is REQUIRED here, not a style choice. ``LOCK_NB`` is what keeps
+    the caller off the kernel wait queue, and on macOS/BSD a thread parked in
+    ``flock(fd)`` blocks any other thread's ``os.close(fd)`` until that
+    ``flock()`` returns — which, against a lock leaked by a SIGKILLed peer, is
+    never. Reached from ``kill_own_groups()`` on the ``/reload`` teardown path
+    that runs after the terminal is restored, a parked acquire wedges the event
+    loop with no TUI left to show it and no SIGINT able to break it (the soft
+    death handler deliberately spares SIGINT, and the main thread is inside a C
+    syscall where no Python handler can run). This is the same bug shape as #401
+    in the MCP OAuth refresh lock. Retrying a non-blocking attempt is strictly
+    weaker than blocking and is the only shape that cannot hang, so do NOT
+    "simplify" this back into ``fcntl.flock(fd, fcntl.LOCK_EX)``.
+
+    Contention is the expected outcome and returns False, letting the caller
+    degrade to running unlocked. Anything else is a real fault that retrying
+    cannot fix, so it is raised for the caller's existing degrade path.
+    """
+    import errno
+    import fcntl
+
+    mode = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+    try:
+        fcntl.flock(fd, mode | fcntl.LOCK_NB)
+        return True
+    except OSError as lock_err:
+        if lock_err.errno in (errno.EAGAIN, errno.EACCES, errno.EWOULDBLOCK):
+            return False
+        raise
+
+
+def _acquire_ledger_lock(fd: int, *, exclusive: bool) -> bool:
+    """Retry the non-blocking acquire to ``_LOCK_ACQUIRE_TIMEOUT_S``. Worker-safe.
+
+    Returns True with the lock held, or False when the bound elapsed under
+    contention — the caller then runs unlocked, which is the documented degrade
+    (see :func:`_ledger_lock`). A real fault propagates as ``OSError`` into the
+    caller's existing degrade path; retrying could not fix it.
+
+    Every attempt is non-blocking, so this function can be abandoned by nothing
+    worse than the bound: unlike a blocking acquire it never parks a thread in
+    the kernel, and therefore never makes a sibling's ``os.close()`` of this fd
+    hang on macOS.
+    """
+    deadline = time.monotonic() + _LOCK_ACQUIRE_TIMEOUT_S
+    sleep_s = _LOCK_RETRY_SLEEP_S
+    while True:
+        if _try_lock_ledger(fd, exclusive=exclusive):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(sleep_s)
+        sleep_s = min(sleep_s * 1.5, _LOCK_RETRY_SLEEP_MAX_S)
+
+
 @contextlib.contextmanager
 def _ledger_lock(path: Path, *, exclusive: bool) -> Iterator[None]:
     """Advisory ``flock`` serialising ledger COMPACTION against APPENDS.
@@ -370,20 +453,45 @@ def _ledger_lock(path: Path, *, exclusive: bool) -> Iterator[None]:
     in flight while it truncates and rewrites.
 
     Best-effort: if the lock itself cannot be taken (permissions, an exotic FS
-    without ``flock``) we DEGRADE to running unlocked rather than block or fail a
-    command — the worst case is the pre-existing lost-append behaviour, never a
-    wrong kill. POSIX only; reached solely after the ``_REAPING_IS_SUPPORTED``
-    guard, so ``fcntl`` (absent on Windows) is imported lazily here.
+    without ``flock``, or simply CONTENTION) we DEGRADE to running unlocked
+    rather than block or fail a command — the worst case is the pre-existing
+    lost-append behaviour, never a wrong kill. POSIX only; reached solely after
+    the ``_REAPING_IS_SUPPORTED`` guard, so ``fcntl`` (absent on Windows) is
+    imported lazily here.
+
+    The acquire is BOUNDED and NON-BLOCKING, which is what makes that promise
+    true rather than aspirational. It once was not: a bare blocking ``flock``
+    here honoured the docstring only when the lock happened to be free, and a
+    husk leaked by a SIGKILLed peer froze the whole process on ``/reload``.
+    :func:`_try_lock_ledger` carries the full reasoning, including why macOS
+    turns a parked acquire into a dead event loop. Do not reintroduce a blocking
+    acquire, and do not stretch ``_LOCK_ACQUIRE_TIMEOUT_S`` into a long wait —
+    that only relocates the hang.
+
+    The fd is opened, retried on, and closed all on the CALLING thread, so no
+    other thread can ever close a descriptor this one is inside a lock call on
+    (the fd-ownership rule from ``auth._acquire_locked_fd``). Here that holds by
+    construction: the acquire never blocks, so the descriptor is never left with
+    an outstanding lock syscall on it.
     """
     fd: int | None = None
     try:
         try:
-            import fcntl
-
             path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             lock_path = _lock_path(path)
             fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
-            fcntl.flock(fd, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+            if not _acquire_ledger_lock(fd, exclusive=exclusive):
+                # Contended past the bound: run unlocked. Debug, not warning —
+                # this is a tolerated outcome on a best-effort hygiene lock, and
+                # the teardown path must stay silent on a restored terminal.
+                logger.debug(
+                    "group reaper: ledger lock contended for %s after %.2fs; proceeding unlocked",
+                    path,
+                    _LOCK_ACQUIRE_TIMEOUT_S,
+                )
+                with contextlib.suppress(OSError):
+                    os.close(fd)
+                fd = None
         except (OSError, ImportError) as exc:
             # Degrade to unlocked: never block or break a command over the lock.
             logger.debug("group reaper: ledger lock unavailable for %s: %s", path, exc)
