@@ -11,7 +11,7 @@ from pathlib import Path
 from types import MappingProxyType
 
 import pytest
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
 from local_operator.evaluation.protocol import (
     MAX_BATCH_SIZE,
@@ -32,6 +32,7 @@ from local_operator.evaluation.protocol import (
     Observation,
     ObservationEnvelope,
     PixelPoint,
+    ProtocolEnvelope,
     ScrollAction,
     TypeAction,
     WaitAction,
@@ -280,7 +281,42 @@ def test_frozen_mapping_has_only_immutable_backing_and_is_hashable() -> None:
     before = observation.to_canonical_json()
     with pytest.raises(TypeError):
         observation.metadata["nested"]["ready"] = False  # type: ignore[index]
+    with pytest.raises(AttributeError):
+        del left._items
+    with pytest.raises(AttributeError):
+        del observation.metadata._items  # type: ignore[attr-defined]
+    assert hash(observation)
     assert observation.to_canonical_json() == before
+
+
+def test_frozen_mapping_equality_preserves_recursive_json_scalar_types() -> None:
+    pairs = [
+        (FrozenMapping({"value": True}), FrozenMapping({"value": 1})),
+        (FrozenMapping({"value": False}), FrozenMapping({"value": 0})),
+        (FrozenMapping({"value": [True]}), FrozenMapping({"value": [1]})),
+        (
+            FrozenMapping({"value": {"nested": False}}),
+            FrozenMapping({"value": {"nested": 0}}),
+        ),
+    ]
+    for boolean_map, integer_map in pairs:
+        assert boolean_map != integer_map
+        assert boolean_map != dict(integer_map)
+        assert len({boolean_map, integer_map}) == 2
+        assert {boolean_map: "bool", integer_map: "int"}[boolean_map] == "bool"
+    left = FrozenMapping({"value": [True, {"count": 1}]})
+    right = FrozenMapping({"value": (True, FrozenMapping({"count": 1}))})
+    assert left == right
+    assert hash(left) == hash(right)
+
+
+def test_protocol_model_equality_tracks_type_distinct_canonical_metadata() -> None:
+    boolean = Observation.model_validate(
+        {**_observation().model_dump(), "metadata": {"value": True}}
+    )
+    integer = Observation.model_validate({**_observation().model_dump(), "metadata": {"value": 1}})
+    assert boolean.to_canonical_json() != integer.to_canonical_json()
+    assert boolean != integer
 
 
 def test_metadata_survives_copy_deepcopy_pickle_and_validated_model_updates() -> None:
@@ -315,10 +351,19 @@ def test_metadata_accepts_mapping_and_tuple_inputs_but_rejects_invalid_mapping_k
     observation = Observation.model_validate(
         {
             **_observation().model_dump(),
-            "metadata": MappingProxyType({"items": (1, FrozenMapping({"safe": True}))}),
+            "metadata": MappingProxyType(
+                {
+                    "items": [
+                        1,
+                        (MappingProxyType({"deep": [FrozenMapping({"safe": True})]}),),
+                    ]
+                }
+            ),
         }
     )
-    assert observation.model_dump(mode="json")["metadata"] == {"items": [1, {"safe": True}]}
+    assert observation.model_dump(mode="json")["metadata"] == {
+        "items": [1, [{"deep": [{"safe": True}]}]]
+    }
     for metadata in (
         MappingProxyType({1: "bad"}),
         MappingProxyType({"bad key": "bad"}),
@@ -576,23 +621,35 @@ def test_canonical_observation_fixture_is_stable_and_requires_exact_encoding() -
             parse_envelope(noncanonical)
 
 
-def test_metadata_schema_matches_portable_recursive_runtime_subset() -> None:
-    schema = Observation.model_json_schema()
-    metadata = schema["properties"]["metadata"]
-    assert metadata["propertyNames"]["pattern"] == r"^[A-Za-z0-9_.:-]{1,256}$"
-    assert "depth 16" in metadata["description"]
-    assert "64000 bytes" in metadata["description"]
-    value = schema["$defs"]["PortableMetadataValue"]
+@pytest.mark.parametrize(
+    "schema",
+    [
+        Observation.model_json_schema(),
+        ObservationEnvelope.model_json_schema(),
+        TypeAdapter(ProtocolEnvelope).json_schema(),
+    ],
+)
+def test_metadata_schema_matches_portable_recursive_runtime_subset(
+    schema: dict[str, object],
+) -> None:
+    defs = schema["$defs"]  # type: ignore[index]
+    metadata_object = defs["PortableMetadataObject"]  # type: ignore[index]
+    assert metadata_object["propertyNames"]["pattern"] == r"^[A-Za-z0-9_.:-]{1,256}$"
+    assert "maximum depth 16" in metadata_object["description"]
+    assert "64000 bytes" in metadata_object["description"]
+    value = defs["PortableMetadataValue"]  # type: ignore[index]
     branches = value["anyOf"]
     assert not any(branch.get("type") == "number" for branch in branches)
+    assert not any(branch.get("additionalProperties") is True for branch in branches)
     integer = next(branch for branch in branches if branch.get("type") == "integer")
     assert integer == {
         "type": "integer",
         "minimum": -MAX_SAFE_JSON_INTEGER,
         "maximum": MAX_SAFE_JSON_INTEGER,
     }
-    object_branch = next(branch for branch in branches if branch.get("type") == "object")
-    assert object_branch["propertyNames"] == {"pattern": r"^[A-Za-z0-9_.:-]{1,256}$"}
+    array = next(branch for branch in branches if branch.get("type") == "array")
+    assert array["items"] == {"$ref": "#/$defs/PortableMetadataValue"}
+    assert {"$ref": "#/$defs/PortableMetadataObject"} in branches
 
 
 def test_metadata_keys_are_portable_ascii_and_values_remain_unicode() -> None:

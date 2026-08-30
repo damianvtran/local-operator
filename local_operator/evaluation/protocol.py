@@ -33,6 +33,7 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+from typing_extensions import TypeAliasType
 
 PROTOCOL_VERSION = "1.0"
 MAX_IDENTIFIER_LENGTH = 256
@@ -54,6 +55,33 @@ Identifier = Annotated[
 Coordinate = Annotated[int, Field(ge=0, le=MAX_COORDINATE)]
 MouseButton = Literal["left", "middle", "right"]
 _METADATA_KEY_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,256}$")
+_METADATA_DESCRIPTION = (
+    f"Portable metadata; runtime maximum depth {MAX_METADATA_DEPTH} and canonical size "
+    f"{MAX_METADATA_BYTES} bytes."
+)
+_SafeMetadataInteger = Annotated[
+    int,
+    Field(ge=-MAX_SAFE_JSON_INTEGER, le=MAX_SAFE_JSON_INTEGER),
+]
+PortableMetadataObject = TypeAliasType(
+    "PortableMetadataObject",
+    Annotated[
+        dict[str, "PortableMetadataValue"],
+        Field(
+            description=_METADATA_DESCRIPTION,
+            json_schema_extra={"propertyNames": {"pattern": r"^[A-Za-z0-9_.:-]{1,256}$"}},
+        ),
+    ],
+)
+PortableMetadataValue = TypeAliasType(
+    "PortableMetadataValue",
+    str
+    | bool
+    | None
+    | _SafeMetadataInteger
+    | list["PortableMetadataValue"]  # pyright: ignore[reportInvalidTypeForm]
+    | PortableMetadataObject,
+)
 
 
 class FrozenMapping(Mapping[str, JsonValue]):
@@ -78,6 +106,9 @@ class FrozenMapping(Mapping[str, JsonValue]):
     def __setattr__(self, name: str, value: object) -> None:
         raise AttributeError(f"{type(self).__name__} is immutable")
 
+    def __delattr__(self, name: str) -> None:
+        raise AttributeError(f"{type(self).__name__} is immutable")
+
     def __getitem__(self, key: str) -> JsonValue:
         for candidate, value in self._items:
             if candidate == key:
@@ -96,10 +127,13 @@ class FrozenMapping(Mapping[str, JsonValue]):
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, Mapping):
             return NotImplemented
-        return _thaw_json(self) == _thaw_json(other)
+        try:
+            return _typed_json_key(self) == _typed_json_key(other)
+        except (TypeError, ValueError):
+            return False
 
     def __hash__(self) -> int:
-        return hash(self._items)
+        return hash(_typed_json_key(self))
 
     def __deepcopy__(self, memo: dict[int, Any]) -> "FrozenMapping":
         # Every reachable value is immutable, so identity is a valid deep copy.
@@ -242,18 +276,7 @@ class Observation(ProtocolModel):
     observation_id: Identifier
     text: str | None = Field(default=None, min_length=1, max_length=MAX_TEXT_LENGTH, pattern=r"\S")
     frames: tuple[FrameRef, ...] = Field(default=(), max_length=32)
-    metadata: Mapping[str, JsonValue] = Field(
-        default_factory=dict,
-        validate_default=True,
-        description=(
-            "Portable metadata: recursively strings, booleans, null, safe integers, arrays, "
-            f"and ASCII-keyed objects; maximum depth {MAX_METADATA_DEPTH} and canonical size "
-            f"{MAX_METADATA_BYTES} bytes."
-        ),
-        json_schema_extra={
-            "propertyNames": {"pattern": r"^[A-Za-z0-9_.:-]{1,256}$"},
-        },
-    )
+    metadata: PortableMetadataObject = Field(default_factory=dict, validate_default=True)
 
     @field_validator("frames", mode="before")
     @classmethod
@@ -282,16 +305,6 @@ class Observation(ProtocolModel):
         if len(canonical) > MAX_METADATA_BYTES:
             raise ValueError(f"metadata exceeds {MAX_METADATA_BYTES} canonical bytes")
         return frozen
-
-    @classmethod
-    def model_json_schema(cls, *args: Any, **kwargs: Any) -> dict[str, Any]:
-        schema = super().model_json_schema(*args, **kwargs)
-        portable = _portable_metadata_schema()
-        schema.setdefault("$defs", {})["PortableMetadataValue"] = portable
-        schema["properties"]["metadata"]["additionalProperties"] = {
-            "$ref": "#/$defs/PortableMetadataValue"
-        }
-        return schema
 
     @field_serializer("metadata")
     def _serialize_metadata(self, metadata: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
@@ -625,35 +638,29 @@ def _freeze_json(value: Any) -> Any:
 def _thaw_json(value: Any) -> JsonValue:
     if isinstance(value, Mapping):
         return {key: _thaw_json(item) for key, item in value.items()}
-    if isinstance(value, tuple):
+    if isinstance(value, (list, tuple)):
         return [_thaw_json(item) for item in value]
     return value
 
 
-def _portable_metadata_schema() -> dict[str, Any]:
-    value_ref = {"$ref": "#/$defs/PortableMetadataValue"}
-    return {
-        "description": (
-            f"Recursive portable metadata value; runtime limits depth to {MAX_METADATA_DEPTH} "
-            f"and canonical metadata to {MAX_METADATA_BYTES} bytes."
-        ),
-        "anyOf": [
-            {"type": "string"},
-            {"type": "boolean"},
-            {"type": "null"},
-            {
-                "type": "integer",
-                "minimum": -MAX_SAFE_JSON_INTEGER,
-                "maximum": MAX_SAFE_JSON_INTEGER,
-            },
-            {"type": "array", "items": value_ref},
-            {
-                "type": "object",
-                "propertyNames": {"pattern": r"^[A-Za-z0-9_.:-]{1,256}$"},
-                "additionalProperties": value_ref,
-            },
-        ],
-    }
+def _typed_json_key(value: Any) -> tuple[Any, ...]:
+    """Return a hash/equality key that preserves JSON scalar type identity."""
+    if value is None:
+        return ("null",)
+    if isinstance(value, bool):
+        return ("boolean", value)
+    if isinstance(value, int):
+        return ("integer", value)
+    if isinstance(value, str):
+        return ("string", value)
+    if isinstance(value, Mapping):
+        return (
+            "object",
+            tuple((key, _typed_json_key(item)) for key, item in sorted(value.items())),
+        )
+    if isinstance(value, (list, tuple)):
+        return ("array", tuple(_typed_json_key(item) for item in value))
+    raise TypeError(f"unsupported JSON value type: {type(value).__name__}")
 
 
 def _canonical_json_value(value: JsonValue) -> bytes:
