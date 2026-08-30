@@ -573,7 +573,7 @@ class TestCliHelpers:
         self, tmp_path: Path, home: Path
     ) -> None:
         """The gate behind ``/mcp remove``'s refusal. ``load_all_mcp_configs``
-        merges seven sources but ``_scope_path`` writes exactly two, so every
+        merges eight sources but ``_scope_path`` writes exactly two, so every
         other source must come back unowned — deleting from one would either
         fail or shadow a config the user still maintains in another tool."""
         cwd = tmp_path / "owned-proj"
