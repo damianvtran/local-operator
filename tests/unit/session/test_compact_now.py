@@ -752,3 +752,67 @@ async def test_a_snapcompact_receipt_never_reports_growth(tmp_path):
         )
         assert "context compacted" in rendered
         await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_snapcompact_pass_that_shrinks_takes_the_proportional_arm(tmp_path):
+    """The ratio arm, on snapcompact, exercised rather than merely reachable.
+
+    ``test_the_snapcompact_frame_correction_is_priced_once`` branches at
+    runtime on ``history_after < history_before``, and its fixture is small
+    enough that only the ``else`` (fallback) arm ever runs — so the
+    proportional-plus-correction arm, which ALL TEN real passes of the measured
+    session take, was asserted only by a dormant ``if`` (agent review round 3,
+    minor-3).
+
+    The bulk has to be on the ASSISTANT side. User turns are preserved
+    verbatim across a pass, so a fixture whose weight is in its prompts leaves
+    nothing summarizable and lands at ``history_after == history_before - 1``
+    — which satisfies a naive shrink assertion while exercising no ratio at
+    all. With assistant-side bulk this compacts 0.27x, the same shape as the
+    real passes (1.8x-8.8x), and the result lands well below the clamp so the
+    ratio is what decides it.
+    """
+    from local_operator.compaction.snapcompact import frame_token_estimate_for
+    from local_operator.compaction.tokens import estimate_messages_tokens
+    from local_operator.harness.types import Usage
+    from local_operator.session.session import IMAGE_TOKEN_ESTIMATE
+
+    stream = ScriptedStream(["assistant reply " * 1200] * 60)
+    session = make_session(tmp_path, stream, model=VISION_MODEL)
+    for index in range(30):
+        await session.prompt(f"question {index}")
+    session._last_usage = Usage(input_tokens=1, context_tokens=600_080)
+
+    plan = await session._plan_compaction(respect_threshold=False)
+    assert isinstance(plan, _CompactionPlan)
+    history_before = plan.tokens_before
+
+    outcome = await session._run_compaction(plan, reason="manual")
+    assert outcome.strategy == "snapcompact"
+
+    history_after = estimate_messages_tokens(session._render_for_compaction())
+    # The whole point of this fixture: if it stops shrinking, the test has
+    # silently gone back to covering the fallback and must be resized.
+    assert history_after < history_before, (
+        f"fixture no longer reaches the proportional arm "
+        f"({history_before:,} -> {history_after:,}); resize it rather than "
+        "deleting this assertion"
+    )
+
+    entries = [e for e in session._transcript.entries() if e.type == "compaction"]
+    frames = entries[-1].payload["preserve_data"]["snapcompact"].get("frames") or []
+    per_frame = frame_token_estimate_for(session._model.provider, session._model.model_id)
+    correction = len(frames) * (per_frame - IMAGE_TOKEN_ESTIMATE)
+
+    # The ratio runs on the UNCORRECTED local figures, the correction is added
+    # once afterwards, and the whole result is clamped.
+    scaled = max(history_after, round(600_080 * history_after / history_before))
+    assert outcome.tokens_after == min(600_080, scaled + correction)
+    assert outcome.tokens_after <= outcome.tokens_before
+    # The clamp must NOT be what decides this case, or the ratio arm is
+    # unobservable and a regression in it would pass unnoticed.
+    assert scaled + correction < 600_080, (
+        "the clamp is masking the ratio: this fixture no longer tests the " "proportional arm"
+    )
+    await session.dispose()

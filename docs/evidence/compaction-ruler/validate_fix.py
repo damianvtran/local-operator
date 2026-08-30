@@ -7,8 +7,28 @@ truth: the provider's OWN next-reported ``context_tokens`` after the pass.
 
   current  = max(la, provB - max(0, lb - la))     # subtracts a local saving
                                                   # from a provider total
-  proposed = max(la, round(provB * la / lb))      # scales the provider total
-                                                  # by the local shrink ratio
+  shipped  = the arithmetic in ``Session._run_compaction``, mirrored exactly
+
+The ``shipped`` column models the WHOLE of that arithmetic, not just the
+ratio, because the parts interact:
+
+  * the frame correction is added AFTER the division, never folded into the
+    numerator. It is a PROVIDER-scale addend and the ratio's soundness rests
+    on numerator and denominator being on one LOCAL ruler; folding it in
+    inflates the ratio and then multiplies the addend by the provider total a
+    second time (agent review round 1, major-2). An earlier revision of THIS
+    script did exactly that, and so measured a formula the codebase does not
+    ship (round 3, minor-2);
+  * the ratio applies only when ``la < lb``. Snapcompact can leave the local
+    estimate larger than it found it, and a ratio above 1 multiplied against a
+    provider total reports a compaction that grew the context (round 2,
+    blocker-1);
+  * the result is clamped to ``provB``, the upper bound the subtraction form
+    had for free and a product does not.
+
+Keep this function in step with ``Session._run_compaction``. A divergence here
+does not break a test; it silently republishes an accuracy figure for a
+formula nobody runs.
 
 Run with ``LO_REPO=<repo-root>`` if the checkout is not at ~/local-operator.
 The transcript is opened read-only and never written.
@@ -52,11 +72,11 @@ def ctx(entry):
 comp = [i for i, e in enumerate(objs) if e.get("type") == "compaction"]
 print(
     f"{'pass':>6} {'provB':>7} {'REAL_after':>10} | {'current':>8} {'err':>8} "
-    f"| {'proposed':>8} {'err':>7}"
+    f"| {'shipped':>8} {'err':>7}"
 )
 
 current_errors = []
-proposed_errors = []
+shipped_errors = []
 for ci in comp:
     # The provider figure the pass acted on, and the one it reported next.
     pb = next((ctx(objs[j]) for j in range(ci - 1, -1, -1) if ctx(objs[j])), None)
@@ -68,17 +88,27 @@ for ci in comp:
     archive = objs[ci]["payload"]["preserve_data"]["snapcompact"]
     frames = len(archive.get("frames") or [])
     per_frame = 5000 if "1932" in archive.get("shape_id", "") else 3293
-    la += frames * (per_frame - IMAGE_TOKEN_ESTIMATE)
+    correction = frames * (per_frame - IMAGE_TOKEN_ESTIMATE)
 
-    current = max(la, pb - max(0, lb - la))
-    proposed = max(la, round(pb * (la / lb)) if lb > 0 else la)
+    # The pre-PR form, which folds the correction into the after-figure and
+    # subtracts a LOCAL saving from a PROVIDER total.
+    current = max(la + correction, pb - max(0, lb - (la + correction)))
+
+    # The shipped form: ratio on the UNCORRECTED local figures, correction
+    # added afterwards, whole result clamped to the figure it reduces from.
+    if lb > 0 and la < lb:
+        shipped = max(la, round(pb * la / lb))
+    else:
+        shipped = pb
+    shipped = min(pb, shipped + correction)
+
     current_errors.append(abs(current - pa))
-    proposed_errors.append(abs(proposed - pa))
+    shipped_errors.append(abs(shipped - pa))
     print(
         f"{ci:>6} {pb:>7} {pa:>10} | {current:>8} {current - pa:>+8} "
-        f"| {proposed:>8} {proposed - pa:>+7}"
+        f"| {shipped:>8} {shipped - pa:>+7}"
     )
 
 mae_current = sum(current_errors) / len(current_errors)
-mae_proposed = sum(proposed_errors) / len(proposed_errors)
-print(f"\nmean abs error  current={mae_current:>9,.0f}   proposed={mae_proposed:>9,.0f}")
+mae_shipped = sum(shipped_errors) / len(shipped_errors)
+print(f"\nmean abs error  pre-PR={mae_current:>9,.0f}   shipped={mae_shipped:>9,.0f}")

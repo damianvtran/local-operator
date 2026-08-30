@@ -86,14 +86,23 @@ provider figure by the ratio the history actually shrank keeps both ends on
 the provider's ruler and needs neither ruler's constants:
 
 ```
-  pass   provB REAL_after |  current      err | proposed     err
-  9954  546458     311220 |   418953  +107733 |   327409  +16189
-mean abs error  current=  139,406   proposed=   14,616
+  pass   provB REAL_after |  current      err |  shipped     err
+  9954  546458     311220 |   418953  +107733 |   315387   +4167
+mean abs error  pre-PR=  139,406   shipped=    9,682
 ```
 
 Pass 9954 is the screenshot the operator reported: `546.5k → 419.0k
 (23% smaller)` for a pass whose true after-figure was 311.2k, a ~43%
-reduction. MAE across all ten passes falls **139,406 → 14,616**.
+reduction. MAE across all ten passes falls **139,406 → 9,682**, a 14.4x
+improvement.
+
+The `shipped` column models the WHOLE of `Session._run_compaction`'s
+arithmetic, not just the ratio: the frame correction is added after the
+division, the ratio is skipped when the pass did not shrink local history, and
+the result is clamped to the provider figure. An earlier revision of this
+script folded the correction into the numerator — the ordering round 1
+rejected — and so advertised 14,616 for a formula the codebase does not ship
+(round 3, minor-2). The real one is a third better.
 
 A tuned-slope variant (`provB - slope * (lb - la)`) was measured and is
 strictly worse even at its best value (19,512 at slope 1.75) while carrying a
@@ -183,7 +192,9 @@ follows the receipt down, which is the same figure rendered in a second place.
 ## 4. The receipt never reports growth, and the fallback is rare
 
 The proportional form assumed `history_after <= history_before`. That holds on
-the text-model passes above but **not** on snapcompact, which replaces history
+every pass in this session (all ten are snapcompact, each carrying a
+`preserve_data.snapcompact` payload with 8 frames) but **not** in general: a
+snapcompact pass replaces history
 with verbatim edges plus archive text plus images the local ruler prices at a
 flat `IMAGE_TOKEN_ESTIMATE`: the saving is real on the provider ruler while the
 local estimate of the replacement can be larger. The ratio then exceeded 1,

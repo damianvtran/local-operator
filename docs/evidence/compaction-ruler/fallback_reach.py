@@ -12,11 +12,27 @@ this PR is built on and reports which branch each would take.
 
 The mechanism the fixtures mistook for a model property: a snapcompact archive
 carries a FIXED overhead -- verbatim plain-text edges sized by frame shape
-(``HQ_EDGE_FRAMES``), not by how much history was removed. Against a
-near-threshold toy history of 18k-56k tokens that fixed cost outweighs what the
-pass took away, so the local estimate grows. Against a real pass firing at
-300-600k it is a small fraction. The fallback is therefore a property of
-unusually SMALL histories, not of vision models.
+(``HQ_EDGE_FRAMES``), not by how much history was removed. About 20,900 tokens
+at the shipped Anthropic shape.
+
+Measured directly, that overhead is what the branch turns on. Driving real
+passes over synthetic histories, ``history_after - history_before`` sits at a
+flat **+21.5k across 24k to 420k of history** -- the edge budget, near enough
+exactly -- and only goes negative once the summarized middle exceeds it:
+
+    hb=  24,040  ha=  27,050   +3,010
+    hb=  60,100  ha=  81,652  +21,552
+    hb= 240,400  ha= 261,893  +21,493
+    hb= 420,700  ha= 442,133  +21,433
+    hb= 622,373  ha= 622,369      -4   <- crosses to proportional
+
+So the branch is decided by "did this pass summarize away more than the edge
+cost", which depends on how much of the history is SUMMARIZABLE and not on
+history size alone. That is why the crossover lands at different sizes in
+different fixtures, and it is why no single token figure is quoted here as
+"the" threshold. Real passes clear it comfortably: all ten below shrink 1.8x
+to 8.8x. The fallback is a property of passes with little to remove relative
+to a fixed archive cost, not of vision models.
 
 Run with ``LO_REPO=<repo-root>``; reads the transcript read-only.
 """

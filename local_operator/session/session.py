@@ -6273,7 +6273,10 @@ class Session:
             # no per-provider slope is stored, so a model whose tokenizer
             # differs tomorrow needs no change here. Measured over all 10 passes
             # of that session, mean absolute error against the provider's next
-            # reported context falls from 139,406 tokens to 14,616.
+            # reported context falls from 139,406 tokens to 9,682 — measured
+            # against the WHOLE of the arithmetic below (ratio, shrink guard,
+            # frame correction after the division, and the clamp), not the
+            # ratio alone.
             #
             # The approximation it makes, stated plainly: ``context_tokens``
             # is ``overhead + history``, and scaling the whole thing shrinks
@@ -6329,9 +6332,20 @@ class Session:
             # try to invent one. ``context_tokens`` is the honest answer: the
             # pass did not reduce the history this ruler can see, so the
             # receipt reports the size it already knew about rather than a
-            # number derived from a ratio the measurement contradicts. That is
-            # also exactly what the shipped subtraction form produced there
-            # (``saved`` clamps to 0), so this is parity, not a new behaviour.
+            # number derived from a ratio the measurement contradicts.
+            #
+            # Near-parity with the shipped subtraction form, which computed
+            # ``max(history_after, context_tokens - 0)`` here. The two agree
+            # whenever a provider figure has been recorded; they diverge when
+            # ``history_after > context_tokens``, reachable only with no usage
+            # record yet (``context_tokens`` then falls back to the local
+            # estimate), where this reports ~17-18k LOWER. That is the safe
+            # direction — the alternative paints above the model's window — and
+            # it reaches nothing that branches on the value: in this branch
+            # ``tokens_after == context_tokens`` exactly, and the recovery band
+            # requires ``<= 0.8 * threshold`` while the gate only fires above
+            # the threshold, so the band fails identically under both forms
+            # (agent review round 3, minor-1).
             #
             # WHEN THIS BRANCH IS REACHED, measured rather than assumed:
             # ``docs/evidence/compaction-ruler/fallback_reach.py`` replays the
@@ -6339,18 +6353,23 @@ class Session:
             # fix and **0 of 10 take it** — every one shrinks local history
             # 1.8x to 8.8x and gets the full proportional receipt.
             #
-            # The branch is reached on passes over unusually SMALL histories,
-            # and the mechanism is the archive's FIXED overhead: a snapcompact
+            # The mechanism is the archive's FIXED overhead: a snapcompact
             # archive carries plain-text edges sized by frame shape
             # (``HQ_EDGE_FRAMES``), not by how much history was removed —
-            # roughly 20,900 tokens at the shipped shape. That is 116% of an
-            # 18k history and 3.9% of a 534k one, so a near-threshold history
-            # can come out LARGER on the local ruler while a real pass never
-            # does. An earlier revision of this comment generalised the
-            # opposite way from synthetic 10-70 turn fixtures and claimed a
-            # vision model always lands here; that was a property of the
-            # fixtures, not of the model, and the figure above is the
-            # correction.
+            # roughly 20,900 tokens at the shipped Anthropic shape. Measured
+            # over real passes, ``history_after - history_before`` sits at a
+            # flat +21.5k from 24k to 420k of history (the edge budget, near
+            # enough exactly) and only goes negative once the summarized middle
+            # exceeds it.
+            #
+            # So the branch turns on "did this pass remove more than the edge
+            # cost", which depends on how much of the history is SUMMARIZABLE
+            # rather than on its size alone — which is why no single token
+            # threshold is quoted here, and why the crossover lands in
+            # different places in different fixtures. An earlier revision of
+            # this comment generalised from synthetic 10-70 turn fixtures and
+            # claimed a vision model always lands here; that was a property of
+            # the fixtures, not of the model.
             #
             # Where it IS reached the bare "context compacted" line is the
             # honest report available from a local-only measurement: the
