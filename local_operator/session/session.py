@@ -1045,6 +1045,18 @@ def _should_compact(
 #: residual came to be both "created headroom" and "reclaimed nothing".
 _ADVISOR_MIN_RECLAIM_FRACTION = 0.10
 
+#: Task-shaped term of the preserve-window cap: how many ``keep_recent_tokens``
+#: the window may grow to before the capacity ceiling is also applied
+#: (:meth:`Session._advisor_floor_cap` carries the full derivation, the limits
+#: of the evidence for this exact value, and why the capacity term must stay).
+#: Sized against 17 measured active-task spans, which are bimodal: thirteen
+#: under 54k and four between 113k and 132k. 5x the 20,000 default lands this
+#: term at 100,000 — above every ordinary task, below the outlier cluster that
+#: drove 35-41% retention. A MULTIPLE rather than an absolute, so it tracks a
+#: user who configures a wider verbatim window. It BINDS only above the ~250k
+#: window crossover; below that ``threshold // 2`` is the smaller term.
+_TASK_FLOOR_KEEP_MULTIPLE = 5
+
 
 def _advisor_detail(hint: Any | None) -> str | None:
     """Receipt sentence for an advisor-triggered pass, or ``None``.
@@ -5788,10 +5800,22 @@ class Session:
             # ``preserve_tokens`` sums every intervening entry, so in a
             # tool-heavy session the widest legal anchor spans far more context
             # than the candidate list suggests. Measured at 2.7x the cap
-            # (800,340 tokens against a 300,000 cap), which was enough to turn
-            # a mandatory 800k-on-1M pass into ``nothing_to_compact`` — the
-            # exact failure the cap exists to prevent, arrived at through the
-            # guard meant to make hints safe (agent review round 1, major-1).
+            # (800,340 tokens against the 300,000 cap of the time), which was
+            # enough to turn a mandatory 800k-on-1M pass into
+            # ``nothing_to_compact`` — the exact failure the cap exists to
+            # prevent, arrived at through the guard meant to make hints safe
+            # (agent review round 1, major-1).
+            #
+            # That cap is now ``min(keep_recent * _TASK_FLOOR_KEEP_MULTIPLE,
+            # threshold // 2)``. On a large window the task term binds and the
+            # clamp TIGHTENS (100,000 against the 300,000 of the incident), so
+            # the same hint is bounded harder than it was when the incident was
+            # recorded. Below the ~250k crossover the capacity term binds and
+            # the clamp is exactly what shipped. Either way it never loosens —
+            # which is the property this comment needs, and it is stated per
+            # window because the tightening is NOT universal (agent review
+            # round 1, blocker-1: an earlier draft dropped the capacity term
+            # and did loosen it on 65% of the registry).
             #
             # The clamp cannot narrow below the local floor: ``max`` is applied
             # against ``keep_recent``, which already carries the capped
@@ -6177,6 +6201,19 @@ class Session:
             # receipt prices the archive the way the next bill will. Measured on
             # the live session that motivated this: the uncorrected figure read
             # 60.1k against a provider-reported 137.5k on the next request.
+            #
+            # Computed HERE but applied AFTER the ratio below, and the order is
+            # load-bearing (agent review round 1, major-2). This addend is a
+            # PROVIDER-scale quantity; ``history_after`` and ``history_before``
+            # are both local estimates, and the receipt's proportionality
+            # argument holds only while numerator and denominator stay on that
+            # one ruler. Folding it into ``history_after`` before dividing
+            # would inflate the ratio and then multiply the addend by the
+            # provider total a second time — on a 6-frame archive against a
+            # 400k→60k pass, an after-figure of 144,900 where 105,000 plus the
+            # correction is right. Adding it afterwards prices the frames once,
+            # in the units the receipt is already reporting in.
+            frame_correction = 0
             snap_payload = (preserve_data or {}).get("snapcompact")
             if isinstance(snap_payload, dict):
                 try:
@@ -6186,7 +6223,7 @@ class Session:
 
                     frame_count = len(snap_payload.get("frames") or [])
                     per_frame = frame_token_estimate_for(self._model.provider, self._model.model_id)
-                    history_after += frame_count * (per_frame - IMAGE_TOKEN_ESTIMATE)
+                    frame_correction = frame_count * (per_frame - IMAGE_TOKEN_ESTIMATE)
                 except Exception:  # noqa: BLE001 - a receipt must not fail the pass
                     logger.debug("frame pricing correction failed", exc_info=True)
             # ``tokens_before`` is the figure the GATE acted on —
@@ -6198,18 +6235,168 @@ class Session:
             # what just happened. omp quotes the provider figure for the same
             # reason (``calculateContextTokens(lastUsage)``).
             #
-            # But the SAVING is measured with one ruler. The provider figure is
-            # the full request (system blocks + tool schemas + history) while
-            # the local estimates cover history alone, so ``context_tokens -
-            # history_after`` would count the fixed overhead as if the pass had
-            # removed it — inflating the receipt's "% smaller" and collapsing
-            # the band (which subtracts before-after) to a figure that
-            # understates the next request by the whole overhead. The honest
-            # after-figure keeps the overhead on both sides:
-            # ``context_tokens - (history saving)``, floored at the history
-            # itself for the degenerate case where the plan's figures cross.
-            saved = max(0, plan.tokens_before - history_after)
-            tokens_after = max(history_after, plan.context_tokens - saved)
+            # The after-figure must stay on the SAME ruler as that before —
+            # and it cannot be reached by subtraction. The provider figure is
+            # the full request (system blocks + tool schemas + history) priced
+            # by the PROVIDER's tokenizer, while ``history_before``/
+            # ``history_after`` price history alone with the local cl100k
+            # estimator. Subtracting a local saving from a provider total
+            # (the previous ``context_tokens - (tokens_before -
+            # history_after)``) silently assumes those two rulers agree
+            # 1-for-1. They do not. Fitting ``provider = a * local + b`` over a
+            # real 10-pass session (``docs/evidence/compaction-ruler/
+            # slope_fit.py``) puts ``claude-opus-5`` at slope 1.685 and
+            # ``claude-opus-4-8`` at 1.622, against 1.036 for an OpenAI control
+            # and 1.019 for GLM in the SAME session with the same tool schemas.
+            # The per-request ratio on opus-5 runs 1.75-1.90. So the divergence
+            # is the provider's tokenizer on code/JSON-dense content, not
+            # content we failed to count.
+            #
+            # It is a per-MODEL property, which is the reason this code carries
+            # no slope constant. The same fit run per EPOCH shows the three
+            # single-model stretches fitting tightly (mean error 419 / 653 /
+            # 1,415 tokens) while every model-switching stretch does not
+            # (9,913 to 71,026) — one line cannot describe two tokenizers.
+            #
+            # Every locally-measured token the old form subtracted was
+            # therefore worth ~1.7 provider tokens on Anthropic, and the
+            # receipt understated each pass by ~140k: the screenshot that
+            # motivated this read "546.5k → 419.0k (23% smaller)" for a pass
+            # whose true after-figure was 311.2k, a 43% reduction.
+            #
+            # Scaling PROPORTIONALLY fixes that without either ruler's
+            # constants having to be known. History shrank to ``history_after /
+            # history_before`` of itself on the local ruler; applying that same
+            # fraction to the provider's own total transports the provider's
+            # fixed overhead AND its tokenizer skew across the pass, because
+            # both ride along inside ``context_tokens``. It is self-calibrating:
+            # no per-provider slope is stored, so a model whose tokenizer
+            # differs tomorrow needs no change here. Measured over all 10 passes
+            # of that session, mean absolute error against the provider's next
+            # reported context falls from 139,406 tokens to 9,682 — measured
+            # against the WHOLE of the arithmetic below (ratio, shrink guard,
+            # frame correction after the division, and the clamp), not the
+            # ratio alone.
+            #
+            # The approximation it makes, stated plainly: ``context_tokens``
+            # is ``overhead + history``, and scaling the whole thing shrinks
+            # the overhead too, though a pass never removes a system block or
+            # a tool schema. That biases the estimate LOW by
+            # ``overhead * (1 - history_after / history_before)``. It is
+            # dominated by the tokenizer skew it corrects, and the measured
+            # residual is in fact biased slightly HIGH (+4.3k to +16.2k on
+            # eight of the ten passes), so subtracting a separately-estimated
+            # overhead here would make the answer worse, not better. The
+            # overhead is also not separable: it is the intercept ``b`` of the
+            # fit above, and the per-epoch table shows ``b`` swinging from
+            # -119,224 to +122,208 across model-mixed stretches — not a
+            # quantity this code could pin down and subtract.
+            #
+            # A tuned-slope variant (``context_tokens - slope * (before -
+            # after)``) was measured and is strictly worse even at its best
+            # value — 19,512 at slope 1.75 — while baking in a constant that
+            # rots the moment a provider retokenizes or the model mix changes.
+            # Do not reintroduce it.
+            #
+            # The zero-guard makes the division total: a pass over empty
+            # history cannot divide.
+            #
+            # The ``history_after`` floor is a BACKSTOP, and it is worth being
+            # precise about how little it does, because a guard that reads as
+            # load-bearing when it is not is how the next reader misjudges this
+            # arithmetic. ``plan.context_tokens`` is
+            # ``compaction_context_tokens(provider, local) = max(provider,
+            # local)``, so it is always >= ``history_before``; with the
+            # shrink guard below ensuring ``history_after < history_before``,
+            # the product is always >= ``history_after`` and the floor cannot
+            # bind through any path a real session takes. It is kept because it
+            # costs nothing and because a receipt reading "0 tokens" is a worse
+            # lie than a stale one if either of those invariants is ever
+            # weakened — the sibling incident on the status band is documented
+            # at ``tui/app.py`` ``_settle_context_reading``.
+            #
+            # The ratio is applied ONLY when the pass actually shrank local
+            # history. That guard is not defensive tidiness: on snapcompact
+            # ``history_after`` routinely EXCEEDS ``history_before`` (agent
+            # review round 2, blocker-1). The pass replaces history with
+            # verbatim text edges plus archive text plus images that the local
+            # ruler prices at a flat ``IMAGE_TOKEN_ESTIMATE``, so the saving is
+            # real on the PROVIDER ruler — that is the entire point of
+            # replaying frames — while the local estimate of the replacement
+            # can be larger than the original. A ratio above 1 then multiplies
+            # an already ~1.7x provider total and the receipt reports a
+            # compaction that GREW the context: measured at 70,888 → 111,594
+            # on a real over-threshold snapcompact pass.
+            #
+            # There is no ratio worth applying in that state, so this does not
+            # try to invent one. ``context_tokens`` is the honest answer: the
+            # pass did not reduce the history this ruler can see, so the
+            # receipt reports the size it already knew about rather than a
+            # number derived from a ratio the measurement contradicts.
+            #
+            # Near-parity with the shipped subtraction form, which computed
+            # ``max(history_after, context_tokens - 0)`` here. The two agree
+            # whenever a provider figure has been recorded; they diverge when
+            # ``history_after > context_tokens``, reachable only with no usage
+            # record yet (``context_tokens`` then falls back to the local
+            # estimate), where this reports ~17-18k LOWER. That is the safe
+            # direction — the alternative paints above the model's window — and
+            # it reaches nothing that branches on the value: in this branch
+            # ``tokens_after == context_tokens`` exactly, and the recovery band
+            # requires ``<= 0.8 * threshold`` while the gate only fires above
+            # the threshold, so the band fails identically under both forms
+            # (agent review round 3, minor-1).
+            #
+            # WHEN THIS BRANCH IS REACHED, measured rather than assumed:
+            # ``docs/evidence/compaction-ruler/fallback_reach.py`` replays the
+            # ten real snapcompact passes of the production session behind this
+            # fix and **0 of 10 take it** — every one shrinks local history
+            # 1.8x to 8.8x and gets the full proportional receipt.
+            #
+            # The mechanism is the archive's FIXED overhead: a snapcompact
+            # archive carries plain-text edges sized by frame shape
+            # (``HQ_EDGE_FRAMES``), not by how much history was removed —
+            # roughly 20,900 tokens at the shipped Anthropic shape. Measured
+            # over real passes, ``history_after - history_before`` sits at a
+            # flat +21.5k from 24k to 420k of history (the edge budget, near
+            # enough exactly) and only goes negative once the summarized middle
+            # exceeds it.
+            #
+            # So the branch turns on "did this pass remove more than the edge
+            # cost", which depends on how much of the history is SUMMARIZABLE
+            # rather than on its size alone — which is why no single token
+            # threshold is quoted here, and why the crossover lands in
+            # different places in different fixtures. An earlier revision of
+            # this comment generalised from synthetic 10-70 turn fixtures and
+            # claimed a vision model always lands here; that was a property of
+            # the fixtures, not of the model.
+            #
+            # Where it IS reached the bare "context compacted" line is the
+            # honest report available from a local-only measurement: the
+            # pass's saving is in images the provider prices several times
+            # higher than this ruler does, so no locally-computed ratio can
+            # see it. Making that case informative needs a provider-side
+            # after-figure (the next request's usage), which arrives after this
+            # event is emitted — a larger change than this one, and NOT
+            # reachable by choosing different arithmetic here.
+            #
+            # The final clamp is the invariant the old subtraction form got for
+            # free and this form does not. ``context_tokens - max(0, saved)``
+            # could never exceed ``context_tokens``; a product can. Without the
+            # clamp the receipt drops its own numbers (``tui/app.py``'s
+            # ``compaction_receipt`` prints a bare "context compacted" when
+            # ``after >= before``) and the status band paints a figure above
+            # the model's whole context window.
+            history_before = plan.tokens_before
+            if history_before > 0 and history_after < history_before:
+                scaled = round(plan.context_tokens * history_after / history_before)
+                tokens_after = max(history_after, scaled)
+            else:
+                tokens_after = plan.context_tokens
+            # The snapcompact frame correction, priced once and in the
+            # receipt's own units (see where it is computed above), then the
+            # whole figure bounded by what it is reporting a reduction FROM.
+            tokens_after = min(plan.context_tokens, tokens_after + frame_correction)
             await self._emit(
                 CompactionEndEvent(
                     reason=reason,
@@ -6933,6 +7120,26 @@ class Session:
                 for message in self._context.messages
                 if isinstance(message, Message) and message.role == "user"
             }
+            # ``floor_cap`` is the THIRD consumer of ``_advisor_floor_cap``,
+            # and the only one where the cap moves an ACCEPT/REJECT boundary
+            # rather than clamping a number (agent review round 1, major-1).
+            # ``validate_hint`` rejects a hint narrower than
+            # ``max(keep_recent_tokens, task_boundary_floor(..., cap))``, so a
+            # lower cap lowers that floor and admits hints it used to refuse:
+            # on a 1M window with a 131,376-token task span the floor drops
+            # 131,376 → 100,000, and a 120,000-token hint flips from
+            # "narrowing, rejected" to accepted.
+            #
+            # That is a widening of what the ADVISOR may propose, not of what a
+            # size pass keeps, and it is bounded on both sides: a hint below
+            # ``keep_recent_tokens`` is still rejected, and an accepted hint is
+            # still clamped by the same cap in ``_plan_compaction``. It can
+            # nonetheless make a pass fire that would not otherwise have
+            # fired — ``should_compact`` takes ``min(threshold,
+            # resolve_advisor_floor_tokens(...))`` once advice is usable — so
+            # "nothing changes when compaction fires" is true of the SIZE
+            # trigger only. The whole path is inert while ``advisor_enabled``
+            # is false, which is the shipped default.
             hint = compaction_api.validate_hint(
                 compaction_api.parse_hint(raw),
                 history,
@@ -6965,21 +7172,136 @@ class Session:
         """Cap for ``task_boundary_floor`` — the preserve window may not eat
         the whole context.
 
-        Half the resolved trigger: above that a "preserved" window leaves the
-        pass nothing to summarize, so ``find_cut_point`` answers ``None`` and
-        the protection turns into "never compact" — the failure the trigger
-        exists to prevent.
+        Above the cap a "preserved" window leaves the pass nothing to
+        summarize, so ``find_cut_point`` answers ``None`` and the protection
+        turns into "never compact" — the failure the trigger exists to prevent.
+
+        Two terms, and the cap is the SMALLER of them:
+
+        1. ``keep_recent_tokens * _TASK_FLOOR_KEEP_MULTIPLE`` — a task-shaped
+           bound, on the same local ruler as the span being capped.
+        2. ``threshold // 2`` — a capacity-shaped CEILING, so the cap can
+           never approach the model's own context window.
+
+        Term 1 is the fix. The cap used to be term 2 alone, which mixed two
+        rulers exactly the way the receipt did: ``task_boundary_floor`` sums a
+        span with the local cl100k estimator (``cutpoint.py``), while
+        ``resolve_threshold_tokens`` returns a PROVIDER-scale number, and the
+        two diverge by ~1.6-1.7x on Anthropic (see the slope measurement at the
+        receipt in :meth:`_run_compaction`). On a 1M window that made the cap
+        300,000 local tokens, and a pass whose last genuine user turn sat
+        131,376 tokens back widened ``keep_recent`` 20k → 131k and retained
+        41.3% of history where seven other passes of the same session retained
+        4-19%.
+
+        **Term 2 is retained deliberately, and dropping it was a bug caught in
+        agent review round 1 (blocker-1).** A cap expressed only in
+        ``keep_recent`` multiples is independent of the model's capacity, which
+        is worse than being on the wrong ruler: at the 20,000 default a flat
+        100,000 EXCEEDS the entire context window of a 32k or 64k model, and
+        65% of the shipped registry's 118 ``context_window`` entries sit below
+        the ~250k crossover where the flat term stops being the tighter of the
+        two (median model: 131,072). Measured on the real
+        ``task_boundary_floor`` → ``find_cut_point`` path, the flat-only cap
+        made a 64k model refuse EVERY over-threshold pass (47/47 samples, where
+        the capacity cap refused none) and dropped a 128k model's reclaim from
+        52% to 7% — under ``_ADVISOR_MIN_RECLAIM_FRACTION``, which permanently
+        disables the advisor for that session. That is precisely the
+        "never compact" failure named above, reached through the guard meant
+        to prevent it.
+
+        Term 2 is a provider-scale number bounding a local-scale span, so it is
+        a ruler mix — but as a one-sided CEILING it is a conservative one: it
+        can only ever make the preserve window SMALLER, and a too-small
+        preserve window costs task context while a too-large one costs the
+        ability to compact at all. The proportional receipt eliminated a ruler
+        mix that decided a REPORTED NUMBER; this one only bounds a safety
+        margin, and no figure shown to the user or used in an equality test
+        derives from it.
+
+        ``_TASK_FLOOR_KEEP_MULTIPLE`` is 5, sized against every active-task
+        span measured on real sessions: the seven recorded at
+        ``cutpoint.task_boundary_floor`` plus the ten in
+        ``docs/evidence/compaction-ruler/retention_real2.txt``. Pooled, those
+        17 spans run p50 47.4k, p75 53.7k, p90 125.9k, max 131.4k. The
+        distribution is bimodal — thirteen spans under 54k, four between 113k
+        and 132k — so the choice is really "where between the two clusters
+        does the bound sit".
+
+        5x the 20,000 default puts it at 100,000: comfortably above the entire
+        lower cluster (the longest ordinary task is 53,732, so the cap has
+        roughly 2x headroom over it) and below the upper cluster, which is
+        exactly the set of passes that retained 35-41% of history where every
+        other pass retained 4-19%. Clipping those four is the bound doing its
+        job, not a regression.
+
+        **Honest limit of the evidence for this exact value.** Because the gap
+        between the clusters is wide, every multiple from 3x to 5x clips the
+        same four spans — no measurement here separates them, and the reason to
+        prefer 5 is margin over the observed ordinary maximum rather than a
+        different outcome. What the data DOES settle is the upper bound: 6x
+        (120,000) lets the 113,835 span through, and 7x lets all four through,
+        so the multiple must not be raised without new evidence. The full table
+        is ``docs/evidence/compaction-ruler/span_percentiles.txt``.
+
+        The outer ``max(keep_recent_tokens, ...)`` is kept, and with term 2
+        back it is a real guard again rather than the tautology a
+        multiple-only cap made of it: on a small window ``threshold // 2`` can
+        fall BELOW ``keep_recent_tokens`` (13,107 against a 20,000 default on a
+        32k model), and a cap under the verbatim window the user configured
+        would silently narrow what they asked to keep.
+
+        THREE call sites read this cap, not two:
+        ``task_boundary_floor`` in :meth:`_plan_compaction`, the advisor-hint
+        clamp beside it, and ``validate_hint``'s ``floor_cap``
+        (``compaction/advisor.py``) — see the note in :meth:`_run_advisor` for
+        the acceptance-boundary shift the third one implies. On a 1M window all
+        three tighten from 300,000 to 100,000; below the ~250k crossover all
+        three are unchanged from today, because term 2 binds there and term 2
+        is what shipped. Both statements describe the HEALTHY path — the two
+        ``except`` branches below answer 0 and ``keep_recent`` respectively,
+        which is narrower than either, deliberately.
         """
-        threshold = 0
+        try:
+            # ``max(0, ...)``: the field is not constrained positive by
+            # pydantic, and a negative would otherwise be returned unchanged —
+            # leaving the outer ``max`` with nothing to floor, which is the one
+            # property the rest of this docstring leans on.
+            keep_recent = max(0, int(settings.keep_recent_tokens))
+        except Exception:  # noqa: BLE001 — degrade to plain recency
+            # A partial settings double (the same tolerance ``_offloaded``
+            # grants its rulers) must not break a pass. Cap 0 makes
+            # ``task_boundary_floor`` return 0, the hint clamp 0 and
+            # ``validate_hint``'s local floor ``keep_recent_tokens``, and every
+            # caller folds that through ``max(keep_recent, ...)`` — so the
+            # degraded answer is plain recency, the pre-floor behaviour.
+            return 0
+        task_cap = keep_recent * _TASK_FLOOR_KEEP_MULTIPLE
         try:
             from local_operator.compaction import api as compaction_api
 
-            threshold = compaction_api.resolve_threshold_tokens(
-                self.effective_model.context_window, settings
+            capacity_cap = (
+                compaction_api.resolve_threshold_tokens(
+                    self.effective_model.context_window, settings
+                )
+                // 2
             )
-        except Exception:  # noqa: BLE001 — degrade to the recency rule
-            return int(settings.keep_recent_tokens)
-        return max(int(settings.keep_recent_tokens), threshold // 2)
+        except Exception:  # noqa: BLE001 — no capacity term, no widening
+            # Without a capacity term there is no safe way to widen, so this
+            # does not widen at all: ``keep_recent`` alone is what the
+            # pre-existing implementation returned here, and it is the answer
+            # that cannot fail dangerously.
+            #
+            # Returning the TASK term instead would restore precisely the
+            # capacity-independent cap this method exists to avoid, on the one
+            # path whose purpose is to fail safe — measured looser than shipped
+            # on 9 of 9 windows, and reproducing ``find_cut_point`` -> ``None``
+            # (never-compact) at 128k (agent review round 2, major-1). The
+            # asymmetry is the point: a too-narrow preserve window costs task
+            # context on a pass that still runs, while a too-wide one costs the
+            # ability to compact at all.
+            return keep_recent
+        return max(keep_recent, min(task_cap, capacity_cap))
 
     def _wire_legal_snapshot(self) -> list[AgentMessage]:
         """A copy of the live message list that a provider will actually accept.

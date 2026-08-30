@@ -697,13 +697,23 @@ async def test_a_consumed_hint_still_widens_the_cut_on_a_size_pass(tmp_path, mon
     size-triggered pass must still be able to keep more history than the
     recency rule asked for. This is the direction the fix must not break: the
     hint stops being a CREDIT, not a preserve window.
+
+    The widening is BOUNDED by ``Session._advisor_floor_cap`` — since that cap
+    became ``keep_recent * _TASK_FLOOR_KEEP_MULTIPLE``, a hint wider than the
+    cap is clamped to it rather than honoured in full. So the assertion is
+    "the hint widened the window to the cap", not "the hint got the exact
+    number it asked for": the latter was only ever true because the old
+    window-derived cap (300k on this 1M-context fixture) was too loose to
+    bind on a 40-token recency budget.
     """
     session = make_session(tmp_path)
     await talk(session)
     pin_measured_context(monkeypatch, 700_000)
-    # A preserve window far wider than the recency budget, so the cut moves
-    # only if the hint is still being read.
+    # A preserve window far wider than the recency budget AND wider than the
+    # cap, so the cut moves only if the hint is still being read, and the
+    # clamp is the thing that decides how far.
     seed_hint(session, preserve=KEEP_RECENT * 20)
+    cap = session._advisor_floor_cap(session._compaction_settings)
 
     widths: list[int] = []
     original = compaction_api.find_cut_point
@@ -716,8 +726,13 @@ async def test_a_consumed_hint_still_widens_the_cut_on_a_size_pass(tmp_path, mon
     await asyncio.wait_for(drive_boundary(session, 700_000), timeout=10.0)
 
     assert widths, "the plan never reached find_cut_point"
-    assert max(widths) >= KEEP_RECENT * 20, (
+    # Widened well past the recency budget, and stopped exactly at the cap.
+    assert max(widths) > KEEP_RECENT, (
         f"the consumed hint stopped widening the cut (keep_recent={widths}) — dropping "
         "ATTRIBUTION must not drop the preserve window the hint asked for"
+    )
+    assert max(widths) == cap, (
+        f"the consumed hint widened to {max(widths)}, expected the clamp at {cap} "
+        "(_advisor_floor_cap bounds a hint wider than the cap)"
     )
     await session.dispose()

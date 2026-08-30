@@ -1,0 +1,21 @@
+keep_recent=20,000   old cap=300,000   new cap=100,000 (= 5 x keep_recent)
+  pass hist_before  task_span | keep_old keep_new | retain_old retain_new
+  1050     246,989        469 |   20,000   20,000 |       8.1%       8.1%
+  2123     344,395     47,445 |   47,445   47,445 |      13.8%      13.8%
+  2929     284,328     53,732 |   53,732   53,732 |      18.9%      18.9%
+  3998     471,776     33,054 |   33,054   33,054 |       7.0%       7.0%
+  4660     344,742     22,561 |   22,561   22,561 |       6.5%       6.5%
+  5439     338,613    129,660 |  129,660  100,000 |      38.3%      29.5%
+  6865     533,774     49,779 |   49,779   49,779 |       9.3%       9.3%
+  7979     322,812    113,835 |  113,835  100,000 |      35.3%      31.0%
+  8982     341,986     10,879 |   20,000   20,000 |       5.8%       5.8%
+  9954     318,084    131,376 |  131,376  100,000 |      41.3%      31.4%
+
+passes the new cap CHANGES: 3/10
+  pass 5439: span 129,660 -> keep_recent 129,660 becomes 100,000 (38.3% -> 29.5% of history kept verbatim)
+  pass 7979: span 113,835 -> keep_recent 113,835 becomes 100,000 (35.3% -> 31.0% of history kept verbatim)
+  pass 9954: span 131,376 -> keep_recent 131,376 becomes 100,000 (41.3% -> 31.4% of history kept verbatim)
+
+measured task spans: min=469  p50=49,779  max=131,376
+  spans a 4x keep_recent cap (80,000) would clip: 3/10 [113835, 129660, 131376]
+  spans a 5x keep_recent cap (100,000) would clip: 3/10 [113835, 129660, 131376]

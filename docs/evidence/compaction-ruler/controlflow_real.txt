@@ -1,0 +1,20 @@
+threshold=600,000  RECOVERY_BAND=0.8  min_reclaim=0.1
+  pass old_after new_after | cont_old cont_new | recl_old recl_new adv_old adv_new
+  1050   262,901   123,880 |     True     True |     0.40     0.72    True    True
+  2123   346,485   163,368 |     True     True |     0.42     0.73    True    True
+  2929   146,528    90,151 |     True     True |     0.59     0.75    True    True
+  3998   137,856   106,570 |     True     True |     0.73     0.79    True    True
+  4660   355,063   173,659 |     True     True |     0.41     0.71    True    True
+  5439   361,292   176,951 |     True     True |     0.40     0.71    True    True
+  6865   134,329    85,935 |     True     True |     0.77     0.85    True    True
+  7979   355,313   145,152 |     True     True |     0.41     0.76    True    True
+  8982   323,138   134,809 |     True     True |     0.45     0.77    True    True
+  9954   418,953   327,409 |     True     True |     0.23     0.40    True    True
+
+(1) _held_context_tokens: display carrier only, no branch on the value.
+(2) auto-continue decision flips: 0/10
+(3) advisor kill-switch flips:    0/10
+
+Direction note: the proposed after-figure is always <= the shipped one on
+this data, so both gates can only move toward 'the pass helped' — neither
+can newly disable the advisor nor newly suppress a continuation.

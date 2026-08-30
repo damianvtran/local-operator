@@ -15,6 +15,36 @@ the ``len(text) // 4`` heuristic below, which is coarser but keeps compaction
 working — real usage from the provider still corrects the accounting after
 each request.
 
+This estimator is a RULER OF ITS OWN, not a prediction of the bill
+------------------------------------------------------------------
+``cl100k_base`` is OpenAI's tokenizer, and Anthropic's differs measurably on
+the code/JSON-dense content an agent session is made of. Fitting
+``provider = a * local + b`` over a real 10-pass session
+(``docs/evidence/compaction-ruler/slope_fit.py``) puts **``claude-opus-5`` at
+slope 1.685 and ``claude-opus-4-8`` at 1.622**, against **1.036 for an OpenAI
+control and 1.019 for GLM in the same session with the same tool schemas**.
+Per-request, an opus-5 context bills 1.75-1.90x this module's estimate.
+
+The slope is a per-MODEL property, not a session constant: fitted per epoch,
+the three single-model stretches fit tightly (mean error 419 / 653 / 1,415
+tokens) while every model-switching stretch does not (9,913 to 71,026), since
+one line cannot describe two tokenizers.
+
+So a number from this module may be compared against ANOTHER number from this
+module, never against a provider figure. Mixing the two is a real bug that has
+shipped twice — the compaction receipt subtracted a local saving from a
+provider total, and ``Session._advisor_floor_cap`` capped a locally-summed
+span with a provider-scale threshold. Both are fixed by keeping each
+comparison on one ruler; neither is fixed by counting more here.
+
+Per-provider calibration was deliberately NOT added. The intercept is not
+identifiable across a model-heterogeneous session (the fit only holds inside
+contiguous single-model runs), and the compaction TRIGGER does not need it:
+``compaction_context_tokens`` already takes ``max(provider, local)`` on any
+request that carries a usage record, so the provider's own count drives when a
+pass fires. A multiplier table here would add a constant that rots on the next
+retokenization while fixing nothing the trigger depends on.
+
 Settle rule / cache contract
 ----------------------------
 The cache is a module-level dict keyed on the message's stable ``id``. Two
