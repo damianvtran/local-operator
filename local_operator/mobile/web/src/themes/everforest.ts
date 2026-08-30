@@ -42,9 +42,13 @@ export const everforest: ThemeDefinition = {
 		borderControl: "#89949C",
 
 		// Upstream blue #7FBBB3 is 4.33:1 on `elevated`, and a value solved
-		// exactly at 4.5 leaves no room for a darker `accentActive` that still
-		// clears the floor. Lifted to 5.20:1 so all three states separate.
-		accent: "#9ACAC3",
+		// Design review D4: the first port took upstream's SYNTAX role names
+		// literally — accent=blue, info=purple — which spent everforest's
+		// signature green on a success glyph and painted the app's most
+		// common ink pink. `accent` is the identity hue here, so it takes
+		// the canonical green (4.70:1 worst ground) and `info` takes the
+		// canonical blue-teal (5.20:1), matching the TUI palette.
+		accent: "#A7C080",
 		accentHover: "#B1D6D1",
 		accentActive: "#85BFB6",
 		accentWash: "#3A4448",
@@ -71,7 +75,7 @@ export const everforest: ThemeDefinition = {
 		// its magenta end rather than straight up: the plain solve (#DBA6BF)
 		// landed ΔE00 10.5 from the lifted red, since both roles brighten into
 		// the same pink. This holds 12.6.
-		info: "#DEA3C6",
+		info: "#9ACAC3",
 		infoWash: "#42424C",
 		infoBorder: "#DEA3C6",
 

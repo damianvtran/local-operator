@@ -47,7 +47,7 @@ export const everforestLight: ThemeDefinition = {
 
 		// Upstream blue #3A94C5 is 2.33:1 on `sunken`; darkened on-hue and
 		// taken to 5.25:1 so `accentActive` still clears 4.5.
-		accent: "#235976",
+		accent: "#566201",
 		accentHover: "#1B445A",
 		accentActive: "#276283",
 		accentWash: "#D9DDCE",
@@ -69,7 +69,7 @@ export const everforestLight: ThemeDefinition = {
 		dangerBorder: "#B12724",
 
 		// Upstream purple #DF69BA is 2.11:1 on `sunken`.
-		info: "#A7247E",
+		info: "#235976",
 		infoWash: "#E4D3C1",
 		infoBorder: "#A7247E",
 

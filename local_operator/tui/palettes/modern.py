@@ -68,15 +68,23 @@ PALETTES: list[ThemeSpec] = [
             "faint": "#7A8478",  # canonical grey0 (3.21:1) — the inert rung
             "edge": "#475258",  # canonical bg3
             "edge-hi": "#4F585E",  # canonical bg4
-            "accent": "#7FBBB3",  # canonical blue
-            "success": "#A7C080",  # canonical green
+            # Design review D4: the first solve took upstream's SYNTAX role
+            # names literally — accent=blue, signal=purple — which left the
+            # theme's signature green #A7C080 spent only on a success glyph.
+            # The rendered frame read as pink-on-slate: nothing in it said
+            # "everforest". This repo's `accent` is the theme's IDENTITY hue
+            # (caret, live indicator, focus), so it takes the green, and
+            # `signal` — the file/reference ink that paints most of the code
+            # in a reply — takes canonical blue instead of the purple.
+            "accent": "#A7C080",  # canonical green — the signature
+            "success": "#83C092",  # canonical aqua, one step cooler than accent
             "warning": "#DBBC7F",  # canonical yellow
             # Canonical red #E67E80 is 3.95:1 on bg1 (< 4); lifted on-hue by
             # the minimum that clears both grounds (4.62/4.01).
             "danger": "#E68082",
-            "string": "#83C092",  # canonical aqua (see the green/aqua note)
-            "signal": "#D699B6",  # canonical purple
-            "label": "#E69875",  # canonical orange
+            "string": "#DBBC7F",  # canonical yellow, upstream's string hue
+            "signal": "#7FBBB3",  # canonical blue — the cool file/reference ink
+            "label": "#D699B6",  # canonical purple
             # Canonical bg_red #514045 puts the lifted red at 3.58:1 — under
             # the 4.0 floor on the one band that always carries it. Sunk
             # toward bg0 with the maroon lead kept, which clears 4.27:1.
@@ -107,7 +115,12 @@ PALETTES: list[ThemeSpec] = [
             "bg": "#FDF6E3",  # canonical bg0
             "surface": "#F4F0D9",  # canonical bg1
             "raised": "#EFEBD4",  # canonical bg2
-            "overlay": "#E6E2CC",  # canonical bg3
+            # Canonical bg3 #E6E2CC is only ΔE 3.17 from bg2, and on paper that
+            # top step reads as no step at all (design review D2: the last two
+            # elevation rungs were indistinguishable in the frame). Taken to
+            # the SOFT variant's bg3 instead — still an upstream everforest
+            # ground, ΔE 6.94 from raised, so a dialog reads as lifted.
+            "overlay": "#DDD8BE",  # canonical bg3 (soft); medium's is ΔE 3.17
             "sunken": "#F8F2DC",  # a hair below bg0 — light polarity has no well
             # Canonical fg #5C6A72 is 5.18:1 on bg0 (< 7); darkened on-hue.
             "fg": "#465157",
@@ -118,8 +131,14 @@ PALETTES: list[ThemeSpec] = [
             "faint": "#A6B0A0",  # canonical grey0 (2.08:1) — the inert rung
             "edge": "#E6E2CC",  # canonical bg3
             "edge-hi": "#E0DCC7",  # canonical bg4
-            "accent": "#317CA5",  # blue, darkened from canonical #3A94C5 (3.13:1)
-            "success": "#6C7B01",  # green, darkened from canonical #8DA101 (2.69:1)
+            # Same role re-map as the dark variant (design review D2): the
+            # signature green carries `accent`, not `success`, and the cool
+            # blue carries `signal`. The first solve put a darkened PURPLE on
+            # `signal`, so the inline code and file paths — the most-painted
+            # ink in a reply — came out hot magenta on cream, and the frame
+            # read as anything but a forest.
+            "accent": "#6C7B01",  # green, darkened from canonical #8DA101 (2.69:1)
+            "success": "#18804F",  # aqua, darkened from canonical #35A77C (2.72:1)
             "warning": "#986D00",  # yellow, darkened from canonical #DFA000 (2.12:1)
             "danger": "#D63A37",  # red, darkened from canonical #F85552 (3.04:1)
             # Aqua, darkened from canonical #35A77C (2.79:1). Taken further
@@ -127,9 +146,9 @@ PALETTES: list[ThemeSpec] = [
             # 4.26:1) landed ΔE00 2.6 from ayu-light's own string green, and
             # two themes in the same batch should not converge on one hex.
             # This sits at 7.1 from it and 19.8 from this theme's own success.
-            "string": "#18804F",
-            "signal": "#CF2C9C",  # purple, darkened from canonical #DF69BA (2.83:1)
-            "label": "#BE5509",  # orange, darkened from canonical #F57D26 (2.48:1)
+            "string": "#986D00",  # yellow, upstream's string hue (same solve as warning)
+            "signal": "#317CA5",  # blue, darkened from canonical #3A94C5 (3.13:1)
+            "label": "#A8317E",  # purple, darkened from canonical #DF69BA (2.83:1)
             # Canonical bg_red #FDE3DA puts the darkened red at 3.80:1 —
             # under the 4.0 floor. Lifted toward bg0, which clears 4.11:1.
             "tint-danger": "#FDEEE9",
@@ -327,32 +346,53 @@ PALETTES: list[ThemeSpec] = [
         description="Ayu on near-white paper, crisp with deepened accents",
         dark=False,
         tokens={
+            # Upstream ayu light defines three near-identical whites for its
+            # panel chrome: editor.bg #FCFCFC, ui.panel.bg #FAFAFA and ui.bg
+            # #F8F9FA sit within dE 0.7 of each other. In an EDITOR that is
+            # fine — the panels are separated by borders and the code area is
+            # the only large field. This UI has no borders on a tool row: the
+            # ledger's rows are told apart by their GROUND alone, so those
+            # three collapsed into one and the whole ledger dissolved into the
+            # page (design review D1 — only the danger row was locatable).
+            #
+            # So bg keeps the canonical editor white and the rungs above it
+            # are re-solved on ayu's own cool grey axis at ~dE 2.9 per step,
+            # just past the ~2 the eye needs. Deviating here is the only way
+            # this theme can show a tool row at all.
             "bg": "#FCFCFC",  # canonical editor.bg
-            "surface": "#FAFAFA",  # canonical ui.panel.bg
-            "raised": "#F8F9FA",  # canonical ui.bg
-            "overlay": "#EBEEF0",  # canonical surface.sunk
-            "sunken": "#F4F6F7",
+            "surface": "#F3F4F5",  # canonical ui.panel.bg #FAFAFA: dE 0.40 (invisible)
+            "raised": "#EAECEE",  # canonical ui.bg #F8F9FA: dE 0.73 from surface
+            "overlay": "#DDE1E4",  # deepened from surface.sunk #EBEEF0 for the last step
+            "sunken": "#F7F8F9",
             # Canonical editor.fg #5C6166 is 6.10:1 on the paper (< 7);
             # darkened on-hue.
-            "fg": "#51565A",
+            # Every ink here is one step deeper than a straight port would
+            # need, and the elevation ladder above is why: a `surface` far
+            # enough from `bg` to be SEEN costs contrast on everything
+            # measured against it. At canonical #FAFAFA the inks cleared
+            # comfortably and no tool row was visible; at a surface the eye
+            # can find, `fg` fell to 6.74:1 and six state hues to ~3.85:1.
+            # Deepening the ink is what buys the ladder — the alternative was
+            # a theme that passes the gate and shows no ledger.
+            "fg": "#4D5256",
             # Canonical comment #787B80 is 4.14:1 (< 4.5); darkened on-hue.
-            "muted": "#717378",
+            "muted": "#6C6E73",
             # Canonical ui.fg #828E9F is 3.24:1 (< 3.4); darkened on-hue.
-            "dim": "#7B8799",
+            "dim": "#768293",
             "faint": "#9AA3AF",  # 2.49:1 — sits below dim, the inert rung
             "edge": "#E3E7EA",
             "edge-hi": "#CBD2D8",
-            "accent": "#1980C8",  # entity, darkened from canonical #399EE6 (2.84:1)
-            "success": "#648500",  # string, darkened from canonical #86B300 (2.42:1)
-            "warning": "#A56F00",  # func, darkened from canonical #F2A300 (2.04:1)
+            "accent": "#187BC1",  # entity, darkened from canonical #399EE6 (2.84:1)
+            "success": "#618100",  # string, darkened from canonical #86B300 (2.42:1)
+            "warning": "#A06C00",  # func, darkened from canonical #F2A300 (2.04:1)
             # Markup red, darkened from canonical #F07171 (2.80:1). The
             # straight lightness walk lands on #E93030, which clears the
             # floor but reads as a pure signal red where ayu's is muted;
             # this keeps more of the canonical's softer chroma at 4.34:1.
-            "danger": "#C94F4F",
-            "string": "#31896C",  # regexp, darkened from canonical #4CBF99 (2.22:1)
-            "signal": "#9566C4",  # constant, darkened from canonical #A37ACC (3.29:1)
-            "label": "#D64F00",  # keyword, darkened from canonical #FF7E33 (2.47:1)
+            "danger": "#C24A4A",
+            "string": "#2F8468",  # regexp, darkened from canonical #4CBF99 (2.22:1)
+            "signal": "#8F62BC",  # constant, darkened from canonical #A37ACC (3.29:1)
+            "label": "#CD4C00",  # keyword, darkened from canonical #FF7E33 (2.47:1)
             # The darkened red reads 3.91:1 on a straight red wash at this
             # paper's luminance — under the 4.0 floor on the band that always
             # carries it. Lifted toward the paper, which clears 4.09:1.

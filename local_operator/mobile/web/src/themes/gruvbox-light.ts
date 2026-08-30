@@ -70,10 +70,14 @@ export const gruvboxLight: ThemeDefinition = {
 		dangerBorder: "#BC0007",
 
 		// faded_orange. Kept distinct from `warning`'s darkened yellow so a
-		// notice and a caution do not read as the same amber.
-		info: "#AF3A03",
-		infoWash: "#F8E9BE",
-		infoBorder: "#C94303",
+		// faded_aqua, not faded_orange. The orange sat only 15.9 dE from
+		// `danger`'s faded_red — both dark red-orange on cream, so an error
+		// message and an informational path read as one colour (design
+		// review D5). Aqua is equally canonical; darkened one step from
+		// #427B58 (4.32:1) to clear this contract's four-ground floor.
+		info: "#407655",
+		infoWash: "#F8EFD1",
+		infoBorder: "#6E9B7E",
 
 		overlayShadow: "0 12px 32px -12px rgb(60 56 54 / 0.22)",
 		scrim: "rgb(60 56 54 / 0.35)",
