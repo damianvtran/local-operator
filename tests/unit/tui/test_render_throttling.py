@@ -732,4 +732,9 @@ async def test_blurring_the_splash_repaints_it_to_its_resting_frame(
 
         assert welcome._mark_color is None
         assert welcome._tip_index == 0
-        assert repaints >= 1, "the splash never repainted, so the screen kept the stale frame"
+        # TWO, not one: the pulse and the tip are separate stops with separate
+        # repaints, and one shared counter at `>= 1` goes green when either
+        # fix alone is removed — over the exact stale-frame defect this test
+        # exists to guard (agent review R16). The count is deterministic here
+        # because both animations were put off their resting frame above.
+        assert repaints >= 2, "a stop cleared its state without repainting the stale frame"
