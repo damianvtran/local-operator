@@ -188,8 +188,12 @@ def _resolve_child(
             f"Invalid {label} path '{raw_path}': dotfiles are not listed and cannot be read"
         )
 
-    base = resource.base_dir.resolve()
     try:
+        # The BASE is resolved inside the guard too (review F6): a resource
+        # whose own base_dir is reached through a looping symlink raises here
+        # exactly as the child path does, and an escape from this line is the
+        # same uncaught RuntimeError on 3.12, just one statement earlier.
+        base = resource.base_dir.resolve()
         target = (resource.base_dir / relative).resolve()
     except (OSError, RuntimeError):
         # A looping symlink is a bad PATH, not a broken resolver: on 3.12/3.13
@@ -283,14 +287,18 @@ def _reference_listing(resource: Skill, *, scheme: str) -> str:
     base = resource.base_dir
     try:
         base_resolved = base.resolve()
-    except OSError:
+    except (OSError, RuntimeError):
+        # RuntimeError beside OSError for the same reason as ``_contained``
+        # (review F6): on 3.12/3.13 a looping base_dir raises RuntimeError
+        # here, and this listing rides a BARE READ whose body has already been
+        # returned — an escape would turn a successful read into a traceback.
         return ""
     body_file = resource.file_path
     try:
         # Resolved once so a symlink ALIAS of the body file is excluded too:
         # the caller just returned that content, whatever name it wears.
         body_resolved = body_file.resolve()
-    except OSError:
+    except (OSError, RuntimeError):
         body_resolved = body_file
     entries: list[str] = []
     overflow = False
@@ -302,7 +310,10 @@ def _reference_listing(resource: Skill, *, scheme: str) -> str:
             return
         try:
             key = str(directory.resolve())
-        except OSError:
+        except (OSError, RuntimeError):
+            # Same version-dependent ELOOP handling as everywhere else in this
+            # module (review F6): an unresolvable directory is skipped, never
+            # raised out of a listing.
             return
         if key in visited:
             return
@@ -329,7 +340,7 @@ def _reference_listing(resource: Skill, *, scheme: str) -> str:
                     try:
                         if child.resolve() == body_resolved:
                             continue
-                    except OSError:
+                    except (OSError, RuntimeError):
                         continue
                 if len(entries) >= _MAX_REFERENCE_ENTRIES:
                     overflow = True
