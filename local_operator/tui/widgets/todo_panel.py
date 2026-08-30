@@ -371,11 +371,16 @@ class TodoPanel(Container):
         self._affordance = TodoAffordance()
         #: What is painted, as an equality guard the 1 Hz poll repaints only on
         #: change (same discipline as the assistant flush). The state tuple is
-        #: ``(fingerprint, budget, expanded, hidden_phase_names)`` (design §7.3):
+        #: ``(fingerprint, budget, cells, expanded, hidden_phase_names)``
+        #: (design §7.3):
         #: * fingerprint — ``(phase_name, text, status, reason)`` per item, so a
         #:   phase rename or an item moving phases repaints;
         #: * budget — the same list renders a different number of rows when its
         #:   space changes;
+        #: * cells — the width a row is clipped against (UX round 2, U7). The
+        #:   budget is a HEIGHT, so a width-only resize would otherwise no-op
+        #:   and leave the compositor cropping a 30-cell footer into a 16-cell
+        #:   region, cutting ``ctrl+t`` itself;
         #: * expanded — a ``ctrl+t`` toggle changes what is shown with no store
         #:   change, so it must be in the guard or the toggle would no-op;
         #: * hidden — a phase crossing the auto-hide threshold changes the view
@@ -385,6 +390,7 @@ class TodoPanel(Container):
                 str,
                 str | None,
                 tuple[tuple[str, str, str, str], ...],
+                int,
                 int,
                 bool,
                 frozenset[str],
@@ -491,13 +497,14 @@ class TodoPanel(Container):
         # early on the guard). `init=False` because the first paint composes its
         # own footer.
         #
-        # RESIZE is deliberately NOT watched (design round 1, D4). A resize
-        # changes the budget, which IS in the equality guard, so `sync` rebuilds
-        # the body and recomposes the footer on the same pass — verified by the
-        # reviewer at 100x30 -> 100x60 (footer correctly drops to bare) and back
-        # to 100x24 (correctly restates the remainder). Adding a resize watcher
-        # would be a second path to the same repaint, which is the drift this
-        # panel's single-authority rules exist to prevent.
+        # RESIZE is deliberately NOT watched here (design round 1, D4), because
+        # `sync`'s equality guard already covers it on BOTH axes: height through
+        # the budget, and width through `_row_cells()` (UX round 2, U7 — the
+        # width term was missing and an edge drag left the row composed for the
+        # old width). A resize therefore rebuilds the body and recomposes the
+        # footer on the same pass. Adding a resize watcher would be a second path
+        # to the same repaint, which is the drift this panel's single-authority
+        # rules exist to prevent.
         self.watch(self._scroll, "scroll_y", self._repaint_expanded_footer, init=False)
 
     # -- sync -----------------------------------------------------------------
@@ -589,11 +596,25 @@ class TodoPanel(Container):
             # Session identity belongs in the guard even when both lists are
             # empty or byte-identical: retargeting must never retain another
             # session's panel state or delayed phase-hide clocks.
+            # WIDTH rides the guard beside the budget (UX round 2, U7). The
+            # budget is ``_body_rows()``, which is a HEIGHT, so a width-only
+            # resize (an edge drag) changed nothing in this tuple and the guard
+            # returned early holding a row composed for a width that no longer
+            # existed. Rows are clipped against ``_row_cells()`` (see
+            # :meth:`_row_cells`), and the expanded footer's shed decision reads
+            # the same value, so a stale width leaves the compositor cropping a
+            # 30-cell row into a 16-cell region — cutting ``ctrl+t`` itself, the
+            # one token that must always survive. Main never showed this on the
+            # expanded row because its 18-cell row was too short to be cropped
+            # past the hotkey; this row is long enough to be harmed, so the
+            # pre-existing hole became user-visible here and is closed here.
+            cells = self._row_cells()
             state = (
                 selected_id,
                 transcript_directory,
                 fingerprint,
                 budget,
+                cells,
                 self._expanded,
                 hidden,
             )
@@ -1273,9 +1294,32 @@ class TodoPanel(Container):
         and disappear under a reader who is only scrolling.
 
         The ARROW is never shed. When the widest prefix does not fit, the NUMBER
-        goes and a bare ``↓ ·`` stays, because the arrow is U4's actual cue while
+        goes and a bare ``↓`` stays, because the arrow is U4's actual cue while
         the count is only U5's orientation — a footer that drops the arrow to
-        keep a number has shed the finding it exists to answer.
+        keep a number has shed the finding it exists to answer. The separator
+        goes WITH the number it was separating (UX round 2 U8 / design round 2
+        D7): ``↓ ·`` left a bullet with nothing on its left, which read as a
+        count that had failed to render rather than as a deliberate shed.
+
+        WHY THE NUMBER COUNTS TODOS AND NOT BODY ROWS, given that the arrow is
+        derived from body rows (D2) and that counting rows would delete the
+        numberless seam below outright: the COLLAPSED row's ``+N more`` counts
+        todos (``hidden_done + hidden_open``), and the pairing between the two
+        rows is the whole reason this wording was chosen — same noun, same
+        position, same tier, one glyph swapped, as UX round 2 confirmed a reader
+        experiences it. Counting body rows here would leave ``+11 more`` and
+        ``↓ 9 more`` saying "more" about two different things one keypress apart,
+        and a reader who scrolled and counted todos would find the number simply
+        wrong — a verifiable falsehood, which is worse than the unverifiable one
+        U2 rejected. The seam is paid for with alignment instead (see below).
+
+        A KNOWN COST of the widest-fit rule (UX round 2, U9): the prefix is a
+        function of width AND list length, and list length is something a live
+        agent session changes constantly. A list growing past a digit boundary at
+        a narrow width can therefore trade the count for the bare arrow with no
+        scroll and no resize. The arrow survives — the reader is never told "this
+        is everything" when it is not — so this is orientation lost, not a lie,
+        and it is the accepted price of the rule that closed U1.
         """
         total = len(self._expanded_item_rows)
         if not total:
@@ -1307,9 +1351,11 @@ class TodoPanel(Container):
             if not more_below:
                 return affordance
             # Too narrow for the number: keep the arrow alone rather than lose
-            # the cue. Still width-tested, so the hotkey outranks even this.
+            # the cue. Still width-tested, so the hotkey outranks even this. The
+            # separator goes with the number it separated (U8/D7) — ``↓ ·`` read
+            # as a bullet whose noun failed to render.
             bare = Text(no_wrap=True, overflow="ellipsis")
-            bare.append("↓ · ", style=dim)
+            bare.append("↓ ", style=dim)
             if cells and bare.cell_len + affordance.cell_len > cells:
                 return affordance  # too narrow for both: the hotkey wins outright
             bare.append_text(affordance)
@@ -1329,7 +1375,14 @@ class TodoPanel(Container):
             # "keep going" without quantifying what is left. This is the seam
             # D2's separation of concerns opens: the arrow answers the viewport,
             # the number answers the todo list, and only here do they diverge.
-            prefix.append("↓ more · ", style=dim)
+            #
+            # Padded into the SAME field as every numbered position (design
+            # round 2, D6). Left unpadded this row was 3 cells narrower than its
+            # siblings and moved the hotkey one notch BEFORE the deliberate
+            # end-state move, so a reader scrolling to the bottom saw the
+            # affordance shift twice where the design intends once — D1's exact
+            # defect class, re-opened by the row that fixed D2.
+            prefix.append(f"↓ {'':>{len(str(total))}} more · ", style=dim)
             prefix.append_text(affordance)
             return prefix
         # The remainder is right-aligned in the widest number's field (design
