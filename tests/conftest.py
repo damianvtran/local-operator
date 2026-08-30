@@ -123,6 +123,47 @@ def restore_root_logger() -> Iterator[None]:
         root.setLevel(saved_level)
 
 
+@pytest.fixture(scope="session", autouse=True)
+def warm_token_encoding() -> None:
+    """Load tiktoken's BPE table ONCE, before any test can be timed against it.
+
+    ``tiktoken.get_encoding`` populates a cache under ``tempfile.gettempdir()``
+    on first use, and on a cache miss it DOWNLOADS the table. Measured on this
+    tree: 2339 ms cold against 62 ms warm. That download is a synchronous
+    network call, and the estimator deliberately runs inline on the event loop
+    for histories under ``OFFLOAD_MIN_CHARS`` — so on a machine with a cold
+    cache the first estimate blocks the loop for seconds.
+
+    That is what made ``test_the_loop_stays_responsive_while_several_subagents_run``
+    flaky, and only on CI: a developer's box has run the tokenizer before, a
+    fresh runner has not. Reproduced directly — a cold ``_get_encoding()`` on
+    the loop thread measures 1213 ms of stall against that test's 1000 ms
+    bound, which matches the 1029-1425 ms CI failures exactly. It failed 9 of
+    main's last 10 runs and blocked three approved PRs.
+
+    Warming here rather than raising the bound keeps the assertion measuring
+    what it was written to measure. The bound is calibrated evidence — 1353 ms
+    before the compaction fix, 139 ms after — so loosening it to swallow a
+    2.3 s download would blind it to a real regression. This is the same
+    principle as ``isolate_environment`` one screen up: a test must not depend
+    on ambient machine state, and "has this machine downloaded the BPE table
+    before?" is exactly that.
+
+    Session-scoped, and per xdist WORKER (each worker is its own process with
+    its own module state), which is the right granularity: the cost is paid
+    once per worker instead of by whichever test happens to touch the
+    tokenizer first. Never raises - a machine that genuinely cannot load
+    tiktoken falls through to the chars/4 estimate, and the suite must still
+    run there.
+    """
+    try:
+        from local_operator.compaction.tokens import _get_encoding
+
+        _get_encoding()
+    except Exception:  # noqa: BLE001 - warming is best-effort, never fatal
+        pass
+
+
 @pytest.fixture
 def terminal_output(tmp_path) -> Iterator[Path]:
     """Everything written to file descriptor 2 during the test, as a file.
