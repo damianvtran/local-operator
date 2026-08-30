@@ -64,12 +64,27 @@ import warnings
 
 import pytest
 
-#: Peak RSS a single worker costs, including its share of the controller.
-#: Measured on this suite (7,438 MB / 14 workers and 3,598 MB / 6 workers both
-#: land here). Used as the divisor for the memory budget; deliberately generous,
-#: because under-provisioning costs a little wall time and over-provisioning
-#: costs the whole machine to swap.
+#: Divisor for the memory budget. This is a deliberately CONSERVATIVE ENVELOPE,
+#: not the measured per-worker RSS - do not "correct" it to the measured figure.
+#: Cleanly measured xdist workers (matched by their execnet command line, on a
+#: subset that spawns no subprocesses of its own) sit at 226-262 MB. 600 is a
+#: ~2.5x margin over that, and the margin is intentional on three counts: a
+#: worker's RSS depends on which tests it draws (the worst observed single
+#: worker was ~1,090 MB), some suites fork their own children that the budget
+#: still has to cover (the eval-tool tests spawn kernel subprocesses), and the
+#: controller's own footprint is charged to no worker. The asymmetry justifies
+#: it: under-provisioning costs a little wall time, over-provisioning costs the
+#: whole machine a swap storm.
 _MB_PER_WORKER = 600
+
+#: Fraction of macOS ``Pages inactive`` treated as genuinely reclaimable. Those
+#: pages are a mix of clean (free on demand) and dirty/compressor-backed
+#: (reclaimable only by paging), and vm_stat does not split them. Counting all
+#: of it is what let the probe report 8 GB of headroom on a swapping machine;
+#: counting none of it reports near-zero on a healthy one with a warm cache.
+#: A quarter is a deliberate middle: pessimistic enough that pressure moves the
+#: number, generous enough not to starve an idle host.
+_INACTIVE_RECLAIM_FRACTION = 0.25
 
 #: Fraction of available memory the suite may claim. The rest is left for the
 #: editor, the agent sessions and the OS page cache that are the reason this
@@ -95,34 +110,72 @@ _MAX_WORKERS = 8
 _FALLBACK_WORKERS = 4
 
 
-def _available_memory_mb() -> int | None:
-    """Available (not total) physical memory in MB, or ``None`` if unmeasurable.
+def _swap_used_mb() -> float:
+    """Consumed swap in MB, or 0.0 when it cannot be read.
 
-    ``psutil`` would answer this in one call and is intentionally NOT a
-    dependency of this project, so each platform is probed through what ships
-    with the OS. Every probe is best-effort: any failure returns ``None`` and the
-    caller degrades to the CPU-only cap rather than guessing.
+    Subtracted from apparent headroom: a machine that is already paging has less
+    room than its free-page count suggests, and this term is what makes the
+    budget shrink as real pressure rises. Failing to 0.0 (rather than to None)
+    keeps a missing/unswapped host on the free-page estimate alone.
+    """
+    try:
+        out = subprocess.run(
+            ["sysctl", "-n", "vm.swapusage"], capture_output=True, text=True, timeout=5, check=True
+        ).stdout
+        match = re.search(r"used\s*=\s*([\d.]+)M", out)
+        return float(match.group(1)) if match else 0.0
+    except Exception:  # a missing probe must not break the budget
+        return 0.0
+
+
+def _available_memory_mb() -> int | None:
+    """Memory the suite can take without pushing the machine into swap, in MB.
+
+    ``None`` when it cannot be measured; the caller then degrades to the
+    CPU-only cap rather than guessing. ``psutil`` would answer this in one call
+    and is intentionally NOT a dependency, so each platform is probed through
+    what ships with the OS.
+
+    The macOS arm is deliberately NOT a naive "free + inactive". A first cut
+    counted ``Pages inactive`` as available and reported 8,137 MB of headroom on
+    this host at the exact moment it had 452 MB genuinely free and 6.1 GB of 7.2
+    GB of swap consumed - so the arm never became the binding constraint under
+    the pressure it exists to detect. On macOS ``inactive`` is not Linux's
+    ``MemAvailable``: much of it is dirty and compressor-backed, reclaimable
+    only by paging, which is the very cost being avoided. Two corrections:
+
+    * ``inactive`` is DISCOUNTED (only a fraction counts as reclaimable) rather
+      than dropped, because dropping it entirely reports near-zero on a healthy
+      machine with a warm page cache and would pin a fine host to the floor.
+    * Consumed swap is SUBTRACTED. A machine already paging has negative real
+      headroom, and this is what makes the probe fall as pressure rises.
     """
     try:
         if sys.platform == "darwin":
-            # `vm_stat` reports counts of 16K pages. "Available" for our purpose
-            # is free + inactive + speculative: inactive pages are clean and
-            # reclaimable on demand, and excluding them would understate a
-            # healthy machine's headroom by many gigabytes.
             out = subprocess.run(
                 ["vm_stat"], capture_output=True, text=True, timeout=5, check=True
             ).stdout
-            page_size = 4096
+            # Page size is read from the header, never assumed: this host uses
+            # 16K pages, so a hardcoded 4096 would under-report by 4x. A miss
+            # returns None like every other failure in this function, rather
+            # than silently pinning the cap to the floor.
             header = re.search(r"page size of (\d+) bytes", out)
-            if header:
-                page_size = int(header.group(1))
-            pages = 0
+            if header is None:
+                return None
+            page_size = int(header.group(1))
+
+            counts = {}
             for label in ("Pages free", "Pages inactive", "Pages speculative"):
                 match = re.search(rf"^{label}:\s+(\d+)\.", out, re.MULTILINE)
                 if match is None:
                     return None
-                pages += int(match.group(1))
-            return pages * page_size // (1024 * 1024)
+                counts[label] = int(match.group(1))
+
+            per_mb = page_size / (1024 * 1024)
+            free_mb = (counts["Pages free"] + counts["Pages speculative"]) * per_mb
+            inactive_mb = counts["Pages inactive"] * per_mb * _INACTIVE_RECLAIM_FRACTION
+            available = free_mb + inactive_mb - _swap_used_mb()
+            return max(0, int(available))
 
         if sys.platform.startswith("linux"):
             # MemAvailable is the kernel's own estimate of what can be handed out
@@ -133,7 +186,7 @@ def _available_memory_mb() -> int | None:
                     if line.startswith("MemAvailable:"):
                         return int(line.split()[1]) // 1024
             return None
-    except Exception:  # noqa: BLE001 - a probe must never break collection
+    except Exception:  # a probe must never break collection
         return None
 
     return None
@@ -164,7 +217,7 @@ def pytest_xdist_auto_num_workers(config: pytest.Config) -> int:
             except ValueError:
                 warnings.warn(
                     f"PYTEST_XDIST_AUTO_NUM_WORKERS is not a number: {override!r}. Ignoring it.",
-                    stacklevel=1,
+                    stacklevel=2,
                 )
 
         cpus = os.cpu_count() or 1
@@ -181,5 +234,5 @@ def pytest_xdist_auto_num_workers(config: pytest.Config) -> int:
             cap = min(cap, int(available_mb * _MEMORY_SHARE) // _MB_PER_WORKER)
 
         return max(_MIN_WORKERS, min(_MAX_WORKERS, cap))
-    except Exception:  # noqa: BLE001 - see docstring: never break the run
+    except Exception:  # see docstring: never break the run
         return _FALLBACK_WORKERS
