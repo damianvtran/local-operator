@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import copy
 import json
+import pickle
 import subprocess
 import sys
 from pathlib import Path
@@ -12,6 +14,7 @@ from pydantic import ValidationError
 
 from local_operator.evaluation.protocol import (
     MAX_BATCH_SIZE,
+    MAX_ENVELOPE_BYTES,
     MAX_METADATA_DEPTH,
     MAX_SAFE_JSON_INTEGER,
     ActionBatch,
@@ -177,6 +180,18 @@ def test_observation_metadata_rejects_nonportable_numbers_at_any_depth(value: fl
         )
 
 
+def test_omitted_metadata_is_immutable_and_canonical() -> None:
+    observation = Observation(
+        task_id="task-1",
+        episode_id="episode-1",
+        sequence=0,
+        observation_id="observation-0",
+    )
+    with pytest.raises(TypeError):
+        observation.metadata["injected"] = 1  # type: ignore[index]
+    assert observation.model_dump(mode="json")["metadata"] == {}
+
+
 def test_metadata_accepts_bool_and_safe_integer_boundaries() -> None:
     observation = Observation.model_validate(
         {
@@ -214,12 +229,47 @@ def test_metadata_is_recursively_immutable_and_serializes_canonically() -> None:
     assert Observation.from_canonical_json(before) == observation
 
 
+def test_metadata_survives_copy_deepcopy_pickle_and_validated_model_updates() -> None:
+    observation = _observation()
+    canonical = observation.to_canonical_json()
+    shallow = observation.model_copy()
+    deep = observation.model_copy(deep=True)
+    copied = copy.deepcopy(observation)
+    restored = pickle.loads(pickle.dumps(observation))
+    for candidate in (shallow, deep, copied, restored):
+        assert candidate == observation
+        assert candidate.to_canonical_json() == canonical
+        with pytest.raises(TypeError):
+            candidate.metadata["injected"] = 1  # type: ignore[index]
+
+    updated = observation.model_copy(update={"metadata": {"items": [1, {"safe": True}]}})
+    with pytest.raises(TypeError):
+        updated.metadata["items"][1]["safe"] = False  # type: ignore[index]
+    assert updated.model_dump(mode="json")["metadata"] == {"items": [1, {"safe": True}]}
+
+    with pytest.raises(ValidationError):
+        observation.model_copy(update={"metadata": {"bad": [float("nan")]}})
+    with pytest.raises(ValidationError):
+        observation.model_copy(update={"sequence": MAX_SAFE_JSON_INTEGER + 1})
+
+
 def test_metadata_depth_is_bounded_before_recursive_model_validation() -> None:
     metadata: dict[str, object] = {"leaf": 1}
     for _ in range(MAX_METADATA_DEPTH + 1):
         metadata = {"nested": metadata}
     with pytest.raises(ValidationError, match="maximum nesting depth"):
         Observation.model_validate({**_observation().model_dump(), "metadata": metadata})
+
+
+def test_observation_sequence_is_bounded_to_portable_safe_integers() -> None:
+    maximum = Observation.model_validate(
+        {**_observation().model_dump(), "sequence": MAX_SAFE_JSON_INTEGER}
+    )
+    assert maximum.sequence == MAX_SAFE_JSON_INTEGER
+    with pytest.raises(ValidationError):
+        Observation.model_validate(
+            {**_observation().model_dump(), "sequence": MAX_SAFE_JSON_INTEGER + 1}
+        )
 
 
 def test_action_union_is_closed_and_has_no_command_escape_hatches() -> None:
@@ -434,6 +484,23 @@ def test_canonical_observation_fixture_is_stable_and_requires_exact_encoding() -
             parse_envelope(noncanonical)
 
 
+def test_metadata_keys_are_portable_ascii_and_values_remain_unicode() -> None:
+    metadata = {
+        "z:key": "snowman ☃ / slash",
+        "A.key": 'line\nquote"backslash\\',
+        "0-key": "é",
+    }
+    observation = Observation.model_validate({**_observation().model_dump(), "metadata": metadata})
+    canonical = observation.to_canonical_json()
+    assert b'"0-key":"\xc3\xa9","A.key":"line\\nquote\\"backslash\\\\","z:key"' in canonical
+    assert b"snowman \xe2\x98\x83 / slash" in canonical
+    for bad_key in ("", "space key", "control\n", "é", "😀", "a" * 257):
+        with pytest.raises(ValidationError, match="keys must match"):
+            Observation.model_validate(
+                {**_observation().model_dump(), "metadata": {"outer": {bad_key: 1}}}
+            )
+
+
 def test_generic_parser_requires_explicit_version_and_rejects_normalized_actions() -> None:
     batch = ActionBatch(
         protocol_version="1.0",
@@ -450,6 +517,27 @@ def test_generic_parser_requires_explicit_version_and_rejects_normalized_actions
     lowercase_key = canonical.replace(b'"ENTER"', b'"enter"')
     with pytest.raises(ValueError, match="not canonical"):
         parse_envelope(lowercase_key)
+
+
+def test_generic_parser_rejects_oversized_and_invalid_utf8_before_json_decode() -> None:
+    valid = ObservationEnvelope(
+        protocol_version="1.0", observation=_observation()
+    ).to_canonical_json()
+    assert parse_envelope(valid) == ObservationEnvelope(
+        protocol_version="1.0", observation=_observation()
+    )
+    oversized_bytes = b" " * (MAX_ENVELOPE_BYTES + 1)
+    oversized_text = "é" * (MAX_ENVELOPE_BYTES // 2 + 1)
+    for payload in (oversized_bytes, oversized_text):
+        with pytest.raises(ValueError, match="exceeds"):
+            parse_envelope(payload)
+    with pytest.raises(ValueError, match="not valid UTF-8"):
+        parse_envelope(b'"\xff"')
+    # A payload exactly at the raw limit reaches JSON parsing rather than the
+    # size guard; padding makes it noncanonical but remains bounded allocation.
+    exact = valid + b" " * (MAX_ENVELOPE_BYTES - len(valid))
+    with pytest.raises(ValueError, match="not canonical"):
+        parse_envelope(exact)
 
 
 def test_generic_parser_rejects_duplicate_keys_at_any_depth() -> None:

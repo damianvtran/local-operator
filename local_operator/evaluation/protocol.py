@@ -8,16 +8,19 @@ observation; callers must never substitute the dimensions of a current display.
 Metadata intentionally uses a portable JSON subset: strings, booleans, null,
 and signed integers exactly representable by IEEE-754 (up to 2^53 - 1). Floats
 are excluded so Python and future non-Python adapters produce identical bytes
-without depending on an RFC 8785 implementation.
+without depending on an RFC 8785 implementation. Canonical JSON is UTF-8 with
+literal Unicode, sorted ASCII object keys, compact ``,:`` separators, standard
+JSON control/quote/backslash escaping, and unescaped slashes.
 """
 
 from __future__ import annotations
 
 import json
 import math
+import re
 import string
-from collections.abc import Mapping
-from types import MappingProxyType
+from collections.abc import Iterator, Mapping
+from copy import deepcopy
 from typing import Annotated, Any, ClassVar, Literal, Self, TypeAlias
 
 from pydantic import (
@@ -37,6 +40,7 @@ MAX_TEXT_LENGTH = 100_000
 MAX_METADATA_BYTES = 64_000
 MAX_METADATA_DEPTH = 16
 MAX_SAFE_JSON_INTEGER = 2**53 - 1
+MAX_ENVELOPE_BYTES = 16 * 1024 * 1024
 MAX_BATCH_SIZE = 64
 MAX_DIMENSION = 1_000_000
 MAX_COORDINATE = 1_000_000
@@ -49,15 +53,56 @@ Identifier = Annotated[
 ]
 Coordinate = Annotated[int, Field(ge=0, le=MAX_COORDINATE)]
 MouseButton = Literal["left", "middle", "right"]
+_METADATA_KEY_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,256}$")
+
+
+class FrozenMapping(Mapping[str, JsonValue]):
+    """A recursively immutable mapping that remains copy and pickle friendly.
+
+    ``MappingProxyType`` protects writes but cannot be deep-copied or pickled,
+    both of which Pydantic callers reasonably use. This value object owns its
+    backing dictionary, exposes no mutable view, and reconstructs itself through
+    the same recursive freezer when unpickled.
+    """
+
+    __slots__ = ("_data",)
+
+    def __init__(self, values: Mapping[str, JsonValue]) -> None:
+        self._data = {key: _freeze_json(value) for key, value in values.items()}
+
+    def __getitem__(self, key: str) -> JsonValue:
+        return self._data[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._data)
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+    def __repr__(self) -> str:
+        return f"FrozenMapping({_thaw_json(self)!r})"
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, Mapping):
+            return NotImplemented
+        return _thaw_json(self) == _thaw_json(other)
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> "FrozenMapping":
+        # Every reachable value is immutable, so identity is a valid deep copy.
+        memo[id(self)] = self
+        return self
+
+    def __reduce__(self) -> tuple[type["FrozenMapping"], tuple[dict[str, JsonValue]]]:
+        return type(self), (dict(self._data),)
 
 
 class ProtocolModel(BaseModel):
     """Immutable, coercion-free wire model shared by every protocol shape."""
 
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True, validate_default=True)
 
     def to_canonical_json(self) -> bytes:
-        """Return the one stable UTF-8 representation used for adapter RPCs."""
+        """Return compact sorted UTF-8 JSON with literal Unicode and slashes."""
         return json.dumps(
             self.model_dump(mode="json"),
             allow_nan=False,
@@ -74,6 +119,26 @@ class ProtocolModel(BaseModel):
         if parsed.to_canonical_json() != raw:
             raise ValueError("payload is valid JSON but is not canonical protocol JSON")
         return parsed
+
+    def model_copy(
+        self,
+        *,
+        update: Mapping[str, Any] | None = None,
+        deep: bool = False,
+    ) -> Self:
+        """Copy through validation so updates cannot bypass wire invariants.
+
+        Pydantic's default ``model_copy(update=...)`` deliberately skips
+        validation. That is unsafe for frozen protocol values because it can
+        inject mutable metadata or invalid bounds. A serialized reconstruction
+        also gives nested protocol models the same validation as RPC input;
+        ``deep`` is accepted for API compatibility but immutability makes the
+        reconstructed result safe either way.
+        """
+        values = self.model_dump(mode="python", round_trip=True)
+        if update:
+            values.update(deepcopy(dict(update)) if deep else update)
+        return type(self).model_validate(values, strict=True)
 
 
 class ArtifactRef(ProtocolModel):
@@ -161,11 +226,11 @@ class Observation(ProtocolModel):
 
     task_id: Identifier
     episode_id: Identifier
-    sequence: int = Field(ge=0, le=2**63 - 1)
+    sequence: int = Field(ge=0, le=MAX_SAFE_JSON_INTEGER)
     observation_id: Identifier
     text: str | None = Field(default=None, min_length=1, max_length=MAX_TEXT_LENGTH, pattern=r"\S")
     frames: tuple[FrameRef, ...] = Field(default=(), max_length=32)
-    metadata: Mapping[str, JsonValue] = Field(default_factory=dict)
+    metadata: Mapping[str, JsonValue] = Field(default_factory=dict, validate_default=True)
 
     @field_validator("frames", mode="before")
     @classmethod
@@ -186,8 +251,8 @@ class Observation(ProtocolModel):
 
     @field_validator("metadata")
     @classmethod
-    def _freeze_metadata(cls, metadata: Mapping[str, JsonValue]) -> Mapping[str, JsonValue]:
-        frozen = _freeze_json(metadata)
+    def _freeze_metadata(cls, metadata: Mapping[str, JsonValue]) -> FrozenMapping:
+        frozen = FrozenMapping(metadata)
         canonical = _canonical_json_value(_thaw_json(frozen))
         if len(canonical) > MAX_METADATA_BYTES:
             raise ValueError(f"metadata exceeds {MAX_METADATA_BYTES} canonical bytes")
@@ -432,7 +497,18 @@ def parse_envelope(payload: bytes | str) -> ProtocolEnvelope:
 
 
 def _decode_canonical_json(payload: bytes | str) -> tuple[bytes, Any]:
-    raw = payload.encode("utf-8") if isinstance(payload, str) else payload
+    # The cap applies to transport bytes before any decoder allocation or
+    # recursive parsing. Strings are measured in their protocol UTF-8 encoding.
+    if isinstance(payload, str):
+        raw = payload.encode("utf-8")
+    else:
+        raw = payload
+    if len(raw) > MAX_ENVELOPE_BYTES:
+        raise ValueError(f"protocol envelope exceeds {MAX_ENVELOPE_BYTES} bytes")
+    try:
+        raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError("protocol envelope is not valid UTF-8") from exc
 
     def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
         result: dict[str, Any] = {}
@@ -472,17 +548,21 @@ def _validate_metadata(value: Any, *, path: str = "metadata", depth: int = 0) ->
         for key, item in value.items():
             if not isinstance(key, str):
                 raise ValueError(f"{path} object keys must be strings")
-            if not key or len(key) > MAX_IDENTIFIER_LENGTH:
-                raise ValueError(f"{path} contains an empty or overlong key")
+            # Dynamic keys use an ASCII subset whose code-point and UTF-16 sort
+            # orders are identical across Python and JavaScript adapters.
+            if _METADATA_KEY_RE.fullmatch(key) is None:
+                raise ValueError(
+                    f"{path} keys must match [A-Za-z0-9_.:-]{{1,{MAX_IDENTIFIER_LENGTH}}}"
+                )
             _validate_metadata(item, path=f"{path}.{key}", depth=depth + 1)
         return
     raise ValueError(f"{path} contains unsupported value type {type(value).__name__}")
 
 
 def _freeze_json(value: Any) -> Any:
-    if isinstance(value, dict):
-        return MappingProxyType({key: _freeze_json(item) for key, item in value.items()})
-    if isinstance(value, list):
+    if isinstance(value, Mapping):
+        return FrozenMapping(value)
+    if isinstance(value, (list, tuple)):
         return tuple(_freeze_json(item) for item in value)
     return value
 
