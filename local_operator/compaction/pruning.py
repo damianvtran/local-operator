@@ -152,11 +152,48 @@ def _supersede_key(message: Message) -> str | None:
     The range rides in the key: a ranged read must NOT supersede a different
     range of the same file (they share not one line), while a full-file read
     supersedes every earlier range — handled in the pass below.
+
+    ``details['surface']`` is the same idea for tools that OBSERVE rather than
+    read: a screen, a page, a canvas. Each result describes the live state of
+    one surface, so a newer observation of the same surface supersedes every
+    older one completely -- the older text describes a screen that no longer
+    exists, exactly as a stale screenshot does.
+
+    Without this, a screen-driving agent accumulates every observation's text
+    forever. Measured on an OSWorld 2.0 episode: 374 tool results held ~71.5k
+    tokens of superseded observation text at cycle 371, most of it the task
+    instruction repeated verbatim in every single result, and the context had
+    grown to 133k with the compaction trigger still correctly far away.
     """
     details = _details_of(message)
+    if not message.tool_name:
+        return None
     path = details.get("path")
-    if isinstance(path, str) and path and message.tool_name:
+    if isinstance(path, str) and path:
         return f"{message.tool_name}:{path}:{details.get('range') or 'full'}"
+    # A URL identifies a re-fetchable resource exactly as a path identifies a
+    # file: ``read <url>`` and ``web_fetch`` of the same address return the
+    # live state of one thing, so the newer answer supersedes the older.
+    url = details.get("url")
+    # A SURFACE is the same idea for tools that OBSERVE rather than fetch: a
+    # browser tab, a screen, a canvas. Each result describes the live state of
+    # that surface, so a newer view supersedes every older one -- the older
+    # text describes a page that no longer exists, exactly as a stale
+    # screenshot does. The browser tool names its handle ``surface_id``;
+    # ``surface`` is the generic spelling for other observers.
+    surface = details.get("surface") or details.get("surface_id")
+    if isinstance(surface, str) and surface:
+        # Scope to what is being observed THROUGH the surface: a tab that has
+        # navigated elsewhere is a different resource, and a selector-scoped
+        # read is not the whole page. Without this a read of the footer would
+        # blank an earlier read of the article body on the same tab.
+        scope = url if isinstance(url, str) and url else ""
+        selector = details.get("selector")
+        if isinstance(selector, str) and selector:
+            scope = f"{scope}#{selector}"
+        return f"{message.tool_name}:surface:{surface}:{scope}"
+    if isinstance(url, str) and url:
+        return f"{message.tool_name}:url:{url}:{details.get('range') or 'full'}"
     return None
 
 

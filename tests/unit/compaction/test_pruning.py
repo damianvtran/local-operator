@@ -1,3 +1,5 @@
+from typing import Any
+
 """Cache-aware pruning: superseded reads, useless blanking, and every guard."""
 
 from local_operator.compaction.pruning import (
@@ -8,7 +10,7 @@ from local_operator.compaction.pruning import (
     prune_tool_outputs,
 )
 from local_operator.compaction.tokens import estimate_tokens
-from local_operator.harness.types import Message
+from local_operator.harness.types import Message, TextContent
 
 NOW = 10_000_000
 ACTIVE = NOW  # not idle
@@ -257,3 +259,90 @@ def test_identical_ranged_read_is_superseded_like_identical_full():
     out, changed = prune_tool_outputs(messages, NOW, ACTIVE)
     assert changed is True
     assert first.text == SUPERSEDED_NOTICE
+
+
+def _observer(call_id: str, name: str, details: dict[str, Any], body: str = "x" * 1200) -> Message:
+    return Message(
+        role="tool",
+        tool_call_id=call_id,
+        tool_name=name,
+        content=[TextContent(text=f"{call_id} {body}")],
+        provider_payload={"details": details},
+    )
+
+
+def _text_len(messages: list[Message]) -> int:
+    """Total characters of TEXT content, ignoring non-text blocks."""
+    return sum(
+        len(block.text)
+        for message in messages
+        for block in (message.content if isinstance(message.content, list) else [])
+        if isinstance(block, TextContent)
+    )
+
+
+def _first_text(message: Message) -> str:
+    blocks = message.content if isinstance(message.content, list) else []
+    return next((b.text for b in blocks if isinstance(b, TextContent)), "")
+
+
+def test_re_observing_one_resource_supersedes_the_earlier_view() -> None:
+    """A URL or a browser surface identifies a live resource, like a path.
+
+    Only path-carrying reads superseded before this, so an agent that polled
+    one page -- watching a CI build, re-fetching a status endpoint, re-reading
+    a tab after acting on it -- carried every stale copy for the rest of the
+    session. Each of those results describes a page that no longer exists.
+    """
+    page = {"surface_id": "s:1", "url": "https://ci/build/9", "selector": "body"}
+    messages = [Message.user("watch it")] + [_observer(f"c{i}", "browser", page) for i in range(8)]
+    before = _text_len(messages)
+
+    pruned, changed = prune_tool_outputs(messages, now_ms=0, last_activity_ms=0)
+
+    assert changed
+    after = _text_len(pruned)
+    assert after < before * 0.3, f"only saved {100 * (1 - after / before):.0f}%"
+    # The newest view must survive intact: it is the only one describing reality.
+    assert "x" * 1200 in _first_text(pruned[-1])
+
+    fetches = [Message.user("poll")] + [
+        _observer(f"f{i}", "web_fetch", {"url": "https://api/status"}) for i in range(6)
+    ]
+    pruned_fetches, changed_fetches = prune_tool_outputs(fetches, now_ms=0, last_activity_ms=0)
+    assert changed_fetches
+    assert _text_len(pruned_fetches) < _text_len(fetches[:1]) + 1200 * 2
+
+
+def test_distinct_observations_are_never_superseded() -> None:
+    """The saving must come from redundancy only, never from real content.
+
+    Different pages, a tab that has navigated elsewhere, a differently-scoped
+    read of the same tab, and bare commands are all genuinely distinct results.
+    Blanking any of them would be data loss dressed up as an optimization.
+    """
+    cases = {
+        "different pages": [
+            _observer(f"p{i}", "browser", {"surface_id": "s:1", "url": f"https://s/{i}"})
+            for i in range(8)
+        ],
+        "same tab, navigated": [
+            _observer("n1", "browser", {"surface_id": "s:1", "url": "https://a"}),
+            _observer("n2", "browser", {"surface_id": "s:1", "url": "https://b"}),
+        ],
+        "same page, different selector": [
+            _observer(
+                "s1", "browser", {"surface_id": "s:1", "url": "https://a", "selector": "article"}
+            ),
+            _observer(
+                "s2", "browser", {"surface_id": "s:1", "url": "https://a", "selector": "footer"}
+            ),
+        ],
+        "bare commands": [_observer(f"b{i}", "bash", {}) for i in range(8)],
+    }
+    for label, messages in cases.items():
+        full = [Message.user("go")] + messages
+        before = _text_len(full)
+        pruned, _changed = prune_tool_outputs(full, now_ms=0, last_activity_ms=0)
+        after = _text_len(pruned)
+        assert after == before, f"{label}: blanked {before - after} chars of distinct content"
