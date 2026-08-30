@@ -3,25 +3,25 @@
   "blocks": 160,
   "counts": {
     "ticks": 50,
-    "paint_chrome": 324,
-    "title_updates": 290,
-    "breadcrumb_updates": 290,
-    "rule_updates": 290,
-    "update_msgs": 1680,
-    "layout_msgs": 271,
-    "refresh_layout": 232,
-    "reflow": 232
+    "paint_chrome": 244,
+    "title_updates": 230,
+    "breadcrumb_updates": 230,
+    "rule_updates": 230,
+    "update_msgs": 1399,
+    "layout_msgs": 227,
+    "refresh_layout": 221,
+    "reflow": 221
   },
   "per_tick": {
     "ticks_per_tick": 1.0,
-    "paint_chrome_per_tick": 6.48,
-    "title_updates_per_tick": 5.8,
-    "breadcrumb_updates_per_tick": 5.8,
-    "rule_updates_per_tick": 5.8,
-    "update_msgs_per_tick": 33.6,
-    "layout_msgs_per_tick": 5.42,
-    "refresh_layout_per_tick": 4.64,
-    "reflow_per_tick": 4.64
+    "paint_chrome_per_tick": 4.88,
+    "title_updates_per_tick": 4.6,
+    "breadcrumb_updates_per_tick": 4.6,
+    "rule_updates_per_tick": 4.6,
+    "update_msgs_per_tick": 27.98,
+    "layout_msgs_per_tick": 4.54,
+    "refresh_layout_per_tick": 4.42,
+    "reflow_per_tick": 4.42
   },
-  "wall_s": 33.568
+  "wall_s": 13.488
 }

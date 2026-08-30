@@ -1212,6 +1212,20 @@ class WelcomeView(Static):
             self._timer.stop()
             self._timer = None
 
+    def sync_animation_rate(self) -> None:
+        """Re-rate the splash's two timers after a focus change.
+
+        The same seam the other four animated surfaces expose, so the app can
+        fan a focus change out uniformly instead of reaching through this
+        widget's privates. The splash owns two timers rather than one (the mark
+        pulse and the tip rotation) and both derive their rate from
+        ``motion_enabled()``, so re-running the two syncs is the whole job:
+        each stops, starts or leaves its timer alone to match what focus now
+        allows.
+        """
+        self._sync_pulse_timer()
+        self._sync_tip_timer()
+
     def _sync_pulse_timer(self) -> None:
         """Glow only while the splash is on screen and animation is allowed.
 

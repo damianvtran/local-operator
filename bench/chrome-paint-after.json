@@ -1,25 +1,19 @@
 {
-  "ticks": 30,
+  "ticks": 50,
   "blocks": 160,
   "counts": {
-    "ticks": 30,
-    "paint_chrome": 91,
-    "title_updates": 87,
-    "update_msgs": 307,
+    "ticks": 50,
+    "paint_chrome": 157,
+    "title_updates": 150,
+    "update_msgs": 560,
     "layout_msgs": 1
   },
   "per_tick": {
     "ticks_per_tick": 1.0,
-    "paint_chrome_per_tick": 3.0333,
-    "title_updates_per_tick": 2.9,
-    "update_msgs_per_tick": 10.2333,
-    "layout_msgs_per_tick": 0.0333
+    "paint_chrome_per_tick": 3.14,
+    "title_updates_per_tick": 3.0,
+    "update_msgs_per_tick": 11.2,
+    "layout_msgs_per_tick": 0.02
   },
-  "wall_s": 4.173,
-  "focus": {
-    "window_s": 8.0,
-    "focused_bytes_per_s": 24109,
-    "blurred_bytes_per_s": 862,
-    "reduction": 28.0
-  }
+  "wall_s": 7.402
 }

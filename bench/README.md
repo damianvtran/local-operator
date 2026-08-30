@@ -164,13 +164,20 @@ fixes (after), 50 driven ticks, 160-block transcript, one running child.
 
 | Per spinner tick | Before | After |
 | --- | --- | --- |
-| `messages.Layout` posted | 5.42 | **0.02** |
-| compositor reflows | 4.64 | **0.00** |
-| `Screen._refresh_layout` | 4.64 | **0.00** |
-| `messages.Update` posted | 33.60 | **16.38** |
-| title rewrites | 5.80 | 4.54 |
-| breadcrumb rewrites | 5.80 | **0.00** |
-| rule rewrites | 5.80 | **0.00** |
+| `messages.Layout` posted | 4.54 | **0.02** |
+| compositor reflows | 4.42 | **0.00** |
+| `Screen._refresh_layout` | 4.42 | **0.00** |
+| `messages.Update` posted | 27.98 | **11.20** |
+| title rewrites | 4.60 | 3.00 |
+| breadcrumb rewrites | 4.60 | **0.00** |
+| rule rewrites | 4.60 | **0.00** |
+
+Both columns are the committed artifacts in this directory
+(`chrome-paint-before.json`, `chrome-paint-after.json`), captured in the same
+session at the same tick count so the two are directly comparable. Absolute
+counts drift a little between runs because the 1 Hz job poll also refreshes the
+page; the columns that go to exactly zero are the ones this work is about, and
+those are structural rather than sampled.
 
 The breadcrumb and the rule are pure functions of `_ancestors`/`_label` and of
 width; neither can change on a spinner tick, and both were being rewritten with

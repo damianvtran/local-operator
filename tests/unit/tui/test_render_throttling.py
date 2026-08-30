@@ -16,7 +16,7 @@ Two invariants run through the whole file and are each pinned by name:
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from textual import messages
@@ -329,7 +329,9 @@ async def test_blur_does_not_stop_a_settled_page_from_staying_settled() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_session_that_never_hears_about_focus_is_never_throttled() -> None:
+async def test_a_session_that_never_hears_about_focus_is_never_throttled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The default is FOCUSED, because some hosts send no focus events at all.
 
     "We were never told" and "the user is looking at this" have to be the same
@@ -340,14 +342,24 @@ async def test_a_session_that_never_hears_about_focus_is_never_throttled() -> No
     async with app.run_test(size=(100, 30)) as pilot:
         view = await _open_running_child(pilot, app)
         assert view._spinner_rate == SPINNER_INTERVAL_S
+        # The shimmer pin has to come OFF for this line to mean anything. The
+        # suite sets LOCAL_OPERATOR_NO_SHIMMER=1 (conftest), under which
+        # `motion_enabled()` is False whatever focus says — so the disjunct
+        # this assertion used to carry was unconditionally true and the test
+        # asserted nothing (agent review R5). Turning motion on isolates the
+        # FOCUS gate, which is the one under test here.
+        monkeypatch.delenv("LOCAL_OPERATOR_NO_SHIMMER", raising=False)
+        assert animation.motion_enabled() is True
         working = WorkingBlock("thinking")
         app._append_block(working)
         await pilot.pause()
-        assert working._tick_ms == WorkingBlock._FRAME_MS or not animation.motion_enabled()
+        assert working._tick_ms == WorkingBlock._FRAME_MS
 
 
 @pytest.mark.asyncio
-async def test_working_block_falls_to_the_static_cadence_on_blur() -> None:
+async def test_working_block_falls_to_the_static_cadence_on_blur(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The 30 fps shimmer line reuses its EXISTING static mode, not a new one.
 
     ``_STATIC_FRAME_MS`` already exists for shimmer-off and is already correct
@@ -377,11 +389,23 @@ async def test_working_block_falls_to_the_static_cadence_on_blur() -> None:
         assert working._tick_ms == WorkingBlock._STATIC_FRAME_MS
         assert working._timer is not None, "throttled, not stopped"
 
+        # Refocus with the shimmer pin OFF, so "restored" is distinguishable
+        # from "never changed". Asserting _STATIC_FRAME_MS on both sides of the
+        # transition (as this did) passes even if refocus does nothing at all
+        # (agent review R5). The AND-ing of the two gates is asserted
+        # separately below.
+        monkeypatch.delenv("LOCAL_OPERATOR_NO_SHIMMER", raising=False)
         app._set_animation_focused(True)
         await pilot.pause()
-        # Restored only where the shimmer setting itself allows motion; the
-        # suite pins LOCAL_OPERATOR_NO_SHIMMER=1, so this asserts the gate is
-        # AND-ed rather than replaced.
+        assert working._tick_ms == WorkingBlock._FRAME_MS, "refocus did not restore"
+
+        # And with the shimmer setting off, focus alone must NOT restore
+        # motion: the gate is AND-ed rather than replaced.
+        monkeypatch.setenv("LOCAL_OPERATOR_NO_SHIMMER", "1")
+        app._set_animation_focused(False)
+        await pilot.pause()
+        app._set_animation_focused(True)
+        await pilot.pause()
         assert working._tick_ms == WorkingBlock._STATIC_FRAME_MS
 
 
@@ -551,3 +575,62 @@ async def test_panel_repaints_in_full_on_refocus() -> None:
         app._set_animation_focused(True)
 
         assert panel._dirty is True
+
+
+def test_the_band_rerenders_on_refocus() -> None:
+    """The band's clock and token counts must be current on refocus.
+
+    The band is the one throttled surface that is NOT a ``Widget`` — it drives
+    a ``Static`` dock and is re-rated by the app rather than by a Textual event
+    of its own — so nothing else in the suite holds its refocus repaint. It is
+    covered here because the band carries the session clock and the token
+    counts, not just a glyph: those are the numbers a returning user reads
+    first, and at the blurred cadence they would otherwise be up to a second
+    stale at the moment the window is looked at.
+
+    Mutation-tested: deleting the ``refresh()`` in ``sync_animation_rate``
+    survived the whole suite before this test existed (agent review R4).
+    """
+    from local_operator.tui.widgets.status_line import StatusLine
+    from tests.unit.tui.test_status_line import _dock
+
+    animation.reset_animation_focus()
+    band = StatusLine(_dock(200))
+    # Only a STREAMING band has a spinner timer to re-rate; an idle one has
+    # already stopped and must stay stopped.
+    band.update(streaming=True)
+    dock = cast(Any, band)._dock
+
+    animation.set_animation_focused(False)
+    band.sync_animation_rate()
+    dock.painted = None
+
+    animation.set_animation_focused(True)
+    band.sync_animation_rate()
+
+    assert dock.painted is not None, "the band did not re-render on refocus"
+    assert dock.layout is False, "the band must never ask for a layout pass"
+    animation.reset_animation_focus()
+
+
+def test_an_idle_band_stays_stopped_across_a_focus_change() -> None:
+    """Re-rating must never START a spinner on a band that is not streaming.
+
+    ``sync_animation_rate`` replaces the timer to change its interval, and the
+    hazard in that shape is arming a surface that had correctly stopped.
+    """
+    from local_operator.tui.widgets.status_line import StatusLine
+    from tests.unit.tui.test_status_line import _dock
+
+    animation.reset_animation_focus()
+    band = StatusLine(_dock(200))
+    dock = cast(Any, band)._dock
+    before = len(dock.intervals)
+
+    animation.set_animation_focused(False)
+    band.sync_animation_rate()
+    animation.set_animation_focused(True)
+    band.sync_animation_rate()
+
+    assert len(dock.intervals) == before, "an idle band was given a spinner"
+    animation.reset_animation_focus()

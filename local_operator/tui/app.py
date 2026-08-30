@@ -8964,11 +8964,13 @@ class OperatorApp(App[None]):
         line are driven by events and not by these timers.
 
         A session that never receives focus events is never throttled: the flag
-        starts focused and only an explicit blur clears it. Textual also flips
-        `app_focus` back to True on any keypress or click and posts AppFocus
-        here, so a spurious blur on a host with half-working focus reporting
-        heals on the user's next keystroke rather than leaving a foreground
-        session stuck at the slow rate.
+        starts focused and only an explicit blur clears it. A session that hears
+        a blur but never the matching focus heals on the user's next keystroke —
+        but NOT through this handler: Textual flips the `app_focus` reactive
+        directly in `App.on_event` and posts no `AppFocus` event for it, so the
+        recovery path is the `_watch_app_focus` watcher above. Verified against
+        Textual 8.2.8, where a blur followed by a keypress leaves `app_focus`
+        True with no event delivered here.
 
         Guarded per surface: one widget mid-teardown must not stop the others
         being told, and no part of this is worth an exception reaching a turn.
@@ -8989,15 +8991,19 @@ class OperatorApp(App[None]):
                 surface.sync_animation_rate()
             except Exception:  # pragma: no cover - defensive; chrome must not raise
                 logger.debug("animation re-rate failed", exc_info=True)
-        # The splash owns two timers and derives both from `motion_enabled()`,
-        # so it is re-synced through the same seams `set_visible` uses rather
-        # than being given a re-rate method of its own.
+        # The splash is queried rather than held as an attribute (it is mounted
+        # and dropped with the boot screen), so it is fanned out to separately
+        # — but through the SAME public `sync_animation_rate` seam as the four
+        # above, not through its privates: a second convention for "re-rate
+        # yourself" is exactly what this module's docstring warns against.
         try:
             welcome = self.query_one(WelcomeView)
-            welcome._sync_pulse_timer()
-            welcome._sync_tip_timer()
         except Exception:
-            pass  # no splash mounted, or already torn down: the ordinary case
+            return  # no splash mounted, or already torn down: the ordinary case
+        try:
+            welcome.sync_animation_rate()
+        except Exception:  # pragma: no cover - defensive; chrome must not raise
+            logger.debug("splash animation re-rate failed", exc_info=True)
 
     def _flush_pending_question(self) -> None:
         """Announce an unanswered question raised while the terminal was focused.
