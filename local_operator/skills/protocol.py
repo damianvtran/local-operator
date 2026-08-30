@@ -114,13 +114,18 @@ def _list_directory(directory: Path, base_resolved: Path) -> str:
     A SYMLINK is listed only when the resolver would also accept it, on the
     two grounds ``_resolve_child`` can refuse: its resolved target must stay
     inside ``base_resolved`` (R3-2), and it must actually exist (review F1).
-    The second is not implied by the first — ``resolve()`` is non-strict, so
-    a dangling link and a self-referential loop both resolve to a path INSIDE
-    the base and pass containment, then fail the resolver's ``exists()``.
-    ``Path.exists()`` follows the link, so it is False for exactly those two
-    shapes and True for a live one. The bare-read listing already drops both
-    (its walk tests ``is_file()``/``is_dir()``, which a broken link fails),
-    so this brings the two surfaces to parity rather than inventing a rule.
+    The second is not implied by the first, and WHICH check rejects a broken
+    link is version-dependent (review F4). On 3.13+ ``resolve()`` is
+    non-strict, so a dangling link and a self-referential loop both resolve to
+    a path INSIDE the base, pass containment, and are caught by ``exists()``
+    — which follows the link and is therefore False for both. On 3.12 a LOOP
+    never reaches ``exists()`` at all: ``pathlib`` converts ELOOP into
+    ``RuntimeError``, which :func:`_contained` catches, so containment is what
+    rejects it there. Both orderings end at the same listing, which is the
+    point; do not simplify either guard on the strength of one interpreter.
+    The bare-read listing already drops both shapes (its walk tests
+    ``is_file()``/``is_dir()``, which a broken link fails), so this brings the
+    two surfaces to parity rather than inventing a rule.
 
     Only symlinks are checked, the same gate ``_reference_listing`` uses.
     ``_resolve_child`` has already resolved AND existence-checked the whole
@@ -129,7 +134,15 @@ def _list_directory(directory: Path, base_resolved: Path) -> str:
     on the overwhelmingly common all-plain-files listing. Omitted entries are
     excluded from the overflow count too: the marker promises "more entries"
     the caller can reach by listing a directory, and an unreadable name is
-    not one of them."""
+    not one of them.
+
+    The parity is over REACHABILITY, not over every read failure. A file that
+    exists but denies permission (``chmod 000``, whether named directly or
+    through a link) is still listed and still fails the read with
+    ``PermissionError`` — pre-existing on both surfaces, and deliberately left
+    (review F5): the check would be a per-entry ``access()`` on every plain
+    file, the answer can change between listing and read anyway, and the
+    adapter degrades it to a message rather than a crash."""
     lines: list[str] = []
     try:
         entries = sorted(directory.iterdir(), key=lambda p: (p.name.lower(), p.name))
