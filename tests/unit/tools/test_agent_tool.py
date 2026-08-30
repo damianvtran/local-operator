@@ -717,3 +717,186 @@ async def test_reinstall_names_reset_as_the_way_to_get_the_packaged_text_back(co
 
     assert "left as-is" in body, "install stays idempotent; that is what protects the edits"
     assert "op='reset' name='reviewer'" in body
+
+
+@pytest.mark.parametrize(
+    "field,edit",
+    [
+        ("tools", {"tools": ["read", "edit", "write"]}),
+        ("effort", {"effort": "lo"}),
+        ("delegate", {"delegate": True}),
+    ],
+)
+@pytest.mark.asyncio
+async def test_reset_restores_a_role_edited_only_in_a_non_prose_field(
+    context, registry, field: str, edit: dict[str, Any]
+) -> None:
+    """F1/U1: the no-op short-circuit compared INSTRUCTIONS ONLY, so a role whose
+    allowlist had been widened but whose prose was untouched never reached the
+    overwrite. It answered "nothing was changed" and kept the widened surface —
+    the exact fail-open the restore exists to close, while reporting success.
+
+    Parametrized across every non-prose field the seed writes because the bug was
+    not specific to `tools`; a check that only learned about `tools` would leave
+    `effort` and `delegate` in the same hole.
+    """
+    await call(context, op="install", name="reviewer")
+    await call(context, op="update", name="reviewer", **edit)
+
+    shown = await call(context, op="show", name="reviewer")
+    body = await call(context, op="reset", name="reviewer")
+
+    assert "this role has been edited" in shown, "show must surface it too"
+    assert field in shown
+    assert "nothing was changed" not in body
+    assert f"{field} replaced" in body
+    profile = resolve_profile("reviewer", registry=registry)
+    packaged = load_seed("reviewer")
+    assert profile is not None and packaged is not None
+    assert profile.tools == packaged.tools
+    assert (profile.effort or None) == (packaged.effort or None)
+    assert profile.may_delegate == packaged.may_delegate
+
+
+@pytest.mark.asyncio
+async def test_divergence_is_not_escapable_by_editing_one_character_of_prose(
+    context,
+) -> None:
+    """F1/U1: with two independent comparisons the verdict on a widened allowlist
+    flipped depending on whether the prose also happened to differ. `show` and
+    `reset` now share one predicate, so the answer cannot depend on that."""
+    packaged = load_seed("reviewer")
+    assert packaged is not None
+
+    await call(context, op="install", name="reviewer")
+    await call(context, op="update", name="reviewer", tools=["read"])
+    tools_only = "this role has been edited" in await call(context, op="show", name="reviewer")
+
+    await call(context, op="update", name="reviewer", instructions=packaged.instructions + " extra")
+    tools_and_prose = "this role has been edited" in await call(context, op="show", name="reviewer")
+
+    assert tools_only is tools_and_prose is True
+
+
+@pytest.mark.asyncio
+async def test_reset_refuses_a_self_authored_role_under_a_packaged_name(context, registry) -> None:
+    """F2: the guard was `load_seed(name) is None`, so a role the operator wrote
+    themselves under a starter's name (`scout`) took the restore path and was
+    destroyed. The refusal must key on PROVENANCE, not on name collision."""
+    await call(context, op="create", name="scout", description="mine", instructions="MY OWN WORK")
+
+    shown = await call(context, op="show", name="scout")
+    body = await call(context, op="reset", name="scout")
+
+    assert "this role has been edited" not in shown, "it was never an install to diverge from"
+    assert "authored here" in body and "nothing was changed" in body
+    assert "op='update' name='scout'" in body
+    profile = resolve_profile("scout", registry=registry)
+    assert profile is not None and profile.instructions == "MY OWN WORK"
+
+
+@pytest.mark.asyncio
+async def test_an_edit_does_not_strip_a_role_of_its_provenance(context, registry) -> None:
+    """The provenance marker is rebuilt by `_op_write`, which encodes a PROFILE's
+    fields and knows nothing about origin. Losing the marker on edit would make
+    `reset` refuse exactly the roles it exists for: an edited install."""
+    await call(context, op="install", name="reviewer")
+    await call(context, op="update", name="reviewer", instructions="ONLY CHECK THE MIGRATIONS.")
+
+    body = await call(context, op="reset", name="reviewer")
+
+    assert "reset role 'reviewer'" in body, "an edited install must still be resettable"
+    profile = resolve_profile("reviewer", registry=registry)
+    assert profile is not None and "MIGRATIONS" not in profile.instructions
+
+
+@pytest.mark.asyncio
+async def test_reset_echoes_every_field_it_replaced_not_only_the_prose(context) -> None:
+    """U2: "recoverable by copy-paste" held for instructions only. A role someone
+    had deliberately NARROWED to `read` lost that restriction with no record,
+    while the closing line pointed at op='update' for the thing that WAS echoed."""
+    await call(context, op="install", name="reviewer")
+    await call(context, op="update", name="reviewer", tools=["read"])
+
+    body = await call(context, op="reset", name="reviewer")
+
+    assert "tools replaced" in body
+    assert "your tools: read" in body, "the restriction they lose has to be written down"
+    assert "op='update'" in body
+
+
+@pytest.mark.asyncio
+async def test_a_one_line_edit_renders_as_a_diff_not_two_walls_of_text(context) -> None:
+    """U3: the block printed both ~32-line bodies whole and left the reader to
+    spot a one-line difference by eye, billed to their context."""
+    packaged = load_seed("reviewer")
+    assert packaged is not None
+    lines = packaged.instructions.splitlines()
+    tweaked = "\n".join(lines[:5] + ["You may skip the tests if you are in a hurry."] + lines[5:])
+
+    await call(context, op="install", name="reviewer")
+    await call(context, op="update", name="reviewer", instructions=tweaked)
+
+    block = (await call(context, op="show", name="reviewer")).split("this role has been edited")[1]
+
+    assert "as a diff against yours" in block
+    assert "+++ packaged" in block
+    assert "You may skip the tests" in block, "the differing line is what the reader needs"
+    assert len(block.splitlines()) < len(lines), "a diff that is longer than the body is no diff"
+
+
+@pytest.mark.asyncio
+async def test_a_wholly_rewritten_role_falls_back_to_the_full_body(context) -> None:
+    """A diff of two unrelated texts is longer than the text itself, so the
+    fallback prints the body — and must not still call it a diff."""
+    await call(context, op="install", name="reviewer")
+    await call(context, op="update", name="reviewer", instructions="totally different short text")
+
+    block = (await call(context, op="show", name="reviewer")).split("this role has been edited")[1]
+
+    assert "too different to diff usefully" in block
+    assert "as a diff against yours" not in block
+    assert "You are an INDEPENDENT reviewer" in block
+
+
+@pytest.mark.asyncio
+async def test_reset_on_an_unknown_name_that_is_a_registered_role_names_update(
+    context,
+) -> None:
+    """U4: sending the reader to a bare starter list was a second dead end when
+    the name they typed is a role of their own with no packaged counterpart."""
+    await call(context, op="create", name="mine", description="d", instructions="my guidance")
+
+    body = await call(context, op="reset", name="mine")
+
+    assert "You do have a role named 'mine'" in body
+    assert "op='update' name='mine'" in body
+
+
+@pytest.mark.asyncio
+async def test_reset_leaves_operator_owned_settings_alone(context, registry) -> None:
+    """F3: a reset restores the packaged ROLE, not a factory-reset row. `model`,
+    `hosting`, `security_prompt` and sampling are the operator's; the seed pins
+    none of them and `update_agent` cannot clear a field through this path."""
+    await call(context, op="install", name="reviewer")
+    agent = registry.get_agent_by_name("reviewer")
+    registry.update_agent(
+        agent.id, _edit_fields(security_prompt="stay in scope", model="gpt-4o-mini")
+    )
+    await call(context, op="update", name="reviewer", instructions="broken")
+
+    await call(context, op="reset", name="reviewer")
+
+    after = registry.get_agent_by_name("reviewer")
+    assert after.security_prompt == "stay in scope"
+    assert after.model == "gpt-4o-mini"
+
+
+@pytest.mark.asyncio
+async def test_both_result_bodies_spell_the_launch_line_the_same_way(context) -> None:
+    """F5: `show` said "launch with" and `_op_reset` said "Launch with"."""
+    await call(context, op="install", name="reviewer")
+    await call(context, op="update", name="reviewer", instructions="broken")
+
+    assert "Launch with task(" not in await call(context, op="reset", name="reviewer")
+    assert "launch with task(" in await call(context, op="show", name="reviewer")
