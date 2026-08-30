@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 from textual.app import App, ComposeResult
 
+from local_operator.tui import animation
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets.transcript import TranscriptView
 
@@ -27,6 +28,13 @@ def hermetic_tui_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("NO_COLOR", raising=False)
     monkeypatch.setenv("TERM", "xterm-256color")
     monkeypatch.setenv("LOCAL_OPERATOR_NO_SHIMMER", "1")
+    # Terminal-focus animation gating is a module global (it has to be: the
+    # surfaces reading it are built at different times and one is not a
+    # Widget). The suite shares a process, so a test that blurs the app would
+    # otherwise leave every later test's timers at the reduced cadence.
+    # Reverted here rather than in each test for the same reason the env pins
+    # above are: a leak like this fails somewhere else entirely.
+    animation.reset_animation_focus()
     # Pin the tool-row icon mode host-independently. `nerd_icons_enabled()` now
     # autodetects from terminal-emulator env markers (glyphs.py), so the icon a
     # row leads with depends on the HOST: a dev box in ghostty/cmux renders the

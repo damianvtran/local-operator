@@ -141,3 +141,65 @@ Reading the table:
 Cold-cache numbers are reported separately and never averaged into the warm
 ones: the first scan after the cache is deleted is 1.6-5.2 s on this store,
 dominated by reading 29,000 marker files, and it writes the cache as it goes.
+
+## chrome-paint-before.json / chrome-paint-after.json
+
+`scripts/bench_tui_chrome_paint.py` measures what one running subagent page
+costs per spinner tick, and what an idle session writes to its terminal focused
+versus blurred. Run:
+
+```sh
+env -u NO_COLOR TERM=xterm-256color \
+  .venv/bin/python scripts/bench_tui_chrome_paint.py --focus 8 --json out.json
+```
+
+Everything except the focus block is a load-invariant COUNT rather than a
+duration, and deliberately so: the machine this was diagnosed on sat at loadavg
+260-307 on 14 cores from unrelated harnesses, where a fixed work quantum held
+its CPU time (81.6 -> 101.5 ms) while wall time inflated 4.6-7.8x. Wall time is
+printed but is not a signal.
+
+Captured against `origin/main` @ `3c79116c` (before) and the same tree with the
+fixes (after), 50 driven ticks, 160-block transcript, one running child.
+
+| Per spinner tick | Before | After |
+| --- | --- | --- |
+| `messages.Layout` posted | 4.54 | **0.02** |
+| compositor reflows | 4.42 | **0.00** |
+| `Screen._refresh_layout` | 4.42 | **0.00** |
+| `messages.Update` posted | 27.98 | **8.82** |
+| title rewrites | 4.60 | 2.56 |
+| breadcrumb rewrites | 4.60 | **0.00** |
+| rule rewrites | 4.60 | **0.00** |
+
+Both columns are the committed artifacts in this directory
+(`chrome-paint-before.json`, `chrome-paint-after.json`), captured at the same
+tick count so the two are directly comparable. The harness names every metric
+even when it is zero, so a column that reads 0.00 is a counted zero in the
+artifact, not a missing key. Absolute counts drift a little between runs
+because the 1 Hz job poll also refreshes the page; the columns that go to
+exactly zero are the ones this work is about, and those are structural rather
+than sampled.
+
+The breadcrumb and the rule are pure functions of `_ancestors`/`_label` and of
+width; neither can change on a spinner tick, and both were being rewritten with
+byte-identical strings 12.5 times a second. The reflow column is the missing
+`layout=False` on the breadcrumb, which negated the deliberate `layout=False`
+its two siblings already carried — one defaulted `update` on the same tick
+relayouts the same screen.
+
+### Focus gating
+
+Terminal bytes per second, splash up and a turn running (the shape of a session
+in a window the user has tabbed away from), 8 s windows:
+
+| | Before | After |
+| --- | --- | --- |
+| focused | 24,039 B/s | 24,109 B/s |
+| blurred | 23,824 B/s | **862 B/s** |
+| ratio | 1.01x | **28.0x** |
+
+The before column is the diagnosis restated: on `origin/main` a real `AppBlur`
+posted to the app changes nothing, because Textual's own `_on_app_blur` only
+sets a flag and refreshes bindings. The focused row is unchanged by design —
+this gates on focus, it does not slow down animation anyone can see.

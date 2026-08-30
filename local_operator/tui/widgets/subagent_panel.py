@@ -31,6 +31,7 @@ from textual.widgets import Static
 
 from local_operator.ansi import strip_control_sequences
 from local_operator.tui import theme as theme_mod
+from local_operator.tui.animation import BLURRED_SPINNER_INTERVAL_S, animation_focused
 from local_operator.tui.costs import job_cost
 from local_operator.tui.widgets.status_line import context_spelling, format_cost
 from local_operator.tui.widgets.tool_card import (
@@ -1172,6 +1173,9 @@ class SubagentPanel(Container):
         self._jobs_by_id: dict[str, Any] = {}
         self._spinner_index = 0
         self._spinner_timer = None
+        #: Interval the live timer was created with; a focus change compares
+        #: against it to decide whether the timer must be replaced.
+        self._spinner_rate: float = SPINNER_INTERVAL_S
         #: Whether the header has been painted once. It is a static label —
         #: the running-count that would once have changed it moved to the
         #: status band — so a second paint can only ever redraw the same row.
@@ -1641,14 +1645,43 @@ class SubagentPanel(Container):
             self._start_spinner()
 
     # -- tick ----------------------------------------------------------------
+    def _spinner_interval(self) -> float:
+        """Full cadence when the terminal is focused, reduced when it is not."""
+        return SPINNER_INTERVAL_S if animation_focused() else BLURRED_SPINNER_INTERVAL_S
+
     def _start_spinner(self) -> None:
         if self._spinner_timer is None and self.is_mounted:
-            self._spinner_timer = self.set_interval(SPINNER_INTERVAL_S, self._tick)
+            self._spinner_rate = self._spinner_interval()
+            self._spinner_timer = self.set_interval(self._spinner_rate, self._tick)
 
     def _stop_spinner(self) -> None:
         if self._spinner_timer is not None:
             self._spinner_timer.stop()
             self._spinner_timer = None
+
+    def sync_animation_rate(self) -> None:
+        """Re-rate the tick after a focus change.
+
+        A Textual timer's interval is fixed at creation, so the timer is
+        replaced. Only a panel that already HAS one is touched: this must never
+        start a tick under a dock of settled children, which is the state
+        `_tick` deliberately stops itself in.
+
+        Coming back to the fast rate marks the panel dirty rather than painting
+        here, because `_tick` is this panel's one repaint point and a second
+        paint path is exactly the duplication its docstring warns about. The
+        next tick is then a FULL repaint, so the numbers, clocks and row set a
+        user sees on refocus are current rather than whatever the throttled
+        window last painted.
+        """
+        if self._spinner_timer is None:
+            return
+        wanted = self._spinner_interval()
+        if wanted == self._spinner_rate:
+            return
+        self._stop_spinner()
+        self._dirty = True
+        self._start_spinner()
 
     def _tick(self) -> None:
         """The panel's ONE repaint point: spinner, coalesced syncs, numbers.
