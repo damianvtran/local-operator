@@ -36,7 +36,6 @@ from local_operator.tui.app import OperatorApp  # noqa: E402
 from local_operator.tui.widgets.settings_view import SettingsView  # noqa: E402
 from tests.unit.tui.test_app_pilot import FakeSession, _factory  # noqa: E402
 
-
 _LOG: list[str] = []
 
 
@@ -75,17 +74,23 @@ async def main() -> None:
         bottom = view._selected
         log(f"at bottom -> selected: {bottom} (last is {indices[-1]})")
         view.action_move(1)
-        log(f"one MORE down -> selected: {view._selected} | wrapped to top? "
-              f"{view._selected == indices[0]}")
+        log(
+            f"one MORE down -> selected: {view._selected} | wrapped to top? "
+            f"{view._selected == indices[0]}"
+        )
         view.action_jump(1)
         view._scroll_rows(1)
-        log(f"wheel at bottom -> selected: {view._selected} | clamped? "
-              f"{view._selected == bottom}")
+        log(
+            f"wheel at bottom -> selected: {view._selected} | clamped? "
+            f"{view._selected == bottom}"
+        )
         view.action_jump(0)
         top = view._selected
         view.action_move(-1)
-        log(f"at top, one MORE up -> selected: {view._selected} | wrapped to bottom? "
-              f"{view._selected == indices[-1]}")
+        log(
+            f"at top, one MORE up -> selected: {view._selected} | wrapped to bottom? "
+            f"{view._selected == indices[-1]}"
+        )
         view.action_jump(0)
         view._scroll_rows(-1)
         log(f"wheel at top -> selected: {view._selected} | clamped? {view._selected == top}")
