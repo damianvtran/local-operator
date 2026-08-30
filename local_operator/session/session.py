@@ -6333,18 +6333,33 @@ class Session:
             # also exactly what the shipped subtraction form produced there
             # (``saved`` clamps to 0), so this is parity, not a new behaviour.
             #
-            # KNOWN LIMITATION, recorded so it is not rediscovered as a bug:
-            # swept over 10/20/40/70-turn histories, snapcompact's local
-            # estimate grew EVERY time, so this branch is the one a vision
-            # model actually takes and its receipt prints the bare "context
-            # compacted" line. That is the honest report available from a
-            # local-only measurement — the pass's real saving is in images the
-            # provider prices ~4x higher than this ruler does, so no
-            # locally-computed ratio can see it. Making that receipt
-            # informative needs a provider-side after-figure (the next
-            # request's usage), which arrives after the event is emitted and is
-            # a larger change than this one; it is NOT fixable by choosing a
-            # different arithmetic here.
+            # WHEN THIS BRANCH IS REACHED, measured rather than assumed:
+            # ``docs/evidence/compaction-ruler/fallback_reach.py`` replays the
+            # ten real snapcompact passes of the production session behind this
+            # fix and **0 of 10 take it** — every one shrinks local history
+            # 1.8x to 8.8x and gets the full proportional receipt.
+            #
+            # The branch is reached on passes over unusually SMALL histories,
+            # and the mechanism is the archive's FIXED overhead: a snapcompact
+            # archive carries plain-text edges sized by frame shape
+            # (``HQ_EDGE_FRAMES``), not by how much history was removed —
+            # roughly 20,900 tokens at the shipped shape. That is 116% of an
+            # 18k history and 3.9% of a 534k one, so a near-threshold history
+            # can come out LARGER on the local ruler while a real pass never
+            # does. An earlier revision of this comment generalised the
+            # opposite way from synthetic 10-70 turn fixtures and claimed a
+            # vision model always lands here; that was a property of the
+            # fixtures, not of the model, and the figure above is the
+            # correction.
+            #
+            # Where it IS reached the bare "context compacted" line is the
+            # honest report available from a local-only measurement: the
+            # pass's saving is in images the provider prices several times
+            # higher than this ruler does, so no locally-computed ratio can
+            # see it. Making that case informative needs a provider-side
+            # after-figure (the next request's usage), which arrives after this
+            # event is emitted — a larger change than this one, and NOT
+            # reachable by choosing different arithmetic here.
             #
             # The final clamp is the invariant the old subtraction form got for
             # free and this form does not. ``context_tokens - max(0, saved)``

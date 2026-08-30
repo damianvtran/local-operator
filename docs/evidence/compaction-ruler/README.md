@@ -9,6 +9,7 @@ contains ten real compaction passes across three models.
 | `slope_fit.txt` | The provider-vs-local token slope, fitted per model and per epoch — the measurement the whole PR rests on |
 | `span_percentiles.txt` | Pooled active-task spans and what each candidate cap multiple would clip — the basis for choosing 5 |
 | `cap_by_window.txt` | The preserve cap across the registry's context windows: why the capacity term must stay (round 1, blocker-1) |
+| `fallback_reach.txt` | How often the receipt's no-shrink fallback fires on real passes: 0/10 (round 2, blocker-1) |
 | `validate_fix.txt` | Receipt accuracy per pass, shipped formula vs proportional, against the provider's own next-reported context |
 | `retention_real2.txt` | Active-task spans per pass and the retention the preserve-window cap allows, old cap vs new |
 | `controlflow_real.txt` | Whether the three `tokens_after` consumers change any DECISION under the fix |
@@ -24,6 +25,7 @@ and need no credential (they read a local transcript):
 .venv/bin/python docs/evidence/compaction-ruler/controlflow_real.py
 .venv/bin/python docs/evidence/compaction-ruler/span_percentiles.py   # no transcript needed
 .venv/bin/python docs/evidence/compaction-ruler/cap_by_window.py      # no transcript needed
+.venv/bin/python docs/evidence/compaction-ruler/fallback_reach.py
 env -u NO_COLOR TERM=xterm-256color .venv/bin/python \
   docs/evidence/compaction-ruler/shot_compaction.py out.svg <repo-root>
 ```
@@ -177,3 +179,40 @@ after:   context compacted · 546.5k → 223.7k tokens (59% smaller), via summar
 
 Layout is identical between the two frames; the status band's context reading
 follows the receipt down, which is the same figure rendered in a second place.
+
+## 4. The receipt never reports growth, and the fallback is rare
+
+The proportional form assumed `history_after <= history_before`. That holds on
+the text-model passes above but **not** on snapcompact, which replaces history
+with verbatim edges plus archive text plus images the local ruler prices at a
+flat `IMAGE_TOKEN_ESTIMATE`: the saving is real on the provider ruler while the
+local estimate of the replacement can be larger. The ratio then exceeded 1,
+multiplied an already ~1.7x provider total, and the receipt reported a
+compaction that *grew* the context (measured 70,888 -> 111,594 on a real
+over-threshold pass), at which point `compaction_receipt` drops both numbers.
+
+The fix applies the ratio only when the pass shrank local history, and clamps
+the result to `context_tokens` — the upper bound the old subtraction form had
+for free.
+
+`fallback_reach.txt` measures how often that no-shrink branch actually fires,
+because an earlier revision of this PR claimed it was the path vision models
+always take:
+
+```
+  pass  hist_before  hist_after  shrank   ratio  branch
+  1050      246,989      52,729    True    4.7x  proportional
+  ...
+  6865      533,774      60,947    True    8.8x  proportional
+  9954      318,084     173,835    True    1.8x  proportional
+
+0/10 real snapcompact passes take the fallback; 10/10 get the full proportional receipt.
+```
+
+**That claim was wrong and is corrected in the code comment.** It came from
+synthetic 10-70 turn fixtures. The archive's plain-text edges are sized by frame
+shape (`HQ_EDGE_FRAMES`), not by how much history was removed — about 20,900
+tokens at the shipped shape, which is 116% of an 18k history and 3.9% of a 534k
+one. So a near-threshold toy history can come out larger on the local ruler
+while a real pass never does. The fallback is a property of unusually small
+histories, not of vision models.
