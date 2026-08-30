@@ -490,6 +490,14 @@ class TodoPanel(Container):
         # a status surface with no other tick to ride (the 1 Hz poll returns
         # early on the guard). `init=False` because the first paint composes its
         # own footer.
+        #
+        # RESIZE is deliberately NOT watched (design round 1, D4). A resize
+        # changes the budget, which IS in the equality guard, so `sync` rebuilds
+        # the body and recomposes the footer on the same pass — verified by the
+        # reviewer at 100x30 -> 100x60 (footer correctly drops to bare) and back
+        # to 100x24 (correctly restates the remainder). Adding a resize watcher
+        # would be a second path to the same repaint, which is the drift this
+        # panel's single-authority rules exist to prevent.
         self.watch(self._scroll, "scroll_y", self._repaint_expanded_footer, init=False)
 
     # -- sync -----------------------------------------------------------------
@@ -1177,10 +1185,11 @@ class TodoPanel(Container):
         row.append("ctrl+t to collapse" if self._expanded else "ctrl+t to expand", style=muted)
         return row
 
-    def _expanded_viewport(self) -> tuple[int, int]:
-        """``(first_body_line, rows)`` the expanded scroll region is showing.
+    def _expanded_viewport(self) -> tuple[int, int, int]:
+        """``(first_body_line, rows, max_scroll)`` for the expanded scroll region.
 
-        The window the footer describes, in BODY-LINE coordinates.
+        The window the footer describes, in BODY-LINE coordinates, plus how far
+        the region can still travel.
 
         ``rows`` restates :meth:`sync`'s own ``max_height`` expression (the row
         budget minus the pinned affordance row) rather than reading the region's
@@ -1191,33 +1200,49 @@ class TodoPanel(Container):
         for a viewport that no longer exists — with no later event to correct it,
         since a scroll is the only thing that repaints the footer and the reader
         has not scrolled yet. Restating sync's expression makes the two agree by
-        construction. It is a CAP, so it equals the painted viewport whenever the
-        body overflows, which is the only case that paints a footer at all: a
-        body shorter than the cap is fully visible and returns no footer.
+        construction.
+
+        ``max_scroll`` is derived the same way (body lines minus the viewport)
+        rather than read off ``self._scroll.max_scroll_y``, for that same
+        staleness reason and so the build path and the scroll path answer "is
+        there more below?" from ONE expression. Once the region has settled the
+        two agree; before it has, only this one is right.
         """
         rows = max(1, self._body_rows() - 1)
         # ``scroll_y`` is a float reactive mid-animation; the fold is a row index.
         offset = max(0, int(self._scroll.scroll_y))
-        return offset, rows
+        max_scroll = max(0, self._expanded_body_lines - rows)
+        return min(offset, max_scroll), rows, max_scroll
 
     def _expanded_footer(self, affordance: Text) -> Text:
         """Prefix the expanded control row with position + overflow (#264, #265).
 
-        ONE footer, not two bolted together. ``↓ 12 of 18 · ctrl+t to collapse``
-        answers both deferred findings with a single set of numbers: the arrow is
-        U4's "content continues below" cue for a reader who never sees the
-        scrollbar thumb (keyboard-only, or a short window where the thumb is one
-        cell), and ``12 of 18`` is U5's orientation. Painting both suggestions
-        literally (``12 of 18 · ↓ 6 below``) would state one fact twice — the
-        remainder is just ``18 - 12`` — so the arrow rides the position instead of
-        repeating it. ``12`` is the LAST todo the viewport reaches, so scrolling
-        to the end lands on ``18 of 18`` and the arrow drops: the cue disappears
-        exactly when there is nothing below, which is the honesty U4 asks for.
+        ONE footer, not two bolted together. ``↓ 6 more · ctrl+t to collapse``
+        answers both deferred findings with a SINGLE number: the arrow is U4's
+        "content continues below" cue for a reader who never sees the scrollbar
+        thumb (keyboard-only, or a short window where the thumb is one cell), and
+        the remainder is U5's orientation. Painting both suggestions literally
+        (``12 of 18 · ↓ 6 below``) would state one fact twice, so only one number
+        is carried.
+
+        WHICH number is ``N more``, not ``N of M`` (UX round 1, U2). ``N of M``
+        looked like the richer choice, but every convention a terminal reader
+        brings to it — pagers, ``less``, search results — makes ``N`` the CURRENT
+        item, while the only ``N`` this panel can compute is the last todo the
+        viewport reaches. Items carry no ordinals, so no visible row can confirm
+        the number, and an unverifiable number invites the other reading ("N are
+        showing"), which is also false. A REMAINDER needs no ordinals to be
+        checked: scroll, and it goes down. It also mirrors the collapsed
+        ``+11 more`` the same reader saw one keypress earlier, so the vocabulary
+        is learned rather than novel, and it is the cheapest string of the
+        candidates — which is what keeps the cue alive at narrow widths (U1).
 
         Appears ONLY when the body actually overflows its viewport. An expanded
         list that fits entirely is not a place a reader can be lost in, and a
-        permanent ``5 of 5`` would be chrome that never changes — the collapsed
-        state does not confess a remainder it does not have either.
+        permanent ``0 more`` would be chrome that never changes — the collapsed
+        state does not confess a remainder it does not have either. At the END of
+        a scroll the remainder is zero and the prefix legitimately vanishes, so
+        its absence MEANS "nothing more" instead of being ambiguous.
 
         INK — ``dim``, the SAME tier as the collapsed ``+N more`` prefix, and
         deliberately not ``muted``. This is the expanded mirror of that prefix (a
@@ -1235,28 +1260,90 @@ class TodoPanel(Container):
         grew would spend the narrow width on the count and leave ``ctrl+t to
         colla…`` — shedding the affordance and keeping the summary, the exact
         inversion ``usage_panel._hint_row`` documents. The hotkey is the one
-        token that must always survive; position is polish.
+        token that must always survive; the remainder is polish.
+
+        The fit is tested against the prefix's WIDEST rendering for this list,
+        not the one being painted (U1). Testing the current string made the cue's
+        presence depend on how many digits the number happened to have, so at 34
+        columns it survived ``↓ 9 more`` and vanished at ``↓ 10 more`` — showing
+        the reader the exact pre-change "this is everything" row with eight todos
+        still hidden. Worse than never showing it, because absence had been
+        taught to mean something. Sizing on the widest value makes the cue a
+        property of the width and the list length alone: it can no longer appear
+        and disappear under a reader who is only scrolling.
+
+        The ARROW is never shed. When the widest prefix does not fit, the NUMBER
+        goes and a bare ``↓ ·`` stays, because the arrow is U4's actual cue while
+        the count is only U5's orientation — a footer that drops the arrow to
+        keep a number has shed the finding it exists to answer.
         """
         total = len(self._expanded_item_rows)
         if not total:
             return affordance
-        offset, rows = self._expanded_viewport()
-        if self._expanded_body_lines <= rows:
-            return affordance  # fits entirely: no position to state, no overflow
-        # ``seen`` counts TODOS at or above the fold, so the number tracks the
+        offset, rows, max_scroll = self._expanded_viewport()
+        if max_scroll <= 0:
+            return affordance  # fits entirely: nothing below, nothing to confess
+        # ``seen`` counts TODOS at or above the fold, so the remainder tracks the
         # list the user is reading rather than the rows the panel happens to
         # paint (phase headers and the root line are not todos).
         fold = offset + rows
         seen = sum(1 for index in self._expanded_item_rows if index < fold)
-        seen = max(1, min(total, seen))
-        prefix = Text(no_wrap=True, overflow="ellipsis")
-        arrow = "↓ " if seen < total else ""
-        prefix.append(
-            f"{arrow}{seen} of {total} · ", style=Style(color=theme_mod.semantic_color("dim"))
-        )
+        remaining = max(0, total - max(0, min(total, seen)))
+        # THE ARROW RIDES THE BODY, NOT THE TODO COUNT (design round 1, D2).
+        # ``remaining`` counts todos, but the thing that SCROLLS is the body, and
+        # the two disagree whenever the lines below the fold are chrome: a plan
+        # ending in an empty phase painted ``no arrow`` with its ``Gamma · 0/0``
+        # header still hidden, contradicting the scrollbar thumb in the same
+        # frame. "Is there more to see?" is a question about the viewport, so it
+        # is answered from the viewport.
+        more_below = offset < max_scroll
+        dim = Style(color=theme_mod.semantic_color("dim"))
         cells = self._row_cells()
-        if cells and prefix.cell_len + affordance.cell_len > cells:
-            return affordance  # too narrow for both: the hotkey wins outright
+        # Sized on the WIDEST remainder this list can show (U1): ``total`` at the
+        # top of the scroll. Whatever fits must fit at every position, or the cue
+        # is not offered at all.
+        widest = Text(f"↓ {total} more · ", no_wrap=True, overflow="ellipsis")
+        if cells and widest.cell_len + affordance.cell_len > cells:
+            if not more_below:
+                return affordance
+            # Too narrow for the number: keep the arrow alone rather than lose
+            # the cue. Still width-tested, so the hotkey outranks even this.
+            bare = Text(no_wrap=True, overflow="ellipsis")
+            bare.append("↓ · ", style=dim)
+            if cells and bare.cell_len + affordance.cell_len > cells:
+                return affordance  # too narrow for both: the hotkey wins outright
+            bare.append_text(affordance)
+            return bare
+        if not more_below:
+            # END OF THE SCROLL — no remainder, so no prefix. The row becomes
+            # byte-identical to the no-overflow footer, which is correct because
+            # both mean "nothing is hidden" (UX round 1, U4). Absence can carry
+            # that meaning only because the widest-fit rule above guarantees the
+            # prefix never disappears for any OTHER reason.
+            return affordance
+        prefix = Text(no_wrap=True, overflow="ellipsis")
+        if not remaining:
+            # More body below, but no more TODOS — the remainder is chrome, e.g.
+            # the header of a trailing phase with no items. ``↓ 0 more`` would be
+            # nonsense and ``↓ 1 more`` would be a lie, so the arrow says
+            # "keep going" without quantifying what is left. This is the seam
+            # D2's separation of concerns opens: the arrow answers the viewport,
+            # the number answers the todo list, and only here do they diverge.
+            prefix.append("↓ more · ", style=dim)
+            prefix.append_text(affordance)
+            return prefix
+        # The remainder is right-aligned in the widest number's field (design
+        # round 1, D1 — the column-stability finding, re-aimed at this wording).
+        # D1 measured the hotkey jumping two cells when the arrow dropped under
+        # ``N of M``; its literal remedy (two reserved spaces) does not transplant
+        # here, because ``N more`` sheds the WHOLE prefix at the end rather than
+        # just the arrow. The same defect class survives the rewording in a form
+        # that bites more often, though: ``↓ 10 more`` -> ``↓ 9 more`` is a
+        # one-cell shift at every power-of-ten boundary, mid-scroll, with the
+        # reader watching. Padding to ``len(str(total))`` pins the hotkey's column
+        # across every position the prefix is shown at, so the only time it moves
+        # is the single deliberate transition to the end state.
+        prefix.append(f"↓ {remaining:>{len(str(total))}} more · ", style=dim)
         prefix.append_text(affordance)
         return prefix
 
