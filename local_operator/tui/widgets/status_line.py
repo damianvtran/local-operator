@@ -40,6 +40,7 @@ from textual.widgets import Static
 
 from local_operator.model.naming import model_label as model_label_forms
 from local_operator.tui import theme as theme_mod
+from local_operator.tui.animation import BLURRED_SPINNER_INTERVAL_S, animation_focused
 from local_operator.tui.terminal_title import SPINNER_FRAMES as _SPINNER_FRAMES
 from local_operator.tui.terminal_title import SPINNER_INTERVAL_S as _SPINNER_INTERVAL_S
 from local_operator.tui.terminal_title import TerminalTitle, TitleState, cwd_label
@@ -949,6 +950,9 @@ class StatusLine:
         self._turn_started_at: float | None = None
         self._spinner_index: int = 0
         self._spinner_timer = None
+        #: Interval the live timer was created with; a focus change compares
+        #: against it to decide whether the timer must be replaced.
+        self._spinner_rate: float = _SPINNER_INTERVAL_S
         #: The child's readings, shadowing the session's own while the
         #: full-page subagent view is up. ``None`` is the ordinary band.
         self._subagent: SubagentBand | None = None
@@ -1871,13 +1875,38 @@ class StatusLine:
         return self._render(width)
 
     # -- spinner ------------------------------------------------------------
+    def _spinner_interval(self) -> float:
+        """Full cadence when the terminal is focused, reduced when it is not."""
+        return _SPINNER_INTERVAL_S if animation_focused() else BLURRED_SPINNER_INTERVAL_S
+
     def _sync_spinner_timer(self) -> None:
         if self._streaming and self._spinner_timer is None:
-            self._spinner_timer = self._dock.set_interval(
-                _SPINNER_INTERVAL_S, self._advance_spinner
-            )
+            self._spinner_rate = self._spinner_interval()
+            self._spinner_timer = self._dock.set_interval(self._spinner_rate, self._advance_spinner)
         elif not self._streaming and self._spinner_timer is not None:
             self._stop_spinner()
+
+    def sync_animation_rate(self) -> None:
+        """Re-rate the band's spinner after a focus change.
+
+        The band is not a ``Widget`` — it drives a ``Static`` dock — so it is
+        re-rated by the app rather than by a Textual event of its own. Only a
+        streaming band has a timer to re-rate; an idle one has already stopped
+        and must stay stopped.
+
+        The band re-renders on the way back to the fast rate because it carries
+        the session clock and the token counts, not just the glyph: those are
+        the numbers a returning user reads first, and they must be current at
+        the moment the window is looked at rather than up to a second stale.
+        """
+        if self._spinner_timer is None:
+            return
+        wanted = self._spinner_interval()
+        if wanted == self._spinner_rate:
+            return
+        self._stop_spinner()
+        self._sync_spinner_timer()
+        self.refresh()
 
     def _advance_spinner(self) -> None:
         self._spinner_index = (self._spinner_index + 1) % len(_SPINNER_FRAMES)

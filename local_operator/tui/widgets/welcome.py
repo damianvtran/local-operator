@@ -81,7 +81,7 @@ from textual.message import Message
 from textual.widgets import Static
 
 from local_operator.tui import theme as theme_mod
-from local_operator.tui.shimmer import shimmer_enabled
+from local_operator.tui.animation import motion_enabled
 from local_operator.tui.widgets.status_line import format_model_label
 from local_operator.tui.widgets.transcript import NOTICE_GLYPHS
 
@@ -1212,6 +1212,20 @@ class WelcomeView(Static):
             self._timer.stop()
             self._timer = None
 
+    def sync_animation_rate(self) -> None:
+        """Re-rate the splash's two timers after a focus change.
+
+        The same seam the other four animated surfaces expose, so the app can
+        fan a focus change out uniformly instead of reaching through this
+        widget's privates. The splash owns two timers rather than one (the mark
+        pulse and the tip rotation) and both derive their rate from
+        ``motion_enabled()``, so re-running the two syncs is the whole job:
+        each stops, starts or leaves its timer alone to match what focus now
+        allows.
+        """
+        self._sync_pulse_timer()
+        self._sync_tip_timer()
+
     def _sync_pulse_timer(self) -> None:
         """Glow only while the splash is on screen and animation is allowed.
 
@@ -1222,11 +1236,23 @@ class WelcomeView(Static):
         timer is created at all — the glow is not merely paused — and the mark
         keeps its resting ``dim``.
 
+        Terminal FOCUS is now part of that same gate, for the same reason one
+        rung down: an unlooked-at splash is the single most expensive idle
+        thing this app does. Measured on one idle session, the pulse and the
+        shimmer together are 20.3 of 22 KB/s of terminal output and 5.6 of 7.9
+        points of CPU; with animation off the same session costs 2.27% and
+        1.0 KB/s. A splash nobody is looking at should cost the second number.
+        The FOCUSED appearance and cadence are deliberately untouched — this
+        gates on focus only, it does not slow the glow down for anyone who can
+        see it.
+
         The clock restarts from the moment the splash appears rather than from
         app start, so a ``/clear`` an arbitrary number of seconds in gets the
-        same first frame as a boot: at rest, then swelling.
+        same first frame as a boot: at rest, then swelling. A blur-then-focus
+        therefore also restarts it at rest, which is the right frame to come
+        back to and the one `_stop_pulse_timer` already guarantees.
         """
-        wanted = bool(self.display) and shimmer_enabled()
+        wanted = bool(self.display) and motion_enabled()
         if wanted and self._pulse_timer is None:
             self._pulse_origin = time.monotonic()
             self._pulse_timer = self.set_interval(MARK_PULSE_INTERVAL_S, self._pulse_tick)
@@ -1239,11 +1265,21 @@ class WelcomeView(Static):
         The colour is cleared with the timer so the next frame drawn after a
         stop is the resting one — a hidden view that comes back on ``/clear``
         must not flash the phase it happened to be paused at.
+
+        The repaint is what makes that true rather than merely intended. With
+        the timer stopped nothing else redraws the mark, so clearing the state
+        alone left the SCREEN holding whatever tint the pulse was mid-swell on
+        while the model believed it was at rest — measured at 48% up the
+        pulse's luminance range, and a different brightness per window
+        depending on where each one was when it lost focus (design review D1).
+        Cheap by construction: this runs on a focus change, not on a tick.
         """
         if self._pulse_timer is not None:
             self._pulse_timer.stop()
             self._pulse_timer = None
-        self._mark_color = None
+        if self._mark_color is not None:
+            self._mark_color = None
+            self.refresh()
 
     def _pulse_tick(self) -> None:
         """One glow frame: a colour, and a repaint only when it MOVED.
@@ -1274,8 +1310,14 @@ class WelcomeView(Static):
         animation, so a snapshot would capture whichever tip the wall clock
         happened to be holding. With the gate closed no timer exists — the
         rotation is not merely paused — and the row holds at ``TIPS[0]``.
+
+        It follows the pulse onto the focus gate too. A tip nobody is reading is
+        not a tip, and at 12 s per rotation a blurred splash rotating for an
+        hour is 300 repaints of a row that was never seen; the row a returning
+        user finds is ``TIPS[0]``, which is the defined still frame rather than
+        an arbitrary sample of the ring.
         """
-        wanted = bool(self.display) and shimmer_enabled()
+        wanted = bool(self.display) and motion_enabled()
         if wanted and self._tip_timer is None:
             # The row OPENS on `TIPS[0]` and never on a lottery. The pool is
             # ordered, and the first thing a first-run user reads was whichever
@@ -1302,12 +1344,23 @@ class WelcomeView(Static):
         The index is cleared with the timer for the reason the pulse clears its
         colour: a still frame must be the DEFINED still frame, not the entry the
         rotation happened to be paused on.
+
+        And, as with the pulse, the repaint is what delivers that. Without it
+        the row kept rendering whichever tip was showing when the timer stopped
+        and then swapped to ``TIPS[0]`` 0.12 s after refocus — stale while
+        nobody is looking, correcting itself exactly when someone is, which is
+        a first-frame-differs-from-settled reflow in prose (design review D2).
+        Doubly wrong in a change whose whole purpose is removing motion the
+        user did not ask for.
         """
         if self._tip_timer is not None:
             self._tip_timer.stop()
             self._tip_timer = None
+        changed = self._tip_index != 0
         self._tip_index = 0
         self._tip_resume = None
+        if changed:
+            self.refresh()
 
     def _tip_tick(self) -> None:
         """The next tip in the ring, and a repaint that cannot move a row.

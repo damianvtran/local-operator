@@ -8903,7 +8903,7 @@ class OperatorApp(App[None]):
         return False
 
     def on_app_focus(self, event: AppFocus) -> None:
-        """The terminal regained OS focus \u2014 stop notifying.
+        """The terminal regained OS focus \u2014 stop notifying, resume animating.
 
         Textual reports focus only on a CHANGE, which is why the notifier
         starts out focused: the app is launched from the terminal the user is
@@ -8912,13 +8912,119 @@ class OperatorApp(App[None]):
         """
         if self._notifier is not None:
             self._notifier.set_focused(True)
+        self._set_animation_focused(True)
 
     def on_app_blur(self, event: AppBlur) -> None:
-        """The terminal lost OS focus \u2014 notifications become deliverable."""
+        """The terminal lost OS focus \u2014 notify, and slow every animation."""
+        self._set_animation_focused(False)
         if self._notifier is None:
             return
         self._notifier.set_focused(False)
         self._flush_pending_question()
+
+    def _watch_app_focus(self, focus: bool) -> None:
+        """Follow Textual's OWN focus reactive, not just the AppFocus event.
+
+        `on_app_focus`/`on_app_blur` cover the terminal reporting focus, but
+        they are not the only way `app_focus` moves. Textual sets the reactive
+        directly in `App.on_event` when a key or mouse-down arrives while it
+        believes the app is blurred, and that assignment posts NO AppFocus
+        event — so the handler below would never run and a session whose host
+        reports blur but not focus (or which never reports focus at all) would
+        stay throttled while the user was actively typing into it. Verified
+        against the real app: after a blur then a keypress, `app_focus` is True
+        while the animation gate was still False.
+
+        Watching the reactive closes that gap, because every path that changes
+        Textual's mind about focus goes through it. The base class implements
+        this hook, so the super call is not optional: it restores focus to the
+        last-focused widget and updates node styles, and dropping it would
+        leave the app unable to type after an alt-tab.
+        """
+        super()._watch_app_focus(focus)
+        self._set_animation_focused(focus)
+
+    def watch_app_focus(self, focus: bool) -> None:
+        """The PUBLIC spelling of the same hook, as insurance.
+
+        Textual's ``Reactive._check_watchers`` calls BOTH spellings — the
+        private ``_watch_app_focus`` and then this one — so this must not
+        delegate to the private override: that would run ``super()``'s
+        implementation twice, and it is not idempotent. On blur the base
+        stashes ``screen.focused`` and then clears focus, so a second call
+        re-reads the ``None`` it just wrote and overwrites the memory; refocus
+        then has nothing to restore and the user has to click before they can
+        type again (agent review round 3, R12).
+
+        Only the animation gate is re-run here, which IS idempotent
+        (``set_animation_focused`` returns False and fans out nothing when the
+        answer has not changed). That keeps the insurance this method exists
+        for — if a future Textual resolves only the public name, the gate
+        still syncs — without paying the base implementation twice.
+        """
+        self._set_animation_focused(focus)
+
+    def _set_animation_focused(self, focused: bool) -> None:
+        """Record focus and re-rate every animated surface on this screen.
+
+        Animation is the largest thing an idle session costs \u2014 measured at 92%
+        of what one writes to its terminal \u2014 and none of it is worth paying for
+        a window nobody is looking at. This is the fan-out: the flag lives in
+        `tui.animation` (a module global, because these surfaces are built at
+        different times and one of them is not a `Widget` at all), and each
+        surface re-rates its own timer through its own `sync_animation_rate`,
+        so no surface gains a second way to decide its cadence.
+
+        Only the RATE changes. Each of those methods repaints \u2014 or, for the
+        panel, marks itself dirty so its single repaint point runs \u2014 on the way
+        back to the fast rate, so a refocused terminal shows the current glyph,
+        clock and counts rather than the frame it was throttled on. Nothing
+        here can drop CONTENT: a blurred session still receives, records and
+        paints every event, because the transcript, the ledger and the working
+        line are driven by events and not by these timers.
+
+        A session that never receives focus events is never throttled: the flag
+        starts focused and only an explicit blur clears it. A session that hears
+        a blur but never the matching focus heals on the user's next keystroke —
+        but NOT through this handler: Textual flips the `app_focus` reactive
+        directly in `App.on_event` and posts no `AppFocus` event for it, so the
+        recovery path is the `_watch_app_focus` watcher above. Established
+        against Textual 8.2.8; `textual>=8.0.0` is the floor this ships on, so
+        the watcher rather than the event is the recovery seam to trust across
+        that range.
+
+        Guarded per surface: one widget mid-teardown must not stop the others
+        being told, and no part of this is worth an exception reaching a turn.
+        """
+        from local_operator.tui.animation import set_animation_focused
+
+        if not set_animation_focused(focused):
+            return
+        for surface in (
+            self._working_block,
+            self._subagent_panel,
+            self._subagent_view,
+            self._status,
+        ):
+            if surface is None:
+                continue
+            try:
+                surface.sync_animation_rate()
+            except Exception:  # pragma: no cover - defensive; chrome must not raise
+                logger.debug("animation re-rate failed", exc_info=True)
+        # The splash is queried rather than held as an attribute (it is mounted
+        # and dropped with the boot screen), so it is fanned out to separately
+        # — but through the SAME public `sync_animation_rate` seam as the four
+        # above, not through its privates: a second convention for "re-rate
+        # yourself" is exactly what this module's docstring warns against.
+        try:
+            welcome = self.query_one(WelcomeView)
+        except Exception:
+            return  # no splash mounted, or already torn down: the ordinary case
+        try:
+            welcome.sync_animation_rate()
+        except Exception:  # pragma: no cover - defensive; chrome must not raise
+            logger.debug("splash animation re-rate failed", exc_info=True)
 
     def _flush_pending_question(self) -> None:
         """Announce an unanswered question raised while the terminal was focused.

@@ -1,0 +1,27 @@
+{
+  "ticks": 50,
+  "blocks": 160,
+  "counts": {
+    "ticks": 50,
+    "paint_chrome": 133,
+    "title_updates": 128,
+    "update_msgs": 441,
+    "layout_msgs": 1,
+    "breadcrumb_updates": 0,
+    "rule_updates": 0,
+    "refresh_layout": 0,
+    "reflow": 0
+  },
+  "per_tick": {
+    "ticks_per_tick": 1.0,
+    "paint_chrome_per_tick": 2.66,
+    "title_updates_per_tick": 2.56,
+    "update_msgs_per_tick": 8.82,
+    "layout_msgs_per_tick": 0.02,
+    "breadcrumb_updates_per_tick": 0.0,
+    "rule_updates_per_tick": 0.0,
+    "refresh_layout_per_tick": 0.0,
+    "reflow_per_tick": 0.0
+  },
+  "wall_s": 5.783
+}
