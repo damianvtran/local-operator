@@ -434,10 +434,18 @@ class SettingsView(Vertical):
     def _position_of(self, identity: "tuple[str, str, int] | None", indices: list[int]) -> int:
         """Where the row with ``identity`` sits in the REBUILT selectable list.
 
-        Falls back to the current index, then to the top: a commit can make the
-        anchor row stop existing entirely (an empty chain is dropped on write),
-        and a movement that refused to move because its origin vanished would
-        be the same stuck key this exists to prevent.
+        Falls back to the current index, then to the top, because a commit can
+        make the anchor row stop existing entirely (an empty chain is dropped on
+        write) and the movement still has to land somewhere real.
+
+        The common fallback is the useful one: when the identity is gone but
+        ``_selected`` is still selectable, the current index is returned and the
+        move proceeds normally from where the user was. The top is the last
+        resort, and under the clamp it is a genuine dead end \u2014 ``action_move(-1)``
+        from position 0 does not move (review round 1, F4). That is accepted
+        rather than papered over: both outcomes have already teleported the
+        cursor away from the row the user was on, which is the real fault, and a
+        wrap here would hide it by jumping to the bottom of a 60-row page.
         """
         if identity is not None:
             for position, index in enumerate(indices):
