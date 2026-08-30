@@ -7045,10 +7045,14 @@ async def execute_wait(
         """
 
         running = _still_running()
+        # The note must agree with details["interrupted_by"]: the text is what
+        # the model actually reads, so rendering "steering" for a cancel we
+        # cannot attribute would keep the mislabelled claim alive in the one
+        # place it matters (review finding N1).
         note = (
             "a message arrived from another session"
             if reason == "peer_message"
-            else "interrupted by steering"
+            else "the wait was cancelled"
         )
         return _text(
             tool_call_id,

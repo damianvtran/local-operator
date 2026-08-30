@@ -236,6 +236,9 @@ async def test_a_steer_cancel_reports_the_job_instead_of_skipped() -> None:
     # Neutral, not "steering": the tool cannot observe from here whether this
     # cancel was a steer or a batch teardown, so it does not claim one (F2).
     assert result.details["interrupted_by"] == "cancelled"
+    # The TEXT is what the model reads, so it must agree with the details
+    # rather than keeping the mislabelled claim alive in prose (N1).
+    assert "steering" not in result.text
     row = manager.get(job_id)
     assert row is not None and row.status == "running"
     await manager.dispose()
