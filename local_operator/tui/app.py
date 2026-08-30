@@ -8944,6 +8944,20 @@ class OperatorApp(App[None]):
         super()._watch_app_focus(focus)
         self._set_animation_focused(focus)
 
+    def watch_app_focus(self, focus: bool) -> None:
+        """The PUBLIC spelling of the same hook, as insurance.
+
+        Textual resolves reactive watchers by name and calls the private
+        ``_watch_<name>`` spelling, which is what the method above overrides.
+        A future Textual that prefers the public spelling — or calls both —
+        would otherwise leave the animation gate un-synced on the reactive
+        path while still receiving the events, and the failure would be
+        exactly the one R2 fixed: a session stuck at the reduced cadence
+        while the user types into it. One delegating line costs nothing and
+        makes the seam name-independent.
+        """
+        self._watch_app_focus(focus)
+
     def _set_animation_focused(self, focused: bool) -> None:
         """Record focus and re-rate every animated surface on this screen.
 
@@ -8968,9 +8982,10 @@ class OperatorApp(App[None]):
         a blur but never the matching focus heals on the user's next keystroke —
         but NOT through this handler: Textual flips the `app_focus` reactive
         directly in `App.on_event` and posts no `AppFocus` event for it, so the
-        recovery path is the `_watch_app_focus` watcher above. Verified against
-        Textual 8.2.8, where a blur followed by a keypress leaves `app_focus`
-        True with no event delivered here.
+        recovery path is the `_watch_app_focus` watcher above. Established
+        against Textual 8.2.8; `textual>=8.0.0` is the floor this ships on, so
+        the watcher rather than the event is the recovery seam to trust across
+        that range.
 
         Guarded per surface: one widget mid-teardown must not stop the others
         being told, and no part of this is worth an exception reaching a turn.

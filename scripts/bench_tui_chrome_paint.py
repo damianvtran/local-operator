@@ -171,6 +171,24 @@ async def run(ticks: int, blocks: int) -> dict[str, Any]:
         wall = time.perf_counter() - started
 
     counts = dict(probe.counts)
+    # Every metric is named even when it is zero. A ``Counter`` only yields
+    # keys it has counted, so a run in which the chrome fixes worked — zero
+    # breadcrumb rewrites, zero reflows — would silently DROP those keys from
+    # the record, and the after-artifact could never match the README table
+    # that claims a 0.00 column (agent review round 2, R9). Stating the full
+    # key set makes "went to zero" legible as a value rather than an absence.
+    for metric in (
+        "ticks",
+        "paint_chrome",
+        "title_updates",
+        "breadcrumb_updates",
+        "rule_updates",
+        "update_msgs",
+        "layout_msgs",
+        "refresh_layout",
+        "reflow",
+    ):
+        counts.setdefault(metric, 0)
     per_tick = {f"{key}_per_tick": round(value / ticks, 4) for key, value in counts.items()}
     return {
         "ticks": ticks,
