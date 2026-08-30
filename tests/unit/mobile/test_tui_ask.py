@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 
 import pytest
 
@@ -155,17 +156,36 @@ async def _control_for(app: OperatorApp, pilot) -> _Control:
     reached only when nothing ever publishes.
     """
     from local_operator.mobile import registry
-    from local_operator.mobile.registry import SessionRecord
 
-    records: list[tuple[SessionRecord, str]] = []
+    records = []
     for _ in range(200):
         records = registry.scan()
         if records:
             break
         await pilot.pause(0.05)
-    assert app._mobile_registrant is not None, "mobile registrant never started"
-    assert records, "no discovery record published"
-    record, _state = records[0]
+    # Reported against the registrant when there is one, because "started but
+    # never published" and "never started" are different failures and the
+    # second is the more likely one to introduce. Checked only on the failure
+    # path: once a record exists the registrant necessarily started, so
+    # asserting it first would have read as though it were still part of the
+    # wait — the exact misreading that produced the original bug (round 1, F4).
+    if not records:
+        assert app._mobile_registrant is not None, "mobile registrant never started"
+        raise AssertionError("registrant started but published no discovery record")
+    # This process's own record, not merely the first one scanned: ``scan`` is a
+    # global discovery read, so indexing it assumes nothing else has published.
+    # That holds under the suite's per-test config dir today, but matching on
+    # our own pid states the requirement rather than depending on it, and turns
+    # a stray record into a legible failure instead of a connection to someone
+    # else's socket (round 1, F6). Pid rather than control port because the port
+    # is stamped on the registrant's thread when the listener binds, so reading
+    # it here would reintroduce exactly the cross-thread race this helper fixes.
+    mine = os.getpid()
+    record = next((r for r, _state in records if r.pid == mine), None)
+    assert record is not None, (
+        f"no discovery record for this process (pid {mine}); "
+        f"scan saw pids {[r.pid for r, _ in records]}"
+    )
     return await _Control.connect(record.control_port, record.control_key)
 
 

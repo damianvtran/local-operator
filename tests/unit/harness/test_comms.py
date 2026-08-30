@@ -61,12 +61,19 @@ MODEL = ModelSpec(provider="test", model_id="m", context_window=100_000)
 MAX_PUMP_TURNS = 3000
 
 #: Same role for the signal-driven wait: a wedged test must fail rather than
-#: hang a CI job forever (this suite has no pytest-timeout). Generous because
-#: it can never be the discriminator — the success path blocks on an
+#: hang a CI job forever (this suite has no pytest-timeout). It can never be
+#: the discriminator for TIMING — the success path blocks on an
 #: ``asyncio.Event`` set by the code under test and never compares elapsed
-#: time — so the only run that reaches it is one where the signal will not
-#: arrive at all.
-DEADLOCK_GUARD_S = 120.0
+#: time — so the only run that reaches it is one where the signal is not
+#: coming at all.
+#:
+#: It is still a COST, though, which is why it is 30 s and not the 120 s this
+#: started at (review round 1, F2): a wedge is paid per affected test, and four
+#: waits here share the bound, so an over-generous guard turns one real
+#: regression in child persistence into minutes of CI. These tests complete in
+#: about a second, so 30 s is still ~30x the observed work — far too wide to
+#: fire on slowness, narrow enough to keep the feedback loop short.
+DEADLOCK_GUARD_S = 30.0
 
 
 class ChangeSignal:

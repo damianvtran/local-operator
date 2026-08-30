@@ -87,8 +87,24 @@ async def _booted(app: OperatorApp) -> None:
     no elapsed-time comparison left on this path — a slower machine makes this
     slower, never red. It also cannot hang past the run: ``run_test`` cancels
     outstanding workers on exit.
+
+    The empty selection is checked rather than passed, because Textual's
+    ``wait_for_complete`` is ``gather(*[w.wait() for w in (workers or self)])``
+    and an empty list is FALSY — it would fall through to every worker in the
+    manager, which is a wait that passes by waiting on the wrong thing. That
+    case is live here: a worker is dropped from the manager once it finishes
+    (``_remove_worker``), so a caller that already booted finds nothing to
+    select. It is legitimate, but only when the session is already adopted, so
+    that is asserted instead of assumed (review round 1, F1).
     """
-    await app.workers.wait_for_complete([w for w in app.workers if w.group == "session"])
+    workers = [w for w in app.workers if w.group == "session"]
+    if workers:
+        await app.workers.wait_for_complete(workers)
+        return
+    assert app._session is not None, (
+        "no session worker is pending and no session was adopted — the boot "
+        "worker never ran, so waiting here would have waited on nothing"
+    )
 
 
 async def _priced(app: OperatorApp, pilot: Any, panel: SubagentPanel, job_id: str) -> None:
@@ -101,10 +117,15 @@ async def _priced(app: OperatorApp, pilot: Any, panel: SubagentPanel, job_id: st
     Waiting on that worker is deterministic; the reading it produces is then
     handed back through ``call_from_thread``, so one pause after it lands is
     what lets that callback run on the UI thread and populate the cache.
+
+    Guarded against the empty selection for the reason given in :func:`_booted`:
+    an empty list makes ``wait_for_complete`` wait on EVERY worker instead of
+    none. Here the legitimate empty case is a reading already in the cache, so
+    the wait is simply skipped and the assertion below does the checking.
     """
-    await app.workers.wait_for_complete(
-        [w for w in app.workers if w.group == f"subagent-stats-{job_id}"]
-    )
+    workers = [w for w in app.workers if w.group == f"subagent-stats-{job_id}"]
+    if workers:
+        await app.workers.wait_for_complete(workers)
     await pilot.pause()
     assert panel.stats_for(job_id).cost is not None, (
         "the stats worker finished without pricing the child — the band under test "
@@ -1452,9 +1473,14 @@ async def test_a_swept_child_is_dropped_from_the_stats_cache() -> None:
         # workers and then let those callbacks run, rather than betting 20
         # frames covers them — same substitution as ``_booted``, and the same
         # reason: the frame budget is the part that load moves.
-        await app.workers.wait_for_complete(
-            [w for w in app.workers if w.group.startswith("subagent-stats-")]
-        )
+        #
+        # Only when the selection is non-empty: an empty list is falsy and
+        # would make ``wait_for_complete`` wait on every worker in the manager
+        # rather than none (see ``_booted``). The assertion below is what
+        # decides the outcome either way.
+        stats_workers = [w for w in app.workers if w.group.startswith("subagent-stats-")]
+        if stats_workers:
+            await app.workers.wait_for_complete(stats_workers)
         await pilot.pause()
         assert len(panel._stats) == 5
         session.jobs = _fake_jobs(jobs[0])  # retention sweeps the rest
