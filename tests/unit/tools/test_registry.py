@@ -126,6 +126,49 @@ def test_default_set_drops_ask_without_a_ui_to_draw_it_on() -> None:
     assert without == [name for name in withui if name != "ask"]
 
 
+def _invalid_enum_nodes(node: Any) -> list[str]:
+    findings: list[str] = []
+
+    def visit(value: Any, path: str, inherited_type: str | None = None) -> None:
+        if isinstance(value, dict):
+            declared_type = value.get("type", inherited_type)
+            if "enum" in value:
+                enum = value["enum"]
+                if not isinstance(enum, list) or not enum:
+                    findings.append(f"{path}.enum is not a non-empty array")
+                else:
+                    for member in enum:
+                        if member == "":
+                            findings.append(f"{path}.enum contains an empty string")
+                        elif declared_type == "string" and not isinstance(member, str):
+                            findings.append(
+                                f"{path}.enum member {member!r} does not match string type"
+                            )
+                        elif isinstance(member, (dict, list)):
+                            findings.append(f"{path}.enum contains a compound value")
+            for key, child in value.items():
+                child_type = declared_type if key in {"anyOf", "oneOf", "allOf"} else None
+                visit(child, f"{path}.{key}", child_type)
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                visit(child, f"{path}[{index}]", inherited_type)
+
+    visit(node, "parameters")
+    return findings
+
+
+def test_no_builtin_schema_emits_a_provider_invalid_enum() -> None:
+    """Audit the complete emitted inventory, not only the schema fixed today."""
+
+    findings = {
+        tool.name: paths
+        for tool in create_tools(_engine_context())
+        if (paths := _invalid_enum_nodes(tool.parameters))
+    }
+
+    assert findings == {}
+
+
 def test_every_tool_has_schema_and_metadata() -> None:
     for tool in create_tools(_engine_context()):
         # JSON Schema derived from the pydantic params model

@@ -9,7 +9,7 @@ import pytest
 from local_operator.agent_profiles import load_seed, resolve_profile
 from local_operator.agents import AgentEditFields, AgentRegistry
 from local_operator.harness.types import ToolContext
-from local_operator.tools.agent_tool import build_agent_tool, execute_agent
+from local_operator.tools.agent_tool import AgentParams, build_agent_tool, execute_agent
 
 
 @pytest.fixture()
@@ -252,6 +252,52 @@ async def test_update_keeps_the_allowlist_it_was_not_asked_to_change(context, re
     assert after is not None
     assert after.tools == before.tools, "the allowlist is a capability boundary"
     assert "Read the diff first." in after.instructions
+
+
+def test_agent_schema_exposes_inherit_without_an_empty_enum_member() -> None:
+    effort = AgentParams.model_json_schema()["properties"]["effort"]
+    enum = effort["anyOf"][0]["enum"]
+
+    assert enum == ["lo", "med", "hi", "inherit"]
+    assert "" not in enum
+
+
+@pytest.mark.parametrize("effort", [None, "inherit"])
+@pytest.mark.asyncio
+async def test_update_effort_wire_semantics(context, registry, effort) -> None:
+    """Nullable omission preserves a pin; only the named sentinel clears it."""
+
+    await call(context, op="install", name="manager")
+    await call(context, op="update", name="manager", effort="lo")
+
+    args = {"effort": effort} if effort is not None else {}
+    await call(context, op="update", name="manager", description="new routing text", **args)
+
+    profile = resolve_profile("manager", registry=registry)
+    assert profile is not None
+    assert profile.effort == (None if effort == "inherit" else "lo")
+
+
+@pytest.mark.asyncio
+async def test_update_null_effort_preserves_existing_pin(context, registry) -> None:
+    await call(context, op="install", name="manager")
+    await call(context, op="update", name="manager", effort="lo")
+
+    await call(context, op="update", name="manager", effort=None)
+
+    profile = resolve_profile("manager", registry=registry)
+    assert profile is not None and profile.effort == "lo"
+
+
+@pytest.mark.asyncio
+async def test_legacy_empty_effort_still_clears_existing_pin(context, registry) -> None:
+    await call(context, op="install", name="manager")
+    await call(context, op="update", name="manager", effort="lo")
+
+    await call(context, op="update", name="manager", effort="")
+
+    profile = resolve_profile("manager", registry=registry)
+    assert profile is not None and profile.effort is None
 
 
 @pytest.mark.asyncio
