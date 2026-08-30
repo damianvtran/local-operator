@@ -404,12 +404,14 @@ def test_the_memo_cannot_grow_without_bound() -> None:
     by orders of magnitude — an entry count would bound the wrong quantity and
     let the map retain tens of MB for the life of the process."""
     _REBOUND_CACHE.clear()
-    # 22, not 40. The cap saturates at 16 entries / ~30.5 MB by roughly the
-    # 17th image; every iteration past that re-proves the same invariant while
-    # allocating another ~12 MB of incompressible RGB. At 40 this was the
-    # heaviest test in the suite (1047 MB peak, 30 s). 22 still overshoots the
-    # saturation point by six evictions, so it exercises eviction rather than
-    # merely filling the map, and the assertions below are unchanged.
+    # Derived, not the flat 40 this used to run. The cap saturates at 16
+    # entries / ~30.5 MB by roughly the 17th image; every iteration past that
+    # re-proves the same invariant while allocating another ~12 MB of
+    # incompressible RGB, and at 40 this was the heaviest test in the suite
+    # (1047 MB peak, 30 s). The count below still overshoots the saturation
+    # point comfortably (27 images, 11 evictions at the current cap), so it
+    # exercises eviction rather than merely filling the map, and the assertions
+    # are unchanged.
     #
     # Derived from the cap rather than hard-coded so the two cannot drift:
     # "enough entries to fill the cap, plus a margin that forces evictions".
