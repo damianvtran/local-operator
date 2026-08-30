@@ -866,6 +866,10 @@ class SettingsView(Vertical):
         The mitigation for immediate-write having no undo. Deletes the stored
         key rather than writing the default over it, so a config file carries
         only what its owner actually chose (see ``settings_io.reset_setting``).
+
+        A row already at its default is reported, not written — see the
+        ``is_default`` guard below, which is what keeps the page's own undo key
+        from being the only gesture in a session that touched config.yml.
         """
         # Disarms a pending delete for the reason `action_activate` records.
         # Captured BEFORE the early returns below, because a disarm is a change
@@ -924,6 +928,40 @@ class SettingsView(Vertical):
                 self._repaint()
             return
         setting = row.setting
+        if settings_io.is_default(self._manager, setting):
+            # A row already at its default has NOTHING to restore, so `r` must
+            # not reach the writer. It did: `reset_setting` deletes the key and
+            # `_delete` writes the file back unconditionally, so pressing `r` on
+            # an untouched row rewrote config.yml — and on a machine with no
+            # config.yml at all it CREATED a 1005-byte one out of a key the user
+            # never set (#440). The gesture the page offers as the safe way to
+            # undo a change was itself the only thing that had changed anything.
+            #
+            # Both of those are one state here, not two: `read_setting` falls
+            # back to `setting.default` when the key is absent, so "no file yet"
+            # and "stored value equals the default" are the same answer from
+            # `is_default` — measured across the whole registry, a config dir
+            # with no file reports 0 of 52 settings off-default.
+            #
+            # Compared BY VALUE, matching `is_default`'s own contract and the
+            # `changed` test that inks the value column two panes over: a row
+            # painted dim as "this is the default" and a row `r` declines to
+            # reset are then the same row, and the page states one fact about
+            # it rather than two.
+            #
+            # It SAYS so rather than swallowing the press, for the reason the
+            # healthy-cascade branch above does — a lit hint whose key does
+            # nothing is the "nothing happens when I click" bug one step earlier
+            # (UX round 1, U5). The hint is deliberately NOT shed the way a
+            # read-only row sheds it: a retired row is permanently inert, while
+            # this one becomes resettable the moment its value changes, so
+            # shedding would flicker `r default` in and out of the footer as a
+            # user toggles a bool. Offering `r` only on off-default rows is the
+            # #440 redesign's job and needs its sign-off; this guard's job is
+            # only to stop the key from writing when it has nothing to undo.
+            self._notice = f"already at its default ({_render_value(setting.default)})"
+            self._repaint()
+            return
         if not self._save(lambda: settings_io.reset_setting(self._manager, setting)):
             return
         self.post_message(
