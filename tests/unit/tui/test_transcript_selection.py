@@ -79,6 +79,7 @@ from local_operator.tui.widgets.editor import BARREN_CLICK_WINDOW_S, Editor
 from local_operator.tui.widgets.toast import TOAST_FAILURE_MS, Toast
 from local_operator.tui.widgets.tool_card import OUTPUT_INDENT, ToolCard
 from local_operator.tui.widgets.transcript import (
+    BOOT_COLUMN_CLASS,
     NoticeBlock,
     RichBlock,
     TranscriptBlock,
@@ -86,6 +87,7 @@ from local_operator.tui.widgets.transcript import (
     UserBlock,
 )
 from local_operator.tui.widgets.welcome import WelcomeView
+from local_operator.update import unknown_refusal
 from tests.unit.tui.conftest import StyledTranscriptApp
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
@@ -148,6 +150,47 @@ async def _mounted(app: StyledTranscriptApp, *blocks: TranscriptBlock) -> Transc
     for block in blocks:
         view.append_block(block)
     return view
+
+
+def _notice_painted(block: NoticeBlock) -> list[str]:
+    """The rows the notice authored, right-trimmed.
+
+    Via ``renderable.plain`` rather than the strips, for the reason
+    ``test_user_block`` gives: the strips are padded out to the widget width,
+    which would make "does this row carry the glyph field" trivially true of a
+    row of spaces. The trailing pad is dropped because Rich supplies it and no
+    assertion here is about it.
+    """
+    renderable = block.renderable
+    assert isinstance(renderable, Text)
+    return [row.rstrip() for row in renderable.plain.split("\n")]
+
+
+async def _notice_rows(
+    *,
+    app_size: tuple[int, int],
+    text: str,
+    kind: str = "info",
+    centred: bool = False,
+) -> list[str]:
+    """A notice's painted rows at ``app_size``, through the REAL stylesheet.
+
+    Two pauses after each state change: the first mounts and lays the block
+    out, the second lets ``on_resize`` re-wrap it against its REAL width.
+    Without the second every assertion would be made against the 80-column
+    fallback the constructor builds with.
+    """
+    app = StyledTranscriptApp()
+    async with app.run_test(size=app_size) as pilot:
+        block = NoticeBlock(text, cast(Any, kind))
+        await _mounted(app, block)
+        await pilot.pause()
+        await pilot.pause()
+        if centred:
+            block.set_class(True, BOOT_COLUMN_CLASS)
+            await pilot.pause()
+            await pilot.pause()
+        return _notice_painted(block)
 
 
 # -- the mechanism -----------------------------------------------------------
@@ -413,6 +456,223 @@ async def test_notice_copy_is_the_sentence_not_the_glyph_field() -> None:
         assert "·" not in copied and "⚠" not in copied
         for row in copied.split("\n"):
             assert row == row.lstrip(" "), f"row carries the glyph field: {row!r}"
+
+
+# -- a notice's own rows: authored breaks, authored indent (#397) -------------
+@pytest.mark.asyncio
+async def test_an_authored_newline_in_a_notice_is_a_ROW_not_a_character() -> None:
+    """Issue #397, the half that printed control characters into the frame.
+
+    ``wrap_cells`` splits on ``" "`` only, so a ``\\n`` was an ordinary
+    character inside a word: measured into that word's width and then painted
+    literally, mid-row. Asserted on the painted rows rather than on the copy,
+    because the copy joins rows with ``\\n`` and cannot tell a break that was
+    honoured from one that survived as a glyph.
+    """
+    rows = await _notice_rows(
+        app_size=(60, 40),
+        text="alpha\n  beta gamma\nsupported upgrades:\n  uv tool upgrade local-operator",
+    )
+    assert rows == [
+        "  · alpha",
+        "      beta gamma",
+        "    supported upgrades:",
+        "      uv tool upgrade local-operator",
+    ]
+    assert not any("\n" in row for row in rows), rows
+
+
+@pytest.mark.asyncio
+async def test_an_authored_indent_survives_onto_the_hanging_field() -> None:
+    """Issue #397, the half that ate the first characters of every indented line.
+
+    ``wrap_cells`` rebuilds rows with a single separator, so a LEADING run of
+    spaces is dropped — ``  uv tool upgrade …`` came back as ``uv tool …`` and,
+    in the report, four characters shorter still. The indent is lifted out
+    before the wrap and re-applied per row, ON TOP of the glyph field: the
+    field is a gutter of fixed width (see ``copy_gutter``), so a row returned to
+    column 0 would lose four cells of its own text to a paste.
+    """
+    rows = await _notice_rows(app_size=(60, 40), text="supported:\n    uv tool upgrade")
+    bodies = [row[NoticeBlock.GLYPH_COLS :] for row in rows]
+    assert bodies == ["supported:", "    uv tool upgrade"]
+    # The indent sits ON the hanging field, not instead of it: the continuation
+    # still reserves the same four cells the first row spends on the glyph.
+    assert rows[1].startswith(" " * NoticeBlock.GLYPH_COLS)
+
+
+@pytest.mark.asyncio
+async def test_an_indented_line_wraps_inside_the_frame() -> None:
+    """The indent is SPENT from the row's budget, not added beside it.
+
+    ``_rows`` wraps the stripped line at ``body - len(indent)`` and then puts
+    the indent back, so the finished row still fits. Wrapping at the full
+    ``body`` instead reads as correct and passes every other assertion here —
+    the rows are right, they are simply too wide — and the overflow lands in
+    the neighbouring column, which is the whole reason this block wraps itself
+    rather than leaving it to Rich (review round 1 found that mutation
+    overflowing the frame with no test to catch it).
+
+    The indent has to be DEEP for this to bind, which is why it is eight
+    spaces and not two. Without the guard a row grows to exactly ``body``, and
+    ``body`` is already the frame minus the glyph field — so a shallow indent
+    overflows into the field and still fits the terminal, hiding the bug. Only
+    a surplus wider than the field lands outside the frame.
+    """
+    width = 56
+    rows = await _notice_rows(
+        app_size=(width, 40), text="supported:\n        " + "upgrade local-operator " * 4
+    )
+    assert len(rows) > 2, "the indented line must actually wrap for this to bind"
+    assert max(cell_len(row) for row in rows) <= width
+
+
+@pytest.mark.asyncio
+async def test_the_update_refusal_renders_with_every_line_intact() -> None:
+    """The actual user-facing regression: ``/update`` on an unrecognised install.
+
+    Reported as ``s.prefix:``, ``orted upgrades:``, ``px upgrade``,
+    ``thon -m pip`` — three to four characters off the front of every line the
+    author indented, with the newlines printed as glyphs between them. Built
+    from the REAL :func:`~local_operator.update.unknown_refusal` rather than a
+    lookalike, so a copy change to that string keeps this test honest; the
+    interpolated paths are pinned so the assertion does not depend on where the
+    suite happens to be checked out.
+    """
+    refusal = unknown_refusal(prefix="/opt/lo", executable="/opt/lo/bin/python")
+    rows = await _notice_rows(app_size=(100, 40), text=refusal, kind="error")
+    # Wide enough that no line needs wrapping, so the rows ARE the authored
+    # lines and any difference is damage rather than a fold.
+    assert [row[NoticeBlock.GLYPH_COLS :] for row in rows] == refusal.split("\n")
+
+
+@pytest.mark.asyncio
+async def test_a_long_single_line_notice_still_hangs_under_its_first_word() -> None:
+    """The behaviour the split must not cost: a wrap is still a wrap.
+
+    One authored line, no newlines at all — the case every notice in the app was
+    before ``/update`` grew a six-line refusal. Continuations land on the
+    hanging field, which is what makes a long notice read as one statement.
+    """
+    rows = await _notice_rows(
+        app_size=(48, 40),
+        text="ctrl+c again to exit - resume with: local-operator --resume session-abc123def456",
+        kind="warning",
+    )
+    assert len(rows) > 1
+    assert rows[0].startswith("  ! ctrl+c again to exit")
+    for row in rows[1:]:
+        assert row.startswith(" " * NoticeBlock.GLYPH_COLS)
+        assert not row[NoticeBlock.GLYPH_COLS :].startswith(" "), row
+    assert " ".join(row[NoticeBlock.GLYPH_COLS :] for row in rows[1:]).split() == (
+        "local-operator --resume session-abc123def456".split()
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_centred_boot_notice_centres_every_authored_line() -> None:
+    """The boot column keeps working, per row, once rows can be authored.
+
+    A boot notice (the splash's MCP connect failure) is centred on the card's
+    axis rather than hung on the spine, and each row is centred on its OWN
+    width. The split adds rows the centring never saw, so it is asserted on the
+    slack either side of each one — including the indented line, whose authored
+    indent is part of the row it centres.
+    """
+    rows = await _notice_rows(
+        app_size=(70, 30),
+        text="MCP cloudflare failed\n  run: lop mcp login cloudflare",
+        kind="error",
+        centred=True,
+    )
+    assert len(rows) == 2
+    for row in rows:
+        assert row.startswith(" "), f"a centred row sits at the spine: {row!r}"
+        assert "\n" not in row
+    # Centred on the axis, not left-aligned in a wide block: the ink is roughly
+    # equidistant from both edges of the notice's own span. Compared against the
+    # widest row's own slack rather than a pinned column, so the assertion
+    # survives a copy change.
+    inks = [(len(row) - len(row.lstrip(" ")), cell_len(row)) for row in rows]
+    for left, painted in inks:
+        assert left > 0 and painted > left
+
+
+@pytest.mark.asyncio
+async def test_a_multi_line_notice_rewraps_and_repins_through_a_resize() -> None:
+    """The block is FINALIZED and re-wraps itself; the split rides every path.
+
+    ``on_resize``, ``restate`` and ``retheme`` all re-run ``_build``, so a
+    multi-line notice that only worked on first paint would decay into the #397
+    frame the moment the terminal moved. The pinned height has to follow the new
+    row count too — a stale pin reserves rows the rebuild no longer paints.
+    """
+    refusal = unknown_refusal(prefix="/opt/lo", executable="/opt/lo/bin/python")
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(100, 40)) as pilot:
+        block = NoticeBlock(refusal, "error")
+        await _mounted(app, block)
+        await pilot.pause()
+        await pilot.pause()
+        wide = _notice_painted(block)
+        assert block.is_finalized()
+        assert len(wide) == 7 and block.size.height == 7
+
+        await pilot.resize_terminal(46, 40)
+        await pilot.pause()
+        await pilot.pause()
+        narrow = _notice_painted(block)
+        assert len(narrow) > len(wide), narrow
+        assert block.size.height == len(narrow)
+        assert all(cell_len(row) <= 46 for row in narrow), narrow
+        # Folded, not damaged: every authored line still begins a row, and the
+        # indented ones still carry their indent.
+        assert narrow[0].startswith("  ✗ cannot tell how this install was")
+        assert "      uv tool upgrade local-operator" in narrow
+
+        # `restate` and `retheme` take the same three steps around `_build`.
+        block.restate("first\n  second indented", "warning")
+        await pilot.pause()
+        await pilot.pause()
+        assert _notice_painted(block) == ["  ! first", "      second indented"]
+        assert block.size.height == 2
+        block.retheme()
+        await pilot.pause()
+        assert _notice_painted(block) == ["  ! first", "      second indented"]
+
+
+@pytest.mark.asyncio
+async def test_a_blank_authored_row_is_kept_between_lines_and_trimmed_at_the_edge() -> None:
+    """The rows the split itself creates, which did not exist as rows before.
+
+    A leading ``\\n`` used to be a character; now it is a row, and painted it
+    would put the kind glyph beside no text with the sentence it marks below.
+    Between lines the same blank row is the paragraph break the author typed, so
+    it stays. An empty notice keeps one row, so the block always has a height
+    for the spacing machinery to reason about.
+    """
+    assert await _notice_rows(app_size=(60, 40), text="\nleading") == ["  · leading"]
+    assert await _notice_rows(app_size=(60, 40), text="trailing\n") == ["  · trailing"]
+    assert await _notice_rows(app_size=(60, 40), text="a\n\nb") == ["  · a", "", "    b"]
+    assert await _notice_rows(app_size=(60, 40), text="") == ["  ·"]
+
+
+@pytest.mark.asyncio
+async def test_a_multi_line_notice_pastes_as_the_text_that_was_authored() -> None:
+    """The clipboard half: the refusal pastes into a bug report unchanged.
+
+    The uniform ``GLYPH_COLS`` gutter is what makes this work — the authored
+    indent sits on top of the field, so stripping the field returns exactly the
+    string ``unknown_refusal`` composed.
+    """
+    refusal = unknown_refusal(prefix="/opt/lo", executable="/opt/lo/bin/python")
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(100, 40)) as pilot:
+        block = NoticeBlock(refusal, "error")
+        await _mounted(app, block)
+        await pilot.pause()
+        await pilot.pause()
+        assert _copy_all(app, block) == refusal
 
 
 @pytest.mark.asyncio
