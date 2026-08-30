@@ -5,8 +5,15 @@ is the id that comes back on the announcement. Asserted against the real
 engine, not a fake and not the source text.
 """
 import asyncio, sys
-sys.path.insert(0, "/tmp/lop-echo-dedup-id")
 import pathlib, tempfile
+
+# The repo root, derived from this file's own location rather than hardcoded:
+# committed evidence has to run from any checkout, not only the worktree it was
+# written in (round 1, F3). Falls back to argv[1] when the script is copied out
+# of docs/evidence/, which is how it is usually run.
+_here = pathlib.Path(__file__).resolve()
+_root = sys.argv[1] if len(sys.argv) > 1 else str(_here.parents[3])
+sys.path.insert(0, _root)
 
 from local_operator.harness.types import Message, MessageStartEvent, StreamEndEvent
 from local_operator.session.session import Session
