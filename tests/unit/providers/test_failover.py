@@ -1811,20 +1811,30 @@ class TestTransientFailuresAreRetriedOnEveryCallPath:
             return OpenAICompatClient("https://api.test.example/v1", http_client=http)
 
         seen: list[Any] = []
-        with pytest.raises(ProviderError) as excinfo:
-            async for event in stream_with_failover(
-                _request(), FakeAuth({"openai": ["k"]}), {"retry": {"baseDelayMs": 1}}, client_for
-            ):
-                seen.append(event)
-        error = excinfo.value
-        assert error.status == 429
-        assert error.kind == "quota"
-        assert "Rate limit exceeded" in str(error)
-        # The visible delta was forwarded exactly once; nothing was replayed.
-        assert [e for e in seen if isinstance(e, StreamTextDelta)] == [
-            StreamTextDelta(delta="Gate")
-        ]
-        await http.aclose()
+        # Closed in ``finally`` — the shape every other client-owning test in
+        # this file already uses. With the close after the assertions, a
+        # failing assertion left the client open and the reader chasing an
+        # "unclosed client" warning attached to whichever later test happened
+        # to trip the collector, instead of the assertion that actually failed.
+        try:
+            with pytest.raises(ProviderError) as excinfo:
+                async for event in stream_with_failover(
+                    _request(),
+                    FakeAuth({"openai": ["k"]}),
+                    {"retry": {"baseDelayMs": 1}},
+                    client_for,
+                ):
+                    seen.append(event)
+            error = excinfo.value
+            assert error.status == 429
+            assert error.kind == "quota"
+            assert "Rate limit exceeded" in str(error)
+            # The visible delta was forwarded exactly once; nothing was replayed.
+            assert [e for e in seen if isinstance(e, StreamTextDelta)] == [
+                StreamTextDelta(delta="Gate")
+            ]
+        finally:
+            await http.aclose()
 
     async def test_the_one_shot_call_the_session_makes_is_marked_replayable(self) -> None:
         """Wiring, not policy: ``_one_shot_complete`` is the compaction summary

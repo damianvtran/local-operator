@@ -136,10 +136,32 @@ TRAJECTORY = [
 
 
 def _job_with(trajectory: list[dict[str, Any]], status: str = "completed") -> Any:
+    """A job carrying its OWN copy of ``trajectory``.
+
+    The copy is the fix for a cross-test leak, not tidiness. Callers pass the
+    module-level :data:`TRAJECTORY`, and three tests mutate what they get back
+    to drive a live update: ``job.trajectory.append(...)`` at the "mounted
+    once" and "coalesced frame" cases, and ``del job.trajectory[:3]`` at the
+    eviction case. Assigning by reference made those edits land on the SHARED
+    list, so every test that ran afterwards folded a trajectory with an extra
+    tool call in it, or with its first message missing.
+
+    That is why this file failed only in company and passed alone, and why the
+    failure moved around: which test sees the corruption depends on execution
+    order, so xdist changes the symptom (2 failures at ``-n4``, 1 at ``-n0``)
+    without changing the cause. Observed as
+    ``assert [...'ToolCard'] == [...'AssistantBlock']`` and
+    ``assert 'history unavailable' in 'read-only'``.
+
+    A shallow copy is sufficient and deliberate: the leak is list membership
+    (append/delete), and no test mutates an event dict in place. Copying the
+    list here rather than asking each test to remember means a new test cannot
+    reintroduce this by writing the obvious thing.
+    """
     job = _Job("sub-1", "audit the ingest path", status=status)
     if status != "running":
         job.settled_at = job.start_time + 42
-    job.trajectory = trajectory
+    job.trajectory = list(trajectory)
     return job
 
 
@@ -848,14 +870,27 @@ async def test_escape_from_child_restores_composer_when_roster_row_was_hidden() 
 
 
 async def _wait_history(pilot: Any, view: SubagentView) -> None:
-    started = view._history_loading
-    for _ in range(100):
-        await asyncio.sleep(0.005)
-        await pilot.pause()
-        started = started or view._history_loading or bool(view._history_entries)
-        if started and not view._history_loading:
-            return
-    raise AssertionError("history worker did not settle")
+    """Block until the history page worker has settled.
+
+    The page is read off the loop (``asyncio.to_thread`` inside a
+    ``subagent-history`` worker), and the flags the callers assert on
+    (``_history_unavailable``, ``_history_error``, ``_history_entries``) are
+    written in that worker's completion path. Waiting on the WORKER is waiting
+    on those writes; the previous 100-cycle poll was spending a frame budget
+    and calling it settled when the budget ran out, which is why
+    ``test_history_unavailable_and_error_retry_keep_trajectory_fallback``
+    failed under xdist as ``assert 'history unavailable' in 'read-only'`` —
+    the state it asserted had simply not been written yet.
+
+    The selection is checked rather than passed because Textual's
+    ``wait_for_complete`` treats an empty list as falsy and falls back to
+    waiting on EVERY worker. Empty here legitimately means the read already
+    finished, so the pause below is enough to let its callback land.
+    """
+    workers = [w for w in view.workers if w.group == "subagent-history"]
+    if workers:
+        await view.workers.wait_for_complete(workers)
+    await pilot.pause()
 
 
 async def _wait_geometry_settled(
@@ -1340,6 +1375,11 @@ async def test_history_unavailable_and_error_retry_keep_trajectory_fallback(
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(90, 28)) as pilot:
         view = await _open(pilot, app, job)
+        # Opening the page kicks off the first history read, and the missing
+        # directory is discovered on that worker — so the note is not painted
+        # until it settles. Asserting straight after _open read whatever state
+        # happened to be current one frame in.
+        await _wait_history(pilot, view)
         assert HISTORY_UNAVAILABLE_NOTE in view._history_state_text()
         assert "Reading the ingest path." in " ".join(view.rendered_rows())
 

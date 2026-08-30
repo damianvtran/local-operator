@@ -70,6 +70,69 @@ def _model_shown(label: str, *, short: bool = False) -> str:
     return format_model_label(label, short=short)
 
 
+async def _booted(app: OperatorApp) -> None:
+    """Block until the boot worker has adopted a session.
+
+    Waits on the WORKER, not on a frame budget (#142). The app paints before
+    its session exists — ``on_mount`` hands ``_boot_session`` to
+    ``run_worker(group="session")`` precisely so first paint does not wait on
+    the factory — and every band assertion here reads the ledger THROUGH that
+    session, so an unbooted app reports no jobs at all. The bounded
+    ``for _ in range(50): await pilot.pause()`` this replaces was a bet that
+    50 frames outlast the factory, and under contention it lost: measured 5
+    failures in 10 runs at 10-way concurrency, every one of them
+    ``assert app._session is not None``.
+
+    ``wait_for_complete`` returns when the worker's task finishes, so there is
+    no elapsed-time comparison left on this path — a slower machine makes this
+    slower, never red. It also cannot hang past the run: ``run_test`` cancels
+    outstanding workers on exit.
+
+    The empty selection is checked rather than passed, because Textual's
+    ``wait_for_complete`` is ``gather(*[w.wait() for w in (workers or self)])``
+    and an empty list is FALSY — it would fall through to every worker in the
+    manager, which is a wait that passes by waiting on the wrong thing. That
+    case is live here: a worker is dropped from the manager once it finishes
+    (``_remove_worker``), so a caller that already booted finds nothing to
+    select. It is legitimate, but only when the session is already adopted, so
+    that is asserted instead of assumed (review round 1, F1).
+    """
+    workers = [w for w in app.workers if w.group == "session"]
+    if workers:
+        await app.workers.wait_for_complete(workers)
+        return
+    assert app._session is not None, (
+        "no session worker is pending and no session was adopted — the boot "
+        "worker never ran, so waiting here would have waited on nothing"
+    )
+
+
+async def _priced(app: OperatorApp, pilot: Any, panel: SubagentPanel, job_id: str) -> None:
+    """Block until the panel's off-thread reader has priced ``job_id``.
+
+    Same substitution as :func:`_booted`, one layer down and with one extra
+    step. ``SubagentPanel._read_stats`` runs ``job_stats`` on a THREAD worker
+    (group ``subagent-stats-<id>``) because pricing a child resolves its model,
+    which for an unlisted model is a provider listing plus a catalogue fetch.
+    Waiting on that worker is deterministic; the reading it produces is then
+    handed back through ``call_from_thread``, so one pause after it lands is
+    what lets that callback run on the UI thread and populate the cache.
+
+    Guarded against the empty selection for the reason given in :func:`_booted`:
+    an empty list makes ``wait_for_complete`` wait on EVERY worker instead of
+    none. Here the legitimate empty case is a reading already in the cache, so
+    the wait is simply skipped and the assertion below does the checking.
+    """
+    workers = [w for w in app.workers if w.group == f"subagent-stats-{job_id}"]
+    if workers:
+        await app.workers.wait_for_complete(workers)
+    await pilot.pause()
+    assert panel.stats_for(job_id).cost is not None, (
+        "the stats worker finished without pricing the child — the band under test "
+        "reads this cache, so the assertions below would pass on an empty reading"
+    )
+
+
 class Job:
     """An ``AsyncJob`` as the panel reads one — duck-typed, like the widget."""
 
@@ -965,10 +1028,7 @@ async def test_opening_and_leaving_a_page_repoints_and_restores_the_live_band(
         # The session boots in a worker, and the band re-points off the LIVE
         # session's ledger — asserting before it lands reads an app that has
         # no jobs to point at yet.
-        for _ in range(50):
-            await pilot.pause()
-            if app._session is not None:
-                break
+        await _booted(app)
         assert app._session is not None
         assert app._status is not None
         app._status.update(model_label="test/model", cost="$1.20")
@@ -977,15 +1037,12 @@ async def test_opening_and_leaving_a_page_repoints_and_restores_the_live_band(
 
         app._open_subagent_view(job.id)
         # The band reads the panel's reading rather than deriving one, and that
-        # reading is taken off-thread — a repaint may not price a child. Pump
-        # until it lands, which is what a user experiences as the numbers
+        # reading is taken off-thread — a repaint may not price a child. Wait
+        # on the reader itself, which is what a user experiences as the numbers
         # appearing a frame or two after the page does.
         panel = app.query_one(SubagentPanel)
         panel.sync(session)
-        for _ in range(60):
-            await pilot.pause()
-            if panel.stats_for(job.id).cost is not None:
-                break
+        await _priced(app, pilot, panel, job.id)
         app._refresh_subagent_view()
         child = app._status.render_text(120).plain
         assert _model_shown(CHILD_MODEL) in child, child
@@ -1166,10 +1223,7 @@ async def test_an_open_page_does_not_reinstate_the_per_event_repaint() -> None:
     session.jobs = _fake_jobs(*jobs)
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(120, 40)) as pilot:
-        for _ in range(50):
-            await pilot.pause()
-            if app._session is not None:
-                break
+        await _booted(app)
         panel = app.query_one(SubagentPanel)
         panel.sync(session)
         panel._tick()
@@ -1414,10 +1468,20 @@ async def test_a_swept_child_is_dropped_from_the_stats_cache() -> None:
         panel = app.query_one(SubagentPanel)
         panel.sync(session)
         panel._tick()
-        for _ in range(20):
-            await pilot.pause()
-            if len(panel._stats) == 5:
-                break
+        # Five children, five thread workers (``subagent-stats-<id>``), each
+        # landing its reading through ``call_from_thread``. Wait on the
+        # workers and then let those callbacks run, rather than betting 20
+        # frames covers them — same substitution as ``_booted``, and the same
+        # reason: the frame budget is the part that load moves.
+        #
+        # Only when the selection is non-empty: an empty list is falsy and
+        # would make ``wait_for_complete`` wait on every worker in the manager
+        # rather than none (see ``_booted``). The assertion below is what
+        # decides the outcome either way.
+        stats_workers = [w for w in app.workers if w.group.startswith("subagent-stats-")]
+        if stats_workers:
+            await app.workers.wait_for_complete(stats_workers)
+        await pilot.pause()
         assert len(panel._stats) == 5
         session.jobs = _fake_jobs(jobs[0])  # retention sweeps the rest
         panel.sync(session)

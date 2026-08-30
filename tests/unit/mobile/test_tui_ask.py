@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 
 import pytest
 
@@ -134,16 +135,57 @@ class _Control:
 
 
 async def _control_for(app: OperatorApp, pilot) -> _Control:
-    for _ in range(50):
-        if app._mobile_registrant is not None:
-            break
-        await pilot.pause(0.05)
-    assert app._mobile_registrant is not None, "mobile registrant never started"
+    """Connect to the app's control socket once its record is really published.
+
+    Waits on the DISCOVERY RECORD, not on the registrant object, and the
+    distinction is the whole bug this replaced. ``Registrant.start`` spawns a
+    daemon thread and returns; the record is written by ``_serve`` on that
+    thread. So ``app._mobile_registrant is not None`` means "registration was
+    requested", not "the record is on disk" — and the old helper waited for the
+    first and then immediately asserted the second, which is only true when
+    the thread happens to win the race.
+
+    On an idle machine it always does, which is why this reads as solid: 5/5
+    passes unloaded and 206/206 for the module at ``-n4``. CI runs ``-n auto``
+    (14 workers), and there it fails as ``no discovery record published`` —
+    observed on two unrelated PRs whose diffs touch no mobile code, and once
+    passing and failing on the SAME head. Polling the condition the assertion
+    actually depends on removes the gap entirely.
+
+    The bound is a deadlock guard rather than a timing assumption: it is
+    reached only when nothing ever publishes.
+    """
     from local_operator.mobile import registry
 
-    records = registry.scan()
-    assert records, "no discovery record published"
-    record, _state = records[0]
+    records = []
+    for _ in range(200):
+        records = registry.scan()
+        if records:
+            break
+        await pilot.pause(0.05)
+    # Reported against the registrant when there is one, because "started but
+    # never published" and "never started" are different failures and the
+    # second is the more likely one to introduce. Checked only on the failure
+    # path: once a record exists the registrant necessarily started, so
+    # asserting it first would have read as though it were still part of the
+    # wait — the exact misreading that produced the original bug (round 1, F4).
+    if not records:
+        assert app._mobile_registrant is not None, "mobile registrant never started"
+        raise AssertionError("registrant started but published no discovery record")
+    # This process's own record, not merely the first one scanned: ``scan`` is a
+    # global discovery read, so indexing it assumes nothing else has published.
+    # That holds under the suite's per-test config dir today, but matching on
+    # our own pid states the requirement rather than depending on it, and turns
+    # a stray record into a legible failure instead of a connection to someone
+    # else's socket (round 1, F6). Pid rather than control port because the port
+    # is stamped on the registrant's thread when the listener binds, so reading
+    # it here would reintroduce exactly the cross-thread race this helper fixes.
+    mine = os.getpid()
+    record = next((r for r, _state in records if r.pid == mine), None)
+    assert record is not None, (
+        f"no discovery record for this process (pid {mine}); "
+        f"scan saw pids {[r.pid for r, _ in records]}"
+    )
     return await _Control.connect(record.control_port, record.control_key)
 
 
