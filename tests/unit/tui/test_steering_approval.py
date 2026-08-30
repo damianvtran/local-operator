@@ -3028,14 +3028,21 @@ async def test_moving_the_caret_after_a_copy_gives_ctrl_c_back_to_the_draft() ->
         # user can see that it is.
         await pilot.press("right")
         await pilot.pause()
-        # The copy is no longer in flight once its highlight is gone, so the
-        # key is back with the draft rung; the RECEIPT flag survives, because
-        # the toast it drives is still true (the text really is on the
-        # clipboard). Asserting both is what keeps the two lifetimes from being
-        # fused again — doing so cost a stale receipt once already (R18-1).
-        # `copy_in_flight` rather than a private flag: it is the predicate the
-        # app's Ctrl+C rung actually consults, so this stays a statement about
-        # the guarded behaviour instead of about a field's name.
+        # The HIGHLIGHT is what this step is about, so it keeps its own direct
+        # assertion: `copy_in_flight` is already False before the press (the
+        # explicit copy claims no gesture window — see `Editor.action_copy`), so
+        # it cannot witness the collapse on its own and would leave this step
+        # asserting nothing about the caret move it describes (review round 1,
+        # F1).
+        assert not editor.selected_text, "the highlight should be gone"
+        # The copy is not in flight either, so the key is back with the draft
+        # rung; the RECEIPT flag survives, because the toast it drives is still
+        # true (the text really is on the clipboard). Asserting both is what
+        # keeps the two lifetimes from being fused again — doing so cost a stale
+        # receipt once already (R18-1). `copy_in_flight` rather than a private
+        # flag: it is the predicate the app's Ctrl+C rung actually consults, so
+        # this stays a statement about the guarded behaviour instead of about a
+        # field's name.
         assert not editor.copy_in_flight, "the copy should no longer divert the key"
         assert editor._copied, "the receipt is still true and must not be retired here"
 

@@ -14529,14 +14529,20 @@ class OperatorApp(App[None]):
         # (D2). Shortened rather than given a continuation line: one row is
         # what a key reference wants, and the second line was carrying four
         # words.
-        # `ctrl+c` documented for the same reason as `ctrl+v` below, and with
-        # the same gap to close: it is not a slash command, so the table above
-        # cannot carry it. The composer's copy gesture is otherwise advertised
-        # only in `welcome.TIPS`, and `WelcomeView.display` goes False after the
-        # first message — so the splash teaches the key to a user who has not
-        # started working yet and is unreachable by the mid-draft user who
-        # actually wants it. `/help` is the surface that is still there an hour
-        # in (#169; the splash tip's own note records this limit).
+        paste_note = Text()
+        paste_note.append("ctrl+v".ljust(name_width), style=muted)
+        paste_note.append(
+            "attaches an image or file from the system clipboard",
+            style=dim,
+        )
+        # `ctrl+c` is documented for the same reason as `ctrl+v` above, and has
+        # the same gap to close: it is not a slash command, so the table cannot
+        # carry it. The composer's copy gesture is otherwise advertised only in
+        # `welcome.TIPS`, and `WelcomeView.display` goes False after the first
+        # message — so the splash teaches the key to a user who has not started
+        # working yet and is unreachable by the mid-draft user who actually
+        # wants it. `/help` is the surface still there an hour in (#169; the
+        # splash tip's own note records this limit).
         #
         # It states the RULE, not just the key, because the half users get wrong
         # is what the second press does. A live range makes ctrl+c a copy every
@@ -14560,18 +14566,16 @@ class OperatorApp(App[None]):
             "move the caret to hand the key back; esc interrupts",
             style=dim,
         )
-        lines.append(copy_note)
-        lines.append(copy_note_more)
-        paste_note = Text()
-        paste_note.append("ctrl+v".ljust(name_width), style=muted)
-        paste_note.append(
-            "attaches an image or file from the system clipboard",
-            style=dim,
-        )
         # The key reference joins the COMMAND TABLE directly, with no blank line
         # between: it answers "what can I press", which is the question the
         # rows above answer, and the trailing notes below are a different
         # subject (see the placement note on `paste_note`).
+        #
+        # `ctrl+c` leads the pair: copying is the gesture a user reaches for far
+        # more often than pasting an image, and the two-line entry reads better
+        # above a one-line neighbour than wedged under it.
+        lines.append(copy_note)
+        lines.append(copy_note_more)
         lines.append(paste_note)
         # `cmd+v` gets its own row because the claim is CONDITIONAL and a
         # conditional claim needs the words to qualify it. The chord reaches
