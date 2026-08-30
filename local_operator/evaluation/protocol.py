@@ -5,6 +5,10 @@ keeps a future adapter RPC small and prevents transport details (filesystem
 paths, object-store URLs, or inline base64) from becoming model-controlled
 capabilities. Every coordinate is interpreted against geometry captured in the
 observation; callers must never substitute the dimensions of a current display.
+Metadata intentionally uses a portable JSON subset: strings, booleans, null,
+and signed integers exactly representable by IEEE-754 (up to 2^53 - 1). Floats
+are excluded so Python and future non-Python adapters produce identical bytes
+without depending on an RFC 8785 implementation.
 """
 
 from __future__ import annotations

@@ -417,11 +417,21 @@ def test_canonical_observation_fixture_is_stable_and_requires_exact_encoding() -
     assert envelope.to_canonical_json() == expected
     assert ObservationEnvelope.from_canonical_json(expected) == envelope
     assert parse_envelope(expected) == envelope
-    noncanonical = json.dumps(json.loads(expected), ensure_ascii=False).encode()
-    with pytest.raises(ValueError, match="not canonical"):
-        ObservationEnvelope.from_canonical_json(noncanonical)
-    with pytest.raises(ValueError, match="not canonical"):
-        parse_envelope(noncanonical)
+    noncanonical_whitespace = json.dumps(json.loads(expected), ensure_ascii=False).encode()
+    noncanonical_order = expected.replace(
+        b'{"kind":"observation","observation":',
+        b'{"observation":',
+        1,
+    ).replace(
+        b'},"protocol_version":"1.0"}',
+        b'},"kind":"observation","protocol_version":"1.0"}',
+        1,
+    )
+    for noncanonical in (noncanonical_whitespace, noncanonical_order):
+        with pytest.raises(ValueError, match="not canonical"):
+            ObservationEnvelope.from_canonical_json(noncanonical)
+        with pytest.raises(ValueError, match="not canonical"):
+            parse_envelope(noncanonical)
 
 
 def test_generic_parser_requires_explicit_version_and_rejects_normalized_actions() -> None:
