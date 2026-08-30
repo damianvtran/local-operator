@@ -26,11 +26,15 @@ columns, so neither line wraps to column 0 — the defect the paste note's own
 comment in `_help_block` records, and the bound
 `test_help_documents_the_composer_copy_key_and_its_release` now pins.
 
-The 74 is measured from the painted compositor, not arithmetic: at 80 columns
-the painted row may be 78 cells (the screen's own 2-cell inset) and the block
-adds a further 2-cell spine indent, so a composed row of 74 fits and **75 wraps
-to two lines**, putting its tail at the key gutter where it reads as another
-key row. That is #402's design round 1 D2, the defect `paste_note` was
+The 74 is measured from the painted compositor, not arithmetic: a composed row
+of 74 fits and **75 wraps to two lines**, putting its tail at the key gutter
+where it reads as another key row. The ceiling is `terminal width - 6`,
+confirmed at three widths (80 → 74, 90 → 84, 100 → 94), and the six cells are
+four separate reservations declared in different places — 1 for
+`TranscriptView`'s left padding, 1 for the permanently reserved scrollbar
+column (D27), 2 for the block's `SPINE_INDENT` (D20), and 2 for `RichBlock`'s
+own `Padding`. Re-deriving it from any single subtraction is what produced the
+wrong 76 twice. That is #402's design round 1 D2, the defect `paste_note` was
 shortened for. The `cmd+v` row below these sits at exactly 74 with zero
 headroom and its comment says so emphatically; this README, that comment, the
 `ctrl+c` comment and the test now state the one number in one voice, after an

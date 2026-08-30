@@ -8970,13 +8970,18 @@ async def test_help_documents_the_composer_copy_key_and_its_release() -> None:
         assert "caret" in release, f"{release!r} does not say what hands the key back"
         assert "esc" in release, f"{release!r} does not name the key that always interrupts"
 
-        # THE WRAP CEILING IS 74, measured from the painted compositor rather
-        # than derived: at 80 columns the painted row may be 78 cells (the
-        # screen's 2-cell inset) and the block adds a 2-cell spine indent, so a
-        # composed row of 74 fits and 75 wraps to two lines. A wrapped tail
-        # lands at the key gutter, where it reads as another key row — #402's
-        # design round 1 D2, the defect `paste_note` was shortened for and
-        # which the `cmd+v` row below reintroduced once.
+        # THE WRAP CEILING IS 74, MEASURED through the painted compositor
+        # rather than derived: a composed row of 74 fits and 75 wraps to two
+        # lines. A wrapped tail lands at the key gutter, where it reads as
+        # another key row — #402's design round 1 D2, the defect `paste_note`
+        # was shortened for and which the `cmd+v` row reintroduced once.
+        #
+        # The rule is `terminal width - 6` (confirmed at 80/90/100 -> 74/84/94),
+        # and the six cells are four reservations declared in different places:
+        # `TranscriptView`'s left padding, the reserved scrollbar column, the
+        # block's `SPINE_INDENT`, and `RichBlock`'s own `Padding`. Stated here
+        # because a one-term derivation gives 76 and that wrong number has been
+        # asserted twice (review round 2 F3, round 3 F4); see `_help_block`.
         #
         # A looser bound here would be worse than none: these rows are the ones
         # this test is advertised as guarding, so a window that excludes 75 and

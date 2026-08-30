@@ -14557,14 +14557,27 @@ class OperatorApp(App[None]):
         # hanging at column 0.
         #
         # MEASURED WIDTH: composed `name_width + description` must be <= 74 at
-        # 80 columns, the same ceiling the `cmd+v` note below derives and for
-        # the same reason (78-cell painted row less the block's 2-cell spine
-        # indent). These rows compose to 64 and 71, so both have headroom — but
-        # a rewording that reaches 75 WRAPS, and the tail lands at the key
-        # gutter where it reads as another key row, which is #402's design
-        # round 1 D2 verbatim. Re-measured from the painted compositor rather
-        # than restated: 74 fits, 75 wraps to two lines.
-        # `test_help_documents_the_composer_copy_key_and_its_release` pins it.
+        # 80 columns, the same ceiling the `cmd+v` note below carries. These
+        # rows compose to 64 and 71, so both have headroom — but a rewording
+        # that reaches 75 WRAPS, and the tail lands at the key gutter where it
+        # reads as another key row, which is #402's design round 1 D2 verbatim.
+        #
+        # THE CEILING IS `terminal width - 6`, MEASURED through the real
+        # compositor at three widths rather than computed (80 -> 74, 90 -> 84,
+        # 100 -> 94; one cell more wraps in every case). Do not re-derive it
+        # from a single subtraction: an earlier revision of this comment said
+        # "a 78-cell painted row less the block's 2-cell spine indent", which
+        # works out to 76 and is how a 76 came to be asserted here at all
+        # (review round 2 F3, round 3 F4). The six cells are four separate
+        # reservations, no two of them declared in the same place:
+        #
+        #     1  `TranscriptView` left padding   (`padding: 1 0 1 1`)
+        #     1  reserved scrollbar column       (`scrollbar-gutter: stable`, D27)
+        #     2  the block's spine indent        (`SPINE_INDENT`, D20)
+        #     2  `RichBlock`'s own `Padding(renderable, (0, 2))`
+        #
+        # `test_help_documents_the_composer_copy_key_and_its_release` pins the
+        # 74, and the bound is mutation-checked: a row padded to 75 fails it.
         copy_note = Text()
         copy_note.append("ctrl+c".ljust(name_width), style=muted)
         copy_note.append("copies the highlighted range in the composer", style=dim)
@@ -14596,11 +14609,11 @@ class OperatorApp(App[None]):
         # work FOR THEM, and a user anywhere else needs to know it will.
         #
         # MEASURED WIDTH, and THIS ROW HAS ZERO HEADROOM — read this before
-        # editing the string. At 80 columns the painted row may be at most 78
-        # cells (the screen's own 2-cell inset), and the block adds a further
-        # 2-cell spine indent, so the composed `name_width + description` must
-        # be <= 74. This row composes to EXACTLY 74. One more character wraps
-        # it. Measured from the painted compositor, not arithmetic:
+        # editing the string. The composed `name_width + description` must be
+        # <= `terminal width - 6`, i.e. 74 at 80 columns; see the `ctrl+c` note
+        # above for where all six reserved cells come from. This row composes
+        # to EXACTLY 74. One more character wraps it. Measured from the painted
+        # compositor, not arithmetic:
         #
         #     W=81  painted 78  fits
         #     W=80  painted 78  fits          <- exactly at the limit
