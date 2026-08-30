@@ -81,15 +81,6 @@ import pytest
 #: whole machine a swap storm.
 _MB_PER_WORKER = 600
 
-#: Fraction of macOS ``Pages inactive`` treated as genuinely reclaimable. Those
-#: pages are a mix of clean (free on demand) and dirty/compressor-backed
-#: (reclaimable only by paging), and vm_stat does not split them. Counting all
-#: of it is what let the probe report 8 GB of headroom on a swapping machine;
-#: counting none of it reports near-zero on a healthy one with a warm cache.
-#: A quarter is a deliberate middle: pessimistic enough that pressure moves the
-#: number, generous enough not to starve an idle host.
-_INACTIVE_RECLAIM_FRACTION = 0.25
-
 #: Fraction of available memory the suite may claim. The rest is left for the
 #: editor, the agent sessions and the OS page cache that are the reason this
 #: machine is contended in the first place.
@@ -114,24 +105,6 @@ _MAX_WORKERS = 8
 _FALLBACK_WORKERS = 4
 
 
-def _swap_used_mb() -> float:
-    """Consumed swap in MB, or 0.0 when it cannot be read.
-
-    Subtracted from apparent headroom: a machine that is already paging has less
-    room than its free-page count suggests, and this term is what makes the
-    budget shrink as real pressure rises. Failing to 0.0 (rather than to None)
-    keeps a missing/unswapped host on the free-page estimate alone.
-    """
-    try:
-        out = subprocess.run(
-            ["sysctl", "-n", "vm.swapusage"], capture_output=True, text=True, timeout=5, check=True
-        ).stdout
-        match = re.search(r"used\s*=\s*([\d.]+)M", out)
-        return float(match.group(1)) if match else 0.0
-    except Exception:  # a missing probe must not break the budget
-        return 0.0
-
-
 def _available_memory_mb() -> int | None:
     """Memory the suite can take without pushing the machine into swap, in MB.
 
@@ -140,19 +113,36 @@ def _available_memory_mb() -> int | None:
     and is intentionally NOT a dependency, so each platform is probed through
     what ships with the OS.
 
-    The macOS arm is deliberately NOT a naive "free + inactive". A first cut
-    counted ``Pages inactive`` as available and reported 8,137 MB of headroom on
-    this host at the exact moment it had 452 MB genuinely free and 6.1 GB of 7.2
-    GB of swap consumed - so the arm never became the binding constraint under
-    the pressure it exists to detect. On macOS ``inactive`` is not Linux's
-    ``MemAvailable``: much of it is dirty and compressor-backed, reclaimable
-    only by paging, which is the very cost being avoided. Two corrections:
+    The macOS arm is ``free + speculative + file-backed``, and each of those two
+    design choices was made against a measured failure of the obvious
+    alternative. Both alternatives are recorded because each looks correct until
+    it is measured, and a future reader will otherwise re-introduce one:
 
-    * ``inactive`` is DISCOUNTED (only a fraction counts as reclaimable) rather
-      than dropped, because dropping it entirely reports near-zero on a healthy
-      machine with a warm page cache and would pin a fine host to the floor.
-    * Consumed swap is SUBTRACTED. A machine already paging has negative real
-      headroom, and this is what makes the probe fall as pressure rises.
+    * **Not ``Pages inactive``.** Counting it as available reported 8,137 MB of
+      headroom on this host at the exact moment it had 452 MB genuinely free and
+      6.1 GB of 7.2 GB of swap consumed, so the arm never bound under the
+      pressure it exists to detect. On macOS ``inactive`` is not Linux's
+      ``MemAvailable``: much of it is dirty and compressor-backed, reclaimable
+      only by paging, which is the cost being avoided. ``File-backed pages`` is
+      the subset vm_stat itself identifies as clean and cheaply reclaimable
+      (page cache, backed by a file, droppable without a write), so it needs no
+      invented discount fraction - an earlier revision multiplied ``inactive``
+      by an asserted 0.25, which was a guess dressed as a measurement.
+    * **Not consumed swap as a pressure term.** Subtracting
+      ``vm.swapusage``'s ``used`` looks like the natural way to notice a machine
+      that is paging, but that counter is CUMULATIVE - macOS does not decrement
+      it when pressure clears, since pages stay in the swap file until faulted
+      back in or the machine reboots. It therefore reads "this host swapped at
+      some point since boot", not "this host is swapping now". Measured: with
+      the OS reporting 78% free and load down from 155 to 21, a stale 3,315 MB
+      swap figure still drove the hook to 2 workers, the floor, where the CPU
+      arm alone would have given 7. A term that only ever ratchets down is worse
+      than no term, because it silently makes the cap independent of actual
+      conditions. The page counts used here are all instantaneous and recover on
+      their own.
+
+    The compressor is deliberately NOT subtracted: pages it occupies are already
+    excluded from both free and file-backed, so subtracting would double-count.
     """
     try:
         if sys.platform == "darwin":
@@ -169,17 +159,19 @@ def _available_memory_mb() -> int | None:
             page_size = int(header.group(1))
 
             counts = {}
-            for label in ("Pages free", "Pages inactive", "Pages speculative"):
-                match = re.search(rf"^{label}:\s+(\d+)\.", out, re.MULTILINE)
+            # "File-backed pages" is not present on every macOS version; treat a
+            # miss as 0 rather than as a probe failure, which degrades to the
+            # free-page estimate instead of discarding a usable measurement.
+            for label in ("Pages free", "Pages speculative"):
+                match = re.search(rf"^{re.escape(label)}:\s+(\d+)\.", out, re.MULTILINE)
                 if match is None:
                     return None
                 counts[label] = int(match.group(1))
+            file_backed = re.search(r"^File-backed pages:\s+(\d+)\.", out, re.MULTILINE)
+            counts["File-backed pages"] = int(file_backed.group(1)) if file_backed else 0
 
             per_mb = page_size / (1024 * 1024)
-            free_mb = (counts["Pages free"] + counts["Pages speculative"]) * per_mb
-            inactive_mb = counts["Pages inactive"] * per_mb * _INACTIVE_RECLAIM_FRACTION
-            available = free_mb + inactive_mb - _swap_used_mb()
-            return max(0, int(available))
+            return max(0, int(sum(counts.values()) * per_mb))
 
         if sys.platform.startswith("linux"):
             # MemAvailable is the kernel's own estimate of what can be handed out

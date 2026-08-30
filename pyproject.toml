@@ -283,7 +283,8 @@ exclude = ["**/node_modules", "**/__pycache__", "**/.*", "docs"]
 # `pytest_xdist_auto_num_workers` and caps it (2..8) from a CPU share and a
 # budget over *available* memory. Without that hook xdist resolves `auto` to
 # `os.cpu_count()`, which on a 14-core host meant 14 workers and a measured
-# 7,438 MB peak RSS — ruinous on this machine, where many git worktrees run
+# 3,661 MB of worker RSS (vs 1,579 MB capped) — ruinous on this machine, where
+# many git worktrees run
 # suites concurrently (three at once drove load to 98-128 and exhausted swap).
 # The suite is dominated by Textual pilot tests that spend their wall time
 # waiting for the event loop rather than on CPU, so a wide run buys nothing:

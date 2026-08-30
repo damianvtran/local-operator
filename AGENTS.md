@@ -19,9 +19,9 @@ would otherwise pick. It has to sit at the rootdir: the hook runs before the
 `tests/` conftest is loaded, so a copy under `tests/` is never called.
 
 The reason is that this repo is worked through many concurrent worktrees. On a
-14-core / 36 GB host, one-per-core meant 14 workers and a measured **7,438 MB
-peak RSS**; three suites at once drove load average to 98-128 and consumed 6.1
-of 7.2 GB of swap. Fewer workers were also *faster* there — an interleaved A/B
+14-core / 36 GB host, one-per-core meant 14 workers and a measured **3,661 MB
+of xdist-worker RSS** against 1,579 MB for the capped run; three suites at once
+drove load average to 98-128 and consumed 6.1 of 7.2 GB of swap. Fewer workers were also *faster* there — an interleaved A/B
 on `tests/unit/server` measured `-n 4` at 5.3-5.9s against `-n 14` at
 7.8-11.3s, because the suite waits on the event loop rather than on CPU. The
 cap is the smaller of a CPU share and a memory budget, so a machine already
@@ -31,13 +31,18 @@ the measured figure: cleanly measured workers sit at 226-262 MB, but a worker's
 RSS depends on which tests it draws (worst observed ~1,090 MB) and some tests
 fork their own subprocesses the budget must still cover.
 
-The memory probe is pressure-aware, which matters more than it sounds:
-`psutil` is deliberately not a dependency, so macOS is read from `vm_stat` and
-Linux from `MemAvailable`. On macOS, counting `Pages inactive` as free reports
-many gigabytes of phantom headroom on a machine that is actively swapping (it
-claimed 8,137 MB while the host had 452 MB free and 6.1 GB of swap consumed), so
-inactive is discounted and consumed swap is subtracted. Any probe failure
-degrades to the CPU-only cap; the hook never raises.
+The memory probe reads *current* pressure, which is subtler than it sounds:
+`psutil` is deliberately not a dependency, so macOS is read from `vm_stat`
+(`free + speculative + file-backed`) and Linux from `MemAvailable`. Two
+plausible-looking alternatives are both wrong and are documented in
+`conftest.py` so nobody re-adds them. Counting `Pages inactive` as free reports
+phantom headroom on a swapping machine (8,137 MB while the host had 452 MB
+free); `File-backed pages` is the subset `vm_stat` itself marks clean and
+cheaply reclaimable, so no invented discount fraction is needed. And subtracting
+`vm.swapusage` looks like a pressure signal but is **cumulative** — macOS never
+decrements it, so a host that swapped hours ago stayed pinned to 2 workers while
+the OS reported 78% free. Every term used here is instantaneous and recovers on
+its own. Any probe failure degrades to the CPU-only cap; the hook never raises.
 
 Override it per session, or bypass it entirely:
 
