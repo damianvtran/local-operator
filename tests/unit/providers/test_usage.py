@@ -176,6 +176,70 @@ def test_usage_health_exact_zero_balance_is_depleted_without_a_total() -> None:
     assert usage_health(mixed, "deepseek-chat").state == "unknown"
 
 
+def test_balance_only_branch_verdicts_survive_the_f9_cleanup() -> None:
+    """The exact-zero-vs-unknown boundary is deliberate; pin every side of it.
+
+    Review F9/F10 dropped a redundant ``remaining is not None`` guard and a
+    bare alias from this branch. The semantics around them are NOT redundant:
+    F3 says a positive balance stays unknown (no denominator to divide by) and
+    F6 says one empty wallet beside a funded one stays unknown too. This
+    enumerates the branch's inputs so a future readability pass cannot quietly
+    move the boundary — negative balances count as non-positive (a debt is not
+    headroom), a row with no ``remaining`` at all is not a balance row, and the
+    depleted verdict's derived fields come from the zeroed rows.
+    """
+
+    def _balance(remaining: float | None, *, shared: bool = True, tier: str = "") -> UsageLimit:
+        return UsageLimit(
+            id=f"p:balance:{remaining}:{tier}",
+            label=f"Balance {remaining}",
+            amount=UsageAmount(remaining=remaining, unit="usd"),
+            window="lifetime",
+            shared=shared,
+            tier=tier,
+            resets_at_ms=20_000,
+        )
+
+    def _health(*limits: UsageLimit, model: str = "deepseek-chat"):
+        return usage_health(
+            UsageReport(provider="deepseek", limits=list(limits)),
+            model,
+            reserve_percent=10,
+            now_ms=10_000,
+        )
+
+    # No balance row at all (nothing measurable, nothing to zero out).
+    assert _health().state == "unknown"
+    assert _health(_balance(None)).state == "unknown"
+    # Every balance zeroed: definitive exhaustion despite the missing total.
+    assert _health(_balance(0.0)).state == "depleted"
+    assert _health(_balance(0.0), _balance(0.0)).state == "depleted"
+    # A negative balance is not headroom, so it does not rescue the account.
+    assert _health(_balance(-5.0)).state == "depleted"
+    assert _health(_balance(0.0), _balance(-5.0)).state == "depleted"
+    # Any positive balance anywhere keeps the whole report unknown (F3/F6).
+    assert _health(_balance(10.0)).state == "unknown"
+    assert _health(_balance(0.0), _balance(10.0)).state == "unknown"
+    assert _health(_balance(-5.0), _balance(10.0)).state == "unknown"
+    # A row with no ``remaining`` is not a balance row: it neither zeroes the
+    # account nor rescues it, so the zeroed rows beside it still decide.
+    assert _health(_balance(0.0), _balance(None)).state == "depleted"
+    assert _health(_balance(10.0), _balance(None)).state == "unknown"
+
+    # The depleted verdict's derived fields are built from the zeroed rows.
+    depleted = _health(_balance(0.0), _balance(0.0))
+    assert depleted.remaining_fraction == 0.0
+    assert depleted.scope == "account"
+    assert depleted.reset_after_ms == 10_000
+    assert depleted.binding_labels == ("Balance 0.0", "Balance 0.0")
+
+    # Tier-only zeroed rows bind ONE model family, not the account.
+    tier_only = _health(_balance(0.0, shared=False, tier="fable"), model="claude-fable-5")
+    assert tier_only.state == "depleted"
+    assert tier_only.scope == "model"
+    assert tier_only.binding_families == ("fable",)
+
+
 def test_usage_health_depleted_reset_ignores_windows_merely_in_reserve() -> None:
     """The depleted horizon counts only fully-spent windows.
 

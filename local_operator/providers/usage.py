@@ -377,17 +377,27 @@ def usage_health(
         # denominator. Recognize only that boundary; positive amounts remain
         # unknown/fail-open rather than inventing a quota percentage (review
         # F3).
-        balances = [limit for limit in relevant if limit.amount.remaining is not None]
+        # Paired with the narrowed amount rather than filtered to bare limits:
+        # the filter already establishes ``remaining is not None``, but that
+        # narrowing does not survive the comprehension, so a later
+        # ``limit.amount.remaining > 0`` needs its own redundant None guard to
+        # type-check. Carrying the value the filter proved is what lets the
+        # positive-balance test below read as the single condition it is
+        # (review F9).
+        balances = [
+            (limit, limit.amount.remaining)
+            for limit in relevant
+            if limit.amount.remaining is not None
+        ]
         # DeepSeek returns one row per currency. One empty wallet does not
         # exhaust an account that still has funds in another, so exact-zero is
         # definitive only when EVERY denominator-less balance row is non-
         # positive. A mixed zero/positive report remains unknown rather than
         # being skipped (review F6).
-        if not balances or any(
-            limit.amount.remaining is not None and limit.amount.remaining > 0 for limit in balances
-        ):
+        if not balances or any(remaining > 0 for _limit, remaining in balances):
             return QuotaHealth("unknown")
-        zero_balance = balances
+        # Past this guard every entry in ``balances`` is a zeroed window, so
+        # the list IS the binding set the verdict below is built from.
         # This branch is unconditionally a depleted verdict (every balance is
         # zeroed), and a depleted account is usable again the moment ANY spent
         # window reopens -- a request needs only one window with headroom -- so
@@ -399,13 +409,13 @@ def usage_health(
         reset_after = min(
             (
                 value
-                for value in (limit.resets_in_ms(now_ms) for limit in zero_balance)
+                for value in (limit.resets_in_ms(now_ms) for limit, _ in balances)
                 if value is not None
             ),
             default=None,
         )
         scope: Literal["account", "model", "unknown"]
-        if all(limit.tier and not limit.shared for limit in zero_balance):
+        if all(limit.tier and not limit.shared for limit, _ in balances):
             scope = "model"
         else:
             scope = "account"
@@ -414,9 +424,9 @@ def usage_health(
             remaining_fraction=0.0,
             reset_after_ms=reset_after,
             scope=scope,
-            binding_labels=tuple(limit.label for limit in zero_balance),
+            binding_labels=tuple(limit.label for limit, _ in balances),
             binding_families=tuple(
-                dict.fromkeys(limit.tier for limit in zero_balance if limit.tier)
+                dict.fromkeys(limit.tier for limit, _ in balances if limit.tier)
             ),
         )
 
