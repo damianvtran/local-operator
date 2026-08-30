@@ -363,6 +363,47 @@ class TestCodexImport:
         configs, _ = load_all_mcp_configs(cwd)
         assert set(configs) == {"ours"}
 
+    def test_non_dict_mcp_servers_shapes_degrade(self, tmp_path: Path, home: Path) -> None:
+        """The shapes a HAND-EDITED TOML actually produces: a scalar where the
+        table should be, and a scalar entry inside it. Both degrade to
+        contributing nothing while our own file still loads."""
+        cwd = tmp_path / "proj"
+        _write(
+            home / ".local-operator" / "mcp.json",
+            {"mcpServers": {"ours": _stdio("ours-cmd")}},
+        )
+        _write_toml(home / ".codex" / "config.toml", 'mcp_servers = "nope"\n')
+        configs, _ = load_all_mcp_configs(cwd)
+        assert set(configs) == {"ours"}
+
+        _write_toml(home / ".codex" / "config.toml", "[mcp_servers]\nbroken = 1\n")
+        configs, _ = load_all_mcp_configs(cwd)
+        assert set(configs) == {"ours"}
+
+    def test_deeply_nested_toml_degrades_instead_of_raising(
+        self, tmp_path: Path, home: Path
+    ) -> None:
+        """``tomllib`` is a recursive-descent parser in Python, so deep inline
+        nesting raises ``RecursionError`` where ``json.loads`` (C) does not.
+        The reader promises every failure degrades to nothing, so this must not
+        escape ``load_all_mcp_configs`` (review round 1, F2)."""
+        cwd = tmp_path / "proj"
+        _write(
+            home / ".local-operator" / "mcp.json",
+            {"mcpServers": {"ours": _stdio("ours-cmd")}},
+        )
+        depth = 2000
+        _write_toml(
+            home / ".codex" / "config.toml",
+            '[mcp_servers.x]\ncommand = "c"\nnested = '
+            + "{ a = " * depth
+            + "1"
+            + " }" * depth
+            + "\n",
+        )
+        configs, _ = load_all_mcp_configs(cwd)
+        assert set(configs) == {"ours"}
+
     def test_missing_codex_file_is_a_no_op(self, tmp_path: Path, home: Path) -> None:
         cwd = tmp_path / "proj"
         assert not (home / ".codex").exists()

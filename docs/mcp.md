@@ -7,7 +7,8 @@ best-effort imports of other tools' configs (`~/.claude.json` — top-level
 `mcpServers` plus project-scoped `projects.<cwd>.mcpServers`,
 `<cwd>/.claude/.mcp.json`, `~/.cursor/mcp.json`, `<cwd>/.vscode/mcp.json`,
 `~/.codex/config.toml` — TOML, `[mcp_servers.<name>]` tables, user scope
-only). Project configs win over user configs, which win over imports;
+only, meaning literally that path: Codex's `CODEX_HOME` override is not
+consulted). Project configs win over user configs, which win over imports;
 `disabledServers` beats `enabledServers`, which beats a server's own
 `enabled: false`.
 

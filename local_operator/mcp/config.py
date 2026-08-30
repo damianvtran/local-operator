@@ -211,6 +211,12 @@ def _read_toml(path: Path) -> dict[str, Any] | None:
     a config we do not own must never be able to break discovery of the ones
     we do, so every failure mode degrades to "this file contributes nothing".
 
+    User scope means literally ``~/.codex/config.toml``. Codex's own
+    ``CODEX_HOME`` override is deliberately NOT consulted: no other candidate
+    honours a foreign tool's env var either, and doing it here would make this
+    the first such precedent. A user who has relocated their Codex home gets
+    no import rather than a wrong one.
+
     This import is READ-ONLY, permanently and by construction: ``tomllib`` is
     stdlib on the 3.12 floor but exposes ``load``/``loads`` only — it cannot
     emit TOML — and ``tomli_w`` is not a dependency. Writing the file back
@@ -224,7 +230,13 @@ def _read_toml(path: Path) -> dict[str, Any] | None:
         with path.open("rb") as handle:  # tomllib requires binary + UTF-8
             loaded = tomllib.load(handle)
         return loaded if isinstance(loaded, dict) else None
-    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError, RecursionError):
+        # ``RecursionError`` has no counterpart in ``_read_json``: ``tomllib``
+        # is a recursive-descent parser written in Python, so deeply nested
+        # inline tables blow the stack (measured: raises at depth 2000, where
+        # the C-implemented ``json.loads`` still parses). Catching it is what
+        # keeps this reader's "every failure mode contributes nothing" promise
+        # literally true rather than true-in-practice.
         return None
 
 
