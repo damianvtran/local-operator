@@ -9,6 +9,11 @@ A candidate PASSES when its rendered height equals ``DEFERRED_STEER_NOTICE``'s
 at every width in the range: that is exactly the condition under which the
 cross-turn settle rewrites the row without moving anything below it.
 
+Coupled to ``tests.unit.tui.test_app_pilot`` for its ``FakeSession``/``_factory``
+(review round 1, F5): nothing runs these in CI, so a rename there breaks them
+silently -- which is exactly when someone editing the receipt copy needs them.
+If the import fails, that pair is what moved.
+
 Usage:
     env -u NO_COLOR TERM=xterm-256color .venv/bin/python \
         scripts/steer_receipt_candidates.py [lo] [hi]
@@ -27,13 +32,23 @@ from local_operator.tui.widgets.transcript import NoticeBlock  # noqa: E402
 from tests.unit.tui.test_app_pilot import FakeSession, _factory  # noqa: E402
 
 CANDIDATES = [
-    "sent with your message — the agent has it now",
-    "sent — the agent has it with your message",
-    "sent — it went with the message you just sent",
+    # The shipped string, and the alternatives design review round 1 (D1/D2)
+    # measured against it. `your next message` is FALSE on every turn the user
+    # did not start -- an idle wake, a peer `lop send`, or a background job
+    # result each open their own turn and drain the queue -- so the row named a
+    # message that need not exist. `that next message` drops the
+    # authorship claim without asserting a position the reader must verify.
+    "sent — it rode along with that next message",  # shipped
+    # Rejected by measurement, and the reason is instructive: the binding
+    # constraint is WORD SHAPE, not length. These are 43 characters like the
+    # shipped string, but their tails break differently and so reflow in the
+    # narrow band. `the message below` was design round 1's suggestion.
+    "sent — it rode along with the message below",
+    "sent — it went along with the message below",
     "sent — it rode along with your next message",
-    "sent with your message — the agent has it",
-    "sent — the agent has it, with your message",
-    "sent with your last message — the agent has it",
+    "sent — it rode along with your last message",
+    "sent — it rode along with the next message",
+    "sent — it went out with the message below it",
     "sent — the agent has it now",  # the current shared string, as control
 ]
 

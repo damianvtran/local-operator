@@ -38,7 +38,7 @@ from local_operator.tui.app import (
 )
 from local_operator.tui.events import SteeringDelivered, TurnEnded
 from local_operator.tui.widgets.editor import Editor
-from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView
+from local_operator.tui.widgets.transcript import NoticeBlock, NoticeKind, TranscriptView
 
 from .test_app_pilot import FakeSession, _factory
 
@@ -78,6 +78,50 @@ def _notice_blocks(app: OperatorApp) -> list[NoticeBlock]:
 def _notice_texts(app: OperatorApp) -> list[str]:
     """Every notice row's text, in transcript order."""
     return [block._text for block in _notice_blocks(app)]
+
+
+async def _settled_notice_height(cols: int, text: str, kind: NoticeKind) -> int:
+    """The row count ``text`` renders to at ``cols`` columns, read once, settled.
+
+    One block in a FRESH app, rather than one block measured before and after a
+    restate. Two things make that the reliable protocol:
+
+    * The pre-restate reading of a restated block is racy — the region is not
+      always settled after a fixed number of pauses, so it comes back one row
+      short intermittently (review round 1, F2, measured at 1 in 12 at 52
+      columns). Here there is no baseline reading to slip: each string is
+      rendered independently and compared as a number.
+    * A second notice mounted beside the first is given a gap row by adaptive
+      spacing when its neighbour is multi-row, so two blocks in one app differ
+      in ``virtual_region`` for reasons that have nothing to do with the copy.
+
+    The height is taken from the block's OWN wrap of its own text at its own
+    measured width, not from ``virtual_region``. That is what makes it
+    deterministic: ``virtual_region`` is assigned by the compositor, so reading
+    it races the layout pass no matter how many frames are waited — polling it
+    for stability merely trades a fixed pause count for an unsettled plateau,
+    which is the same flake one step removed (observed at a width that moved
+    between runs). ``_rows`` is a pure function of the text and the body width,
+    it is the very computation that decides the row count, and it is what
+    ``_build`` itself calls, so it answers the question the test is actually
+    asking: how many rows does this string occupy here.
+
+    The width is still read from the mounted block, so the transcript's real
+    padding and scrollbar are in the number rather than assumed.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(cols, 24)) as pilot:
+        await pilot.pause()
+        block = NoticeBlock(text, kind)
+        app._append_block(block)
+        await pilot.pause()
+        await pilot.pause()
+        # Mirrors `NoticeBlock._build`: the block reserves a fixed glyph field
+        # and wraps the remainder, so the body is the block's width less that
+        # gutter. Read from the live block rather than recomputed from `cols`.
+        width = max((block.size.width or 80) - 2, 12)
+        body = max(width - block.GLYPH_COLS, 8)
+        return len(block._rows(body))
 
 
 async def _submit(pilot: Any, app: OperatorApp, text: str) -> None:
@@ -755,33 +799,35 @@ async def test_the_cross_turn_settle_does_not_change_the_rows_height() -> None:
     character counts alone cannot tell you — the round-1 candidate was chosen by
     counting and turned out to be the same length as the string it replaced.
 
-    Every width from 28 up, because the crossovers are not where arithmetic on
+    Every width from 20 up, because the crossovers are not where arithmetic on
     the string lengths puts them: the transcript's own padding and scrollbar are
-    in the block's usable width and not in the raw character count.
+    in the block's usable width and not in the raw character count. The binding
+    constraint is WORD SHAPE rather than length — all three receipt strings in
+    play are 43 characters, and `sent — it rode along with the message below`
+    still reflows at 22 and 24 because its tail breaks differently.
+
+    Each string is measured in its OWN app, read once through
+    `_settled_notice_height`, rather than by reading one block before and after
+    a restate. That protocol was racy (review round 1, F2): the pre-restate
+    reading is taken while the block's region may not have settled, so it came
+    back one row short about once in twelve at 52 columns — and over 33 widths
+    that made a red run likely, reporting a copy regression that did not exist.
+    The post-restate reading was never wrong; only the baseline slipped.
     """
-    for cols in range(28, 61):
-        app = OperatorApp(lambda: _factory(FakeSession()))
-        async with app.run_test(size=(cols, 24)) as pilot:
-            await pilot.pause()
-            # The SAME block restated, which is what the settle actually does.
-            # Two blocks compared side by side measure something else: adaptive
-            # spacing gives the second one a gap row when the first is
-            # multi-row, so `virtual_region` differs by one for reasons that
-            # have nothing to do with the copy.
-            row = NoticeBlock(DEFERRED_STEER_NOTICE, "note")
-            app._append_block(row)
-            await pilot.pause()
-            await pilot.pause()
-            before = row.virtual_region.height
-
-            row.restate(DEFERRED_SENT_STEER_NOTICE, "success")
-            await pilot.pause()
-            await pilot.pause()
-
-            assert row.virtual_region.height == before, (
-                f"at {cols} columns the cross-turn settle changes the row from "
-                f"{before} to {row.virtual_region.height} rows"
-            )
+    for cols in range(20, 91):
+        deferred = await _settled_notice_height(cols, DEFERRED_STEER_NOTICE, "note")
+        settled = await _settled_notice_height(cols, DEFERRED_SENT_STEER_NOTICE, "success")
+        # Naming both strings, because the failure a future reader will hit is
+        # "somebody edited the copy", and the message has to point at that
+        # rather than at the transcript.
+        assert deferred == settled, (
+            f"at {cols} columns the receipt strings render to different heights "
+            f"({deferred} vs {settled} rows), so the cross-turn settle reflows "
+            f"the transcript. The copy was edited and its wrap point moved:\n"
+            f"  deferred={DEFERRED_STEER_NOTICE!r}\n"
+            f"  settled ={DEFERRED_SENT_STEER_NOTICE!r}\n"
+            f"Re-run scripts/steer_receipt_candidates.py to pick a replacement."
+        )
 
 
 @pytest.mark.asyncio
@@ -846,3 +892,50 @@ async def test_a_settling_deferred_row_leaves_a_scrolled_up_reader_alone() -> No
             or "message" in after
             for _, before, after in changed
         ), changed
+
+
+@pytest.mark.asyncio
+async def test_a_takeover_still_settles_the_rows_it_deliberately_kept() -> None:
+    """Review round 1, F3: the guard's premise is "the rows went", not "the
+    controller changed", and the two come apart on takeover.
+
+    `_adopt_takeover_session` rotates the transport when the remote facade wins
+    the transcript lease. Unlike `/reload` it is NOT a conversation change: the
+    transcript, the held steer rows and the engine's queue all survive, and its
+    docstring says so. So a drain already in flight across that swap is about a
+    row this app is still holding, and dropping it leaves the receipt stuck on
+    `queued` after the message really went — the exact stale promise #151 and
+    #157 exist to prevent, reintroduced by a guard that over-generalised.
+    """
+    session = _Streaming()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        for _ in range(200):
+            if app._controller is not None:
+                break
+            await pilot.pause()
+            await asyncio.sleep(0.01)
+        assert app._controller is not None, "the session never booted"
+        outgoing_controller = app._controller
+
+        await _submit(pilot, app, "steered just before the lease changed hands")
+        assert QUEUED_STEER_NOTICE in _notice_texts(app)
+        (row,) = app._queued_steer_notices
+
+        # The takeover: a new session object, same conversation, transcript and
+        # held rows deliberately kept.
+        await app._adopt_takeover_session(_Streaming())
+        await pilot.pause()
+        assert app._controller is not outgoing_controller
+        assert app._queued_steer_notices == [row], "takeover must keep the held rows"
+
+        # The drain that was already in flight when the lease changed hands.
+        outgoing_controller._handle_steering_delivered(SteeringDeliveredEvent(count=1))
+        await pilot.pause()
+        await pilot.pause()
+
+        assert row._text == SENT_STEER_NOTICE, (
+            "a takeover keeps the conversation, so the receipt for a message "
+            "that really went must still settle its row"
+        )

@@ -376,7 +376,7 @@ class SteeringDelivered(Message):
     and only a stamped origin can be PROVEN stale.
     """
 
-    def __init__(self, count: int, origin: Any | None = None) -> None:
+    def __init__(self, count: int, origin: "EventController | None" = None) -> None:
         super().__init__()
         self.count = count
         self.origin = origin

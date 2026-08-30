@@ -12,6 +12,11 @@ Both scroll states are measured because they fail differently: pinned to the
 bottom the offset auto-corrects (only the tail moves), while scrolled up the
 offset stays put and the same offset shows different text.
 
+Coupled to ``tests.unit.tui.test_app_pilot`` for its ``FakeSession``/``_factory``
+(review round 1, F5): nothing runs these in CI, so a rename there breaks them
+silently -- which is exactly when someone editing the receipt copy needs them.
+If the import fails, that pair is what moved.
+
 Usage:
     env -u NO_COLOR TERM=xterm-256color .venv/bin/python \
         scripts/steer_receipt_probe.py [cols ...]

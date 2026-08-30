@@ -6,6 +6,11 @@ takes the message. Each restate that changes the row count reflows everything
 below it. This tabulates all three transitions so the fix can be judged against
 the whole set rather than the one transition issue #160 names.
 
+Coupled to ``tests.unit.tui.test_app_pilot`` for its ``FakeSession``/``_factory``
+(review round 1, F5): nothing runs these in CI, so a rename there breaks them
+silently -- which is exactly when someone editing the receipt copy needs them.
+If the import fails, that pair is what moved.
+
 Usage:
     env -u NO_COLOR TERM=xterm-256color .venv/bin/python \
         scripts/steer_receipt_transitions.py [lo] [hi]
