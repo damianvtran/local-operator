@@ -14529,6 +14529,39 @@ class OperatorApp(App[None]):
         # (D2). Shortened rather than given a continuation line: one row is
         # what a key reference wants, and the second line was carrying four
         # words.
+        # `ctrl+c` documented for the same reason as `ctrl+v` below, and with
+        # the same gap to close: it is not a slash command, so the table above
+        # cannot carry it. The composer's copy gesture is otherwise advertised
+        # only in `welcome.TIPS`, and `WelcomeView.display` goes False after the
+        # first message — so the splash teaches the key to a user who has not
+        # started working yet and is unreachable by the mid-draft user who
+        # actually wants it. `/help` is the surface that is still there an hour
+        # in (#169; the splash tip's own note records this limit).
+        #
+        # It states the RULE, not just the key, because the half users get wrong
+        # is what the second press does. A live range makes ctrl+c a copy every
+        # time; the key returns to the draft and interrupt rungs when the caret
+        # moves and the highlight collapses. Saying only "ctrl+c copies" would
+        # leave a user with a range still up believing the interrupt is gone,
+        # which is why `esc` is named on the same row: it stops the agent
+        # whether or not anything is highlighted.
+        #
+        # Two lines with the `ljust(name_width)` continuation its neighbours
+        # use, so the second line aligns under the first description rather than
+        # hanging at column 0. Composed widths are 64 and 71 cells against the
+        # 76-cell content box at 80 columns (measured, as the paste note's own
+        # comment requires).
+        copy_note = Text()
+        copy_note.append("ctrl+c".ljust(name_width), style=muted)
+        copy_note.append("copies the highlighted range in the composer", style=dim)
+        copy_note_more = Text()
+        copy_note_more.append("".ljust(name_width), style=muted)
+        copy_note_more.append(
+            "move the caret to hand the key back; esc interrupts",
+            style=dim,
+        )
+        lines.append(copy_note)
+        lines.append(copy_note_more)
         paste_note = Text()
         paste_note.append("ctrl+v".ljust(name_width), style=muted)
         paste_note.append(

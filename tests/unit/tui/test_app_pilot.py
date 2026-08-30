@@ -8931,3 +8931,47 @@ async def test_help_documents_the_system_clipboard_paste_key() -> None:
         assert "ctrl+v" in text, "/help must name the system clipboard paste key"
         line = next(row for row in text.splitlines() if "ctrl+v" in row)
         assert "clipboard" in line, f"{line!r} names the key without saying what it does"
+
+
+@pytest.mark.asyncio
+async def test_help_documents_the_composer_copy_key_and_its_release() -> None:
+    """``ctrl+c`` is the composer's copy gesture and needs a durable surface.
+
+    Same shape of gap as ``ctrl+v`` above: not a slash command, so the command
+    table cannot carry it, and its only other advertisement is a ``welcome``
+    tip on a splash that stops being displayed after the first message. The
+    user who wants the key is mid-draft, which is exactly when the splash is
+    gone (#169).
+
+    The RULE is asserted, not merely the key. A live range makes every ctrl+c a
+    copy, so a user holding a highlight has to know what gives the key back —
+    otherwise the honest reading of a one-line "ctrl+c copies" entry is that
+    the interrupt has disappeared. ``esc`` is on the row because it stops the
+    agent regardless of what is highlighted.
+    """
+    from rich.console import Group
+    from rich.padding import Padding
+    from rich.text import Text
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        padding = cast(Padding, app._help_block().renderable)
+        group = cast(Group, padding.renderable)
+        rows = [cast(Text, row).plain for row in group.renderables]
+        text = "\n".join(rows)
+
+        assert "ctrl+c" in text, "/help must name the composer copy key"
+        index = next(i for i, row in enumerate(rows) if "ctrl+c" in row)
+        assert "copies" in rows[index], f"{rows[index]!r} names the key without its effect"
+        # The continuation line carries the half users get wrong: how the key
+        # stops being a copy, and what always interrupts.
+        release = rows[index + 1]
+        assert "caret" in release, f"{release!r} does not say what hands the key back"
+        assert "esc" in release, f"{release!r} does not name the key that always interrupts"
+
+        # The block is built for a 76-cell content box at 80 columns; a row that
+        # overflows it wraps to column 0 and reads as a stray sentence (the
+        # defect the paste note's own comment records).
+        for row in (rows[index], release):
+            assert len(row) <= 76, f"{row!r} is {len(row)} cells, past the content box"
