@@ -163,6 +163,42 @@ def test_a_role_without_an_allowlist_keeps_the_full_inventory() -> None:
     assert filter_tools(ALL_TOOLS, None) == ALL_TOOLS
 
 
+def test_the_hands_on_roles_are_told_to_look_things_up() -> None:
+    """``coder`` and ``designer`` hit the two cases the general principle is
+    weakest on, so each seed carries the role-specific application.
+
+    ``coder`` meets third-party error messages and unfamiliar APIs; ``designer``
+    judges surfaces where current practice is the reference. Both seeds had
+    zero mention of the web, and neither declares a ``tools:`` allowlist, so
+    they already HAD the tools and simply were never told when to use them.
+    Contract, not wording.
+    """
+    coder = seed("coder").instructions
+    assert "web_search" in coder
+    # A found answer is a lead to verify here, never a patch to paste.
+    assert "not a patch" in " ".join(coder.split())
+
+    designer = seed("designer").instructions
+    assert "web_search" in designer
+    # The guard specific to this role: research informs judgement, but a
+    # D-finding must still be visible in the frame, per the seed's own rule
+    # that a UI is never reviewed from source alone.
+    assert "never as grounds for a finding you cannot see in the" in " ".join(designer.split())
+
+
+def test_the_hands_on_roles_keep_the_full_inventory() -> None:
+    """Neither seed may grow a ``tools:`` line to "enable" the web tools.
+
+    ``tools=None`` means "whatever the parent would build", which already
+    includes ``web_search``/``web_fetch`` from ``DEFAULT_TOOL_NAMES``. Adding
+    an allowlist to advertise them would RESTRICT the child to exactly that
+    list — a capability regression wearing the costume of an enablement.
+    """
+    for name in ("coder", "designer"):
+        assert seed(name).tools is None, name
+        assert filter_tools(ALL_TOOLS, seed(name)) == ALL_TOOLS, name
+
+
 def test_an_allowlist_naming_absent_tools_matches_nothing_rather_than_raising() -> None:
     """A profile written on another machine (or naming an MCP tool this
     session never loaded) must still run, with the tools it does have."""
