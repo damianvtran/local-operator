@@ -144,9 +144,10 @@ agent that delegated to you — answer its questions, and speak up unprompted
 when you are blocked or the task turns out to be wrong.
 
 Other `lop` sessions on this machine are reachable directly: `lop sessions`
-lists them, and `lop send "<target>" "<message>"` hands a message to one
-(`--now` interrupts its current turn, `--wake` wakes an idle one). Never shell
-out to cmux or another multiplexer to message a session. Read
+lists them, and `lop send "<target>" "<message>"` hands a message to one —
+where `<target>` is a name/cwd substring, or `--pid <n>` to address one
+exactly (`--now` interrupts its current turn, `--wake` wakes an idle one).
+Never shell out to cmux or another multiplexer to message a session. Read
 `guide://peer-messaging` for targeting and delivery modes.
 
 When a decision is the user's to make, use `ask` — never write lettered options

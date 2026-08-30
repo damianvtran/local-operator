@@ -7022,11 +7022,13 @@ async def execute_wait(
     # evicted job rows, and worse than the poll it replaced.
     #
     # The producer only ever sets and increments; re-arming is the consumer's
-    # job. Reading the count and clearing with no `await` between them is
+    # job. No `await` separates the snapshot from the clear, so the sequence is
     # atomic with respect to the loop, and the producer runs on that same loop
-    # (see PeerArrivalProtocol), so a message cannot slip between the two and
-    # be lost: it either lands before the snapshot and is counted, or after
-    # the clear and re-sets the event.
+    # (see PeerArrivalProtocol), so a message cannot slip between them and be
+    # lost: it either lands before the snapshot and is counted, or after the
+    # clear and re-sets the event. Do NOT "tidy" this by moving the count and
+    # the clear adjacent to each other or by reordering them — what matters is
+    # only that nothing awaits in between.
     peer = context.peer_arrival if context is not None else None
     peer_event = peer.event() if peer is not None else None
     peer_seen = peer.count() if peer is not None else 0
@@ -7094,10 +7096,34 @@ async def execute_wait(
             # the signal is aborted, and only absorb the plain steer cancel.
             if signal is not None and signal.aborted:
                 raise
-            return _peer_interrupt("steering")
-        if peer is not None and peer.count() > peer_seen:
-            return _peer_interrupt("peer_message")
+            # A cancel with NO signal at all cannot be a steer: steering rides
+            # interruptible_runner, which always passes one. Absorbing it here
+            # would invent a steering event on a host that has no steering, so
+            # let it propagate as the plain cancellation it is.
+            if signal is None:
+                raise
+            # Steering is not the only remaining cancel source - a batch
+            # teardown (`GeneratorExit` in _execute_batch's finally) cancels
+            # the task with a live, non-aborted signal too, and the tool
+            # cannot tell the two apart from here: ToolContext deliberately
+            # exposes no steering capability, and adding one just to label a
+            # string would put loop state in a tool for no behavioural gain.
+            # `interrupted_by` is machine-readable and "steering" is the one
+            # value implying a human or peer acted, so report the neutral,
+            # always-true cause instead of guessing. The still-running payload
+            # (the point of this branch) is unchanged either way.
+            return _peer_interrupt("cancelled")
+        # Settle BEFORE peer: when a job settles on the same loop iteration as
+        # a message arrives, the finished result is strictly more valuable than
+        # "a message arrived", and reporting the peer branch would describe a
+        # completed job as running (and, via _still_running() == [], pin the
+        # WRONG job id in details - the exact failure _still_running's
+        # docstring exists to prevent). The message is not lost either way: it
+        # is already parked in the session journal and lands at the next
+        # turn-safe boundary.
         job = _settled()
+        if job is None and peer is not None and peer.count() > peer_seen:
+            return _peer_interrupt("peer_message")
         if job is None and all(jobs.get(job_id) is None for job_id in job_ids):
             return _error(tool_call_id, "wait", f"job {', '.join(job_ids)} disappeared")
     # Handing the result to the model HERE means auto-delivery must not

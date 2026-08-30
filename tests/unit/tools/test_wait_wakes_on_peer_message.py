@@ -218,17 +218,24 @@ async def test_a_steer_cancel_reports_the_job_instead_of_skipped() -> None:
     context = ToolContext(cwd=".", jobs=manager, peer_arrival=_Peer())
     job_id = manager.register("task", "slow", _runner(30.0))
 
-    task = asyncio.ensure_future(_wait(context, job_id=job_id, wait_ms=300_000))
+    # A steer always arrives with a LIVE, non-aborted signal: steering rides
+    # interruptible_runner, which never passes signal=None. Modelling it with
+    # signal=None would test a shape production cannot produce (and which the
+    # tool now correctly refuses to attribute to steering at all).
+    task = asyncio.ensure_future(
+        _wait(context, signal=AbortSignal(), job_id=job_id, wait_ms=300_000)
+    )
     await asyncio.sleep(0.2)
     task.cancel()  # what interruptible_runner does on a steer
     result = await task
 
     assert "still running" in result.text
-    assert "steering" in result.text
     assert result.details is not None
     assert result.details["job_id"] == job_id
     assert result.details["status"] == "running"
-    assert result.details["interrupted_by"] == "steering"
+    # Neutral, not "steering": the tool cannot observe from here whether this
+    # cancel was a steer or a batch teardown, so it does not claim one (F2).
+    assert result.details["interrupted_by"] == "cancelled"
     row = manager.get(job_id)
     assert row is not None and row.status == "running"
     await manager.dispose()
@@ -255,6 +262,49 @@ async def test_abort_still_stops_a_wait_and_is_not_swallowed() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_cancel_with_no_signal_is_not_attributed_to_steering() -> None:
+    """A host that passes ``signal=None`` has no steering mechanism at all, so
+    a cancel there cannot be a steer. Absorbing it would report a steering
+    event nobody sent (review finding F2); the cancellation must propagate as
+    the plain cancellation it is."""
+    manager = AsyncJobManager()
+    context = ToolContext(cwd=".", jobs=manager, peer_arrival=_Peer())
+    job_id = manager.register("task", "slow", _runner(30.0))
+
+    task = asyncio.ensure_future(_wait(context, job_id=job_id, wait_ms=300_000))
+    await asyncio.sleep(0.2)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await manager.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_settled_job_beats_a_simultaneous_peer_message() -> None:
+    """When a job settles on the SAME loop iteration a message lands, the
+    finished result wins: reporting the peer branch would describe a completed
+    job as ``running`` and pin the wrong id in ``details`` (review finding
+    F3). The message is not lost — it is already parked in the journal."""
+    manager = AsyncJobManager()
+    peer = _Peer()
+    context = ToolContext(cwd=".", jobs=manager, peer_arrival=peer)
+    job_id = manager.register("task", "quick", _runner(0.2))
+
+    async def message_as_it_settles() -> None:
+        await asyncio.sleep(0.2)
+        peer.mark()
+
+    asyncio.ensure_future(message_as_it_settles())
+    result = await _wait(context, job_id=job_id, wait_ms=300_000)
+
+    assert result.details is not None
+    assert result.details["status"] == "completed"
+    assert result.details.get("interrupted_by") is None
+    await manager.dispose()
+
+
+@pytest.mark.asyncio
 async def test_the_cancel_path_does_not_consume_the_job() -> None:
     """`mark_consumed` must NOT run when the wait is cut short: auto-delivery
     (Session._on_job_completed, keyed on AsyncJob.consumed) is what hands the
@@ -277,8 +327,11 @@ async def test_the_cancel_path_does_not_consume_the_job() -> None:
     await _wait(context, job_id=job_id, wait_ms=300_000)
     assert consumed == [], "a peer-interrupted wait must not consume the job"
 
-    # Steer path.
-    task = asyncio.ensure_future(_wait(context, job_id=job_id, wait_ms=300_000))
+    # Steer path. A live, non-aborted signal is the real steer shape — see
+    # test_a_steer_cancel_reports_the_job_instead_of_skipped.
+    task = asyncio.ensure_future(
+        _wait(context, signal=AbortSignal(), job_id=job_id, wait_ms=300_000)
+    )
     await asyncio.sleep(0.2)
     task.cancel()
     await task
