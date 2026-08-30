@@ -1,0 +1,500 @@
+"""What each animated surface is allowed to cost when nothing has changed.
+
+Every assertion here is a COUNT of invalidation, not a duration. The work these
+tests guard was diagnosed on a machine whose wall clock was worthless — a fixed
+quantum held its CPU time (81.6 -> 101.5 ms) while wall time inflated 4.6-7.8x
+under unrelated load — so a timing assertion here would be a flake generator
+that proves nothing. A row that is not rewritten emits no escape sequences and
+a tick that posts no ``messages.Layout`` cannot reflow the screen, whatever the
+box is doing at the time.
+
+Two invariants run through the whole file and are each pinned by name:
+
+* animation may only ever change RATE, never content; and
+* a session that is never told about focus must never end up throttled.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+import pytest
+from textual import messages
+from textual.widgets import Static
+
+from local_operator.tui import animation
+from local_operator.tui.app import OperatorApp
+from local_operator.tui.widgets.subagent_panel import SPINNER_INTERVAL_S, SubagentPanel
+from local_operator.tui.widgets.subagent_view import SubagentView
+from local_operator.tui.widgets.transcript import UserBlock, WorkingBlock
+from local_operator.tui.widgets.welcome import WelcomeView
+
+from .test_band_panels import FakeSession, _async_factory, _fake_jobs, _Job
+
+
+async def _open_running_child(pilot: Any, app: OperatorApp) -> SubagentView:
+    """A running child page over a seeded conversation, settled and painted."""
+    for _ in range(80):
+        await pilot.pause()
+        if app._session is not None:
+            break
+    app._append_block(UserBlock("audit the ingest path"))
+    app._refresh_band()
+    await pilot.pause()
+    app._open_subagent_view("sub-1")
+    await pilot.pause()
+    await pilot.pause()
+    return app.query_one(SubagentView)
+
+
+def _running_app() -> OperatorApp:
+    session = FakeSession()
+    session.jobs = _fake_jobs(_Job("sub-1", "audit the ingest path", status="running"))
+    return OperatorApp(_async_factory(session))
+
+
+class _UpdateSpy:
+    """Records every ``Static.update`` on the page's three chrome rows."""
+
+    def __init__(self, view: SubagentView) -> None:
+        self.calls: dict[str, list[tuple[Any, dict[str, Any]]]] = {
+            "title": [],
+            "breadcrumb": [],
+            "rule": [],
+        }
+        for name, key in (
+            ("_title", "title"),
+            ("_breadcrumb", "breadcrumb"),
+            ("_rule", "rule"),
+        ):
+            widget: Static = getattr(view, name)
+            original = widget.update
+
+            def update(
+                renderable: Any = "",
+                *,
+                _key: str = key,
+                _original: Any = original,
+                **kwargs: Any,
+            ) -> Any:
+                self.calls[_key].append((renderable, kwargs))
+                return _original(renderable, **kwargs)
+
+            widget.update = update  # type: ignore[method-assign]
+
+
+@pytest.mark.asyncio
+async def test_breadcrumb_is_painted_without_a_relayout() -> None:
+    """The breadcrumb passes ``layout=False`` like the title and rule beside it.
+
+    It is ``height: 1`` in the sheet exactly as they are, so it cannot move the
+    box; the default ``layout=True`` cleared every ancestor's arrangement cache
+    and posted ``messages.Layout``, which made the deliberate ``layout=False``
+    on its two siblings buy nothing at all — one relayout on the same tick
+    reflows the same screen.
+    """
+    app = _running_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        view = await _open_running_child(pilot, app)
+        spy = _UpdateSpy(view)
+        # Force a full repaint: the memo is keyed on facts that have not moved.
+        view._chrome_state = None
+        view._breadcrumb_key = None
+        view._rule_key = None
+        view._paint_chrome()
+
+        assert spy.calls["breadcrumb"], "the breadcrumb was never painted"
+        for _renderable, kwargs in spy.calls["breadcrumb"]:
+            assert kwargs.get("layout") is False
+        # Stated together, because the value of any one of the three is
+        # conditional on the other two: one defaulted update relayouts anyway.
+        for row in ("title", "rule"):
+            for _renderable, kwargs in spy.calls[row]:
+                assert kwargs.get("layout") is False
+
+
+@pytest.mark.asyncio
+async def test_a_spinner_tick_repaints_only_the_row_carrying_the_spinner() -> None:
+    """The glyph rides the title, so a tick must not touch breadcrumb or rule.
+
+    ``_chrome_state`` carries the spinner and ``_tick`` advances the index
+    before calling ``_paint_chrome``, so the memo misses on essentially every
+    tick of a running child (measured live: 291 misses in 313 calls over two
+    seconds). Before the per-row keys that meant the breadcrumb and the rule
+    were rewritten with byte-identical strings 12.5 times a second.
+    """
+    app = _running_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        view = await _open_running_child(pilot, app)
+        assert view._running, "fixture must be a RUNNING child or there is no spinner"
+        spy = _UpdateSpy(view)
+
+        before = view._spinner_index
+        for _ in range(8):
+            view._tick()
+            await pilot.pause()
+
+        assert view._spinner_index != before, "the animation stopped advancing"
+        # The cadence is untouched: every tick still repaints the glyph. It is
+        # `>=` rather than `==` because the 1 Hz job poll also refreshes the
+        # page, and this test is about which ROWS a tick touches, not about
+        # owning every paint that happens during it.
+        assert len(spy.calls["title"]) >= 8
+        assert spy.calls["breadcrumb"] == []
+        assert spy.calls["rule"] == []
+
+
+@pytest.mark.asyncio
+async def test_unchanged_chrome_strings_are_not_rewritten() -> None:
+    """Re-painting with identical facts writes nothing to the terminal.
+
+    ``_paint_chrome`` is called from ``show()``, which runs on every child
+    event and on the 1 Hz poll, so the common case is a refresh that changes
+    nothing — and its own docstring says such a refresh must repaint nothing.
+    """
+    app = _running_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        view = await _open_running_child(pilot, app)
+        view._paint_chrome()
+        spy = _UpdateSpy(view)
+
+        for _ in range(5):
+            view._paint_chrome()
+
+        assert spy.calls["title"] == []
+        assert spy.calls["breadcrumb"] == []
+        assert spy.calls["rule"] == []
+
+
+@pytest.mark.asyncio
+async def test_a_changed_breadcrumb_still_repaints() -> None:
+    """The skip is a memo, not a freeze: new facts must reach the screen."""
+    app = _running_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        view = await _open_running_child(pilot, app)
+        view._paint_chrome()
+        spy = _UpdateSpy(view)
+
+        view._ancestors = ["orchestrator", "reviewer"]
+        view._paint_chrome()
+
+        assert len(spy.calls["breadcrumb"]) >= 1
+        painted = spy.calls["breadcrumb"][-1][0].plain
+        assert "orchestrator" in painted and "reviewer" in painted
+
+
+@pytest.mark.asyncio
+async def test_a_spinner_tick_posts_no_layout_message() -> None:
+    """The end-to-end statement of the two fixes above, at the screen.
+
+    Counting ``messages.Layout`` rather than reflows keeps the assertion at the
+    boundary the widget actually controls: a Layout message is what clears the
+    arrangement caches and makes the compositor re-arrange every widget behind
+    the page.
+    """
+    app = _running_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        view = await _open_running_child(pilot, app)
+        screen = app.screen
+        posted: list[Any] = []
+        original_post = screen.post_message
+
+        def post_message(message: Any) -> Any:
+            posted.append(message)
+            return original_post(message)
+
+        screen.post_message = post_message  # type: ignore[method-assign]
+        for _ in range(10):
+            view._tick()
+            await pilot.pause()
+
+        assert [m for m in posted if isinstance(m, messages.Layout)] == []
+
+
+# -- focus gating -----------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_blur_slows_every_animated_surface_and_focus_restores_it() -> None:
+    """One blur re-rates the page, the panel and the band; focus puts them back.
+
+    The rate is asserted through each surface's own recorded interval rather
+    than by timing a real timer: the point is which cadence was requested, and
+    a duration assertion under load measures the box, not the app.
+    """
+    app = _running_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        view = await _open_running_child(pilot, app)
+        panel = app._subagent_panel
+        assert panel is not None
+        panel._start_spinner()
+        band = app._status
+        assert band is not None
+        band._streaming = True
+        band._sync_spinner_timer()
+        await pilot.pause()
+
+        assert view._spinner_rate == SPINNER_INTERVAL_S
+        assert panel._spinner_rate == SPINNER_INTERVAL_S
+
+        app._set_animation_focused(False)
+        await pilot.pause()
+
+        assert not animation.animation_focused()
+        assert view._spinner_rate == animation.BLURRED_SPINNER_INTERVAL_S
+        assert panel._spinner_rate == animation.BLURRED_SPINNER_INTERVAL_S
+        assert band._spinner_rate == animation.BLURRED_SPINNER_INTERVAL_S
+        # Slowed, never stopped: a frozen spinner and a finished job look the
+        # same, and this app uses motion as its word for "alive".
+        assert view._spinner_timer is not None
+        assert panel._spinner_timer is not None
+        assert band._spinner_timer is not None
+
+        app._set_animation_focused(True)
+        await pilot.pause()
+
+        assert view._spinner_rate == SPINNER_INTERVAL_S
+        assert panel._spinner_rate == SPINNER_INTERVAL_S
+        assert band._spinner_rate == SPINNER_INTERVAL_S
+
+
+@pytest.mark.asyncio
+async def test_refocus_repaints_so_no_surface_shows_a_stale_frame() -> None:
+    """The reduced rate may cost frames; it may never leave stale state.
+
+    The clock, the status and the glyph on the child page are all painted from
+    the throttled timer, so returning to the window has to repaint immediately
+    rather than wait up to a second for the next slow tick.
+    """
+    app = _running_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        view = await _open_running_child(pilot, app)
+        app._set_animation_focused(False)
+        await pilot.pause()
+
+        # State moves while the terminal is away.
+        view._elapsed = "4m12s"
+        spy = _UpdateSpy(view)
+        app._set_animation_focused(True)
+        await pilot.pause()
+
+        assert spy.calls["title"], "refocus did not repaint the title"
+        assert "4m12s" in spy.calls["title"][-1][0].plain
+
+
+@pytest.mark.asyncio
+async def test_blur_does_not_stop_a_settled_page_from_staying_settled() -> None:
+    """Re-rating must never START a timer a surface correctly stopped.
+
+    A settled child has no spinner by design; a naive "restart the timer on
+    focus change" would spin a finished job forever.
+    """
+    session = FakeSession()
+    session.jobs = _fake_jobs(_Job("sub-1", "audit the ingest path", status="completed"))
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        view = await _open_running_child(pilot, app)
+        assert view._spinner_timer is None
+
+        app._set_animation_focused(False)
+        await pilot.pause()
+        assert view._spinner_timer is None
+
+        app._set_animation_focused(True)
+        await pilot.pause()
+        assert view._spinner_timer is None
+
+
+@pytest.mark.asyncio
+async def test_a_session_that_never_hears_about_focus_is_never_throttled() -> None:
+    """The default is FOCUSED, because some hosts send no focus events at all.
+
+    "We were never told" and "the user is looking at this" have to be the same
+    state, or a session on such a host animates at the reduced rate forever.
+    """
+    assert animation.animation_focused() is True
+    app = _running_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        view = await _open_running_child(pilot, app)
+        assert view._spinner_rate == SPINNER_INTERVAL_S
+        working = WorkingBlock("thinking")
+        app._append_block(working)
+        await pilot.pause()
+        assert working._tick_ms == WorkingBlock._FRAME_MS or not animation.motion_enabled()
+
+
+@pytest.mark.asyncio
+async def test_working_block_falls_to_the_static_cadence_on_blur() -> None:
+    """The 30 fps shimmer line reuses its EXISTING static mode, not a new one.
+
+    ``_STATIC_FRAME_MS`` already exists for shimmer-off and is already correct
+    (frozen glyph, a repaint only when the clock's second changes), so a
+    blurred window and a shimmer-off window are one tested state rather than
+    two. Measured: 6.8% of a core and ~30 paints/s animated against 3.5% and
+    0.8 paints/s static.
+    """
+    app = _running_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(80):
+            await pilot.pause()
+            if app._session is not None:
+                break
+        working = WorkingBlock("thinking")
+        app._append_block(working)
+        # The app fans out to the block it OWNS, which is how a real turn wires
+        # it (`_start_working_block`); a block merely appended by a test is not
+        # on that path.
+        app._working_block = working
+        await pilot.pause()
+        working._animated = True
+        working._tick_ms = WorkingBlock._FRAME_MS
+
+        app._set_animation_focused(False)
+        await pilot.pause()
+        assert working._tick_ms == WorkingBlock._STATIC_FRAME_MS
+        assert working._timer is not None, "throttled, not stopped"
+
+        app._set_animation_focused(True)
+        await pilot.pause()
+        # Restored only where the shimmer setting itself allows motion; the
+        # suite pins LOCAL_OPERATOR_NO_SHIMMER=1, so this asserts the gate is
+        # AND-ed rather than replaced.
+        assert working._tick_ms == WorkingBlock._STATIC_FRAME_MS
+
+
+@pytest.mark.asyncio
+async def test_blur_never_drops_content(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A blurred session still paints everything it is told.
+
+    The throttle touches repaint TIMERS only. Transcript blocks, the ledger and
+    the working line's label are all event-driven, so they must land on a
+    blurred terminal exactly as they do on a focused one — anything else would
+    be a session that quietly loses output while the user is in another window.
+    """
+    app = _running_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(80):
+            await pilot.pause()
+            if app._session is not None:
+                break
+        app._set_animation_focused(False)
+        await pilot.pause()
+
+        app._append_block(UserBlock("this arrived while the window was blurred"))
+        await pilot.pause()
+        rows = [getattr(block, "renderable", "") for block in app._transcript_view().blocks()]
+        plain = " ".join(getattr(row, "plain", str(row)) for row in rows)
+        assert "this arrived while the window was blurred" in plain
+
+
+@pytest.mark.asyncio
+async def test_welcome_pulse_stops_unfocused_and_resumes_focused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The splash's glow is 92% of what an idle session writes to the terminal.
+
+    Gated on focus ONLY: the focused cadence and appearance are untouched, so
+    this asserts the timers exist again after refocus rather than that they
+    changed rate.
+    """
+    monkeypatch.delenv("LOCAL_OPERATOR_NO_SHIMMER", raising=False)
+    monkeypatch.setattr("local_operator.tui.shimmer.settings_get", lambda *a, **k: True)
+    app = _running_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(80):
+            await pilot.pause()
+            if app._session is not None:
+                break
+        welcome = app.query_one(WelcomeView)
+        welcome.set_visible(True)
+        welcome._sync_pulse_timer()
+        welcome._sync_tip_timer()
+        await pilot.pause()
+        assert welcome._pulse_timer is not None
+        assert welcome._tip_timer is not None
+
+        app._set_animation_focused(False)
+        await pilot.pause()
+        # Not merely paused: with the gate closed no timer exists at all, which
+        # is the same shape the shimmer kill switch already produces.
+        assert welcome._pulse_timer is None
+        assert welcome._tip_timer is None
+        # And the mark is back at its DEFINED resting frame, not the phase the
+        # glow happened to be holding when the user looked away.
+        assert welcome._mark_color is None
+        assert welcome._tip_index == 0
+
+        app._set_animation_focused(True)
+        await pilot.pause()
+        assert welcome._pulse_timer is not None
+        assert welcome._tip_timer is not None
+
+
+@pytest.mark.asyncio
+async def test_shimmer_disabled_path_is_unchanged_by_focus(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The kill switch still wins on its own: focus cannot re-enable animation.
+
+    ``motion_enabled()`` is an AND, so a developer or a CI job that turned
+    animation off gets a still frame whether or not the terminal is focused.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_NO_SHIMMER", "1")
+    app = _running_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(80):
+            await pilot.pause()
+            if app._session is not None:
+                break
+        welcome = app.query_one(WelcomeView)
+        welcome.set_visible(True)
+        welcome._sync_pulse_timer()
+        await pilot.pause()
+        assert welcome._pulse_timer is None
+
+        app._set_animation_focused(True)
+        await pilot.pause()
+        assert welcome._pulse_timer is None
+        assert not animation.motion_enabled()
+
+
+def test_focus_flag_defaults_focused_and_reports_only_real_changes() -> None:
+    """The flag's contract, without an app: default True, idempotent sets.
+
+    The return value is what lets the app skip the fan-out — Textual reasserts
+    focus on every keypress, so an unconditional resync would stop and restart
+    four timers per character typed.
+    """
+    animation.reset_animation_focus()
+    assert animation.animation_focused() is True
+    assert animation.set_animation_focused(True) is False
+    assert animation.set_animation_focused(False) is True
+    assert animation.set_animation_focused(False) is False
+    assert animation.set_animation_focused(True) is True
+    animation.reset_animation_focus()
+
+
+@pytest.mark.asyncio
+async def test_panel_repaints_in_full_on_refocus() -> None:
+    """The dock's numbers must be current the moment the window is looked at.
+
+    The panel has ONE repaint point (``_tick``), so refocus marks it dirty
+    rather than painting from a second path; the next tick is then a full
+    repaint including the re-read stats.
+    """
+    app = _running_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(80):
+            await pilot.pause()
+            if app._session is not None:
+                break
+        panel = app.query_one(SubagentPanel)
+        panel._start_spinner()
+        await pilot.pause()
+        panel._dirty = False
+
+        app._set_animation_focused(False)
+        await pilot.pause()
+        app._set_animation_focused(True)
+
+        assert panel._dirty is True

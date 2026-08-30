@@ -76,6 +76,7 @@ from local_operator.session.transcript import (
     read_transcript_page,
 )
 from local_operator.tui import theme as theme_mod
+from local_operator.tui.animation import BLURRED_SPINNER_INTERVAL_S, animation_focused
 from local_operator.tui.widgets import tool_card
 from local_operator.tui.widgets.assistant import AssistantBlock
 from local_operator.tui.widgets.subagent_panel import (
@@ -1436,8 +1437,20 @@ class SubagentView(Vertical):
         self._rule_text = Text()
         self._hint_text = Text()
         self._hint_width: int | None = None
+        #: Per-row paint keys for the two chrome rows the spinner does NOT
+        #: touch. `_chrome_state` above carries the spinner and so misses on
+        #: essentially every tick of a running child; these two decide whether
+        #: the breadcrumb and the rule have anything new to say, which on a
+        #: spinner tick they never do. `None` means "never painted", so the
+        #: first `_paint_chrome` always writes both.
+        self._breadcrumb_key: tuple[Any, ...] | None = None
+        self._rule_key: tuple[Any, ...] | None = None
         self._spinner_index = 0
         self._spinner_timer: Any = None
+        #: The interval the live timer was created with. Textual timers cannot
+        #: be re-rated in place, so a focus change compares against this to
+        #: decide whether the timer has to be replaced at all.
+        self._spinner_rate: float = SPINNER_INTERVAL_S
         self._running = False
         # Title facts, defaulted so the page can paint before its first
         # `show()` — mount order is Textual's, not ours.
@@ -2206,15 +2219,26 @@ class SubagentView(Vertical):
             spinner,
             self._agent_role,
             self._effort,
+            # The ANCESTORS belong here for the same reason role and effort do:
+            # they are painted (by the breadcrumb) and nothing else in this key
+            # implies them, so a page re-parented under a different lineage at
+            # an unchanged label, status and width would be memoised out and
+            # keep the stale trail. Cheap to carry — a tuple of at most a few
+            # short strings, compared once per call.
+            tuple(self._ancestors),
         )
         if self._chrome_state == state:
             return
         self._chrome_state = state
+        # The theme is resolved at BUILD time into every ``Style`` below, so it
+        # is a term of both per-row keys: without it a `/theme` switch under an
+        # open page would be skipped by those keys and the breadcrumb and rule
+        # would keep the old ramp's ink for the life of the page. The epoch
+        # counter is this codebase's existing invalidation handle for exactly
+        # that (see `assistant.py`'s frozen-epoch check); it is a module global
+        # read, so carrying it costs nothing per tick.
+        epoch = theme_mod.get_theme_epoch()
         self._title_text = self._title_row(width, spinner, tools)
-        self._rule_text = Text(
-            "─" * max(1, width - SCROLLBAR_GUTTER_CELLS),
-            style=Style(color=theme_mod.semantic_color("faint")),
-        )
         # Keyed on WIDTH alone: the row is a pure function of it, while the
         # memo above also carries the spinner and therefore fires eight times
         # a second — re-measuring five candidate rungs and layout-refreshing
@@ -2222,23 +2246,58 @@ class SubagentView(Vertical):
         if self._hint_width != width:
             self._hint_width = width
             self._hint_text = self._hint_row(width)
-        # ``layout=False`` on both: the sheet fixes each at ``height: 1``
-        # (``.subagent-view-title``, ``.subagent-view-rule``) and both are
-        # built ``no_wrap`` to the measured width, so neither can move the
-        # box. Textual's default reflows the screen, and the memo above
-        # carries the spinner, so this runs 12.5 times a second for as long as
-        # the child is alive. A/B in one process, 161 blocks behind the page,
-        # three-second idle windows, two rounds: 4.4%/4.2% of a core with the
-        # default against 3.5%/3.6% with this.
+        # ``layout=False`` on all three: the sheet fixes each at ``height: 1``
+        # (``.subagent-view-title``, ``.subagent-view-breadcrumb``,
+        # ``.subagent-view-rule``) and each is built to the measured width, so
+        # none can move the box. Textual's default reflows the screen, and the
+        # memo above carries the spinner, so this runs 12.5 times a second for
+        # as long as the child is alive. A/B in one process, 161 blocks behind
+        # the page, three-second idle windows, two rounds: 4.4%/4.2% of a core
+        # with the default against 3.5%/3.6% with this.
+        #
+        # The breadcrumb used to omit the keyword while its two siblings passed
+        # it, which NEGATED both of theirs: one defaulted `update` three lines
+        # below relayouts the same screen on the same tick, so the pair bought
+        # nothing. Measured over 50 driven ticks with eight children and a
+        # 160-block transcript, adding it here takes `messages.Layout` from
+        # 1.08 per tick to 0.00 and compositor reflows from 160 to 32.
         self._title.update(self._title_text, layout=False)
-        breadcrumb = "Conversation"
-        if self._ancestors:
-            breadcrumb += " > " + " > ".join(self._ancestors)
-        breadcrumb += " > " + self._label
-        self._breadcrumb.update(
-            Text(breadcrumb, style=Style(color=theme_mod.semantic_color("dim")))
-        )
-        self._rule.update(self._rule_text, layout=False)
+        # Below this line each row carries its OWN key, because the memo above
+        # is defeated on ~93% of ticks by design: `spinner` is one of its terms
+        # and `_tick` advances the index before every call, so on a running
+        # child the memo misses 291 times out of 313 in two seconds. The
+        # spinner is painted by the TITLE and by nothing else — the breadcrumb
+        # is a pure function of `_ancestors` + `_label`, the rule of width —
+        # so without these keys both were rewritten with byte-identical strings
+        # 12.5 times a second, each rewrite still costing a `messages.Update`
+        # and a repaint of the row. Skipping the unchanged pair takes the
+        # screen's Update messages from 48.5 to 30.6 per tick (-37%) and the
+        # child's tick from 11.52 ms to 9.88 ms (-14.3%).
+        #
+        # This mirrors `SubagentPanel._tick`'s cheap glyph-only path rather
+        # than inventing a second convention: there the panel repaints only the
+        # rows carrying a glyph; here the page repaints only the row that
+        # carries one. The animation's cadence is untouched — the title still
+        # advances on every tick.
+        breadcrumb_key = (tuple(self._ancestors), self._label, epoch)
+        if self._breadcrumb_key != breadcrumb_key:
+            self._breadcrumb_key = breadcrumb_key
+            breadcrumb = "Conversation"
+            if self._ancestors:
+                breadcrumb += " > " + " > ".join(self._ancestors)
+            breadcrumb += " > " + self._label
+            self._breadcrumb.update(
+                Text(breadcrumb, style=Style(color=theme_mod.semantic_color("dim"))),
+                layout=False,
+            )
+        rule_key = (width, epoch)
+        if self._rule_key != rule_key:
+            self._rule_key = rule_key
+            self._rule_text = Text(
+                "─" * max(1, width - SCROLLBAR_GUTTER_CELLS),
+                style=Style(color=theme_mod.semantic_color("faint")),
+            )
+            self._rule.update(self._rule_text, layout=False)
 
     def _title_row(self, width: int, spinner: str, tools: int) -> Text:
         """``Subagent · <role> · <label>  <glyph> <status> · <effort> · <elapsed> · <n> tools``.
@@ -2523,17 +2582,46 @@ class SubagentView(Vertical):
         return row
 
     # -- spinner -------------------------------------------------------------
-    def _start_spinner(self) -> None:
+    def _spinner_interval(self) -> float:
         # Motion, not colour, is how this app says "alive", at the cadence the
         # band and the status line already use: two speeds on one screen read
-        # as two different states.
+        # as two different states. On a BLURRED terminal all of them slow to
+        # the same reduced cadence together, so that property still holds.
+        return SPINNER_INTERVAL_S if animation_focused() else BLURRED_SPINNER_INTERVAL_S
+
+    def _start_spinner(self) -> None:
         if self._spinner_timer is None:
-            self._spinner_timer = self.set_interval(SPINNER_INTERVAL_S, self._tick)
+            self._spinner_rate = self._spinner_interval()
+            self._spinner_timer = self.set_interval(self._spinner_rate, self._tick)
 
     def _stop_spinner(self) -> None:
         if self._spinner_timer is not None:
             self._spinner_timer.stop()
             self._spinner_timer = None
+
+    def sync_animation_rate(self) -> None:
+        """Re-rate the spinner after a focus change.
+
+        Textual's ``Timer`` has no public way to change its interval, so the
+        timer is replaced rather than adjusted — which is safe because the
+        spinner's phase is held in ``_spinner_index`` and not in the timer, so
+        nothing about the animation resets. Only a page with a live timer is
+        touched: re-rating a settled child would START a spinner it had
+        correctly stopped.
+
+        The chrome is repainted immediately on the way back to the fast rate so
+        a refocused terminal shows the CURRENT glyph, status and clock rather
+        than the frame it was throttled on — the reduced rate is allowed to
+        cost frames, never to leave stale content on screen.
+        """
+        if self._spinner_timer is None:
+            return
+        wanted = self._spinner_interval()
+        if wanted == self._spinner_rate:
+            return
+        self._stop_spinner()
+        self._start_spinner()
+        self._paint_chrome()
 
     def _tick(self) -> None:
         self._spinner_index = (self._spinner_index + 1) % len(SPINNER_FRAMES)

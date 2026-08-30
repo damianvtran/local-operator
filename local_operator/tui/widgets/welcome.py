@@ -81,7 +81,7 @@ from textual.message import Message
 from textual.widgets import Static
 
 from local_operator.tui import theme as theme_mod
-from local_operator.tui.shimmer import shimmer_enabled
+from local_operator.tui.animation import motion_enabled
 from local_operator.tui.widgets.status_line import format_model_label
 from local_operator.tui.widgets.transcript import NOTICE_GLYPHS
 
@@ -1222,11 +1222,23 @@ class WelcomeView(Static):
         timer is created at all — the glow is not merely paused — and the mark
         keeps its resting ``dim``.
 
+        Terminal FOCUS is now part of that same gate, for the same reason one
+        rung down: an unlooked-at splash is the single most expensive idle
+        thing this app does. Measured on one idle session, the pulse and the
+        shimmer together are 20.3 of 22 KB/s of terminal output and 5.6 of 7.9
+        points of CPU; with animation off the same session costs 2.27% and
+        1.0 KB/s. A splash nobody is looking at should cost the second number.
+        The FOCUSED appearance and cadence are deliberately untouched — this
+        gates on focus only, it does not slow the glow down for anyone who can
+        see it.
+
         The clock restarts from the moment the splash appears rather than from
         app start, so a ``/clear`` an arbitrary number of seconds in gets the
-        same first frame as a boot: at rest, then swelling.
+        same first frame as a boot: at rest, then swelling. A blur-then-focus
+        therefore also restarts it at rest, which is the right frame to come
+        back to and the one `_stop_pulse_timer` already guarantees.
         """
-        wanted = bool(self.display) and shimmer_enabled()
+        wanted = bool(self.display) and motion_enabled()
         if wanted and self._pulse_timer is None:
             self._pulse_origin = time.monotonic()
             self._pulse_timer = self.set_interval(MARK_PULSE_INTERVAL_S, self._pulse_tick)
@@ -1274,8 +1286,14 @@ class WelcomeView(Static):
         animation, so a snapshot would capture whichever tip the wall clock
         happened to be holding. With the gate closed no timer exists — the
         rotation is not merely paused — and the row holds at ``TIPS[0]``.
+
+        It follows the pulse onto the focus gate too. A tip nobody is reading is
+        not a tip, and at 12 s per rotation a blurred splash rotating for an
+        hour is 300 repaints of a row that was never seen; the row a returning
+        user finds is ``TIPS[0]``, which is the defined still frame rather than
+        an arbitrary sample of the ring.
         """
-        wanted = bool(self.display) and shimmer_enabled()
+        wanted = bool(self.display) and motion_enabled()
         if wanted and self._tip_timer is None:
             # The row OPENS on `TIPS[0]` and never on a lottery. The pool is
             # ordered, and the first thing a first-run user reads was whichever

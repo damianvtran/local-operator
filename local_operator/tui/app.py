@@ -8903,7 +8903,7 @@ class OperatorApp(App[None]):
         return False
 
     def on_app_focus(self, event: AppFocus) -> None:
-        """The terminal regained OS focus \u2014 stop notifying.
+        """The terminal regained OS focus \u2014 stop notifying, resume animating.
 
         Textual reports focus only on a CHANGE, which is why the notifier
         starts out focused: the app is launched from the terminal the user is
@@ -8912,13 +8912,70 @@ class OperatorApp(App[None]):
         """
         if self._notifier is not None:
             self._notifier.set_focused(True)
+        self._set_animation_focused(True)
 
     def on_app_blur(self, event: AppBlur) -> None:
-        """The terminal lost OS focus \u2014 notifications become deliverable."""
+        """The terminal lost OS focus \u2014 notify, and slow every animation."""
+        self._set_animation_focused(False)
         if self._notifier is None:
             return
         self._notifier.set_focused(False)
         self._flush_pending_question()
+
+    def _set_animation_focused(self, focused: bool) -> None:
+        """Record focus and re-rate every animated surface on this screen.
+
+        Animation is the largest thing an idle session costs \u2014 measured at 92%
+        of what one writes to its terminal \u2014 and none of it is worth paying for
+        a window nobody is looking at. This is the fan-out: the flag lives in
+        `tui.animation` (a module global, because these surfaces are built at
+        different times and one of them is not a `Widget` at all), and each
+        surface re-rates its own timer through its own `sync_animation_rate`,
+        so no surface gains a second way to decide its cadence.
+
+        Only the RATE changes. Each of those methods repaints \u2014 or, for the
+        panel, marks itself dirty so its single repaint point runs \u2014 on the way
+        back to the fast rate, so a refocused terminal shows the current glyph,
+        clock and counts rather than the frame it was throttled on. Nothing
+        here can drop CONTENT: a blurred session still receives, records and
+        paints every event, because the transcript, the ledger and the working
+        line are driven by events and not by these timers.
+
+        A session that never receives focus events is never throttled: the flag
+        starts focused and only an explicit blur clears it. Textual also flips
+        `app_focus` back to True on any keypress or click and posts AppFocus
+        here, so a spurious blur on a host with half-working focus reporting
+        heals on the user's next keystroke rather than leaving a foreground
+        session stuck at the slow rate.
+
+        Guarded per surface: one widget mid-teardown must not stop the others
+        being told, and no part of this is worth an exception reaching a turn.
+        """
+        from local_operator.tui.animation import set_animation_focused
+
+        if not set_animation_focused(focused):
+            return
+        for surface in (
+            self._working_block,
+            self._subagent_panel,
+            self._subagent_view,
+            self._status,
+        ):
+            if surface is None:
+                continue
+            try:
+                surface.sync_animation_rate()
+            except Exception:  # pragma: no cover - defensive; chrome must not raise
+                logger.debug("animation re-rate failed", exc_info=True)
+        # The splash owns two timers and derives both from `motion_enabled()`,
+        # so it is re-synced through the same seams `set_visible` uses rather
+        # than being given a re-rate method of its own.
+        try:
+            welcome = self.query_one(WelcomeView)
+            welcome._sync_pulse_timer()
+            welcome._sync_tip_timer()
+        except Exception:
+            pass  # no splash mounted, or already torn down: the ordinary case
 
     def _flush_pending_question(self) -> None:
         """Announce an unanswered question raised while the terminal was focused.
