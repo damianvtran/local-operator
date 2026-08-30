@@ -12,6 +12,38 @@ cd ~/local-operator
 .venv/bin/python -m pytest tests/unit -q          # ~2700 tests, ~3.5 min
 ```
 
+**The suite caps its own parallelism.** `addopts` asks for `-n auto`, but the
+root `conftest.py` implements xdist's `pytest_xdist_auto_num_workers` hook and
+resolves that to a capped count (2-8) instead of the one-worker-per-core xdist
+would otherwise pick. It has to sit at the rootdir: the hook runs before the
+`tests/` conftest is loaded, so a copy under `tests/` is never called.
+
+The reason is that this repo is worked through many concurrent worktrees. On a
+14-core / 36 GB host, one-per-core meant 14 workers and a measured **7,438 MB
+peak RSS**; three suites at once drove load average to 98-128 and consumed 6.1
+of 7.2 GB of swap. Fewer workers were also *faster* there — an interleaved A/B
+on `tests/unit/server` measured `-n 4` at 5.3-5.9s against `-n 14` at
+7.8-11.3s, because the suite waits on the event loop rather than on CPU. The
+cap is the smaller of a CPU share and a budget over *available* memory (about
+600 MB per worker, measured), so a machine already under pressure from sibling
+worktrees backs off on its own. The memory probe (`vm_stat` on macOS,
+`MemAvailable` on Linux — `psutil` is deliberately not a dependency) degrades to
+the CPU-only cap on any failure and never raises.
+
+Override it per session, or bypass it entirely:
+
+```sh
+PYTEST_XDIST_AUTO_NUM_WORKERS=12 .venv/bin/python -m pytest tests/unit -q  # honoured unclamped
+.venv/bin/python -m pytest tests/unit -n 12 -q   # explicit -n bypasses the hook
+.venv/bin/python -m pytest tests/unit -n0 -q     # serialise for a debugger
+```
+
+**CI is unaffected**: a 4-vCPU runner already resolves below the cap, so the
+hook changes nothing there. `--dist worksteal` is also in `addopts` — per-test
+durations here vary by orders of magnitude, and the default `load` scheduler
+pre-assigns chunks, leaving workers idle at the tail while one grinds through
+the slow Textual pilot tests.
+
 TUI tests need a colour-capable terminal, so run them with the environment the
 suite expects:
 
