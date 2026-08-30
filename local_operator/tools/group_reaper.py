@@ -116,17 +116,27 @@ _CMD_LOG_CHARS = 120
 #:
 #: A generous timeout would not fix that, it would only move the freeze, so the
 #: bound is sized off the HONEST contender instead: a sub-``PIPE_BUF`` append or
-#: a small read-filter-rewrite, microseconds to low milliseconds. 0.3s leaves
-#: about two orders of magnitude of headroom before an honest contender degrades
-#: while staying imperceptible to a user. This deliberately diverges from
+#: a small read-filter-rewrite, microseconds to low milliseconds. 0.3s sits two
+#: orders of magnitude past the SLOW end of that range (100x a 3 ms rewrite, and
+#: far more against the microsecond case), so an honest contender degrades only
+#: long after it should have finished, while staying imperceptible to a user.
+#: This deliberately diverges from
 #: ``auth.LOCK_ACQUIRE_TIMEOUT_S`` (15s): that lock guards a destructive
 #: rotating-token double-spend, this one guards an append whose loss is benign.
 _LOCK_ACQUIRE_TIMEOUT_S = 0.3
 
-#: Retry cadence for the non-blocking acquire, with the same gentle geometric
-#: backoff as the MCP OAuth refresh lock: fast pickup for the common
+#: Retry cadence for the non-blocking acquire: fast pickup for the common
 #: released-in-a-moment case, then fewer wakeups once the holder is evidently
 #: not finishing within our bound.
+#:
+#: Same SHAPE as the MCP OAuth refresh lock (geometric, 1.5x growth) but
+#: deliberately re-tuned, and the values must NOT be "restored to parity" with
+#: ``auth``'s 0.05/0.25 — that would silently break this bound. auth retries
+#: against a 15s timeout; we retry against 0.3s, so its 0.25s ceiling is 83% of
+#: our ENTIRE budget. Measured: this cadence gets 10 attempts inside 0.3s where
+#: auth's would get 5, and a single 0.25s sleep step would mean one late attempt
+#: and a bound that is a coin flip rather than a schedule. The cadence is
+#: proportional to the timeout it serves; change one and re-derive the other.
 _LOCK_RETRY_SLEEP_S = 0.01
 _LOCK_RETRY_SLEEP_MAX_S = 0.05
 
