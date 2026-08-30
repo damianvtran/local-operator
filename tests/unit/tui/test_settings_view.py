@@ -104,7 +104,14 @@ async def test_reopening_does_not_raise_duplicate_ids() -> None:
 async def test_bool_toggle_writes_and_survives_reopen(tmp_path: Path) -> None:
     """The BOOL kind, end to end: a toggle reaches config.yml, and the reopened
     page reads it back — a page that only changed its own memory would pass any
-    assertion made against the frame alone."""
+    assertion made against the frame alone.
+
+    Driven through ``action_toggle`` (`space`) since #440: `enter` opens the
+    two-choice expansion instead of writing, and `space` is the in-place
+    accelerator that kept the one-keystroke flip. The end-to-end claim is
+    unchanged — this is still "a bool reaches config.yml and survives a
+    reopen", just through the key that now carries it.
+    """
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(120, 32)) as pilot:
         await pilot.pause()
@@ -112,7 +119,7 @@ async def test_bool_toggle_writes_and_survives_reopen(tmp_path: Path) -> None:
         view = app.query_one(SettingsView)
         await pilot.pause()
         _select(view, "display.shimmer")
-        view.action_activate()
+        view.action_toggle()
         await pilot.pause()
         assert _values(tmp_path)["display.shimmer"] is False
 
@@ -233,7 +240,13 @@ async def test_esc_is_a_ladder(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_reset_restores_the_default(tmp_path: Path) -> None:
-    """Immediate-write's one real cost is undo; this is the mitigation."""
+    """Immediate-write's one real cost is undo; this is the mitigation.
+
+    The flip goes through ``action_toggle`` since #440 (see
+    ``test_bool_toggle_writes_and_survives_reopen``), which also puts the row
+    OFF-default — the state `r` is now the only one offered in, so this test
+    exercises the gating rather than being blocked by it.
+    """
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(120, 32)) as pilot:
         await pilot.pause()
@@ -241,7 +254,7 @@ async def test_reset_restores_the_default(tmp_path: Path) -> None:
         view = app.query_one(SettingsView)
         await pilot.pause()
         _select(view, "display.terminal_title")
-        view.action_activate()
+        view.action_toggle()
         await pilot.pause()
         assert _values(tmp_path)["display.terminal_title"] is False
         view.action_reset()
@@ -496,8 +509,25 @@ async def test_a_retired_row_stops_advertising_keys_that_cannot_act() -> None:
         # The way OUT is never shed, and moving is still offered.
         assert "esc" in hints and "move" in hints, hints
 
-        # An ordinary row still advertises both.
+        # An ordinary row still advertises `enter`. `r` is a separate question
+        # since #440: it is offered only where it would act, so the row has to
+        # be taken OFF its default before `r default` is expected \u2014 which is
+        # `test_r_is_not_offered_and_writes_nothing_on_a_default_row`'s subject.
+        # U2's own finding is unaffected: the retired row sheds both keys, and
+        # a row that can act advertises what can act on it.
         view.action_jump(0)
+        await pilot.pause()
+        hints = view.rendered_hints()
+        assert "change" in hints, hints
+        assert "default" not in hints, f"`r` is advertised on a defaulted row: {hints}"
+
+        _select(view, "retry.maxRetries")
+        await pilot.press("enter")
+        for _ in range(len(view._buffer)):
+            await pilot.press("backspace")
+        for char in "4":
+            await pilot.press(char)
+        await pilot.press("enter")
         await pilot.pause()
         hints = view.rendered_hints()
         assert "change" in hints and "default" in hints, hints
@@ -1070,47 +1100,14 @@ async def test_an_open_editor_owns_its_navigation_keys(tmp_path: Path) -> None:
         )
 
 
-@pytest.mark.asyncio
-async def test_an_arrow_during_an_edit_does_not_silently_discard_it(tmp_path: Path) -> None:
-    """UX round 1, U3 — a valid buffer is not lost to an unrelated navigation
-    key. Up/down used to call ``_cancel_edit`` unconditionally, so a user who
-    typed a value and pressed down to look elsewhere lost it with no message,
-    while the footer promised only ``enter saves · esc cancels``."""
-    app = OperatorApp(lambda: _factory(FakeSession()))
-    async with app.run_test(size=(120, 32)) as pilot:
-        await pilot.pause()
-        app._open_settings_view()
-        view = app.query_one(SettingsView)
-        await pilot.pause()
-
-        _select(view, "retry.baseDelayMs")
-        await pilot.press("enter")
-        for _ in range(len(view._buffer)):
-            await pilot.press("backspace")
-        for char in "1500":
-            await pilot.press(char)
-        await pilot.pause()
-        assert view._buffer == "1500"
-
-        await pilot.press("down")
-        await pilot.pause()
-        # A valid buffer COMMITS on the way out rather than evaporating.
-        assert _values(tmp_path)["retry"]["baseDelayMs"] == 1500
-        assert view.editing_key is None
-
-        # An INVALID buffer keeps the editor open instead, so the move does not
-        # throw away text the user still has to correct.
-        _select(view, "retry.maxRetries")
-        await pilot.press("enter")
-        for _ in range(len(view._buffer)):
-            await pilot.press("backspace")
-        for char in "9999":
-            await pilot.press(char)
-        await pilot.press("down")
-        await pilot.pause()
-        assert view.editing_key == "retry.maxRetries", "an invalid buffer was discarded by a move"
-        assert view._buffer == "9999"
-        assert "at most 100" in view.error_text
+# `test_an_arrow_during_an_edit_does_not_silently_discard_it` (UX round 1, U3)
+# stood here. It is REPLACED, not deleted, by
+# `test_an_arrow_during_an_edit_discards_and_writes_nothing` at the bottom of
+# this file, whose docstring records why the premise it rested on changed
+# (#440 §2.4). The pointer is left here on purpose: a reader who greps for U3
+# in this file should find the reversal rather than an absence, because an
+# apparently-vanished regression test is indistinguishable from a fix someone
+# quietly undid.
 
 
 @pytest.mark.asyncio
@@ -1553,6 +1550,15 @@ async def test_a_commit_that_inserts_rows_does_not_strand_the_cursor(
     ``action_move`` exists to prevent. Independent of the end-clamping the
     test above pins — this is about a press in the MIDDLE of the list landing
     on the right row, not about what the ends do.
+
+    UPDATED FOR #440, in the one way the contract change requires: the commit
+    that inserts the rows is now the explicit ``enter`` rather than the arrow
+    itself, because movement no longer writes (see ``_settle_row``). U13's
+    subject is untouched — the rows are still inserted above the cursor and the
+    arrow that follows must still resolve its target from the REBUILT list. The
+    spec notes (§5) that removing movement-triggered commits removes the U13
+    hazard CLASS outright; this assertion keeps guarding the mechanism that
+    made it safe.
     """
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
@@ -1572,10 +1578,13 @@ async def test_a_commit_that_inserts_rows_does_not_strand_the_cursor(
         for char in "cheap openrouter/qwen3-coder":
             await pilot.press(char if char != " " else "space")
         await pilot.pause()
+        # The explicit accept, which is now the only gesture that commits.
+        await pilot.press("enter")
+        await pilot.pause()
         await pilot.press(key)
         await pilot.pause()
 
-        # The chain was committed by the move, which is U3's contract...
+        # The chain was committed by the accept...
         assert "cheap" in settings_io.read_chains(ConfigManager(tmp_path))
         # ...and the cursor is on the row that is genuinely adjacent in the
         # REBUILT list, not on one resolved from the list as it was before.
@@ -1756,12 +1765,21 @@ async def test_the_delete_ask_keeps_its_key_contract(size: tuple[int, int]) -> N
 
 
 @pytest.mark.asyncio
-async def test_the_editor_says_that_moving_saves() -> None:
-    """UX round 2, U14 \u2014 commit-on-move is right, but it has to be TAUGHT.
+async def test_the_editor_says_what_moving_does() -> None:
+    """UX round 2's U14, INVERTED by #440 rather than dropped.
 
-    The contract enumerated exactly two exits, ``enter`` and ``esc``, and a user
-    reading it concludes anything else is neither. That is the opposite of most
-    editors, so a value gets stored by an arrow key the page never mentioned.
+    U14's finding was that a contract enumerating exactly two exits \u2014 ``enter``
+    and ``esc`` \u2014 makes a reader conclude anything else is neither, so a rule
+    where movement SAVED had to be taught explicitly or values would be stored
+    by a key the page never mentioned.
+
+    Under the new contract movement CANCELS (see ``_settle_row``), which is
+    what a reader of a two-exit contract already assumes and what every other
+    editor does. The teaching burden moves rather than disappearing: the editor
+    row states the pair plainly again, and the footer \u2014 U14's own placement,
+    and the surface a user reads mid-edit \u2014 is where the arrow keys' behaviour
+    is named, because someone with 0.43.x muscle memory is exactly who needs to
+    see it there.
     """
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(120, 32)) as pilot:
@@ -1774,9 +1792,10 @@ async def test_the_editor_says_that_moving_saves() -> None:
         await pilot.press("1")
         await pilot.pause()
         row = next(line for line in view.render_lines_for_test() if "Base delay" in line)
-        assert "\u2191\u2193 saves" in row, row
-        # The footer says it too, on the key it applies to.
-        assert "saves" in view.rendered_hints(), view.rendered_hints()
+        assert "enter saves \u00b7 esc cancels" in row, row
+        assert "\u2191\u2193 saves" not in row, f"the row still promises that moving saves: {row}"
+        # The footer says what the arrows do, on the key it applies to.
+        assert "cancels" in view.rendered_hints(), view.rendered_hints()
 
 
 @pytest.mark.asyncio
@@ -1920,7 +1939,11 @@ async def test_a_structurally_wrong_config_names_the_file_instead_of_leaking_a_t
         config_file.write_text("values: not-a-mapping\n")
         before = config_file.read_bytes()
         _select(view, "display.shimmer")
-        await pilot.press("enter")
+        # `space`, the in-place bool toggle: since #440 `enter` on a bool opens
+        # the choice list and writes nothing, so it can no longer reach the
+        # writer whose wording this test pins. `space` is the gesture that
+        # still writes on one keystroke.
+        await pilot.press("space")
         await pilot.pause()
         message = view.error_text
         assert "config.yml" in message, message
@@ -2076,16 +2099,19 @@ async def test_a_hint_whose_label_grows_is_painted_at_its_new_width(
 
         assert view.editing_key == "retry.maxRetries"
         logical = hint.rendered()
-        assert "saves" in logical, "the model no longer states the rule at all"
+        # The clause is `move \u00b7 cancels` since #440 rather than `move \u00b7 saves`
+        # \u2014 the rule reversed, the widths did not, and U21's finding is about
+        # what happens to a hint whose label GROWS, whatever it grows into.
+        assert "cancels" in logical, "the model no longer states the rule at all"
         assert hint.size.width >= cell_len(logical), (
             f"the move hint is painted {hint.size.width} cells wide for a "
-            f"{cell_len(logical)}-cell label {logical!r}, so the clause naming the rule "
-            f"that an arrow key commits the value is clipped off the frame"
+            f"{cell_len(logical)}-cell label {logical!r}, so the clause naming what an "
+            f"arrow key does to this value is clipped off the frame"
         )
         frame = _painted_frame(app)
-        assert "saves" in frame, (
-            "the painted frame does not contain `saves` anywhere, so nothing on screen "
-            f"tells the user that moving off this row will commit it:\n{frame}"
+        assert "cancels" in frame, (
+            "the painted frame does not contain `cancels` anywhere, so nothing on screen "
+            f"tells the user that moving off this row will discard it:\n{frame}"
         )
 
 
@@ -2753,7 +2779,7 @@ async def test_paging_lands_on_the_true_end_of_the_list() -> None:
 async def test_a_key_that_writes_reveals_its_row_before_it_writes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`enter` on an OFF-SCREEN bool scrolls the row into view, then toggles it.
+    """`space` on an OFF-SCREEN bool scrolls the row into view, then toggles it.
 
     The wheel moves the viewport and leaves the cursor behind, so the cursor can
     sit off screen while the user reads elsewhere. This page writes immediately:
@@ -2803,10 +2829,16 @@ async def test_a_key_that_writes_reveals_its_row_before_it_writes(
         assert not _cursor_on_screen(view), "premise: the wheel carried the cursor off screen"
 
         monkeypatch.setattr(settings_io, "write_setting", _spy)
-        await pilot.press("enter")
+        # `space`, not `enter`. Since #440 `enter` on a bool OPENS the two-choice
+        # expansion and writes nothing, so it can no longer carry this
+        # assertion; `space` is the retained in-place toggle and is therefore
+        # the page's only remaining one-keystroke write \u2014 which makes it exactly
+        # the gesture this interlock has to cover (issue #440, second comment:
+        # the accelerator must not reintroduce the hazard the contract closes).
+        await pilot.press("space")
         await pilot.pause()
 
-        assert seen, "`enter` on the off-screen row did not reach the write at all"
+        assert seen, "`space` on the off-screen row did not reach the write at all"
         assert seen["bytes_at_write"] == before, (
             "config was written before the acted-on row was revealed: "
             f"{seen['bytes_at_write']!r} != {before!r}"
@@ -2929,6 +2961,29 @@ async def test_the_wheel_step_follows_the_apps_scroll_sensitivity() -> None:
 # only `last_modified` is still a write, and it is still the page touching a
 # file the user did not ask it to touch.
 # ---------------------------------------------------------------------------
+
+
+def _click_row(view: SettingsView, index: int) -> None:
+    """Click the row at ``index``, the way `on_click` actually receives one.
+
+    A hand-built ``events.Click`` does not work here: ``_index_at`` maps a
+    click through the body's SCREEN coordinates, so the event has to carry
+    `screen_x`/`screen_y` that land inside the painted list. This is the same
+    stand-in `test_a_click_lands_on_the_row_that_was_clicked` uses, factored
+    out because the #440 tests need it for a second reason \u2014 a click elsewhere
+    is one of the routes that must cancel an edit and revert a preview.
+    """
+    offset = view._body.scroll_offset.y
+
+    class _Click:
+        button = 1
+        screen_x = view._body.region.x + 1
+        screen_y = view._body.region.y + index - offset
+
+        def stop(self) -> None:
+            pass
+
+    view.on_click(_Click())
 
 
 def _config_bytes(tmp_path: Path) -> bytes | None:
@@ -3084,19 +3139,14 @@ async def test_the_wheel_and_a_click_elsewhere_never_write(tmp_path: Path, key: 
         assert _config_bytes(tmp_path) == before, "the wheel wrote config.yml"
 
         # A click on a DIFFERENT row: the gesture `_leave_row` committed on.
-        view.post_message(
-            events.Click(
-                widget=view._list,
-                x=4,
-                y=2,
-                delta_x=0,
-                delta_y=0,
-                button=1,
-                shift=False,
-                meta=False,
-                ctrl=False,
-            )
+        other = next(
+            index
+            for index in range(view._selected + 1, len(view._rows))
+            if view._rows[index].kind == "setting"
         )
+        view._body.scroll_to(y=max(other - 3, 0), animate=False)
+        await pilot.pause()
+        _click_row(view, other)
         await pilot.pause()
         assert _config_bytes(tmp_path) == before, "a click elsewhere wrote config.yml"
 
@@ -3166,10 +3216,23 @@ async def test_an_arrow_during_an_edit_discards_and_writes_nothing(tmp_path: Pat
 
 @pytest.mark.asyncio
 async def test_wheel_and_arrow_agree_about_leaving_an_edit(tmp_path: Path) -> None:
-    """The contradiction test (spec §1.2). `_leave_row` COMMITTED a valid buffer
-    for arrows, clicks and ctrl+n/p while `_scroll_rows` DISCARDED it for the
+    """The contradiction test (spec §1.2), REBASED onto the scroll model.
+
+    The spec measured a page where `_leave_row` COMMITTED a valid buffer for
+    arrows, clicks and ctrl+n/p while `_scroll_rows` DISCARDED it for the
     wheel — two rules for one gesture ("the user moved off the row"), with
-    nothing on screen distinguishing them. Both must now discard."""
+    nothing on screen distinguishing them.
+
+    The scroll fix (v0.43.17, #447) resolved half of it from the other side and
+    landed first, as §7.5 said it would: the wheel now moves the VIEWPORT and
+    leaves the cursor on its row, so it stopped being a "leave the row" gesture
+    at all and stopped cancelling. The remaining half is this change — the
+    arrows stop committing.
+
+    So the assertion is on the property both gestures must share rather than on
+    identical state, which they no longer have and should not: neither WRITES,
+    which is the contract, and the arrow discards because it genuinely leaves
+    the row while the wheel keeps the editor because it does not."""
     app = OperatorApp(lambda: _factory(FakeSession()))
     outcomes: dict[str, Any] = {}
     async with app.run_test(size=(120, 32)) as pilot:
@@ -3190,12 +3253,14 @@ async def test_wheel_and_arrow_agree_about_leaving_an_edit(tmp_path: Path) -> No
                 for _ in range(3):
                     view._list.post_message(_wheel(view._list, down=True))
             await pilot.pause()
-            outcomes[name] = (view.editing_key, _config_bytes(tmp_path))
+            outcomes[name] = _config_bytes(tmp_path)
+            view._cancel_edit()
+            view._repaint()
 
     assert outcomes["arrow"] == outcomes["wheel"], (
-        f"the arrows and the wheel still disagree about leaving an edit: {outcomes}"
+        f"the arrows and the wheel still disagree about an open edit: {outcomes}"
     )
-    assert outcomes["arrow"][1] is None, "leaving an edit wrote config.yml"
+    assert outcomes["arrow"] is None, "leaving an edit wrote config.yml"
 
 
 @pytest.mark.asyncio
@@ -3424,15 +3489,21 @@ async def test_previewing_a_theme_writes_nothing_and_esc_restores_it(tmp_path: P
         assert _config_bytes(tmp_path) is None
 
 
-@pytest.mark.parametrize("exit_route", ("move-off", "leave-page", "wheel"))
+@pytest.mark.parametrize("exit_route", ("move-off", "leave-page", "click-elsewhere"))
 @pytest.mark.asyncio
 async def test_a_theme_preview_reverts_on_every_exit_route(
     tmp_path: Path, exit_route: str
 ) -> None:
     """The risk table's High row: "preview leaves the app in a theme the file
-    disagrees with". Every way out of the expansion — not just `esc` — has to
-    put the captured theme back, so this drives each route separately rather
-    than trusting one of them to stand for the rest."""
+    disagrees with". Every way out of the expansion — not just `esc`, which
+    `test_previewing_a_theme_writes_nothing_and_esc_restores_it` covers — has
+    to put the captured theme back, so each route is driven separately rather
+    than trusting one of them to stand for the rest.
+
+    The WHEEL is deliberately not among them. Under the scroll model (#447) it
+    moves the viewport and leaves the cursor on its choice, so it is not an
+    exit from the group at all — see `_scroll_rows`, which records why
+    reverting on a glance would be the worse surprise."""
     from local_operator.tui import theme as theme_mod
 
     app = OperatorApp(lambda: _factory(FakeSession()))
@@ -3453,10 +3524,25 @@ async def test_a_theme_preview_reverts_on_every_exit_route(
             for _ in range(60):
                 await pilot.press("up")
         elif exit_route == "leave-page":
+            # Torn down by the APP, the route the page's own `esc` never sees
+            # (a session swap, a `/clear`) and the one where a leaked preview
+            # would be least recoverable.
             app._close_settings_view()
         else:
-            for _ in range(40):
-                view._list.post_message(_wheel(view._list, down=True))
+            # A click on a row OUTSIDE the group, which leaves it exactly as an
+            # arrow past its end does. A DIFFERENT setting, not the owner: the
+            # owner still belongs to the expansion, so clicking it is a click
+            # inside the group and correctly keeps it open.
+            outside = next(
+                index
+                for index, row in enumerate(view._rows)
+                if row.kind == "setting"
+                and row.setting is not None
+                and row.setting.key != "tui.theme"
+            )
+            view._body.scroll_to(y=max(outside - 3, 0), animate=False)
+            await pilot.pause()
+            _click_row(view, outside)
         await pilot.pause()
 
         assert theme_mod.current_theme() == opened_on, (
@@ -3519,43 +3605,72 @@ async def test_display_keys_stay_flat_through_the_choice_path(tmp_path: Path) ->
 
 @pytest.mark.asyncio
 async def test_layout_stability_across_choosing_and_preview() -> None:
-    """Invariant 1: every state of this page paints the same number of rows at
-    the same y. The model adds three states to the detail line (choosing,
-    previewing, the `default: …` clause), and design round 5 pinned all six
-    existing ones at byte-identical y — a new state that moved the footer would
-    reflow the whole page under the reader."""
+    """Invariant 1: the page's CHROME sits at the same y in every state.
+
+    Design round 5 pinned all six existing states at byte-identical y, and the
+    model adds three more to the detail line: CHOOSING ("nothing is saved until
+    you press enter"), an off-default row's `default: …` clause, and the
+    previewing state — which repaints the whole app's ink and therefore makes
+    the repaint happen far more often than a pick ever did.
+
+    Measured on the WIDGET GEOMETRY rather than on the row count. The list is
+    scrolled inside a fixed viewport, so expanding a group legitimately makes
+    the virtual list longer; what must not move is the detail row, the footer
+    and the body's own height, because those are what the reader's eye is
+    anchored to and a shift in any of them is the whole page reflowing under
+    them (spec §6, invariant 1; AGENTS.md "Visual validation" step 4)."""
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
         view = await _open_page(pilot, app)
 
-        heights: dict[str, int] = {}
+        def _chrome() -> tuple[int, int, int, int]:
+            return (
+                view._detail.region.y,
+                view._hints.region.y,
+                view._body.size.height,
+                view._body.size.width,
+            )
+
+        geometry: dict[str, tuple[int, int, int, int]] = {}
 
         _select(view, "retry.enabled")
         await pilot.pause()
-        heights["browsing"] = len(view.render_lines_for_test())
+        geometry["browsing"] = _chrome()
 
         await pilot.press("enter")
         await pilot.pause()
-        heights["choosing"] = len(view.render_lines_for_test())
+        geometry["choosing"] = _chrome()
 
         await pilot.press("down")
         await pilot.pause()
-        heights["browsed"] = len(view.render_lines_for_test())
+        geometry["browsed"] = _chrome()
 
         await pilot.press("escape")
         await pilot.pause()
+        _select(view, "retry.maxRetries")
+        await pilot.press("enter")
+        for _ in range(len(view._buffer)):
+            await pilot.press("backspace")
+        for char in "4":
+            await pilot.press(char)
+        await pilot.press("enter")
+        await pilot.pause()
+        assert view.editing_key is None, f"the editor did not close: {view.error_text}"
+        geometry["off-default"] = _chrome()
+
         _select(view, "tui.theme")
         await pilot.press("enter")
         await pilot.press("down")
         await pilot.press("down")
         await pilot.pause()
-        heights["previewing"] = len(view.render_lines_for_test())
+        geometry["previewing"] = _chrome()
         await pilot.press("escape")
         await pilot.pause()
+        geometry["reverted"] = _chrome()
 
-        assert len(set(heights.values())) == 1, (
-            f"the page changes height between states, moving the footer: {heights}"
+        assert len(set(geometry.values())) == 1, (
+            f"the page's chrome moves between states, reflowing under the reader: {geometry}"
         )
 
 

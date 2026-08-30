@@ -169,6 +169,28 @@ class SettingsChanged(Message):
         self.value = value
 
 
+class SettingsPreview(Message):
+    """A setting is being TRIED ON. Nothing has been stored (#440 §3).
+
+    A separate message from :class:`SettingsChanged` on purpose, and the
+    separation is the safety property rather than a tidiness one.
+    ``SettingsChanged`` means "this value is now in config.yml, bring the live
+    surfaces into line with the file"; this one means "paint as if, and expect
+    to be told to put it back". Collapsing the two would give the app one
+    handler that cannot tell a durable value from a transient one, and the
+    first edit that made the handler persist something — cache a value, write a
+    marker, tell another subsystem — would silently make previews permanent.
+
+    Carries the same ``(key, value)`` shape so the app's live-apply code is
+    reachable by both, without either being able to reach the other's job.
+    """
+
+    def __init__(self, key: str, value: Any) -> None:
+        super().__init__()
+        self.key = key
+        self.value = value
+
+
 class SettingsView(Vertical):
     """The page: title, a rule, the settings body, a side pane, and the footer.
 
@@ -199,7 +221,14 @@ class SettingsView(Vertical):
         Binding("home", "jump(0)", "First", show=False),
         Binding("end", "jump(1)", "Last", show=False),
         Binding("enter", "activate", "Change", show=False),
-        Binding("space", "activate", "Change", show=False),
+        # `space` is NOT an alias for `enter` any more (#440 §2.5). `enter` is
+        # the exploratory key — the one a user presses to find out what a row
+        # does — so it opens and never writes; `space` is the deliberate
+        # in-place flip for a bool the user already knows. Everywhere else it
+        # does exactly what `enter` does, so the accelerator adds one shortcut
+        # rather than a second contract. The footer never advertises it, which
+        # is what keeps discovery on the safe path.
+        Binding("space", "toggle", "Toggle", show=False),
         # left/right switch the side pane's tab. They do NOT move within a row:
         # every editable row here is either a list to expand or a field to type
         # into, so a horizontal cursor would have nothing to travel along.
@@ -261,6 +290,18 @@ class SettingsView(Vertical):
         self._edit_seed = ""
         #: Cascade editor state: which chain is open for hop editing, if any.
         self._chain: str | None = None
+        #: The APPLIED value captured when a previewing expansion opened, or
+        #: None when no preview is in flight. Restored on every exit route
+        #: (:meth:`_revert_preview`) — the half of preview that makes it safe
+        #: to offer at all, since a leaked preview leaves the app wearing a
+        #: value its config file disagrees with (#440 §3).
+        self._preview_before: str | None = None
+        #: Whether this session has already explained a discarded edit. The
+        #: model reverses a behaviour that shipped recently (moving off a row
+        #: used to SAVE), so the first discard says so — and only the first, or
+        #: the message crowds the detail row's real job of carrying errors
+        #: (spec §7.4).
+        self._discard_announced = False
         #: Chain key whose deletion has been asked for and not yet confirmed.
         #: `d` on a CHAIN row destroys every hop in it and immediate-write has
         #: no undo, so it asks first — a magnitude above `d` on a single hop,
@@ -378,10 +419,12 @@ class SettingsView(Vertical):
                 if setting.kind is Kind.CASCADE:
                     rows.extend(self._cascade_rows(setting))
                 elif self._expanded == setting.key:
-                    # `resolved_choices`: a registry-sourced enum (tui.theme)
+                    # `_choices_for`: a registry-sourced enum (tui.theme)
                     # declares no static choices, so `choices` would expand to
-                    # an empty group and read as the expansion having failed.
-                    for choice in setting.resolved_choices:
+                    # an empty group and read as the expansion having failed —
+                    # and a BOOL declares none at all, since its value space is
+                    # synthesised rather than registered (see `_choices_for`).
+                    for choice in _choices_for(setting):
                         rows.append(_Row(kind="choice", setting=setting, choice=choice))
         return rows
 
@@ -463,22 +506,30 @@ class SettingsView(Vertical):
         if not self._selectable():
             return
         # The row is remembered by IDENTITY and the list is re-derived AFTER
-        # the commit, never before it. `_leave_row` writes, and a write on an
-        # add row inserts rows above the cursor, so stepping from an index
-        # snapshotted beforehand lands on a row the user did not ask for —
-        # committing a chain with `down` put the cursor back on `+ add a chain`,
-        # which reads as the arrow key being dead (review round 2, U13).
-        # `_close_chain` already resolves its target this way for the same
-        # reason, and this is that pattern applied to movement.
+        # the settle, never before it. Under #440 movement no longer writes, so
+        # this no longer guards a commit that inserts rows — but `_settle_row`
+        # still rebuilds the list (an expansion closing drops its choice rows),
+        # and an index snapshotted beforehand then names a row the user did not
+        # ask for. Kept as the belt-and-braces the spec calls for: it costs
+        # nothing and it guards a future structural change (review round 2,
+        # U13). `_close_chain` resolves its target the same way.
         anchor = self._current()
         identity = anchor.identity if anchor is not None else None
-        if not self._leave_row():
+        if not self._settle_row():
             return
         indices = self._selectable()
         if not indices:
             return
         position = self._position_of(identity, indices)
         self._selected = indices[min(max(position + delta, 0), len(indices) - 1)]
+        # AFTER the cursor has landed: whether it left an open choice group is
+        # a question only the destination answers, and the same arrow browses
+        # within the group before it eventually leaves (invariant 8).
+        self._settle_expansion()
+        # A previewing setting paints the highlighted choice on the running app
+        # as the cursor crosses it. Storing nothing — that is the whole point —
+        # and reverted by `_settle_expansion` above on the move that leaves.
+        self._preview_choice()
         self._repaint()
         self._scroll_to_selection()
 
@@ -534,7 +585,7 @@ class SettingsView(Vertical):
         if delta > 0 and target == position:
             indices = self._selectable()
             if indices and self._selected != indices[-1]:
-                if not self._leave_row():
+                if not self._settle_row():
                     return
                 indices = self._selectable()
                 if indices:
@@ -543,7 +594,7 @@ class SettingsView(Vertical):
                     self._scroll_to_selection()
             return
         wanted = self._rows[headers[target]].section
-        if not self._leave_row():
+        if not self._settle_row():
             return
         rebuilt = [index for index, row in enumerate(self._rows) if row.kind == "header"]
         landing = next(
@@ -557,7 +608,7 @@ class SettingsView(Vertical):
     def action_jump(self, to_end: int) -> None:
         if not self._selectable():
             return
-        if not self._leave_row():
+        if not self._settle_row():
             return
         # Re-derived after the commit for the reason `action_move` records: the
         # ends of the list move when a commit inserts or drops rows.
@@ -570,7 +621,7 @@ class SettingsView(Vertical):
 
     def _select_after(self, header_index: int) -> None:
         """Put the cursor on the first selectable row at or after a header."""
-        if not self._leave_row():
+        if not self._settle_row():
             return
         self._select_after_index(header_index)
 
@@ -689,20 +740,31 @@ class SettingsView(Vertical):
 
     # -- activation ---------------------------------------------------------
     def action_activate(self) -> None:
-        """Enter/Space on the highlighted row: the row decides what that means.
+        """``enter`` on the highlighted row: OPEN it, or accept what is open.
 
-        One key for every row kind, because "the obvious thing" is unambiguous
-        per kind: a bool toggles, an enum expands (and a choice inside it
-        commits), text opens an editor, a chain expands, an add row starts a
-        new entry. A page with a different key per kind would be a page whose
-        footer cannot state its own contract in one clause.
+        The page's whole contract, in one method: *`enter` opens, `enter`
+        accepts, `esc` cancels* (#440 §2.2). Every row kind is one of two
+        shapes and the only difference is what "open" looks like — a value
+        space you browse (bool, enum) opens a choice list, a value you type
+        opens the inline editor, the cascade opens its own group. None of those
+        writes. The write happens on the SECOND `enter`, on the thing the user
+        chose, which is the only gesture on this page that changes config.yml.
+
+        Bools reach here through the same door as enums since #440: `enter`
+        used to toggle and store on one keystroke, which is the gesture pressed
+        exploratorily, and `retry.enabled` or `web_fetch.allow_private` flipping
+        because someone wanted to see what the row did is the complaint this
+        redesign answers. :meth:`action_toggle` keeps the fast path for a user
+        who already knows the row.
         """
         row = self._current()
         if row is None:
             return
         # Show the user the row this is about to act on. The wheel can leave the
-        # cursor off screen, and this page writes immediately — see
-        # `_reveal_cursor`. A no-op when the cursor is already visible.
+        # cursor off screen — see `_reveal_cursor`. Still required under the new
+        # contract even though `enter` on a resting row no longer writes: the
+        # SECOND `enter` accepts, and an accept the user cannot see is the same
+        # hazard by one more keystroke. A no-op when the cursor is visible.
         self._reveal_cursor()
         # Any action that is not `d` or `esc` DISARMS a pending delete. The ask
         # was cleared by a cursor move and by `esc`, but not by a key acting on
@@ -726,6 +788,19 @@ class SettingsView(Vertical):
             # why it went unnoticed until `tui.theme` grew 35 members.
             owner = row.setting.key
             self._write(row.setting, row.choice.value)
+            if self._error:
+                # A REFUSED write must not keep the paint its preview applied,
+                # or the app is left wearing a value config.yml does not have
+                # and nothing on screen says so. The editor's own rejection
+                # rule applies here too: the expansion stays open with the
+                # reason, so the user can pick again.
+                self._revert_preview()
+                self._repaint()
+                return
+            # The write LANDED, so the previewed paint is now simply the stored
+            # value: drop the capture without restoring it. Clearing rather than
+            # reverting is the whole difference between accept and cancel.
+            self._preview_before = None
             self._expanded = None
             self._repaint()
             self._select_setting_row(owner)
@@ -746,16 +821,36 @@ class SettingsView(Vertical):
         setting = row.setting
         if setting is None:
             return
-        if setting.kind is Kind.BOOL:
-            # A bool has exactly two states, so Enter TOGGLES rather than
-            # expanding a two-item list: an expansion that always shows the
-            # same two rows is a click the user pays for every time.
-            current = settings_io.read_setting(self._manager, setting)
-            self._write(setting, not bool(current))
-            return
-        if setting.kind is Kind.ENUM:
+        if setting.kind in (Kind.BOOL, Kind.ENUM):
+            # BOOL joins ENUM here (#440 §2.5). The old branch toggled and
+            # stored on this keystroke, defending the saved click: "an expansion
+            # that always shows the same two rows is a click the user pays for
+            # every time". That reasoning holds only where the click is the
+            # cost; the cost turned out to be that the exploratory press on a
+            # bool changed the user's setup, and the expansion is not empty
+            # ceremony — it names which value SHIPPED, which the collapsed row
+            # never carried. `space` buys the saved keystroke back for anyone
+            # who wants it.
             self._expanded = None if self._expanded == setting.key else setting.key
-            self._repaint()
+            if self._expanded is None:
+                # Closing by re-pressing `enter` is a cancel like any other.
+                self._revert_preview()
+                self._repaint()
+            else:
+                # THE CURSOR OPENS ON THE STORED CHOICE, not on the owning row.
+                # This is what keeps the expansion from feeling like a tax on
+                # bools (#440 §2.5's concession): landing on the current value
+                # makes flipping one `enter, down, enter` — three keys in the
+                # same finger position — and on a 35-member enum like
+                # `tui.theme` it answers "which one am I on?" without the user
+                # hunting for the `●`. Opening on the owner would also mean the
+                # first `down` merely entered the list, so every pick cost one
+                # more keystroke than it needed to.
+                self._repaint()
+                self._select_stored_choice(setting)
+                # Only now, with the cursor on a real choice, can a preview
+                # apply — and on the stored value it is a no-op by construction.
+                self._preview_choice()
             # Reveal the CHOICES, not just the row that owns them. Scrolling
             # the selected row into view is not enough: expanding a row sitting
             # on the viewport's bottom edge put every choice below the fold, so
@@ -789,6 +884,45 @@ class SettingsView(Vertical):
             return
         self._begin_edit(row)
 
+    def action_toggle(self) -> None:
+        """``space`` — flip a BOOL in place; anything else, act like ``enter``.
+
+        The accelerator #440 §2.5 keeps, and the concession that makes the
+        bool-as-expansion decision cheap rather than pedantic. `enter` opens the
+        safe two-choice list because it is the key a user presses when they do
+        NOT know what a row does; `space` is the deliberate flip for a user who
+        does. The footer never advertises it, so discovery goes through the safe
+        path and only someone who already knows the row finds the fast one.
+
+        It writes on one keystroke, which makes it the page's only remaining
+        single-gesture write — so it carries the same interlock the other
+        writing keys do: :meth:`_reveal_cursor` first, because the wheel can
+        park the cursor off screen and `space` would otherwise reintroduce the
+        exact off-screen-write hazard the contract removes from `enter`
+        (issue #440, second comment; the gap #447 documents).
+
+        On every other row kind it defers to `enter` rather than doing nothing:
+        a key that works on some rows and is dead on others is the "nothing
+        happens when I click" complaint the footer ladder exists to avoid.
+        """
+        row = self._current()
+        if row is None:
+            return
+        self._reveal_cursor()
+        setting = row.setting
+        if row.kind != "setting" or setting is None or setting.kind is not Kind.BOOL:
+            self.action_activate()
+            return
+        # An open editor or an armed delete owns the key first: `space` inside
+        # a buffer is a space character, and `action_activate` already routes
+        # both. Only a resting BOOL row reaches the toggle.
+        if self._editing is not None:
+            self.action_activate()
+            return
+        self._confirm_delete = None
+        current = settings_io.read_setting(self._manager, setting)
+        self._write(setting, not bool(current))
+
     def _enter_cascade(self) -> None:
         """Put the cursor on the first row of the cascade's own editor.
 
@@ -808,7 +942,7 @@ class SettingsView(Vertical):
         # stops being true when the cursor leaves it (review round 1, B2; the
         # same "model changed, paint did not" class as the armed-delete bug
         # `action_reset` documents).
-        if not self._leave_row():
+        if not self._settle_row():
             return
         for index in range(self._selected + 1, len(self._rows)):
             row = self._rows[index]
@@ -928,39 +1062,22 @@ class SettingsView(Vertical):
                 self._repaint()
             return
         setting = row.setting
+        # OFFERED ONLY WHERE IT ACTS (#440 §1.3, §4.4). `action_reset` had no
+        # default-state guard, so `r` on a row already at its shipped value
+        # called `reset_setting` anyway — which rewrites the file to delete a
+        # key. On a machine with no config.yml at all, opening the page,
+        # landing on any row and pressing the key the footer advertises CREATED
+        # a 1005-byte config file, with nothing on screen saying so because the
+        # row showed its default before and after.
+        #
+        # `is_default` is the same predicate `_paint_hints` sheds the hint on
+        # and `_paint_detail` names the default from, deliberately: one question
+        # asked in three places cannot give three answers. Silent rather than
+        # explained, because the hint is not painted here at all — the same rule
+        # read-only rows already follow.
         if settings_io.is_default(self._manager, setting):
-            # A row already at its default has NOTHING to restore, so `r` must
-            # not reach the writer. It did: `reset_setting` deletes the key and
-            # `_delete` writes the file back unconditionally, so pressing `r` on
-            # an untouched row rewrote config.yml — and on a machine with no
-            # config.yml at all it CREATED a 1005-byte one out of a key the user
-            # never set (#440). The gesture the page offers as the safe way to
-            # undo a change was itself the only thing that had changed anything.
-            #
-            # Both of those are one state here, not two: `read_setting` falls
-            # back to `setting.default` when the key is absent, so "no file yet"
-            # and "stored value equals the default" are the same answer from
-            # `is_default` — measured across the whole registry, a config dir
-            # with no file reports 0 of 52 settings off-default.
-            #
-            # Compared BY VALUE, matching `is_default`'s own contract and the
-            # `changed` test that inks the value column two panes over: a row
-            # painted dim as "this is the default" and a row `r` declines to
-            # reset are then the same row, and the page states one fact about
-            # it rather than two.
-            #
-            # It SAYS so rather than swallowing the press, for the reason the
-            # healthy-cascade branch above does — a lit hint whose key does
-            # nothing is the "nothing happens when I click" bug one step earlier
-            # (UX round 1, U5). The hint is deliberately NOT shed the way a
-            # read-only row sheds it: a retired row is permanently inert, while
-            # this one becomes resettable the moment its value changes, so
-            # shedding would flicker `r default` in and out of the footer as a
-            # user toggles a bool. Offering `r` only on off-default rows is the
-            # #440 redesign's job and needs its sign-off; this guard's job is
-            # only to stop the key from writing when it has nothing to undo.
-            self._notice = f"already at its default ({_render_value(setting.default)})"
-            self._repaint()
+            if disarmed:
+                self._repaint()
             return
         if not self._save(lambda: settings_io.reset_setting(self._manager, setting)):
             return
@@ -1092,19 +1209,45 @@ class SettingsView(Vertical):
         self._caret = 0
         self._error = ""
 
-    def _leave_row(self) -> bool:
-        """Settle whatever the current row has open, and say whether to move.
+    def _settle_row(self) -> bool:
+        """Put the current row back to rest. NOTHING here writes.
 
-        Movement used to call ``_cancel_edit`` unconditionally, so a plain
-        ``down`` after typing a valid value threw it away silently — the footer
-        promises ``enter saves · esc cancels`` and says nothing about arrows, so
-        the user's model is "esc is how I lose this" (UX round 1, U3). The rule
-        here is the one the page can state honestly: a VALID buffer commits on
-        the way out, and an INVALID one holds the cursor where it is with the
-        rejected text and the reason both still on screen — the same contract
-        Enter already has, so there is only one rule to learn.
+        THE central change of #440, and the one that makes the page's contract
+        statable in one sentence: *nothing changes your configuration until you
+        press `enter` on the thing you want.* Leaving a row is the gesture that
+        used to break it.
 
-        Returns ``False`` when the caller must NOT move.
+        WHAT THIS REPLACES, AND WHY IT IS A REVERSAL RATHER THAN A REGRESSION.
+        This was ``_leave_row``, and it COMMITTED a valid buffer on the way out.
+        That came from UX round 1's U3, which found that movement discarded a
+        typed value silently and chose commit-on-move because, under a page
+        where writes were immediate anyway, silently SAVING is the less-bad
+        silent outcome — a save is undoable with ``r``, a discard is not. Round
+        2's U14 then taught the rule in the footer.
+
+        The operator changed the premise (#440,
+        ``~/local-operator-worktrees/settings-edit-model.md`` §2.4). Under an
+        explicit-accept contract, discarding is no longer a lost save; it is the
+        absence of an action the user never took, and the editor is visibly open
+        until they take it. Commit-on-move is also the single rule that makes
+        "explore a setting without changing my setup" impossible, because
+        opening an editor to SEE the stored value is itself something you then
+        have to leave. Textual's own widgets already answer it this way: `Input`
+        emits `Submitted` only on Enter, and `SelectOverlay._on_blur` dismisses
+        rather than committing.
+
+        It also resolves the page's internal contradiction by construction. The
+        arrows committed and the wheel discarded, both for "the user moved off
+        the row", with nothing on screen distinguishing them. Every mover now
+        routes through here, so there is one answer.
+
+        ALWAYS RETURNS TRUE, and the signature is kept so the callers read the
+        same as before. Cancelling cannot fail, so there is no state a movement
+        key cannot leave — which deliberately deletes the old "an invalid buffer
+        holds the cursor" behaviour. That existed only because leaving was a
+        WRITE and a write can be refused; keeping it under a cancel would be
+        friction with nothing behind it, and a page that traps the cursor on a
+        row is the dead end the model exists to remove.
         """
         # A pending chain-delete confirmation is answered by `d` or by `esc`,
         # never by drifting off the row: an ask that survived the cursor moving
@@ -1112,18 +1255,158 @@ class SettingsView(Vertical):
         self._confirm_delete = None
         # The notice answered a keypress on THIS row, so it stops being true
         # the moment the cursor leaves it — the same lifetime `_error` has.
+        # Set again below when the discard itself is what needs announcing.
         self._notice = ""
+        # NOT the expansion. A choice group is left by the cursor travelling
+        # OUT of it, which only the mover knows about — collapsing here would
+        # close the group on the arrow that browses within it, which is the one
+        # gesture the expansion exists to serve. `_settle_expansion` is the
+        # counterpart, called once the cursor has landed.
         if self._editing is None:
             self._error = ""
             return True
-        if self._buffer == self._edit_seed:
-            # Nothing was typed. Closing beats committing an identical value:
-            # a write would stamp a defaulted key into the file just because the
-            # cursor passed through the row.
-            self._cancel_edit()
-            return True
-        self._commit_edit()
-        return self._editing is None
+        # The migration notice (spec §7.4). The behaviour being removed shipped
+        # recently, and a user with the habit is about to lose a value they
+        # would previously have kept — so the FIRST time a session does it, the
+        # row says what happened and states the new rule. Once per session and
+        # not per occurrence: a message that fires on every move becomes noise
+        # on the row that also carries validation errors, and the user stops
+        # reading it. Informational ink, not danger ink (UX round 2, U16) — the
+        # user did nothing wrong.
+        if self._buffer != self._edit_seed and not self._discard_announced:
+            self._discard_announced = True
+            self._notice = "discarded — enter saves, esc or moving away cancels"
+        self._cancel_edit()
+        return True
+
+    def _select_stored_choice(self, setting: Setting) -> None:
+        """Put the cursor on the choice that is currently stored.
+
+        Falls back to the first choice when the stored value is not a member of
+        the offered space — which is reachable: a theme removed from the
+        registry, or a value hand-edited into config.yml. Landing somewhere
+        real beats landing nowhere, and the `●` is absent in that case so the
+        frame still tells the truth about nothing being selected.
+        """
+        current = settings_io.read_setting(self._manager, setting)
+        first: int | None = None
+        for index, row in enumerate(self._rows):
+            if row.kind != "choice" or row.setting is None or row.setting.key != setting.key:
+                continue
+            if first is None:
+                first = index
+            if row.choice is not None and row.choice.value == current:
+                self._selected = index
+                self._repaint()
+                return
+        if first is not None:
+            self._selected = first
+            self._repaint()
+
+    def _settle_expansion(self) -> None:
+        """Close an open choice group the cursor has travelled OUT of.
+
+        Called AFTER a move has landed, because "did the cursor leave the
+        group" is a question only the destination can answer — the same arrow
+        that browses within an expansion is the one that eventually leaves it,
+        and :meth:`_settle_row` runs before the cursor has moved at all.
+
+        Invariant 8 (spec §6, and #425's arrows-wrap rule). An arrow at the end
+        of a choice group must neither wrap inside the group nor stop dead: a
+        group that traps the cursor is a dead end, and list-wide movement has to
+        keep working. So the cursor leaves, the group closes behind it, and the
+        preview goes back — leaving is a cancel like every other exit.
+        """
+        if self._expanded is None:
+            return
+        row = self._current()
+        if row is not None and row.setting is not None and row.setting.key == self._expanded:
+            return  # still on the owning row or one of its choices
+        self._revert_preview()
+        self._expanded = None
+        # Closing DROPS the choice rows, and they sat between the top of the
+        # list and wherever the cursor just landed — so the index that was
+        # correct a line ago now names a row that many places further down.
+        # Re-anchored on the row's identity, the same survives-a-rebuild
+        # mechanism `action_move` and `on_click` use (review round 2, U13);
+        # without it, arrowing out of the 35-member `tui.theme` group landed
+        # the cursor 35 rows past where the arrow pointed.
+        if row is None:
+            return
+        self._rows = self._build_rows()
+        settled = next(
+            (index for index, candidate in enumerate(self._rows) if candidate.identity == row.identity),
+            None,
+        )
+        if settled is not None:
+            self._selected = settled
+
+    # -- preview ------------------------------------------------------------
+    def _preview_choice(self) -> None:
+        """Apply the highlighted choice to the RUNNING APP, storing nothing.
+
+        Only for a setting that opts in with ``Setting.preview`` — today just
+        ``tui.theme``. The value is posted as :class:`SettingsPreview`, which is
+        deliberately a DIFFERENT message from :class:`SettingsChanged`: the
+        latter is the write notification, and routing a preview through it is
+        how a preview would eventually be made to persist by a well-meaning
+        edit to the app's handler. Two messages means the live-apply path is
+        reachable without the write path being involved at all.
+
+        The value the user started on is captured on the way IN, and it is the
+        APPLIED value (``theme_mod.current_theme()``) rather than the stored
+        one: the two differ when ``/theme`` was used this session without
+        persisting, and restoring the stored value would then "revert" the user
+        onto a theme they had already moved off.
+        """
+        row = self._current()
+        if row is None or row.kind != "choice" or row.setting is None or row.choice is None:
+            return
+        if not row.setting.preview:
+            return
+        if self._preview_before is None:
+            self._preview_before = theme_mod.current_theme()
+        self.post_message(SettingsPreview(row.setting.key, row.choice.value))
+
+    def revert_preview_for_teardown(self) -> None:
+        """Undo an in-flight preview when the APP is closing this page.
+
+        The one caller is :meth:`OperatorApp._close_settings_view`, which is
+        reached by routes the page itself never sees (a session swap, a
+        ``/clear``). It is a distinct entry point from :meth:`_revert_preview`
+        only in that it must not rely on message delivery: the widget is
+        removed on the next line, and a message posted from a removed widget is
+        never handled — so the restore is applied to the app directly here.
+        """
+        restore = self._preview_before
+        if restore is None:
+            return
+        self._preview_before = None
+        app = getattr(self, "app", None)
+        apply_theme = getattr(app, "_apply_theme", None)
+        if apply_theme is not None:
+            apply_theme(restore)
+
+    def _revert_preview(self) -> None:
+        """Put the captured pre-preview value back, on ANY exit route.
+
+        The load-bearing half of the feature, and the one the risk table rates
+        High: a preview that leaks leaves the app wearing a theme its config
+        file disagrees with, and nothing on screen would ever say so. Every way
+        out of the expansion funnels here — `esc`, an arrow off the group, the
+        wheel, a click elsewhere, leaving the page — and so does a REFUSED
+        write, since a commit that did not land must not keep the paint it
+        previewed.
+
+        Idempotent, because several of those routes legitimately overlap (`esc`
+        settles the row and then closes the expansion): with nothing captured
+        there is nothing to put back.
+        """
+        restore = self._preview_before
+        if restore is None:
+            return
+        self._preview_before = None
+        self.post_message(SettingsPreview("tui.theme", restore))
 
     def _caret_left(self) -> None:
         self._caret = max(0, self._caret - 1)
@@ -1145,10 +1428,10 @@ class SettingsView(Vertical):
         if target is None:
             return
         if target.startswith("hop:") or target.startswith("hopadd:"):
-            self._commit_hop(target)
+            self._anchored_commit(lambda: self._commit_hop(target))
             return
         if target == "chainadd":
-            self._commit_chain_add()
+            self._anchored_commit(self._commit_chain_add)
             return
         setting = settings_io.resolve_key(target)
         if setting is None:
@@ -1208,6 +1491,34 @@ class SettingsView(Vertical):
         working = {key: list(hops) for key, hops in read.items()}
         base = {key: list(hops) for key, hops in read.items()}
         return working, base
+
+    def _anchored_commit(self, commit: Callable[[], None]) -> None:
+        """Run a STRUCTURAL commit and keep the cursor on the row it was on.
+
+        U13's mechanism, moved to where the commit moved. Accepting on ``+ add
+        a chain`` inserts the chain row, its hops and an ``+ add a hop`` row
+        ABOVE the cursor, so the raw index that was correct before the write
+        names a different row after it — the user pressed ``enter`` on the add
+        row and the cursor silently jumped into the group that appeared.
+
+        ``action_move`` and ``on_click`` already re-anchor this way because
+        under the OLD contract they were the gestures that committed. Under
+        #440 only ``enter`` commits, so this is the same guard applied to the
+        gesture that now carries the hazard — and it is the last of it, since no
+        movement key can restructure the list any more (spec §5).
+        """
+        anchor = self._current()
+        identity = anchor.identity if anchor is not None else None
+        commit()
+        if identity is None:
+            return
+        settled = next(
+            (index for index, row in enumerate(self._rows) if row.identity == identity),
+            None,
+        )
+        if settled is not None and self._rows[settled].selectable:
+            self._selected = settled
+            self._repaint()
 
     def _commit_hop(self, target: str) -> None:
         """Save an edited or newly-added cascade hop."""
@@ -1470,6 +1781,12 @@ class SettingsView(Vertical):
             event.stop()
             event.prevent_default()
             owner = self._expanded
+            # `esc` is the named cancel, so it is the route the preview revert
+            # has to be most obviously correct on: the app snaps back to the
+            # theme the user opened on, in the same frame the expansion
+            # collapses. That snap-back is the feature and not a glitch — it is
+            # the visual statement that nothing was kept (#440 §3).
+            self._revert_preview()
             self._expanded = None
             self._repaint()
             self._select_setting_row(owner)
@@ -1529,7 +1846,7 @@ class SettingsView(Vertical):
         # aimed at. Clicking `Theme` landed on a hop three rows away (review
         # round 2, U13). The identity travels with the row across the rebuild.
         wanted = row.identity
-        if not self._leave_row():
+        if not self._settle_row():
             return
         settled = next(
             (index for index, candidate in enumerate(self._rows) if candidate.identity == wanted),
@@ -1538,6 +1855,11 @@ class SettingsView(Vertical):
         if settled is None or not self._rows[settled].selectable:
             return
         self._selected = settled
+        # A click can land outside an open choice group, which is a way of
+        # leaving it exactly as an arrow past its end is — same rule, same
+        # cancel, same preview revert (invariant 8).
+        self._settle_expansion()
+        self._preview_choice()
         self._repaint()
 
     def on_mouse_move(self, event) -> None:  # type: ignore[no-untyped-def]
@@ -1623,6 +1945,25 @@ class SettingsView(Vertical):
 
         No commit semantics are involved: this moves the view, never the cursor,
         so it neither writes a value nor settles an open editor.
+
+        A THEME PREVIEW deliberately SURVIVES a wheel gesture, and this is a
+        conscious departure from #440's §2.3 table, which lists the wheel among
+        the routes that revert. That table was written against the pre-#447
+        page, where the wheel moved the CURSOR and therefore genuinely left the
+        choice group. It no longer does: the wheel moves the viewport and the
+        cursor stays on the choice the user put it on, so nothing has left the
+        group and there is nothing to cancel. Reverting here would mean the
+        theme snapped back because the user glanced down the page — the same
+        surprise this method's own docstring rejects for the inline editor one
+        paragraph below. The spec anticipated exactly this (§7.5: "rebase onto
+        [the scroll fix] rather than the other way round").
+
+        The preview is still reverted by every gesture that actually leaves:
+        `esc`, an arrow out of the group, a click elsewhere, and leaving the
+        page. There is also a mechanical reason not to put it here — Textual
+        stops the wheel on the body container while it can still scroll, so
+        this method only runs at the very end of the list, and a revert hung on
+        it would fire for some wheel gestures and not others.
 
         BEHAVIOUR CHANGE, stated here because this is where the next reader
         looks: the previous implementation called ``_cancel_edit()`` on every
@@ -1782,6 +2123,15 @@ class SettingsView(Vertical):
             # "which one am I on" is the question the expansion exists to answer.
             line.append("● " if chosen else "○ ", style=accent if chosen else dim)
             line.append(row.choice.label, style=base)
+            if row.choice.value == row.setting.default:
+                # Which member SHIPPED, named in the list rather than inferred
+                # from the ink (#440 §2.2). This is the information the
+                # collapsed row never carried and the reason a two-member bool
+                # expansion is not empty ceremony: `●` says what is stored and
+                # `(default)` says what `r` would give back, so the user can
+                # see the difference between "I chose this" and "this is what
+                # it came with" before touching anything.
+                line.append("  (default)", style=dim)
             if row.choice.description:
                 line.append(f"  {row.choice.description}", style=faint)
             return line
@@ -1834,7 +2184,13 @@ class SettingsView(Vertical):
             line.append_text(self._editor_text())
             return line
         value = settings_io.read_setting(self._manager, setting)
-        changed = value != setting.default
+        # Routed through `is_default` rather than through `value !=
+        # setting.default` (#440 §4.3). The two agree on all fifty rows of a
+        # fresh config — measured — but they are not the same question, and the
+        # one that matters is the one `r` acts on. Using the same predicate for
+        # the INK, the footer's hint and the reset action is what stops those
+        # three from ever disagreeing about whether a row is the user's own.
+        changed = not settings_io.is_default(self._manager, setting)
         # A CHANGED value is painted in the foreground ink and a defaulted one
         # dim, so the config's actual shape is visible at a glance — which is
         # the state a user needs before they can decide what to reset.
@@ -1852,8 +2208,19 @@ class SettingsView(Vertical):
             line.append("—", style=dim)
             return line
         line.append(_render_value(value), style=value_style)
-        if setting.kind is Kind.ENUM and self._expanded == setting.key:
-            line.append(" ▾", style=dim)
+        if setting.kind in (Kind.BOOL, Kind.ENUM):
+            if self._expanded == setting.key:
+                line.append(" ▾", style=dim)
+            elif selected:
+                # The affordance glyph (#440 §4.1), on the CURSOR ROW ONLY. It
+                # answers "does `enter` give me a list or a text field?" before
+                # the press — the same `▸` the chain row already uses for
+                # "there is more under this", so it is a glyph the page has
+                # rather than a new one. Cursor-row-only for the reason the
+                # scope tag rides the section header: fifty of these down the
+                # page would be noise, and the question is only ever asked
+                # about the row the user is on.
+                line.append(" ▸", style=dim)
         return line
 
     def _editor_text(self) -> Text:
@@ -1886,17 +2253,24 @@ class SettingsView(Vertical):
         # read as two separate problems — the row's copy also had to compete
         # with the value column for space it does not have.
         #
-        # `↑↓` is named alongside `enter` because moving off the row SAVES, and
-        # a contract enumerating exactly two exits with `esc cancels` beside
-        # them implies every other key is one or the other. That is the
-        # opposite of most editors, so it has to be taught rather than
-        # discovered by losing a value to it (UX round 2, U14). The clause
-        # sheds first when the row is narrow: it is the least load-bearing of
-        # the three, and the other two are the keys a user needs to get out.
-        contract = "  enter or ↑↓ saves · esc cancels · clear to unset"
-        room = self._list_width() - _VALUE_COLUMN - cell_len(editor.plain)
-        if cell_len(contract) > room:
-            contract = "  enter or ↑↓ saves · esc cancels"
+        # ONE accept and one cancel, which is the whole model in five words
+        # (#440 §4.5). The old copy named `↑↓` alongside `enter` because moving
+        # off the row saved — U14's teaching of a rule that no longer exists.
+        # Now every exit but `enter` cancels, so the contract does not have to
+        # enumerate them: naming the two keys IS the complete statement, and it
+        # is the same sentence Textual's `Input`, omp's `TextInputSubmenu` and
+        # lazygit's popups all make.
+        #
+        # `clear to unset` is offered only where clearing MEANS something
+        # (#387's deferred U6): on a setting whose empty string is a real value
+        # the clause advertised a behaviour the row does not have.
+        contract = "  enter saves · esc cancels"
+        setting = settings_io.resolve_key(self._editing or "")
+        if setting is not None and setting.empty_unsets:
+            full = "  enter saves · esc cancels · clear to unset"
+            room = self._list_width() - _VALUE_COLUMN - cell_len(editor.plain)
+            if cell_len(full) <= room:
+                contract = full
         editor.append(contract, style=faint)
         return editor
 
@@ -2042,9 +2416,40 @@ class SettingsView(Vertical):
             text.append("enter, then type: <provider>/<model>", style=faint)
         elif row.setting is not None:
             text.append(row.setting.help, style=faint)
+            # The clauses this row sheds FIRST, and in this order, because the
+            # help answers "what is this" — the question a lost user has — while
+            # these answer "what would this key do", which only matters once
+            # they know where they are (#440 §4.4).
+            for clause in self._detail_clauses(row):
+                text.append(f" · {clause}", style=faint)
             text.append(f"   {row.setting.key}", style=Style(color=theme_mod.semantic_color("dim")))
         self._detail_text = text
         self._detail.update(text)
+
+    def _detail_clauses(self, row: "_Row") -> list[str]:
+        """The state-dependent clauses appended to a setting row's help.
+
+        Two, both new with #440's model and both answering a question the page
+        could not answer before:
+
+        - While CHOOSING, that browsing this list is free. It is the sentence
+          the whole redesign exists to make true, and the expansion is exactly
+          where a user is deciding whether to trust it.
+        - On an off-default row, WHAT ``r`` would restore. `r` has no confirm —
+          it is definitionally a return to a known state — so naming the value
+          is what lets a user predict it before pressing. Only on rows where
+          the key is offered, so the detail line and the footer cannot disagree
+          about whether `r` does anything here.
+        """
+        setting = row.setting
+        if setting is None:
+            return []
+        clauses: list[str] = []
+        if self._expanded == setting.key:
+            clauses.append("nothing is saved until you press enter")
+        elif not settings_io.is_default(self._manager, setting):
+            clauses.append(f"default: {_render_value(setting.default)}")
+        return clauses
 
     #: Narrowest page that still shows BOTH columns. Below it the pane is
     #: hidden and the settings list takes the whole body: the pane is context,
@@ -2556,6 +2961,36 @@ class SettingsView(Vertical):
         row = self._current()
         return row is not None and row.setting is not None and row.setting.kind is Kind.READONLY
 
+    def _reset_applies(self) -> bool:
+        """Would ``r`` actually do something on the highlighted row?
+
+        THE predicate behind the footer hint, the detail line's ``default: …``
+        clause and :meth:`action_reset`'s guard — one question in one place, so
+        the three cannot answer it differently. That is not hypothetical: the
+        page already shipped a state where the hint was lit, the detail line
+        said nothing, and the key rewrote config.yml (#440 §1.3).
+
+        ``is_default`` rather than ``value != setting.default`` for the reason
+        §4.3 gives: `r` acts on whether the key is STORED, which is a different
+        question from whether the value matches, and they diverge for a value
+        stored explicitly at the shipped default.
+        """
+        if self._editing is not None or self._confirm_delete is not None:
+            # An in-progress state owns the footer's wording, exactly as
+            # `_current_is_readonly` documents.
+            return True
+        row = self._current()
+        if row is None or row.setting is None or row.kind != "setting":
+            # A chain, hop or add row: `r` says why it does not apply there,
+            # which is a real answer and worth advertising.
+            return True
+        if row.setting.kind is Kind.CASCADE:
+            # The cascade explains itself on `r` (a healthy one has no shipped
+            # default to restore; a malformed one is cleared by it), so the key
+            # acts on this row in both states.
+            return True
+        return not settings_io.is_default(self._manager, row.setting)
+
     def _title_room(self) -> int:
         """Cells left for the config path after the ``settings ·`` lead."""
         try:
@@ -2593,12 +3028,26 @@ class SettingsView(Vertical):
         # user arrows away from a value expecting to abandon it and stores it
         # instead (UX round 2, U14). Naming it on the move hint puts the rule on
         # the key it applies to.
-        if self._confirm_delete is not None:
+        # A third state joins them with #440: while CHOOSING, `esc` closes the
+        # expansion rather than leaving the page (the Esc ladder already worked
+        # this way; the footer was the half that did not say so), and `enter`
+        # picks rather than opens. Advertising `back to conversation` on a key
+        # that cancels is the same footer-vs-detail disagreement D7 found.
+        if self._confirm_delete is not None or self._expanded is not None:
             exit_label = "cancel"
         else:
             exit_label = "back to conversation"
+        if self._expanded is not None:
+            enter = (self._enter_hint, " choose", True)
         if self._editing is not None:
-            move = (self._move_hint, " move · saves", False)
+            # U14's `· saves` clause, INVERTED rather than removed. Moving off
+            # an open editor now cancels (see `_settle_row`), and the reason
+            # U14 put the rule on this hint in the first place still holds: a
+            # contract naming exactly two exits implies everything else is
+            # neither, so the key that is neither has to say what it is. The
+            # clause stays the same width class it was, which is what keeps
+            # U21's shedding measurement valid.
+            move = (self._move_hint, " move · cancels", False)
             enter = (self._enter_hint, " save", True)
 
         def rung(
@@ -2622,12 +3071,27 @@ class SettingsView(Vertical):
         # is only to stop advertising keys that will not act.
         if self._current_is_readonly():
             leads = [move]
+        elif not self._reset_applies():
+            # The SAME rule, one step finer (#440 §4.4). `r` deletes the stored
+            # key, so on a row that has no stored key it does nothing at all —
+            # and it used to do worse than nothing, rewriting the file to delete
+            # a key that was never there (§1.3). Dropping it from `leads` rather
+            # than from a hardcoded rung is what keeps the derived narrow rungs
+            # below honest; a literal `[move, enter]` here would put `r` back on
+            # a default row as soon as the terminal was narrow enough to shed
+            # the pane hint, which is the regression invariant 3 warns about.
+            leads = [move, enter]
         if self._pane_fits():
             leads.append(pane)
         # The narrow rungs shed to a one-word `esc` label, except in the
-        # confirm state where `cancel` IS the one word and shedding it back to
-        # `back` would restore the very ambiguity D7 is about.
-        narrow = "cancel" if self._confirm_delete is not None else "back"
+        # confirm and choosing states where `cancel` IS the one word and
+        # shedding it back to `back` would restore the very ambiguity D7 is
+        # about.
+        narrow = (
+            "cancel"
+            if self._confirm_delete is not None or self._expanded is not None
+            else "back"
+        )
         # The narrower rungs are DERIVED from what this row actually offers,
         # dropping one hint at a time from the right, rather than restating the
         # full ladder: a hardcoded `[move, enter, reset]` rung would put the
@@ -2725,6 +3189,18 @@ class SettingsView(Vertical):
         return self._editing
 
     @property
+    def expanded_key(self) -> str | None:
+        """Which choice group is open, or None.
+
+        Exposed alongside :attr:`editing_key` because #440 gives the page two
+        open states rather than one, and several of its assertions are about
+        which one a gesture produced — `enter` on a bool must open THIS one and
+        not the editor, which is not a distinction the painted rows make
+        obvious on a two-member group.
+        """
+        return self._expanded
+
+    @property
     def error_text(self) -> str:
         """The inline validation error currently on screen ("" when none)."""
         return self._error
@@ -2756,6 +3232,12 @@ class SettingsView(Vertical):
         self._leave()
 
     def _leave(self) -> None:
+        # Leaving the PAGE is an exit route like any other, and it is the one
+        # where a leaked preview would be least recoverable: the expansion is
+        # gone, so nothing on screen would ever offer to put the theme back and
+        # the app would sit in a state config.yml disagrees with until the next
+        # restart (#440 §3, the risk table's High row).
+        self._revert_preview()
         self.post_message(SettingsViewDismissed())
 
 
@@ -2817,6 +3299,41 @@ class _Row:
         key = self.setting.key if self.setting is not None else ""
         choice = str(getattr(self.choice, "value", "")) if self.choice is not None else ""
         return (self.kind, f"{key}|{self.chain or ''}|{choice}", self.hop_index)
+
+
+#: The two members a BOOL row expands into, in the order they are offered.
+#: `on` first so the list reads the way the value column does, and so the
+#: cursor's resting position on a defaulted flag is the top row.
+_BOOL_CHOICES = (
+    settings_io.Choice(value=True, label="on"),
+    settings_io.Choice(value=False, label="off"),
+)
+
+
+def _choices_for(setting: Setting) -> tuple[settings_io.Choice, ...]:
+    """The value space ``setting`` expands into — for ENUM *and* BOOL.
+
+    A bool's two members are SYNTHESISED rather than declared on each of the
+    fifteen bool settings in the registry: the value space of a boolean is a
+    property of the type, and fifteen hand-written copies of ``on``/``off``
+    would be fifteen chances to drift. Keeping it here rather than in
+    ``settings_io`` also keeps the presentational vocabulary (``on``/``off``,
+    matching :func:`_render_value`) out of the module the CLI imports.
+
+    Bools expand at all because of #440: ``enter`` used to toggle and store on
+    one keystroke, which is the gesture a user presses to find out WHAT a row
+    does — on an enum they got a list, on a bool their approval mode changed.
+    The expansion also carries information the collapsed row does not: which
+    value ships as the default. `space` remains the in-place accelerator for a
+    user who already knows the row (spec §2.5).
+
+    ``resolved_choices`` for everything else, never ``choices``: a
+    registry-sourced enum (``tui.theme``) declares no static members and would
+    expand into an empty group.
+    """
+    if setting.kind is Kind.BOOL:
+        return _BOOL_CHOICES
+    return setting.resolved_choices
 
 
 def _render_value(value: Any) -> str:
