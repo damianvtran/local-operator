@@ -31,6 +31,12 @@ def all_palettes() -> list[ThemeSpec]:
     The Radient brand ramp goes immediately after the neon FAMILY: it is
     the same blue-black architecture as neon's tron wearing the Radient
     kit, so a user comparing the two finds them one family scroll apart.
+
+    Rosé Pine sits with the classics for the same reason they lead: it is a
+    name users arrive knowing. Its three variants stay together — including
+    the light one, which breaks the "lights at the end" rule on purpose,
+    because a user picking Dawn is choosing between Rosé Pine variants, not
+    between light ramps.
     """
     from local_operator.tui.palettes import (  # local: cycle-free at call time
         classics,
@@ -38,10 +44,12 @@ def all_palettes() -> list[ThemeSpec]:
         nature,
         neon,
         radient,
+        rose_pine,
     )
 
     return [
         *classics.PALETTES,
+        *rose_pine.PALETTES,
         *neon.PALETTES,
         *radient.PALETTES,
         *nature.PALETTES,
