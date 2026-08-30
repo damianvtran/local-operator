@@ -33,7 +33,15 @@ it proves what the APP does with the bytes a terminal sends, not what any
 terminal sends. That half is the byte captures in `bytes/`, taken from the real
 Ghostty and the real Terminal.app, and the two halves together are the claim.
 
-Usage:  python3 pty_drive.py            (run from the worktree root)
+Usage, from the worktree root, with the venv interpreter (a bare `python3` has
+no `local_operator` on its path and dies at import):
+
+    cp docs/evidence/cmd-chords/pty_drive.py.txt /tmp/pty_drive.py
+    env -u NO_COLOR ./.venv/bin/python /tmp/pty_drive.py
+
+Prints `PASS:` or `FAIL:` and sets the exit code; it asserts rather than
+printing a frame to be eyeballed. The `.txt` suffix keeps this throwaway probe
+out of the repo's flake8/isort gates, so it is copied out before running.
 """
 
 from __future__ import annotations
@@ -95,8 +103,12 @@ def main() -> int:
         "LOCAL_OPERATOR_NO_TERMINAL_TITLE": "1",
     }
     env.pop("NO_COLOR", None)
+    # No subcommand: the TUI is what `local_operator.cli` runs bare. An earlier
+    # revision passed "chat", which argparse rejects with `invalid choice`, so
+    # the app never booted and the first key hit a closed pty with `OSError:
+    # [Errno 5]` (code round 2 F7, ux round 2 U3).
     proc = subprocess.Popen(
-        [sys.executable, "-m", "local_operator.cli", "chat"],
+        [sys.executable, "-m", "local_operator.cli"],
         stdin=slave,
         stdout=slave,
         stderr=slave,
@@ -105,11 +117,35 @@ def main() -> int:
     )
     os.close(slave)
     try:
-        drain(master, 12.0)  # boot
-        for key in ("shift+left", "shift+left", "super+c"):
-            os.write(master, KEYS[key])
-            time.sleep(0.6)
-        print(visible(drain(master, 3.0))[-2000:])
+        booted = visible(drain(master, 15.0))
+        if "Message Local Operator" not in booted:
+            print("FAIL: the app did not reach the composer; no gesture was sent")
+            return 1
+
+        # TYPE FIRST, then select, then copy. Without the text write there is
+        # no selection for `super+c` to act on, so the chord correctly does
+        # nothing and the run demonstrates NOTHING — and an empty result reads
+        # as "the chord never arrived", which is the exact false negative
+        # `drain()` above exists to avoid (ux round 2 U3).
+        os.write(master, b"hello world")
+        time.sleep(1.5)
+        drain(master, 1.0)
+        for _ in range(5):
+            os.write(master, KEYS["shift+left"])
+            time.sleep(0.25)
+        drain(master, 1.0)
+
+        os.write(master, KEYS["super+c"])
+        time.sleep(1.5)
+        after = visible(drain(master, 3.0))
+
+        # Assert rather than print a frame for a human to squint at: a harness
+        # whose output has to be interpreted is one whose failures get argued
+        # with. "copied" is the receipt the app paints for every copy gesture.
+        if "copied" not in after:
+            print("FAIL: super+c produced no copy receipt")
+            return 1
+        print("PASS: super+c copied a composer selection and posted its receipt")
     finally:
         proc.terminate()
         proc.wait(timeout=10)

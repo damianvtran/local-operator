@@ -187,11 +187,14 @@ async def test_both_copy_chords_collapse_a_click_chain_selection() -> None:
     """THE defect this change fixes for Cmd+C, which already copied.
 
     ``TextArea`` binds ``ctrl+c,super+c`` to ``copy``, so Cmd+C already reached
-    ``action_copy`` and already produced a receipt. But a ``Binding`` fires
-    through the action system and never enters ``_on_key``, so it skipped the
-    click-chain collapse that hands the key back to the draft and interrupt
-    rungs. Measured before the fix: ctrl+c left the selection collapsed and
-    super+c left it live, which is R1-2's bug reintroduced for the other chord.
+    ``action_copy`` and already produced a receipt. But ``_on_key`` had no
+    ``super+c`` branch to consume the key, so the press fell straight through
+    to that binding and skipped the click-chain collapse that hands the key
+    back to the draft and interrupt rungs. (``_on_key`` runs FIRST; a binding
+    fires only on the keys it does not consume. An earlier wording here had
+    that rule inverted — code round 1 F2, code round 2 F6.) Measured before the
+    fix: ctrl+c left the selection collapsed and super+c left it live, which is
+    R1-2's bug reintroduced for the other chord.
 
     Parametrised over both keys deliberately: the assertion is that the two
     chords are ONE behaviour, and a test that only pressed super+c would pass

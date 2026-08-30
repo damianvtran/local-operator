@@ -114,11 +114,23 @@ COLLAPSED selection raises `SkipAction` and does nothing at all —
 
 which from the user's side is exactly "cmd+C did nothing".
 
-### The real `super+c` defect: it bypasses `_on_key`
+### The real `super+c` defect: it never passed through `_on_key`
 
 This is the divergence worth fixing, and it is the file's own hard-won lesson
-(code round 2 F5, ux round 2 U6): a `Binding` fires through the action system
-and never enters `_on_key`. The Ctrl+C copy route in `_on_key` does one thing
+(code round 2 F5, ux round 2 U6). The rule, measured against textual 8.2.8
+rather than assumed: **`_on_key` runs FIRST, and a binding fires only on the
+keys `_on_key` does not consume** with `event.stop()`. A normal `Binding` does
+not bypass `_on_key`; only a PRIORITY binding does. `super+c` had no `_on_key`
+branch claiming it, so the press fell straight through to `TextArea`'s
+inherited `ctrl+c,super+c` binding.
+
+(An earlier revision of this document and of five comments in the source stated
+that rule backwards — "a `Binding` fires through the action system and never
+enters `_on_key`". That is wrong, it was the sole justification offered for the
+split placement, and it is corrected here and at every site: code round 1 F2,
+code round 2 F6.)
+
+The Ctrl+C copy route in `_on_key` does one thing
 the bare binding does not — it COLLAPSES a click-chain selection after copying,
 so the key is handed back to the draft and interrupt rungs. Measured on the
 unmodified tree with a click-chain selection live:
@@ -157,6 +169,14 @@ Frames in `frames/`: `after_real_cmdv.png` (image attached from a real Cmd+V),
 `final_cmdc.png` (copy receipt on screen), `before_splash.svg`/
 `after_splash.svg` (the placeholder returning to `Message Local Operator…`),
 and `before_help_80col.svg`/`after_help_80col.svg` (the new `cmd+v` row).
+
+`before_help.svg` is kept as the historical shot of the `/help` screen BEFORE
+this PR, at ~97 columns, and is the only frame still showing the removed
+`ctrl+v pastes an image` placeholder in the composer. Cited here deliberately
+so it is not an unreferenced orphan (design round 2, D5): it is a placeholder
+before-shot, and it is explicitly NOT evidence about the row width, because at
+97 columns the wrap it would have to show cannot occur. The width evidence is
+the 80-column pair above.
 
 The help pair is captured at **80 columns specifically**. The round-1 frame was
 taken at ~97 columns, which is above the wrap threshold, so it showed a clean

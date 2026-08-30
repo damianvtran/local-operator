@@ -3689,9 +3689,13 @@ class Editor(TextArea):
 
         The composer cannot rely on Textual's binding reaching this method on
         its own: Ctrl+C is the app's interrupt (see :meth:`_copy_drag`), and
-        the inherited ``ctrl+c,super+c`` binding bypasses :meth:`_on_key` and
-        with it the click-chain collapse. So :meth:`_on_key` routes both copy
-        chords here directly. This override exists so
+        the inherited ``ctrl+c,super+c`` binding reaches this action WITHOUT
+        passing any :meth:`_on_key` branch, so the click-chain collapse is
+        skipped. (`_on_key` runs first and a binding fires only on the keys it
+        does not consume — see the BINDINGS table for the measurement. The
+        earlier wording here said the binding "bypasses" `_on_key`, which
+        inverts the rule; code round 2, F6.) So :meth:`_on_key` routes both
+        copy chords here directly. This override exists so
         that path — and any other caller of the ``copy`` action — writes the
         clipboard through the SAME message a transcript copy uses, rather than
         ``super().action_copy()``: Textual's base writes silently, and this

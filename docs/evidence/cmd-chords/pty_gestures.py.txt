@@ -42,7 +42,10 @@ try:
 finally:
     p.terminate(); p.wait(timeout=10); os.close(m)
 
-# 3. Ctrl+C with NO selection must not copy; draft survives
+# 3. Cmd+C with NO selection must not copy; draft survives. NOTE the chord:
+#    for CTRL+C with no selection "must not copy" would be wrong — that is the
+#    interrupt rung. super+c carries no interrupt meaning, so doing nothing is
+#    its correct behaviour (ux round 2, U4).
 subprocess.run(["pbcopy"], input=b"")
 m,p = boot()
 try:

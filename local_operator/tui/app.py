@@ -14473,11 +14473,18 @@ class OperatorApp(App[None]):
         # terminals": a user in Terminal.app needs to know the key will not
         # work FOR THEM, and a user anywhere else needs to know it will.
         #
-        # MEASURED WIDTH, and the budget is tighter than it looks. At 80
-        # columns the painted row may be at most 78 cells (the screen's own
-        # 2-cell inset), and the block adds a further 2-cell spine indent, so
-        # the composed `name_width + description` must be <= 74. The first
-        # revision of this row ran to 75 and wrapped at exactly 80 columns —
+        # MEASURED WIDTH, and THIS ROW HAS ZERO HEADROOM — read this before
+        # editing the string. At 80 columns the painted row may be at most 78
+        # cells (the screen's own 2-cell inset), and the block adds a further
+        # 2-cell spine indent, so the composed `name_width + description` must
+        # be <= 74. This row composes to EXACTLY 74. One more character wraps
+        # it. Measured from the painted compositor, not arithmetic:
+        #
+        #     W=81  painted 78  fits
+        #     W=80  painted 78  fits          <- exactly at the limit
+        #     W=79  painted 65  WRAPS         <- tail `Terminal.app` at col 0
+        #
+        # The first revision ran to 75 and so broke one width EARLIER, at 80 —
         # the single most common terminal width — putting `Terminal.app)` at
         # column 0 in the KEY gutter, where it reads as another key row. That
         # is #402's design round 1 D2 verbatim, which is what `paste_note`
@@ -14485,13 +14492,19 @@ class OperatorApp(App[None]):
         # neighbour exists as the fix for (design round 1 D1, code round 1 F1,
         # ux round 1 U2 — all three reviewers found it independently).
         #
-        # The semicolon buys the four cells the parenthesis spent while
-        # keeping the restriction, which is the half of this row a stranded
-        # Terminal.app user actually needs. `name_width` is DERIVED from the
-        # longest command name, so this budget moves when a command is added:
-        # `test_help_notes.py` pins both rows against the real painted width
-        # rather than against a fixed string, so the next command that widens
-        # the gutter fails the test instead of silently wrapping the row.
+        # The semicolon reclaimed exactly ONE cell (55 -> 54: dropping two
+        # parens saves 2, the space before `not` costs 1 back), which was the
+        # single cell this row was over by. It did not buy slack — an earlier
+        # revision of this comment claimed four cells, and a reader who
+        # believes in four spare cells will add a word and wrap the row again
+        # (design round 2, D4).
+        #
+        # `name_width` is DERIVED from the longest command name, so the budget
+        # SHRINKS when a command with a longer name is added — this row is the
+        # first thing that breaks. `test_the_paste_key_rows_do_not_wrap_at_
+        # eighty_columns` in `tests/unit/tui/test_app_pilot.py` pins both rows
+        # against the real painted frame rather than against a fixed string,
+        # so that case fails the test instead of silently wrapping the row.
         cmd_paste_note = Text()
         cmd_paste_note.append("cmd+v".ljust(name_width), style=muted)
         cmd_paste_note.append(
