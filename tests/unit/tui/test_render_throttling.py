@@ -25,7 +25,7 @@ from textual.widgets import Static
 from local_operator.tui import animation
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.subagent_panel import SPINNER_INTERVAL_S, SubagentPanel
-from local_operator.tui.widgets.subagent_view import SubagentView
+from local_operator.tui.widgets.subagent_view import SPINNER_FRAMES, SubagentView
 from local_operator.tui.widgets.transcript import UserBlock, WorkingBlock
 from local_operator.tui.widgets.welcome import WelcomeView
 
@@ -129,17 +129,39 @@ async def test_a_spinner_tick_repaints_only_the_row_carrying_the_spinner() -> No
         assert view._running, "fixture must be a RUNNING child or there is no spinner"
         spy = _UpdateSpy(view)
 
-        before = view._spinner_index
-        for _ in range(8):
-            view._tick()
-            await pilot.pause()
+        # Count the ADVANCES, never compare two indices. `_spinner_index` is
+        # advanced modulo `len(SPINNER_FRAMES)`, so it is a phase on a cycle
+        # and not a monotonic counter: any run whose total tick count is a
+        # multiple of the frame count lands back on the frame it started from,
+        # and `index != before` then reads a moving spinner as a stopped one.
+        # The total is NOT under this test's control — the view's own spinner
+        # timer is live and fires during `pilot.pause()`, so the driven ticks
+        # below are a lower bound on how many actually happen. That is what
+        # made CI fail `assert 3 != 3` on one leg and pass on another, and it
+        # is why the phase is observed through a counting wrapper instead.
+        advances = 0
+        real_tick = view._tick
 
-        assert view._spinner_index != before, "the animation stopped advancing"
+        def counting_tick() -> None:
+            nonlocal advances
+            advances += 1
+            real_tick()
+
+        view._tick = counting_tick  # type: ignore[method-assign]
+        try:
+            ticks = len(SPINNER_FRAMES) + 1
+            for _ in range(ticks):
+                view._tick()
+                await pilot.pause()
+        finally:
+            del view._tick  # type: ignore[attr-defined]
+
+        assert advances >= ticks, "the animation stopped advancing"
         # The cadence is untouched: every tick still repaints the glyph. It is
         # `>=` rather than `==` because the 1 Hz job poll also refreshes the
         # page, and this test is about which ROWS a tick touches, not about
         # owning every paint that happens during it.
-        assert len(spy.calls["title"]) >= 8
+        assert len(spy.calls["title"]) >= ticks
         assert spy.calls["breadcrumb"] == []
         assert spy.calls["rule"] == []
 
