@@ -32,15 +32,20 @@ def all_palettes() -> list[ThemeSpec]:
     the same blue-black architecture as neon's tron wearing the Radient
     kit, so a user comparing the two finds them one family scroll apart.
 
-    Rosé Pine sits with the classics for the same reason they lead: it is a
-    name users arrive knowing. Its three variants stay together — including
-    the light one, which breaks the "lights at the end" rule on purpose,
-    because a user picking Dawn is choosing between Rosé Pine variants, not
-    between light ramps.
+    ``rose_pine``, ``companions`` and ``modern`` all sit with the classics
+    rather than with the lights, and all three hold light ramps that the
+    "lights last" rule would otherwise separate out. That rule is about a
+    dark-terminal user scrolling past ramps they will never pick; it does not
+    apply to a light theme whose whole point is being the daylight half of a
+    dark one a row or two above — Dawn under Rosé Pine, Alucard under Dracula,
+    Kanagawa Lotus under Wave. Splitting those pairs to honour the rule would
+    cost the user the comparison the pair exists to offer.
     """
     from local_operator.tui.palettes import (  # local: cycle-free at call time
         classics,
+        companions,
         lights,
+        modern,
         nature,
         neon,
         radient,
@@ -50,6 +55,8 @@ def all_palettes() -> list[ThemeSpec]:
     return [
         *classics.PALETTES,
         *rose_pine.PALETTES,
+        *companions.PALETTES,
+        *modern.PALETTES,
         *neon.PALETTES,
         *radient.PALETTES,
         *nature.PALETTES,
