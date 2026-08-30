@@ -1,0 +1,7 @@
+[worktree assert OK] manager=/private/tmp/lop-codex-auth/local_operator/mcp/manager.py
+gitlab                 FAILED  MCPError: Server returned an error response
+launchdarkly           FAILED  MCPError: unauthorized access
+minerva-qa             FAILED  MCPError: Server returned an error response
+datadog                FAILED  MCPError: Server returned an error response
+openaiDeveloperDocs    CONNECTED  tools=5
+unreachable-host       FAILED  CancelledError: Cancelled via cancel scope 1085d9950

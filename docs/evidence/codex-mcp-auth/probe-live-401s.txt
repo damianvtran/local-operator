@@ -1,0 +1,5 @@
+gitlab                 401  WWW-Authenticate: 'Bearer realm="GitLab", resource_metadata="https://gitlab.com/.well-known/oauth-protected-resource/api/v4/mcp"'
+launchdarkly           401  WWW-Authenticate: 'Bearer resource_metadata="https://mcp.launchdarkly.com/.well-known/oauth-protected-resource/mcp/launchdarkly"'
+minerva-qa             401  WWW-Authenticate: 'Bearer resource_metadata="https://mcp.qa.gominerva.com/.well-known/oauth-protected-resource/mcp", scope="mcp:read"'
+datadog                401  WWW-Authenticate: None
+openaiDeveloperDocs    200  WWW-Authenticate: None

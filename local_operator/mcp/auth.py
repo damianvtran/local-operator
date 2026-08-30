@@ -153,6 +153,46 @@ class McpAuthRequiredError(RuntimeError):
         self.server_url = server_url
 
 
+class McpAuthChallengeError(RuntimeError):
+    """An HTTP MCP server refused the connect with 401/403.
+
+    Distinct from :class:`McpAuthRequiredError`, which means "we HAVE an OAuth
+    config and the grant needs a browser". This one means "the transport was
+    rejected as unauthorized", and it exists because the SDK erases that fact:
+    a 401 the provider cannot resolve surfaces from ``session.initialize()`` as
+    a generic ``MCPError(-32603, 'Server returned an error response')`` (or
+    ``-32001, 'unauthorized access'``) with **no status code anywhere on the
+    exception** — verified against the live GitLab, LaunchDarkly, Datadog and
+    Minerva QA endpoints. Those two strings are exactly what the user
+    screenshotted, and neither says what to do.
+
+    ``oauth_available`` records whether RFC 9728 / RFC 8414 discovery actually
+    found an authorization server for this URL. It drives the WORDING and must
+    never be guessed: a server can 401 with no ``WWW-Authenticate`` header at
+    all (Datadog does), and promising ``/mcp login`` when we found no endpoint
+    would send the user at a command that cannot work.
+
+    ``has_stored_grant`` is what makes ``login`` vs ``reauth`` truthful: a
+    server we have never held a credential for needs a first grant, while one
+    whose stored grant just got rejected needs it replaced. The manager reads
+    the credential store to set this rather than inferring it from the error.
+    """
+
+    def __init__(
+        self,
+        server_url: str,
+        *,
+        status_code: int,
+        oauth_available: bool,
+        has_stored_grant: bool,
+    ) -> None:
+        super().__init__(f"MCP server at {server_url} refused the connection ({status_code})")
+        self.server_url = server_url
+        self.status_code = status_code
+        self.oauth_available = oauth_available
+        self.has_stored_grant = has_stored_grant
+
+
 class McpLoginCancelledError(RuntimeError):
     """An interactive MCP OAuth grant ended with no authorization arriving.
 
@@ -600,22 +640,186 @@ class McpTokenStorage:
         self._write(creds)
 
 
+#: Server URLs OBSERVED to answer an MCP request with 401/403 during this
+#: process's lifetime, mapped to whether OAuth metadata discovery then found an
+#: authorization server for them.
+#:
+#: Why this exists: a config imported from a foreign tool (Codex's
+#: ``config.toml``, issue #367) carries only a ``url`` and no ``auth`` block,
+#: because that tool holds its OAuth grants elsewhere. Nothing in the static
+#: config says the server needs OAuth, so the auth-capable paths
+#: (``_build_oauth_auth``, ``_ensure_oauth_fresh``, ``/mcp login``) all declined
+#: it and the connect went out unauthenticated. The server's own 401 challenge
+#: is the authoritative signal, so we record it when we see it and let the
+#: gates consult it. This is deliberately TRANSPORT-level and names no config
+#: source: any config that omits an auth block benefits identically.
+#:
+#: Per-process and observation-only by design. It is not a cache that has to be
+#: invalidated: the durable cross-process signal that a server uses OAuth is a
+#: stored credential row (see :func:`server_has_stored_grant`), which is what
+#: makes a RESTART re-authenticate rather than re-observe a 401 first.
+OAUTH_CHALLENGES: dict[str, bool] = {}
+
+
+def record_oauth_challenge(server_url: str, *, oauth_available: bool) -> None:
+    """Remember that ``server_url`` answered with an authorization challenge.
+
+    ``oauth_available`` is whether discovery found an authorization server.
+    A True observation is never downgraded by a later False: discovery is a
+    network call that can fail transiently, and forgetting that a server is
+    OAuth-capable would put the user back on the dead-end message.
+    """
+    if oauth_available or server_url not in OAUTH_CHALLENGES:
+        OAUTH_CHALLENGES[server_url] = oauth_available
+
+
+def server_has_stored_grant(server_url: str, store: StructuralAuthStore | None = None) -> bool:
+    """True when an OAuth credential row already exists for ``server_url``.
+
+    This is the honest basis for choosing between ``/mcp login`` (we have
+    never held a grant here) and ``/mcp reauth`` (we hold one and the server
+    just rejected it), and it is also the DURABLE signal that a server without
+    an explicit ``auth`` block authenticates over OAuth — the observed-challenge
+    ledger above is per-process, so without this a restart would connect
+    unauthenticated again and ignore a perfectly good stored token.
+
+    A row is NOT enough: the same row also carries ``client_info``, the dynamic
+    client registration the SDK writes when it merely DISCOVERS a server, well
+    before any user authorizes. Counting that as a grant made a server nobody
+    had ever logged into report "authorization expired — run /mcp reauth",
+    sending the user to replace a credential that was never issued. Only an
+    actual token payload counts.
+
+    Never raises: an unreadable store degrades to "no stored grant", which
+    costs a wording nuance rather than a connect.
+    """
+    try:
+        payload = McpTokenStorage(server_url, store)._read()
+    except Exception:  # noqa: BLE001 — the store is best-effort here
+        logger.debug("stored-grant lookup failed for %s", server_url, exc_info=True)
+        return False
+    if not payload:
+        return False
+    tokens = payload.get("tokens")
+    if not isinstance(tokens, dict):
+        return False
+    return bool(tokens.get("access_token") or tokens.get("refresh_token"))
+
+
+def server_rejects_oauth(cfg: MCPServerConfig) -> bool:
+    """True when this config can NEVER use an OAuth grant — a static fact.
+
+    Two shapes qualify, and both are decidable without touching the network:
+    a stdio server (no transport that can carry a bearer token) and a server
+    whose config explicitly declares some OTHER auth type. An ``apikey`` entry
+    is a statement by the user about how this server authenticates, and
+    starting an OAuth flow on it would answer a question they already
+    answered — the login must stay a hard refusal there (F3).
+    """
+    auth = getattr(cfg, "auth", None)
+    auth_type = getattr(auth, "type", None) if auth is not None else None
+    if auth_type is not None and auth_type != "oauth":
+        return True
+    return not getattr(cfg, "url", None)
+
+
+def server_is_oauth_capable(
+    cfg: MCPServerConfig,
+    store: StructuralAuthStore | None = None,
+) -> bool:
+    """Whether this server should be connected through the OAuth provider.
+
+    Three ways to qualify, in order of authority:
+
+    1. an explicit ``auth.type == "oauth"`` block — the local-operator format's
+       own signal, and the only one that existed before;
+    2. a stored OAuth credential for its URL — durable proof across restarts
+       that this server authenticates with a grant we already hold;
+    3. an observed 401/403 challenge whose discovery found an authorization
+       server — the live signal that rescues a config which simply does not
+       carry an auth block.
+
+    A server matching none of the three stays unauthenticated, with no
+    discovery and no added latency: that is what keeps a genuinely public MCP
+    server (``developers.openai.com/mcp``) connecting exactly as it does today,
+    and what stops us attaching an OAuth provider to every remote server on
+    boot. There is deliberately no "assume yes" mode — an explicit login that
+    needs an answer this cannot give asks the network for one instead, via
+    :func:`probe_oauth_capability`.
+    """
+    if server_rejects_oauth(cfg):
+        return False
+    auth = getattr(cfg, "auth", None)
+    if auth is not None and getattr(auth, "type", None) == "oauth":
+        return True
+    url = getattr(cfg, "url", None)
+    if not url:
+        return False
+    if OAUTH_CHALLENGES.get(url):
+        return True
+    return server_has_stored_grant(url, store)
+
+
+async def probe_oauth_capability(
+    cfg: MCPServerConfig, store: StructuralAuthStore | None = None
+) -> bool:
+    """Answer "can this server take an OAuth grant?", asking the network if needed.
+
+    The gate an explicit ``/mcp login`` runs. Whether a server without an auth
+    block uses OAuth is not knowable from the config — that is the whole
+    problem a foreign-tool import creates — so when the static evidence is
+    silent this performs the one RFC 9728/8414 discovery that settles it, and
+    records the result for later connects.
+
+    This replaces an earlier "a deliberate login accepts any remote server"
+    shortcut, which enabled the command for known-public and API-key servers
+    (F3). Paying one metadata round trip is the honest way to keep the first
+    login on a fresh import working WITHOUT claiming every URL is
+    authenticable: a server that advertises no authorization server is now
+    refused with the same message a stdio server gets, instead of being sent
+    into a grant that cannot complete.
+    """
+    if server_is_oauth_capable(cfg, store):
+        return True
+    if server_rejects_oauth(cfg):
+        return False
+    url = getattr(cfg, "url", None)
+    if not url:
+        return False
+    try:
+        discovered = await discover_oauth_endpoints(url) is not None
+    except Exception:  # noqa: BLE001 — a probe failure must not crash the command
+        logger.debug("OAuth capability probe failed for %s", url, exc_info=True)
+        return False
+    if discovered:
+        record_oauth_challenge(url, oauth_available=True)
+    return discovered
+
+
 def oauth_server_names(cwd: str | os.PathLike[str]) -> list[str]:
     """Names of configured OAuth-enabled servers, in config order.
 
     The ``/mcp login|reauth|logout`` argument lists are filled from this, so
-    they offer exactly the servers those commands can act on — a stdio or
-    API-key server has no OAuth grant to log into or out of, and offering it
-    would be a row whose only outcome is a warning notice.
+    they offer exactly the servers those commands can act on — a stdio server
+    has no OAuth grant to log into or out of, and offering it would be a row
+    whose only outcome is a warning notice.
+
+    A server with no explicit ``auth`` block is offered once there is EVIDENCE
+    it authenticates — a stored grant, or an observed OAuth challenge — which
+    is how a foreign-tool import (Codex, issue #367) reaches this list: its
+    connect fails first and records the challenge, so the picker then offers
+    exactly the server the user just watched fail.
+
+    Deliberately the STRICT test, unlike the gate that executes a login: a
+    suggestion list is a claim that these servers have something to log into,
+    and speculatively listing every remote server would fill the picker with
+    rows whose only outcome is a warning notice. Typing an unlisted name still
+    works (see the TUI's ``_resolve_mcp_server``), so nothing is unreachable.
     """
     from local_operator.mcp.config import load_all_mcp_configs
 
     configs, _sources = load_all_mcp_configs(cwd)
-    return [
-        name
-        for name, cfg in configs.items()
-        if getattr(getattr(cfg, "auth", None), "type", None) == "oauth"
-    ]
+    return [name for name, cfg in configs.items() if server_is_oauth_capable(cfg)]
 
 
 def mcp_logout_server(
@@ -645,8 +849,10 @@ def mcp_logout_server(
     cfg = configs.get(name)
     if cfg is None:
         return f"MCP server {name!r} is not configured"
-    auth = getattr(cfg, "auth", None)
-    if auth is None or getattr(auth, "type", None) != "oauth":
+    # Strict, like the picker: logging out is only meaningful for a server we
+    # actually hold — or have observed the need for — a grant on. A stored
+    # grant satisfies this on its own, which is the case that matters here.
+    if not server_is_oauth_capable(cfg, store):
         return f"MCP server {name!r} does not use OAuth login"
     # Only remote configs carry ``url``; a stdio config reaching here would
     # have already failed the OAuth check above, so the getattr is a type

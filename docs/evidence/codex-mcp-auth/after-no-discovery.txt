@@ -1,0 +1,3 @@
+[worktree assert OK] manager=/private/tmp/lop-codex-auth/local_operator/mcp/manager.py
+  raised: McpAuthChallengeError
+  user sees: × MCP apikey-only failed: apikey-only rejected our credentials (401) — no OAuth endpoint advertised; check its API key or headers

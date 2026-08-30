@@ -1,0 +1,10 @@
+=== AFTER (this worktree) ===
+  conn-refused   CancelledError: Cancelled via cancel scope 10b2c6f30
+  dns-nxdomain   CancelledError: Cancelled via cancel scope 10b361310
+  http-500       MCPError: Server returned an error response
+  http-404       MCPError: Not Found
+=== BEFORE (origin/main) ===
+  conn-refused   CancelledError: Cancelled via cancel scope 10af3b610
+  dns-nxdomain   CancelledError: Cancelled via cancel scope 10afb5a90
+  http-500       MCPError: Server returned an error response
+  http-404       MCPError: Not Found
