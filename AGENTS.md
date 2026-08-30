@@ -395,6 +395,19 @@ change.
   `call_after_refresh`, so notches arriving in one burst all read the same stale
   offset and a fast flick collapses to a couple of rows.
 
+  Step the handler by the LIVE `app.scroll_sensitivity_y`, never by a constant
+  copied from it. It is a per-instance attribute set in `App.__init__`, so a
+  hardcoded step that matches today desynchronises the moment anything changes
+  it — measured at 4.0, the container applied 4 rows per notch over the list and
+  the widget handler 2 everywhere else, which is the position-dependence above
+  reappearing.
+
+  Finally, **the cursor being allowed off screen is a contract with the keys**:
+  once the wheel can leave it behind, every key that ACTS on the cursor has to
+  scroll it into view first, or it writes to a row the user cannot see and the
+  frame does not change. Reveal-then-act, not an interlock that makes the first
+  press a no-op — the press should still do what it says on the first try.
+
   The trigger is "the list is the whole page", NOT "the list scrolls", and the
   difference is load-bearing: `model_picker.move` windows a catalogue of
   hundreds of rows and still WRAPS, correctly, because it is an overlay on the
