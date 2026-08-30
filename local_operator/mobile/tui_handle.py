@@ -341,7 +341,11 @@ class TuiSessionHandle(SessionHandle):
 
         if not await self._on_app(do_steer):
             return "already admitted"
-        self._fold.note_user_message(text, steer=True)
+        # Keyed by the id `do_steer` handed the session (always supplied on
+        # this path), so the drain's MessageStartEvent upgrades THIS row
+        # instead of being matched against the transcript tail — by delivery
+        # time a steer's echo is several assistant/tool rows back (issue #231).
+        self._fold.note_user_message(text, steer=True, message_id=command_id)
         if self._on_projection is not None:
             self._on_projection()
         return "steering queued"

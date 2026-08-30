@@ -1,0 +1,40 @@
+"""Render the #228 collision case: a TUI steer "continue", then the phone's own
+"continue". Uses the REAL OperatorApp (so local_operator.tcss applies)."""
+import asyncio, inspect, sys
+sys.path.insert(0, sys.argv[2])
+
+from local_operator.tui.app import OperatorApp
+from local_operator.tui.events import UserMessageStart
+from local_operator.tui.widgets.editor import Editor
+from local_operator.tui.widgets.transcript import TranscriptView, UserBlock
+from tests.unit.tui.test_app_pilot import FakeSession, _factory
+
+
+class Streaming(FakeSession):
+    @property
+    def is_streaming(self): return True
+
+
+async def main() -> None:
+    session = Streaming()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(200):
+            if app._session is not None: break
+            await pilot.pause(); await asyncio.sleep(0.01)
+        ed = app.query_one(Editor); ed.focus(); await pilot.pause()
+        ed.text = "continue"; await pilot.pause()
+        await pilot.press("enter"); await pilot.pause()
+
+        supports_id = "message_id" in inspect.signature(UserMessageStart.__init__).parameters
+        evt = (UserMessageStart("continue", 0, "phone-message-id") if supports_id
+               else UserMessageStart("continue", 0))
+        app.post_message(evt)
+        await pilot.pause(); await pilot.pause()
+
+        rows = [b for b in app.query_one(TranscriptView).blocks()
+                if isinstance(b, UserBlock) and b.text() == "continue"]
+        app.save_screenshot(sys.argv[1])
+        print(f"{sys.argv[1]}: {len(rows)} 'continue' user row(s)")
+
+asyncio.run(main())

@@ -817,3 +817,95 @@ async def test_compact_now_during_recovery_refuses_in_user_language(
     finally:
         if remote is not None:
             await remote.dispose()
+
+
+# --- round 1, F1: the follower's prompt path carries the caller's id ---------
+
+
+class _RecordingClient:
+    """A connected-shape client that records the command instead of sending it."""
+
+    connected = True
+
+    def __init__(self) -> None:
+        self.commands: list[Any] = []
+
+    async def send_command(self, command: Any, *, streaming: bool = False) -> str:
+        self.commands.append(command)
+        return "prompt admitted"
+
+
+@pytest.mark.asyncio
+async def test_follower_prompt_carries_a_caller_supplied_message_id() -> None:
+    """A follower TUI correlates its optimistic echo by id like the owner does.
+
+    The TUI probes ``prompt`` for a ``message_id`` keyword and registers the id
+    it supplies, matching the announcement against it. ``RemoteSession.prompt``
+    had no such keyword -- it minted its own via ``ContinuationCommand.create``
+    -- so on an attached follower the probe failed, the entry registered
+    id-less, and a DISTINCT message whose words collided was still swallowed
+    (#228). The id must reach the wire as the command id, which the owner then
+    adopts as the Message id and announces back.
+    """
+    remote = _bare_remote(Path("/tmp/r1-f1-prompt"))
+    remote._owner_ready.set()
+    client = _RecordingClient()
+    remote._client = client  # type: ignore[assignment]
+
+    await remote.prompt("continue", message_id="tui-minted-id")
+
+    assert len(client.commands) == 1
+    assert (
+        client.commands[0].command_id == "tui-minted-id"
+    ), "the caller's id must ride the wire as the command id"
+    assert client.commands[0].text == "continue"
+
+
+@pytest.mark.asyncio
+async def test_follower_prompt_still_mints_an_id_when_none_is_supplied() -> None:
+    """The historical behaviour is preserved for callers that supply nothing:
+    the command still gets a fresh, valid identity rather than an empty one."""
+    import uuid
+
+    remote = _bare_remote(Path("/tmp/r1-f1-mint"))
+    remote._owner_ready.set()
+    client = _RecordingClient()
+    remote._client = client  # type: ignore[assignment]
+
+    await remote.prompt("no id supplied")
+
+    assert len(client.commands) == 1
+    minted = client.commands[0].command_id
+    assert minted, "a command with no identity cannot be reconciled on reconnect"
+    uuid.UUID(minted)  # the wire validator requires a real UUID
+
+
+@pytest.mark.asyncio
+async def test_a_takeover_target_without_the_seam_is_not_handed_an_id() -> None:
+    """``message_id`` is optional on SessionProtocol, so a takeover target that
+    cannot accept one must be called the old way rather than with a keyword it
+    would reject -- the same probe the TUI makes, for the same reason."""
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    class _LegacyTarget:
+        async def prompt(self, text: str, images: Any = None) -> None:
+            calls.append((text, {}))
+
+    class _ModernTarget:
+        async def prompt(
+            self, text: str, images: Any = None, *, message_id: str | None = None
+        ) -> None:
+            calls.append((text, {"message_id": message_id}))
+
+    legacy = _bare_remote(Path("/tmp/r1-f1-legacy"))
+    legacy._owner_ready.set()
+    legacy._takeover_target = _LegacyTarget()  # type: ignore[assignment]
+    await legacy.prompt("hello", message_id="an-id")
+    assert calls == [("hello", {})], "a legacy target must not receive the keyword"
+
+    calls.clear()
+    modern = _bare_remote(Path("/tmp/r1-f1-modern"))
+    modern._owner_ready.set()
+    modern._takeover_target = _ModernTarget()  # type: ignore[assignment]
+    await modern.prompt("hello", message_id="an-id")
+    assert calls == [("hello", {"message_id": "an-id"})], "the id must reach a capable target"

@@ -618,7 +618,19 @@ class OwnedSessionHandle(SessionHandle):
             raise
         self._command_reservations.accept(command_id)
         self._projection.queued_count += 1
-        self._fold.note_user_message(text, steer=True)
+        # Register the echo under the id the session will actually announce, so
+        # the drain's MessageStartEvent upgrades THIS row rather than being
+        # matched against the transcript tail (issue #231) — a steer is
+        # delivered at a later tool boundary, by which point assistant and tool
+        # rows have pushed the echo out of any window. Only when `message_id`
+        # really reached the session: a session that mints its own id would
+        # announce something this key could never match, and the fold's tail
+        # fallback is the correct behaviour there.
+        self._fold.note_user_message(
+            text,
+            steer=True,
+            message_id=command_id if "message_id" in fields else None,
+        )
         self._notify()
         return "steering queued"
 

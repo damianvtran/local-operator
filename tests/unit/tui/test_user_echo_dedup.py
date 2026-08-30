@@ -16,6 +16,16 @@ the TUI paints for a message the session will later announce is recorded in
 ``_pending_user_echoes``, and ``on_user_message_start`` consumes a matching
 entry instead of painting. No entry means the message came from another front
 end, which is the case the handler exists to paint.
+
+Issue #228 is the second half: the registry originally matched by TEXT, so a
+DISTINCT message whose words collided with a pending echo (repeated "yes" /
+"continue" sent from the phone while a TUI echo of the same words was still
+outstanding) consumed that entry and never painted — the message reached the
+model and the transcript stayed silent about it. Entries now carry the message
+id the app itself minted and handed to the session, so an id this surface never
+registered paints however familiar the words. An entry with no id (a session
+whose ``prompt`` predates the ``message_id`` seam) keeps the text match, which
+is what the ``FakeSession`` cases below exercise.
 """
 
 from __future__ import annotations
@@ -55,6 +65,54 @@ class _Streaming(FakeSession):
         # `steer` override did and let the base fake hold the object.
         self.steers.append(message.text)
         super().steer_message(message)
+
+
+class _IdAware(FakeSession):
+    """A fake with the production ``message_id`` seam on ``prompt``.
+
+    ``FakeSession`` deliberately predates it, which is how the legacy text
+    fallback stays covered; this one is the shape the real ``Session`` has, so
+    the app mints a correlation id and hands it over. ``prompt_ids`` records
+    what it received, which is the id the real session would then announce.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.prompt_ids: list[str | None] = []
+
+    async def prompt(  # type: ignore[override]
+        self,
+        text: str,
+        images: Sequence[ImageContent] | None = None,
+        *,
+        message_id: str | None = None,
+    ) -> None:
+        self.prompt_ids.append(message_id)
+        await super().prompt(text, images)
+
+
+def _echo_ids(app: OperatorApp) -> list[str]:
+    """The message ids of the pending echo entries, in registration order."""
+    return [entry.message_id for entry in app._pending_user_echoes]
+
+
+def _echo_texts(app: OperatorApp) -> list[str]:
+    """The texts of the pending echo entries, in registration order."""
+    return [entry.text for entry in app._pending_user_echoes]
+
+
+def _steer_id(session: FakeSession, text: str) -> str:
+    """The id of the queued steering Message carrying ``text``.
+
+    The session announces a drained steer with the very object the app queued,
+    so this is the id the real ``MessageStartEvent`` would carry — the tests
+    below post it rather than an empty id, which is what makes them exercise
+    the id path instead of the legacy fallback.
+    """
+    for message in session.queued_steering():
+        if getattr(message, "text", None) == text:
+            return str(message.id)
+    raise AssertionError(f"no queued steer carrying {text!r}")
 
 
 def _user_blocks(app: OperatorApp, text: str) -> list[UserBlock]:
@@ -120,7 +178,7 @@ async def test_a_steered_message_is_not_painted_again_by_its_own_delivery() -> N
         app._append_block(NoticeBlock("stand-in for a second tool card", "info"))
         await pilot.pause()
 
-        app.post_message(UserMessageStart(steer, 0))
+        app.post_message(UserMessageStart(steer, 0, _steer_id(session, steer)))
         await pilot.pause()
 
         assert len(_user_blocks(app, steer)) == 1, "the delivery echoed an already-painted row"
@@ -141,10 +199,12 @@ async def test_two_steers_drained_together_neither_repaints() -> None:
         await _submit(pilot, app, "second steer")
         assert session.steers == ["first steer", "second steer"]
 
+        first_id = _steer_id(session, "first steer")
+        second_id = _steer_id(session, "second steer")
         app.post_message(SteeringDelivered(2))
         await pilot.pause()
-        app.post_message(UserMessageStart("first steer", 0))
-        app.post_message(UserMessageStart("second steer", 0))
+        app.post_message(UserMessageStart("first steer", 0, first_id))
+        app.post_message(UserMessageStart("second steer", 0, second_id))
         await pilot.pause()
 
         assert len(_user_blocks(app, "first steer")) == 1
@@ -207,7 +267,7 @@ async def test_a_session_swap_drops_the_echoes_waiting_on_the_old_queue() -> Non
     async with app.run_test(size=(100, 24)) as pilot:
         await pilot.pause()
         await _submit(pilot, app, "same words, new session")
-        assert app._pending_user_echoes == ["same words, new session"]
+        assert _echo_texts(app) == ["same words, new session"]
 
         app._session_factory = lambda: _factory(FakeSession())  # type: ignore[assignment]
         await app._reload_session()
@@ -257,15 +317,16 @@ async def test_a_pending_echo_survives_clear_and_is_consumed_by_its_event() -> N
     async with app.run_test(size=(100, 24)) as pilot:
         await pilot.pause()
         await _submit(pilot, app, "survives the clear")
-        assert app._pending_user_echoes == ["survives the clear"]
+        assert _echo_texts(app) == ["survives the clear"]
+        steer_id = _steer_id(session, "survives the clear")
 
         app._clear_transcript()
         await pilot.pause()
-        assert app._pending_user_echoes == [
+        assert _echo_texts(app) == [
             "survives the clear"
         ], "the clear removed the row but not the event that is still coming"
 
-        app.post_message(UserMessageStart("survives the clear", 0))
+        app.post_message(UserMessageStart("survives the clear", 0, steer_id))
         await pilot.pause()
         assert app._pending_user_echoes == []
         assert _user_blocks(app, "survives the clear") == [], "consumed, not repainted"
@@ -284,19 +345,20 @@ async def test_a_deferred_steer_is_settled_not_repainted_by_the_next_turns_echo(
     async with app.run_test(size=(100, 24)) as pilot:
         await pilot.pause()
         await _submit(pilot, app, "deferred across the turn")
-        assert app._pending_user_echoes == ["deferred across the turn"]
+        assert _echo_texts(app) == ["deferred across the turn"]
+        steer_id = _steer_id(session, "deferred across the turn")
 
         app.post_message(TurnEnded(True, None))
         await pilot.pause()
         assert DEFERRED_STEER_NOTICE in _notice_texts(app)
-        assert app._pending_user_echoes == [
+        assert _echo_texts(app) == [
             "deferred across the turn"
         ], "the turn ended, but the message is still queued — the entry stays"
 
         # The next turn's drain: the receipt settles the deferred row, and the
         # announcement consumes the entry instead of repainting the message.
         app.post_message(SteeringDelivered(1))
-        app.post_message(UserMessageStart("deferred across the turn", 0))
+        app.post_message(UserMessageStart("deferred across the turn", 0, steer_id))
         await pilot.pause()
         texts = _notice_texts(app)
         assert SENT_STEER_NOTICE in texts and DEFERRED_STEER_NOTICE not in texts
@@ -321,3 +383,147 @@ async def test_the_loop_prompt_never_gets_a_user_row() -> None:
         app.post_message(UserMessageStart(LOOP_PROMPT, 0))
         await pilot.pause()
         assert _user_blocks(app, LOOP_PROMPT) == []
+
+
+# --- issue #228: a distinct message whose words collide must still paint ------
+
+
+@pytest.mark.asyncio
+async def test_a_foreign_prompt_with_the_words_of_a_pending_steer_still_paints() -> None:
+    """Issue #228, reproduced: the collision the text match swallowed.
+
+    A steer is queued from the TUI ("continue") and its echo is pending. The
+    PHONE then sends its own "continue", which the session announces with a
+    DIFFERENT message id. Matching by text consumed the steer's entry and
+    painted nothing, so the TUI showed one row where the conversation had two
+    messages — the model saw both and the transcript denied one of them. The id
+    is what tells them apart.
+    """
+    session = _Streaming()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        await _submit(pilot, app, "continue")
+        assert len(_user_blocks(app, "continue")) == 1, "the TUI's own echo"
+        steer_id = _steer_id(session, "continue")
+
+        # The phone's message: same words, its own identity.
+        app.post_message(UserMessageStart("continue", 0, "phone-message-id"))
+        await pilot.pause()
+        assert (
+            len(_user_blocks(app, "continue")) == 2
+        ), "the phone's distinct message must paint; matching by text swallowed it"
+        assert _echo_ids(app) == [steer_id], "the steer's entry is still waiting on its own event"
+
+        # And the true duplicate is still suppressed EXACTLY once: the steer's
+        # own delivery finds its entry and repaints nothing.
+        app.post_message(SteeringDelivered(1))
+        app.post_message(UserMessageStart("continue", 0, steer_id))
+        await pilot.pause()
+        assert len(_user_blocks(app, "continue")) == 2, "the steer's own event must not repaint"
+        assert app._pending_user_echoes == []
+
+
+@pytest.mark.asyncio
+async def test_the_prompt_path_registers_the_id_it_handed_the_session() -> None:
+    """The prompt half of the same contract, end to end.
+
+    The app mints the correlation id and pushes it into ``prompt(message_id=)``
+    — it cannot read one back, because ``prompt`` returns only when the whole
+    turn is over, long after the announcement. The id the session received is
+    therefore the id its ``MessageStartEvent`` carries, and it must be the id
+    sitting in the registry.
+    """
+    session = _IdAware()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        await _submit(pilot, app, "a prompt with an id")
+        for _ in range(10):
+            await pilot.pause()
+
+        assert session.prompts == ["a prompt with an id"]
+        assert session.prompt_ids and session.prompt_ids[0], "the app must supply a message_id"
+        assert _echo_ids(app) == [session.prompt_ids[0]]
+
+        # A colliding message from elsewhere paints...
+        app.post_message(UserMessageStart("a prompt with an id", 0, "some-other-id"))
+        await pilot.pause()
+        assert len(_user_blocks(app, "a prompt with an id")) == 2
+
+        # ...and this prompt's own announcement still suppresses its repaint.
+        app.post_message(UserMessageStart("a prompt with an id", 0, session.prompt_ids[0] or ""))
+        await pilot.pause()
+        assert len(_user_blocks(app, "a prompt with an id")) == 2
+        assert app._pending_user_echoes == []
+
+
+@pytest.mark.asyncio
+async def test_a_session_without_the_message_id_seam_keeps_the_text_match() -> None:
+    """``FakeSession.prompt`` has no ``message_id`` keyword, so the app must
+    NOT mint an id it cannot hand over: an entry keyed by an id the session
+    will never announce could match nothing, and every prompt would paint
+    twice. Such an entry registers id-less and matches by text, exactly as
+    before — the compatibility path older and third-party sessions ride."""
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        await _submit(pilot, app, "no id seam here")
+        for _ in range(10):
+            await pilot.pause()
+        assert _echo_ids(app) == [""], "no id may be minted for a session that cannot take one"
+
+        # The session mints its own id, so the announcement carries one the app
+        # has never seen — and the text fallback is what suppresses the repaint.
+        app.post_message(UserMessageStart("no id seam here", 0, "session-minted-id"))
+        await pilot.pause()
+        assert len(_user_blocks(app, "no id seam here")) == 1
+        assert app._pending_user_echoes == []
+
+
+@pytest.mark.asyncio
+async def test_an_id_carrying_entry_is_never_consumed_by_a_text_collision() -> None:
+    """The fallback must not undo the fix. An entry that HAS an id has an exact
+    event coming, so an id-less announcement carrying the same words must paint
+    rather than spend it — otherwise the steer's own delivery would later find
+    its entry gone and paint the duplicate #227 removed."""
+    session = _Streaming()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        await _submit(pilot, app, "yes")
+        steer_id = _steer_id(session, "yes")
+
+        # An announcement with no id at all (a reduced event producer): it is
+        # not this steer's, so it paints and leaves the entry standing.
+        app.post_message(UserMessageStart("yes", 0))
+        await pilot.pause()
+        assert len(_user_blocks(app, "yes")) == 2
+        assert _echo_ids(app) == [steer_id]
+
+        app.post_message(UserMessageStart("yes", 0, steer_id))
+        await pilot.pause()
+        assert len(_user_blocks(app, "yes")) == 2, "the steer's own delivery must not repaint"
+
+
+@pytest.mark.asyncio
+async def test_a_recalled_steer_takes_only_its_own_entry() -> None:
+    """Esc unsends a queued steer, so its entry must go with the row it
+    described. By ID: with two steers carrying the same words, a by-text
+    removal could take the sibling's entry and leave the recalled one standing
+    — the survivor would then swallow the resend's echo."""
+    session = _Streaming()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        await _submit(pilot, app, "same words")
+        await _submit(pilot, app, "same words")
+        first_id = _steer_id(session, "same words")
+        ids = _echo_ids(app)
+        assert len(ids) == 2 and ids[0] == first_id
+
+        # Esc recalls the NEWEST steer; its entry, and only its entry, goes.
+        await pilot.press("escape")
+        await pilot.pause()
+        assert _echo_ids(app) == [first_id], "the recall took the wrong steer's entry"

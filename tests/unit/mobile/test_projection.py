@@ -886,3 +886,107 @@ def test_absorb_user_event_upgrades_echoed_row_with_image_refs() -> None:
     upgraded = fold.projection.transcript[-1]
     assert upgraded.id == message.id
     assert upgraded.images == [{"index": 0, "mime_type": "image/png"}]
+
+
+# --- issue #231: user echoes de-duped by id, not by a 3-entry tail window ----
+
+
+def test_a_phone_steer_is_not_repainted_once_assistant_rows_push_it_out() -> None:
+    """Issue #231, reproduced: the defect the tail window guaranteed.
+
+    A phone steer is echoed optimistically, then the turn keeps running — the
+    engine only drains the steering queue at a LATER tool boundary, so by the
+    time the message's own ``MessageStartEvent`` arrives the echo is several
+    assistant rows back. The three-entry scan could no longer see it and
+    painted the steer a second time. The registry keys on the message id, so
+    distance from the tail is irrelevant.
+    """
+    fold = make_fold()
+    command_id = "cmd-steer-1"
+    fold.note_user_message("use the other endpoint", steer=True, message_id=command_id)
+    assert len([e for e in fold.projection.transcript if e.kind == "steer"]) == 1
+
+    # The turn goes on: four assistant rows push the echo well past the window
+    # the old scan looked at.
+    for index in range(4):
+        fold.fold_event(
+            MessageStartEvent(message=Message.assistant(f"still working {index}")),
+        )
+    assert len(fold.projection.transcript) == 5
+
+    # Only NOW is the steer drained and announced, carrying the id the handle
+    # supplied as the message id.
+    fold.absorb_user_event(Message.user("use the other endpoint", id=command_id))
+
+    rows = [e for e in fold.projection.transcript if e.text == "use the other endpoint"]
+    assert len(rows) == 1, "the drain repainted a steer already on the phone"
+    assert rows[0].kind == "steer", "the echo's own row survives, not a fresh user row"
+
+
+def test_absorb_user_event_returns_false_for_a_registered_echo() -> None:
+    """The de-dupe contract the callers read: a registered echo is folded into
+    the existing row, so the fold reports it did NOT add one."""
+    fold = make_fold()
+    fold.note_user_message("already on screen", steer=True, message_id="cmd-2")
+    added = fold.absorb_user_event(Message.user("already on screen", id="cmd-2"))
+    assert added is False
+    assert len([e for e in fold.projection.transcript if e.text == "already on screen"]) == 1
+
+
+def test_a_distinct_message_with_colliding_words_still_paints() -> None:
+    """The mirror image of the same defect: a genuinely NEW message whose text
+    matched a recent row was swallowed by the window. Different id, different
+    message, so it must appear."""
+    fold = make_fold()
+    fold.note_user_message("continue", steer=True, message_id="cmd-3")
+    fold.absorb_user_event(Message.user("continue", id="a-different-message"))
+    rows = [e for e in fold.projection.transcript if e.text == "continue"]
+    assert len(rows) == 2, "a distinct message must not be eaten by a word collision"
+
+
+def test_a_registered_echo_row_is_not_consumed_by_a_colliding_neighbour() -> None:
+    """The tail fallback (for handles with no id) must not spend a row that has
+    an EXACT event coming: that row's own announcement would then find its
+    entry gone and paint the duplicate this issue exists to remove."""
+    fold = make_fold()
+    fold.note_user_message("same words", steer=True, message_id="cmd-4")
+
+    # An id-less announcement carrying the same words: not the registered
+    # steer's, so it paints rather than consuming that row.
+    fold.absorb_user_event(Message.user("same words", id="foreign"))
+    assert len([e for e in fold.projection.transcript if e.text == "same words"]) == 2
+
+    # The registered steer's own event still upgrades its row, adding nothing.
+    fold.absorb_user_event(Message.user("same words", id="cmd-4"))
+    assert len([e for e in fold.projection.transcript if e.text == "same words"]) == 2
+
+
+def test_the_echoed_row_adopts_the_persisted_message_id() -> None:
+    """The row is keyed by the command id until the real message arrives; from
+    then on it must carry the message id, which is what a later history fold
+    and the web client's list reconciliation agree on."""
+    fold = make_fold()
+    fold.note_user_message("key me", steer=True, message_id="cmd-5")
+    assert fold.projection.transcript[-1].id == "cmd-5"
+    fold.absorb_user_event(Message.user("key me", id="cmd-5"))
+    assert fold.projection.transcript[-1].id == "cmd-5"
+
+
+def test_a_legacy_handle_without_an_id_keeps_the_tail_dedup() -> None:
+    """A handle that supplies no id (older/third-party) still de-dupes its own
+    echo through the historical tail scan — the compatibility path."""
+    fold = make_fold()
+    fold.note_user_message("no id supplied", steer=True)
+    added = fold.absorb_user_event(Message.user("no id supplied"))
+    assert added is False
+    assert len([e for e in fold.projection.transcript if e.text == "no id supplied"]) == 1
+
+
+def test_a_history_fold_clears_pending_echoes() -> None:
+    """A wholesale rebuild replaces the rows the entries pointed at, so a
+    surviving entry would reference a row no longer in the transcript."""
+    fold = make_fold()
+    fold.note_user_message("pending across the fold", steer=True, message_id="cmd-6")
+    assert fold._pending_user_echoes
+    fold.fold_history([Message.user("something else entirely")])
+    assert fold._pending_user_echoes == {}

@@ -1011,19 +1011,54 @@ class RemoteSession:
 
     # -- driving turns ------------------------------------------------------
 
-    async def prompt(self, text: str, images: Sequence[ImageContent] | None = None) -> None:
+    async def prompt(
+        self,
+        text: str,
+        images: Sequence[ImageContent] | None = None,
+        *,
+        message_id: str | None = None,
+    ) -> None:
+        """Send a prompt to the owner, optionally under a caller-supplied id.
+
+        ``message_id`` becomes the ``ContinuationCommand`` id, which the owner
+        adopts as the ``Message`` id and announces back on the user
+        ``MessageStartEvent``. A follower TUI needs that round trip for the same
+        reason the owner path does: it registers the id it painted a row for and
+        matches the announcement against it, so a DISTINCT message with
+        colliding words still paints (#228). Without the keyword the TUI's seam
+        probe found nothing to hand an id to, registered the entry id-less, and
+        an attached follower kept the swallow this class of fix removes.
+
+        The steering twin has always carried identity this way
+        (``_send_steer_when_ready`` sends ``command_id=message.id``); this is
+        the prompt path catching up with its own sibling. Minted here when the
+        caller supplies nothing, which is the historical behaviour.
+        """
         await self._owner_ready.wait()
         target = self._takeover_target
         if target is not None:
-            await target.prompt(text, images)
+            # A takeover means a real in-process Session now owns the
+            # conversation. Forward the id only when that target can take one:
+            # the seam is optional on SessionProtocol, and a target without it
+            # mints its own — the same probe the TUI makes, for the same reason.
+            if message_id and "message_id" in inspect.signature(target.prompt).parameters:
+                await target.prompt(text, images, message_id=message_id)
+            else:
+                await target.prompt(text, images)
             return
         client = self._client
         if client is None or not client.connected:
             raise ConnectionError("session owner is reconnecting")
-        command = ContinuationCommand.create(
-            self._session_id,
-            text,
-            [_image_to_wire(image) for image in (images or [])],
+        images_wire = [_image_to_wire(image) for image in (images or [])]
+        command = (
+            ContinuationCommand(
+                command_id=message_id,
+                session_id=self._session_id,
+                text=text,
+                images=images_wire,
+            )
+            if message_id
+            else ContinuationCommand.create(self._session_id, text, images_wire)
         )
         await client.send_command(command, streaming=self._streaming)
 
