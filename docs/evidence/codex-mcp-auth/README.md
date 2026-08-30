@@ -177,3 +177,64 @@ wording — so the design round's frames remain current:
 
 Direct 401, 403, public 200, and 404/500 non-auth parity all unchanged, and
 startup still opens zero browsers.
+
+## Round 2 remediation (F5–F6)
+
+**F5 — a challenge could still relabel a later NETWORK failure.** Round 1
+cleared the latch only when a later *response* arrived on the endpoint. A retry
+that dies at DNS/connect/TLS/read time produces no response at all, so no hook
+ran and the earlier 401 stayed latched — the terminal network failure was
+reported as `/mcp login`.
+
+The verdict is now bound to the **request**, not the last response: a
+`request` event hook (`_AuthChallengeWatcher.begin`) clears the slot as each
+same-endpoint request starts, and `observe` sets it only if that request comes
+back 401/403. Whatever happens next — a response, or a socket error that never
+produces one — no stale verdict survives. A request to any other URL (the
+provider's discovery and token traffic) neither sets nor clears.
+
+Proven end to end with a real `httpx` client and a real server:
+
+```
+after the 401           : watcher verdict = 401
+retry failed with       : ReadTimeout (no response)
+after the dead retry    : watcher verdict = None
+classified as           : None      (NOT auth advice)
+```
+
+**F6 — the login gates dropped the manager's effective store.** Both
+`_mcp_login_worker` and `_run_mcp_grant_on_owner` called
+`probe_oauth_capability(cfg)` with no store, so a server whose grant exists
+only in an injected store was refused as "does not use OAuth login" whenever
+discovery was unavailable — even though the same manager had just classified
+its failure as `reauth` from that store.
+
+Eligibility is now a manager-owned operation,
+`McpManager.server_supports_oauth_login`, which passes its own effective store
+through. Both entry points call it via one TUI helper; a reduced follower
+facade that does not implement it falls back to the store-less probe, which is
+correct because such a facade owns no store to consult.
+
+With discovery offline and a grant in a custom store:
+
+```
+probe_oauth_capability(cfg)                  -> False   (the old call)
+manager.server_supports_oauth_login(cfg)     -> True    (consults its store)
+```
+
+### Parity preserved
+
+The live matrix and the whole transport matrix are byte-identical to round 1 —
+same verbs, same wording, so the terminal design round remains current:
+
+```
+✓ openaiDeveloperDocs: connected
+× datadog:      run /mcp login datadog to authorize
+× gitlab:       run /mcp reauth gitlab — authorization expired
+× launchdarkly: run /mcp login launchdarkly to authorize
+× minerva-qa:   run /mcp login minerva-qa to authorize
+
+F1-redirect-401    McpAuthChallengeError    parity-500  MCPError (unchanged)
+parity-direct-401  McpAuthChallengeError    parity-404  MCPError (unchanged)
+parity-403         McpAuthChallengeError
+```

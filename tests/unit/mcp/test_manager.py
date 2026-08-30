@@ -2010,3 +2010,103 @@ class TestAuthChallengeWatcherAttribution:
         exc = await manager._challenge_error(cfg, watcher)
         assert exc is not None and exc.has_stored_grant is True
         assert "/mcp reauth" in McpManager._auth_failure_text("gitlab", exc)
+
+
+class TestChallengeIsBoundToTheTerminalRequest:
+    """F5: a challenge must not outlive the request that produced it.
+
+    Clearing only when a later RESPONSE arrives left the verdict latched when
+    the next request died at DNS/connect/TLS/read time — no response hook runs
+    then — so a terminal network failure was reported as an auth problem.
+    """
+
+    URL = "https://srv.example/mcp"
+
+    def _response(self, status: int, url: str) -> Any:
+        return SimpleNamespace(status_code=status, request=SimpleNamespace(url=url))
+
+    @pytest.mark.asyncio
+    async def test_a_request_that_never_answers_leaves_no_verdict(self) -> None:
+        """The exact F5 state: 401, then a retry that fails with no response."""
+        from local_operator.mcp.manager import _AuthChallengeWatcher
+
+        watcher = _AuthChallengeWatcher(self.URL)
+        await watcher.begin(SimpleNamespace(url=self.URL))
+        await watcher.observe(self._response(401, self.URL))
+        assert watcher.status_code == 401
+        # The retry starts and then dies at the socket: begin() runs, observe()
+        # never does.
+        await watcher.begin(SimpleNamespace(url=self.URL))
+        assert watcher.status_code is None
+
+    @pytest.mark.asyncio
+    async def test_a_network_failure_after_a_challenge_is_not_auth_advice(
+        self, tmp_path: Path
+    ) -> None:
+        """End to end through the classifier: no verdict means no /mcp login."""
+        from local_operator.mcp.config import MCPHttpServerConfig
+        from local_operator.mcp.manager import _AuthChallengeWatcher
+
+        manager = McpManager(str(tmp_path))
+        cfg = MCPHttpServerConfig(url=self.URL)
+        watcher = _AuthChallengeWatcher(self.URL)
+        await watcher.begin(SimpleNamespace(url=self.URL))
+        await watcher.observe(self._response(401, self.URL))
+        await watcher.begin(SimpleNamespace(url=self.URL))  # retry, then a socket error
+        assert await manager._challenge_error(cfg, watcher) is None
+
+    @pytest.mark.asyncio
+    async def test_a_request_to_another_url_never_clears_the_verdict(self) -> None:
+        """Discovery and token requests ride the same client; a probe starting
+        must not erase the endpoint's own challenge."""
+        from local_operator.mcp.manager import _AuthChallengeWatcher
+
+        watcher = _AuthChallengeWatcher(self.URL)
+        await watcher.begin(SimpleNamespace(url=self.URL))
+        await watcher.observe(self._response(401, self.URL))
+        await watcher.begin(
+            SimpleNamespace(url="https://srv.example/.well-known/oauth-protected-resource")
+        )
+        assert watcher.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_a_challenge_still_survives_to_classification(self) -> None:
+        """The ordinary path must keep working: begin() then a 401 classifies."""
+        from local_operator.mcp.manager import _AuthChallengeWatcher
+
+        watcher = _AuthChallengeWatcher(self.URL)
+        await watcher.begin(SimpleNamespace(url=self.URL))
+        await watcher.observe(self._response(401, self.URL))
+        assert watcher.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_the_eligibility_gate_uses_the_managers_effective_store(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """F6. With discovery offline, only the injected store can supply the
+        evidence — a store-less probe refuses a server this manager would
+        itself classify as needing reauth."""
+        from local_operator.mcp import auth as auth_mod
+        from local_operator.mcp.config import MCPHttpServerConfig
+
+        auth_mod.OAUTH_CHALLENGES.clear()
+
+        async def discovery_offline(url: str) -> None:
+            return None
+
+        monkeypatch.setattr(auth_mod, "discover_oauth_endpoints", discovery_offline)
+
+        from tests.unit.mcp.test_auth import FakeAuthStore
+
+        store = FakeAuthStore()
+        url = "https://srv.example/mcp"
+        auth_mod.McpTokenStorage(url, store)._write({"tokens": {"access_token": "a"}})
+
+        manager = McpManager(str(tmp_path))
+        manager.auth_store = cast(Any, store)
+        cfg = MCPHttpServerConfig(url=url)
+
+        # The store-less call both login paths used to make.
+        assert await auth_mod.probe_oauth_capability(cfg) is False
+        # The manager-owned operation consults its own store and allows it.
+        assert await manager.server_supports_oauth_login(cfg) is True

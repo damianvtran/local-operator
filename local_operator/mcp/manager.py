@@ -769,24 +769,44 @@ class _AuthChallengeWatcher:
     consume the stream the SDK is about to parse). The connect's error path
     decides what to do with the observation.
 
-    Two properties are load-bearing, and both are regression-tested:
+    Three properties are load-bearing, and all three are regression-tested:
 
     - **The endpoint is matched semantically, not by string equality.** A
       server may canonicalize ``/mcp`` to ``/mcp/`` with a 307 and only then
       challenge; the SDK's client follows redirects, so the final response's
       request URL is not the configured string. Comparing raw text there
       dropped exactly the challenge the user needed to see (F1).
-    - **The LAST response on the endpoint wins.** ``status_code`` used to
-      latch on the first 401 and never clear, so an attempt that was
-      challenged and then failed on a retry with a 500 was still reported as
-      an authorization problem — the precise misrouting of a non-auth failure
-      this feature promises not to do (F2). A later non-challenge response on
-      the same endpoint therefore supersedes an earlier challenge.
+    - **The verdict belongs to the LAST request, not the last response.** The
+      status is cleared when a new request to the endpoint *starts*, and set
+      again only if that request comes back 401/403. Clearing on the response
+      alone was not enough: a retry that dies at DNS/connect/TLS/read time
+      produces no response at all, so the previous challenge stayed latched and
+      a terminal NETWORK failure was reported as "run /mcp login" (F5, and the
+      case F2's response-only fix missed). Binding to the request means an
+      unanswered request leaves no verdict behind, which is the honest state.
+    - **A redirect hop is not a verdict.** It is the client being sent
+      elsewhere, and the request it triggers carries the challenge that
+      matters.
     """
 
     def __init__(self, server_url: str) -> None:
         self.server_url = server_url
         self.status_code: int | None = None
+
+    async def begin(self, request: Any) -> None:
+        """Invalidate the previous verdict as a new endpoint request starts.
+
+        Installed as the httpx ``request`` hook. This is what makes the
+        observation describe the request whose outcome is actually being
+        classified: whatever happens next — a response, or a connection error
+        that never produces one — the stale 401 from an earlier request is
+        already gone.
+        """
+        try:
+            if self._endpoint_key(str(request.url)) == self._endpoint_key(self.server_url):
+                self.status_code = None
+        except Exception:  # noqa: BLE001 — an observer must never break a connect
+            logger.debug("auth challenge request observation failed", exc_info=True)
 
     @staticmethod
     def _endpoint_key(url: str) -> str:
@@ -803,20 +823,25 @@ class _AuthChallengeWatcher:
         return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}{path}"
 
     async def observe(self, response: Any) -> None:
-        """Record the latest verdict from the MCP endpoint itself.
+        """Record this request's verdict from the MCP endpoint itself.
 
-        Responses from other URLs are ignored entirely — they are neither a
-        challenge nor a supersession. The same client also carries the OAuth
-        provider's discovery and token requests, and a 401 from a metadata
-        probe is a normal part of discovery rather than the server refusing us.
+        Responses from other URLs are ignored entirely. The same client also
+        carries the OAuth provider's discovery and token requests, and a 401
+        from a metadata probe is a normal part of discovery rather than the
+        server refusing us — so such a response must neither set a verdict nor
+        clear one.
+
+        ``begin`` has already cleared the slot for this request, so this only
+        ever needs to record a challenge; a non-challenge response simply
+        leaves the cleared state in place.
         """
         try:
             if self._endpoint_key(str(response.request.url)) != self._endpoint_key(self.server_url):
                 return
             status = response.status_code
             # 3xx is the redirect itself, not a verdict: the client is about to
-            # re-request the canonical URL, and treating the hop as a
-            # non-challenge would clear a challenge that has not happened yet.
+            # re-request the canonical URL, and the request hook will clear the
+            # slot again for that follow-up.
             if 300 <= status < 400:
                 return
             self.status_code = status if status in (401, 403) else None
@@ -1584,9 +1609,13 @@ class McpManager:
             # carrying no status code at all, so this hook is the only place
             # the authorization failure is still identifiable. It records the
             # observation and raises nothing; the connect's error path reads
-            # what it saw (see ``_challenge_status``).
+            # what it saw (see ``_challenge_error``). BOTH hooks are required:
+            # the request hook is what ties the verdict to the request whose
+            # outcome is being classified, so a retry that dies before any
+            # response cannot leave an earlier 401 latched (F5).
             if challenge_watcher is not None:
                 conn.auth_challenge = challenge_watcher
+                http_client.event_hooks["request"].append(challenge_watcher.begin)
                 http_client.event_hooks["response"].append(challenge_watcher.observe)
             streams_cm = streamable_http_client(cfg.url, http_client=http_client)
         elif isinstance(cfg, MCPSseServerConfig):
@@ -1631,6 +1660,26 @@ class McpManager:
         except Exception:  # pragma: no cover - environment dependent
             logger.debug("providers.auth_store unavailable", exc_info=True)
             return None
+
+    async def server_supports_oauth_login(self, cfg: MCPServerConfig) -> bool:
+        """Whether an explicit ``/mcp login`` on ``cfg`` may proceed.
+
+        The manager-owned eligibility operation, and the only one a front end
+        should call. It exists because the answer depends on THIS manager's
+        effective auth store: a session running against an injected store holds
+        its grants there, and a gate that consulted the default machine store
+        instead refused a login for a server this same manager had just
+        classified as needing ``reauth`` whenever discovery was unavailable
+        (F6). Keeping the store inside the manager also means no caller has to
+        know the store exists.
+
+        Delegates the policy itself to
+        :func:`~local_operator.mcp.auth.probe_oauth_capability`, so the static
+        refusals and the one-shot discovery probe stay in a single place.
+        """
+        from local_operator.mcp.auth import probe_oauth_capability
+
+        return await probe_oauth_capability(cfg, self._effective_auth_store())
 
     def _build_oauth_auth(
         self, url: str, cfg: MCPServerConfig, *, interactive: bool = False
