@@ -481,13 +481,33 @@ class Toast(Static):
         # Centring splits it (5/5) and costs nothing on a message that already
         # fills the card, where there is no slack to divide.
         #
-        # ONE-LINE messages only, which is the whole reason this is computed here
-        # rather than declared as `text-align: center` in the tcss. The MCP
-        # startup summary is two lines — a head and a `failed: …` detail line —
-        # and they are read as a pair down a shared left edge. Centring each row
-        # against its own length staggers them (measured: lead 4 then lead 7 on
-        # the short variant), which is worse than the trailing slack this fixes.
-        self.styles.text_align = "center" if "\n" not in self._message else "left"
+        # ONE-ROW messages only, which is the whole reason this is computed here
+        # rather than declared as `text-align: center` in the tcss. A card that
+        # paints more than one row is read as a block down a shared left edge —
+        # the MCP startup summary is a head plus a `failed: …` detail line — and
+        # centring each row against its own length staggers them, which is worse
+        # than the trailing slack this fixes.
+        #
+        # A message reaches two rows two ways, and the test is on the ROWS rather
+        # than on either cause. An explicit newline is the obvious one. WRAPPING
+        # is the one that bit: `\n not in message` let any message past the text
+        # budget take the centred branch and stagger, and it is reachable from a
+        # real caller — the MCP auth notice (`OperatorApp.on_auth_required`) is
+        # built untruncated from a server name, so `⊙ MCP <name> needs
+        # authorization — run /mcp auth to reconnect it` crosses 58 cells even
+        # for a two-letter name (measured `leads=[1, 29]`, and `[2, 17]` for
+        # `github-enterprise-server`). That is the failure variant, held for
+        # `TOAST_FAILURE_MS` precisely because the user has to read a command out
+        # of it (review round 2, F4).
+        #
+        # The budget is the card's own text box, so this asks the same question
+        # the wrap will: does the longest line fit on one row of THIS card?
+        text_cells = max(
+            (cell_len(line) for line in self._message.split("\n")),
+            default=0,
+        )
+        one_row = "\n" not in self._message and text_cells <= cap - TOAST_PADDING_CELLS
+        self.styles.text_align = "center" if one_row else "left"
         # The floor is written onto the WIDGET as well, and it has to be: the
         # card is `width: auto`, so Textual sizes it to its text and `_card_width`
         # alone would only move the offset — widening the gap on the left while

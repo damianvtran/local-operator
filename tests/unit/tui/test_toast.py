@@ -496,24 +496,57 @@ async def test_the_floors_slack_is_split_rather_than_left_trailing() -> None:
         assert abs(lead - trail) <= 1, (lead, trail)
 
 
-@pytest.mark.asyncio
-async def test_a_two_line_notice_keeps_its_rows_on_one_left_edge() -> None:
-    """Centring is for single-line receipts only.
+#: Messages that paint on more than one row, one per WAY of getting there. The
+#: parametrisation is the point: the guard must key on the rendered rows, not on
+#: whichever cause a test happened to pick (review round 2, F4).
+MULTI_ROW_MESSAGES = [
+    # An explicit newline: the MCP startup summary, a head plus a detail line.
+    pytest.param("\u2299 MCP: 1 of 2 up\nfailed: gh", 80, id="explicit-newline"),
+    pytest.param(
+        "\u2299 MCP: 1 of 2 servers up\nfailed: slack \u2014 command not found",
+        80,
+        id="newline-long",
+    ),
+    # WRAPPING, from a real caller. `OperatorApp.on_auth_required` builds this
+    # untruncated from a server name, so it crosses the card's text budget even
+    # for a two-letter name. This is the case an implementation-shaped test
+    # missed: it has no newline in it at all.
+    pytest.param(
+        "\u2299 MCP gh needs authorization \u2014 run /mcp auth to reconnect it",
+        120,
+        id="wrapped-short-name",
+    ),
+    pytest.param(
+        "\u2299 MCP github-enterprise-server needs authorization \u2014 run /mcp auth"
+        " to reconnect it",
+        120,
+        id="wrapped-long-name",
+    ),
+]
 
-    The MCP startup summary is a head plus a ``failed: …`` detail line, read as
-    a pair down a shared left edge. Centring each row against its own length
-    staggers them, which is a worse defect than the trailing slack D3 is about —
-    so the alignment is decided per message in ``_refit`` rather than declared
-    once in the stylesheet.
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("message,width", MULTI_ROW_MESSAGES)
+async def test_a_card_that_paints_more_than_one_row_is_never_centred(
+    message: str, width: int
+) -> None:
+    """Any multi-row card keeps its rows on one left edge, however it got them.
+
+    Asserted against the INTENT rather than against the guard's condition. The
+    first version of this test passed an explicit ``\n``, so it only exercised
+    ``"\n" not in message`` \u2014 it restated the implementation, and a message that
+    reached two rows by WRAPPING sailed straight past it and staggered (F4, and
+    the same shape as F1 in round 1). The rows are counted in the painted frame,
+    so how the card came by them is not part of the assertion.
     """
-    async with ToastApp().run_test(size=(80, 24)) as pilot:
+    async with ToastApp().run_test(size=(width, 24)) as pilot:
         toast = pilot.app.query_one(Toast)
-        toast.show("\u2299 MCP: 1 of 2 up\nfailed: gh", duration_ms=60_000)
+        toast.show(message, duration_ms=60_000)
         await pilot.pause()
         await pilot.pause()
         leads = _row_leads(pilot.app, toast)
-        assert len(leads) == 2, leads
-        assert leads[0] == leads[1], leads
+        assert len(leads) > 1, f"this case must actually paint >1 row: {leads}"
+        assert len(set(leads)) == 1, leads
 
 
 @pytest.mark.asyncio
