@@ -1894,3 +1894,119 @@ class TestAuthChallengeMessaging:
         result = await manager._connect_round({"gitlab": cfg}, {"gitlab": "codex"})
         assert "/mcp login gitlab" in result.errors["gitlab"]
         assert "Server returned an error response" not in result.errors["gitlab"]
+
+
+class TestAuthChallengeWatcherAttribution:
+    """Which response the watcher attributes to this connect (F1, F2)."""
+
+    URL = "https://srv.example/mcp"
+
+    def _response(self, status: int, url: str) -> Any:
+        return SimpleNamespace(status_code=status, request=SimpleNamespace(url=url))
+
+    @pytest.mark.asyncio
+    async def test_a_challenge_after_a_canonicalising_redirect_is_observed(self) -> None:
+        """F1. A server may 307 ``/mcp`` to ``/mcp/`` and only then challenge.
+        The client follows the redirect, so the final response's request URL is
+        not the configured string; comparing raw text dropped the challenge and
+        the user kept getting the SDK's opaque error."""
+        from local_operator.mcp.manager import _AuthChallengeWatcher
+
+        watcher = _AuthChallengeWatcher(self.URL)
+        await watcher.observe(self._response(307, self.URL))
+        await watcher.observe(self._response(401, "https://srv.example/mcp/"))
+        assert watcher.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_case_and_query_differences_still_match_the_endpoint(self) -> None:
+        from local_operator.mcp.manager import _AuthChallengeWatcher
+
+        watcher = _AuthChallengeWatcher(self.URL)
+        await watcher.observe(self._response(401, "https://SRV.example/mcp?session=abc"))
+        assert watcher.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_a_later_non_auth_response_supersedes_an_earlier_challenge(self) -> None:
+        """F2. The watcher used to latch the first 401 forever, so an attempt
+        that was challenged and then failed on a retry with a 500 was reported
+        as an authorization problem — exactly the misrouting of a non-auth
+        failure this feature promises not to do."""
+        from local_operator.mcp.manager import _AuthChallengeWatcher
+
+        watcher = _AuthChallengeWatcher(self.URL)
+        await watcher.observe(self._response(401, self.URL))
+        assert watcher.status_code == 401
+        await watcher.observe(self._response(500, self.URL))
+        assert watcher.status_code is None
+
+    @pytest.mark.asyncio
+    async def test_a_redirect_hop_never_clears_a_pending_verdict(self) -> None:
+        """A 3xx is the client being sent elsewhere, not the server's verdict."""
+        from local_operator.mcp.manager import _AuthChallengeWatcher
+
+        watcher = _AuthChallengeWatcher(self.URL)
+        await watcher.observe(self._response(401, self.URL))
+        await watcher.observe(self._response(307, self.URL))
+        assert watcher.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_a_metadata_probe_neither_sets_nor_clears(self) -> None:
+        """Discovery rides the same client; its responses are not verdicts on
+        the connect, in either direction."""
+        from local_operator.mcp.manager import _AuthChallengeWatcher
+
+        watcher = _AuthChallengeWatcher(self.URL)
+        await watcher.observe(self._response(401, self.URL))
+        await watcher.observe(
+            self._response(200, "https://srv.example/.well-known/oauth-protected-resource")
+        )
+        assert watcher.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_the_stored_grant_fact_comes_from_the_classifying_store(
+        self, tmp_path: Path
+    ) -> None:
+        """F4. The challenge already resolved this against the manager's own
+        (possibly injected) store; re-reading the default machine store here
+        answered a different question and rendered ``login`` for a server
+        demonstrably holding a grant."""
+        from local_operator.mcp.auth import McpAuthChallengeError
+
+        exc = McpAuthChallengeError(
+            "https://srv.example/mcp",
+            status_code=401,
+            oauth_available=True,
+            has_stored_grant=True,
+        )
+        # The default store is empty here, so a second lookup would say
+        # "login". The carried fact must win.
+        with mock.patch(
+            "local_operator.mcp.auth.server_has_stored_grant", return_value=False
+        ) as lookup:
+            text = McpManager._auth_failure_text("gitlab", exc)
+        assert "/mcp reauth gitlab" in text
+        assert lookup.call_count == 0
+
+    @pytest.mark.asyncio
+    async def test_the_challenge_error_carries_the_managers_store_verdict(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The manager's injected store is what classifies the failure."""
+        from local_operator.mcp.config import MCPHttpServerConfig
+        from local_operator.mcp.manager import _AuthChallengeWatcher
+
+        manager = McpManager(str(tmp_path))
+        cfg = MCPHttpServerConfig(url="https://srv.example/mcp")
+        watcher = _AuthChallengeWatcher("https://srv.example/mcp")
+        watcher.status_code = 401
+
+        async def fake_discover(url: str) -> object:
+            return object()
+
+        monkeypatch.setattr("local_operator.mcp.auth.discover_oauth_endpoints", fake_discover)
+        monkeypatch.setattr(
+            "local_operator.mcp.auth.server_has_stored_grant", lambda url, store=None: True
+        )
+        exc = await manager._challenge_error(cfg, watcher)
+        assert exc is not None and exc.has_stored_grant is True
+        assert "/mcp reauth" in McpManager._auth_failure_text("gitlab", exc)

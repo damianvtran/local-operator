@@ -115,3 +115,65 @@ above are the evidence. Each is reproducible from a worktree off `origin/main`:
 drive `McpManager._connect_server` / `_connect_round` against the server URLs in
 the table, and render the frames with `OperatorApp.save_screenshot` per
 AGENTS.md "Visual validation" (the real app, so the stylesheet is applied).
+
+## Round 1 remediation (F1–F4)
+
+Four majors from the agent review, each fixed at source with a regression test
+verified to fail against the pre-fix code.
+
+**F1 — a challenge after a redirect was missed.** The hook compared the
+response's request URL to the configured string, so a server canonicalizing
+`/mcp` → `307 /mcp/` and challenging on the redirect target did not match, and
+the user kept getting the opaque error. Endpoint identity is now semantic
+(scheme/host lowercased, query dropped, trailing slash stripped).
+
+Reproduced end to end through the real SDK transport against a local server:
+
+```
+BEFORE  F1-redirect-401   MCPError               -> "Server returned an error response"
+AFTER   F1-redirect-401   McpAuthChallengeError  -> names the fix
+        hook saw 307 http://127.0.0.1:8902/redir
+        hook saw 401 http://127.0.0.1:8902/redir/
+```
+
+**F2 — an earlier 401 could relabel a later non-auth failure.** `status_code`
+latched on the first challenge and was never cleared, so a 401 followed by a
+500 on the same endpoint still reported as authorization — the exact
+misrouting this feature promises not to do. The **last** response on the
+endpoint now wins; a 3xx hop is not a verdict and never clears a pending one.
+
+```
+after 401 -> status_code=401
+after 500 -> status_code=None
+classified as: None      (stays a network/server error)
+```
+
+**F3 — `/mcp login` was enabled for every remote config.** The `deliberate`
+shortcut accepted API-key and known-public servers. It is removed. A stdio
+server or an explicit non-OAuth `auth.type` is now a hard refusal that costs no
+network call, and the remaining unknown case is settled by one discovery probe
+(`probe_oauth_capability`) before any grant starts — so the first login on a
+fresh import still works, without claiming every URL is authenticable.
+
+**F4 — the classifying store's verdict was discarded.** `_challenge_error`
+resolved `has_stored_grant` against the manager's own (possibly injected)
+store, then `_auth_required_text` threw it away and re-read the default machine
+store, rendering `login` for a server demonstrably holding a grant. The carried
+fact is now used; only the legacy `McpAuthRequiredError`, which has no such
+field, falls back to a lookup.
+
+### Parity preserved
+
+The live matrix is byte-identical to the pre-remediation run — same verbs, same
+wording — so the design round's frames remain current:
+
+```
+✓ openaiDeveloperDocs: connected
+× datadog:      run /mcp login datadog to authorize
+× gitlab:       run /mcp reauth gitlab — authorization expired
+× launchdarkly: run /mcp login launchdarkly to authorize
+× minerva-qa:   run /mcp login minerva-qa to authorize
+```
+
+Direct 401, 403, public 200, and 404/500 non-auth parity all unchanged, and
+startup still opens zero browsers.

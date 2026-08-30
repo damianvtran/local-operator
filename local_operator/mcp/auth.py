@@ -706,11 +706,26 @@ def server_has_stored_grant(server_url: str, store: StructuralAuthStore | None =
     return bool(tokens.get("access_token") or tokens.get("refresh_token"))
 
 
+def server_rejects_oauth(cfg: MCPServerConfig) -> bool:
+    """True when this config can NEVER use an OAuth grant — a static fact.
+
+    Two shapes qualify, and both are decidable without touching the network:
+    a stdio server (no transport that can carry a bearer token) and a server
+    whose config explicitly declares some OTHER auth type. An ``apikey`` entry
+    is a statement by the user about how this server authenticates, and
+    starting an OAuth flow on it would answer a question they already
+    answered — the login must stay a hard refusal there (F3).
+    """
+    auth = getattr(cfg, "auth", None)
+    auth_type = getattr(auth, "type", None) if auth is not None else None
+    if auth_type is not None and auth_type != "oauth":
+        return True
+    return not getattr(cfg, "url", None)
+
+
 def server_is_oauth_capable(
     cfg: MCPServerConfig,
     store: StructuralAuthStore | None = None,
-    *,
-    deliberate: bool = False,
 ) -> bool:
     """Whether this server should be connected through the OAuth provider.
 
@@ -724,32 +739,61 @@ def server_is_oauth_capable(
        server — the live signal that rescues a config which simply does not
        carry an auth block.
 
-    With ``deliberate=False`` (startup, auto-reconnect) a server matching none
-    of the three stays unauthenticated, with no discovery and no added latency:
-    that is what keeps a genuinely public MCP server
-    (``developers.openai.com/mcp``) connecting exactly as it does today, and
-    what stops us attaching an OAuth provider to every remote server on boot.
-
-    ``deliberate=True`` is for an explicit ``/mcp login`` and accepts ANY remote
-    server. Whether a server needs OAuth cannot be answered without a network
-    round trip, so the strict test would otherwise refuse the very first login
-    on a Codex-imported server — the dead end this change exists to remove.
-    Being permissive here is safe rather than merely convenient: the SDK's
-    provider only starts a grant in response to a 401, so attaching it to a
-    server that needs no auth changes nothing and opens no browser. A stdio
-    server is still refused, having no transport that can carry a bearer token.
+    A server matching none of the three stays unauthenticated, with no
+    discovery and no added latency: that is what keeps a genuinely public MCP
+    server (``developers.openai.com/mcp``) connecting exactly as it does today,
+    and what stops us attaching an OAuth provider to every remote server on
+    boot. There is deliberately no "assume yes" mode — an explicit login that
+    needs an answer this cannot give asks the network for one instead, via
+    :func:`probe_oauth_capability`.
     """
+    if server_rejects_oauth(cfg):
+        return False
     auth = getattr(cfg, "auth", None)
     if auth is not None and getattr(auth, "type", None) == "oauth":
         return True
     url = getattr(cfg, "url", None)
     if not url:
-        return False  # stdio: no transport-level challenge to observe
-    if deliberate:
-        return True
+        return False
     if OAUTH_CHALLENGES.get(url):
         return True
     return server_has_stored_grant(url, store)
+
+
+async def probe_oauth_capability(
+    cfg: MCPServerConfig, store: StructuralAuthStore | None = None
+) -> bool:
+    """Answer "can this server take an OAuth grant?", asking the network if needed.
+
+    The gate an explicit ``/mcp login`` runs. Whether a server without an auth
+    block uses OAuth is not knowable from the config — that is the whole
+    problem a foreign-tool import creates — so when the static evidence is
+    silent this performs the one RFC 9728/8414 discovery that settles it, and
+    records the result for later connects.
+
+    This replaces an earlier "a deliberate login accepts any remote server"
+    shortcut, which enabled the command for known-public and API-key servers
+    (F3). Paying one metadata round trip is the honest way to keep the first
+    login on a fresh import working WITHOUT claiming every URL is
+    authenticable: a server that advertises no authorization server is now
+    refused with the same message a stdio server gets, instead of being sent
+    into a grant that cannot complete.
+    """
+    if server_is_oauth_capable(cfg, store):
+        return True
+    if server_rejects_oauth(cfg):
+        return False
+    url = getattr(cfg, "url", None)
+    if not url:
+        return False
+    try:
+        discovered = await discover_oauth_endpoints(url) is not None
+    except Exception:  # noqa: BLE001 — a probe failure must not crash the command
+        logger.debug("OAuth capability probe failed for %s", url, exc_info=True)
+        return False
+    if discovered:
+        record_oauth_challenge(url, oauth_available=True)
+    return discovered
 
 
 def oauth_server_names(cwd: str | os.PathLike[str]) -> list[str]:

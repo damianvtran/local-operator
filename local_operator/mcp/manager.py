@@ -42,6 +42,7 @@ from dataclasses import dataclass, field
 from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, TypedDict, TypeVar
+from urllib.parse import urlsplit
 
 from local_operator.ansi import strip_control_sequences
 from local_operator.harness.types import (
@@ -767,26 +768,58 @@ class _AuthChallengeWatcher:
     (the body is a lazily-streamed SSE payload, and touching it here would
     consume the stream the SDK is about to parse). The connect's error path
     decides what to do with the observation.
+
+    Two properties are load-bearing, and both are regression-tested:
+
+    - **The endpoint is matched semantically, not by string equality.** A
+      server may canonicalize ``/mcp`` to ``/mcp/`` with a 307 and only then
+      challenge; the SDK's client follows redirects, so the final response's
+      request URL is not the configured string. Comparing raw text there
+      dropped exactly the challenge the user needed to see (F1).
+    - **The LAST response on the endpoint wins.** ``status_code`` used to
+      latch on the first 401 and never clear, so an attempt that was
+      challenged and then failed on a retry with a 500 was still reported as
+      an authorization problem — the precise misrouting of a non-auth failure
+      this feature promises not to do (F2). A later non-challenge response on
+      the same endpoint therefore supersedes an earlier challenge.
     """
 
     def __init__(self, server_url: str) -> None:
         self.server_url = server_url
         self.status_code: int | None = None
 
-    async def observe(self, response: Any) -> None:
-        """Note a 401/403 on a request to the MCP endpoint itself.
+    @staticmethod
+    def _endpoint_key(url: str) -> str:
+        """Comparable identity for one MCP endpoint.
 
-        Only responses from the MCP URL count. The same client also carries
-        the OAuth provider's discovery and token requests, and a 401 from a
-        metadata probe is a normal part of discovery rather than the server
-        refusing us.
+        Drops the query (the SDK appends its own parameters), lowercases the
+        scheme/host, and strips a trailing slash so a redirect that only
+        canonicalizes the path still resolves to the same endpoint. Anything
+        finer would re-introduce F1; anything coarser would start attributing
+        a metadata probe's 401 to the connect.
+        """
+        parsed = urlsplit(url)
+        path = parsed.path.rstrip("/")
+        return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}{path}"
+
+    async def observe(self, response: Any) -> None:
+        """Record the latest verdict from the MCP endpoint itself.
+
+        Responses from other URLs are ignored entirely — they are neither a
+        challenge nor a supersession. The same client also carries the OAuth
+        provider's discovery and token requests, and a 401 from a metadata
+        probe is a normal part of discovery rather than the server refusing us.
         """
         try:
-            if response.status_code not in (401, 403):
+            if self._endpoint_key(str(response.request.url)) != self._endpoint_key(self.server_url):
                 return
-            if str(response.request.url).split("?")[0] != self.server_url.split("?")[0]:
+            status = response.status_code
+            # 3xx is the redirect itself, not a verdict: the client is about to
+            # re-request the canonical URL, and treating the hop as a
+            # non-challenge would clear a challenge that has not happened yet.
+            if 300 <= status < 400:
                 return
-            self.status_code = response.status_code
+            self.status_code = status if status in (401, 403) else None
         except Exception:  # noqa: BLE001 — an observer must never break a connect
             logger.debug("auth challenge observation failed", exc_info=True)
 
@@ -1609,11 +1642,14 @@ class McpManager:
         proactive refresh discovered, so a mid-session in-flow refresh targets
         the real token endpoint.
 
-        ``interactive`` ALSO widens which servers qualify: an explicit
-        ``/mcp login`` is a deliberate instruction to authorize this server, so
-        a remote config that has not yet been seen to challenge still gets a
-        provider. A background connect stays strict, so boot neither discovers
-        nor authenticates against servers that never asked it to.
+        The eligibility test is the SAME for a background connect and an
+        explicit login. An interactive login that needs the question answered
+        by the network has already had it answered by
+        :func:`~local_operator.mcp.auth.probe_oauth_capability` before reaching
+        here, and that probe records its result in the challenge ledger this
+        test reads — so widening the gate on ``interactive`` would only let a
+        known-public or API-key server through (F3) without enabling anything
+        a real OAuth server needs.
         """
         # NOT ``cfg.auth.type == 'oauth'`` any more. A config imported from a
         # foreign tool (Codex, issue #367) carries only a ``url`` — that tool
@@ -1625,7 +1661,7 @@ class McpManager:
         # format benefits equally.
         from local_operator.mcp.auth import server_is_oauth_capable
 
-        if not server_is_oauth_capable(cfg, self._effective_auth_store(), deliberate=interactive):
+        if not server_is_oauth_capable(cfg, self._effective_auth_store()):
             return None
         try:
             from local_operator.mcp.auth import build_oauth_provider
@@ -1740,18 +1776,28 @@ class McpManager:
         string lands in the durable transcript notice and in ``/mcp``, so one
         helper keeps all three surfaces agreeing.
 
-        ``login`` vs ``reauth`` is decided by whether a credential row exists,
+        ``login`` vs ``reauth`` is decided by whether a stored grant exists,
         not guessed. Reaching this error at all means the stored grant could
-        not be refreshed non-interactively, so a server we DO hold a row for is
+        not be refreshed non-interactively, so a server we DO hold one for is
         holding a stale one: telling that user to ``login`` points them at a
         command that leaves the dead credential in place, while ``reauth``
-        replaces it. A server with no row has simply never been authorized.
-        """
-        from local_operator.mcp.auth import server_has_stored_grant
+        replaces it. A server with nothing stored has never been authorized.
 
-        # The real store, deliberately: this is a durable fact about the
-        # machine, and it must read the same row every future process will.
-        if server_has_stored_grant(exc.server_url):
+        A challenge carries that fact on itself, already resolved against the
+        manager's OWN (possibly injected) store at the instant the failure was
+        classified — so it is used as-is. Re-reading the default machine store
+        here would answer a different question than the one that produced the
+        error, and a session running against an injected store rendered
+        ``login`` for a server it demonstrably held a grant for (F4). Only the
+        legacy :class:`McpAuthRequiredError`, which carries no such field,
+        falls back to a lookup.
+        """
+        has_stored_grant = getattr(exc, "has_stored_grant", None)
+        if has_stored_grant is None:
+            from local_operator.mcp.auth import server_has_stored_grant
+
+            has_stored_grant = server_has_stored_grant(exc.server_url)
+        if has_stored_grant:
             return f"run /mcp reauth {name} — authorization expired"
         return f"run /mcp login {name} to authorize"
 

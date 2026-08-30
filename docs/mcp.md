@@ -74,6 +74,18 @@ a server unauthenticated forever. The rule is deliberately transport-level and
 names no config source, so every format benefits. A server that needs no auth
 never challenges, so it keeps connecting unauthenticated with no discovery and
 no added startup latency.
+
+Two shapes can never take a grant and are refused outright, without a network
+call: a stdio server (no transport that can carry a bearer token) and one whose
+config declares a non-OAuth `auth.type` such as `apikey` — that is the user
+stating how the server authenticates, and its `401` is not an invitation to an
+OAuth flow.
+
+An explicit `/mcp login` on a server whose config says nothing either way — the
+imported case — resolves the question with a single metadata discovery before
+starting any grant. A server that advertises no authorization server is refused
+with the same message a stdio server gets, rather than being sent into a flow
+that cannot complete.
 Tokens and client registrations persist in the shared `auth.db` under
 provider `mcp-oauth`, one row per server URL. Supplying a `client_id` in
 config pins the client: the registration is pre-seeded and dynamic client
