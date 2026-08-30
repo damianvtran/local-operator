@@ -1,0 +1,6 @@
+parent still owned by this process : True
+fork owner (must be None)          : None
+BOOT RESULT: OPENS ITS OWN CONVERSATION ✓
+  resolved dir  : b15ac47a6e71
+  transcript    : present
+  boot prompt   : 'try the streaming parser'

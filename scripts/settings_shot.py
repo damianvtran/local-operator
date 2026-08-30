@@ -47,6 +47,10 @@ STATE selects what the page is showing:
                that cannot act on it
     top        TRAVELLED back to the first row by held `up`, which is the frame
                that shows whether the section header owning it is on screen
+    fork       the Fork section's rows, scrolled into view
+    fork-open  the same, with `fork.mode` expanded into its choices
+    fork-placement       the cmux placement row, scrolled into view
+    fork-placement-open  the same, expanded into workspace/surface
     theme      the Theme row highlighted (OUT.svg) and activated (OUT.open.svg),
                which is the affordance review round 1 m1 changed: TEXT opened a
                free-text editor, ENUM expands the registry's themes as choices
@@ -203,6 +207,27 @@ async def main() -> None:
             await pilot.pause()
             await pilot.pause()
             app.save_screenshot(out.replace(".svg", ".frame2.svg"))
+        elif state == "fork":
+            _select(view, "fork.mode")
+            await pilot.pause()
+            app.save_screenshot(out)
+        elif state == "fork-open":
+            # ENUM rows expand in place, so the choices and their descriptions
+            # are only visible activated — which is the state a user picking
+            # `switch` actually sees.
+            _select(view, "fork.mode")
+            view.action_activate()
+            await pilot.pause()
+            app.save_screenshot(out)
+        elif state == "fork-placement":
+            _select(view, "fork.cmux_placement")
+            await pilot.pause()
+            app.save_screenshot(out)
+        elif state == "fork-placement-open":
+            _select(view, "fork.cmux_placement")
+            view.action_activate()
+            await pilot.pause()
+            app.save_screenshot(out)
         elif state == "enum":
             _select(view, "tool_approval_mode")
             view.action_activate()

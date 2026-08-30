@@ -46,6 +46,12 @@ ECHO_POLICY = {
     "reload": False,
     "update": False,
     "resume": False,
+    # TRUE, and the second command to earn it for the same reason `/goal` does:
+    # the argument becomes a user turn a model is given — in the FORK. The
+    # receipt in THIS window names both session ids but not the instruction, so
+    # without the echo the only record of what the branch was asked to do is in
+    # another window entirely.
+    "fork": True,
     # The label of the conversation, not words the model is told: the receipt
     # quotes the title that ended up in force, which is more than what was typed.
     "rename": False,
@@ -109,6 +115,9 @@ PROMPT_POLICY = {
     "reload": False,
     "update": False,
     "resume": False,
+    # Free text destined for a model, so an inline `/fork` reassembles to the
+    # front of the composer rather than splicing into the middle of a sentence.
+    "fork": True,
     "rename": False,
     "model": False,
     "effort": False,

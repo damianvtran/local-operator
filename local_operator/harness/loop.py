@@ -1136,6 +1136,11 @@ class AgentLoop:
         index = 0
         first_slot = True
         while index < len(plan):
+            # ``_peek_steering`` and NOT ``_peek_interrupt``, which is a
+            # correctness rule rather than an oversight: skipping the batch's
+            # remaining calls is right when the USER redirected the work, and
+            # wrong for a pending fork, which has redirected nothing and must
+            # leave the parent's turn intact. See ``LoopConfig.has_pending_fork``.
             if (
                 not first_slot
                 and config.interrupt_mode == "immediate"
@@ -1374,7 +1379,12 @@ class AgentLoop:
             if config.has_urgent_steering_messages is not None
             else config.has_steering_messages
         )
-        poll_interruptible = config.interrupt_mode == "immediate" and peek is not None
+        # A pending fork is also a reason to poll: without it, a fork requested
+        # during a long interruptible tool would wait out the whole tool (a
+        # ten-minute ``wait``, a slow MCP call) before reaching its boundary.
+        poll_interruptible = config.interrupt_mode == "immediate" and (
+            peek is not None or config.has_pending_fork is not None
+        )
         # Set by the abort watcher so the runners' cancellation handlers can
         # tell an abort apart from a steering interrupt and label their
         # synthetic results correctly.
@@ -1474,7 +1484,7 @@ class AgentLoop:
                             break
                         if signal is not None and signal.aborted:
                             break
-                        if self._peek_steering(config):
+                        if self._peek_interrupt(config):
                             tool_task.cancel()
                             break
                 finally:
@@ -1952,6 +1962,12 @@ class AgentLoop:
 
     @staticmethod
     def _peek_steering(config: LoopConfig) -> bool:
+        """Whether queued STEERING may cancel a running tool.
+
+        Steering alone, deliberately narrow: this is the predicate the
+        batch-skip branch reads, and skipping a batch's remaining calls is only
+        ever right when the USER redirected the work.
+        """
         peek = (
             config.has_urgent_steering_messages
             if config.has_urgent_steering_messages is not None
@@ -1962,6 +1978,33 @@ class AgentLoop:
         try:
             return bool(peek())
         except Exception:
+            return False
+
+    @staticmethod
+    def _peek_interrupt(config: LoopConfig) -> bool:
+        """Whether ANYTHING wants the running tool to stop now.
+
+        Two reasons today: queued steering, and a pending fork waiting for a
+        safe boundary. Spelled as one concept because the tool-cancellation
+        sites genuinely ask that one question — a reader who found the fork
+        check bolted onto something named ``_peek_steering`` would reasonably
+        conclude a fork IS a steer, which is the misreading that leads to a fork
+        injecting a user turn into the parent.
+
+        The distinction from :meth:`_peek_steering` is not cosmetic: this one
+        may interrupt a tool, and ONLY :meth:`_peek_steering` may skip a batch's
+        remaining calls. See ``LoopConfig.has_pending_fork``.
+        """
+        if AgentLoop._peek_steering(config):
+            return True
+        fork = config.has_pending_fork
+        if fork is None:
+            return False
+        try:
+            return bool(fork())
+        except Exception:
+            # Same posture as the steering peek: a host callback that raises
+            # must cost an interrupt, never the running turn.
             return False
 
     # -- deadline wiring ----------------------------------------------------

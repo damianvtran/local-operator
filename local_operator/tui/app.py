@@ -228,6 +228,8 @@ from local_operator.tui.widgets.welcome import (
 )
 
 if TYPE_CHECKING:  # keeps the provider graph off the TUI's runtime import path
+    from pathlib import Path
+
     from local_operator.multiplexer import SessionBroadcast
     from local_operator.providers.controller import CatalogueEntry
     from local_operator.providers.oauth.callback_server import LoginCallbacks
@@ -486,6 +488,37 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # quotes the title that ended up in force, which is strictly more than the
     # typed words (the store trims and caps them).
     SlashCommand("rename", "Rename this conversation; auto-naming never overrides it"),
+    # Beside the session-transition family because it is one: /fork is the entry
+    # the table was missing, the one that carries history INTO a fresh session
+    # (/new discards it, /resume moves to an existing one).
+    #
+    # echo=True, and it is the case the registry's echo rule was written for: the
+    # argument becomes a user turn the MODEL is given — in the FORK. The receipt
+    # names both session ids, but only the echo shows what the fork was asked to
+    # do, and that text is not visible anywhere in this window otherwise.
+    #
+    # consumes_prompt=True because the argument is free text destined for a
+    # model, so an inline /fork reassembles to the front of the composer rather
+    # than splicing into the middle of a sentence.
+    SlashCommand(
+        "fork",
+        # Terse for the reason `/model` and `/theme` record above: the
+        # description column wraps past ~55 cells. The long form was 76
+        # characters — the longest of all 32 commands — and it was the ONLY row
+        # in `/help` that wrapped at 100 columns, hanging its orphan word back
+        # in the COMMAND column so the listing rendered a phantom command named
+        # `message`. The picker truncated it before the argument clause at every
+        # common width, cutting exactly the half that says the argument exists.
+        #
+        # `<message>` is front-loaded rather than trailing so it survives that
+        # truncation: at 60 columns a user still sees that the argument is a
+        # message the branch STARTS ON, which is what stops them typing a title
+        # and being billed for a turn in another window. `docs/fork.md` carries
+        # the rest.
+        "Branch this conversation; /fork <message> starts it on that",
+        echo=True,
+        consumes_prompt=True,
+    ),
     # The switch receipt names the old AND new label — strictly more than the
     # typed selector, which may have been elided to `default`.
     SlashCommand(
@@ -1930,6 +1963,19 @@ class OperatorApp(App[None]):
         # next substantive message retries, which is bounded by the user's own
         # sends and only ever fires while no name exists to displace.
         self._name_requested: bool = False
+        #: A receipt that must survive a session transition, as
+        #: ``(fork_id, text)``. `fork.mode=switch` reboots onto the fork, which
+        #: wipes the ledger about half a second after the notice is written, so
+        #: the copy naming the fork and the way back to the parent is stashed
+        #: here and re-emitted after adoption.
+        #:
+        #: The ID is carried WITH the text because a transition can fail: an
+        #: unscoped stash survived a failed boot and then fired on the next
+        #: successful one, telling the user they had switched to a fork they
+        #: never reached, from a session that was neither. Flushing only when
+        #: the adopted session IS the fork makes that unconstructable rather
+        #: than relying on every adoption path remembering to clear it.
+        self._pending_fork_receipt: tuple[str, str] | None = None
         # The opener-derived label the band and the tab wear until the
         # generated title lands. Latched to the FIRST substantive message on
         # purpose: a conversation is identified by what it was opened for, and
@@ -2794,6 +2840,68 @@ class OperatorApp(App[None]):
                 task.cancel()
             raise
 
+    def _flush_fork_receipt(self, session_id: str = "") -> None:
+        """Re-emit a fork receipt that a session transition would have destroyed.
+
+        `fork.mode = switch` prints its receipt and then reboots onto the fork,
+        which clears the ledger — so the two ids the user needs (the fork they
+        are now in, and the parent they just left) were on screen for under half
+        a second. Restating it AFTER adoption is what makes the one mode that
+        removes the original from the screen also the mode that says how to get
+        back to it.
+
+        Consumed, not just read: a later `/reload` of this same session must not
+        replay a receipt about a fork the user has long since moved past.
+        """
+        stashed, self._pending_fork_receipt = self._pending_fork_receipt, None
+        if stashed is None:
+            return
+        fork_id, receipt = stashed
+        # Only for the session it was written about. A transition that failed,
+        # or that landed somewhere else entirely (`_attach_or_refuse`, a
+        # `/resume` to an unrelated conversation), drops it rather than
+        # narrating a switch that did not happen.
+        if session_id and fork_id and session_id != fork_id:
+            return
+        self._notice(receipt, "note")
+
+    def _submit_boot_prompt(self, session: Any) -> None:
+        """Run a fork's opening message, if this session was started with one.
+
+        ``/fork do the thing`` parks that text as a sidecar in the FORK's own
+        session directory, because a prompt must not ride the resume argv — see
+        ``fork.BOOT_PROMPT_NAME`` for why that boundary matters. This is where
+        the fork picks it up, immediately after adoption, so the branch is
+        already working by the time the user looks at the new window.
+
+        Routed through :meth:`_submit_prompt`, the same door the composer uses,
+        rather than ``Session.prompt`` directly: that is what writes the visible
+        user row and registers the echo bookkeeping, and it is also what makes
+        the auto-naming path fire on this message like any other first turn. A
+        session that starts working with nothing on screen explaining why is the
+        failure this avoids.
+
+        The sidecar is CONSUMED (read-and-deleted) by the read, so a later
+        ``/resume`` of this fork — or a crash restore of it — replays the
+        transcript and idles like every other session instead of re-running the
+        instruction that opened it.
+        """
+        session_id = getattr(session, "session_id", "") or ""
+        if not session_id:
+            return
+        try:
+            from local_operator.fork import consume_boot_prompt
+            from local_operator.paths import config_dir
+
+            text = consume_boot_prompt(config_dir() / "sessions" / session_id)
+        except Exception:
+            # Best-effort by the same rule the sidecar readers use: losing an
+            # injected message is a disappointment, failing the boot is not
+            # survivable.
+            return
+        if text.strip():
+            self._submit_prompt(text)
+
     async def _preflight_usage(self, session: Any) -> None:
         """Warm the provider's quota reading once the app is already painted.
 
@@ -2863,6 +2971,7 @@ class OperatorApp(App[None]):
             self._on_boot_failed(error)
             return
         self._adopt_session(session)
+        self._submit_boot_prompt(session)
         await self._preflight_usage(session)
         # Warm the active provider's quota row in the shared cache so the first
         # `/usage` after launch answers from disk. No-op when another session
@@ -3810,10 +3919,28 @@ class OperatorApp(App[None]):
                 # leave the previous conversation standing under an error that
                 # says there is no session at all.
                 carried_spend = self._reset_ledger_for_swap()
+                # The fork receipt goes with the transition that failed. The
+                # id-scoping in `_flush_fork_receipt` already stops it narrating
+                # the WRONG session, but a stash left set would sit there until
+                # some later boot happened to match the id — so the switch that
+                # did not happen drops its copy here.
+                self._pending_fork_receipt = None
                 self._on_boot_failed(error)
             else:
                 carried_spend = self._reset_ledger_for_swap()
                 self._adopt_session(session)
+                self._flush_fork_receipt(getattr(session, "session_id", "") or "")
+                # The IN-PROCESS adoption path needs the boot prompt too, not
+                # just the cold-boot one. `/fork <message>` with
+                # `fork.mode = switch` swaps this terminal onto the fork rather
+                # than opening a window, and without this the injected message
+                # was silently dropped: the user saw their `/fork <message>` row
+                # echoed, and no model was ever given it. Worse, the unconsumed
+                # sidecar then fired on the fork's NEXT cold resume, breaking
+                # the "restore-and-idle, never auto-continue" rule that
+                # `fork.consume_boot_prompt` promises to keep by construction.
+                # Consuming it here makes both modes read it exactly once.
+                self._submit_boot_prompt(session)
                 await self._preflight_usage(session)
         finally:
             self._swapping_session = False
@@ -4457,6 +4584,269 @@ class OperatorApp(App[None]):
         self._session_factory = lambda: self._resume_factory(None)  # type: ignore[misc]
         notice("starting a new session…")
         self._run_session_transition(self._reload_session())
+
+    def _cmd_fork(self, arg: str, notice: NoticeFn) -> None:
+        """``/fork [message]`` — branch this conversation into a new session.
+
+        The gap in the session-command family: ``/clear`` wipes the screen and
+        keeps the conversation, ``/new`` discards the conversation and keeps the
+        app, ``/resume`` moves to an existing one. Nothing carried history INTO
+        a fresh session, so "try this two ways" meant polluting one conversation
+        with a dead end or rebuilding context from scratch.
+
+        **The original session keeps running and is not disturbed.** The fork
+        opens in a new window or cmux workspace (``fork.mode = window``, the
+        default), because the entire value of forking is trying a direction
+        without leaving the conversation that got you there — a switch-in-place
+        would cost two context switches per branch. ``fork.mode = switch`` opts
+        into moving this terminal onto the fork instead.
+
+        Three arrival states, and they get three different behaviours:
+
+        * **idle** — clone immediately, right here. The transcript on disk is
+          already complete (every message is appended as it happens), so a copy
+          at idle is a consistent snapshot needing no coordination at all.
+        * **turn running** — defer to the session's next safe boundary, which
+          also interrupts an in-flight interruptible tool so the boundary
+          arrives in ~250 ms rather than after a ten-minute ``wait``. The
+          parent's turn is otherwise untouched: no steering message, no skipped
+          tool calls.
+        * **compacting** — REFUSE. ``_compacting`` means the transcript's head is
+          being rewritten, and a clone taken then can copy a half-rewritten
+          file. A refusal rather than a defer because compaction is minutes and
+          the user should decide whether to wait.
+        """
+        session = self._session
+        if session is None:
+            self._system_notice("fork unavailable: the session is still starting", "warning")
+            return
+        session_id = self._resumable_session_id()
+        if not session_id:
+            # Nothing on disk to copy yet. Said plainly rather than creating an
+            # empty fork, which would look like it worked and open a window onto
+            # a conversation with no history in it.
+            self._system_notice("nothing to fork yet — this conversation has no history", "warning")
+            return
+        if self._compacting:
+            self._system_notice("esc first — history is being rewritten", "warning")
+            return
+
+        from local_operator.paths import config_dir
+
+        message = arg.strip()
+        # The echo lands here, once the command is known to be actionable: it is
+        # the only place the fork's opening instruction is visible in THIS
+        # window, and echoing before the refusals above would attribute a
+        # message to the user that no model was ever given.
+        if message:
+            self._echo_user_command(f"/fork {message}")
+
+        if not self._turn_is_live():
+            notice("forking…")
+            self.run_worker(self._fork_now(config_dir(), session_id, message), exclusive=False)
+            return
+
+        # Deferred: the session drains it at its next boundary. `request_fork`
+        # documents why there are two such boundaries and why both are needed.
+        # An OPTIONAL session capability, probed rather than required, matching
+        # how this app treats every other one (`subscribe_frontend`,
+        # `set_takeover_callback`, `set_model`). Deferring needs a tool loop to
+        # have a boundary in, which the lightweight hosts and `RemoteSession` do
+        # not have — and a fork on a follower must run against THIS machine
+        # anyway, since it opens a window here and reads this config.yml.
+        request_fork = getattr(session, "request_fork", None)
+        if not callable(request_fork):
+            # No boundary to wait for: clone now. The transcript on disk is
+            # missing the turn in flight, which is the honest snapshot such a
+            # host can offer, and it is strictly better than refusing.
+            notice("forking…")
+            self.run_worker(self._fork_now(config_dir(), session_id, message), exclusive=False)
+            return
+
+        # The callback fires from the session's drain, which runs on this same
+        # event loop. It only SCHEDULES the report: opening a window can block
+        # for seconds (see `_on_fork_complete`), and the drain happens at the
+        # parent's turn boundary — blocking there would stall the very turn this
+        # feature promises to leave running.
+        replaced = request_fork(
+            config_dir(),
+            message=message,
+            on_complete=self._schedule_fork_report,
+        )
+        if replaced:
+            # Say that the earlier request was dropped. Two identical
+            # acknowledgements for two `/fork`s that produce ONE fork is the
+            # defect this closes: the replacement is fine, doing it invisibly
+            # is not, and the single receipt lands minutes later far up the
+            # scrollback where the discrepancy would never be spotted.
+            notice(
+                (
+                    f"fork request replaced — the branch will carry “{message}”"
+                    if message
+                    else "fork request replaced — the branch will carry no message"
+                ),
+                "note",
+            )
+            return
+        notice("forking at the next safe boundary…")
+
+    def _schedule_fork_report(self, fork_id: str, error: str) -> None:
+        """Run the fork's receipt-and-spawn off the caller's stack.
+
+        The session's drain calls this synchronously at a turn boundary, so the
+        work it starts must not run there.
+        """
+        self.run_worker(self._on_fork_complete(fork_id, error), exclusive=False)
+
+    async def _fork_now(self, config_dir_path: "Path", session_id: str, message: str) -> None:
+        """Clone immediately, off the event loop, then report. Idle path only."""
+        from local_operator.fork import ForkError, fork_session
+
+        try:
+            fork_id = await asyncio.to_thread(
+                fork_session, config_dir_path, session_id, message=message
+            )
+        except ForkError as exc:
+            await self._on_fork_complete("", str(exc))
+            return
+        except Exception as exc:  # noqa: BLE001 — a fork must never crash the TUI
+            await self._on_fork_complete("", str(exc))
+            return
+        await self._on_fork_complete(fork_id, "")
+
+    async def _on_fork_complete(self, fork_id: str, error: str) -> None:
+        """Report the clone, then open the fork. Runs on the app's own loop.
+
+        The two failure kinds are deliberately NOT reported the same way. A
+        clone failure means there is no fork and carries ``warning``; a spawn
+        failure means the fork exists and only the window did not open, which is
+        a ``note`` naming the id and the command that reaches it. Presenting
+        them alike is how a user goes looking for a session that never existed.
+        """
+        if error or not fork_id:
+            self._system_notice(f"fork failed: {error or 'unknown error'}", "warning")
+            return
+
+        from local_operator.spawn.policy import (
+            FORK_MODE_SWITCH,
+            fork_cmux_placement,
+            fork_mode,
+        )
+
+        values = self._config_values()
+        if fork_mode(values) == FORK_MODE_SWITCH:
+            # No spawn at all: the proven session transition moves this terminal
+            # onto the fork. The original stays on disk, untouched and
+            # resumable — which is what makes this mode safe rather than lossy.
+            #
+            # The receipt has to survive the transition, which is why it is
+            # STASHED rather than printed here. `_resume_session` reboots the
+            # app and the ledger is wiped about half a second later, so a notice
+            # written now is destroyed before it can be read — and this is the
+            # one mode where the original conversation LEAVES THE SCREEN, so it
+            # is the one mode where "how do I get back?" is a real question. The
+            # parent id is captured now because after the transition this
+            # session IS the fork and can no longer name what it came from.
+            parent_id = self._resumable_session_id()
+            self._pending_fork_receipt = (
+                fork_id,
+                (
+                    f"switched to fork {fork_id} — the original is still there: "
+                    f"lop --resume {parent_id}"
+                    if parent_id
+                    else f"switched to fork {fork_id}"
+                ),
+            )
+            self._resume_session(fork_id, self._notice)
+            return
+
+        from local_operator.multiplexer.broadcast import resume_argv, resume_executable
+        from local_operator.spawn.fallback import fallback_receipt
+        from local_operator.spawn.registry import active_backend
+        from local_operator.spawn.types import ForkLaunch
+
+        backend = active_backend(cmux_placement=fork_cmux_placement(values))
+        if backend is None:
+            self._notice(fallback_receipt(fork_id), "note")
+            return
+
+        executable = resume_executable()
+        launch = ForkLaunch(
+            session_id=fork_id,
+            executable=executable,
+            argv=resume_argv(fork_id, executable),
+            cwd=self._session_cwd(),
+            title=self._fork_window_title(),
+        )
+        try:
+            # OFF THE LOOP. Three backends (cmux's surface placement, kitty and
+            # wezterm) run a bounded `subprocess.run` to learn whether their
+            # first-choice mechanism worked — up to CALL_TIMEOUT_S each, and a
+            # hung mux server or a cmux socket mid-restart spends all of it.
+            # Measured at 5.02 s of event-loop lag when run inline, which is a
+            # frozen TUI and, on the deferred path, a stalled parent turn. The
+            # environment is copied rather than passed live: it crosses a thread
+            # boundary, and `os.environ` is process-global mutable state.
+            opened = await asyncio.to_thread(backend.spawn, launch, dict(os.environ))
+        except Exception:
+            # A backend must not raise, but this path is the user's fork and not
+            # the place to find out that one did.
+            opened = False
+        if opened:
+            # The backend names the PLACE, not itself. Under cmux the fork is a
+            # sidebar row or a tab rather than a window, and it is deliberately
+            # never focused — so this line is the only thing pointing the user
+            # at the right level of the UI. `getattr` so a third-party backend
+            # that predates the field still produces a sensible receipt.
+            place = getattr(backend, "opened_place", None) or f"a new {backend.name} window"
+            self._notice(f"forked to {fork_id} — opened in {place}", "note")
+        else:
+            self._notice(fallback_receipt(fork_id, failed=True), "note")
+
+    def _config_values(self) -> dict[str, Any]:
+        """This machine's config ``values``, or ``{}`` when unreadable.
+
+        Read at COMMAND time rather than cached at boot, which is what the
+        ``fork`` section's LIVE scope promises: an edit takes effect on the very
+        next ``/fork`` in this same session.
+        """
+        try:
+            from local_operator.config import ConfigManager
+            from local_operator.paths import config_dir
+
+            return dict(ConfigManager(config_dir()).get_config().values)
+        except Exception:
+            return {}
+
+    def _session_cwd(self) -> str:
+        """The session's working directory, falling back to the process's.
+
+        The fork must open in the PARENT's directory: a window in ``$HOME``
+        would reopen the conversation pointing at the wrong project, and a
+        different cwd also changes the environment block and which ``createIf``
+        tools resolve — altering the cached prompt prefix the fork exists to
+        inherit warm.
+        """
+        session = self._session
+        session_cwd = getattr(session, "_cwd", None) if session is not None else None
+        if isinstance(session_cwd, str) and session_cwd:
+            return session_cwd
+        return os.getcwd()
+
+    def _fork_window_title(self) -> str:
+        """The label the new window or workspace carries.
+
+        Built from the conversation's own name when it has one, because a
+        sidebar of workspaces called "local-operator" is no more navigable than
+        a column of hex ids. Sanitised through the same helper the notification
+        titles use: this string reaches a shell-adjacent surface, and a
+        conversation name is model-generated text.
+        """
+        from local_operator.tui.notify import sanitize_text
+
+        session = self._session
+        name = sanitize_text(getattr(session, "conversation_name", "") or "") if session else ""
+        return f"fork · {name}" if name else "local-operator fork"
 
     def _team_registry(self) -> Any | None:
         """The session's team registry, or None when the host keeps none."""
@@ -6736,7 +7126,13 @@ class OperatorApp(App[None]):
         # prompt holding focus for a flow the user has just interrupted.
         self._settle_key_prompt()
         if self._session is not None:
+            # Probed BEFORE the abort, which clears it: the user needs to be
+            # told the fork went away with the turn, or a request that silently
+            # vanished is as surprising as one that silently survived.
+            fork_was_pending = bool(getattr(self._session, "has_pending_fork", bool)())
             self._session.abort("interrupted")
+            if fork_was_pending:
+                self._notice("fork cancelled", "note")
         # A bang-mode command is not a turn, so aborting the session does
         # not reach it. Same key, same meaning: stop the work in front of
         # the user. After the session abort so a live turn and a live
@@ -10938,6 +11334,8 @@ class OperatorApp(App[None]):
             self._cmd_new(notice)
         elif command == "/resume":
             self._cmd_resume(arg, notice)
+        elif command == "/fork":
+            self._cmd_fork(arg, notice)
         elif command == "/rename":
             self._cmd_rename(arg, notice)
         elif command == "/model":
@@ -14022,7 +14420,16 @@ class OperatorApp(App[None]):
         if panel is None or not panel.is_open:
             # ^f is unbound everywhere else, so pressed outside the aside it
             # would otherwise be a key that does nothing with no explanation.
-            self._system_notice("ctrl+f forks an open aside — ctrl+b opens one", "warning")
+            # Names BOTH meanings, because this is the one moment the two
+            # collide: a user who has just learned `/fork` presses ^F expecting
+            # to branch the session and gets this. Saying only what ^F does —
+            # in the same verb they just learned, for the operation this is not
+            # — left them with no route to the thing they actually wanted.
+            self._system_notice(
+                "ctrl+f folds an open aside into the chat (ctrl+b opens one) — "
+                "to branch this conversation, use /fork",
+                "warning",
+            )
             return
         pairs = panel.fork_messages()
         if not pairs:

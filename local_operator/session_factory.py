@@ -1314,10 +1314,19 @@ async def _prepare(
     from local_operator.providers.auth_store import AuthStore
 
     auth_store = AuthStore(credential_manager=credential_manager)
+    # A fork inherits its PARENT's provider cache key. The fork's transcript is
+    # a byte-identical copy, so its first request reproduces the parent's cached
+    # prefix exactly and should be routed to it rather than opening a fresh one.
+    # Credential stickiness deliberately stays on this session's own id — see
+    # ``create_stream_fn``. Empty for any session that is not a fork, which is
+    # the ordinary case and costs one sidecar read at construction.
+    from local_operator.fork import fork_parent
+
     stream_fn = create_stream_fn(
         auth_store,
         settings=config_manager.get_config().values,
         session_id=transcript_dir.name,
+        cache_lineage_id=fork_parent(transcript_dir) or None,
     )
 
     # --- tools + lazy knowledge (streams A and C) --------------------------

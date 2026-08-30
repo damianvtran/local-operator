@@ -1,0 +1,16 @@
+PARENT session title in force : 'Refactor the loader'
+
+/fork try the streaming parser
+   parent's name entry present in the copied transcript : True
+   title.json copied                                    : True
+   OBSERVED conversation_name at fork boot              : ''   <- empty => auto-naming will fire
+   OBSERVED /resume picker row label                    : 'Refactor the loader'   <- never blank
+
+/fork  (bare)
+   parent's name entry present in the copied transcript : True
+   title.json copied                                    : True
+   OBSERVED conversation_name at fork boot              : ''   <- empty => auto-naming will fire
+   OBSERVED /resume picker row label                    : 'Refactor the loader'   <- never blank
+
+after the fork names itself from its own first request:
+   OBSERVED conversation_name on next resume            : 'Streaming parser attempt'

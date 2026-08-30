@@ -1,0 +1,3 @@
+spawn took 5.01s (the backend really did hang)
+max event-loop lag while it hung: 14 ms
+=> loop stayed responsive

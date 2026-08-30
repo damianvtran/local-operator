@@ -1,0 +1,7 @@
+poll interval (STEERING_INTERRUPT_POLL_S): 0.25s
+tool would have run for:                   600.0s
+teardown latency after /fork, 5 runs:       ['0.263s', '0.247s', '0.251s', '0.275s', '0.270s']
+max: 0.275s  (must be under ~2x the poll interval)
+
+batch with a pending fork throughout: executed=['a', 'b']
+both calls ran -> the fork interrupted the tool WITHOUT skipping the batch

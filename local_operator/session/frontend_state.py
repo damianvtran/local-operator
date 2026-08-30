@@ -67,6 +67,11 @@ _FRONTEND_LOCAL_SLASHES = {
     "reload",
     "update",
     "resume",
+    # A fork opens a window on THIS machine and reads THIS machine's config.yml
+    # for where to put it — the same argument `/settings` and `/theme` make. On a
+    # follower attached to a remote owner, forking must open a window here, not
+    # on the owner's host where nobody is sitting.
+    "fork",
     "theme",
     # The settings page reads and writes THIS machine's config.yml, exactly
     # like `/theme` and `/search` above it. Routed to the owner it would open
