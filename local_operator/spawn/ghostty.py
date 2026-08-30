@@ -46,6 +46,7 @@ class GhosttyBackend:
     """Opens a fork in a new ghostty window."""
 
     name = "ghostty"
+    opened_place = "a new Ghostty window"
 
     def detect(self, env: EnvMap) -> bool:
         """True inside ghostty — but the registry asks cmux FIRST.

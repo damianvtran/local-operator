@@ -437,3 +437,40 @@ class TestPolicyDefaults:
         from local_operator.spawn.policy import DEFAULT_FORK_MODE, fork_mode
 
         assert fork_mode(values) == DEFAULT_FORK_MODE
+
+
+class TestTheReceiptNamesThePlaceNotTheBackend:
+    """D3/U5. The receipt is the only thing pointing at an unfocused fork.
+
+    Deriving the noun from ``backend.name`` told every user a "window" opened.
+    Under cmux the default placement is a WORKSPACE — a sidebar row in the
+    window they already have — so a user who chose `surface` went looking for a
+    window that does not exist, and the AppleScript backends produced "a new
+    applescript window", naming a mechanism rather than a place.
+    """
+
+    def test_every_backend_names_a_place(self) -> None:
+        for backend in backends():
+            place = backend.opened_place
+            assert place and place[0].islower(), f"{backend.name}: {place!r}"
+            assert "applescript" not in place.lower()
+
+    def test_cmux_names_the_placement_it_actually_used(self) -> None:
+        assert CmuxBackend(PLACEMENT_WORKSPACE).opened_place == "a new cmux workspace"
+        assert CmuxBackend(PLACEMENT_SURFACE).opened_place == "a new surface in this workspace"
+
+    def test_no_backend_calls_a_cmux_placement_a_window(self) -> None:
+        """The specific wrong word, pinned so it cannot come back."""
+        for placement in (PLACEMENT_WORKSPACE, PLACEMENT_SURFACE):
+            assert "window" not in CmuxBackend(placement).opened_place
+
+
+class TestTerminalAppDoesNotStealFocus:
+    """R5/D-focus. `activate` raised Terminal.app over whatever the user was
+    typing in, and iTerm2's script never had it."""
+
+    def test_the_terminal_script_does_not_activate(self) -> None:
+        from local_operator.spawn.apple import ITERM_SCRIPT, TERMINAL_SCRIPT
+
+        assert "activate" not in TERMINAL_SCRIPT
+        assert "activate" not in ITERM_SCRIPT

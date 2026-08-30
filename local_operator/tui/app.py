@@ -502,7 +502,20 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # than splicing into the middle of a sentence.
     SlashCommand(
         "fork",
-        "Branch this conversation into a new session, optionally with a first message",
+        # Terse for the reason `/model` and `/theme` record above: the
+        # description column wraps past ~55 cells. The long form was 76
+        # characters — the longest of all 32 commands — and it was the ONLY row
+        # in `/help` that wrapped at 100 columns, hanging its orphan word back
+        # in the COMMAND column so the listing rendered a phantom command named
+        # `message`. The picker truncated it before the argument clause at every
+        # common width, cutting exactly the half that says the argument exists.
+        #
+        # `<message>` is front-loaded rather than trailing so it survives that
+        # truncation: at 60 columns a user still sees that the argument is a
+        # message the branch STARTS ON, which is what stops them typing a title
+        # and being billed for a turn in another window. `docs/fork.md` carries
+        # the rest.
+        "Branch this conversation; /fork <message> starts it on that",
         echo=True,
         consumes_prompt=True,
     ),
@@ -1950,6 +1963,11 @@ class OperatorApp(App[None]):
         # next substantive message retries, which is bounded by the user's own
         # sends and only ever fires while no name exists to displace.
         self._name_requested: bool = False
+        #: A receipt that must survive a session transition. `fork.mode=switch`
+        #: reboots onto the fork, which wipes the ledger about half a second
+        #: after the notice is written, so the copy naming the fork and the way
+        #: back to the parent is stashed here and re-emitted after adoption.
+        self._pending_fork_receipt: str = ""
         # The opener-derived label the band and the tab wear until the
         # generated title lands. Latched to the FIRST substantive message on
         # purpose: a conversation is identified by what it was opened for, and
@@ -2813,6 +2831,23 @@ class OperatorApp(App[None]):
             if task is not None:
                 task.cancel()
             raise
+
+    def _flush_fork_receipt(self) -> None:
+        """Re-emit a fork receipt that a session transition would have destroyed.
+
+        `fork.mode = switch` prints its receipt and then reboots onto the fork,
+        which clears the ledger — so the two ids the user needs (the fork they
+        are now in, and the parent they just left) were on screen for under half
+        a second. Restating it AFTER adoption is what makes the one mode that
+        removes the original from the screen also the mode that says how to get
+        back to it.
+
+        Consumed, not just read: a later `/reload` of this same session must not
+        replay a receipt about a fork the user has long since moved past.
+        """
+        receipt, self._pending_fork_receipt = self._pending_fork_receipt, ""
+        if receipt:
+            self._notice(receipt, "note")
 
     def _submit_boot_prompt(self, session: Any) -> None:
         """Run a fork's opening message, if this session was started with one.
@@ -3872,6 +3907,7 @@ class OperatorApp(App[None]):
             else:
                 carried_spend = self._reset_ledger_for_swap()
                 self._adopt_session(session)
+                self._flush_fork_receipt()
                 # The IN-PROCESS adoption path needs the boot prompt too, not
                 # just the cold-boot one. `/fork <message>` with
                 # `fork.mode = switch` swaps this terminal onto the fork rather
@@ -4610,11 +4646,26 @@ class OperatorApp(App[None]):
         # for seconds (see `_on_fork_complete`), and the drain happens at the
         # parent's turn boundary — blocking there would stall the very turn this
         # feature promises to leave running.
-        request_fork(
+        replaced = request_fork(
             config_dir(),
             message=message,
             on_complete=self._schedule_fork_report,
         )
+        if replaced:
+            # Say that the earlier request was dropped. Two identical
+            # acknowledgements for two `/fork`s that produce ONE fork is the
+            # defect this closes: the replacement is fine, doing it invisibly
+            # is not, and the single receipt lands minutes later far up the
+            # scrollback where the discrepancy would never be spotted.
+            notice(
+                (
+                    f"fork request replaced — the branch will carry “{message}”"
+                    if message
+                    else "fork request replaced — the branch will carry no message"
+                ),
+                "note",
+            )
+            return
         notice("forking at the next safe boundary…")
 
     def _schedule_fork_report(self, fork_id: str, error: str) -> None:
@@ -4665,6 +4716,22 @@ class OperatorApp(App[None]):
             # No spawn at all: the proven session transition moves this terminal
             # onto the fork. The original stays on disk, untouched and
             # resumable — which is what makes this mode safe rather than lossy.
+            #
+            # The receipt has to survive the transition, which is why it is
+            # STASHED rather than printed here. `_resume_session` reboots the
+            # app and the ledger is wiped about half a second later, so a notice
+            # written now is destroyed before it can be read — and this is the
+            # one mode where the original conversation LEAVES THE SCREEN, so it
+            # is the one mode where "how do I get back?" is a real question. The
+            # parent id is captured now because after the transition this
+            # session IS the fork and can no longer name what it came from.
+            parent_id = self._resumable_session_id()
+            self._pending_fork_receipt = (
+                f"switched to fork {fork_id} — the original is still there: "
+                f"lop --resume {parent_id}"
+                if parent_id
+                else f"switched to fork {fork_id}"
+            )
             self._resume_session(fork_id, self._notice)
             return
 
@@ -4701,7 +4768,13 @@ class OperatorApp(App[None]):
             # the place to find out that one did.
             opened = False
         if opened:
-            self._notice(f"forked to {fork_id} — opened in a new {backend.name} window", "note")
+            # The backend names the PLACE, not itself. Under cmux the fork is a
+            # sidebar row or a tab rather than a window, and it is deliberately
+            # never focused — so this line is the only thing pointing the user
+            # at the right level of the UI. `getattr` so a third-party backend
+            # that predates the field still produces a sensible receipt.
+            place = getattr(backend, "opened_place", None) or f"a new {backend.name} window"
+            self._notice(f"forked to {fork_id} — opened in {place}", "note")
         else:
             self._notice(fallback_receipt(fork_id, failed=True), "note")
 
@@ -7028,7 +7101,13 @@ class OperatorApp(App[None]):
         # prompt holding focus for a flow the user has just interrupted.
         self._settle_key_prompt()
         if self._session is not None:
+            # Probed BEFORE the abort, which clears it: the user needs to be
+            # told the fork went away with the turn, or a request that silently
+            # vanished is as surprising as one that silently survived.
+            fork_was_pending = bool(getattr(self._session, "has_pending_fork", bool)())
             self._session.abort("interrupted")
+            if fork_was_pending:
+                self._notice("fork cancelled", "note")
         # A bang-mode command is not a turn, so aborting the session does
         # not reach it. Same key, same meaning: stop the work in front of
         # the user. After the session abort so a live turn and a live
@@ -14316,7 +14395,16 @@ class OperatorApp(App[None]):
         if panel is None or not panel.is_open:
             # ^f is unbound everywhere else, so pressed outside the aside it
             # would otherwise be a key that does nothing with no explanation.
-            self._system_notice("ctrl+f forks an open aside — ctrl+b opens one", "warning")
+            # Names BOTH meanings, because this is the one moment the two
+            # collide: a user who has just learned `/fork` presses ^F expecting
+            # to branch the session and gets this. Saying only what ^F does —
+            # in the same verb they just learned, for the operation this is not
+            # — left them with no route to the thing they actually wanted.
+            self._system_notice(
+                "ctrl+f folds an open aside into the chat (ctrl+b opens one) — "
+                "to branch this conversation, use /fork",
+                "warning",
+            )
             return
         pairs = panel.fork_messages()
         if not pairs:

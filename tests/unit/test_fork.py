@@ -553,3 +553,90 @@ class TestTheBootPromptFiresInBothModes:
                 f"{method} does not consume the fork boot prompt, so a "
                 f"/fork <message> in that mode silently drops the message"
             )
+
+
+class TestTheForkRowIsDistinguishableWhileItBorrowsATitle:
+    """D2/U2. A fresh fork and its parent were byte-identical picker rows.
+
+    Same name, same "just now", separable only by a 12-hex id — in exactly the
+    window where a user is most likely hunting for one of the two. The marker
+    is about the AMBIGUOUS STATE, not ancestry, so it must clear the moment the
+    fork names itself or it becomes permanent noise.
+    """
+
+    def test_a_fork_wearing_its_parents_title_is_marked(self, tmp_path: Path) -> None:
+        from local_operator.resume import recent_session_rows
+
+        _seed_named_parent(tmp_path, "Refactor the loader")
+        fork_id = fork_session(tmp_path, PARENT_ID)
+
+        rows = {row.id: row for row in recent_session_rows(tmp_path)}
+        assert rows[fork_id].forked is True
+        assert rows[PARENT_ID].forked is False
+        # Both still READ the same, which is why the flag has to exist.
+        assert rows[fork_id].name == rows[PARENT_ID].name
+
+    def test_the_mark_clears_once_the_fork_names_itself(self, tmp_path: Path) -> None:
+        """The half that stops this becoming a permanent tag."""
+        import time as _time
+
+        from local_operator.resume import recent_session_rows, write_session_title
+
+        _seed_named_parent(tmp_path, "Refactor the loader")
+        fork_id = fork_session(tmp_path, PARENT_ID)
+        _time.sleep(0.02)
+        write_session_title(
+            tmp_path / "sessions" / fork_id,
+            "Streaming parser attempt",
+            user_set=False,
+            past_names=[],
+        )
+
+        rows = {row.id: row for row in recent_session_rows(tmp_path)}
+        assert rows[fork_id].name == "Streaming parser attempt"
+        assert rows[fork_id].forked is False, "the fork stayed tagged after naming itself"
+
+    def test_an_ordinary_session_is_never_marked(self, tmp_path: Path) -> None:
+        from local_operator.resume import recent_session_rows
+
+        _seed_named_parent(tmp_path, "Refactor the loader")
+        rows = recent_session_rows(tmp_path)
+        assert all(row.forked is False for row in rows)
+
+
+class TestASecondForkRequestIsNotSilent:
+    """U3. Two `/fork`s produced two acknowledgements and one fork."""
+
+    def test_replacing_a_pending_request_is_reported(self, tmp_path: Path) -> None:
+        session = _bare_session(tmp_path)
+
+        first = session.request_fork(tmp_path, message="a", on_complete=lambda i, e: None)
+        second = session.request_fork(tmp_path, message="b", on_complete=lambda i, e: None)
+
+        assert first is False, "the first request replaced nothing"
+        assert second is True, "the second request silently discarded the first"
+
+
+class TestAPendingForkIsCancellable:
+    """U4. Esc stopped the turn and the fork arrived anyway, minutes later."""
+
+    def test_abort_withdraws_a_pending_fork(self, tmp_path: Path) -> None:
+        session = _bare_session(tmp_path)
+        session.request_fork(tmp_path, message="x", on_complete=lambda i, e: None)
+        assert session.has_pending_fork() is True
+
+        session.abort("interrupted")
+
+        assert session.has_pending_fork() is False
+
+    def test_cancel_reports_whether_anything_was_pending(self, tmp_path: Path) -> None:
+        session = _bare_session(tmp_path)
+        assert session.cancel_fork() is False
+        session.request_fork(tmp_path, message="x", on_complete=lambda i, e: None)
+        assert session.cancel_fork() is True
+
+
+def _bare_session(tmp_path: Path):
+    """A Session over an empty transcript, for the request/cancel bookkeeping."""
+    _seed_parent(tmp_path, session_id="reqreqreqreq")
+    return _build_session(tmp_path / "sessions" / "reqreqreqreq")

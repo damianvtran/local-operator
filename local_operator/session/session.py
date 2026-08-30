@@ -3680,8 +3680,8 @@ class Session:
         *,
         message: str = "",
         on_complete: Callable[[str, str], None],
-    ) -> None:
-        """Branch this conversation into a new session at the next safe boundary.
+    ) -> bool:
+        """Branch this conversation at the next safe boundary. Replacement? -> True.
 
         The transcript on disk is the artifact a fork copies, so a fork is only
         correct at a point where the run's messages are already persisted AND
@@ -3711,10 +3711,44 @@ class Session:
         ``on_complete`` is called with ``(fork_id, error)`` — exactly one of
         which is non-empty — on the session's own loop. The host owns everything
         the user sees from there; the session's responsibility ends at the clone.
+
+        Returns True when this request REPLACED one that was already pending, so
+        the host can say so rather than silently dropping the earlier one.
         """
+        # A second request REPLACES the first, and says so. A bare assignment
+        # discarded the earlier one silently: both `/fork`s were echoed as user
+        # rows and both got "forking at the next safe boundary…", so the screen
+        # showed two forks pending while exactly one was ever created — carrying
+        # only the second message. A user refining their instruction got what
+        # they wanted by luck; a user deliberately branching twice from the same
+        # point lost a branch, and the single receipt arrives minutes later and
+        # far up the scrollback from the two acknowledgements, so the
+        # discrepancy is very unlikely to be noticed.
+        #
+        # Replacing rather than queueing is the right default: the common case
+        # by far is changing your mind about the message, and two windows opened
+        # from one keystroke pair is the more surprising outcome. The caller
+        # reports the replacement; the session only tells it that one happened.
+        replaced = self._fork_pending
         self._fork_pending = _ForkRequest(
             config_dir=config_dir, message=message, on_complete=on_complete
         )
+        return replaced is not None
+
+    def cancel_fork(self) -> bool:
+        """Withdraw a pending fork. True when one was actually waiting.
+
+        Esc is what a user reaches for to take something back in this app, and
+        it already unsends a queued steer (:meth:`recall_steering`). Without
+        this a requested fork was the one thing in the family with no undo: the
+        abort stopped the turn, which LOOKS like it stopped everything, and the
+        fork then arrived minutes later as a window in a sidebar row nobody was
+        watching. Wired into :meth:`abort` so the escape route the user already
+        knows covers this too.
+        """
+        cancelled = self._fork_pending is not None
+        self._fork_pending = None
+        return cancelled
 
     def has_pending_fork(self) -> bool:
         """Whether a fork is waiting for a boundary. Polled by the loop.
@@ -3990,8 +4024,16 @@ class Session:
         and the agent would run the continuation the user just tried to stop.
         The flag is checked at the top of the continuation drain and pre-aborts
         the next turn's signal.
+
+        A PENDING FORK is withdrawn here too. A fork requested mid-turn waits
+        for a boundary that an abort means will never arrive in the shape it was
+        asked for, and Esc looking like it stopped everything while a window
+        opens minutes later is the surprise this closes — see
+        :meth:`cancel_fork`. The host reports it; ``abort`` returns nothing, so
+        the caller asks the session what it cancelled.
         """
         self._abort_requested = True
+        self.cancel_fork()
         if self._signal is not None:
             self._signal.abort(reason)
 

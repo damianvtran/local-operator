@@ -33,6 +33,7 @@ class WezTermBackend:
     """Opens a fork in a new WezTerm window."""
 
     name = "wezterm"
+    opened_place = "a new WezTerm window"
 
     def detect(self, env: EnvMap) -> bool:
         return terminals.is_wezterm(env)

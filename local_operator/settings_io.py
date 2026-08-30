@@ -635,7 +635,11 @@ SETTINGS: tuple[Setting, ...] = (
         key="fork.cmux_placement",
         path=("fork", "cmux_placement"),
         section="fork",
-        label="cmux placement",
+        # Leads with the CONDITION, not the tool name: this row is a sub-clause
+        # of "Where a fork opens" above it, and "placement" is a word that
+        # appears nowhere else a user has seen. The help text already phrased it
+        # this way; the label was lagging behind it.
+        label="Where it opens under cmux",
         kind=Kind.ENUM,
         default="workspace",
         help="Under cmux, whether a fork gets its own workspace or a surface here.",

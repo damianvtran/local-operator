@@ -43,6 +43,7 @@ class KittyBackend:
     """Opens a fork in a new kitty OS window."""
 
     name = "kitty"
+    opened_place = "a new kitty window"
 
     def detect(self, env: EnvMap) -> bool:
         return terminals.is_kitty(env)

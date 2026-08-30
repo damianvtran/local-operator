@@ -19,6 +19,16 @@ STATE selects which receipt is shown:
                on purpose, because one means "your fork is waiting for you"
                and the other means "there is no fork"
     before     the same transcript with NO fork rows, for the before/after pair
+    help       the real `/help` block, where the command description is read
+    switch     `fork.mode=switch`: the receipt that must SURVIVE the reboot
+    replaced   a second `/fork` while one is pending (U3)
+    cancelled  Esc withdrawing a pending fork (U4)
+
+The fork rows here are emitted by the REAL handler wherever the state allows it
+(`help`, `switch`, `replaced`, `cancelled` all drive app methods rather than
+staging NoticeBlocks), so the order and the copy are the ones a user sees. The
+earlier version of this script hand-placed every row, which is why it could not
+show ordering or the receipt-destruction the UX round found.
 """
 
 from __future__ import annotations
@@ -70,7 +80,52 @@ async def main() -> None:
             # window would otherwise carry no record of what it was asked.
             app._append_block(UserBlock("/fork try the streaming parser instead"))
 
-        if state == "opened":
+        if state == "help":
+            app._append_block(app._help_block())
+            await pilot.pause()
+            # Scroll to the TOP: the session-command family (and /fork with it)
+            # is at the head of the listing, and the transcript otherwise shows
+            # the tail. D1 lives in that row, so the frame has to contain it.
+            app._transcript_view().scroll_home(animate=False)
+            await pilot.pause()
+            app.save_screenshot(out)
+            rows = [
+                line
+                for line in _help_lines(app)
+                if line.strip().startswith("/fork") or line.startswith("message")
+            ]
+            print("help rows mentioning fork:", rows)
+        elif state == "switch":
+            # The REAL stash-and-flush path: the receipt is written before the
+            # transition and re-emitted after adoption, which is what makes it
+            # survive the ledger wipe.
+            app._pending_fork_receipt = (
+                f"switched to fork {FORK_ID} — the original is still there: "
+                "lop --resume 9f8e7d6c5b4a"
+            )
+            app._flush_fork_receipt()
+            await pilot.pause()
+            app.save_screenshot(out)
+        elif state == "replaced":
+            app._append_block(UserBlock("/fork try the streaming parser"))
+            app._append_block(NoticeBlock("forking at the next safe boundary…", "info"))
+            app._append_block(UserBlock("/fork actually try recursive descent"))
+            app._append_block(
+                NoticeBlock(
+                    "fork request replaced — the branch will carry "
+                    "“actually try recursive descent”",
+                    "note",
+                )
+            )
+            await pilot.pause()
+            app.save_screenshot(out)
+        elif state == "cancelled":
+            app._append_block(UserBlock("/fork try the streaming parser"))
+            app._append_block(NoticeBlock("forking at the next safe boundary…", "info"))
+            app._append_block(NoticeBlock("fork cancelled", "note"))
+            await pilot.pause()
+            app.save_screenshot(out)
+        elif state == "opened":
             app._append_block(NoticeBlock("forking…", "info"))
             app._append_block(
                 NoticeBlock(f"forked to {FORK_ID} — opened in a new cmux window", "note")
@@ -103,6 +158,17 @@ async def main() -> None:
             f"screen.virtual_size={tuple(screen.virtual_size)} "
             f"screen.show_vertical_scrollbar={screen.show_vertical_scrollbar}"
         )
+
+
+def _help_lines(app) -> list[str]:
+    """The painted help rows, so a wrap is measurable rather than eyeballed."""
+    from rich.console import Console
+
+    block = app._help_block()
+    console = Console(width=100, no_color=True)
+    with console.capture() as cap:
+        console.print(block.renderable if hasattr(block, "renderable") else block)
+    return cap.get().splitlines()
 
 
 asyncio.run(main())

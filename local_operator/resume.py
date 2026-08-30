@@ -1238,6 +1238,18 @@ class SessionRow(NamedTuple):
     id: str
     mtime: float
     name: str
+    #: True while this session is a FORK still wearing the title it inherited
+    #: from its parent, so the picker can tell the branch from the trunk.
+    #:
+    #: Without it a fresh fork and its parent are byte-identical rows — same
+    #: name, same "just now" — separable only by a 12-hex id, in exactly the
+    #: window where a user is most likely to be looking for one of them. The
+    #: state is not always brief either: a bare ``/fork`` keeps the borrowed
+    #: title until the user sends it something, which may be never.
+    #:
+    #: Defaulted so every existing construction site keeps working; only the
+    #: picker's row builder sets it.
+    forked: bool = False
 
 
 def stored_session_title(session_dir: Path) -> str:
@@ -1494,7 +1506,70 @@ def recent_session_rows(config_dir: Path, limit: int | None = None) -> list[Sess
     (see :func:`recent_sessions`) and the only per-row cost added is
     :func:`session_name`, one bounded head read.
     """
-    return [
-        SessionRow(session_id, mtime, session_name(config_dir / "sessions" / session_id))
-        for session_id, mtime in recent_sessions(config_dir, limit)
-    ]
+    rows: list[SessionRow] = []
+    for session_id, mtime in recent_sessions(config_dir, limit):
+        session_dir = config_dir / "sessions" / session_id
+        # The origin marker was already READ for the visibility decision in
+        # ``recent_sessions`` (and memoised), so asking again here is cheap —
+        # and only for a session that actually carries one, which forks do and
+        # ordinary conversations do not.
+        rows.append(
+            SessionRow(
+                session_id,
+                mtime,
+                session_name(session_dir),
+                forked=wears_inherited_title(session_dir),
+            )
+        )
+    return rows
+
+
+def wears_inherited_title(session_dir: Path) -> bool:
+    """True while a FORK is still displaying the title it inherited.
+
+    The marker is about the AMBIGUOUS STATE, not about ancestry: a fork that has
+    named itself is a conversation in its own right and tagging it forever would
+    be noise on every row it ever appears in. So this asks the same question
+    ``Session._is_unnamed_fork`` asks at boot — is the newest journalled title
+    older than the fork instant — and answers False as soon as the fork writes
+    its own name.
+
+    Read from the sidecar rather than the transcript so the picker keeps its
+    one-bounded-read-per-row cost model; a fork always has the sidecar, because
+    the clone copies it precisely so the row is never blank.
+    """
+    forked_at = _fork_instant(session_dir)
+    if forked_at is None:
+        return False
+    sidecar = _read_title_sidecar(session_dir)
+    if sidecar is None or not sidecar.text:
+        # A fork of a never-named parent: nothing was inherited, so there is
+        # nothing borrowed to mark.
+        return False
+    try:
+        stamped = (session_dir / TITLE_SIDECAR_NAME).stat().st_mtime
+    except OSError:
+        return False
+    # The sidecar is rewritten when this session names itself, so a stamp newer
+    # than the fork means the title on show is its own.
+    return stamped <= forked_at
+
+
+def _fork_instant(session_dir: Path) -> float | None:
+    """``forked_at`` from the origin marker, or None when this is not a fork.
+
+    Duplicated in spirit with ``fork.fork_instant`` and deliberately NOT
+    imported from it: this module is import-guarded (see the module docstring)
+    and ``fork`` imports ``shutil``/``uuid`` plus the retention module, which
+    the CLI's ``--resume`` path must not acquire. The payload is three keys and
+    the reader is five lines; the import edge would cost more than the copy.
+    """
+    try:
+        raw = (session_dir / ORIGIN_NAME).read_text(encoding="utf-8", errors="replace")
+        payload = json.loads(raw)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(payload, dict) or payload.get("origin") != ORIGIN_FORK:
+        return None
+    forked_at = payload.get("forked_at")
+    return float(forked_at) if isinstance(forked_at, (int, float)) else None

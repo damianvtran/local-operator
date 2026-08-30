@@ -116,6 +116,19 @@ class CmuxBackend:
     def __init__(self, placement: str = PLACEMENT_WORKSPACE) -> None:
         self.placement = placement
 
+    @property
+    def opened_place(self) -> str:
+        """What this placement actually creates, in the user's words.
+
+        A workspace is a SIDEBAR ROW in the window the user already has, and a
+        surface is a tab in the workspace they are already in — neither is a
+        window, and both are deliberately unfocused, so the receipt is the only
+        thing that tells the user where to look.
+        """
+        if self.placement == PLACEMENT_SURFACE:
+            return "a new surface in this workspace"
+        return "a new cmux workspace"
+
     def detect(self, env: EnvMap) -> bool:
         """True when this process is a cmux surface AND a cmux CLI exists.
 

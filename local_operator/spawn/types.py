@@ -80,9 +80,29 @@ class SpawnBackend(Protocol):
     to live.
     """
 
-    #: Stable identifier, used in log lines and in the fork receipt the user
-    #: reads ("opened in a new cmux workspace"). Matches the emulator's own name.
+    #: Stable identifier, used in log lines. Matches the emulator's own name.
+    #: NOT the noun the receipt uses — see :attr:`opened_place`.
     name: str
+
+    #: What this backend actually OPENS, as the user would name it: "a new cmux
+    #: workspace", "a new surface in this workspace", "a new Ghostty window".
+    #:
+    #: A separate member rather than an f-string over :attr:`name`, because the
+    #: two genuinely differ. Deriving the noun gave every backend the word
+    #: "window": under cmux the default placement creates a WORKSPACE — a
+    #: sidebar row in the window the user is already in — so a user who chose
+    #: `cmux_placement = surface` was told a window opened and went looking for
+    #: one that does not exist. It also produced "a new applescript window",
+    #: naming a mechanism rather than a place. The receipt is the only thing
+    #: telling a user where to find a fork that deliberately did not steal
+    #: focus, so it has to name the right level of the UI.
+    #:
+    #: READ-ONLY (a property, not an attribute), which is what lets a backend
+    #: DERIVE it: cmux's answer depends on the placement it was constructed
+    #: with, so it computes the string rather than storing one. A plain
+    #: attribute here would be invariant-and-mutable and reject that.
+    @property
+    def opened_place(self) -> str: ...
 
     def detect(self, env: EnvMap) -> bool:
         """Whether a fork opened from HERE should use this backend.

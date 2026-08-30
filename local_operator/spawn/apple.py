@@ -81,6 +81,7 @@ class _AppleScriptBackend:
     """Shared spawn half; the subclasses differ only in script and detection."""
 
     name = "applescript"
+    opened_place = "a new window"
     script = ""
 
     def spawn(self, launch: ForkLaunch, env: EnvMap) -> bool:
@@ -118,6 +119,7 @@ class TerminalAppBackend(_AppleScriptBackend):
     """Opens a fork in a new macOS Terminal.app window."""
 
     name = "apple-terminal"
+    opened_place = "a new Terminal window"
     script = TERMINAL_SCRIPT
 
     def detect(self, env: EnvMap) -> bool:
@@ -128,6 +130,7 @@ class ITerm2Backend(_AppleScriptBackend):
     """Opens a fork in a new iTerm2 window."""
 
     name = "iterm2"
+    opened_place = "a new iTerm2 window"
     script = ITERM_SCRIPT
 
     def detect(self, env: EnvMap) -> bool:
