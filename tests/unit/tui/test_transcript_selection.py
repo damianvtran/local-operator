@@ -3577,10 +3577,17 @@ async def test_a_receipt_retires_even_when_the_caret_moved_before_the_edit() -> 
         await _composer_copy(app, pilot, _cell(editor, 0, 0), _cell(editor, 0, 20))
         assert editor._copied, "the drag should have posted a receipt"
 
-        # The caret moves off the copied range, retiring the GESTURE claim only.
+        # The caret moves off the copied range. The copy stops being in flight
+        # — the key goes back to the draft and interrupt rungs — but the RECEIPT
+        # survives, which is the asymmetry this test exists to pin.
+        #
+        # Asserted through `copy_in_flight`, the predicate the app's Ctrl+C rung
+        # actually consults, rather than a private flag: the `_copy_gesture`
+        # field this line used to name was deleted once the composer stopped
+        # copying on release and nothing set it any more.
         await pilot.press("right")
         await pilot.pause()
-        assert not editor._copy_gesture, "the gesture claim should have retired"
+        assert not editor.copy_in_flight, "the copy should no longer divert the key"
         assert editor._copied, "the receipt is still true and must survive a caret move"
 
         # NOW the user edits the copied characters away.

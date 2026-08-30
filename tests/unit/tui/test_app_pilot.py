@@ -8931,3 +8931,61 @@ async def test_help_documents_the_system_clipboard_paste_key() -> None:
         assert "ctrl+v" in text, "/help must name the system clipboard paste key"
         line = next(row for row in text.splitlines() if "ctrl+v" in row)
         assert "clipboard" in line, f"{line!r} names the key without saying what it does"
+
+
+@pytest.mark.asyncio
+async def test_help_documents_the_composer_copy_key_and_its_release() -> None:
+    """``ctrl+c`` is the composer's copy gesture and needs a durable surface.
+
+    Same shape of gap as ``ctrl+v`` above: not a slash command, so the command
+    table cannot carry it, and its only other advertisement is a ``welcome``
+    tip on a splash that stops being displayed after the first message. The
+    user who wants the key is mid-draft, which is exactly when the splash is
+    gone (#169).
+
+    The RULE is asserted, not merely the key. A live range makes every ctrl+c a
+    copy, so a user holding a highlight has to know what gives the key back —
+    otherwise the honest reading of a one-line "ctrl+c copies" entry is that
+    the interrupt has disappeared. ``esc`` is on the row because it stops the
+    agent regardless of what is highlighted.
+    """
+    from rich.console import Group
+    from rich.padding import Padding
+    from rich.text import Text
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        padding = cast(Padding, app._help_block().renderable)
+        group = cast(Group, padding.renderable)
+        rows = [cast(Text, row).plain for row in group.renderables]
+        text = "\n".join(rows)
+
+        assert "ctrl+c" in text, "/help must name the composer copy key"
+        index = next(i for i, row in enumerate(rows) if "ctrl+c" in row)
+        assert "copies" in rows[index], f"{rows[index]!r} names the key without its effect"
+        # The continuation line carries the half users get wrong: how the key
+        # stops being a copy, and what always interrupts.
+        release = rows[index + 1]
+        assert "caret" in release, f"{release!r} does not say what hands the key back"
+        assert "esc" in release, f"{release!r} does not name the key that always interrupts"
+
+        # THE WRAP CEILING IS 74, MEASURED through the painted compositor
+        # rather than derived: a composed row of 74 fits and 75 wraps to two
+        # lines. A wrapped tail lands at the key gutter, where it reads as
+        # another key row — #402's design round 1 D2, the defect `paste_note`
+        # was shortened for and which the `cmd+v` row reintroduced once.
+        #
+        # The rule is `terminal width - 6` (confirmed at 80/90/100 -> 74/84/94),
+        # and the six cells are four reservations declared in different places:
+        # `TranscriptView`'s left padding, the reserved scrollbar column, the
+        # block's `SPINE_INDENT`, and `RichBlock`'s own `Padding`. Stated here
+        # because a one-term derivation gives 76 and that wrong number has been
+        # asserted twice (review round 2 F3, round 3 F4); see `_help_block`.
+        #
+        # A looser bound here would be worse than none: these rows are the ones
+        # this test is advertised as guarding, so a window that excludes 75 and
+        # 76 cannot fire at the boundary where the defect first appears (review
+        # round 2, F3).
+        for row in (rows[index], release):
+            assert len(row) <= 74, f"{row!r} is {len(row)} cells and wraps at 80 columns"
