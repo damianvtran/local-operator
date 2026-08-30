@@ -18,9 +18,13 @@ several agent sessions run suites at the same time.
 Measured on a 14-core / 36 GB host, all numbers from real runs of
 ``pytest tests/unit``:
 
-* ``-n auto`` (14 workers): **7,438 MB peak RSS** across 19 processes; roughly
-  **600 MB per worker** including the controller (``-n 6`` peaked at 3,598 MB,
-  so the growth is linear).
+* ``-n auto`` resolves to 14 workers. Measuring the xdist workers themselves
+  (matched by their execnet command line, on a subset that forks no children of
+  its own, so the numbers describe workers and nothing else), 3 interleaved
+  rounds: **14 workers = 3,661 MB** of worker RSS, **7 workers = 1,579 MB** -
+  57% less, with per-worker RSS flat at 226-262 MB across both. Whole-tree peak
+  figures are deliberately not quoted here: they conflate workers with
+  subprocesses the tests themselves spawn and are not a function of ``-n``.
 * Three suites running concurrently drove load average to **98-128** on 14 cores
   and consumed **6.1 GB of 7.2 GB** of swap. At that point everything on the
   machine is slower, not just the tests.

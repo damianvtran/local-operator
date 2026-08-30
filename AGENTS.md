@@ -24,11 +24,20 @@ peak RSS**; three suites at once drove load average to 98-128 and consumed 6.1
 of 7.2 GB of swap. Fewer workers were also *faster* there — an interleaved A/B
 on `tests/unit/server` measured `-n 4` at 5.3-5.9s against `-n 14` at
 7.8-11.3s, because the suite waits on the event loop rather than on CPU. The
-cap is the smaller of a CPU share and a budget over *available* memory (about
-600 MB per worker, measured), so a machine already under pressure from sibling
-worktrees backs off on its own. The memory probe (`vm_stat` on macOS,
-`MemAvailable` on Linux — `psutil` is deliberately not a dependency) degrades to
-the CPU-only cap on any failure and never raises.
+cap is the smaller of a CPU share and a memory budget, so a machine already
+under pressure from sibling worktrees backs off on its own. The budget divides
+by 600 MB per worker, which is a deliberate ~2.5x safety envelope rather than
+the measured figure: cleanly measured workers sit at 226-262 MB, but a worker's
+RSS depends on which tests it draws (worst observed ~1,090 MB) and some tests
+fork their own subprocesses the budget must still cover.
+
+The memory probe is pressure-aware, which matters more than it sounds:
+`psutil` is deliberately not a dependency, so macOS is read from `vm_stat` and
+Linux from `MemAvailable`. On macOS, counting `Pages inactive` as free reports
+many gigabytes of phantom headroom on a machine that is actively swapping (it
+claimed 8,137 MB while the host had 452 MB free and 6.1 GB of swap consumed), so
+inactive is discounted and consumed swap is subtracted. Any probe failure
+degrades to the CPU-only cap; the hook never raises.
 
 Override it per session, or bypass it entirely:
 
