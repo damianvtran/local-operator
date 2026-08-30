@@ -424,6 +424,38 @@ change.
   a comment that restates the code is noise, and a change with a non-obvious
   reason needs the reason recorded.
 
+## Adding a configuration key
+
+**Every new configuration key must also be added to the `/settings` registry
+(`local_operator/settings_io.py`).** A key that only exists in the code that
+reads it is invisible: `/settings` is the surface users browse to discover what
+is configurable, and `lop config edit`/`config list` resolve names out of that
+same registry, so an unregistered key can only be set by someone who already
+knows it exists and edits `config.yml` by hand.
+
+Adding one means, in the same change:
+
+1. A `Setting` in `SETTINGS`, in a declared `Section`. If the section is new,
+   add it to `SECTIONS` too — and pick its `Scope` honestly. Scope is uniform
+   within a section by construction, so a key that takes effect immediately does
+   not belong in a section labelled "new sessions"; split the section instead.
+2. **A real module-level default constant next to the code that reads the key**,
+   mapped in `_consumer_defaults()` in `tests/unit/test_settings_io.py`.
+3. `path=` spelled deliberately. Almost every key is a genuinely NESTED tuple
+   (`("fork", "mode")`). The `display.*` flags are the exception — they are
+   literal dotted keys at the top level because that is what `tui/settings.py`
+   reads — and getting this backwards writes a key nothing reads while looking
+   like success from every angle.
+
+`test_every_default_matches_its_consumer` is the enforcement, and it fails **by
+name** for any setting with no consumer entry. There is an allow-list
+(`_NO_SINGLE_VALUE_CONSUMER`) for keys that genuinely have no single-value
+consumer, guarded by its own staleness test — it is for free-text keys whose
+"default" is "unset means inherit", not an escape hatch for a key you did not
+feel like wiring up. Using it to silence the failure defeats the guard: the
+whole point is that a registry default disagreeing with the code's default is a
+painted lie that nothing else reports.
+
 ## Usage analytics (`local_operator/analytics/`)
 
 Every provider call across every session contributes to one shared, on-disk

@@ -439,6 +439,16 @@ def render_rows(
         # pinning it to the floor made selecting it darker than every
         # unselected row, so the highlight inverted.
         name = row.name or "(unnamed session)"
+        # A fork still wearing its parent's title is otherwise a byte-identical
+        # row to the parent — same name, same age — separable only by a hex id,
+        # and that is precisely the moment a user opens this picker looking for
+        # one of the two. The suffix is dropped the instant the fork writes its
+        # own name (``forked`` is only set while the title is inherited), so it
+        # marks the ambiguous state rather than permanently labelling the
+        # session. Inside the name field so it truncates with the name and
+        # cannot ragged the columns beside it.
+        if getattr(row, "forked", False):
+            name = f"{name}  (fork)"
         if row.name:
             name_colour = fg if current else muted
         else:

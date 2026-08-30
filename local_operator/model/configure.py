@@ -1613,6 +1613,7 @@ class SessionStreamFn:
         auth_store: AuthStore,
         settings: Mapping[str, Any] | None,
         session_id: str | None,
+        cache_lineage_id: str | None = None,
     ) -> None:
         import httpx
 
@@ -1621,6 +1622,17 @@ class SessionStreamFn:
         self._auth_store = auth_store
         self._settings = settings
         self._session_id = session_id
+        # The identity this session's PROVIDER CACHE is keyed under, which is
+        # the session id for an ordinary session and the PARENT's id for a fork.
+        #
+        # Separate from ``_session_id`` on purpose, and the separation is the
+        # safety property: ``_session_id`` alone scopes sticky CREDENTIAL
+        # selection (``auth_store._set_sticky`` keys on ``(provider,
+        # session_id)`` and is passed ``_session_id`` directly, never this
+        # value). So a fork sharing a cache key with its parent shares a
+        # routing hint and nothing else — in particular it does not share a
+        # pinned credential row. Unifying the two would silently make it do so.
+        self._cache_lineage_id = cache_lineage_id or session_id
         self._http = httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=30.0))
         self._notice_handler: Callable[[str, str], Awaitable[None] | None] | None = None
         # The session's route bridge: called with the pinned fallback target
@@ -3111,12 +3123,22 @@ class SessionStreamFn:
                 update={"model": request.model.model_copy(update={"reasoning_effort": effort})}
             )
 
-        if self._session_id and request.prompt_cache_key is None:
-            # The transcript directory name is stable for the session and
-            # already scopes credential stickiness. Reusing it here keeps every
-            # turn on the same provider cache without coupling the harness loop
-            # to session storage.
-            request = request.model_copy(update={"prompt_cache_key": self._session_id})
+        if self._cache_lineage_id and request.prompt_cache_key is None:
+            # The transcript directory name is stable for the session, so
+            # reusing it keeps every turn on the same provider cache without
+            # coupling the harness loop to session storage. For a FORK this is
+            # the PARENT's id (see ``_cache_lineage_id``): the fork replays a
+            # byte-identical transcript, so it really is the same prefix, and a
+            # routing/stickiness hint is exactly what should follow it. Without
+            # the inheritance a fork's first request routes as a fresh prefix —
+            # the same class of regression measured when this key was stripped
+            # entirely, which moved cache-read rates from ~97-98% to ~89-90%.
+            #
+            # Only the OpenAI-shaped wire reads this key
+            # (``OpenAICompatClient._build_responses_body``); Anthropic keys its
+            # cache on prefix CONTENT, so a fork hits there on byte-identity
+            # alone and is unaffected either way.
+            request = request.model_copy(update={"prompt_cache_key": self._cache_lineage_id})
 
         await self.preflight_usage(request.model)
         async for event in self._record_stream(
@@ -3271,6 +3293,7 @@ def create_stream_fn(
     settings: Mapping[str, Any] | None = None,
     *,
     session_id: str | None = None,
+    cache_lineage_id: str | None = None,
 ) -> SessionStreamFn:
     """Build the ``LoopConfig.stream_fn`` for a session.
 
@@ -3282,8 +3305,17 @@ def create_stream_fn(
     credential selection STICKY per session; without it the store round-robins
     on every resolve and multi-credential providers alternate accounts
     mid-conversation (cold cache prefix, alternating identity headers).
+
+    ``cache_lineage_id`` overrides ONLY the provider cache key, defaulting to
+    ``session_id``. A ``/fork`` passes its parent's id so the branch keeps the
+    warm prefix it inherited byte-for-byte. It is a separate parameter rather
+    than a reused ``session_id`` because the two govern different things:
+    credential stickiness must stay scoped to the real session (a fork sharing
+    a pinned credential row with its parent would be a genuine bug), while the
+    cache key is a routing hint whose whole purpose is to follow an identical
+    prefix.
     """
-    return SessionStreamFn(auth_store, settings, session_id)
+    return SessionStreamFn(auth_store, settings, session_id, cache_lineage_id)
 
 
 def calculate_cost(

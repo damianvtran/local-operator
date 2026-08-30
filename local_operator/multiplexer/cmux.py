@@ -243,3 +243,35 @@ def _rpc(binary: str, method: str, params: dict[str, object]) -> dict[str, objec
         logger.debug("cmux %s returned non-JSON", method)
         return None
     return parsed if isinstance(parsed, dict) else None
+
+
+# ---------------------------------------------------------------------------
+# Shared surface for other packages
+# ---------------------------------------------------------------------------
+#
+# ``local_operator.spawn.cmux`` opens a WORKSPACE or SURFACE for a forked
+# session and needs exactly the client this module already owns: the binary
+# resolution rule (PATH before ``CMUX_BUNDLED_CLI_PATH``, defined once in
+# ``tools.builtin``), the RPC helper and the surface target. These wrappers
+# exist so that reuse is an import of a public name rather than a second cmux
+# client — which is the drift that would let the two disagree about where the
+# binary lives.
+#
+# They DELEGATE to the underscore functions rather than replacing them: those
+# are the definitions the existing tests monkeypatch, and a promotion that moved
+# the body would silently make every one of those patches a no-op.
+
+
+def cmux_binary() -> str | None:
+    """The cmux CLI path, or None when there is no usable cmux here."""
+    return _cmux_binary()
+
+
+def cmux_rpc(binary: str, method: str, params: dict[str, object]) -> dict[str, object] | None:
+    """One cmux RPC call. Returns the parsed result, or None on ANY failure."""
+    return _rpc(binary, method, params)
+
+
+def surface_target(env: EnvMap) -> dict[str, str] | None:
+    """``{workspace_id, surface_id}`` for this pane, or None when not in cmux."""
+    return _surface_target(env)

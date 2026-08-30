@@ -239,6 +239,18 @@ SECTIONS: tuple[Section, ...] = (
         Scope.NEW_SESSIONS,
         "When the conversation is summarised to reclaim context.",
     ),
+    # LIVE, and stated deliberately: ``/fork`` reads these through the config
+    # manager at the moment it runs, so an edit takes effect on the very next
+    # fork in this same session. Claiming NEW_SESSIONS would be the painted lie
+    # the anti-drift test exists to prevent. A section of its own rather than
+    # folding into "Session" because scope is uniform within a section by
+    # construction and that one is NEW_SESSIONS.
+    Section(
+        "fork",
+        "Fork",
+        Scope.LIVE,
+        "Where /fork opens the branched conversation.",
+    ),
     Section(
         "web_search",
         "Web search",
@@ -594,6 +606,47 @@ SETTINGS: tuple[Setting, ...] = (
         default="",
         help="provider/model for the hi effort tier. Empty keeps the parent's model.",
         empty_unsets=True,
+    ),
+    # -- fork ---------------------------------------------------------------
+    #
+    # Both paths are genuinely NESTED two-element tuples, not flat dotted keys.
+    # The ``display.*`` trap above applies only to keys ``tui/settings.py`` reads
+    # as literal dotted top-level keys; nothing reads ``values["fork.mode"]``,
+    # and declaring it that way would write a key nothing reads while looking
+    # like success from every angle.
+    Setting(
+        key="fork.mode",
+        path=("fork", "mode"),
+        section="fork",
+        label="Where a fork opens",
+        kind=Kind.ENUM,
+        default="window",
+        help="Whether /fork opens a new window or takes over this one.",
+        choices=(
+            Choice(
+                "window",
+                "new window",
+                "open the fork elsewhere; this session keeps running",
+            ),
+            Choice("switch", "switch in place", "this terminal moves onto the fork"),
+        ),
+    ),
+    Setting(
+        key="fork.cmux_placement",
+        path=("fork", "cmux_placement"),
+        section="fork",
+        # Leads with the CONDITION, not the tool name: this row is a sub-clause
+        # of "Where a fork opens" above it, and "placement" is a word that
+        # appears nowhere else a user has seen. The help text already phrased it
+        # this way; the label was lagging behind it.
+        label="Where it opens under cmux",
+        kind=Kind.ENUM,
+        default="workspace",
+        help="Under cmux, whether a fork gets its own workspace or a surface here.",
+        choices=(
+            Choice("workspace", "new workspace", "a sidebar row of its own"),
+            Choice("surface", "new surface", "a tab in the current workspace"),
+        ),
     ),
     # -- compaction ---------------------------------------------------------
     Setting(

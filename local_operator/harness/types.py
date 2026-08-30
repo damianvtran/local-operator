@@ -1411,6 +1411,28 @@ class LoopConfig(BaseModel):
     # semantics for everything they queue.
     has_urgent_steering_messages: Callable[[], bool] | None = Field(default=None, exclude=True)
 
+    # A fork was requested and is waiting for a safe boundary to clone the
+    # transcript at. Polled ALONGSIDE the steering peek (see
+    # ``AgentLoop._peek_interrupt``) rather than through a second poll loop,
+    # which would double the wakeups on every interruptible tool for no benefit.
+    #
+    # Deliberately NOT a steering message, which is the shape it superficially
+    # resembles: a steer becomes a user turn in THIS session's context and
+    # changes what this session is doing, whereas a fork must leave the parent's
+    # conversation untouched — the entire point of forking is to try a direction
+    # without leaving the one that got you here.
+    #
+    # The asymmetry that follows from that, and the subtlest rule in the
+    # feature: a pending fork may CANCEL an ``interruptible=True`` tool (those
+    # are re-runnable by construction, which is what the flag means), so the
+    # boundary arrives in ~250 ms instead of after a ten-minute ``wait``. But it
+    # must NEVER cause the remaining calls in a batch to be SKIPPED. Steering
+    # skips them because the user redirected the work; a fork has redirected
+    # nothing, and skipping would silently damage the parent's turn. The
+    # batch-skip test in ``_execute_tool_calls`` therefore stays gated on
+    # steering alone.
+    has_pending_fork: Callable[[], bool] | None = Field(default=None, exclude=True)
+
     interrupt_mode: Literal["immediate", "wait"] = "wait"
     # Epoch-ms deadline for the whole run, if any.
     deadline: float | None = None

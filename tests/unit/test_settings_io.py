@@ -43,6 +43,10 @@ def _consumer_defaults() -> dict[str, object]:
         CONNECTIVITY_MAX_RETRIES,
         RetrySettings,
     )
+    from local_operator.spawn.policy import (
+        DEFAULT_FORK_CMUX_PLACEMENT,
+        DEFAULT_FORK_MODE,
+    )
     from local_operator.tui.theme import DEFAULT_THEME
     from local_operator.web_fetch.models import DEFAULT_WEB_FETCH_CONFIG
     from local_operator.web_search.models import DEFAULT_WEB_SEARCH_CONFIG
@@ -67,6 +71,12 @@ def _consumer_defaults() -> dict[str, object]:
         "retry.fallbackChains": dict(retry.fallback_chains),
         "subagents.max_running": DEFAULT_MAX_RUNNING_JOBS,
         "providers.openai.api": DEFAULT_CONFIG.values["providers"]["openai"]["api"],
+        # The fork keys have REAL single-value consumers — the constants
+        # ``/fork`` itself reads — so they are mapped here rather than
+        # allow-listed. An allow-list entry would buy a green test while leaving
+        # the registry default and the feature's default free to disagree.
+        "fork.mode": DEFAULT_FORK_MODE,
+        "fork.cmux_placement": DEFAULT_FORK_CMUX_PLACEMENT,
     }
     for field in type(compaction).model_fields:
         consumers[f"compaction.{field}"] = getattr(compaction, field)

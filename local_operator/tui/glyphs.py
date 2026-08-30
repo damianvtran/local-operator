@@ -59,6 +59,7 @@ from typing import Mapping
 
 from rich.cells import cell_len
 
+from local_operator import terminals
 from local_operator.tui.settings import settings_get
 
 #: The type the detection helper accepts, mirroring ``notify.EnvMap``. A plain
@@ -190,26 +191,23 @@ def _nerd_capable_terminal(env: EnvMap | None = None) -> bool:
     unknown emulator) is False: when in doubt, plain beats tofu.
     """
     source = os.environ if env is None else env
-    # ghostty (and cmux, which embeds it) — bundles JetBrainsMono Nerd Font.
-    if source.get("GHOSTTY_RESOURCES_DIR") or source.get("GHOSTTY_BIN"):
-        return True
-    # kitty — bundles Symbols Nerd Font as its symbol_map fallback. ``startswith``
-    # rather than equality so TERM variants (``xterm-kitty-direct``) still match,
-    # matching notify.detect_protocol's kitty check exactly.
-    if source.get("KITTY_WINDOW_ID") or source.get("TERM", "").startswith("xterm-kitty"):
-        return True
-    # wezterm — ships Nerd Font Symbols as a default fallback font.
-    if source.get("WEZTERM_PANE") or source.get("WEZTERM_EXECUTABLE"):
-        return True
-    # iTerm2 (iterm.app) and Warp (warpterminal) are deliberately OMITTED from
-    # this set even though notify.detect_protocol lists them: neither bundles a
-    # Nerd symbol fallback font, so the PUA codepoints would tofu there. A
-    # patched-font iTerm user opts in via the explicit ``display.nerd_icons``
-    # config flag rather than being auto-enabled into replacement boxes.
-    term_program = source.get("TERM_PROGRAM", "").lower()
-    if term_program in ("ghostty", "wezterm"):
-        return True
-    return False
+    # The marker tests live in ``local_operator.terminals`` (a stdlib-only leaf,
+    # so this module acquires no edge into the notification stack — see the
+    # docstring). Which emulators are LISTED here is this module's own judgement
+    # and is deliberately narrower than notify's:
+    #
+    # - ghostty (and cmux, which embeds it) bundles JetBrainsMono Nerd Font.
+    # - kitty bundles Symbols Nerd Font as its symbol_map fallback.
+    # - wezterm ships Nerd Font Symbols as a default fallback font.
+    #
+    # iTerm2 and Warp are OMITTED even though notify.detect_protocol lists them:
+    # neither bundles a Nerd symbol fallback font, so the PUA codepoints would
+    # tofu there. A patched-font iTerm user opts in via the explicit
+    # ``display.nerd_icons`` config flag rather than being auto-enabled into
+    # replacement boxes.
+    return (
+        terminals.is_ghostty(source) or terminals.is_kitty(source) or terminals.is_wezterm(source)
+    )
 
 
 def nerd_icons_enabled() -> bool:

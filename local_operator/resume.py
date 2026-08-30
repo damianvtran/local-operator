@@ -59,6 +59,23 @@ ORIGIN_NAME = "origin.json"
 #: scheduled run, a server-side session) is a new value and not a second file.
 ORIGIN_SUBAGENT = "subagent"
 
+#: ``origin`` value for a session ``/fork`` branched off another. Unlike
+#: :data:`ORIGIN_SUBAGENT` this marks the user's OWN work: the marker records
+#: PROVENANCE (which conversation this branched from, in its ``parent`` field),
+#: and provenance is not a reason to hide a row.
+ORIGIN_FORK = "fork"
+
+#: Origins that are still the user's own conversation, so :func:`is_user_session`
+#: keeps listing them.
+#:
+#: An ALLOW-LIST rather than an ``or`` bolted onto the predicate, because the
+#: default for a new origin must stay "not the user's" (see
+#: :func:`is_user_session`): visibility is opt-IN, so an author minting a new
+#: origin value has to come here and say so deliberately. That is exactly the
+#: "has to say so here" the predicate's docstring already demanded — this makes
+#: the place to say it a named constant instead of an edit to a boolean.
+USER_ORIGINS: frozenset[str] = frozenset({ORIGIN_FORK})
+
 #: Memoised ``origin.json`` verdicts for :func:`recent_sessions`, keyed on each
 #: marker's own ``(mtime, size)``.
 #:
@@ -869,14 +886,23 @@ def backfill_session_titles(config_dir: Path, limit: int = 500) -> int:
 def is_user_session(session_dir: Path) -> bool:
     """True when a human started this session, so a picker may offer it.
 
-    EVERY non-empty origin is hidden, not a listed set of them: a new value
-    added later (a scheduled run, a server-side session) is therefore opt-OUT
-    of the picker by default, and an author who wants a new origin to remain
-    listable has to say so here. That default is the safe direction — a value
-    is minted by whichever code path creates the directory, and the paths that
-    do so are the machine's own.
+    Every non-empty origin is hidden EXCEPT the ones named in
+    :data:`USER_ORIGINS`: a new value added later (a scheduled run, a
+    server-side session) is therefore opt-OUT of the picker by default, and an
+    author who wants a new origin to remain listable has to say so there. That
+    default is the safe direction — a value is minted by whichever code path
+    creates the directory, and the paths that do so are the machine's own.
+
+    ``fork`` is the first origin to take the opt-in, and it is worth stating why
+    it differs in kind from ``subagent``: a subagent directory is a machine's
+    delegated run that the user never opened, while a fork is a conversation the
+    user deliberately branched. Both carry a marker; only one of them is
+    somebody else's work. Four consumers read this predicate and a fork is
+    wanted in all four — the ``/resume`` picker, ``resume_dir``'s ``@latest``
+    scan, the multiplexer's crash-restore binding, and the mobile session list.
     """
-    return not session_origin(session_dir)
+    origin = session_origin(session_dir)
+    return not origin or origin in USER_ORIGINS
 
 
 def resume_dir(config_dir: Path, requested: str) -> Path:
@@ -1096,7 +1122,26 @@ def recent_sessions(config_dir: Path, limit: int | None = None) -> list[tuple[st
     regardless, so a caller asking for all sessions costs the same as one
     asking for ten.
     """
-    rows: list[tuple[str, float]] = []
+    return [
+        (name, mtime) for name, mtime, _origin in _recent_sessions_with_origin(config_dir, limit)
+    ]
+
+
+def _recent_sessions_with_origin(
+    config_dir: Path, limit: int | None = None
+) -> list[tuple[str, float, str]]:
+    """:func:`recent_sessions`, plus the ``origin`` this scan already parsed.
+
+    The scan reads and parses every marker that exists in order to decide
+    visibility, then threw that verdict away — so a caller needing the origin
+    (the picker, to mark a fork) re-opened the same file per row. Returning it
+    costs nothing: the read has happened, and for the common unmarked session
+    the value is ``""`` with no syscall added at all.
+
+    Private because the public pair is what every other caller wants and the
+    CLI's recovery listing pins its shape.
+    """
+    rows: list[tuple[str, float, str]] = []
     try:
         scan = os.scandir(config_dir / "sessions")
     except OSError:
@@ -1163,9 +1208,20 @@ def recent_sessions(config_dir: Path, limit: int | None = None) -> list[tuple[st
                         # could not confirm it, and ``merged`` below is built
                         # from the names seen here.
                         seen.discard(entry.name)
-                if origin:
+                # The same verdict :func:`is_user_session` reaches, spelled out
+                # here rather than delegated because this loop must not pay a
+                # second stat per directory to re-read the marker it just read.
+                # It is therefore the ONE place that has to be kept in step with
+                # that predicate by hand — ``USER_ORIGINS`` is the shared fact
+                # both consult, so a new user-visible origin is added there once
+                # rather than in two places that can drift.
+                if origin and origin not in USER_ORIGINS:
                     continue
-            rows.append((entry.name, mtime))
+            else:
+                # No marker: the user's own session, and the cheap path this
+                # scan is careful to keep free of reads.
+                origin = ""
+            rows.append((entry.name, mtime, origin))
     merged = {
         name: entry for name, entry in cached.items() if name in seen and isinstance(entry, dict)
     }
@@ -1205,6 +1261,18 @@ class SessionRow(NamedTuple):
     id: str
     mtime: float
     name: str
+    #: True while this session is a FORK still wearing the title it inherited
+    #: from its parent, so the picker can tell the branch from the trunk.
+    #:
+    #: Without it a fresh fork and its parent are byte-identical rows — same
+    #: name, same "just now" — separable only by a 12-hex id, in exactly the
+    #: window where a user is most likely to be looking for one of them. The
+    #: state is not always brief either: a bare ``/fork`` keeps the borrowed
+    #: title until the user sends it something, which may be never.
+    #:
+    #: Defaulted so every existing construction site keeps working; only the
+    #: picker's row builder sets it.
+    forked: bool = False
 
 
 def stored_session_title(session_dir: Path) -> str:
@@ -1460,8 +1528,87 @@ def recent_session_rows(config_dir: Path, limit: int | None = None) -> list[Sess
     Uncapping is affordable because the scan underneath is limit-independent
     (see :func:`recent_sessions`) and the only per-row cost added is
     :func:`session_name`, one bounded head read.
+
+    **The fork mark costs nothing on an unmarked session.** The scan already
+    parsed every ``origin.json`` that exists, so the verdict is threaded out of
+    it (:func:`_recent_sessions_with_origin`) rather than re-read here; a
+    session with no marker — the overwhelming majority — adds no syscall at
+    all, and only a row already known to be a FORK pays the title probe. An
+    earlier revision asked ``wears_inherited_title`` per row unconditionally,
+    which attempted two reads per row on a store containing zero forks (the
+    absence was discovered from the ``OSError``) and measured +52% on a
+    3,000-session store, on this synchronous UI-thread path. That is the exact
+    "unmarked is the cheap path" property :func:`recent_sessions` documents at
+    length, and it must not be given back here.
     """
-    return [
-        SessionRow(session_id, mtime, session_name(config_dir / "sessions" / session_id))
-        for session_id, mtime in recent_sessions(config_dir, limit)
-    ]
+    rows: list[SessionRow] = []
+    for session_id, mtime, origin in _recent_sessions_with_origin(config_dir, limit):
+        session_dir = config_dir / "sessions" / session_id
+        rows.append(
+            SessionRow(
+                session_id,
+                mtime,
+                session_name(session_dir),
+                # Gated on the origin the scan ALREADY parsed. Non-forks — every
+                # ordinary conversation — short-circuit here without touching
+                # the disk again.
+                forked=origin == ORIGIN_FORK and wears_inherited_title(session_dir),
+            )
+        )
+    return rows
+
+
+def wears_inherited_title(session_dir: Path) -> bool:
+    """True while a FORK is still displaying the title it inherited.
+
+    The marker is about the AMBIGUOUS STATE, not about ancestry: a fork that has
+    named itself is a conversation in its own right and tagging it forever would
+    be noise on every row it ever appears in. So this asks the same question
+    ``Session._is_unnamed_fork`` asks at boot — is the newest journalled title
+    older than the fork instant — and answers False as soon as the fork writes
+    its own name.
+
+    Read from the sidecar rather than the transcript so the picker keeps its
+    one-bounded-read-per-row cost model; a fork always has the sidecar, because
+    the clone copies it precisely so the row is never blank.
+    """
+    forked_at = _fork_instant(session_dir)
+    if forked_at is None:
+        return False
+    sidecar = _read_title_sidecar(session_dir)
+    if sidecar is None or not sidecar.text:
+        # A fork of a NEVER-NAMED parent is still ambiguous, and this used to
+        # return False on the reasoning that nothing was inherited. That was
+        # wrong: ``session_name`` falls back to the transcript's opening
+        # message, and the clone copies the transcript — so the fork displays
+        # the identical opener beside its parent, which is exactly the
+        # duplicate-row confusion the mark exists to resolve. It has no title
+        # of its own yet by definition, so it is still borrowing.
+        return True
+    try:
+        stamped = (session_dir / TITLE_SIDECAR_NAME).stat().st_mtime
+    except OSError:
+        return False
+    # The sidecar is rewritten when this session names itself, so a stamp newer
+    # than the fork means the title on show is its own.
+    return stamped <= forked_at
+
+
+def _fork_instant(session_dir: Path) -> float | None:
+    """``forked_at`` from the origin marker, or None when this is not a fork.
+
+    Duplicated in spirit with ``fork.fork_instant`` and deliberately NOT
+    imported from it: this module is import-guarded (see the module docstring)
+    and ``fork`` imports ``shutil``/``uuid`` plus the retention module, which
+    the CLI's ``--resume`` path must not acquire. The payload is three keys and
+    the reader is five lines; the import edge would cost more than the copy.
+    """
+    try:
+        raw = (session_dir / ORIGIN_NAME).read_text(encoding="utf-8", errors="replace")
+        payload = json.loads(raw)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(payload, dict) or payload.get("origin") != ORIGIN_FORK:
+        return None
+    forked_at = payload.get("forked_at")
+    return float(forked_at) if isinstance(forked_at, (int, float)) else None
