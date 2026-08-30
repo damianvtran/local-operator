@@ -2485,13 +2485,13 @@ async def test_the_wheel_scrolls_the_same_way_wherever_the_pointer_sits() -> Non
                 target.post_message(_wheel(target, down=True))
             await pilot.pause()
             travelled[name] = body.scroll_offset.y
-            assert view._selected == view._selectable()[0], (
-                f"the wheel over the {name} moved the cursor"
-            )
+            assert (
+                view._selected == view._selectable()[0]
+            ), f"the wheel over the {name} moved the cursor"
 
-        assert len(set(travelled.values())) == 1, (
-            f"the wheel travels different distances by pointer position: {travelled}"
-        )
+        assert (
+            len(set(travelled.values())) == 1
+        ), f"the wheel travels different distances by pointer position: {travelled}"
         assert travelled["list"] > 0, "the wheel did not scroll at all"
 
 
@@ -2528,9 +2528,9 @@ async def test_the_wheel_leaves_the_cursor_where_the_user_put_it(tmp_path: Path)
         await pilot.pause()
 
         assert view._selected == parked, "the wheel moved the cursor"
-        assert not _cursor_on_screen(view), (
-            "premise: enough wheel travel to carry the cursor off screen"
-        )
+        assert not _cursor_on_screen(
+            view
+        ), "premise: enough wheel travel to carry the cursor off screen"
         assert view.editing_key is None, "the wheel opened an editor"
         assert _values(tmp_path) == {}, "a wheel gesture wrote to the config"
 
@@ -2570,9 +2570,9 @@ async def test_the_arrows_still_scroll_the_cursor_into_view() -> None:
         for _ in range(len(view._selectable()) + 5):
             await pilot.press("down")
             await pilot.pause()
-            assert _cursor_on_screen(view), (
-                f"`down` walked the cursor off screen at row {view._selected}"
-            )
+            assert _cursor_on_screen(
+                view
+            ), f"`down` walked the cursor off screen at row {view._selected}"
         assert view._selected == view._selectable()[-1]
 
         await pilot.press("home")
@@ -2614,9 +2614,9 @@ async def test_paging_lands_on_the_true_end_of_the_list() -> None:
                 f"at {size} pagedown settled on row {view._selected}, "
                 f"but the last selectable row is {last}"
             )
-            assert view._body.scroll_offset.y == view._body.max_scroll_y, (
-                "paging reached the last row without reaching the bottom of the view"
-            )
+            assert (
+                view._body.scroll_offset.y == view._body.max_scroll_y
+            ), "paging reached the last row without reaching the bottom of the view"
 
             # And back: `pageup` reaches the first row the same way.
             for _ in range(25):
