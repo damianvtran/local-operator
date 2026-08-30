@@ -61,10 +61,19 @@ def _contained(child: Path, base_resolved: Path) -> bool:
     resolver will. A listing that disagrees with it produces the
     advertise-then-reject failure mode: a name the model is invited to read
     and then refused.
+
+    ``RuntimeError`` is caught beside ``OSError`` because ``resolve()`` does
+    not report a symlink loop the same way across supported interpreters: on
+    3.12/3.13 ``pathlib`` translates ELOOP into ``RuntimeError("Symlink loop
+    from ...")``, while on 3.14 it delegates to ``os.path.realpath`` and
+    returns the unresolved path instead. An uncaught loop would propagate out
+    of a LISTING, turning a link an author can create into a crash rather than
+    an omitted line. Measured on both, not assumed — and the divergence is why
+    the loop cases are covered by tests rather than by inspection.
     """
     try:
         return child.resolve().is_relative_to(base_resolved)
-    except OSError:
+    except (OSError, RuntimeError):
         return False
 
 
@@ -78,12 +87,17 @@ def _resolver_would_accept(child: Path, base_resolved: Path) -> bool:
     link and a self-referential loop both resolve to a path inside the base
     and satisfy containment, so only the ``exists()`` call (which follows the
     link, and is therefore False for both) rejects them.
+
+    ``exists()`` swallows its own ELOOP/ENOENT, so it needs no loop handling
+    of its own; :func:`_contained` carries that, and this call is reached only
+    after it. ``RuntimeError`` is caught here anyway so the pair degrades
+    identically under any interpreter that grows the same translation.
     """
     if not _contained(child, base_resolved):
         return False
     try:
         return child.exists()
-    except OSError:
+    except (OSError, RuntimeError):
         return False
 
 
@@ -162,7 +176,18 @@ def _resolve_child(
         )
 
     base = resource.base_dir.resolve()
-    target = (resource.base_dir / relative).resolve()
+    try:
+        target = (resource.base_dir / relative).resolve()
+    except (OSError, RuntimeError):
+        # A looping symlink is a bad PATH, not a broken resolver: on 3.12/3.13
+        # ``resolve()`` raises RuntimeError("Symlink loop from ...") for ELOOP
+        # while 3.14 returns the unresolved path and fails the ``exists()``
+        # below. Without this the same URL crashed the read on one interpreter
+        # and reported "path not found" on another. Degrade to the not-found
+        # error either way, matching what the listings now do by omitting it.
+        raise ValueError(
+            f"{label.title()} path not found: {scheme}://{resource.name}/{relative}"
+        ) from None
     if not target.is_relative_to(base):
         raise ValueError(f"Invalid {label} path '{raw_path}': escapes the {label} directory")
     if not target.exists():

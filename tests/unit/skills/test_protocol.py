@@ -568,6 +568,48 @@ class TestDirectoryListingContainment:
             with pytest.raises(ValueError):
                 resolve_skill_url(f"skill://theta/references/{name}", skills)
 
+    def test_a_looping_symlink_never_escapes_as_a_runtimeerror(self, tmp_path: Path) -> None:
+        """Reading a looping link is a ValueError on every supported version.
+
+        Caught by CI, not by inspection: ``Path.resolve()`` reports ELOOP
+        differently across the interpreters this project supports. On 3.12 and
+        3.13 pathlib translates it into ``RuntimeError("Symlink loop from
+        ...")``; on 3.14 it delegates to ``os.path.realpath``, returns the
+        unresolved path, and the failure surfaces at ``exists()`` instead. The
+        listing and the resolver both catch it, so the same URL behaves the
+        same way on all of them instead of crashing on one and reporting a
+        clean error on another.
+        """
+        skill = _make_skill(tmp_path, "lambda_")
+        (skill.base_dir / "selfloop.md").symlink_to(skill.base_dir / "selfloop.md")
+        (skill.base_dir / "a.md").symlink_to(skill.base_dir / "b.md")
+        (skill.base_dir / "b.md").symlink_to(skill.base_dir / "a.md")
+        skills = {"lambda_": skill}
+
+        for name in ("selfloop.md", "a.md", "b.md"):
+            with pytest.raises(ValueError, match="not found"):
+                resolve_skill_url(f"skill://lambda_/{name}", skills)
+
+        # And a loop anywhere in the tree never breaks the listings that walk
+        # past it -- the bare read still returns its body, not a traceback.
+        body = resolve_skill_url("skill://lambda_", skills)
+        assert body is not None and "# Test skill body" in body
+
+    def test_looping_directory_symlink_does_not_break_a_listing(self, tmp_path: Path) -> None:
+        # The directory arm of the same problem: `_list_directory` stats every
+        # entry, so a self-referential DIRECTORY link is on the walk's path.
+        skill = _make_skill(tmp_path, "mu")
+        refs = skill.base_dir / "references"
+        refs.mkdir()
+        (refs / "real.md").write_text("real", encoding="utf-8")
+        (refs / "dirloop").symlink_to(refs / "dirloop", target_is_directory=True)
+        skills = {"mu": skill}
+
+        assert resolve_skill_url("skill://mu/references", skills) == "real.md"
+        body = resolve_skill_url("skill://mu", skills)
+        assert body is not None
+        assert "references/real.md" in body
+
     def test_live_symlinks_survive_the_existence_check(self, tmp_path: Path) -> None:
         # The existence check must not cost a working link. A file alias and
         # a directory alias both resolve, exist, and stay readable.
