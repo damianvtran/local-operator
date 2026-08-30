@@ -61,15 +61,22 @@ async def main() -> None:
         view = app.query_one(SettingsView)
         await pilot.pause()
 
-        for index, row in enumerate(view._rows):
-            if row.kind == "setting" and row.setting is not None:
-                if row.setting.key == "retry.fallbackChains":
-                    view._selected = index
-                    break
-        else:  # pragma: no cover - the row is in the shipped registry
+        cascade = next(
+            (
+                (index, row.setting)
+                for index, row in enumerate(view._rows)
+                if row.kind == "setting"
+                and row.setting is not None
+                and row.setting.key == "retry.fallbackChains"
+            ),
+            None,
+        )
+        if cascade is None:  # the row is in the shipped registry
             raise AssertionError("no cascade setting row")
+        index, setting = cascade
+        view._selected = index
 
-        print(f"cascade row: {view._rows[view._selected].setting.key}")
+        print(f"cascade row: {setting.key}")
         print(f"chains BEFORE:            {settings_io.read_chains(view._manager)}")
 
         # A real `enter`, through the app's own binding, not a direct call.
