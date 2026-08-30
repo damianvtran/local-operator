@@ -5718,6 +5718,43 @@ async def test_mcp_remove_refuses_a_server_defined_by_a_foreign_config(
 
 
 @pytest.mark.asyncio
+async def test_mcp_remove_refuses_a_codex_imported_server(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Codex refusal is PERMANENT, not a policy choice: `tomllib` parses
+    TOML and cannot emit it (`tomli_w` is not a dependency), so a server
+    defined by `~/.codex/config.toml` can be listed but never removed in
+    place. The refusal has to name that file and Codex CLI, because "remove it
+    there" is the only action left to the user (issues #367/#368)."""
+    home = _mcp_home(tmp_path, monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    (home / ".codex").mkdir(parents=True)
+    codex_config = home / ".codex" / "config.toml"
+    codex_config.write_text(
+        '[mcp_servers.codexy]\nurl = "https://codexy.example/mcp"\n', encoding="utf-8"
+    )
+    codex_before = codex_config.read_text()
+    manager = FakeMcpManager(["filesystem", "grafana", "notion", "codexy"], [])
+    app = OperatorApp(lambda: _factory(McpSession(manager=manager, startup=McpStartupOutcome())))
+    async with app.run_test(size=(100, 24)) as pilot:
+        for _ in range(6):
+            await pilot.pause()
+        app.query_one(Toast).dismiss_toast()
+        await _type_command(pilot, app, "mcp remove codexy")
+        for _ in range(6):
+            await pilot.pause()
+        text = _transcript_text(app)
+        assert "~/.codex/config.toml" in text
+        # The origin phrase soft-wraps at the transcript width, so collapse
+        # whitespace before matching rather than asserting on a line break.
+        assert "imported from Codex CLI" in " ".join(text.split())
+        assert "Remove it there" in text
+        # A `not found` here would be the confusing failure #368 replaced.
+        assert "is not configured" not in text
+    assert codex_config.read_text() == codex_before
+
+
+@pytest.mark.asyncio
 async def test_mcp_add_writes_both_transports_and_names_the_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import textwrap
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -37,6 +38,12 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 def _write(path: Path, doc: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(doc), encoding="utf-8")
+
+
+def _write_toml(path: Path, body: str) -> None:
+    """Write a Codex-shaped TOML config, dedented so tests can stay indented."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(textwrap.dedent(body), encoding="utf-8")
 
 
 def _stdio(command: str = "npx", **extra: Any) -> dict[str, Any]:
@@ -257,6 +264,187 @@ class TestShapesAndImports:
         configs, sources = load_all_mcp_configs(tmp_path)
         assert configs == {}
         assert sources == {}
+
+
+class TestCodexImport:
+    """``~/.codex/config.toml`` (issue #367): the one non-JSON import source."""
+
+    def test_stdio_and_remote_servers_imported_with_provenance(
+        self, tmp_path: Path, home: Path
+    ) -> None:
+        """Codex ``[mcp_servers.<name>]`` tables map onto both transports.
+
+        ``command``/``args``/``env`` and ``url`` are exactly what
+        ``_coerce_server_config`` already infers from, so no Codex-specific
+        transport handling should be needed.
+        """
+        cwd = tmp_path / "proj"
+        cwd.mkdir(parents=True)
+        _write_toml(
+            home / ".codex" / "config.toml",
+            """
+            [mcp_servers.node_repl]
+            command = "node_repl"
+            args = ["--stdio"]
+            env = { NODE_PATH = "/opt/node" }
+
+            [mcp_servers.docs]
+            url = "https://developers.example.com/mcp"
+            """,
+        )
+        configs, sources = load_all_mcp_configs(cwd)
+        stdio = configs["node_repl"]
+        assert isinstance(stdio, MCPStdioServerConfig)
+        assert stdio.command == "node_repl"
+        assert stdio.args == ["--stdio"]
+        assert stdio.env == {"NODE_PATH": "/opt/node"}
+        remote = configs["docs"]
+        assert isinstance(remote, MCPHttpServerConfig)
+        assert remote.url == "https://developers.example.com/mcp"
+        assert sources["node_repl"].endswith(".codex/config.toml")
+        assert sources["docs"].endswith(".codex/config.toml")
+
+    def test_codex_never_overrides_any_earlier_source(self, tmp_path: Path, home: Path) -> None:
+        """Codex is APPENDED LAST, so first-seen-wins makes it lose every tie.
+
+        The position is the whole point of the ordering decision on #367: it
+        can override neither local-operator's own files nor the other imports.
+        """
+        cwd = tmp_path / "proj"
+        _write(
+            home / ".local-operator" / "mcp.json",
+            {"mcpServers": {"lop_srv": _stdio("lop-cmd")}},
+        )
+        _write(home / ".claude.json", {"mcpServers": {"claude_srv": _stdio("claude-cmd")}})
+        _write(home / ".cursor" / "mcp.json", {"mcpServers": {"cursor_srv": _stdio("cursor-cmd")}})
+        _write(
+            cwd / ".vscode" / "mcp.json",
+            {"mcp": {"servers": {"vscode_srv": _stdio("vscode-cmd")}}},
+        )
+        _write_toml(
+            home / ".codex" / "config.toml",
+            """
+            [mcp_servers.lop_srv]
+            command = "codex-cmd"
+
+            [mcp_servers.claude_srv]
+            command = "codex-cmd"
+
+            [mcp_servers.cursor_srv]
+            command = "codex-cmd"
+
+            [mcp_servers.vscode_srv]
+            command = "codex-cmd"
+
+            [mcp_servers.codex_only]
+            command = "codex-cmd"
+            """,
+        )
+        configs, sources = load_all_mcp_configs(cwd)
+        assert _command(configs, "lop_srv") == "lop-cmd"
+        assert _command(configs, "claude_srv") == "claude-cmd"
+        assert _command(configs, "cursor_srv") == "cursor-cmd"
+        assert _command(configs, "vscode_srv") == "vscode-cmd"
+        # Only the name no other tool claimed comes from Codex.
+        assert _command(configs, "codex_only") == "codex-cmd"
+        assert sources["codex_only"].endswith(".codex/config.toml")
+
+    def test_malformed_toml_degrades_to_no_servers(self, tmp_path: Path, home: Path) -> None:
+        """Best-effort, exactly like ``_read_json``: a broken foreign config
+        must never break discovery of the files we DO own."""
+        cwd = tmp_path / "proj"
+        _write(
+            home / ".local-operator" / "mcp.json",
+            {"mcpServers": {"ours": _stdio("ours-cmd")}},
+        )
+        path = home / ".codex" / "config.toml"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("[mcp_servers.broken\ncommand = ", encoding="utf-8")
+        configs, _ = load_all_mcp_configs(cwd)
+        assert set(configs) == {"ours"}
+
+    def test_missing_codex_file_is_a_no_op(self, tmp_path: Path, home: Path) -> None:
+        cwd = tmp_path / "proj"
+        assert not (home / ".codex").exists()
+        configs, sources = load_all_mcp_configs(cwd)
+        assert configs == {}
+        assert sources == {}
+
+    def test_unmodelled_codex_keys_still_load(self, tmp_path: Path, home: Path) -> None:
+        """Codex carries keys we do not model (``startup_timeout_sec``,
+        ``cwd``). ``extra="allow"`` must keep the entry loadable rather than
+        rejecting the server for a field that is simply not ours."""
+        cwd = tmp_path / "proj"
+        _write_toml(
+            home / ".codex" / "config.toml",
+            """
+            [mcp_servers.slow]
+            command = "slow-server"
+            startup_timeout_sec = 120
+            cwd = "/tmp/work"
+            """,
+        )
+        configs, _ = load_all_mcp_configs(cwd)
+        cfg = configs["slow"]
+        assert isinstance(cfg, MCPStdioServerConfig)
+        assert cfg.command == "slow-server"
+        assert cfg.cwd == "/tmp/work"
+        # The unmodelled key survives round-tripping rather than being dropped.
+        assert cfg.model_dump()["startup_timeout_sec"] == 120
+
+    def test_codex_enabled_false_suppresses(self, tmp_path: Path, home: Path) -> None:
+        """``enabled`` IS modelled, so a server the user disabled in Codex
+        stays disabled here — importing a config means importing its opinion
+        about what should run."""
+        cwd = tmp_path / "proj"
+        _write_toml(
+            home / ".codex" / "config.toml",
+            """
+            [mcp_servers.on]
+            command = "on-cmd"
+
+            [mcp_servers.off]
+            command = "off-cmd"
+            enabled = false
+            """,
+        )
+        configs, _ = load_all_mcp_configs(cwd)
+        assert set(configs) == {"on"}
+
+    def test_local_operator_disabled_list_suppresses_a_codex_server(
+        self, tmp_path: Path, home: Path
+    ) -> None:
+        """The enable/disable lists are format-agnostic: they come from the
+        local-operator files and apply to every source, Codex included."""
+        cwd = tmp_path / "proj"
+        _write(home / ".local-operator" / "mcp.json", {"disabledServers": ["noisy"]})
+        _write_toml(
+            home / ".codex" / "config.toml",
+            """
+            [mcp_servers.noisy]
+            command = "noisy-cmd"
+
+            [mcp_servers.quiet]
+            command = "quiet-cmd"
+            """,
+        )
+        configs, _ = load_all_mcp_configs(cwd)
+        assert set(configs) == {"quiet"}
+
+    def test_codex_source_is_not_an_owned_write_scope(self, tmp_path: Path, home: Path) -> None:
+        """``tomllib`` cannot write, so a Codex source can never resolve to a
+        scope ``remove_server`` would edit. This is what makes the TUI's
+        ``/mcp remove`` refusal correct rather than merely conservative."""
+        cwd = tmp_path / "proj"
+        _write_toml(
+            home / ".codex" / "config.toml",
+            """
+            [mcp_servers.codexy]
+            command = "codex-cmd"
+            """,
+        )
+        _configs, sources = load_all_mcp_configs(cwd)
+        assert owned_scope_for_source(sources["codexy"], cwd) is None
 
 
 class TestValidation:

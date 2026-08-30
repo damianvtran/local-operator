@@ -15410,7 +15410,7 @@ class OperatorApp(App[None]):
         """Do one ``/mcp remove`` and return its receipt as ``(text, kind)``.
 
         The refusal is the point of this command. ``load_all_mcp_configs``
-        merges SEVEN sources but local-operator only writes two of them, so a
+        merges EIGHT sources but local-operator only writes two of them, so a
         server can be perfectly visible in ``/mcp`` and still be none of our
         business to delete. Removing an entry defined by ``~/.claude.json``
         would either fail or, worse, write a local-operator file that shadows a
