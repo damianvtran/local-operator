@@ -943,9 +943,11 @@ DOUBLE_STOP_WINDOW_S = 4.0
 #: from silently never matching.
 ACTIVITY_APPROVAL = "approval"
 
-#: Class the Screen carries while the session has no content. It selects the
-#: boot layout in the stylesheet (centred, clamped input card) and is flipped in
-#: exactly one place — see ``OperatorApp._set_welcome_visible``.
+#: Class the Screen carries while the session has no content AND no full-page
+#: mode is up. It selects the boot layout in the stylesheet (centred, clamped
+#: input card). Written in exactly one place — ``_sync_boot_layout_class`` —
+#: which RE-DERIVES it from those live facts; the several call sites ask it to
+#: recompute rather than each setting the class from what it believes.
 BOOT_LAYOUT_CLASS = "boot"
 
 #: Class the Screen carries while the full-page subagent view is open. Same
@@ -7855,20 +7857,31 @@ class OperatorApp(App[None]):
         stale while the page was open — a ``/clear`` or a session swap behind
         the page moves ``_welcome_visible`` under it.
 
-        Scoped to ``/settings`` on purpose. Its two sibling modes — the org
-        chart and the subagent view — mount the same way and are compressed by
-        the same collision when opened over the splash (measured; the subagent
-        view takes 21 of 28 rows at 100x30). They are NOT changed here because
-        the report and the fix were scoped to this page; extending the
-        suppression to them is one more term in this condition and no other
-        edit, and it wants its own frames before it ships. ``/resume``,
-        ``/analytics`` and the ask card are unaffected either way: they are
-        pushed screens or toast-layer cards, so the boot layout beneath them is
-        still the layout being looked at and must stay. ``/failovers`` is not a
-        mode at all — it appends a transcript block, which retires the splash
-        through the ordinary content path.
+        EVERY full-page mode counts, not just ``/settings``. All three replace
+        the transcript region through the same three lines (hide the
+        transcript, mount before ``#input-dock``, add the mode's class), so all
+        three collide with the boot layout the same way — measured from the
+        splash before this term was generalised: the subagent view took 21 of
+        28 rows at 100x30 and the org chart 26 of 38 at 140x40, both with the
+        card still clamped. Keying on ``_settings_view`` alone made the siblings
+        WORSE than uniformly broken: it made them route-dependent, because
+        ``_close_settings_view`` restored the boot layout without asking whether
+        another mode was still mounted, so the subagent view rendered at one
+        height opened from the splash and a different one opened over a settings
+        page that was then closed underneath it (review round 1, F2).
+
+        ``/resume``, ``/analytics`` and the ask card are deliberately NOT in
+        this condition: they are pushed screens or toast-layer cards, so the
+        boot layout beneath them is still the layout being looked at and must
+        stay. ``/failovers`` is not a mode at all — it appends a transcript
+        block, which retires the splash through the ordinary content path.
         """
-        boot = bool(self._welcome_visible) and self._settings_view is None
+        boot = (
+            bool(self._welcome_visible)
+            and self._settings_view is None
+            and self._subagent_view is None
+            and self._org_chart_view is None
+        )
         self.screen.set_class(boot, BOOT_LAYOUT_CLASS)
 
     def _start_terminal_title(self) -> None:
@@ -9515,6 +9528,12 @@ class OperatorApp(App[None]):
         self._transcript_view().display = False
         self.screen.mount(view, before=self.query_one("#input-dock"))
         self.screen.add_class(SUBAGENT_LAYOUT_CLASS)
+        # Same collision the settings page had: the boot layout is a SECOND
+        # layout and this mode replaces the region it lays out. Ordered after
+        # the mount so the sync sees the view it keys on, and before the
+        # compact-layout pass, which measures against the rows this frees.
+        self._sync_boot_layout_class()
+        self._sync_boot_layout()
         self._sync_subagent_compact_layout(self.size.height)
         self._set_composer_read_only(True)
         # Enter paints the new mode first; folding and mounting a retained
@@ -9540,6 +9559,11 @@ class OperatorApp(App[None]):
         self.screen.remove_class(SUBAGENT_LAYOUT_CLASS)
         self.screen.remove_class(SUBAGENT_COMPACT_LAYOUT_CLASS)
         self._transcript_view().display = True
+        # Re-derived rather than restored from a copy: the splash may have been
+        # retired or brought back while the page was up, and another mode may
+        # still be mounted underneath this one.
+        self._sync_boot_layout_class()
+        self._sync_boot_layout()
         self._set_composer_read_only(False)
         if self._todo_panel is not None and self._session is not None:
             self._todo_panel.sync(self._session)
@@ -9605,6 +9629,11 @@ class OperatorApp(App[None]):
         self._transcript_view().display = False
         self.screen.mount(view, before=self.query_one("#input-dock"))
         self.screen.add_class(ORG_CHART_LAYOUT_CLASS)
+        # See ``_sync_boot_layout_class``: this mode replaces the transcript
+        # region, so the boot layout's centred card and reserved rows have to
+        # come off or the chart renders into the leftovers above them.
+        self._sync_boot_layout_class()
+        self._sync_boot_layout()
         self._set_composer_read_only(True)
         # nit-1 — deliberate ordering. ``mount`` posts ``on_mount`` (which calls
         # ``_repaint``) but does not run it synchronously; this ``show(root)``
@@ -9631,6 +9660,10 @@ class OperatorApp(App[None]):
         view.remove()
         self.screen.remove_class(ORG_CHART_LAYOUT_CLASS)
         self._transcript_view().display = True
+        # Re-derived for the reason ``_close_subagent_view`` records: live
+        # state decides, never a flag saved when the mode opened.
+        self._sync_boot_layout_class()
+        self._sync_boot_layout()
         self._set_composer_read_only(False)
         restore = self._org_chart_focus_restore
         self._org_chart_focus_restore = None
