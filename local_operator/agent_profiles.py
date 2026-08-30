@@ -68,6 +68,19 @@ logger = logging.getLogger(__name__)
 #: Where the packaged starter profiles live (one ``<name>.md`` per role).
 SEEDS_DIR = Path(__file__).parent / "agent_seeds"
 
+#: Tag prefix recording that a role row was WRITTEN FROM a packaged seed, e.g.
+#: ``seed:reviewer``. The registry is a flat namespace shared with roles the
+#: operator authored themselves, so without this marker a row named ``scout``
+#: that someone wrote from scratch is byte-indistinguishable from an installed
+#: ``scout`` — both are just ``['role', ...]``. ``reset`` is destructive, so it
+#: needs to know which of the two it is looking at; see :func:`seed_origin`.
+#:
+#: Deliberately NOT part of :func:`seed_tags`: that function encodes a
+#: PROFILE's fields, and provenance is a property of the registry ROW, not of
+#: the profile. Folding it in would make ``op='create'`` stamp a self-authored
+#: role as seed-derived just because it renders the same fields.
+SEED_ORIGIN_PREFIX = "seed:"
+
 #: Cap on an instruction body admitted from a profile. A profile is user data
 #: and rides in front of a child's prompt on every turn, so an unbounded body
 #: is an unbounded per-turn bill. Generous enough for a detailed role brief,
@@ -555,6 +568,20 @@ def install_seed(
     ``overwrite`` is set, so a concurrent second launch of the same role cannot
     duplicate the profile or clobber edits the operator has made.
 
+    ``overwrite`` restores exactly the fields the SEED owns — instructions,
+    routing description, and the role tags carrying the tool allowlist, effort
+    and delegate flag. It deliberately does not touch ``model``, ``hosting``,
+    ``security_prompt`` or the sampling settings: those are the operator's, a
+    seed pins none of them, and ``update_agent`` skips ``None`` values so they
+    cannot be cleared through this path anyway. A reset is therefore "the
+    packaged ROLE back", not "a factory-reset row" — worth stating because
+    ``security_prompt`` in particular survives one. It also bypasses the
+    :class:`NameTakenError` guard,
+    because the kwarg means "the caller has already decided". Both properties
+    make it unsafe to reach on an incidental install path: it is exposed to
+    users only through the ``agent`` tool's explicit ``op='reset'``, which does
+    its own non-role check and echoes the instructions it replaced.
+
     Raises :class:`NameTakenError` when the name belongs to an agent that is
     NOT a role. Returning that row (which is what this used to do) reported a
     successful install while writing nothing, so an operator recovering from a
@@ -584,47 +611,185 @@ def install_seed(
         # edited prompt is what the next delegation will run.
         return profile_from_agent(registry, existing), True
 
-    tags = list(seed_tags(seed))
-    if existing is None:
+    # The provenance marker rides alongside the profile's own field tags. It is
+    # what later lets ``reset`` tell an installed copy from a role the operator
+    # authored under a name that happens to collide with a starter.
+    tags = [*seed_tags(seed), f"{SEED_ORIGIN_PREFIX}{seed.name}"]
+
+    # One field builder for both paths, so a create and an overwrite cannot
+    # drift into writing different subsets of what the seed owns.
+    def _fields(**overrides: Any) -> AgentEditFields:
         # Every other field is explicitly None so the profile inherits the
         # session's model and sampling settings: a seed pinning a model would
         # silently override the operator's provider choice. Spelled out rather
         # than defaulted because ``AgentEditFields`` is validated in strict
         # mode, which is the convention every other caller here follows.
-        agent = registry.create_agent(
-            AgentEditFields(
-                name=seed.name,
-                # ``when_to_use`` FIRST, and the order is load-bearing. The
-                # registry has one description field; a profile has two texts,
-                # and this one is the ROUTING text — it is what ``search``
-                # embeds and match against. Persisting ``description`` instead
-                # silently dropped the trigger phrasings on install, so a role
-                # that was discoverable as a packaged starter became
-                # undiscoverable the moment an operator installed it, and
-                # search then recommended a confidently wrong role rather than
-                # failing visibly ("check the UI looks right" -> manager).
-                description=seed.when_to_use or seed.description,
-                tags=tags,
-                categories=["role"],
-                security_prompt=None,
-                hosting=None,
-                model=None,
-                last_message=None,
-                temperature=None,
-                top_p=None,
-                top_k=None,
-                max_tokens=None,
-                stop=None,
-                frequency_penalty=None,
-                presence_penalty=None,
-                seed=None,
-                current_working_directory=None,
-            )
+        base: dict[str, Any] = dict(
+            name=None,
+            # ``when_to_use`` FIRST, and the order is load-bearing. The
+            # registry has one description field; a profile has two texts, and
+            # this one is the ROUTING text — it is what ``search`` embeds and
+            # matches against. Persisting ``description`` instead silently
+            # dropped the trigger phrasings on install, so a role that was
+            # discoverable as a packaged starter became undiscoverable the
+            # moment an operator installed it, and search then recommended a
+            # confidently wrong role rather than failing visibly ("check the UI
+            # looks right" -> manager).
+            description=seed.when_to_use or seed.description,
+            tags=tags,
+            categories=["role"],
+            security_prompt=None,
+            hosting=None,
+            model=None,
+            last_message=None,
+            temperature=None,
+            top_p=None,
+            top_k=None,
+            max_tokens=None,
+            stop=None,
+            frequency_penalty=None,
+            presence_penalty=None,
+            seed=None,
+            current_working_directory=None,
         )
+        base.update(overrides)
+        return AgentEditFields(**base)
+
+    if existing is None:
+        agent = registry.create_agent(_fields(name=seed.name))
     else:
         agent = existing
+        # An overwrite restores the seed's ROLE FIELDS too, not just its prose.
+        # This branch used to write only ``system_prompt``, which made a
+        # restore half a restore: an edited ``tools:`` tag survived, so a
+        # `reviewer` reset after someone widened its allowlist kept the full
+        # write inventory under the packaged guidance's name. The allowlist is
+        # a capability boundary rather than advice, so restoring the text
+        # without it fails OPEN while reporting success.
+        registry.update_agent(agent.id, _fields())
     registry.set_agent_system_prompt(agent.id, seed.instructions)
     return profile_from_agent(registry, agent), False
+
+
+def seed_origin(agent: "AgentData") -> str | None:
+    """The seed name a role row was installed FROM, or None if self-authored.
+
+    ``reset`` overwrites, so "is this row a copy of a packaged seed?" has to be
+    answerable from the row itself rather than guessed from the name. Guessing
+    from the name is what made a self-authored ``scout`` resettable: it collides
+    with a packaged starter, so a name-only check called it a diverged install
+    and destroyed the operator's own work.
+
+    Rows written before this marker existed return None and are therefore
+    treated as self-authored, which is the SAFE direction: the worst outcome is
+    that an operator with an old installed row is told to use ``op='update'``
+    instead of getting a one-shot restore, rather than a reset eating work the
+    harness never wrote.
+    """
+
+    prefix = SEED_ORIGIN_PREFIX
+    for tag in agent.tags or []:
+        text = str(tag).strip()
+        if not text.lower().startswith(prefix):
+            continue
+        origin = text[len(prefix) :].strip().lower()
+        if not origin:
+            return None
+        # The marker must name THIS row, and must name a real starter. Tags are
+        # writable by the server routes, the desktop UI and agent import, none
+        # of which know what this marker means, so a destructive verb keying on
+        # it cannot simply trust whatever string it finds: a `seed:reviewer`
+        # tag carried onto an unrelated agent would otherwise hand `reset`
+        # permission to overwrite that agent with the reviewer seed. Validating
+        # the marker against the row's own name keeps a cross-name or forged
+        # tag inert rather than dangerous.
+        if origin != str(agent.name or "").strip().lower():
+            logger.warning(
+                "ignoring seed provenance tag %r on agent %r: it names another role",
+                text,
+                agent.name,
+            )
+            return None
+        if origin not in set(list_seeds()):
+            return None
+        return origin
+    return None
+
+
+def matches_seed_text(profile: AgentProfile, seed: AgentProfile) -> bool:
+    """Whether a row's PROSE is still byte-identical to the packaged seed's.
+
+    The unlock for rows installed before provenance was recorded. A row whose
+    instructions and routing description both still match the seed exactly
+    cannot be self-authored work worth protecting — adopting the seed over it
+    is a no-op on every text a human would have written — so it is safe to
+    treat as an install even with no marker. That is what keeps the provenance
+    guard from permanently locking out every role installed by an earlier
+    release, without weakening it for a row that actually holds someone's
+    words.
+
+    Deliberately NOT part of :func:`seed_divergence`: this asks "is this the
+    shipped text?", which is a provenance question, while divergence asks
+    "should reset do anything?". Conflating them would make a role unlockable
+    by the very edit that makes it worth restoring.
+    """
+
+    return (
+        seed.instructions.strip() == (profile.instructions or "").strip()
+        and (seed.when_to_use or seed.description).strip()
+        == (profile.description or profile.when_to_use or "").strip()
+    )
+
+
+def seed_divergence(profile: AgentProfile, seed: AgentProfile) -> tuple[str, ...]:
+    """Which of the seed's own fields an installed role no longer matches.
+
+    ONE definition of "diverged", because ``show`` and ``reset`` must never
+    disagree about whether a role is clean. They previously each compared the
+    instruction body independently, which had two consequences: a role whose
+    ``tools`` allowlist had been widened but whose prose was untouched reported
+    "nothing was changed" and kept the widened surface (the exact fail-open the
+    restore exists to close, while announcing success), and the discrepancy was
+    escapable by editing one character of prose, which flipped the same reset
+    into restoring the allowlist after all.
+
+    Only fields the seed actually WRITES are compared. ``model``, ``hosting``
+    and the sampling settings are deliberately left to the operator (a seed
+    pinning a model would override their provider choice), so a difference
+    there is not divergence and must not be reported as one.
+
+    ``description`` IS compared, against ``when_to_use or description`` because
+    that is the value :func:`install_seed` persists — the routing text ``search``
+    embeds. An earlier version excluded it, justified by the claim that
+    comparing it "would flag every installed role". That claim was false, and
+    the way it was false is the point: it holds only when comparing against
+    ``seed.description``, which is NOT what install writes. Measured against
+    all six packaged starters, the correct comparison flags zero. Leaving it
+    out meant a description-only edit was invisible and unresettable, and a
+    reset triggered by any other field silently rewrote the routing text with
+    no echo, so a role the user could ``search`` for stopped matching
+    afterwards. Verify an exclusion by RUNNING it against every real seed, not
+    by reasoning about what it would do.
+
+    Field names are returned rather than a bool so the caller can say WHICH
+    fields it is about to replace: an overwrite the user cannot see coming is
+    a data loss with a friendly message on it.
+    """
+
+    diverged: list[str] = []
+    if seed.instructions.strip() != (profile.instructions or "").strip():
+        diverged.append("instructions")
+    if (seed.when_to_use or seed.description or "").strip() != (
+        profile.description or profile.when_to_use or ""
+    ).strip():
+        diverged.append("description")
+    if (profile.tools or None) != (seed.tools or None):
+        diverged.append("tools")
+    if (profile.effort or None) != (seed.effort or None):
+        diverged.append("effort")
+    if bool(profile.may_delegate) != bool(seed.may_delegate):
+        diverged.append("delegate")
+    return tuple(diverged)
 
 
 def seed_tags(profile: AgentProfile) -> tuple[str, ...]:
