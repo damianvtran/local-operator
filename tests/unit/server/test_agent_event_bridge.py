@@ -20,6 +20,7 @@ import queue
 from typing import Any
 
 from local_operator.harness.types import (
+    Content,
     Message,
     MessageEndEvent,
     MessageStartEvent,
@@ -78,6 +79,32 @@ def test_the_final_text_wins_at_message_end() -> None:
     assert record.message == "partial and then some"
     assert record.is_complete is True
     assert bridge.final_response == "partial and then some"
+
+
+def test_a_tool_call_only_turn_keeps_the_text_it_streamed() -> None:
+    """An end event with empty content must not wipe what was streamed.
+
+    A turn that answers with text and then calls a tool ends with the text
+    already assembled, but a turn whose message carries no text blocks at all
+    ends with empty content. Adopting the end event's text unconditionally would
+    throw away everything accumulated in that second case — silently, since the
+    deltas were already broadcast. The fallback in the bridge exists for this,
+    and without this test a mutation removing it keeps the suite green.
+    """
+    empty_contents: list[list[Content]] = [[], [TextContent(text="")]]
+    for empty in empty_contents:
+        bridge, _ = _bridge()
+        message = _streamed()
+
+        bridge.handle(MessageStartEvent(message=message))
+        bridge.handle(MessageUpdateEvent(message=message, delta="streamed text"))
+
+        message.content = empty
+        bridge.handle(MessageEndEvent(message=message))
+
+        assert (
+            bridge._streams[message.id].message == "streamed text"
+        ), f"content={empty!r} at message_end wiped the accumulated text"
 
 
 def test_a_message_that_never_streamed_still_reports_its_text() -> None:

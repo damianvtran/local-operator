@@ -411,13 +411,19 @@ def test_the_memo_cannot_grow_without_bound() -> None:
     # saturation point by six evictions, so it exercises eviction rather than
     # merely filling the map, and the assertions below are unchanged.
     #
-    # Derived from the cap rather than hard-coded so the two cannot drift: each
-    # of these images rebounds to roughly 2 MB, so this is "enough to fill the
-    # cap, plus a margin that forces evictions". Raising
-    # ``_REBOUND_CACHE_MAX_BYTES`` therefore raises the workload with it instead
+    # Derived from the cap rather than hard-coded so the two cannot drift:
+    # "enough entries to fill the cap, plus a margin that forces evictions".
+    # Raising ``_REBOUND_CACHE_MAX_BYTES`` raises the workload with it instead
     # of silently leaving the eviction assertion non-binding.
-    approx_entry_bytes = 2 * 1024 * 1024
-    iterations = _REBOUND_CACHE_MAX_BYTES // approx_entry_bytes + 6
+    #
+    # The assumed entry size is rounded DOWN from the measured ~1.91 MB. Round
+    # it up and the derived count grows more slowly than the number of entries
+    # the cap can hold, so a large enough cap stops evicting and the assertion
+    # goes quiet again — the very failure this derivation removes. The margin
+    # scales with the cap for the same reason.
+    approx_entry_bytes = 3 * 1024 * 1024 // 2
+    entries_to_fill = _REBOUND_CACHE_MAX_BYTES // approx_entry_bytes
+    iterations = entries_to_fill + max(6, entries_to_fill // 4)
     for index in range(iterations):
         # Distinct sizes, so every one is a distinct cache key. Photographic
         # noise, so each result is genuinely large rather than a flat PNG that
