@@ -740,6 +740,18 @@ class SettingsView(Vertical):
         of an already-open chain sit inside the group too. The first selectable
         row after the setting is the right target in every one of those shapes.
         """
+        # This is a cursor MOVE, so it settles the row it leaves exactly as
+        # `action_move` does. Setting `_selected` directly skipped `_leave_row`
+        # and therefore skipped the line that clears `_notice`, so `r` then
+        # `enter` — the natural sequence on this row, since `r`'s own answer
+        # points at `d` on a chain row — carried `r resets one setting…` onto
+        # the chain row the user had just travelled to, hiding that row's own
+        # `d deletes it` contract. The notice answers a keypress on ONE row and
+        # stops being true when the cursor leaves it (review round 1, B2; the
+        # same "model changed, paint did not" class as the armed-delete bug
+        # `action_reset` documents).
+        if not self._leave_row():
+            return
         for index in range(self._selected + 1, len(self._rows)):
             row = self._rows[index]
             # The group ends at the next row that belongs to something else —

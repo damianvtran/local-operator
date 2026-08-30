@@ -2264,3 +2264,47 @@ async def test_r_on_a_healthy_cascade_still_explains_itself_without_writing(
         view._manager.reload()
         assert settings_io.read_chains(view._manager) == chains
         assert "delete a chain with d" in view.notice_text
+
+
+@pytest.mark.asyncio
+async def test_enter_into_the_cascade_does_not_carry_the_previous_row_notice(
+    tmp_path: Path,
+) -> None:
+    """`_enter_cascade` settles the row it leaves (review round 1, B2).
+
+    `r` then `enter` is a natural sequence on exactly this row: `r` answers
+    with a notice pointing at `d` on a chain row, and `enter` is how the user
+    gets to that chain row. Moving the cursor by assigning `_selected` skipped
+    `_leave_row`, so they arrived with the previous row's instruction still on
+    screen and no `d deletes it` hint for the row they were now on — the same
+    "model changed, paint did not" class as the armed-delete bug. Reaching the
+    same row with `down` always painted correctly, which is the comparison this
+    test makes.
+    """
+    settings_io.write_chains(ConfigManager(tmp_path), {"default": ["anthropic/claude-opus-5"]})
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 32)) as pilot:
+        await pilot.pause()
+        app._open_settings_view()
+        view = app.query_one(SettingsView)
+        await pilot.pause()
+
+        _select(view, "retry.fallbackChains")
+        await pilot.press("r")
+        await pilot.pause()
+        assert view.notice_text, "the setup press produced no notice to go stale"
+
+        await pilot.press("enter")
+        await pilot.pause()
+
+        current = view._current()
+        assert current is not None and current.kind == "chain"
+        assert view.notice_text == "", (
+            "the notice from `r` on the cascade row followed the cursor onto the chain "
+            f"row: {view.notice_text!r}"
+        )
+        detail = view.render_lines_for_test()[-1]
+        assert (
+            "enter opens the chain" in detail
+        ), f"the chain row's own contract is not on screen after `enter`: {detail!r}"
