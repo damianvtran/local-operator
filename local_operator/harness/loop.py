@@ -980,7 +980,13 @@ class AgentLoop:
             # ``context.messages`` on this path, but the object is observable,
             # and losing the partial answer on cancel is a behaviour change this
             # optimization has no business making.
-            assistant.content = [TextContent(text="".join(text_parts))]
+            #
+            # Guarded for the same reason as the assembly at the end of this
+            # function: a cancel before any text delta must leave ``content``
+            # as the empty LIST it was constructed with, not a list holding an
+            # empty text block.
+            if text_parts:
+                assistant.content = [TextContent(text="".join(text_parts))]
             raise
         except Exception as exc:
             # `error` below is handed straight to the UI, which prints it as a
@@ -1027,7 +1033,19 @@ class AgentLoop:
         # reports the text that did arrive — the frozen row on an aborted turn
         # is what the user is left reading. The hard-cancel path re-raises
         # above and assembles there for the same reason.
-        assistant.content = [TextContent(text="".join(text_parts))]
+        #
+        # ONLY when there is text. A turn that emits tool calls and no prose is
+        # ordinary — it is what every "call the tool, say nothing" step looks
+        # like — and this assignment used to be unreachable for it, because it
+        # lived inside the delta loop and no delta ever arrived. Hoisting it out
+        # made it run unconditionally, so such a turn started carrying
+        # ``[TextContent(text="")]`` where it used to carry ``[]``. Anthropic
+        # rejects that on the NEXT request of the turn with
+        # ``HTTP 400: messages: text content blocks must be non-empty``, which
+        # kills the run outright. The empty list is what the Message was
+        # constructed with and what every provider already handles.
+        if text_parts:
+            assistant.content = [TextContent(text="".join(text_parts))]
         assistant.tool_calls = [
             self._assemble_tool_call(state) for _, state in sorted(tool_states.items())
         ]
