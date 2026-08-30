@@ -2002,3 +2002,124 @@ async def test_r_on_an_armed_chain_row_repaints_the_disarmed_ask(tmp_path: Path)
             "the footer still offers `esc cancel` for an ask that no longer exists, so "
             f"`esc` will leave the page instead:\n{disarmed}"
         )
+
+
+@pytest.mark.asyncio
+async def test_enter_on_the_cascade_row_does_not_destroy_the_cascade(tmp_path: Path) -> None:
+    """#440: `enter` on the failover cascade SETTING row used to open a
+    free-text editor seeded with the mapping's Python repr, and committing that
+    repr stored it as a STRING — `read_chains` then returned `{}` and the whole
+    cascade was gone, unrecoverably, because `r` cannot restore a value that is
+    no longer a mapping.
+
+    Asserted on the STORED VALUE rather than on whether an editor opened: the
+    editor is the mechanism, the destroyed config is the bug, and a test that
+    only checked `view._editing` would pass against any future fall-through
+    that still wrote through some other door.
+    """
+    chains = {"default": ["anthropic/claude-opus-5", "openrouter/deepseek"]}
+    settings_io.write_chains(ConfigManager(tmp_path), dict(chains))
+
+    def stored() -> Any:
+        # The RAW value on disk, not what `read_chains` makes of it: the repr
+        # write is only visible before `read_chains` discards it.
+        return _values(tmp_path)["retry"]["fallbackChains"]
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 32)) as pilot:
+        await pilot.pause()
+        app._open_settings_view()
+        view = app.query_one(SettingsView)
+        await pilot.pause()
+
+        _select(view, "retry.fallbackChains")
+        # A real key press through the app's own binding, not a direct call:
+        # the fall-through was on the activation path a user actually travels.
+        await pilot.press("enter")
+        await pilot.pause()
+        # Type a character and accept it, which is what turned the seeded repr
+        # into a committed value. Harmless once the row no longer opens an
+        # editor, and the only way to reach the destructive commit if it does.
+        await pilot.press("x")
+        await pilot.press("enter")
+        await pilot.pause()
+
+        view._manager.reload()
+        assert isinstance(stored(), dict), (
+            "retry.fallbackChains is no longer a mapping after `enter` on the cascade "
+            f"row — the cascade has been destroyed: {stored()!r}"
+        )
+        assert settings_io.read_chains(view._manager) == chains, (
+            "the cascade did not survive `enter` on its row: "
+            f"{settings_io.read_chains(view._manager)!r}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_enter_on_the_cascade_row_opens_its_own_editor(tmp_path: Path) -> None:
+    """The other half of #440: `enter` must not merely be inert. The footer
+    offers `enter change` on this row, so the key travels INTO the cascade's
+    own two-level editor — a lit hint whose key does nothing is the same
+    complaint one step earlier."""
+    settings_io.write_chains(ConfigManager(tmp_path), {"default": ["anthropic/a"]})
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 32)) as pilot:
+        await pilot.pause()
+        app._open_settings_view()
+        view = app.query_one(SettingsView)
+        await pilot.pause()
+
+        _select(view, "retry.fallbackChains")
+        await pilot.press("enter")
+        await pilot.pause()
+        assert view._editing is None, "a text editor opened on a row with no scalar value"
+        current = view._current()
+        assert current is not None and current.kind == "chain" and current.chain == "default"
+
+        # And it works from there: the chain opens into its hops.
+        await pilot.press("enter")
+        await pilot.pause()
+        assert view._chain == "default"
+
+
+@pytest.mark.asyncio
+async def test_begin_edit_refuses_a_kind_that_is_not_edited_as_text(tmp_path: Path) -> None:
+    """The belt-and-braces guard behind #440.
+
+    Every non-text kind has its own `action_activate` branch, so `_begin_edit`
+    is only reachable on one by a MISSING branch — and the cost of that
+    omission was a destroyed config, not a dead key. Driven directly at
+    `_begin_edit`, because the whole point is what happens when the branch that
+    should have caught the row is not there.
+    """
+    settings_io.write_chains(ConfigManager(tmp_path), {"default": ["anthropic/a"]})
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 32)) as pilot:
+        await pilot.pause()
+        app._open_settings_view()
+        view = app.query_one(SettingsView)
+        await pilot.pause()
+
+        for kind in (Kind.CASCADE, Kind.BOOL, Kind.ENUM, Kind.READONLY):
+            index = next(
+                (
+                    index
+                    for index, row in enumerate(view._rows)
+                    if row.kind == "setting"
+                    and row.setting is not None
+                    and row.setting.kind is kind
+                ),
+                None,
+            )
+            assert index is not None, f"no shipped row of kind {kind}"
+            view._begin_edit(view._rows[index])
+            assert view._editing is None, f"_begin_edit opened a text editor on {kind}"
+            assert view._error, f"_begin_edit refused {kind} silently"
+
+        # A kind that IS edited as text still opens, so the guard did not turn
+        # the editor off wholesale.
+        index = _select(view, "retry.maxRetries")
+        view._begin_edit(view._rows[index])
+        assert view._editing == "retry.maxRetries"

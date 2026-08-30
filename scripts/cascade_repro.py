@@ -75,8 +75,10 @@ async def main() -> None:
         # A real `enter`, through the app's own binding, not a direct call.
         await pilot.press("enter")
         await pilot.pause()
-        print(f"after real 'enter':       editing? {view._editing is not None} | "
-              f"buffer: {view._buffer[:44]!r}")
+        print(
+            f"after real 'enter':       editing? {view._editing is not None} | "
+            f"buffer: {view._buffer[:44]!r}"
+        )
 
         # Type one character so the commit is not the no-op "nothing typed"
         # path, then accept it exactly as a user would.
