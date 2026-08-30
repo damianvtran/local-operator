@@ -2553,6 +2553,7 @@ async def test_a_hard_cancel_keeps_the_text_that_already_streamed() -> None:
         started["message"].text == "partial answer"
     ), "a hard cancel dropped the text that had already streamed"
 
+
 # ---------------------------------------------------------------------------
 # A pending fork rides the interrupt poll, but is NOT a steer
 # ---------------------------------------------------------------------------
