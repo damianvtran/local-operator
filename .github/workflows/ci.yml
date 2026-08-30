@@ -3,8 +3,21 @@ name: Pre-release CI Testing
 on:
   push:
     branches:
+      # ONLY `main` here, deliberately.
+      #
+      # `dev-*` used to be in this list as well, which double-billed every
+      # feature branch: a `dev-*` branch with an open PR fired a `push` run AND
+      # a `pull_request` run for the SAME commit, two identical sets of jobs
+      # whose results nobody read twice. At one point 29 of the SHAs in the
+      # queue were running both. The `pull_request` trigger below already
+      # covers feature branches, so dropping `dev-*` here halves the per-commit
+      # cost without reducing what is actually tested.
+      #
+      # A `dev-*` branch with NO open PR now gets no CI until the PR is opened.
+      # That is the intended trade: CI exists to gate review and merge, and an
+      # un-PR'd branch is gating nothing. Use `workflow_dispatch` to run it by
+      # hand if you need a pre-PR signal.
       - main
-      - 'dev-*'
   # PULL REQUESTS TOO. Without this a feature branch received NO CI until it
   # was already merged, which let a broken `pip install .` and an import that
   # fails on the declared minimum Python both reach review looking green.
@@ -12,9 +25,67 @@ on:
   pull_request:
   workflow_dispatch:
 
+# One in-flight run per ref. A review cycle force-pushes repeatedly, and
+# without this every superseded push kept its full job set queued to completion
+# against a 20-job account-wide concurrency cap — 56% of the active queue was
+# once running against commits their own branch had already moved past, while
+# the newest commit (the only one anybody was waiting on) sat behind them.
+#
+# `github.workflow` is in the key so this workflow never cancels a sibling
+# workflow's run on the same ref (the release/publish line in particular).
+#
+# `github.ref` is the right granularity: for a `pull_request` event it is the
+# PR's merge ref, so successive pushes to one PR supersede each other while
+# two different PRs never collide.
+#
+# A push to `main` is never cancelled BY A LATER MERGE, and the SHA in the
+# group key is how that is achieved. A push to `main` is a merge whose result
+# is the release signal and the record for that commit, so every one of those
+# runs must complete.
+#
+# The precise guarantee: no `main` run is cancelled or evicted by a run on a
+# DIFFERENT commit. Two runs on the SAME `main` commit — a re-run, or a
+# `workflow_dispatch` at a commit already building — do share a group and the
+# later one supersedes the earlier. That is acceptable because the survivor is
+# on the identical SHA and, not being a `pull_request`, runs the same full
+# both-leg matrix: the CI record is replaced by an equivalent one rather than
+# lost, which is also what a GitHub re-run does by design.
+#
+# `cancel-in-progress: false` alone would NOT deliver that. A concurrency group
+# permits one run in progress and, by default, only ONE run pending: when a
+# third arrives the waiting one is cancelled. With `main` merging faster than
+# this workflow's ~23 min duration (four merges inside 27 minutes was observed
+# while writing this), run A executes, B waits, C arrives and evicts B — and B
+# is then a commit on `main` that no CI ever reported on.
+#
+# Adding `github.sha` for `main` gives every merge commit its OWN group, so
+# `main` runs never contend and none can be cancelled or evicted. Feature
+# branches keep a per-ref group, so successive pushes to one PR still supersede
+# each other, which is where the throughput saving comes from.
+#
+# Why not `queue: max` (the documented way to hold up to 100 pending runs):
+# GitHub rejects `queue: max` combined with a `cancel-in-progress` that can
+# evaluate true, and this workflow needs cancellation on feature branches.
+# Tried, and it failed the run at plan time with:
+#   "The combination of 'queue: max' and 'cancel-in-progress: true'
+#    is not allowed"
+# A unique group per `main` commit reaches the same guarantee with keys that
+# have been supported all along, and it does not queue `main` runs behind each
+# other — they simply run.
+#
+# This matters specifically because the `test` matrix below runs the 3.13 leg
+# ONLY on `main`. `main` is the safety net for the narrowed pull request
+# matrix, so a hole in that net would undo the justification for narrowing it.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.ref == 'refs/heads/main' && github.sha || 'shared' }}
+  cancel-in-progress: true
+
 jobs:
   lint:
     runs-on: ubuntu-latest
+    # Generous against the ~30 s this takes; it exists so a wedged install step
+    # cannot hold a concurrency slot for the 360-minute GitHub default.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -39,6 +110,7 @@ jobs:
 
   type-check:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     env:
       PYRIGHT_PYTHON_FORCE_VERSION: latest
     steps:
@@ -64,14 +136,67 @@ jobs:
         
   test:
     runs-on: ubuntu-latest
+    # ~23 min is the honest ceiling for a healthy run of this stage, so 40 is a
+    # backstop for a hang and not a limit healthy work can reach. It is
+    # load-bearing: a `test (3.13)` job once hung and held one of the account's
+    # 20 concurrency slots for 3h38m, because with no `timeout-minutes` the
+    # GitHub default is SIX HOURS. The suite's own failure modes assert or
+    # error in seconds; only a deadlock gets here.
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
-        # BOTH ends of `requires-python`. Testing only the minimum let a
-        # 3.13-only typing feature ship; testing only the newest would let a
-        # 3.12 incompatibility ship. The declared range has to be the tested
-        # range or the classifier is a guess.
-        python-version: ["3.12", "3.13"]
+        # BOTH ends of `requires-python` on `main`, the minimum only on pull
+        # requests.
+        #
+        # The rule this preserves is unchanged: testing only the minimum lets a
+        # 3.13-only typing feature ship, and testing only the newest lets a
+        # 3.12 incompatibility ship, so the declared range has to be the tested
+        # range or the classifier is a guess. `main` therefore still tests the
+        # full declared range, and no commit reaches a release without both
+        # ends having run on it.
+        #
+        # What changes is WHEN the 3.13 leg runs on feature work. This stage is
+        # ~23 min and was the single largest consumer of a 20-job account-wide
+        # concurrency cap; at two legs per run it alone could exceed the whole
+        # account's parallelism during a busy review cycle, and the queueing
+        # delayed every other branch AND the release pipeline. Running one leg
+        # per PR commit halves that.
+        #
+        # The cost, stated plainly: a 3.13-ONLY break is now caught when the PR
+        # merges to `main` rather than on the PR itself. That is a real
+        # reduction in per-PR gate strength.
+        #
+        # It was accepted on MEASURED grounds, not on the intuition that such
+        # breaks are rare. Surveying recent CI runs where BOTH legs actually
+        # reported a pass/fail (excluding cancelled legs), 3.13-only reds are a
+        # MINORITY of 3.12-only reds — measured repeatedly at roughly 1:2 to
+        # 1:7 depending on the window, and never once inverted. So the 3.13 leg
+        # is not carrying a unique load; if anything the 3.12 leg catches more.
+        #
+        # Deliberately a RATIO and not a fixed count: this repo merges fast
+        # enough that any absolute number is stale within hours, and two
+        # independent surveys of overlapping windows disagreed on the count
+        # while agreeing on the direction. The direction is the load-bearing
+        # part and it has held at every window measured.
+        #
+        # What decided it is WHY those reds happen: each was `1 failed` out of
+        # ~9000, on a DIFFERENT timing-sensitive test (transcript selection,
+        # resume-subagents, tui responsiveness), never the same test twice, and
+        # none was a genuine 3.13 language or typing incompatibility. One was
+        # confirmed by reading the log to be a composer-height timing assertion
+        # (test_transcript_selection.py:2243). They are flakes on a slow,
+        # loaded runner — the class of defect #461 ("wait on conditions instead
+        # of the clock") addresses.
+        #
+        # So relegating this leg to `main` takes a source of flaky reds out of
+        # the review loop while keeping the real incompatibility gate — which
+        # has not fired in this window — on every merge. If a true 3.13-only
+        # incompatibility ever DOES reach `main`, put "3.13" back into the
+        # pull_request arm rather than reaching for more concurrency; the flakes
+        # are the thing to fix first, and they are a separate concern from this
+        # workflow (see dev-test-determinism).
+        python-version: ${{ github.event_name == 'pull_request' && fromJSON('["3.12"]') || fromJSON('["3.12", "3.13"]') }}
     steps:
       - uses: actions/checkout@v4
 
@@ -79,6 +204,27 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+          # Restores pip's HTTP cache. Measured saving is SMALL — install is
+          # ~15-20 s of a ~23 min job — so this is emphatically not what fixes
+          # the queue; it removes a PyPI round trip and one network flake mode
+          # per job.
+          #
+          # Known limitation, stated so nobody reads more into this than it
+          # delivers: the key is `pyproject.toml`, and this project pins none of
+          # its 19 runtime dependencies (`>=` throughout) and has no lockfile.
+          # The key therefore only changes when that FILE changes, while the
+          # resolved wheels drift underneath it as upstreams release. The cache
+          # decays into staleness rather than staying current.
+          #
+          # That is safe, not merely tolerable: this is pip's HTTP download
+          # cache, not a restored site-packages. pip still resolves against the
+          # index on every run and reuses a cached download only when the
+          # resolution asks for that exact artifact, so a stale entry cannot pin
+          # an old version into a build or otherwise poison a run. Adding a
+          # lockfile would make this caching genuinely effective, and is the
+          # right fix if install time ever becomes material here.
+          cache: pip
+          cache-dependency-path: pyproject.toml
 
       - name: Install dependencies
         run: |
@@ -116,6 +262,7 @@ jobs:
 
   pip-audit:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - name: Install package
