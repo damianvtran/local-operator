@@ -230,8 +230,10 @@ browser" info bar. The reached page in both is typeset by `_demo_page()`
 rather than captured, and the drawn browser chrome is a minimal traffic-light
 + URL bar that deliberately carries no Chrome UI beyond it. Both assets
 therefore convey the agent-owns-this-tab fact through the composited
-`popup-connected.png` frame (its connected state and `Driving:` line) and the
-demo page's own "This tab — OPENED BY AGENT" status row.
+`popup-connected.png` frame (its "Connected." state over the
+`BRIDGE TEST PAGE` label and that page's `127.0.0.1` URL, naming the same page
+the browser frame reached) and the demo page's own "This tab — OPENED BY AGENT"
+status row.
 
 If a future reviewer requires the literal banner, note that **dropping a new
 capture into `docs/evidence/browser-extension/` will not change these assets** —

@@ -142,9 +142,11 @@ workflows documented below; no long-lived Google credential is stored.
       `127.0.0.1` test page); no account avatar, email, or live code present.
 - [ ] Confirm the agent-work screenshot shows a real completed path and
       Chrome's debugger disclosure rather than hiding it. **Open:** screenshot 4
-      shows the completed path (`Page Two` reached, popup `Driving:` line) but
-      the supplied capture omits Chrome's debugger banner. Re-capture with the
-      banner visible before upload; see the caveat in `assets.md`.
+      shows the completed path (the reached page in a browser frame, and the
+      popup's "Connected." state over that same `127.0.0.1` test-page URL) but
+      no asset shows Chrome's debugger banner. The reached page is typeset by
+      `build_assets.py` rather than captured, so restoring the banner is a
+      builder change, not a re-capture; see the caveat in `assets.md`.
 - [x] Keep original captures and editable compositions with the release record.
       → `build_assets.py` regenerates every PNG from the committed source frames.
 
