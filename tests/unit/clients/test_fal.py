@@ -1,3 +1,4 @@
+from itertools import count
 from typing import Any, Dict
 from unittest.mock import MagicMock, patch
 
@@ -26,9 +27,13 @@ def _fake_clock(step: float = 0.25):
     Advancing a fixed step per call bounds the loop to a handful of passes,
     keeps the elapsed-time assertions meaningful, and makes the test
     deterministic rather than dependent on how loaded the machine is.
-    """
-    from itertools import count
 
+    The step is calibrated against how many times the loop consumes the clock
+    per iteration (``generate_image`` reads it for the ``while`` bound and again
+    for the half-timeout branch). Adding or removing a ``time.time()`` call in
+    that loop changes how many polls a given step produces, so a change there
+    should re-check the assertions here rather than assume the step still fits.
+    """
     return (n * step for n in count())
 
 

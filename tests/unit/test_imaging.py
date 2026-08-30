@@ -410,7 +410,14 @@ def test_the_memo_cannot_grow_without_bound() -> None:
     # heaviest test in the suite (1047 MB peak, 30 s). 22 still overshoots the
     # saturation point by six evictions, so it exercises eviction rather than
     # merely filling the map, and the assertions below are unchanged.
-    iterations = 22
+    #
+    # Derived from the cap rather than hard-coded so the two cannot drift: each
+    # of these images rebounds to roughly 2 MB, so this is "enough to fill the
+    # cap, plus a margin that forces evictions". Raising
+    # ``_REBOUND_CACHE_MAX_BYTES`` therefore raises the workload with it instead
+    # of silently leaving the eviction assertion non-binding.
+    approx_entry_bytes = 2 * 1024 * 1024
+    iterations = _REBOUND_CACHE_MAX_BYTES // approx_entry_bytes + 6
     for index in range(iterations):
         # Distinct sizes, so every one is a distinct cache key. Photographic
         # noise, so each result is genuinely large rather than a flat PNG that
