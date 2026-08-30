@@ -254,6 +254,19 @@ def select_collapsed(items: list[dict[str, Any]], cap: int) -> tuple[list[dict[s
     return [*lead, *within], hidden
 
 
+def _item_line_indices(lines: list[Text]) -> list[int]:
+    """Body-line indices that carry a TODO, in paint order.
+
+    The expanded footer counts TODOS, not rows: a body line is a phase header,
+    the root ``stage`` line, or an item, and a position that counted chrome
+    would tell the reader ``14 of 21`` about an eighteen-item list. Item rows are
+    recognised by the tool's own ``- [`` mark, the same predicate
+    :meth:`TodoPanel._guarantee_expanded_item` already uses to find the first
+    item — one way of asking "is this a todo row?", not two.
+    """
+    return [i for i, line in enumerate(lines) if "- [" in line.plain]
+
+
 def _active_phase_index(phases: list[dict[str, Any]]) -> int:
     """Index of the EARLIEST phase still holding open work — the collapsed
     view's viewport anchor (omp ``formatSummary``'s ``currentIdx``, todo.ts:732).
@@ -395,6 +408,15 @@ class TodoPanel(Container):
         #: line count, and the two must agree or the band reflows on the first
         #: frame (see :meth:`predicted_rows`).
         self._painted_rows: int = 0
+        #: Body-line indices carrying a todo, and the body's total line count,
+        #: as of the last EXPANDED paint — the two numbers the position footer
+        #: (#264/#265) is computed from. Recorded at paint time because the
+        #: scroll-time repaint (:meth:`_repaint_expanded_footer`) has no phases
+        #: to rebuild from and must not re-read the store: a scroll changes the
+        #: viewport, never the list. Empty whenever the panel is collapsed or the
+        #: affordance was dropped, which is what makes "no footer" the default.
+        self._expanded_item_rows: list[int] = []
+        self._expanded_body_lines: int = 0
         self._restored_todos: dict[str, list[dict[str, Any]]] = {}
         self._todo_loads: dict[str, asyncio.Task[None]] = {}
         # Hidden until the first todo exists: an empty panel is not content.
@@ -458,6 +480,17 @@ class TodoPanel(Container):
         # guard still governs a single repaint.
         yield self._scroll
         yield self._affordance
+
+    def on_mount(self) -> None:
+        # The expanded footer's position is a function of the scroll offset, and
+        # a scroll repaints nothing on its own — `sync`'s equality guard covers
+        # the store, the budget, the expanded flag and the hidden set, none of
+        # which a wheel notch or a `ctrl+down` moves. Watching the reactive is
+        # the only signal that fires exactly when the count changes; the panel is
+        # a status surface with no other tick to ride (the 1 Hz poll returns
+        # early on the guard). `init=False` because the first paint composes its
+        # own footer.
+        self.watch(self._scroll, "scroll_y", self._repaint_expanded_footer, init=False)
 
     # -- sync -----------------------------------------------------------------
     async def _load_restored_todos(
@@ -646,7 +679,6 @@ class TodoPanel(Container):
         (defect 2). Both list-of-rows results and the affordance are clipped to
         width here, uniformly, so no row can push the band past the screen.
         """
-        dim = Style(color=theme_mod.semantic_color("dim"))
         # The headerless back-compat path is the IMPLICIT single phase only, so
         # the panel and the ``view`` receipt make the identical choice (design
         # §5.2 — one list spelled one way). ``builtin._todo_view_text`` gates its
@@ -673,26 +705,50 @@ class TodoPanel(Container):
         if self._expanded and affordance is not None:
             lines, affordance = self._guarantee_expanded_item(lines, affordance)
 
+        # EXPANDED POSITION/OVERFLOW FOOTER (#264 U4 + #265 U5). Composed HERE,
+        # not inside ``_affordance_row``, because it is a function of the FINAL
+        # line list: ``_guarantee_expanded_item`` above may have dropped chrome
+        # rows or the affordance itself, and a footer computed before that would
+        # describe a viewport the panel no longer paints.
+        if self._expanded and affordance is not None:
+            self._expanded_item_rows = _item_line_indices(lines)
+            self._expanded_body_lines = len(lines)
+            affordance = self._expanded_footer(affordance)
+        else:
+            self._expanded_item_rows = []
+            self._expanded_body_lines = 0
+
         # The clip happens HERE, against a width, because nothing in the layout
         # supplies one (see :meth:`_row_cells`). Applied uniformly to headers,
         # items and the affordance so no row can push the band past the screen.
-        cells = self._row_cells()
-        if cells:
-            for line in [*lines, *([affordance] if affordance is not None else [])]:
-                if line.cell_len <= cells:
-                    continue
-                # Rich's own ``overflow="ellipsis"`` leaves the cut as "word …"
-                # whenever it lands on a space, so the same row would truncate in
-                # two typographic styles one column apart. The project's one
-                # truncator rstrips first (``tool_card.truncate_cells``) and this
-                # does the same, span-aware: crop a cell short, drop the trailing
-                # space, then spend that cell on the marker — which is `dim`
-                # because a truncation mark is chrome, not part of the sentence.
-                line.truncate(cells - 1, overflow="crop")
-                while line.plain.endswith(" "):
-                    line.right_crop(1)
-                line.append("…", style=dim)
+        for line in [*lines, *([affordance] if affordance is not None else [])]:
+            self._clip_row(line)
         return Text("\n").join(lines), affordance
+
+    def _clip_row(self, line: Text) -> None:
+        """Truncate one composed row to the width it is drawn at, IN PLACE.
+
+        This panel's single truncator, shared by :meth:`_build`'s uniform pass
+        and the scroll-time footer repaint (:meth:`_repaint_expanded_footer`): a
+        footer that gains its ``N of M`` prefix mid-scroll must be cut the same
+        way as one that carried it from the last full paint, or the same row
+        truncates in two typographic styles depending on how it got there.
+
+        Rich's own ``overflow="ellipsis"`` leaves the cut as "word …" whenever it
+        lands on a space, so the same row would truncate in two typographic
+        styles one column apart. The project's one truncator rstrips first
+        (``tool_card.truncate_cells``) and this does the same, span-aware: crop a
+        cell short, drop the trailing space, then spend that cell on the marker —
+        which is ``dim`` because a truncation mark is chrome, not part of the
+        sentence.
+        """
+        cells = self._row_cells()
+        if not cells or line.cell_len <= cells:
+            return
+        line.truncate(cells - 1, overflow="crop")
+        while line.plain.endswith(" "):
+            line.right_crop(1)
+        line.append("…", style=Style(color=theme_mod.semantic_color("dim")))
 
     def _build_flat(self, items: list[dict[str, Any]]) -> tuple[list[Text], Text | None]:
         """The single-phase (implicit ``\"Todos\"``) render — HEADERLESS and
@@ -1094,7 +1150,13 @@ class TodoPanel(Container):
         with ``0, 0`` and never carries a hidden-count prefix. This corrects the
         original design's "expanded is bounded by ``_body_rows()`` too": expanded
         genuinely reveals every todo (defect 1), so there is no hidden remainder
-        left to confess.
+        left to confess. That invariant is why the expanded POSITION footer
+        (#264/#265) is composed in :meth:`_expanded_footer` on top of this row
+        rather than inside it: ``N of M`` states where the viewport sits in a
+        list that is entirely present, which is a different claim from
+        collapsed's ``+N more`` confession that items are missing. Keeping the
+        two apart is what stops the position count from being mistaken for a
+        hidden remainder returning.
 
         The hidden-count prefix stays ``dim`` (chrome — a running total), but the
         ``ctrl+t`` hotkey token steps up to ``muted`` (D3/U3): fully ``dim`` it is
@@ -1114,6 +1176,115 @@ class TodoPanel(Container):
                 row.append(f"+{hidden_done} done · ", style=dim)
         row.append("ctrl+t to collapse" if self._expanded else "ctrl+t to expand", style=muted)
         return row
+
+    def _expanded_viewport(self) -> tuple[int, int]:
+        """``(first_body_line, rows)`` the expanded scroll region is showing.
+
+        The window the footer describes, in BODY-LINE coordinates.
+
+        ``rows`` restates :meth:`sync`'s own ``max_height`` expression (the row
+        budget minus the pinned affordance row) rather than reading the region's
+        ``content_size``. That is not a shortcut, it is the only correct source
+        here: :meth:`_build` runs BEFORE ``sync`` applies the new cap, so on the
+        frame a ``ctrl+t`` expands the panel ``content_size`` still holds the
+        COLLAPSED height, and a footer computed from it would state a position
+        for a viewport that no longer exists — with no later event to correct it,
+        since a scroll is the only thing that repaints the footer and the reader
+        has not scrolled yet. Restating sync's expression makes the two agree by
+        construction. It is a CAP, so it equals the painted viewport whenever the
+        body overflows, which is the only case that paints a footer at all: a
+        body shorter than the cap is fully visible and returns no footer.
+        """
+        rows = max(1, self._body_rows() - 1)
+        # ``scroll_y`` is a float reactive mid-animation; the fold is a row index.
+        offset = max(0, int(self._scroll.scroll_y))
+        return offset, rows
+
+    def _expanded_footer(self, affordance: Text) -> Text:
+        """Prefix the expanded control row with position + overflow (#264, #265).
+
+        ONE footer, not two bolted together. ``↓ 12 of 18 · ctrl+t to collapse``
+        answers both deferred findings with a single set of numbers: the arrow is
+        U4's "content continues below" cue for a reader who never sees the
+        scrollbar thumb (keyboard-only, or a short window where the thumb is one
+        cell), and ``12 of 18`` is U5's orientation. Painting both suggestions
+        literally (``12 of 18 · ↓ 6 below``) would state one fact twice — the
+        remainder is just ``18 - 12`` — so the arrow rides the position instead of
+        repeating it. ``12`` is the LAST todo the viewport reaches, so scrolling
+        to the end lands on ``18 of 18`` and the arrow drops: the cue disappears
+        exactly when there is nothing below, which is the honesty U4 asks for.
+
+        Appears ONLY when the body actually overflows its viewport. An expanded
+        list that fits entirely is not a place a reader can be lost in, and a
+        permanent ``5 of 5`` would be chrome that never changes — the collapsed
+        state does not confess a remainder it does not have either.
+
+        INK — ``dim``, the SAME tier as the collapsed ``+N more`` prefix, and
+        deliberately not ``muted``. This is the expanded mirror of that prefix (a
+        running total, chrome), and the docstring above records why the split
+        exists: the ``ctrl+t`` token is ``muted`` at 7.93:1 because it is the ONLY
+        signal the toggle exists, and it has to stay the loudest thing on the row.
+        Painting a positional count at ``muted`` would put chrome level with the
+        one actionable token and invert that hierarchy — a reader would find the
+        numbers before the key. ``dim`` at 4.18:1 is what ``+N more`` is judged
+        legible enough to say, and this says no more than that.
+
+        WIDTH — the prefix is dropped WHOLE when it does not fit beside the
+        hotkey, never truncated into it. The row is ``no_wrap``/``ellipsis`` and
+        clipped against the screen (:meth:`_clip_row`), so a footer that simply
+        grew would spend the narrow width on the count and leave ``ctrl+t to
+        colla…`` — shedding the affordance and keeping the summary, the exact
+        inversion ``usage_panel._hint_row`` documents. The hotkey is the one
+        token that must always survive; position is polish.
+        """
+        total = len(self._expanded_item_rows)
+        if not total:
+            return affordance
+        offset, rows = self._expanded_viewport()
+        if self._expanded_body_lines <= rows:
+            return affordance  # fits entirely: no position to state, no overflow
+        # ``seen`` counts TODOS at or above the fold, so the number tracks the
+        # list the user is reading rather than the rows the panel happens to
+        # paint (phase headers and the root line are not todos).
+        fold = offset + rows
+        seen = sum(1 for index in self._expanded_item_rows if index < fold)
+        seen = max(1, min(total, seen))
+        prefix = Text(no_wrap=True, overflow="ellipsis")
+        arrow = "↓ " if seen < total else ""
+        prefix.append(
+            f"{arrow}{seen} of {total} · ", style=Style(color=theme_mod.semantic_color("dim"))
+        )
+        cells = self._row_cells()
+        if cells and prefix.cell_len + affordance.cell_len > cells:
+            return affordance  # too narrow for both: the hotkey wins outright
+        prefix.append_text(affordance)
+        return prefix
+
+    def _repaint_expanded_footer(self, *_args: Any) -> None:
+        """Restate the footer's position after a scroll, without a full repaint.
+
+        The numbers are a function of the scroll offset, and NOTHING else
+        repaints when a reader scrolls the expanded list: ``sync``'s equality
+        guard (design §7.3) covers the store, the budget, the expanded flag and
+        the hidden set, and a scroll moves none of them. Deliberately so — adding
+        the offset to that tuple would rebuild the whole body on every wheel
+        notch. Watching the reactive instead is the signal that fires exactly
+        when the answer changes, the same trade ``SubagentView`` makes for its
+        scroll arrows.
+
+        Recomposes from :meth:`_affordance_row`, the single authority for the
+        hotkey token, so the scroll path and the build path cannot spell the
+        control two ways. Writes only on a real change: ``update`` refreshes the
+        widget, and a watcher that wrote unconditionally would repaint once per
+        scroll event for the many notches that do not move the count.
+        """
+        if not self._expanded or not self._affordance.display:
+            return
+        footer = self._expanded_footer(self._affordance_row(0, 0))
+        self._clip_row(footer)
+        if str(self._affordance.content) == footer.plain:
+            return
+        self._affordance.update(footer)
 
     # -- budgets --------------------------------------------------------------
     def _row_cells(self) -> int:

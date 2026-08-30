@@ -1067,3 +1067,233 @@ async def test_expanded_shows_an_item_at_the_floor_flat_and_phased() -> None:
             assert scroll.max_scroll_y > 0
             assert app.query_one("#input-shell").region.height > 0
             builtin.TODO_STORE.clear()
+
+
+# --------------------------------------------------------------------------- #
+# Expanded overflow/position footer (#264 U4, #265 U5)
+# --------------------------------------------------------------------------- #
+
+
+async def _booted_panel(  # type: ignore[no-untyped-def]
+    app: OperatorApp, pilot, phases: list[dict[str, object]]
+) -> TodoPanel:
+    """Seed the store once the SESSION exists, repaint, and hand back the panel.
+
+    Waits for ``app._session`` rather than a frame count. The app paints before
+    its session exists (the factory is awaited in a boot worker) and the panel
+    reads the store keyed by ``session_id``, so a repaint landing in that window
+    finds no todos and hides the panel — which reads as an assertion about
+    footers failing for a reason that has nothing to do with footers.
+    ``test_band_panels.py`` documents the same race and waits the same way.
+    """
+    for _ in range(200):
+        await pilot.pause()
+        if app._session is not None:
+            break
+    from local_operator.tools import builtin
+
+    builtin.TODO_STORE["sess"] = phases
+    app._refresh_band()
+    await pilot.pause()
+    return app.query_one(TodoPanel)
+
+
+async def _settled_expand(app: OperatorApp, pilot) -> TodoPanel:  # type: ignore[no-untyped-def]
+    """Press ``ctrl+t`` and wait for the scroll region's virtual size to settle.
+
+    The panel repaints in the tick the flag flips (``request_toggle`` ->
+    ``_refresh_band``), but ``max_scroll_y`` is a function of a virtual size the
+    compositor computes a frame later. A single ``pause`` therefore reads
+    ``max_scroll_y == 0`` on a list that does overflow, which is the shape of a
+    flake rather than a defect — the footer's own text is already correct at that
+    point. Settling here keeps the OVERFLOW PRECONDITION honest: a test asserting
+    an overflow footer must first prove the list actually overflows.
+    """
+    panel = app.query_one(TodoPanel)
+    await pilot.press("ctrl+t")
+    for _ in range(40):
+        await pilot.pause()
+        if panel._scroll.max_scroll_y > 0:
+            break
+    return panel
+
+
+def _long_multi_phase() -> list[dict[str, object]]:
+    """A 17-item plan that overflows the expanded budget on a 100x30 terminal.
+
+    Deliberately longer than ``_big_multi_phase``: that one FITS at a normal
+    height (it is the fixture proving expand reveals everything), so it can never
+    exercise the overflow footer. The counts here are asserted against
+    ``sum(len(phase items))`` rather than restated, so a fixture edit cannot make
+    a wrong position number look right.
+    """
+    return [
+        {"name": "Discovery", "items": [_item(f"discovery task {n}", "done") for n in range(4)]},
+        {
+            "name": "Implementation",
+            "items": [
+                _item("implementation task 0", "done"),
+                *[_item(f"implementation task {n}", "pending") for n in range(1, 6)],
+                _item("implementation task 6", "blocked", reason="waiting on review"),
+            ],
+        },
+        {
+            "name": "Validation",
+            "items": [
+                *[_item(f"validation task {n}", "pending") for n in range(5)],
+                _item("validation task 5", "dropped"),
+            ],
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_expanded_overflow_footer_states_position_and_more_below() -> None:
+    """U4 + U5 as ONE footer: an expanded list that overflows reads
+    ``↓ N of M · ctrl+t to collapse``.
+
+    The scrollbar thumb was the only signal content continued — invisible to a
+    keyboard-only reader and easy to miss on a short window. ``M`` is the REAL
+    list length (asserted off the fixture, not restated) and ``N`` counts todos
+    at or above the fold, so the pair orients the reader as well as confessing
+    the remainder."""
+    from local_operator.tools import builtin
+
+    session = FakeSession()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        phases = _long_multi_phase()
+        total = sum(len(phase["items"]) for phase in phases)  # type: ignore[arg-type]
+        await _booted_panel(app, pilot, phases)
+        panel = await _settled_expand(app, pilot)
+
+        # Precondition: this list really does overflow, or the footer is vacuous.
+        assert panel._scroll.max_scroll_y > 0
+        footer = _affordance_text(panel)
+        assert footer.endswith("ctrl+t to collapse"), footer
+        assert f" of {total} · " in footer, footer
+        assert footer.startswith("↓ "), footer
+        # The position is a count of TODOS, not painted rows: phase headers and
+        # the root line are chrome and must not inflate it.
+        seen = int(footer.split(" of ")[0].removeprefix("↓ "))
+        assert 0 < seen < total, footer
+        builtin.TODO_STORE.clear()
+
+
+@pytest.mark.asyncio
+async def test_expanded_footer_absent_when_the_whole_list_is_visible() -> None:
+    """No overflow, no cue. An expanded list the reader can see in full is not a
+    place to be lost in, and a permanent ``5 of 5`` would be chrome that never
+    changes — collapsed does not confess a remainder it does not have either."""
+    from local_operator.tools import builtin
+
+    session = FakeSession()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        panel = await _booted_panel(
+            app,
+            pilot,
+            [
+                {"name": "Auth", "items": [_item("token exchange", "pending")]},
+                {"name": "Cleanup", "items": [_item("remove the shim", "pending")]},
+            ],
+        )
+        await pilot.press("ctrl+t")
+        await pilot.pause()
+
+        assert panel._scroll.max_scroll_y == 0  # precondition: nothing hidden
+        assert _affordance_text(panel) == "ctrl+t to collapse"
+        builtin.TODO_STORE.clear()
+
+
+@pytest.mark.asyncio
+async def test_expanded_footer_tracks_the_keyboard_scroll_and_drops_the_arrow() -> None:
+    """The position follows ``ctrl+down``/``ctrl+up`` (U2's real key path), and
+    reaching the end drops the ``↓`` while the count reads ``M of M``.
+
+    A scroll repaints nothing on its own — ``sync``'s equality guard covers the
+    store, the budget, the expanded flag and the hidden set, none of which a
+    scroll moves — so this is the regression guard for the ``scroll_y`` watcher.
+    A footer frozen at its first-paint numbers would be worse than none: it would
+    claim more content below after the reader had already reached the end."""
+    from local_operator.tools import builtin
+
+    session = FakeSession()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        phases = _long_multi_phase()
+        total = sum(len(phase["items"]) for phase in phases)  # type: ignore[arg-type]
+        await _booted_panel(app, pilot, phases)
+        panel = await _settled_expand(app, pilot)
+        assert panel._scroll.max_scroll_y > 0  # precondition: it really overflows
+        at_top = _affordance_text(panel)
+        assert at_top.startswith("↓ "), at_top
+
+        # The REAL binding, not the scroll API: this is the path a user takes.
+        await pilot.press("ctrl+down")
+        for _ in range(12):
+            await pilot.pause()
+        assert panel._scroll.scroll_y == panel._scroll.max_scroll_y
+        at_end = _affordance_text(panel)
+        assert at_end == f"{total} of {total} · ctrl+t to collapse", at_end
+
+        await pilot.press("ctrl+up")
+        for _ in range(12):
+            await pilot.pause()
+        assert _affordance_text(panel) == at_top
+        builtin.TODO_STORE.clear()
+
+
+@pytest.mark.asyncio
+async def test_expanded_footer_sheds_whole_before_it_eats_the_hotkey() -> None:
+    """Narrow width: the position prefix is dropped ENTIRE, never truncated into
+    the ``ctrl+t`` token.
+
+    The row is ``no_wrap``/``ellipsis`` and clipped against the screen, so a
+    footer that merely grew would spend a narrow width on the count and leave
+    ``ctrl+t to colla…`` — keeping the summary and shedding the affordance, the
+    exact inversion ``usage_panel._hint_row`` documents. The hotkey is the only
+    signal the toggle exists; position is polish."""
+    from local_operator.tools import builtin
+
+    session = FakeSession()
+    for width in (16, 20, 40):
+        session = FakeSession()
+        app = OperatorApp(_async_factory(session))
+        async with app.run_test(size=(width, 30)) as pilot:
+            panel = await _booted_panel(app, pilot, _long_multi_phase())
+            await pilot.press("ctrl+t")
+            await pilot.pause()
+
+            footer = _affordance_text(panel)
+            # ``ctrl+t`` survives at every width — the one non-negotiable token.
+            assert "ctrl+t" in footer, f"w={width}: {footer!r}"
+            if " of " in footer:
+                # Wide enough for both: the hotkey phrase stays WHOLE behind the
+                # prefix, never clipped to pay for the count.
+                assert footer.endswith("ctrl+t to collapse"), f"w={width}: {footer!r}"
+            else:
+                # Shed WHOLE: the row is exactly what it was before this feature,
+                # with no count fragment and no orphaned separator.
+                assert footer.startswith("ctrl+t to"), f"w={width}: {footer!r}"
+                assert "·" not in footer, f"w={width}: {footer!r}"
+            builtin.TODO_STORE.clear()
+
+
+@pytest.mark.asyncio
+async def test_collapsed_affordance_is_unchanged_by_the_expanded_footer() -> None:
+    """The collapsed row keeps its ``+N more · ctrl+t to expand`` exactly: the
+    new footer is an EXPANDED-only addition, and the collapsed goldens
+    (``test_band_panels.py``) must not move."""
+    from local_operator.tools import builtin
+
+    session = FakeSession()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        panel = await _booted_panel(app, pilot, _long_multi_phase())
+        assert panel._expanded is False
+        footer = _affordance_text(panel)
+        assert footer.endswith("· ctrl+t to expand"), footer
+        assert footer.startswith("+"), footer
+        assert "of" not in footer.split("·")[0], footer
+        builtin.TODO_STORE.clear()
