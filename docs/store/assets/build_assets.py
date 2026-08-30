@@ -524,7 +524,17 @@ def _split_canvas(
     return cv
 
 
-def _demo_page(w: int = 620, h: int = 346, row_right_inset: int = 0) -> Image.Image:
+# Fixed page geometry for `_demo_page`. NOT a resize knob: the page body is
+# typeset against these exact numbers (gutter, row height, footer pin and the
+# body measure are all tuned to them), and both call sites composite the result
+# through `_fit`, which is where any scaling actually happens. Named constants
+# rather than literals so the tuned values are visible where the geometry is
+# reasoned about.
+DEMO_PAGE_W = 620
+DEMO_PAGE_H = 346
+
+
+def _demo_page(row_right_inset: int = 0) -> Image.Image:
     """The local page the agent reached, typeset in the site's design system.
 
     WHY DRAWN, NOT PASTED: the real capture (`action-screenshot-page2.png`) is
@@ -549,9 +559,13 @@ def _demo_page(w: int = 620, h: int = 346, row_right_inset: int = 0) -> Image.Im
     The marquee overlaps the popup card onto this page's right side, which
     would bury the right-aligned status values; the inset keeps every check
     visible there while screenshot (d), which is not overlapped, uses the
-    full width.
+    full width. It is the only variable here: the page size is fixed at
+    DEMO_PAGE_W x DEMO_PAGE_H because the layout below hardcodes absolutes
+    tuned to it (44px gutter, 27px rows, footer pinned 22px off the bottom,
+    a 350px body measure). Compositing at another size is `_fit`'s job.
     """
     s = 2  # supersampling factor
+    w, h = DEMO_PAGE_W, DEMO_PAGE_H
     W, H = w * s, h * s
     pg = Image.new("RGB", (W, H), SURFACE)
     d = ImageDraw.Draw(pg)
@@ -563,6 +577,9 @@ def _demo_page(w: int = 620, h: int = 346, row_right_inset: int = 0) -> Image.Im
     # the system's "one accent, few places" rule.
     ef = font("mono", 10 * s, 500)
     easc = ef.getmetrics()[0]
+    # +1*s: optical centring. The dot is centred on the ascent midpoint, but the
+    # mono cap-height sits slightly above it, so the geometric centre reads a
+    # touch high against the label; one supersampled pixel down settles it.
     cy = y + easc // 2 + 1 * s
     d.ellipse([mx, cy - 3 * s, mx + 6 * s, cy + 3 * s], fill=ACCENT)
     draw_tracked(d, (mx + 14 * s, y), "LOCAL TEST PAGE", ef, ACCENT, 0.08 * 10 * s)
@@ -577,15 +594,19 @@ def _demo_page(w: int = 620, h: int = 346, row_right_inset: int = 0) -> Image.Im
     # One-line body: what loading this page actually demonstrates. Figtree
     # body voice, ink-muted, exactly the site's supporting-copy recipe.
     bf = font("sans", 14 * s, 400)
-    d.text(
-        (mx, y),
-        "If this page loads, the local bridge is reachable and the",
-        font=bf,
-        fill=INK_MUTED,
+    # Measure is 350 page-px, not the full content column: a full-width rag
+    # leaves a short widow on the second line, and the narrower measure gives
+    # the balanced two-line block the composition was tuned around. Broken by
+    # wrap() rather than by hand so a copy edit cannot silently land the break
+    # in the wrong place.
+    body = (
+        "If this page loads, the local bridge is reachable and the agent "
+        "can drive its own tab in this browser."
     )
-    y += round(14 * s * 1.5)
-    d.text((mx, y), "agent can drive its own tab in this browser.", font=bf, fill=INK_MUTED)
-    y += round(14 * s * 1.5) + 14 * s
+    for line in wrap(d, body, bf, 350 * s):
+        d.text((mx, y), line, font=bf, fill=INK_MUTED)
+        y += round(14 * s * 1.5)
+    y += 14 * s
 
     # Status list: three hairline-separated rows, label left in Figtree ink,
     # uppercase mono value right-aligned with a small accent check. Each row
@@ -604,6 +625,10 @@ def _demo_page(w: int = 620, h: int = 346, row_right_inset: int = 0) -> Image.Im
         base = y + (row_h - lf.getmetrics()[0]) // 2
         d.text((mx, base), label, font=lf, fill=INK)
         vw = text_width(d, value, vf, 0.06 * 10 * s)
+        # +1*s: optical centring against the Figtree label on the same row. The
+        # mono ascent metric overstates the uppercase cap-height, so centring on
+        # it alone leaves the value visibly high; one supersampled pixel aligns
+        # the two cap-heights.
         vbase = y + (row_h - vf.getmetrics()[0]) // 2 + 1 * s
         # Check glyph drawn as two strokes (the mono face's U+2713 coverage
         # is not guaranteed across the vendored subset, so we draw it).
@@ -659,7 +684,7 @@ def build_screenshot_connected(path: str):
         "Connected",
         "Your browser, with an agent in it.",
         "Paired and connected. Local Operator drives one tab and shows you what it "
-        "reached. Here, Page Two on your own machine.",
+        "reached. Here, the bridge test page on your own machine.",
         frame,
     )
     cv.save(path)
@@ -831,7 +856,7 @@ def build_marquee(path: str):
     # Right ~60%: the reached page (typeset in-theme — see _demo_page) in
     # browser chrome with the connected popup.
     # row_right_inset=150: the connected popup pasted below overlaps this
-    # card's right side from page-local x ~449 (popup left 1075 on canvas,
+    # card's right side from page-local x ~448.5 (popup left 1074 on canvas,
     # card left 640, fit scale ~0.968); insetting the status rows to ~426
     # keeps every check and value visible beside the popup.
     page = _fit(_demo_page(row_right_inset=150), max_h=360, max_w=600)
