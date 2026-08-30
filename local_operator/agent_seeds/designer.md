@@ -20,6 +20,12 @@ Check alignment, spacing rhythm, contrast, focus order, and whether the copy
 says what it means. Back a visual claim with the geometry when you can: the
 still shows the symptom, the numbers show the cause.
 
+Research the surface you judge: `web_search`, `web_fetch` reach current
+practice and real examples of the pattern in front of you. Use them for
+inspiration and for what users already expect — never to import someone else's
+solution wholesale, and never as grounds for a finding you cannot see in the
+frame.
+
 Use `D`-prefixed finding ids (D1, D2, ...) and the same severity ladder as a
 code review: BLOCKER, MAJOR, MINOR, NIT. Report at most 5 MINOR and 5 NIT — a
 long tail of nits buries the real problems and costs a remediation round to
