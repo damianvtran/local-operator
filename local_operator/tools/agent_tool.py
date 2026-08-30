@@ -508,12 +508,24 @@ async def _op_show(context: ToolContext | None, tool_call_id: str, name: str) ->
         body += "s" if len(diverged_fields) == 1 else ""
         body += ")."
         if "instructions" in diverged_fields:
-            rendered, is_diff = _instruction_diff(profile.instructions or "", seed.instructions)
-            label = (
-                "packaged instructions, as a diff against yours"
-                if is_diff
-                else "packaged instructions in full (too different to diff usefully)"
-            )
+            # WHAT the reader is told to do decides what they are shown. On a
+            # resettable row `reset` does the applying, so a diff is the useful
+            # rendering: it answers "what changed?" in a couple of lines. On an
+            # unrecorded row the closing line asks them to apply the values
+            # THEMSELVES, and a diff is not appliable — it carries only the
+            # changed lines, so the instruction and the output disagreed and
+            # the op that prints the full body was the one they were steered
+            # away from. Print what they are being asked to copy.
+            if _provenance == "installed":
+                rendered, is_diff = _instruction_diff(profile.instructions or "", seed.instructions)
+                label = (
+                    "packaged instructions, as a diff against yours"
+                    if is_diff
+                    else "packaged instructions in full (too different to diff usefully)"
+                )
+            else:
+                rendered = seed.instructions.strip() or "(none)"
+                label = "packaged instructions in full"
             body += f"\n{label}:\n{rendered}"
         for field, mine, packaged in _field_rows(profile, seed):
             if field in diverged_fields:
@@ -711,13 +723,25 @@ async def _op_install(context: ToolContext | None, tool_call_id: str, name: str)
         # deliberate skip leaves an operator believing they restored the
         # packaged guidance while their own edited prompt is what the next
         # delegation runs. Same failure shape C4 fixed on the non-role branch.
+        # Offer `reset` ONLY where it would work. Advertising it on a row reset
+        # will refuse is the same dead end #141 was filed about, relocated into
+        # a second message: `show` was gated on provenance and this was not, so
+        # a legacy edited row was still sent to a verb that declines. One
+        # predicate decides it everywhere.
+        found = _seed_provenance(registry, profile)
+        resettable = found is not None and found[1] == "installed"
+        restore = (
+            f"op='reset' name={profile.name!r} to put the packaged version back, or "
+            if resettable
+            else ""
+        )
         return _text(
             tool_call_id,
             "agent",
             f"role {profile.name!r} is already installed and was left as-is (your edits are "
             f"kept): op='show' name={profile.name!r} to read it (it prints the packaged "
-            f"version too when yours has diverged), op='reset' name={profile.name!r} to put "
-            f"the packaged version back, or op='update' name={profile.name!r} to change it.",
+            f"version too when yours has diverged), "
+            f"{restore}op='update' name={profile.name!r} to change it.",
         )
     return _text(
         tool_call_id,
@@ -785,10 +809,20 @@ async def _op_reset(context: ToolContext | None, tool_call_id: str, name: str) -
         return _error(
             tool_call_id,
             "agent",
+            # Name the escape that actually RUNS. This used to say "install the
+            # starter under a different name", which cannot work — `install`
+            # only accepts packaged names and nothing renames — leaving a
+            # history-destroying shell delete as the only route on the one path
+            # that has a safe in-tool answer. `show` renders the packaged body
+            # even when the name is occupied, and `create` accepts any name, so
+            # read-then-author is the recovery, and the destructive option is
+            # mentioned last with its cost.
             f"an agent named {seed.name!r} already exists and is not a role, so nothing was "
-            f"reset. Install the starter under a different name, or remove that agent with "
-            f"`local-operator agents delete --name {seed.name}` first (that deletes its "
-            f"conversation history too; this tool cannot delete agents).",
+            f"reset. To get the packaged guidance under a name you can use: op='show' "
+            f"name={seed.name!r} to read it, then op='create' name='my-{seed.name}' with those "
+            f"instructions. To free the name itself, `local-operator agents delete --name "
+            f"{seed.name}` at the shell deletes that agent and its conversation history; this "
+            "tool cannot delete or rename agents.",
         )
 
     previous = profile_from_agent(registry, existing) if existing is not None else None

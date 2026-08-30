@@ -1151,3 +1151,87 @@ async def test_a_forged_marker_cannot_make_reset_overwrite_someone_elses_work(
     assert "no record of being installed" in body
     profile = resolve_profile("scout", registry=registry)
     assert profile is not None and profile.instructions == "MY OWN WORK"
+
+
+@pytest.mark.asyncio
+async def test_reinstall_offers_reset_only_where_reset_would_work(context) -> None:
+    """F10: `show` was gated on provenance and this message was not, so a legacy
+    edited row was still sent to a verb that declines — the #141 dead end
+    surviving in a second message."""
+    _legacy_role_row(context.agent_registry, "reviewer", instructions="MY OWN REWRITE")
+
+    body = await call(context, op="install", name="reviewer")
+
+    assert "left as-is" in body
+    assert "op='reset'" not in body, "reset would refuse this row"
+    assert "op='update' name='reviewer'" in body
+
+
+@pytest.mark.asyncio
+async def test_reinstall_still_offers_reset_on_a_provenanced_row(context) -> None:
+    """The F10 gate must not remove the offer where it does work."""
+    await call(context, op="install", name="reviewer")
+    await call(context, op="update", name="reviewer", instructions="edited")
+
+    body = await call(context, op="install", name="reviewer")
+
+    assert "op='reset' name='reviewer'" in body
+
+
+@pytest.mark.asyncio
+async def test_the_non_role_refusal_names_an_escape_that_runs(context, registry) -> None:
+    """U12: it said "install the starter under a different name", which cannot
+    work — `install` takes only packaged names and nothing renames — leaving a
+    history-destroying shell delete as the only named route on the one path that
+    has a safe in-tool answer."""
+    agent = registry.create_agent(_edit_fields(name="reviewer", description="my chat agent"))
+    registry.set_agent_system_prompt(agent.id, "Be agreeable.")
+
+    body = await call(context, op="reset", name="reviewer")
+
+    assert "Install the starter under a different name" not in body
+    assert "op='show' name='reviewer'" in body and "op='create' name='my-reviewer'" in body
+    # The escape it names must actually run for this reader.
+    assert "packaged starter" in await call(context, op="show", name="reviewer")
+    created = await call(
+        context, op="create", name="my-reviewer", description="d", instructions="pasted"
+    )
+    assert "created role 'my-reviewer'" in created
+    assert registry.get_agent_system_prompt(agent.id) == "Be agreeable.", "must not overwrite"
+
+
+@pytest.mark.asyncio
+async def test_show_prints_what_it_tells_an_unrecorded_reader_to_apply(context) -> None:
+    """U13: the closing line said "apply the packaged values yourself" while the
+    body rendered a DIFF, which carries only the changed lines and cannot be
+    applied. What the reader is told to do decides what they are shown."""
+    _legacy_role_row(context.agent_registry, "manager", instructions="MY OWN REWRITE")
+    packaged = load_seed("manager")
+    assert packaged is not None
+
+    body = await call(context, op="show", name="manager")
+
+    assert "packaged instructions in full" in body
+    assert "as a diff against yours" not in body
+    missing = [
+        line
+        for line in packaged.instructions.strip().splitlines()
+        if line.strip() and line not in body
+    ]
+    assert not missing, f"the reader cannot apply what is not printed: {missing[:2]}"
+
+
+@pytest.mark.asyncio
+async def test_show_still_diffs_a_row_that_reset_can_restore(context) -> None:
+    """The U13 change is scoped to the hand-apply path: where `reset` does the
+    applying, the diff is still the useful rendering."""
+    packaged = load_seed("reviewer")
+    assert packaged is not None
+    lines = packaged.instructions.splitlines()
+    tweaked = "\n".join(lines[:5] + ["You may skip the tests if you are in a hurry."] + lines[5:])
+    await call(context, op="install", name="reviewer")
+    await call(context, op="update", name="reviewer", instructions=tweaked)
+
+    body = await call(context, op="show", name="reviewer")
+
+    assert "as a diff against yours" in body
