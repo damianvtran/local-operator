@@ -120,9 +120,9 @@ _CMD_LOG_CHARS = 120
 #: orders of magnitude past the SLOW end of that range (100x a 3 ms rewrite, and
 #: far more against the microsecond case), so an honest contender degrades only
 #: long after it should have finished, while staying imperceptible to a user.
-#: This deliberately diverges from
-#: ``auth.LOCK_ACQUIRE_TIMEOUT_S`` (15s): that lock guards a destructive
-#: rotating-token double-spend, this one guards an append whose loss is benign.
+#: This deliberately diverges from ``auth.LOCK_ACQUIRE_TIMEOUT_S`` (15s): that
+#: lock guards a destructive rotating-token double-spend, this one guards an
+#: append whose loss is benign.
 _LOCK_ACQUIRE_TIMEOUT_S = 0.3
 
 #: Retry cadence for the non-blocking acquire: fast pickup for the common
