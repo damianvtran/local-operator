@@ -244,6 +244,143 @@ class HostingNotConfiguredError(ValueError):
     """
 
 
+class HostingUnknownError(HostingNotConfiguredError):
+    """Raised when hosting names a provider the registry does not own.
+
+    A SUBCLASS of :class:`HostingNotConfiguredError`, and that is the whole
+    point of the fix it belongs to. The two conditions had been treated
+    asymmetrically: "nothing configured" was a guided first-run state, while
+    "configured to garbage" (a typo, a hand-edited config, a provider id
+    removed by an upgrade) was a fatal crash. The user's remedy is IDENTICAL in
+    both cases -- ``/login`` / ``/provider`` / ``/model`` from inside the app --
+    so the recoverable classification has to cover both, or a one-character typo
+    in ``config.yml`` locks the user out of the only surface that can repair it.
+    Reported as ``Unsupported hosting platform: anthropicxyq`` from deep inside
+    ``configure_model``, it left every session dead AND every provider-switch
+    command answering "session is still starting...", because ``_session``
+    stayed ``None``.
+
+    Subclassing rather than adding a sibling means the existing
+    recoverable-setup handling (the CLI preflight's
+    ``except HostingNotConfiguredError``, the TUI's ``isinstance`` check in
+    ``_on_boot_failed``) picks this up with no change, and cannot be updated for
+    one condition while forgetting the other. The two stay DISTINGUISHABLE by
+    type, which is what lets each surface say "nothing configured" or
+    "configured to an unknown provider 'X'" rather than one vague message
+    covering both.
+
+    Do NOT "simplify" this back into a bare ``ValueError`` at the resolver, and
+    do not relax ``configure_model``'s own guard: that guard is a correct
+    programming-error backstop for callers that bypass this resolver, and the
+    bug was that bad CONFIG could reach it, not that it existed.
+
+    The offending value is carried as :attr:`hosting` rather than left to be
+    re-parsed out of the message text: the TUI needs to name it in phrasing of
+    its own (action-first, because its splash truncates from the right), and
+    scraping it back out of a sentence is how the two surfaces drift apart the
+    first time either is reworded.
+    """
+
+    def __init__(self, message: str, hosting: str = "", source: str = "config") -> None:
+        super().__init__(message)
+        self.hosting = hosting
+        #: WHERE the bad value came from: ``"config"``, ``"flag"`` (``--hosting``)
+        #: or ``"agent"`` (an agent record). Carried because the in-app repair
+        #: writes the CONFIG FILE, so it can only fix the config case: precedence
+        #: is agent > flag > config, and a login that rewrites config while the
+        #: bad value comes from argv or an agent record changes nothing the next
+        #: boot will read. The UI uses this to avoid promising a repair it cannot
+        #: perform — telling the user to run `/login` against a `--hosting` typo
+        #: is a loop, and a wrong instruction is worse than none.
+        self.source = source
+
+
+class ModelNotConfiguredError(HostingNotConfiguredError):
+    """Raised when hosting is a real provider but no model can be resolved for it.
+
+    A SIBLING of :class:`HostingUnknownError` under the recoverable base, for the
+    same reason that class exists: the user's remedy is reachable only from
+    inside the app, so the condition has to reach the surface that offers it.
+    Raised as a bare ``ValueError`` it missed the ``isinstance`` gate in the
+    TUI's ``_on_boot_failed``, landed in the red "session failed to start" branch
+    with ``_session`` None and ``_setup_state`` False, and left every provider
+    command answering "session is still starting..." -- the exact terminal state
+    this error family was introduced to remove.
+
+    That is reachable through the app's OWN repair: logging in to a provider with
+    no known default model (``alibaba-token-plan``) writes a registry-VALID
+    hosting with an empty model, so the next boot arrives here. Before this
+    class the user was stuck HARDER after the repair than before it -- ``/login``
+    wrote nothing because hosting was now valid, and ``/model`` had no session to
+    talk to.
+
+    DISTINCT from ``HostingUnknownError`` rather than reusing it, because the
+    diagnosis differs and the surfaces say so: hosting is fine here, the MODEL is
+    missing, and telling a user whose provider is correct that it "is not a known
+    provider" sends them to fix the one thing that is not broken. The hosting is
+    carried for the same reason its sibling carries it -- so the UI can name it
+    without re-parsing a sentence.
+
+    Recoverable does NOT mean permissive: the non-interactive paths (headless
+    REPL, ``exec``, non-tty) still fail fast on this in ``_preflight_hosting_model``,
+    because a scripted run has no one to answer the prompt and must not limp
+    along picking a model nobody chose.
+    """
+
+    def __init__(self, message: str, hosting: str = "") -> None:
+        super().__init__(message)
+        #: The provider that resolved fine but has no model. Unlike its sibling
+        #: this needs no ``source``: hosting came from somewhere valid, and the
+        #: remedy (`/model`, which writes config) is the same wherever the empty
+        #: model came from.
+        self.hosting = hosting
+
+
+#: How the user changes a bad hosting value, per source. Keyed by
+#: :attr:`HostingUnknownError.source`, because the remedy genuinely differs: only
+#: the config case is fixed by `login`/`config edit`, and naming the wrong one
+#: sends the user round a loop that cannot terminate.
+_HOSTING_SOURCE_REMEDY = {
+    "config": (
+        "Set a supported one with `local-operator config edit hosting <provider>` "
+        "or `local-operator login <provider>` (e.g. openai, anthropic, google); "
+        "`local-operator provider` lists them all."
+    ),
+    "flag": (
+        "It came from the --hosting flag, so correct that flag (e.g. "
+        "--hosting openai); `local-operator provider` lists the supported ids."
+    ),
+    "agent": (
+        "It came from the agent's own record, which overrides config, so update "
+        "the agent's hosting; `local-operator provider` lists the supported ids."
+    ),
+}
+
+
+def _unknown_hosting_message(hosting: str, source: str = "config") -> str:
+    """Error text for a hosting id the provider registry does not know.
+
+    Names the offending value AND the remedy, because the message this replaces
+    ("Unsupported hosting platform: anthropicxyq") named only the value and left
+    the user to guess what a supported one looks like. Concrete provider ids are
+    inlined rather than generated from the registry, matching
+    :func:`_no_model_message` directly below -- a short, stable example list
+    reads better than a dump of every id, and spelling the examples out is
+    already this module's convention.
+
+    Used by the non-interactive fail-fast paths (headless REPL, ``exec``,
+    non-tty). The TUI writes its own action-first phrasing for the same
+    condition, because its splash line truncates from the right.
+    """
+    where = {
+        "config": "in your configuration",
+        "flag": "passed with --hosting",
+        "agent": "on the agent record",
+    }.get(source, "in your configuration")
+    remedy = _HOSTING_SOURCE_REMEDY.get(source, _HOSTING_SOURCE_REMEDY["config"])
+    return f"Hosting '{hosting}' {where} is not a known provider. {remedy}"
+
+
 def _no_model_message(hosting: str) -> str:
     """Error text for a provider with no known default model.
 
@@ -268,16 +405,42 @@ def resolve_hosting_model(
     Raises ``ValueError`` with the legacy message shapes when either value is
     missing, so the CLI's red-banner handler reports it exactly like before.
     """
-    hosting: str | None = getattr(agent, "hosting", None) if agent is not None else None
-    hosting = (
-        hosting or getattr(args, "hosting", None) or config_manager.get_config_value("hosting")
-    )
+    # The SOURCE is tracked alongside the value, not just the value: the repair
+    # offered when this turns out to be unusable writes the config file, which
+    # is only the last of these three. See HostingUnknownError.source.
+    agent_hosting: str | None = getattr(agent, "hosting", None) if agent is not None else None
+    flag_hosting: str | None = getattr(args, "hosting", None)
+    hosting = agent_hosting or flag_hosting or config_manager.get_config_value("hosting")
+    hosting_source = "agent" if agent_hosting else "flag" if flag_hosting else "config"
     model_name: str | None = getattr(agent, "model", None) if agent is not None else None
     model_name = (
         model_name or getattr(args, "model", None) or config_manager.get_config_value("model_name")
     )
     if not hosting:
         raise HostingNotConfiguredError("Hosting platform is not configured.")
+    # Validate the RESOLVED hosting here, in the same preflight that already
+    # catches the not-configured case, rather than letting a garbage value sail
+    # through and detonate in `configure_model` deep inside boot. WHERE this is
+    # detected is what makes it recoverable: this is the one point both the CLI
+    # preflight and the TUI boot handler classify, so the same condition raised
+    # here reaches the guided setup state while raised later it reaches the red
+    # "session failed to start" this fix exists to remove.
+    #
+    # Checked through `get_provider_definition`, NOT a membership test against
+    # provider ids: that function resolves legacy aliases (`noop` -> `test`), so
+    # an id test would newly reject an alias the engine still accepts and turn a
+    # working config into a setup prompt. It is also the exact lookup
+    # `configure_model` performs, so this accepts precisely what the engine
+    # accepts -- a preflight stricter than the engine is its own outage.
+    from local_operator.providers.registry import get_provider_definition
+
+    if get_provider_definition(hosting) is None:
+        # Before the default-model lookup below: an unknown provider has no
+        # default model either, so checking the model first reported the missing
+        # model (a symptom) and buried the unknown provider (the cause).
+        raise HostingUnknownError(
+            _unknown_hosting_message(hosting, hosting_source), hosting, hosting_source
+        )
     if not model_name:
         # A hosting with no model is not a dead end: every mainstream provider
         # has a reasonable default, so resolve to it rather than raising. Only
@@ -287,7 +450,16 @@ def resolve_hosting_model(
 
         model_name = default_model_for(hosting)
         if not model_name:
-            raise ValueError(_no_model_message(hosting))
+            # RECOVERABLE, not fatal: a provider with no known default is a
+            # config the user can still fix from inside the app (`/model`), and
+            # this is a config the app itself writes -- `/login` into a provider
+            # with no default clears the model deliberately. Raised as a plain
+            # ValueError it bypassed the TUI's recoverable-error gate and became
+            # the dead "session failed to start" state, which is what made the
+            # sanctioned repair leave the user worse off than the corruption it
+            # repaired. The message is unchanged -- it names concrete model ids,
+            # and the fail-fast paths still print exactly it.
+            raise ModelNotConfiguredError(_no_model_message(hosting), hosting)
     return hosting, model_name
 
 

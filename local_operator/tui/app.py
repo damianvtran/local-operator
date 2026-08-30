@@ -1533,6 +1533,23 @@ class OperatorApp(App[None]):
         #: `/login` that resolves it. While set, a successful login reloads the
         #: session (there is none yet) rather than only re-polling the splash.
         self._setup_state = False
+        #: The unknown provider id that put us in the setup state, when that is
+        #: why we are here (``None`` for the nothing-configured case).
+        #:
+        #: Kept as a RECORD of why this boot entered setup, not as policy input.
+        #: It used to drive the repair in `_apply_login_defaults`; that decision
+        #: now belongs to `providers/login_defaults`, which asks the registry
+        #: instead. The registry test is strictly wider — it also repairs a
+        #: config corrupted by another route, which this flag cannot see — and
+        #: the flag is deliberately not consulted anywhere, so the two can never
+        #: disagree about whether a config is broken.
+        self._invalid_hosting: str | None = None
+        #: The provider that resolved fine but has no model, when THAT is why we
+        #: are in the setup state (``None`` otherwise). Unlike `_invalid_hosting`
+        #: this one IS read: `/model` and the picker's `d` key consult it to
+        #: decide that a saved default should also boot the session that does
+        #: not exist yet, which is what makes this setup state escapable.
+        self._model_missing_for: str | None = None
         #: Invoked before a post-login session rebuild so the launch-time config
         #: manager (captured by the session factory closure) re-reads the
         #: hosting/model that `/login` just wrote to disk. ``None`` outside the
@@ -3312,10 +3329,35 @@ class OperatorApp(App[None]):
         # `/login` affordance and the `/model` / `/provider` surfaces are the
         # setup UI — no separate wizard. Imported lazily beside every other
         # session_factory reference in this module.
-        from local_operator.session_factory import HostingNotConfiguredError
+        from local_operator.session_factory import (
+            HostingNotConfiguredError,
+            HostingUnknownError,
+            ModelNotConfiguredError,
+        )
 
         if isinstance(error, HostingNotConfiguredError):
-            self._enter_setup_state()
+            # HostingUnknownError is a SUBCLASS, so a config naming a provider
+            # the registry does not own lands here too, and deliberately: its
+            # remedy is the same `/login` / `/provider` the unconfigured case
+            # uses, and treating it as a crash instead left the user unable to
+            # switch away from the bad value from inside the app (`_session`
+            # stayed None, so every provider command answered "session is still
+            # starting..."). The bad value is carried into the setup state so
+            # the guidance can name what is actually wrong.
+            #
+            # ModelNotConfiguredError is the THIRD member of the family and is
+            # routed here for the same reason, but it is passed separately: the
+            # provider is correct and the MODEL is missing, so reusing the
+            # unknown-provider wording would send the user to fix the one part
+            # of their config that is right. It has no `source` -- `/model`
+            # writes config whatever the empty model came from.
+            unknown = isinstance(error, HostingUnknownError)
+            no_model = isinstance(error, ModelNotConfiguredError)
+            self._enter_setup_state(
+                unknown_hosting=getattr(error, "hosting", None) if unknown else None,
+                hosting_source=getattr(error, "source", "config") if unknown else "config",
+                model_missing_for=getattr(error, "hosting", None) if no_model else None,
+            )
             return
         self._system_notice(f"session failed to start: {error}", "error")
         assert self._status is not None
@@ -3326,19 +3368,62 @@ class OperatorApp(App[None]):
         # accepted and painted where the app meant to say "session error".
         self._status.update(model_label="session error", model_name="", streaming=False)
 
-    def _enter_setup_state(self) -> None:
+    def _enter_setup_state(
+        self,
+        *,
+        unknown_hosting: str | None = None,
+        hosting_source: str = "config",
+        model_missing_for: str | None = None,
+    ) -> None:
         """First-run setup: guide the user to `/login` with no session yet.
 
         Reached when the session could not be built because NOTHING is
-        configured (see :meth:`_on_boot_failed`). No parallel wizard: the splash
-        already owns the empty-state real estate and carries a notice row, so the
-        guidance lives there, the status band says "setup" instead of a model
-        name, and the existing `/login` / `/model` / `/provider` commands do the
-        work. A successful `/login` sets hosting + a default model and reloads
-        the session (see :meth:`_login_flow`), which lands the user in a normal
-        working app.
+        configured, or because what IS configured names a provider the registry
+        does not own (see :meth:`_on_boot_failed`). No parallel wizard: the
+        splash already owns the empty-state real estate and carries a notice row,
+        so the guidance lives there, the status band says "setup" instead of a
+        model name, and the existing `/login` / `/model` / `/provider` commands
+        do the work. A successful `/login` sets hosting + a default model and
+        reloads the session (see :meth:`_login_flow`), which lands the user in a
+        normal working app.
+
+        ``unknown_hosting`` names the bad value for the second case. The two
+        conditions share this ONE state on purpose (identical remedy), but not
+        one message: telling a user whose config says `anthropicxyq` that "no
+        provider is configured" contradicts the file they are looking at and
+        sends them looking for the wrong problem.
+
+        ``model_missing_for`` names the THIRD way in: hosting resolves to a real
+        provider that has no known default model, so there is nothing to boot
+        with. The remedy is `/model` rather than `/login` -- a login would write
+        nothing, because hosting is already valid -- and the splash says so. This
+        state is reached by the app's own repair (`/login` into a provider with
+        no default clears the model deliberately), which is why it must be
+        escapable rather than merely non-red: see :meth:`_cmd_model` and
+        :meth:`_persist_default_from_picker`, which rebuild the session from
+        setup instead of refusing with "session is still starting...".
+
+        ``hosting_source`` keeps that honesty one step further. `/login` writes
+        the CONFIG FILE, but precedence is agent > flag > config, so when the
+        bad value came from `--hosting` or an agent record a login cannot fix
+        it — the next boot resolves the same value and returns here. Promising
+        a remedy that cannot work is a loop the user cannot see the shape of,
+        so those cases name the real source instead.
         """
         self._setup_state = True
+        # Remembered for the SAME reason `_invalid_hosting` is: the escape from
+        # this variant is `/model`, which writes config and must then rebuild
+        # the session that does not exist yet. Without it a user who picked a
+        # model would have their choice saved and still be looking at a setup
+        # splash, which is the "repaired but still stuck" shape of B1 again.
+        self._model_missing_for = model_missing_for
+        # The bad value is remembered so the post-login rebuild can OVERWRITE it.
+        # Without this the recovery is a loop: `_apply_login_defaults` only
+        # adopts a provider when hosting is empty, and here it is not empty --
+        # it is wrong -- so a successful `/login` would write nothing, the
+        # rebuild would resolve the same bad hosting, and the app would drop
+        # straight back into this state having told the user it was starting.
+        self._invalid_hosting = unknown_hosting
         # A notice, not a red error: the splash paints this in the warning voice
         # beside its `/login` hint, which is exactly the affordance the user
         # needs. Toast headline included so it is noticed on a busy first frame.
@@ -3347,11 +3432,66 @@ class OperatorApp(App[None]):
         # BEFORE the diagnosis or it is what drops (D2). The band and toast
         # already carry "no provider configured", so leading with the remedy
         # spends the scarce columns on the one thing they do not.
-        self._announce_on_splash(
-            "Run /login <provider> to get started (e.g. /login openai) "
-            "— no provider configured yet, or /provider to see the list.",
-            "warning",
-        )
+        # Action-first in BOTH variants, for the reason above: the command
+        # survives truncation, the diagnosis is what may be cut.
+        #
+        # LENGTH is the other half of that constraint, and word order alone did
+        # not satisfy it. The first version of the unknown-provider line ran to
+        # 141 characters, so at 80 and 100 columns — the widths people actually
+        # use — it was cut mid-clause on "is not", and at 60 the offending value
+        # never appeared at all: the user was told to fix "this" without ever
+        # being told what "this" was, which is precisely what naming the value
+        # exists to prevent. Both lines are now short enough to survive 80
+        # columns whole.
+        #
+        # A runnable example (`/login openai`) replaces the `<provider>`
+        # placeholder plus a parenthetical example: the placeholder form spent
+        # ~30 of the scarcest columns saying the same thing twice, and the
+        # concrete command teaches the shape by itself. `/provider` is kept
+        # because it is the discovery affordance for "which providers exist".
+        if model_missing_for:
+            # `/model` and NOT `/login`: hosting is already a provider the
+            # registry owns, so a login writes nothing (the planner's
+            # "already set and usable" branch) and the user would loop. The
+            # provider is named because it is correct -- the user needs to know
+            # which provider they are choosing a model for, not to doubt it.
+            #
+            # Budget: the splash paints this row at `terminal width - 6` cells
+            # (measured, see the test guard), so this stays inside 74 to render
+            # whole on an 80-column terminal.
+            self._announce_on_splash(
+                f"/model to pick one — '{model_missing_for}' has no default model.",
+                "warning",
+                headline=f"No model set for '{model_missing_for}'",
+            )
+        elif unknown_hosting and hosting_source != "config":
+            # `/login` writes config, and config is NOT what produced this
+            # value, so recommending it here would be a lie that loops. Name
+            # the real source and keep the line inside 80 columns.
+            origin = "--hosting" if hosting_source == "flag" else "the agent"
+            self._announce_on_splash(
+                f"'{unknown_hosting}' from {origin} is not a known provider "
+                "(/provider lists them).",
+                "warning",
+                headline=f"Unknown provider '{unknown_hosting}'",
+            )
+        elif unknown_hosting:
+            self._announce_on_splash(
+                f"/login openai — '{unknown_hosting}' is not a known "
+                "provider (/provider lists all).",
+                "warning",
+                # The headline is passed rather than sniffed out of the text:
+                # the toast is the ONE element that is never truncated, so it
+                # is where the bad value is guaranteed to reach the user even
+                # on a narrow terminal.
+                headline=f"Unknown provider '{unknown_hosting}'",
+            )
+        else:
+            self._announce_on_splash(
+                "/login openai to get started — no provider configured " "(/provider lists all).",
+                "warning",
+                headline="No provider configured",
+            )
         if self._status is not None:
             # "setup" rather than a model name: there is no model until the user
             # picks a provider, and leaving MODEL_PENDING up would read as a
@@ -10858,6 +10998,21 @@ class OperatorApp(App[None]):
                 "warning",
             )
             return
+        if session is None and self._setup_state and self._model_missing_for and target:
+            # THE ESCAPE from the no-default-model setup state. Without this the
+            # state is a trap: hosting is already registry-valid, so `/login`
+            # writes nothing, and this method's "session is still starting..."
+            # refusal below is exactly the message the user is stuck behind.
+            # Landing in a non-red setup state would then be a cosmetic fix --
+            # the same dead end wearing a different colour.
+            #
+            # A switch is meaningless with no session to switch, so this is
+            # unconditionally the PERSIST-and-boot path: write the pair to
+            # config, then rebuild. `persist_default` is not required, because a
+            # user who names a model at a prompt that has no session is asking
+            # to start one.
+            self._recover_from_missing_model(target, notice)
+            return
         if session is None or not hasattr(session, "set_model"):
             # A rejected command changed nothing, so the conversation has not
             # started: `_system_notice` keeps the boot composition intact where
@@ -11112,12 +11267,99 @@ class OperatorApp(App[None]):
         except Exception as error:  # noqa: BLE001 — a read-only config dir
             self._system_notice(f"could not save default: {error}", "warning")
             return
+        if self._setup_state and self._model_missing_for:
+            # In the no-model setup state this key is a RECOVERY, not just a
+            # preference: the value it just wrote is the one thing the session
+            # was missing, so "used from the next launch" would be false advice
+            # — there is no current launch to prefer, and telling the user to
+            # restart is the dead end this state exists to avoid.
+            self._system_notice(
+                f"boot default saved to {saved_to}: hosting {row.provider}, "
+                f"model_name {row.model_id}"
+            )
+            self._leave_setup_state_and_boot(self._notice)
+            return
         # Names both halves, the file and the keys, exactly as the command's
         # own receipt does — one vocabulary for one outcome reached two ways.
         self._system_notice(
             f"boot default saved to {saved_to}: hosting {row.provider}, "
             f"model_name {row.model_id} (used from the next launch)"
         )
+
+    def _recover_from_missing_model(self, target: str, notice: NoticeFn) -> None:
+        """Write a model into config from the setup state, then BOOT the session.
+
+        The way out of the "hosting is valid but has no default model" setup
+        state. That state is reachable through the app's own repair — logging in
+        to a provider with no known default (`alibaba-token-plan`) deliberately
+        clears the model — and every other recovery command is a no-op in it:
+        `/login` writes nothing because hosting is already a provider the
+        registry owns, and `/provider` only lists. So this is the ONE path out,
+        and it has to do both halves. Writing config without rebuilding would
+        save the user's choice and leave them looking at the same setup splash
+        until they restarted the app, which is the "repaired but still stuck"
+        defect this exists to close, one step further along.
+
+        The provider is taken from the selector rather than from
+        ``_model_missing_for``: a user who cannot run the configured provider
+        should be able to leave for one they can, and refusing a different
+        provider here would be a second dead end for the sake of tidiness.
+        """
+        provider, sep, model_id = target.partition("/")
+        if not sep or not model_id:
+            self._system_notice(
+                "usage: /model <provider>/<model-id> (e.g. openai/gpt-4o)", "warning"
+            )
+            return
+        provider = provider.lower()
+        # Validated BEFORE the write, for the reason the ordinary switch path
+        # gives: `resolve_model` does not raise on an unknown provider, so a typo
+        # would be persisted and the next boot would return here — the same loop
+        # with an extra step in it.
+        if self._providers is not None and self._providers.provider(provider) is None:
+            self._system_notice(f"unknown provider: {provider} — see /provider", "warning")
+            return
+        try:
+            from local_operator.config import ConfigManager
+            from local_operator.paths import config_dir
+
+            manager = ConfigManager(config_dir())
+            manager.set_config_value("hosting", provider)
+            manager.set_config_value("model_name", model_id)
+            saved_to = _home_relative(str(manager.config_file))
+        except Exception as error:  # noqa: BLE001 — a read-only config dir
+            # Fatal HERE, unlike the ordinary `/model default` path where the
+            # live switch already succeeded: with no session, an unwritten
+            # config means the rebuild below would resolve the same empty model
+            # and drop straight back into this state.
+            self._system_notice(f"could not save the model: {error}", "error")
+            return
+        notice(f"saved hosting {provider}, model_name {model_id} to {saved_to}", "info")
+        self._leave_setup_state_and_boot(notice)
+
+    def _leave_setup_state_and_boot(self, notice: NoticeFn) -> None:
+        """Clear the setup state and build the session its config now allows.
+
+        Shared by the two commands that can supply the missing model — `/model
+        <p>/<id>` and the picker's `d` key — so the escape is one sequence
+        rather than two copies that drift; that class of divergence is what
+        `providers/login_defaults` was extracted to end. `/login` keeps its own
+        tail because it is already inside a worker and awaits the rebuild
+        directly, while these two are synchronous command handlers and must hand
+        the rebuild to one.
+
+        The ordering is load-bearing rather than incidental: ``_on_config_changed``
+        must run before the rebuild, or the launch-time config manager captured
+        by the session factory replays the very values that failed and the app
+        drops straight back into setup having said it was starting.
+        """
+        self._setup_state = False
+        self._model_missing_for = None
+        self._invalid_hosting = None
+        if self._on_config_changed is not None:
+            self._on_config_changed()
+        notice("starting session…", "info")
+        self._run_session_transition(self._reload_session())
 
     def _persist_hint_notice(self) -> str:
         """The line a bare ``/model`` prints above the list.
@@ -14376,21 +14618,34 @@ class OperatorApp(App[None]):
         """
         try:
             from local_operator.config import ConfigManager
-            from local_operator.model.defaults import default_model_for
             from local_operator.paths import config_dir
-            from local_operator.providers.registry import credential_provider_id
+            from local_operator.providers.login_defaults import plan_login_defaults
 
             manager = ConfigManager(config_dir())
-            if manager.get_config_value("hosting"):
+            # The POLICY is shared with `local-operator login` (see
+            # providers/login_defaults): what to write for a given provider and
+            # current config is one function, because this rule previously
+            # existed twice and the copies drifted into writing different
+            # hosting ids and different models for identical input. The
+            # "is the current hosting broken?" test is the planner's REGISTRY
+            # lookup rather than this app's `_invalid_hosting` flag: the flag is
+            # strictly narrower (it only knows about a value THIS boot
+            # reported), so a config corrupted by another route was repaired by
+            # the CLI and ignored here.
+            plan = plan_login_defaults(
+                provider,
+                manager.get_config_value("hosting"),
+                manager.get_config_value("model_name"),
+            )
+            if plan.hosting is None:
                 return None
-            hosting = credential_provider_id(provider)
-            manager.set_config_value("hosting", hosting)
-            model = default_model_for(hosting) or ""
-            receipt = f"set default hosting to '{hosting}'"
-            if model and not manager.get_config_value("model_name"):
-                manager.set_config_value("model_name", model)
-                receipt += f", model to '{model}'"
-            return receipt
+            manager.set_config_value("hosting", plan.hosting)
+            # ``None`` = leave it; ``""`` = clear a model belonging to the
+            # provider just replaced. The explicit None test is what keeps the
+            # clearing case from being swallowed by a falsy check.
+            if plan.model_name is not None:
+                manager.set_config_value("model_name", plan.model_name)
+            return plan.receipt
         except Exception as error:  # noqa: BLE001 — never fail a completed login
             return f"logged in, but could not save default hosting/model: {error}"
 
@@ -14444,6 +14699,18 @@ class OperatorApp(App[None]):
             # is hidden right now because the notice above is a transcript block.
             if self._setup_state:
                 self._setup_state = False
+                # Cleared with the state that owns it: the repair is written,
+                # and a LATER `/login` (the user adding a second provider) must
+                # not be read as another repair and overwrite their hosting.
+                self._invalid_hosting = None
+                # Same lifetime, same reason. A login cannot itself supply a
+                # missing model (it writes nothing when hosting is already
+                # valid), so if that is why we were in setup the rebuild below
+                # re-enters it — which is recoverable, not fatal, and the splash
+                # still points at `/model`. What must not survive is a stale
+                # flag telling a LATER `/model` to rebuild a session that is by
+                # then running normally.
+                self._model_missing_for = None
                 # Reconcile the launch-time config manager with what
                 # `_apply_login_defaults` just wrote, or the rebuild resolves the
                 # same empty config and drops back into setup.
@@ -16962,7 +17229,9 @@ class OperatorApp(App[None]):
             self._live_peer_receipts.add(message.message_id)
         self._append_block(PeerMessageBlock(message.body, message.sender))
 
-    def _announce_on_splash(self, text: str, kind: NoticeKind) -> None:
+    def _announce_on_splash(
+        self, text: str, kind: NoticeKind, *, headline: str | None = None
+    ) -> None:
         """Hold ``text`` on the splash and raise a toast for it.
 
         The splash is content-sized and rests on the input card, so a
@@ -16985,7 +17254,7 @@ class OperatorApp(App[None]):
         except NoMatches:
             return
         duration = TOAST_FAILURE_MS if kind in ("warning", "error") else TOAST_DEFAULT_MS
-        toast.show(_splash_toast_headline(text), duration_ms=duration)
+        toast.show(_splash_toast_headline(text, headline), duration_ms=duration)
 
     def _recall_queued_steers(self) -> None:
         """Esc: lift the newest still-queued steer back into the composer.
@@ -17634,8 +17903,12 @@ def _first_line(text: str) -> str:
     return ""
 
 
-def _splash_toast_headline(text: str) -> str:
+def _splash_toast_headline(text: str, headline: str | None = None) -> str:
     """The toast half of a splash announcement: a glance, not the reason.
+
+    ``headline`` is the caller's own glance for states it can name. Prefer it
+    over the text-sniffing fallbacks below: it cannot silently stop matching
+    when the message is reworded.
 
     The splash row already carries the full sentence. Repeating it in the
     toast made a two-row card that sat on the mark (design round 1, D1)
@@ -17644,6 +17917,8 @@ def _splash_toast_headline(text: str) -> str:
     zai/glm-5.3`` — because that is the model the next prompt will hit.
     Anything else stays one short clause, never the whole line.
     """
+    if headline:
+        return headline
     body = " ".join(text.split())
     if not body:
         return "Notice"
@@ -17658,6 +17933,15 @@ def _splash_toast_headline(text: str) -> str:
     # sentence lands mid-word ("…configured ye…") and repeats the greeting the
     # splash already owns (D5), so the setup notice gets its own clean headline
     # naming the condition rather than a truncated slice of the action line.
+    #
+    # Callers that KNOW the state pass ``headline`` explicitly instead of
+    # relying on the substring probe below. Deriving a headline by re-parsing
+    # prose is fragile in a way that already bit us: this branch matched the
+    # literal "no provider configured", so when the unknown-provider message
+    # was added — a sibling state one row away in the same function — it fell
+    # through to the blind cut and reintroduced the exact dangling-fragment
+    # defect D5 was raised against. A new message must not silently regress a
+    # fixed finding by failing to contain a magic phrase.
     if "no provider configured" in body.lower():
         return "No provider configured"
     # One clause, no wrap: the toast sits over the lockup, and a second
