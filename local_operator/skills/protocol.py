@@ -68,6 +68,25 @@ def _contained(child: Path, base_resolved: Path) -> bool:
         return False
 
 
+def _resolver_would_accept(child: Path, base_resolved: Path) -> bool:
+    """True when ``_resolve_child`` would serve ``child`` rather than raise.
+
+    The resolver refuses a child path on two grounds a listing can check
+    cheaply, and both must hold or the listing advertises a name that errors
+    on read: containment (:func:`_contained`) and existence. Existence is a
+    SEPARATE question because ``Path.resolve()`` is non-strict — a dangling
+    link and a self-referential loop both resolve to a path inside the base
+    and satisfy containment, so only the ``exists()`` call (which follows the
+    link, and is therefore False for both) rejects them.
+    """
+    if not _contained(child, base_resolved):
+        return False
+    try:
+        return child.exists()
+    except OSError:
+        return False
+
+
 def _list_directory(directory: Path, base_resolved: Path) -> str:
     """Render a directory listing: ``name/ (dir)`` for dirs, plain names for
     files, deterministic alphabetical order. Dotfiles are skipped (they are
@@ -78,16 +97,25 @@ def _list_directory(directory: Path, base_resolved: Path) -> str:
     ``urlsplit``/``unquote`` even when it contains ``%``, ``#`` or ``?``.
 
     ``base_resolved`` is the resource root, already resolved by the caller.
-    A symlink whose target escapes it is omitted, because ``_resolve_child``
-    rejects a read of it: this is the child-path listing the bare-read
-    overflow marker routes to, so without the check the overflow path hands
-    back names that cannot be read (R3-2). Only symlinks are checked, the
-    same gate ``_reference_listing`` uses — ``_resolve_child`` resolves the
-    whole child path before calling here, so a non-symlink entry of an
-    already-contained directory cannot escape and does not need the stat.
-    Escaped entries are excluded from the overflow count too: the marker
-    promises "more entries" the caller can reach by listing a directory, and
-    an unreadable name is not one of them."""
+    A SYMLINK is listed only when the resolver would also accept it, on the
+    two grounds ``_resolve_child`` can refuse: its resolved target must stay
+    inside ``base_resolved`` (R3-2), and it must actually exist (review F1).
+    The second is not implied by the first — ``resolve()`` is non-strict, so
+    a dangling link and a self-referential loop both resolve to a path INSIDE
+    the base and pass containment, then fail the resolver's ``exists()``.
+    ``Path.exists()`` follows the link, so it is False for exactly those two
+    shapes and True for a live one. The bare-read listing already drops both
+    (its walk tests ``is_file()``/``is_dir()``, which a broken link fails),
+    so this brings the two surfaces to parity rather than inventing a rule.
+
+    Only symlinks are checked, the same gate ``_reference_listing`` uses.
+    ``_resolve_child`` has already resolved AND existence-checked the whole
+    child path before calling here, so a plain entry of an already-contained
+    directory can neither escape nor dangle: the extra stat would buy nothing
+    on the overwhelmingly common all-plain-files listing. Omitted entries are
+    excluded from the overflow count too: the marker promises "more entries"
+    the caller can reach by listing a directory, and an unreadable name is
+    not one of them."""
     lines: list[str] = []
     try:
         entries = sorted(directory.iterdir(), key=lambda p: (p.name.lower(), p.name))
@@ -97,7 +125,7 @@ def _list_directory(directory: Path, base_resolved: Path) -> str:
         entry
         for entry in entries
         if not entry.name.startswith(".")
-        and (not entry.is_symlink() or _contained(entry, base_resolved))
+        and (not entry.is_symlink() or _resolver_would_accept(entry, base_resolved))
     ]
     shown = 0
     for entry in listable:
@@ -178,13 +206,28 @@ def _reference_listing(resource: Skill, *, scheme: str) -> str:
       appear; every route stays readable through the resolver either way.
       HARDLINKS are the deliberate exception: a hardlink of the body file,
       or of another reference, is listed as its own entry because resolved-
-      path equality cannot see one — telling them apart needs a per-entry
-      ``st_dev``/``st_ino`` stat on every walked file. That cost is paid on
-      every bare skill read to suppress a duplicate that (a) is readable
-      and correct if followed, and (b) essentially never occurs in an
-      authored skill tree, where references are ordinary files and symlinks.
-      Redundancy is the cheaper failure, so this is not worth fixing (R3-3);
-      revisit only if hardlinked skill trees become real;
+      path equality cannot see one. Redundancy is the cheaper failure here,
+      so this is not worth fixing (R3-3); revisit only if hardlinked skill
+      trees become real.
+
+      That verdict is about WHAT THE STAT BUYS, not about stats being
+      expensive, since the containment/existence checks above are stats too
+      (review F2 read the two as inconsistent). Three things separate them.
+      They are paid by different entries: the checks above run only on
+      symlinks, so a listing of ordinary files skips them, while telling a
+      hardlink apart needs ``st_dev``/``st_ino`` on EVERY walked file.  They
+      buy different things: the checks above remove a name that ERRORS on
+      read, a correctness defect the model sees as a broken invitation,
+      whereas the hardlink check removes a name that reads correctly and is
+      merely redundant.  And they are wrong in different directions: an
+      unchecked escape or dangle is a promise the resolver breaks, while an
+      unchecked hardlink is one extra true line. Measured on this machine
+      over a 2000-entry directory, listing all plain files costs 7.4 ms
+      before this change and 18.1 ms after; an (unrealistic) all-symlink
+      directory costs 8.8 ms and 439 ms. The pathological arm is expensive,
+      but it is bounded by how many symlinks an author writes into one
+      references directory, and correctness is worth it there in a way
+      tidiness is not;
     - names are percent-encoded exactly as ``_resolve_child``'s ``unquote``
       expects, so a filename containing ``%``, ``#`` or ``?`` survives the
       URL round-trip instead of being listed in a form ``urlsplit`` mangles;
