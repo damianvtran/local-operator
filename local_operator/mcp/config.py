@@ -7,7 +7,8 @@ onto local-operator paths:
 - User config: ``~/.local-operator/mcp.json``.
 - Best-effort imports of foreign tool configs: ``~/.claude.json``
   (``mcpServers`` key), ``<cwd>/.claude/.mcp.json``, ``~/.cursor/mcp.json``,
-  ``<cwd>/.vscode/mcp.json`` (``mcp.servers`` key).
+  ``<cwd>/.vscode/mcp.json`` (``mcp.servers`` key), ``~/.codex/config.toml``
+  (TOML, ``[mcp_servers.<name>]`` tables; issue #367).
 
 Priority: project > user > imports; later sources NEVER override an earlier
 one (first-seen wins at the name level). ``disabledServers`` lists collected
@@ -20,6 +21,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import tomllib
+from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
 from typing import Any, Literal
@@ -182,6 +185,12 @@ def _coerce_server_config(raw: JsonValue) -> MCPServerConfig | None:
         return None
 
 
+#: A candidate-file reader: path -> parsed document, or ``None`` when the file
+#: is missing or unparsable. Every reader is best-effort by contract, so a
+#: foreign config we do not own can never break discovery of the ones we do.
+_ConfigReader = Callable[[Path], "dict[str, Any] | None"]
+
+
 def _read_json(path: Path) -> dict[str, Any] | None:
     """Best-effort JSON read: missing file or bad JSON yields ``None``."""
     try:
@@ -190,6 +199,44 @@ def _read_json(path: Path) -> dict[str, Any] | None:
         loaded = json.loads(path.read_text(encoding="utf-8"))
         return loaded if isinstance(loaded, dict) else None
     except (OSError, ValueError, UnicodeDecodeError):
+        return None
+
+
+def _read_toml(path: Path) -> dict[str, Any] | None:
+    """Best-effort TOML read: missing file or bad TOML yields ``None``.
+
+    Codex CLI (``~/.codex/config.toml``) is the one import source that is not
+    JSON, so it needs its own reader rather than another ``_read_json`` entry
+    (issue #367). The contract is deliberately identical to ``_read_json``'s:
+    a config we do not own must never be able to break discovery of the ones
+    we do, so every failure mode degrades to "this file contributes nothing".
+
+    User scope means literally ``~/.codex/config.toml``. Codex's own
+    ``CODEX_HOME`` override is deliberately NOT consulted: no other candidate
+    honours a foreign tool's env var either, and doing it here would make this
+    the first such precedent. A user who has relocated their Codex home gets
+    no import rather than a wrong one.
+
+    This import is READ-ONLY, permanently and by construction: ``tomllib`` is
+    stdlib on the 3.12 floor but exposes ``load``/``loads`` only — it cannot
+    emit TOML — and ``tomli_w`` is not a dependency. Writing the file back
+    would also lose the comments and formatting of a file another tool owns.
+    ``/mcp remove`` therefore refuses a Codex-imported server by name instead
+    of pretending it can delete it (see ``_mcp_remove_result`` in the TUI).
+    """
+    try:
+        if not path.is_file():
+            return None
+        with path.open("rb") as handle:  # tomllib requires binary + UTF-8
+            loaded = tomllib.load(handle)
+        return loaded if isinstance(loaded, dict) else None
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError, RecursionError):
+        # ``RecursionError`` has no counterpart in ``_read_json``: ``tomllib``
+        # is a recursive-descent parser written in Python, so deeply nested
+        # inline tables blow the stack (measured: raises at depth 2000, where
+        # the C-implemented ``json.loads`` still parses). Catching it is what
+        # keeps this reader's "every failure mode contributes nothing" promise
+        # literally true rather than true-in-practice.
         return None
 
 
@@ -230,8 +277,10 @@ def _claude_json_servers(doc: dict[str, Any], root: Path) -> dict[str, Any]:
 def _imported_servers(doc: dict[str, Any], key_path: tuple[str, ...] | None) -> dict[str, Any]:
     """Server entries from a foreign tool config.
 
-    ``key_path`` walks nested dicts (``("mcp", "servers")`` for VS Code);
-    ``None`` means the ``mcpServers`` key at the top level.
+    ``key_path`` walks nested dicts (``("mcp", "servers")`` for VS Code,
+    ``("mcp_servers",)`` for Codex's ``[mcp_servers.<name>]`` tables, which
+    ``tomllib`` parses into exactly that nested-dict shape); ``None`` means
+    the ``mcpServers`` key at the top level.
     """
     if key_path is None:
         return _local_operator_servers(doc)
@@ -292,6 +341,8 @@ def load_all_mcp_configs(
     5. ``<cwd>/.claude/.mcp.json``
     6. ``~/.cursor/mcp.json``
     7. ``<cwd>/.vscode/mcp.json`` (``mcp.servers`` key)
+    8. ``~/.codex/config.toml`` (TOML, ``[mcp_servers.<name>]`` tables;
+       user scope only — Codex project-scoped config is not imported)
 
     Enable/disable resolution uses lists from the local-operator files
     (project first, then user): ``disabledServers`` wins over
@@ -309,15 +360,25 @@ def load_all_mcp_configs(
     disabled: set[str] = set()
     enabled: set[str] = set()
 
-    # (path, key_path into doc for the servers dict) in priority order.
-    candidates: list[tuple[Path, tuple[str, ...] | None]] = [
-        (project_path, None),
-        (project_dot_path, None),
-        (user_path, None),
-        (home / ".claude.json", None),
-        (root / ".claude" / ".mcp.json", None),
-        (home / ".cursor" / "mcp.json", None),
-        (root / ".vscode" / "mcp.json", ("mcp", "servers")),
+    # (path, reader, key_path into doc for the servers dict) in priority
+    # order. The reader travels WITH the candidate so a non-JSON source is
+    # just another row here: the enable/disable lists, the two-pass
+    # suppression resolution and the ``sources`` provenance map below all stay
+    # format-agnostic instead of growing a parallel loop per file format.
+    candidates: list[tuple[Path, _ConfigReader, tuple[str, ...] | None]] = [
+        (project_path, _read_json, None),
+        (project_dot_path, _read_json, None),
+        (user_path, _read_json, None),
+        (home / ".claude.json", _read_json, None),
+        (root / ".claude" / ".mcp.json", _read_json, None),
+        (home / ".cursor" / "mcp.json", _read_json, None),
+        (root / ".vscode" / "mcp.json", _read_json, ("mcp", "servers")),
+        # Codex CLI is APPENDED LAST on purpose (issue #367): first-seen-wins
+        # makes position observable whenever two tools define the same server
+        # name, and last is the only position that guarantees Codex can never
+        # override local-operator's own files OR any of the other imports.
+        # User scope only; Codex project-scoped config is out of scope here.
+        (home / ".codex" / "config.toml", _read_toml, ("mcp_servers",)),
     ]
 
     claude_path = home / ".claude.json"
@@ -328,8 +389,8 @@ def load_all_mcp_configs(
     # name slot, block the user-level entry of the same name, and then get
     # deleted — leaving the server absent instead of falling back.
     per_name: dict[str, list[tuple[MCPServerConfig, str]]] = {}
-    for path, key_path in candidates:
-        doc = _read_json(path)
+    for path, reader, key_path in candidates:
+        doc = reader(path)
         if doc is None:
             continue
         # Local-operator files contribute enable/disable lists.
@@ -458,7 +519,7 @@ def owned_scope_for_source(
 ) -> str | None:
     """The write scope whose file is ``source``, or ``None`` when unowned.
 
-    ``load_all_mcp_configs`` merges seven sources but :func:`_scope_path` only
+    ``load_all_mcp_configs`` merges eight sources but :func:`_scope_path` only
     ever writes two of them, so "where did this server come from" and "can we
     edit it here" are different questions. Callers that MUTATE a server (the
     TUI's ``/mcp remove``) must ask this one: removing an entry defined by
