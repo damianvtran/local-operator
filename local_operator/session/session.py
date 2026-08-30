@@ -6295,26 +6295,74 @@ class Session:
             # rots the moment a provider retokenizes or the model mix changes.
             # Do not reintroduce it.
             #
-            # Both guards are load-bearing. The zero-guard makes the division
-            # total (a pass over empty history cannot divide). The
-            # ``history_after`` floor never binds on the measured data, where
-            # the provider figure exceeds the local estimate; it binds whenever
-            # ``context_tokens < history_before``, which is the ordinary state
-            # for a provider whose tokenizer is COARSER than cl100k (the
-            # OpenAI control sits near that line at slope 1.036). A receipt
-            # reading "0 tokens" is a worse lie than a stale one — the sibling
-            # incident on the status band is documented at ``tui/app.py``
-            # ``_settle_context_reading``.
+            # The zero-guard makes the division total: a pass over empty
+            # history cannot divide.
+            #
+            # The ``history_after`` floor is a BACKSTOP, and it is worth being
+            # precise about how little it does, because a guard that reads as
+            # load-bearing when it is not is how the next reader misjudges this
+            # arithmetic. ``plan.context_tokens`` is
+            # ``compaction_context_tokens(provider, local) = max(provider,
+            # local)``, so it is always >= ``history_before``; with the
+            # shrink guard below ensuring ``history_after < history_before``,
+            # the product is always >= ``history_after`` and the floor cannot
+            # bind through any path a real session takes. It is kept because it
+            # costs nothing and because a receipt reading "0 tokens" is a worse
+            # lie than a stale one if either of those invariants is ever
+            # weakened — the sibling incident on the status band is documented
+            # at ``tui/app.py`` ``_settle_context_reading``.
+            #
+            # The ratio is applied ONLY when the pass actually shrank local
+            # history. That guard is not defensive tidiness: on snapcompact
+            # ``history_after`` routinely EXCEEDS ``history_before`` (agent
+            # review round 2, blocker-1). The pass replaces history with
+            # verbatim text edges plus archive text plus images that the local
+            # ruler prices at a flat ``IMAGE_TOKEN_ESTIMATE``, so the saving is
+            # real on the PROVIDER ruler — that is the entire point of
+            # replaying frames — while the local estimate of the replacement
+            # can be larger than the original. A ratio above 1 then multiplies
+            # an already ~1.7x provider total and the receipt reports a
+            # compaction that GREW the context: measured at 70,888 → 111,594
+            # on a real over-threshold snapcompact pass.
+            #
+            # There is no ratio worth applying in that state, so this does not
+            # try to invent one. ``context_tokens`` is the honest answer: the
+            # pass did not reduce the history this ruler can see, so the
+            # receipt reports the size it already knew about rather than a
+            # number derived from a ratio the measurement contradicts. That is
+            # also exactly what the shipped subtraction form produced there
+            # (``saved`` clamps to 0), so this is parity, not a new behaviour.
+            #
+            # KNOWN LIMITATION, recorded so it is not rediscovered as a bug:
+            # swept over 10/20/40/70-turn histories, snapcompact's local
+            # estimate grew EVERY time, so this branch is the one a vision
+            # model actually takes and its receipt prints the bare "context
+            # compacted" line. That is the honest report available from a
+            # local-only measurement — the pass's real saving is in images the
+            # provider prices ~4x higher than this ruler does, so no
+            # locally-computed ratio can see it. Making that receipt
+            # informative needs a provider-side after-figure (the next
+            # request's usage), which arrives after the event is emitted and is
+            # a larger change than this one; it is NOT fixable by choosing a
+            # different arithmetic here.
+            #
+            # The final clamp is the invariant the old subtraction form got for
+            # free and this form does not. ``context_tokens - max(0, saved)``
+            # could never exceed ``context_tokens``; a product can. Without the
+            # clamp the receipt drops its own numbers (``tui/app.py``'s
+            # ``compaction_receipt`` prints a bare "context compacted" when
+            # ``after >= before``) and the status band paints a figure above
+            # the model's whole context window.
             history_before = plan.tokens_before
-            if history_before > 0:
-                tokens_after = max(
-                    history_after, round(plan.context_tokens * history_after / history_before)
-                )
+            if history_before > 0 and history_after < history_before:
+                scaled = round(plan.context_tokens * history_after / history_before)
+                tokens_after = max(history_after, scaled)
             else:
-                tokens_after = history_after
+                tokens_after = plan.context_tokens
             # The snapcompact frame correction, priced once and in the
-            # receipt's own units (see where it is computed above).
-            tokens_after += frame_correction
+            # receipt's own units (see where it is computed above), then the
+            # whole figure bounded by what it is reporting a reduction FROM.
+            tokens_after = min(plan.context_tokens, tokens_after + frame_correction)
             await self._emit(
                 CompactionEndEvent(
                     reason=reason,
@@ -7176,18 +7224,23 @@ class Session:
         the acceptance-boundary shift the third one implies. On a 1M window all
         three tighten from 300,000 to 100,000; below the ~250k crossover all
         three are unchanged from today, because term 2 binds there and term 2
-        is what shipped.
+        is what shipped. Both statements describe the HEALTHY path — the two
+        ``except`` branches below answer 0 and ``keep_recent`` respectively,
+        which is narrower than either, deliberately.
         """
         try:
-            keep_recent = int(settings.keep_recent_tokens)
+            # ``max(0, ...)``: the field is not constrained positive by
+            # pydantic, and a negative would otherwise be returned unchanged —
+            # leaving the outer ``max`` with nothing to floor, which is the one
+            # property the rest of this docstring leans on.
+            keep_recent = max(0, int(settings.keep_recent_tokens))
         except Exception:  # noqa: BLE001 — degrade to plain recency
             # A partial settings double (the same tolerance ``_offloaded``
             # grants its rulers) must not break a pass. Cap 0 makes
             # ``task_boundary_floor`` return 0, the hint clamp 0 and
             # ``validate_hint``'s local floor ``keep_recent_tokens``, and every
             # caller folds that through ``max(keep_recent, ...)`` — so the
-            # degraded answer is exactly the pre-floor recency behaviour,
-            # which is what the previous fallback also produced.
+            # degraded answer is plain recency, the pre-floor behaviour.
             return 0
         task_cap = keep_recent * _TASK_FLOOR_KEEP_MULTIPLE
         try:
@@ -7199,11 +7252,21 @@ class Session:
                 )
                 // 2
             )
-        except Exception:  # noqa: BLE001 — no capacity term, keep the task one
-            # Losing the ceiling is safe in the direction that matters: the
-            # task term still bounds the window, and this is the same
-            # degradation the pre-existing implementation took here.
-            return max(keep_recent, task_cap)
+        except Exception:  # noqa: BLE001 — no capacity term, no widening
+            # Without a capacity term there is no safe way to widen, so this
+            # does not widen at all: ``keep_recent`` alone is what the
+            # pre-existing implementation returned here, and it is the answer
+            # that cannot fail dangerously.
+            #
+            # Returning the TASK term instead would restore precisely the
+            # capacity-independent cap this method exists to avoid, on the one
+            # path whose purpose is to fail safe — measured looser than shipped
+            # on 9 of 9 windows, and reproducing ``find_cut_point`` -> ``None``
+            # (never-compact) at 128k (agent review round 2, major-1). The
+            # asymmetry is the point: a too-narrow preserve window costs task
+            # context on a pass that still runs, while a too-wide one costs the
+            # ability to compact at all.
+            return keep_recent
         return max(keep_recent, min(task_cap, capacity_cap))
 
     def _wire_legal_snapshot(self) -> list[AgentMessage]:

@@ -26,6 +26,7 @@ from local_operator.compaction.api import (  # noqa: E402
     CompactionSettings,
     resolve_threshold_tokens,
 )
+from local_operator.compaction.thresholds import resolve_threshold_percent  # noqa: E402
 from local_operator.session.session import _TASK_FLOOR_KEEP_MULTIPLE  # noqa: E402
 
 SETTINGS = CompactionSettings()
@@ -70,7 +71,16 @@ digits = [
 ]
 values = sorted(int(d) for d in digits if d.isdigit() and int(d) > 1_000)
 if values:
-    crossover = KEEP * _TASK_FLOOR_KEEP_MULTIPLE * 2  # threshold//2 == flat term
+    # The crossover is where ``threshold // 2`` first reaches the task term,
+    # i.e. threshold == 2 * task_cap. Expressed in WINDOW tokens, since that is
+    # what the label says and what a reader compares a model against: the
+    # threshold is ``threshold_percent`` of the window, so the window crossover
+    # is the threshold crossover divided by that fraction (200,000 / 0.8 =
+    # 250,000). Reporting the threshold figure under a "of window" label put
+    # 200,000 next to a table whose own 200,000 row reads "unchanged"
+    # (agent review round 2, nit-1).
+    threshold_crossover = KEEP * _TASK_FLOOR_KEEP_MULTIPLE * 2
+    crossover = round(threshold_crossover / resolve_threshold_percent(SETTINGS))
     below = [v for v in values if resolve_threshold_tokens(v, SETTINGS) // 2 < KEEP * 5]
     print(
         f"\nregistry context_window entries: {len(values)}  "

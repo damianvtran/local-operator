@@ -10,4 +10,4 @@ keep_recent=20,000  task term = keep_recent x 5
  1,000,000    600,000   300,000    100,000   100,000  tighter by 200,000 (the win)
 
 registry context_window entries: 118  median=131,072
-below the crossover (capacity term binds): 77 (65%)  crossover ~= 200,000 tokens of window
+below the crossover (capacity term binds): 77 (65%)  crossover ~= 250,000 tokens of window

@@ -1322,3 +1322,64 @@ async def test_a_mid_sized_window_still_compacts_over_threshold(tmp_path, monkey
         "never-compact failure the capacity term prevents"
     )
     await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_capacity_lookup_failing_never_widens_the_cap(tmp_path, monkeypatch):
+    """The SECOND ``except`` in ``_advisor_floor_cap``, which had no test.
+
+    When ``resolve_threshold_tokens`` raises there is no capacity term, and the
+    only safe answer is not to widen at all. Returning the task term instead
+    restores the exact capacity-independent cap round 1 rejected — on the one
+    path whose purpose is to fail safe — which measures looser than shipped on
+    every window and reproduces ``find_cut_point`` -> ``None`` at 128k
+    (agent review round 2, major-1).
+
+    The asymmetry is why ``keep_recent`` is right rather than merely smaller: a
+    too-narrow preserve window costs task context on a pass that still runs,
+    while a too-wide one costs the ability to compact at all.
+    """
+    settings = CompactionSettings(keep_recent_tokens=20_000)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("threshold resolution unavailable")
+
+    monkeypatch.setattr(compaction_api, "resolve_threshold_tokens", boom)
+
+    for window in (32_768, 64_000, 128_000, 200_000, 1_000_000):
+        session = Session(
+            model=ModelSpec(provider="test", model_id=f"w{window}", context_window=window),
+            stream_fn=ScriptedStream(),
+            tools=[],
+            transcript=Transcript(tmp_path / f"w{window}"),
+            system_blocks_provider=lambda: ["stable"],
+            compaction_settings=settings,
+        )
+        cap = session._advisor_floor_cap(settings)
+        # Plain recency: exactly what the pre-existing implementation returned
+        # on this path, and never the 100,000 flat task term.
+        assert cap == 20_000, f"window {window:,}: degraded cap is {cap:,}, expected 20,000"
+        assert cap < 100_000
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_negative_keep_recent_cannot_produce_a_negative_cap(tmp_path):
+    """``keep_recent_tokens`` is not constrained positive by pydantic.
+
+    A negative value used to be returned unchanged, so the outer ``max`` had
+    nothing to floor — harmless downstream (``task_boundary_floor`` answers 0
+    for a non-positive cap) but it silently voided the one property the
+    docstring leans on (agent review round 2, minor-3).
+    """
+    settings = CompactionSettings(keep_recent_tokens=-5_000)
+    session = Session(
+        model=BIG_MODEL,
+        stream_fn=ScriptedStream(),
+        tools=[],
+        transcript=Transcript(tmp_path / "sess"),
+        system_blocks_provider=lambda: ["stable"],
+        compaction_settings=settings,
+    )
+    assert session._advisor_floor_cap(settings) == 0
+    await session.dispose()
