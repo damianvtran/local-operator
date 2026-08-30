@@ -229,10 +229,18 @@ def test_batch_size_status_mouse_and_numeric_bounds_are_closed() -> None:
     with pytest.raises(ValidationError):
         _batch(*[WaitAction(observation_id="observation-7", duration_ms=1)] * (MAX_BATCH_SIZE + 1))
     with pytest.raises(ValidationError):
-        FinishAction(observation_id="observation-7", status="maybe", reason="uncertain")  # type: ignore[arg-type]
+        FinishAction(
+            observation_id="observation-7",
+            status="maybe",  # type: ignore[arg-type]
+            reason="uncertain",
+        )
     with pytest.raises(ValidationError):
         ClickAction(
-            observation_id="observation-7", frame_id="frame-1", x=1, y=2, button="primary"  # type: ignore[arg-type]
+            observation_id="observation-7",
+            frame_id="frame-1",
+            x=1,
+            y=2,
+            button="primary",  # type: ignore[arg-type]
         )
     with pytest.raises(ValidationError):
         ScrollAction(
@@ -243,7 +251,10 @@ def test_batch_size_status_mouse_and_numeric_bounds_are_closed() -> None:
             delta_y=0,
         )
     with pytest.raises(ValidationError):
-        WaitAction(observation_id="observation-7", duration_ms=float("nan"))  # type: ignore[arg-type]
+        WaitAction(
+            observation_id="observation-7",
+            duration_ms=float("nan"),  # type: ignore[arg-type]
+        )
 
 
 def test_key_validation_and_historical_double_click_are_explicit() -> None:
