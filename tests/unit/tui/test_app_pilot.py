@@ -8970,8 +8970,17 @@ async def test_help_documents_the_composer_copy_key_and_its_release() -> None:
         assert "caret" in release, f"{release!r} does not say what hands the key back"
         assert "esc" in release, f"{release!r} does not name the key that always interrupts"
 
-        # The block is built for a 76-cell content box at 80 columns; a row that
-        # overflows it wraps to column 0 and reads as a stray sentence (the
-        # defect the paste note's own comment records).
+        # THE WRAP CEILING IS 74, measured from the painted compositor rather
+        # than derived: at 80 columns the painted row may be 78 cells (the
+        # screen's 2-cell inset) and the block adds a 2-cell spine indent, so a
+        # composed row of 74 fits and 75 wraps to two lines. A wrapped tail
+        # lands at the key gutter, where it reads as another key row — #402's
+        # design round 1 D2, the defect `paste_note` was shortened for and
+        # which the `cmd+v` row below reintroduced once.
+        #
+        # A looser bound here would be worse than none: these rows are the ones
+        # this test is advertised as guarding, so a window that excludes 75 and
+        # 76 cannot fire at the boundary where the defect first appears (review
+        # round 2, F3).
         for row in (rows[index], release):
-            assert len(row) <= 76, f"{row!r} is {len(row)} cells, past the content box"
+            assert len(row) <= 74, f"{row!r} is {len(row)} cells and wraps at 80 columns"

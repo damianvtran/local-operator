@@ -14522,8 +14522,8 @@ class OperatorApp(App[None]):
         # and `notifications` - two `lop config edit` toggles - reads as a
         # settings footnote rather than a key reference (design round 1, D2).
         #
-        # The copy is 51 cells so the composed row is 71 against the 76-cell
-        # content box at 80 columns. The previous wording was 77 and was the
+        # The copy is 51 cells so the composed row is 71 against the 74-cell
+        # ceiling at 80 columns. The previous wording was 77 and was the
         # only note in the block that wrapped WITHOUT the `ljust(name_width)`
         # continuation its neighbours use, so its second line hung at column 0
         # (D2). Shortened rather than given a continuation line: one row is
@@ -14554,9 +14554,17 @@ class OperatorApp(App[None]):
         #
         # Two lines with the `ljust(name_width)` continuation its neighbours
         # use, so the second line aligns under the first description rather than
-        # hanging at column 0. Composed widths are 64 and 71 cells against the
-        # 76-cell content box at 80 columns (measured, as the paste note's own
-        # comment requires).
+        # hanging at column 0.
+        #
+        # MEASURED WIDTH: composed `name_width + description` must be <= 74 at
+        # 80 columns, the same ceiling the `cmd+v` note below derives and for
+        # the same reason (78-cell painted row less the block's 2-cell spine
+        # indent). These rows compose to 64 and 71, so both have headroom — but
+        # a rewording that reaches 75 WRAPS, and the tail lands at the key
+        # gutter where it reads as another key row, which is #402's design
+        # round 1 D2 verbatim. Re-measured from the painted compositor rather
+        # than restated: 74 fits, 75 wraps to two lines.
+        # `test_help_documents_the_composer_copy_key_and_its_release` pins it.
         copy_note = Text()
         copy_note.append("ctrl+c".ljust(name_width), style=muted)
         copy_note.append("copies the highlighted range in the composer", style=dim)

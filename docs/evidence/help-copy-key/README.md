@@ -21,10 +21,21 @@ table is a single `ctrl+v` row, and nothing in the durable help names the copy
 key. `after.svg` is this change: `ctrl+c` sits directly above it in the same
 block, left-aligned in the same key column, with its continuation line indented
 under the description via the `ljust(name_width)` continuation its neighbours
-use. Composed widths are 64 and 71 cells against the 76-cell content box at 80
+use. Composed widths are 64 and 71 cells against a **74-cell ceiling** at 80
 columns, so neither line wraps to column 0 — the defect the paste note's own
 comment in `_help_block` records, and the bound
 `test_help_documents_the_composer_copy_key_and_its_release` now pins.
+
+The 74 is measured from the painted compositor, not arithmetic: at 80 columns
+the painted row may be 78 cells (the screen's own 2-cell inset) and the block
+adds a further 2-cell spine indent, so a composed row of 74 fits and **75 wraps
+to two lines**, putting its tail at the key gutter where it reads as another
+key row. That is #402's design round 1 D2, the defect `paste_note` was
+shortened for. The `cmd+v` row below these sits at exactly 74 with zero
+headroom and its comment says so emphatically; this README, that comment, the
+`ctrl+c` comment and the test now state the one number in one voice, after an
+earlier revision of this change asserted a looser 76 that could not have fired
+at the boundary it guards (review round 2, F3).
 
 Capture either side:
 
