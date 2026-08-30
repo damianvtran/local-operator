@@ -370,6 +370,44 @@ change.
   are all on screen (`←→` between the teams and agents panes) has no ends to
   clamp against and nothing that scrolls, so it keeps cycling.
 
+- **One gesture owns the viewport at a time.** A list inside a
+  `ScrollableContainer` has TWO positions that can each move the view: the
+  container's own scroll offset (wheel, scrollbar drag) and a cursor whose
+  "scroll the selection into view" recomputes the offset from the selected row.
+  Let both drive the same view from the same gesture and they overwrite each
+  other — on `/settings` the wheel moved the cursor and then re-derived the
+  viewport from it, so wheeling to the bottom and giving one more notch snapped
+  the view back to the top (reported against v0.43.10).
+
+  The split that holds: **the wheel and the scrollbar move the VIEWPORT and
+  leave the cursor alone; keys that move the CURSOR scroll it into view.** The
+  cursor is then allowed to go off screen, which is what every editor and list
+  UI does and the only arrangement in which the scrollbar thumb is telling the
+  truth.
+
+  Two traps when handing the wheel to the container. Textual stops the wheel
+  event on the container *while it can still scroll*, so a widget-level
+  `on_mouse_scroll_*` handler runs **only at the ends of the travel and outside
+  the container's region** — which is why this defect looked like "it bounces
+  when I reach the bottom" and why the same notch behaved differently over the
+  pane than over the list. And accumulate from `scroll_target_y` with
+  `immediate=True`, not `scroll_relative`: the default defers to
+  `call_after_refresh`, so notches arriving in one burst all read the same stale
+  offset and a fast flick collapses to a couple of rows.
+
+  Step the handler by the LIVE `app.scroll_sensitivity_y`, never by a constant
+  copied from it. It is a per-instance attribute set in `App.__init__`, so a
+  hardcoded step that matches today desynchronises the moment anything changes
+  it — measured at 4.0, the container applied 4 rows per notch over the list and
+  the widget handler 2 everywhere else, which is the position-dependence above
+  reappearing.
+
+  Finally, **the cursor being allowed off screen is a contract with the keys**:
+  once the wheel can leave it behind, every key that ACTS on the cursor has to
+  scroll it into view first, or it writes to a row the user cannot see and the
+  frame does not change. Reveal-then-act, not an interlock that makes the first
+  press a no-op — the press should still do what it says on the first try.
+
   The trigger is "the list is the whole page", NOT "the list scrolls", and the
   difference is load-bearing: `model_picker.move` windows a catalogue of
   hundreds of rows and still WRAPS, correctly, because it is an overlay on the
