@@ -6,6 +6,7 @@ from local_operator.compaction.pruning import (
     MIN_PRUNE_TOKENS,
     SUPERSEDED_NOTICE,
     USELESS_NOTICE,
+    _supersede_key,
     compute_suffix_tokens,
     prune_tool_outputs,
 )
@@ -346,3 +347,30 @@ def test_distinct_observations_are_never_superseded() -> None:
         pruned, _changed = prune_tool_outputs(full, now_ms=0, last_activity_ms=0)
         after = _text_len(pruned)
         assert after == before, f"{label}: blanked {before - after} chars of distinct content"
+
+
+def test_the_surface_key_cannot_confuse_a_fragment_with_a_selector() -> None:
+    """Distinct reads must never share a key, or blanking loses real content.
+
+    Joining url and selector with a bare separator collides: a read of
+    ``https://a#body`` with no selector and a read of ``https://a`` scoped to
+    selector ``body`` are different results that would produce one key, and the
+    newer would blank the older. Length-prefixing the parts removes the
+    ambiguity for every input, including empty and missing.
+    """
+    fragment = _observer("c1", "browser", {"surface_id": "s:1", "url": "https://a#body"})
+    scoped = _observer(
+        "c2", "browser", {"surface_id": "s:1", "url": "https://a", "selector": "body"}
+    )
+    assert _supersede_key(fragment) != _supersede_key(scoped)
+
+    # And the pass itself must leave both alive.
+    messages = [Message.user("go"), fragment, scoped]
+    before = _text_len(messages)
+    pruned, _changed = prune_tool_outputs(messages, now_ms=0, last_activity_ms=0)
+    assert _text_len(pruned) == before
+
+    # Absent and None are the same absence, so they SHOULD share a key.
+    assert _supersede_key(
+        _observer("c3", "browser", {"surface_id": "s:1", "url": None, "selector": "body"})
+    ) == _supersede_key(_observer("c4", "browser", {"surface_id": "s:1", "selector": "body"}))

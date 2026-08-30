@@ -187,10 +187,17 @@ def _supersede_key(message: Message) -> str | None:
         # navigated elsewhere is a different resource, and a selector-scoped
         # read is not the whole page. Without this a read of the footer would
         # blank an earlier read of the article body on the same tab.
-        scope = url if isinstance(url, str) and url else ""
+        # The parts are LENGTH-PREFIXED rather than joined by a separator.
+        # A bare separator collides on real input: url "https://a#body" with no
+        # selector and url "https://a" with selector "body" are different reads
+        # that would otherwise produce one key, so the newer would blank the
+        # older and lose content the model still needs. No delimiter can appear
+        # inside a length, so this is unambiguous for every input. Absent and
+        # None still share a key, which is correct -- they are the same absence.
+        scope_url = url if isinstance(url, str) else ""
         selector = details.get("selector")
-        if isinstance(selector, str) and selector:
-            scope = f"{scope}#{selector}"
+        scope_selector = selector if isinstance(selector, str) else ""
+        scope = f"{len(scope_url)}:{scope_url}{len(scope_selector)}:{scope_selector}"
         return f"{message.tool_name}:surface:{surface}:{scope}"
     if isinstance(url, str) and url:
         return f"{message.tool_name}:url:{url}:{details.get('range') or 'full'}"
