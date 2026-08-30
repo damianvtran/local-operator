@@ -280,6 +280,14 @@ async def test_an_interrupted_turn_retires_the_promise_it_can_no_longer_keep() -
         # it was lost — the user would retype and the agent would get it twice.
         assert "not sent" not in DEFERRED_STEER_NOTICE
         assert "still queued" in DEFERRED_STEER_NOTICE
+        # And it must not claim the user will send that message (design round 2,
+        # D6). A wake that lands while idle, a peer `lop send` and a background
+        # job result each open their own turn and drain the queue, so the turn
+        # this row is waiting on need not be one the user started. The promise
+        # and the settle share the deictic for that reason; `your` in either is
+        # the same false authorship claim one state apart.
+        assert "your" not in DEFERRED_STEER_NOTICE
+        assert "your" not in DEFERRED_SENT_STEER_NOTICE
 
 
 @pytest.mark.asyncio

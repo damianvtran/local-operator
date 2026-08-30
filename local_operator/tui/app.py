@@ -316,7 +316,23 @@ MODEL_SWITCH_MID_TURN_NOTICE = "applies from the next step — this one finishes
 #: The turn ended without ever reaching a boundary to drain at — interrupted,
 #: failed, or simply answered with no further tool calls. ONE string for all
 #: three, because they are one fact from the user's side: the message is waiting
-#: and goes with their next message, and what they do about it is identical.
+#: and goes with whatever prompt opens the next turn, and what they do about it
+#: is identical.
+#:
+#: `that next message`, not `your next message` (design round 2, D6). The turn
+#: that drains this row need not be one the user started: an idle wake, a peer
+#: `lop send` and a background job result each open their own turn and drain the
+#: steering queue, so the promise named a message that need not exist. The
+#: settle one state over (`DEFERRED_SENT_STEER_NOTICE`) was corrected for
+#: exactly this in round 1, and leaving the promise saying `your` above a settle
+#: saying `that` reads as a considered distinction rather than the oversight it
+#: was. Promise and settle now share the deictic, so the row visibly restates
+#: itself instead of switching pronouns mid-story.
+#:
+#: Geometry-neutral, measured rather than assumed — this is the REFERENCE height
+#: every other receipt string is matched against, so a change here moves the
+#: whole set. `scripts/steer_receipt_transitions.py` over 20-90 columns reports
+#: the same pre-existing `q->d` band and `d->ds` still clean at every width.
 #:
 #: An earlier version named the interrupt in the row ("the turn was stopped"),
 #: which cost 22 cells to restate the `! interrupted` notice sitting one row
@@ -328,7 +344,7 @@ MODEL_SWITCH_MID_TURN_NOTICE = "applies from the next step — this one finishes
 #:
 #: Dropping it also stops the row being WRONG on the error path, where the turn
 #: was not stopped by anyone: it failed, and its own error notice says so.
-DEFERRED_STEER_NOTICE = "still queued — sends with your next message"
+DEFERRED_STEER_NOTICE = "still queued — sends with that next message"
 #: The settle for a row that was DEFERRED, where `SENT_STEER_NOTICE` is the
 #: settle for one delivered inside the turn it was queued against. Two strings
 #: for one transition, which #132 spent two rounds arguing against, so the case
