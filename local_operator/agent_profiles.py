@@ -690,9 +690,55 @@ def seed_origin(agent: "AgentData") -> str | None:
     prefix = SEED_ORIGIN_PREFIX
     for tag in agent.tags or []:
         text = str(tag).strip()
-        if text.lower().startswith(prefix):
-            return text[len(prefix) :].strip().lower() or None
+        if not text.lower().startswith(prefix):
+            continue
+        origin = text[len(prefix) :].strip().lower()
+        if not origin:
+            return None
+        # The marker must name THIS row, and must name a real starter. Tags are
+        # writable by the server routes, the desktop UI and agent import, none
+        # of which know what this marker means, so a destructive verb keying on
+        # it cannot simply trust whatever string it finds: a `seed:reviewer`
+        # tag carried onto an unrelated agent would otherwise hand `reset`
+        # permission to overwrite that agent with the reviewer seed. Validating
+        # the marker against the row's own name keeps a cross-name or forged
+        # tag inert rather than dangerous.
+        if origin != str(agent.name or "").strip().lower():
+            logger.warning(
+                "ignoring seed provenance tag %r on agent %r: it names another role",
+                text,
+                agent.name,
+            )
+            return None
+        if origin not in set(list_seeds()):
+            return None
+        return origin
     return None
+
+
+def matches_seed_text(profile: AgentProfile, seed: AgentProfile) -> bool:
+    """Whether a row's PROSE is still byte-identical to the packaged seed's.
+
+    The unlock for rows installed before provenance was recorded. A row whose
+    instructions and routing description both still match the seed exactly
+    cannot be self-authored work worth protecting — adopting the seed over it
+    is a no-op on every text a human would have written — so it is safe to
+    treat as an install even with no marker. That is what keeps the provenance
+    guard from permanently locking out every role installed by an earlier
+    release, without weakening it for a row that actually holds someone's
+    words.
+
+    Deliberately NOT part of :func:`seed_divergence`: this asks "is this the
+    shipped text?", which is a provenance question, while divergence asks
+    "should reset do anything?". Conflating them would make a role unlockable
+    by the very edit that makes it worth restoring.
+    """
+
+    return (
+        seed.instructions.strip() == (profile.instructions or "").strip()
+        and (seed.when_to_use or seed.description).strip()
+        == (profile.description or profile.when_to_use or "").strip()
+    )
 
 
 def seed_divergence(profile: AgentProfile, seed: AgentProfile) -> tuple[str, ...]:
@@ -712,6 +758,19 @@ def seed_divergence(profile: AgentProfile, seed: AgentProfile) -> tuple[str, ...
     pinning a model would override their provider choice), so a difference
     there is not divergence and must not be reported as one.
 
+    ``description`` IS compared, against ``when_to_use or description`` because
+    that is the value :func:`install_seed` persists — the routing text ``search``
+    embeds. An earlier version excluded it, justified by the claim that
+    comparing it "would flag every installed role". That claim was false, and
+    the way it was false is the point: it holds only when comparing against
+    ``seed.description``, which is NOT what install writes. Measured against
+    all six packaged starters, the correct comparison flags zero. Leaving it
+    out meant a description-only edit was invisible and unresettable, and a
+    reset triggered by any other field silently rewrote the routing text with
+    no echo, so a role the user could ``search`` for stopped matching
+    afterwards. Verify an exclusion by RUNNING it against every real seed, not
+    by reasoning about what it would do.
+
     Field names are returned rather than a bool so the caller can say WHICH
     fields it is about to replace: an overwrite the user cannot see coming is
     a data loss with a friendly message on it.
@@ -720,6 +779,10 @@ def seed_divergence(profile: AgentProfile, seed: AgentProfile) -> tuple[str, ...
     diverged: list[str] = []
     if seed.instructions.strip() != (profile.instructions or "").strip():
         diverged.append("instructions")
+    if (seed.when_to_use or seed.description or "").strip() != (
+        profile.description or profile.when_to_use or ""
+    ).strip():
+        diverged.append("description")
     if (profile.tools or None) != (seed.tools or None):
         diverged.append("tools")
     if (profile.effort or None) != (seed.effort or None):

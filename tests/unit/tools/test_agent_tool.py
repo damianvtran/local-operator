@@ -573,7 +573,7 @@ async def test_show_prints_the_packaged_text_when_an_installed_role_diverged(
     body = await call(context, op="show", name="reviewer")
 
     assert "ONLY CHECK THE MIGRATIONS." in body, "their own text is still what runs"
-    assert "this role has been edited" in body
+    assert "differs from the packaged starter" in body
     assert "You are an INDEPENDENT reviewer" in body, "the packaged text is readable again"
     assert "op='reset' name='reviewer'" in body
 
@@ -587,7 +587,7 @@ async def test_show_stays_quiet_when_an_installed_role_still_matches(context) ->
 
     body = await call(context, op="show", name="reviewer")
 
-    assert "this role has been edited" not in body
+    assert "differs from the packaged starter" not in body
     assert "op='reset'" not in body
 
 
@@ -599,7 +599,7 @@ async def test_show_on_a_user_authored_role_never_offers_a_reset(context) -> Non
 
     body = await call(context, op="show", name="mine")
 
-    assert "this role has been edited" not in body and "op='reset'" not in body
+    assert "differs from the packaged starter" not in body and "op='reset'" not in body
 
 
 @pytest.mark.asyncio
@@ -746,7 +746,7 @@ async def test_reset_restores_a_role_edited_only_in_a_non_prose_field(
     shown = await call(context, op="show", name="reviewer")
     body = await call(context, op="reset", name="reviewer")
 
-    assert "this role has been edited" in shown, "show must surface it too"
+    assert "differs from the packaged starter" in shown, "show must surface it too"
     assert field in shown
     assert "nothing was changed" not in body
     assert f"{field} replaced" in body
@@ -770,10 +770,14 @@ async def test_divergence_is_not_escapable_by_editing_one_character_of_prose(
 
     await call(context, op="install", name="reviewer")
     await call(context, op="update", name="reviewer", tools=["read"])
-    tools_only = "this role has been edited" in await call(context, op="show", name="reviewer")
+    tools_only = "differs from the packaged starter" in await call(
+        context, op="show", name="reviewer"
+    )
 
     await call(context, op="update", name="reviewer", instructions=packaged.instructions + " extra")
-    tools_and_prose = "this role has been edited" in await call(context, op="show", name="reviewer")
+    tools_and_prose = "differs from the packaged starter" in await call(
+        context, op="show", name="reviewer"
+    )
 
     assert tools_only is tools_and_prose is True
 
@@ -788,8 +792,12 @@ async def test_reset_refuses_a_self_authored_role_under_a_packaged_name(context,
     shown = await call(context, op="show", name="scout")
     body = await call(context, op="reset", name="scout")
 
-    assert "this role has been edited" not in shown, "it was never an install to diverge from"
-    assert "authored here" in body and "nothing was changed" in body
+    # `show` DOES report the difference (U7: reading is not destructive, and
+    # going quiet here was the #141 dead end), but it must never offer `reset`
+    # on a role that reset would refuse.
+    assert "differs from the packaged starter" in shown
+    assert "op='reset'" not in shown.split("launch with")[1]
+    assert "no record of being installed" in body and "nothing was changed" in body
     assert "op='update' name='scout'" in body
     profile = resolve_profile("scout", registry=registry)
     assert profile is not None and profile.instructions == "MY OWN WORK"
@@ -837,7 +845,9 @@ async def test_a_one_line_edit_renders_as_a_diff_not_two_walls_of_text(context) 
     await call(context, op="install", name="reviewer")
     await call(context, op="update", name="reviewer", instructions=tweaked)
 
-    block = (await call(context, op="show", name="reviewer")).split("this role has been edited")[1]
+    block = (await call(context, op="show", name="reviewer")).split(
+        "differs from the packaged starter"
+    )[1]
 
     assert "as a diff against yours" in block
     assert "+++ packaged" in block
@@ -852,7 +862,9 @@ async def test_a_wholly_rewritten_role_falls_back_to_the_full_body(context) -> N
     await call(context, op="install", name="reviewer")
     await call(context, op="update", name="reviewer", instructions="totally different short text")
 
-    block = (await call(context, op="show", name="reviewer")).split("this role has been edited")[1]
+    block = (await call(context, op="show", name="reviewer")).split(
+        "differs from the packaged starter"
+    )[1]
 
     assert "too different to diff usefully" in block
     assert "as a diff against yours" not in block
@@ -900,3 +912,242 @@ async def test_both_result_bodies_spell_the_launch_line_the_same_way(context) ->
 
     assert "Launch with task(" not in await call(context, op="reset", name="reviewer")
     assert "launch with task(" in await call(context, op="show", name="reviewer")
+
+
+def _legacy_role_row(registry: AgentRegistry, name: str, **overrides: Any):
+    """A role row as a PRE-PROVENANCE release wrote it: role tags, no `seed:`.
+
+    The population U7 was found on. Built by hand because no code path writes
+    an unmarked row any more, and the upgrade case cannot be tested without one.
+    """
+    from local_operator.agent_profiles import AgentProfile, seed_tags
+
+    seed = load_seed(name)
+    assert seed is not None
+    profile = AgentProfile(
+        name=name,
+        tools=overrides.get("tools", seed.tools),
+        effort=seed.effort,
+        may_delegate=seed.may_delegate,
+    )
+    agent = registry.create_agent(
+        _edit_fields(
+            name=name,
+            description=seed.when_to_use or seed.description,
+            tags=list(seed_tags(profile)),
+            categories=["role"],
+        )
+    )
+    registry.set_agent_system_prompt(agent.id, overrides.get("instructions", seed.instructions))
+    return agent
+
+
+@pytest.mark.asyncio
+async def test_a_legacy_row_with_untouched_prose_can_still_be_reset(context, registry) -> None:
+    """U7: keying reset on the `seed:` marker alone locked out every role
+    installed by an earlier release — on the real registry, the rows whose
+    allowlist had drifted, which are exactly the users reset exists for. A row
+    whose prose is byte-identical to the seed holds nobody's writing, so it
+    unlocks without weakening the guard for a row that does."""
+    _legacy_role_row(context.agent_registry, "reviewer", tools=("read", "bash"))
+
+    body = await call(context, op="reset", name="reviewer")
+
+    assert "tools replaced" in body
+    profile = resolve_profile("reviewer", registry=registry)
+    packaged = load_seed("reviewer")
+    assert profile is not None and packaged is not None
+    assert profile.tools == packaged.tools
+
+
+@pytest.mark.asyncio
+async def test_a_legacy_row_with_rewritten_prose_is_refused_without_claiming_authorship(
+    context, registry
+) -> None:
+    """U7: absence of a marker is not evidence a human wrote the role. A
+    pre-marker install and a hand-authored role are indistinguishable BY
+    CONSTRUCTION, so the refusal must state what is known (no install record)
+    rather than assert history it cannot support."""
+    _legacy_role_row(context.agent_registry, "manager", instructions="MY OWN REWRITE")
+
+    body = await call(context, op="reset", name="manager")
+
+    assert "no record of being installed" in body
+    assert "authored here" not in body, "do not assert authorship the tool cannot know"
+    assert "packaged instructions:" in body, "the packaged text must be copy-pasteable"
+    assert "op='update' name='manager'" in body
+    profile = resolve_profile("manager", registry=registry)
+    assert profile is not None and "MY OWN REWRITE" in profile.instructions
+
+
+@pytest.mark.asyncio
+async def test_show_still_reads_a_role_that_reset_will_not_overwrite(context) -> None:
+    """U7: gating the READ path on provenance left a pre-upgrade user at the
+    exact #141 dead end. Reading is not destructive, so `show` keeps working and
+    points at the op that does — never at `reset`, which would refuse."""
+    _legacy_role_row(context.agent_registry, "manager", instructions="MY OWN REWRITE")
+
+    body = await call(context, op="show", name="manager")
+
+    assert "differs from the packaged starter" in body
+    tail = body.split("launch with")[1]
+    assert "op='update'" in tail
+    assert "op='reset'" not in tail, "never offer a verb that will refuse"
+
+
+@pytest.mark.asyncio
+async def test_an_unrecorded_role_that_already_matches_reports_the_plain_no_op(context) -> None:
+    """U8: a legacy row that already matches was told it "was authored here",
+    which over-claimed on the one case where the true answer is simply "nothing
+    to do". The byte-identical unlock answers this structurally rather than by
+    wording: matching prose means the row is treated as installed, so it takes
+    the ordinary no-op path and never reaches a refusal at all."""
+    _legacy_role_row(context.agent_registry, "coder")
+
+    body = await call(context, op="reset", name="coder")
+
+    assert "already matches the packaged version" in body
+    assert "no record of being installed" not in body
+    assert "authored here" not in body
+
+
+@pytest.mark.asyncio
+async def test_a_self_authored_role_is_still_refused_after_the_legacy_unlock(
+    context, registry
+) -> None:
+    """The unlock must not reopen F2: a role written from scratch under a
+    starter's name has prose that does NOT match, so it stays protected."""
+    await call(context, op="create", name="scout", description="mine", instructions="MY OWN WORK")
+
+    body = await call(context, op="reset", name="scout")
+
+    assert "no record of being installed" in body
+    profile = resolve_profile("scout", registry=registry)
+    assert profile is not None and profile.instructions == "MY OWN WORK"
+
+
+@pytest.mark.asyncio
+async def test_refusals_name_only_commands_that_exist(context, registry) -> None:
+    """U7: the old text sent readers to a rename and a delete this tool does not
+    have, and the guide's `install` workaround errored. Naming a command that
+    does not exist is the dead-end failure #141 was filed about."""
+    agent = registry.create_agent(_edit_fields(name="reviewer", description="my chat agent"))
+    registry.set_agent_system_prompt(agent.id, "Be agreeable.")
+
+    non_role = await call(context, op="reset", name="reviewer")
+
+    assert "local-operator agents delete --name reviewer" in non_role
+    assert "conversation history" in non_role, "say what the escape costs"
+    assert "Rename that agent" not in non_role
+
+
+@pytest.mark.asyncio
+async def test_an_absent_packaged_effort_does_not_render_as_a_tier(context) -> None:
+    """U11: `packaged effort: (unset)` invites the reader to parse `(unset)` as
+    a literal tier."""
+    _legacy_role_row(context.agent_registry, "manager", instructions="MY OWN REWRITE")
+    await call(context, op="update", name="manager", effort="lo")
+
+    body = await call(context, op="show", name="manager")
+
+    assert "packaged effort: not set by the starter" in body
+    assert "packaged effort: (unset)" not in body
+
+
+@pytest.mark.asyncio
+async def test_a_description_only_edit_is_visible_and_resettable(context, registry) -> None:
+    """F6: `install_seed` writes `description`, but `seed_divergence` excluded
+    it, so a description-only edit was invisible and unresettable — F1's bug one
+    field over. The exclusion was justified by a claim that comparing it would
+    flag every installed role; that is true only against `seed.description`,
+    which is NOT the value install writes."""
+    await call(context, op="install", name="reviewer")
+    await call(context, op="update", name="reviewer", description="does something else entirely")
+
+    shown = await call(context, op="show", name="reviewer")
+    body = await call(context, op="reset", name="reviewer")
+
+    assert "description differs" in shown
+    assert "description replaced" in body
+    assert "does something else entirely" in body, "the routing text must be echoed, not dropped"
+    packaged = load_seed("reviewer")
+    profile = resolve_profile("reviewer", registry=registry)
+    assert packaged is not None and profile is not None
+    assert profile.description.strip() == (packaged.when_to_use or packaged.description).strip()
+
+
+@pytest.mark.parametrize("name", ["architect", "coder", "designer", "manager", "reviewer", "scout"])
+def test_a_freshly_installed_starter_reports_no_divergence(tmp_path, name: str) -> None:
+    """F6, run rather than reasoned: the guard against the exclusion's stated
+    justification. If comparing `description` really did flag every installed
+    role, this fails for all six — it flags none."""
+    from local_operator.agent_profiles import (
+        install_seed,
+        profile_from_agent,
+        seed_divergence,
+    )
+
+    registry = AgentRegistry(tmp_path)
+    install_seed(name, registry=registry)
+    seed = load_seed(name)
+    assert seed is not None
+    row = registry.get_agent_by_name(name)
+    assert row is not None
+    profile = profile_from_agent(registry, row)
+
+    assert seed_divergence(profile, seed) == ()
+
+
+@pytest.mark.asyncio
+async def test_search_still_finds_a_role_after_it_is_reset(context) -> None:
+    """F6's observable effect: `description` is the text `search` embeds, so a
+    reset that rewrote it without comparing it broke the user's routing."""
+    await call(context, op="install", name="reviewer")
+    await call(context, op="update", name="reviewer", instructions="broken")
+    await call(context, op="reset", name="reviewer")
+
+    body = await call(context, op="search", query="check this pull request diff for bugs")
+
+    assert "reviewer" in body
+
+
+def test_a_provenance_marker_naming_another_role_is_ignored(tmp_path) -> None:
+    """F8: tags are writable by the server routes, the desktop UI and agent
+    import, none of which know what this marker means. A destructive verb keying
+    on it must not trust a `seed:reviewer` tag found on some other agent."""
+    from local_operator.agent_profiles import install_seed, seed_origin
+
+    registry = AgentRegistry(tmp_path)
+    install_seed("reviewer", registry=registry)
+    agent = registry.get_agent_by_name("reviewer")
+    assert agent is not None
+    assert seed_origin(agent) == "reviewer"
+
+    def origin_now() -> str | None:
+        row = registry.get_agent_by_name("reviewer")
+        assert row is not None
+        return seed_origin(row)
+
+    registry.update_agent(agent.id, _edit_fields(tags=["role", "seed:coder"]))
+    assert origin_now() is None
+
+    registry.update_agent(agent.id, _edit_fields(tags=["role", "seed:not-a-starter"]))
+    assert origin_now() is None
+
+
+@pytest.mark.asyncio
+async def test_a_forged_marker_cannot_make_reset_overwrite_someone_elses_work(
+    context, registry
+) -> None:
+    """F8, the consequence rather than the predicate: a cross-name marker must
+    leave a self-authored role protected."""
+    await call(context, op="create", name="scout", description="mine", instructions="MY OWN WORK")
+    agent = registry.get_agent_by_name("scout")
+    assert agent is not None
+    registry.update_agent(agent.id, _edit_fields(tags=["role", "seed:reviewer"]))
+
+    body = await call(context, op="reset", name="scout")
+
+    assert "no record of being installed" in body
+    profile = resolve_profile("scout", registry=registry)
+    assert profile is not None and profile.instructions == "MY OWN WORK"

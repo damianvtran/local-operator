@@ -67,6 +67,7 @@ from local_operator.agent_profiles import (
     is_specialist,
     list_seeds,
     load_seed,
+    matches_seed_text,
     profile_from_agent,
     seed_divergence,
     seed_origin,
@@ -224,11 +225,16 @@ def _profile_line(profile: AgentProfile, *, installed: bool) -> str:
     return row if len(row) <= _ROW_CAP else row[: _ROW_CAP - 1].rstrip() + "…"
 
 
-def _format_field(value: Any) -> str:
-    """One spelling for a role field in prose, so two readers cannot disagree."""
+def _format_field(value: Any, *, absent: str = "(unset)") -> str:
+    """One spelling for a role field in prose, so two readers cannot disagree.
+
+    ``absent`` is overridable because "(unset)" reads as a literal value for a
+    field whose values are words: `packaged effort: (unset)` invites the reader
+    to parse `(unset)` as a tier.
+    """
 
     if value is None or value == () or value == "":
-        return "(unset)"
+        return absent
     if isinstance(value, bool):
         return "yes" if value else "no"
     if isinstance(value, tuple):
@@ -243,9 +249,21 @@ def _field_rows(profile: AgentProfile, seed: AgentProfile) -> list[tuple[str, st
     describe different sets of fields.
     """
 
+    no_tier = "not set by the starter"
     return [
+        # `description` is the routing text `search` embeds, so replacing it
+        # without saying so quietly breaks how the user finds this role.
+        (
+            "description",
+            _format_field(profile.description or profile.when_to_use),
+            _format_field(seed.when_to_use or seed.description),
+        ),
         ("tools", _format_field(profile.tools), _format_field(seed.tools)),
-        ("effort", _format_field(profile.effort), _format_field(seed.effort)),
+        (
+            "effort",
+            _format_field(profile.effort, absent="not set"),
+            _format_field(seed.effort, absent=no_tier),
+        ),
         ("delegate", _format_field(profile.may_delegate), _format_field(seed.may_delegate)),
     ]
 
@@ -283,18 +301,40 @@ def _instruction_diff(mine: str, packaged: str) -> tuple[str, bool]:
     return "\n".join(diff_lines), True
 
 
-def _resettable_seed(registry: Any, profile: AgentProfile) -> AgentProfile | None:
-    """The packaged seed an installed role could be restored TO, or None.
+def _may_overwrite(agent: Any, profile: AgentProfile, seed: AgentProfile) -> bool:
+    """Whether ``reset`` is allowed to write the seed over this row.
+
+    Two independent ways to establish that the row is a harness copy rather
+    than someone's work: an explicit ``seed:`` marker, or prose that is still
+    byte-identical to the packaged text. One predicate so ``show`` and
+    ``reset`` cannot drift on the question.
+    """
+
+    return seed_origin(agent) == seed.name or matches_seed_text(profile, seed)
+
+
+def _seed_provenance(
+    registry: Any, profile: AgentProfile
+) -> tuple[AgentProfile, Literal["installed", "unrecorded"]] | None:
+    """The packaged seed behind a role, and whether reset may overwrite it.
 
     Returns None for a role that is not installed (the seed IS what is being
-    shown), for a role with no packaged counterpart, and — critically — for a
-    role the operator AUTHORED under a name that happens to collide with a
-    starter. That last case is why this takes the registry: a name-only check
-    called a self-authored ``scout`` a diverged install, so ``show`` told its
-    author "this role has been edited" about work they wrote from scratch and
-    ``reset`` then destroyed it. Provenance is read from the row's own
-    ``seed:`` marker; a row with no marker is treated as self-authored, which
-    is the safe direction.
+    shown) and for a role with no packaged counterpart. Otherwise it returns
+    the seed plus a PROVENANCE verdict, because "which seed is this?" and "may
+    reset overwrite it?" are different questions and only ``reset`` needs the
+    second one. ``show`` reading the row is not destructive, so gating the
+    READ path on provenance is what left a pre-upgrade user at the exact #141
+    dead end this tool exists to close.
+
+    The verdict is three-state:
+
+    - ``"installed"`` — the row carries a ``seed:`` marker, or its prose is
+      still byte-identical to the packaged text (see
+      :func:`matches_seed_text`). Reset may overwrite.
+    - ``"unrecorded"`` — a role that predates the marker, or one authored
+      under a starter's name. Indistinguishable from each other by
+      construction, which is precisely why the caller must NOT claim to know
+      which it is. Reset refuses; show still reads.
     """
 
     if not profile.agent_id:
@@ -308,28 +348,37 @@ def _resettable_seed(registry: Any, profile: AgentProfile) -> AgentProfile | Non
         agent = registry.get_agent_by_name(profile.name)
     except Exception:  # noqa: BLE001 - an unreadable row is not a restore target
         return None
-    if agent is None or seed_origin(agent) != seed.name:
+    if agent is None:
         return None
-    return seed
+    if _may_overwrite(agent, profile, seed):
+        return seed, "installed"
+    return seed, "unrecorded"
 
 
 def _divergent_seed(
     registry: Any, profile: AgentProfile
-) -> tuple[AgentProfile, tuple[str, ...]] | None:
-    """``(seed, diverged_fields)`` for an installed role that no longer matches.
+) -> tuple[AgentProfile, tuple[str, ...], Literal["installed", "unrecorded"]] | None:
+    """``(seed, diverged_fields, provenance)`` for a role that no longer matches.
 
     Divergence itself is decided by :func:`seed_divergence`, the ONE definition
     ``show`` and ``reset`` share. Two independent comparisons is how ``show``
     came to render nothing while a widened allowlist sat in the row.
+
+    Deliberately answers for an ``unrecorded`` row as well. Reading a role is
+    not destructive, so the provenance guard has nothing to protect on this
+    path — and staying silent here is what left every pre-upgrade user unable
+    to see the packaged text, which is the whole of #141. The verdict rides
+    along so the caller can offer ``reset`` only where it would actually work.
     """
 
-    seed = _resettable_seed(registry, profile)
-    if seed is None:
+    found = _seed_provenance(registry, profile)
+    if found is None:
         return None
+    seed, provenance = found
     diverged = seed_divergence(profile, seed)
     if not diverged:
         return None
-    return seed, diverged
+    return seed, diverged, provenance
 
 
 def _registry(context: ToolContext | None) -> Any:
@@ -453,10 +502,11 @@ async def _op_show(context: ToolContext | None, tool_call_id: str, name: str) ->
     # whole profile would call every installed role diverged.
     divergence = _divergent_seed(registry, profile)
     if divergence is not None:
-        seed, diverged_fields = divergence
-        body += "\n\nthis role has been edited (" + ", ".join(diverged_fields) + " differ"
+        seed, diverged_fields, _provenance = divergence
+        body += "\n\nthis role differs from the packaged starter of the same name ("
+        body += ", ".join(diverged_fields) + " differ"
         body += "s" if len(diverged_fields) == 1 else ""
-        body += " from the packaged version)."
+        body += ")."
         if "instructions" in diverged_fields:
             rendered, is_diff = _instruction_diff(profile.instructions or "", seed.instructions)
             label = (
@@ -474,8 +524,14 @@ async def _op_show(context: ToolContext | None, tool_call_id: str, name: str) ->
     body += f"\n\nlaunch with task(agent={profile.name!r})"
     if not profile.agent_id:
         body += f", or op='install' name={profile.name!r} to edit it"
-    elif divergence is not None:
+    elif divergence is not None and divergence[2] == "installed":
         body += f", or op='reset' name={profile.name!r} to restore the packaged version"
+    elif divergence is not None:
+        # An unrecorded row cannot be reset (reset will not overwrite what it
+        # cannot prove the harness wrote), so offering the verb here would be
+        # the same dead end #141 was filed about. Name the op that DOES work
+        # on the values printed above, which is what makes them copy-pasteable.
+        body += f", or op='update' name={profile.name!r} to apply the packaged values yourself"
     body += "."
     text, spill = spill_truncate(body, "agent", context)
     return _text(tool_call_id, "agent", text, details=spill or None)
@@ -730,25 +786,57 @@ async def _op_reset(context: ToolContext | None, tool_call_id: str, name: str) -
             tool_call_id,
             "agent",
             f"an agent named {seed.name!r} already exists and is not a role, so nothing was "
-            "reset. Rename that agent, or use a different name for the role.",
+            f"reset. Install the starter under a different name, or remove that agent with "
+            f"`local-operator agents delete --name {seed.name}` first (that deletes its "
+            f"conversation history too; this tool cannot delete agents).",
         )
 
     previous = profile_from_agent(registry, existing) if existing is not None else None
+    diverged = seed_divergence(previous, seed) if previous is not None else ()
     # PROVENANCE, not name collision. A role the operator authored under a
     # starter's name has a seed but is not a copy OF it, so restoring "the
     # packaged version" over it would delete work the harness never wrote —
     # while the name-only check that used to guard this reported success.
-    if existing is not None and previous is not None and seed_origin(existing) != seed.name:
-        return _error(
-            tool_call_id,
-            "agent",
-            f"role {seed.name!r} was authored here, not installed from the packaged starter "
-            f"of the same name, so there is nothing to restore and nothing was changed. Edit "
-            f"it with op='update' name={seed.name!r}, or op='show' name={seed.name!r} to read "
-            "it first. (To adopt the packaged version instead, rename or delete yours first — "
-            "this refuses rather than overwrite work you wrote.)",
+    #
+    # The marker is only one of two ways to establish that. A row whose prose
+    # still matches the seed byte-for-byte holds nobody's words, so it unlocks
+    # even without a marker; without that escape hatch every role installed by
+    # an earlier release would be permanently refused, which turned a safety
+    # guard into the very #141 dead end this tool exists to close.
+    if (
+        existing is not None
+        and previous is not None
+        and not _may_overwrite(existing, previous, seed)
+    ):
+        # Do NOT assert authorship. Absence of a marker is not evidence that a
+        # human wrote this: a pre-marker install and a hand-authored role are
+        # indistinguishable here BY CONSTRUCTION, so claiming the second is a
+        # positive statement about history the tool cannot support and the
+        # reader cannot falsify. Say what is actually known — there is no
+        # install record — and hand over the packaged values so the reader can
+        # apply them through an op that exists.
+        lead = (
+            f"role {seed.name!r} has no record of being installed from the packaged starter, "
+            f"so reset will not overwrite it and nothing was changed. Rows created before this "
+            f"record existed look the same as a role you wrote yourself under a starter's name."
         )
-    diverged = seed_divergence(previous, seed) if previous is not None else ()
+        # U8 is answered by the unlock rather than by wording here: a row that
+        # already matches the seed has matching prose by definition, so it is
+        # treated as installed and takes the ordinary "already matches" path
+        # above. Reaching this point therefore always means real divergence,
+        # and a "nothing to change" arm here would be unreachable.
+        body = lead + "\n\nthe packaged values, to apply yourself:"
+        if "instructions" in diverged:
+            body += f"\n\npackaged instructions:\n{seed.instructions.strip()}\n"
+        for field, mine, packaged in _field_rows(previous, seed):
+            if field in diverged:
+                body += f"\npackaged {field}: {packaged}  (yours: {mine})"
+        body += (
+            f"\n\nop='update' name={seed.name!r} to apply them, or op='show' "
+            f"name={seed.name!r} to read the whole role first."
+        )
+        text, spill = spill_truncate(body, "agent", context)
+        return _text(tool_call_id, "agent", text, details=spill or None)
     if previous is not None and not diverged:
         # Reporting a restore for a no-op is the exact misreport `install`'s
         # message was fixed for; the answer to "did it change?" has to be no.
