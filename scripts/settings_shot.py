@@ -64,6 +64,24 @@ STATE selects what the page is showing:
     theme      the Theme row highlighted (OUT.svg) and activated (OUT.open.svg),
                which is the affordance review round 1 m1 changed: TEXT opened a
                free-text editor, ENUM expands the registry's themes as choices
+    bool-open  a BOOL row activated. The subject of #440's contract change:
+               `enter` used to write the flipped value on the press, so the
+               before-frame is the row already toggled and the after-frame is
+               a two-choice expansion that has written nothing. A still of the
+               resting row cannot show either, so both frames are taken
+    choosing   the same bool expansion with the cursor moved DOWN onto the
+               unstored choice — the state whose whole claim is that browsing
+               a value space writes nothing, and where the footer must read
+               `enter choose · esc cancel` rather than the browsing copy
+    preview    `tui.theme` expanded and browsed onto a different theme
+               (OUT.svg), then `esc` (OUT.reverted.svg). Preview repaints the
+               WHOLE app including this page, so the pair is what shows the
+               snap-back is a revert rather than a half-applied ramp
+    reset-offered  two frames of the `r` gating: an OFF-DEFAULT row, whose
+               detail line names the default `r` would restore and whose
+               footer offers the key (OUT.svg), beside a DEFAULT row that
+               offers neither (OUT.default.svg). The rule is only legible as a
+               contrast, so one frame alone proves nothing
     frames     TWO consecutive frames (OUT.svg and OUT.frame2.svg) to prove the
                opening layout settles rather than reflowing after paint
     boot       the page opened from the BOOT/splash state, with NO conversation
@@ -93,6 +111,7 @@ os.environ["LOCAL_OPERATOR_CONFIG_DIR"] = _SCRATCH
 from local_operator import settings_io  # noqa: E402
 from local_operator.config import ConfigManager  # noqa: E402
 from local_operator.settings_io import Setting  # noqa: E402
+from local_operator.tui import theme as theme_mod  # noqa: E402
 from local_operator.tui.app import OperatorApp  # noqa: E402
 from local_operator.tui.widgets.assistant import AssistantBlock  # noqa: E402
 from local_operator.tui.widgets.settings_view import SettingsView  # noqa: E402
@@ -349,6 +368,64 @@ async def main() -> None:
             await pilot.pause()
             app.save_screenshot(out.replace(".svg", ".offdefault.svg"))
             geometry += f" || off-default hints={view.rendered_hints()!r}"
+        elif state == "bool-open":
+            # TWO frames, for the reason `theme` and `cascade-row` take two:
+            # the change is in what ACTIVATION does, not in how the row rests.
+            # Before #440's contract change the second frame shows the value
+            # column already flipped and config.yml already written; after it,
+            # a two-choice expansion marking the stored value and the shipped
+            # default, with nothing written.
+            _select(view, "retry.enabled")
+            await pilot.pause()
+            app.save_screenshot(out)
+            view.action_activate()
+            await pilot.pause()
+            app.save_screenshot(out.replace(".svg", ".open.svg"))
+        elif state == "choosing":
+            # The expansion BROWSED, not merely opened. The claim under test is
+            # that moving the cursor across a value space writes nothing, and
+            # the cursor resting on the choice that is NOT stored is the only
+            # frame that shows it — an expansion photographed on its stored
+            # member looks identical whether or not browsing commits.
+            _select(view, "retry.enabled")
+            view.action_activate()
+            await pilot.pause()
+            view.action_move(1)
+            await pilot.pause()
+            app.save_screenshot(out)
+        elif state == "preview":
+            # TWO frames: browsed onto a theme that is not the stored one, then
+            # `esc`. The revert is the load-bearing half — a preview with no
+            # proven restore leaves the app wearing a ramp its config disagrees
+            # with — and it is only visible as a PAIR, since the reverted frame
+            # is by construction identical to the pre-open one.
+            _select(view, "tui.theme")
+            view.action_activate()
+            await pilot.pause()
+            # Two rows down: the first choice is the stored theme, so one move
+            # would photograph a preview of the value already applied.
+            view.action_move(1)
+            view.action_move(1)
+            await pilot.pause()
+            app.save_screenshot(out)
+            geometry = _geometry(app, view, state, size)
+            geometry += f" || previewing={theme_mod.current_theme()}"
+            await pilot.press("escape")
+            await pilot.pause()
+            app.save_screenshot(out.replace(".svg", ".reverted.svg"))
+            geometry += f" restored={theme_mod.current_theme()}"
+        elif state == "reset-offered":
+            # A CONTRAST, in two frames. `r` is offered only where it would do
+            # something, so the frame that matters is the pair: an off-default
+            # row naming the default it restores, beside a default row that
+            # sheds the key entirely. `_seed_config` sets maxRetries to 4, and
+            # baseDelayMs is left untouched at its shipped value.
+            _select(view, "retry.maxRetries")
+            await pilot.pause()
+            app.save_screenshot(out)
+            _select(view, "retry.baseDelayMs")
+            await pilot.pause()
+            app.save_screenshot(out.replace(".svg", ".default.svg"))
         elif state == "retired":
             for _ in range(len(view._rows)):
                 view.action_jump(1)
