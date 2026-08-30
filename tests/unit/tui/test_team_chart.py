@@ -342,6 +342,55 @@ async def test_mode_does_not_scroll_the_screen_and_esc_restores() -> None:
         assert not app.screen.has_class(ORG_CHART_LAYOUT_CLASS)
 
 
+@pytest.mark.parametrize("size", [(100, 30), (140, 40)])
+@pytest.mark.asyncio
+async def test_the_chart_takes_the_whole_view_when_opened_from_the_splash(
+    size: tuple[int, int],
+) -> None:
+    """The chart gets the same geometry from the splash as over a conversation.
+
+    ``Screen.boot`` is a whole second layout (centred width-clamped input card,
+    plus rows reserved below it in the dock's padding), and this mode replaces
+    the region it lays out. Applied together the chart got the leftovers around
+    a card that still held its clamp — 26 of 38 rows at 140x40, and at 100x30 an
+    input shell clamped to 73 cells at column 12 rather than 96 at column 1.
+
+    BOTH dimensions are asserted because the collision is not the same shape at
+    every size: at 100x30 the composition reserves no rows at all, so a
+    rows-only assertion passes while the card is still visibly clamped over the
+    page (review round 1, F1/F2).
+    """
+    session = FakeSession()
+    session.team_registry = _nested_registry()
+
+    async def measure(seed_conversation: bool) -> tuple[int, int, int, int]:
+        app = OperatorApp(lambda: _factory(session))
+        async with app.run_test(size=size) as pilot:
+            await _boot(pilot, app)
+            if seed_conversation:
+                app._append_block(UserBlock("hello"))
+                await pilot.pause()
+                assert not app.screen.has_class("boot"), size
+            else:
+                assert app.screen.has_class("boot"), size
+            app._open_org_chart_view("org")
+            await pilot.pause()
+            await pilot.pause()
+            view = app._org_chart_view
+            assert view is not None
+            dock = app.query_one("#input-dock")
+            shell = app.query_one("#input-shell")
+            assert not app.screen.has_class("boot-card"), (
+                f"{size}: the boot card's clamp survived into the chart "
+                f"(#input-shell is {shell.size.width} cells at x={shell.region.x})"
+            )
+            assert dock.outer_size.height == dock.size.height, size
+            assert app.screen.virtual_size.height <= app.screen.size.height, size
+            return (view.size.height, view.size.width, shell.size.width, shell.region.x)
+
+    assert await measure(False) == await measure(True), size
+
+
 @pytest.mark.asyncio
 async def test_wide_org_scrolls_the_body_not_the_screen() -> None:
     session = FakeSession()

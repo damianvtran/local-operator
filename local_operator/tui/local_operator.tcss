@@ -793,10 +793,13 @@ Screen.aside #transcript {
  * the input row and the band — inside the clamp, because they are inside the
  * card.
  *
- * `Screen.boot` is the whole switch, and the app flips it in the same call that
- * shows or hides the splash (OperatorApp._set_welcome_visible). Two layouts,
- * ONE condition: a second notion of "the session is empty" is exactly how a
- * centred boot card ends up on screen beside a populated transcript. A second
+ * `Screen.boot` is the whole switch, and one place decides it
+ * (OperatorApp._sync_boot_layout_class), which re-derives it from live state:
+ * the splash is up AND no full-page mode (`/settings`, the subagent view, the
+ * org chart) has replaced the transcript region. Two layouts, ONE condition: a
+ * second notion of "the session is empty" is exactly how a centred boot card
+ * ends up on screen beside a populated transcript — or, as the v0.43.0 report
+ * showed, on top of a mode that thought it had the whole view. A second
  * class, `.boot-card`, rides on top of it — not a third layout, a MEASUREMENT:
  * whether this terminal is wide enough for the card to read as one (see the rule
  * below).

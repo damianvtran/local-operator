@@ -390,12 +390,24 @@ class SettingsView(Vertical):
 
     # -- movement -----------------------------------------------------------
     def action_move(self, delta: int) -> None:
-        """Move the cursor by ``delta`` selectable rows, WRAPPING.
+        """Move the cursor by ``delta`` selectable rows, CLAMPED.
 
-        Wrapping because an arrow key is a discrete, deliberate press: a user
-        holding ``down`` at the bottom of a list expects to come round, and the
-        alternative (silently stopping) reads as a stuck key. Page and wheel
-        clamp instead — see :meth:`action_section` and the scroll handlers.
+        This page is the documented EXCEPTION to the repo's wrap-vs-clamp rule
+        (AGENTS.md, "Wrapping vs clamping"), which has arrow keys wrap because a
+        press is deliberate. That reasoning holds for a short picker, where the
+        whole list is on screen and coming round is a shortcut to a row the user
+        can already see. It does not hold here: the settings are a long,
+        sectioned, SCROLLED list (60-odd rows against a viewport of 14 at
+        100x30), so the bottom is a destination travelled to rather than a place
+        stumbled onto, and wrapping teleported the reader from the section they
+        were working in to the top of the page with the viewport jumping with
+        them. Reported against v0.43.0: the bottom is expected to hold.
+
+        Clamping also makes the page agree with ITSELF. The wheel
+        (:meth:`_scroll_rows`) and paging (:meth:`action_section`) already
+        clamp, so `down` and a wheel notch on the same last row disagreed about
+        what the end of the list means — worse than either rule applied
+        uniformly.
         """
         if not self._selectable():
             return
@@ -415,17 +427,25 @@ class SettingsView(Vertical):
         if not indices:
             return
         position = self._position_of(identity, indices)
-        self._selected = indices[(position + delta) % len(indices)]
+        self._selected = indices[min(max(position + delta, 0), len(indices) - 1)]
         self._repaint()
         self._scroll_to_selection()
 
     def _position_of(self, identity: "tuple[str, str, int] | None", indices: list[int]) -> int:
         """Where the row with ``identity`` sits in the REBUILT selectable list.
 
-        Falls back to the current index, then to the top: a commit can make the
-        anchor row stop existing entirely (an empty chain is dropped on write),
-        and a movement that refused to move because its origin vanished would
-        be the same stuck key this exists to prevent.
+        Falls back to the current index, then to the top, because a commit can
+        make the anchor row stop existing entirely (an empty chain is dropped on
+        write) and the movement still has to land somewhere real.
+
+        The common fallback is the useful one: when the identity is gone but
+        ``_selected`` is still selectable, the current index is returned and the
+        move proceeds normally from where the user was. The top is the last
+        resort, and under the clamp it is a genuine dead end \u2014 ``action_move(-1)``
+        from position 0 does not move (review round 1, F4). That is accepted
+        rather than papered over: both outcomes have already teleported the
+        cursor away from the row the user was on, which is the real fault, and a
+        wrap here would hide it by jumping to the bottom of a 60-row page.
         """
         if identity is not None:
             for position, index in enumerate(indices):
@@ -452,6 +472,25 @@ class SettingsView(Vertical):
         # not wrap to the first. A page gesture is travel, and travel that
         # teleports across the whole document is how a reader loses their place.
         target = min(max(position + delta, 0), len(headers) - 1)
+        # ...but the LAST section is not the last row, and paging has to be able
+        # to reach the end the other gestures reach. Held `down` and `end` both
+        # finish on the final row; `pagedown` settled on the last section's
+        # first row and stopped with five rows still below it, so the page had
+        # two different answers for where it ends (UX round 1, U3). Once paging
+        # can advance no further by section it finishes the journey to the last
+        # row. `pageup` needs no counterpart: the first section's first row IS
+        # the first selectable row, so travelling up already terminates there.
+        if delta > 0 and target == position:
+            indices = self._selectable()
+            if indices and self._selected != indices[-1]:
+                if not self._leave_row():
+                    return
+                indices = self._selectable()
+                if indices:
+                    self._selected = indices[-1]
+                    self._repaint()
+                    self._scroll_to_selection()
+            return
         wanted = self._rows[headers[target]].section
         if not self._leave_row():
             return
@@ -510,6 +549,14 @@ class SettingsView(Vertical):
         # key the footer advertises that is not `d` or `esc` cancels the ask.
         self._confirm_delete = None
         panes = [_PANE_TEAMS, _PANE_AGENTS]
+        # CYCLES, and stays cycling while the list movement above clamps. This
+        # is not the same gesture: two tabs, both labelled and both on screen,
+        # are a closed cycle rather than a list with ends — there is no "bottom"
+        # to travel to and nothing scrolls, so `→` on the last tab has no
+        # meaning other than the first one. Clamping it would make the second
+        # press of a two-tab toggle silently dead, which is the stuck key the
+        # wrap convention exists to avoid. The clamp on `action_move` is about
+        # losing your place in a long scrolled list; neither term applies here.
         position = (panes.index(self._pane) + delta) % len(panes)
         self._pane = panes[position]
         self._repaint()
@@ -530,8 +577,20 @@ class SettingsView(Vertical):
         if height <= 0:
             return
         offset = self._body.scroll_offset.y
-        if self._selected < offset:
-            self._body.scroll_to(y=self._selected, animate=False)
+        # Scroll far enough to show the row's own SECTION HEADER, not just the
+        # row. Headers are unselectable, so travelling to the first row of the
+        # page settled at `scroll_y=1` with the `Model` header one line off the
+        # top edge: a highlighted row whose section title is missing and a
+        # scrollbar thumb not quite at the start of its track. The bottom end
+        # reads as arrival and the top did not, and the clamp is what made
+        # users dwell there long enough to notice (UX round 1, U1). Only the
+        # contiguous run of headers directly above the row is included, so this
+        # reveals the row's own title and never scrolls past unrelated content.
+        top = self._selected
+        while top > 0 and self._rows[top - 1].kind == "header":
+            top -= 1
+        if top < offset:
+            self._body.scroll_to(y=top, animate=False)
         elif self._selected >= offset + height:
             self._body.scroll_to(y=self._selected - height + 1, animate=False)
 
@@ -1261,11 +1320,12 @@ class SettingsView(Vertical):
         self._scroll_rows(-1)
 
     def _scroll_rows(self, delta: int) -> None:
-        """Wheel movement — CLAMPED, unlike the wrapping arrows.
+        """Wheel movement — CLAMPED, like every other movement on this page.
 
-        The convention this repo states in AGENTS.md: arrows wrap because a
-        press is deliberate, wheel and page clamp because a gesture that
-        teleports to the other end of the list reads as the list resetting.
+        A gesture that teleports to the other end of the list reads as the list
+        resetting itself. The arrows clamp here too, which is this page's
+        documented exception to the repo's wrap-vs-clamp convention — see
+        :meth:`action_move` for why a long scrolled list earns it.
         """
         indices = self._selectable()
         if not indices:
@@ -2142,6 +2202,18 @@ class SettingsView(Vertical):
         self._rule.update(self._rule_text)
         self._paint_hints()
 
+    def _current_is_readonly(self) -> bool:
+        """Is the highlighted row a retired setting that no key can act on?
+
+        Only while nothing is in progress: an open editor or an armed delete
+        owns the footer's wording (it teaches `enter save` / `esc cancel`), and
+        neither state can be entered from a read-only row anyway.
+        """
+        if self._editing is not None or self._confirm_delete is not None:
+            return False
+        row = self._current()
+        return row is not None and row.setting is not None and row.setting.kind is Kind.READONLY
+
     def _title_room(self) -> int:
         """Cells left for the config path after the ``settings ·`` lead."""
         try:
@@ -2198,19 +2270,32 @@ class SettingsView(Vertical):
         # key does nothing is the "nothing happens when I click" bug one step
         # earlier — the same rule `HintButton.set_actionable` states.
         leads: list[_Hint] = [move, enter, reset]
+        # The same rule applied to the ROW: on a retired setting neither key
+        # does anything — `enter` only reports that it cannot be changed and `r`
+        # returns without resetting — so neither is offered. The last six rows
+        # of the page are read-only, and the clamp turned the bottom from a
+        # waypoint into a place users park, under a footer promising `enter
+        # change · r default` on a row that honours neither (UX round 1, U2).
+        # The detail line already says WHY the row is retired; the footer's job
+        # is only to stop advertising keys that will not act.
+        if self._current_is_readonly():
+            leads = [move]
         if self._pane_fits():
             leads.append(pane)
         # The narrow rungs shed to a one-word `esc` label, except in the
         # confirm state where `cancel` IS the one word and shedding it back to
         # `back` would restore the very ambiguity D7 is about.
         narrow = "cancel" if self._confirm_delete is not None else "back"
+        # The narrower rungs are DERIVED from what this row actually offers,
+        # dropping one hint at a time from the right, rather than restating the
+        # full ladder: a hardcoded `[move, enter, reset]` rung would put the
+        # keys back on a read-only row as soon as the terminal got narrow
+        # enough to shed the pane hint.
+        shed = [rung(leads[:count], narrow) for count in range(len(leads) - 1, -1, -1)]
         rungs = [
             rung(leads, exit_label),
             rung(leads, narrow),
-            rung([move, enter, reset], narrow),
-            rung([move, enter], narrow),
-            rung([move], narrow),
-            rung([], narrow),
+            *shed,
         ]
         width = max(self.size.width - 2, 1)
         chosen = rungs[-1]
