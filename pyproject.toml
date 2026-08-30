@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-operator"
-version = "0.43.14"
+version = "0.43.15"
 description = "A team of proactive AI assistants that can work together behind the scenes to help you get mundane tasks done so you can focus on the fun stuff."
 readme = "README.md"
 authors = [{ name = "Damian Tran", email = "damian@gominerva.com" }]
@@ -278,12 +278,35 @@ exclude = ["**/node_modules", "**/__pycache__", "**/.*", "docs"]
 #   .venv/bin/python -m pyright --pythonpath .venv/bin/python .
 
 [tool.pytest.ini_options]
-# `-n auto` distributes the suite across one worker process per logical core.
+# `-n auto` distributes the suite across worker processes, but the worker count
+# is NOT one-per-core: the root `conftest.py` implements
+# `pytest_xdist_auto_num_workers` and caps it (2..8) from a CPU share and a
+# budget over *available* memory. Without that hook xdist resolves `auto` to
+# `os.cpu_count()`, which on a 14-core host meant 14 workers and a measured
+# 3,661 MB of worker RSS (vs 1,579 MB capped) — ruinous on this machine, where
+# many git worktrees run
+# suites concurrently (three at once drove load to 98-128 and exhausted swap).
 # The suite is dominated by Textual pilot tests that spend their wall time
-# waiting for the event loop to settle rather than on CPU, so this scales CI
-# wall time down roughly with the core count (4 on GitHub's ubuntu-latest)
-# without changing what each test does. Run `-n0` locally to serialise for a
-# debugger (`--pdb`/`-s` need a single process).
+# waiting for the event loop rather than on CPU, so a wide run buys nothing:
+# an interleaved A/B on tests/unit/server measured `-n 4` FASTER than `-n 14`
+# (5.3-5.9s vs 7.8-11.3s) under that contention. See conftest.py for the full
+# measurements and the fallback behaviour. CI is exempt from the CPU share (a
+# dedicated runner has no contention to protect against) and keeps every core.
+#
+# `auto` must stay literal here: an explicit `-n N` in addopts would make both
+# the hook and the env var inert.
+#   PYTEST_XDIST_AUTO_NUM_WORKERS=N  per-session override, honoured unclamped.
+#   -n0                              serialise for a debugger (`--pdb`/`-s`
+#                                    need a single process); bypasses the hook.
+#   -n 12                            an explicit count also bypasses the hook.
+#
+# `--dist worksteal`: per-test durations here vary by orders of magnitude
+# (Textual pilot tests wait on the event loop; a pure-function test is
+# microseconds). The default `load` scheduler pre-assigns work in chunks, so a
+# worker that draws the slow tests still holds them while its peers sit idle at
+# the tail of the run. worksteal lets an idle worker take pending tests off a
+# busy one, which xdist documents as handling "tests with significantly
+# differing duration" better — exactly this suite's shape.
 #
 # The old `-vv -s` was dropped deliberately: `-vv` prints a line per test,
 # which is ~5.8k lines of I/O that buys nothing in CI logs, and `-s`
@@ -305,7 +328,7 @@ exclude = ["**/node_modules", "**/__pycache__", "**/.*", "docs"]
 #
 # Run it explicitly with:
 #   env -u NO_COLOR TERM=xterm-256color .venv/bin/python -m pytest tests/e2e -m e2e -n0
-addopts = "-n auto -m \"not e2e\""
+addopts = "-n auto --dist worksteal -m \"not e2e\""
 testpaths = ["tests"]
 markers = [
     # Applied by LOCATION in tests/e2e/conftest.py, so a module in that package
