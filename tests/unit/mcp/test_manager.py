@@ -11,6 +11,7 @@ from collections import deque
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest import mock
 
 import pytest
 from mcp.types import CallToolResult, ListToolsResult, TextContent, Tool
@@ -1768,3 +1769,344 @@ class TestAuthRequiredHandling:
         assert stored is not None and stored.timeout is None
         assert conn.config.timeout is None
         await manager.disconnect_all()
+
+
+class TestAuthChallengeMessaging:
+    """A 401/403 must name the command that fixes it (issue #367 follow-up).
+
+    The SDK erases the status code: a 401 it cannot resolve arrives from
+    ``session.initialize()`` as ``MCPError(-32603, 'Server returned an error
+    response')`` — which is exactly what the user saw on the splash. The
+    watcher observes the response before that happens.
+    """
+
+    def _exc(self, *, oauth_available: bool = True, has_stored_grant: bool = False) -> Any:
+        from local_operator.mcp.auth import McpAuthChallengeError
+
+        return McpAuthChallengeError(
+            "https://srv.example/mcp",
+            status_code=401,
+            oauth_available=oauth_available,
+            has_stored_grant=has_stored_grant,
+        )
+
+    def test_a_challenge_with_oauth_names_the_login_command(self) -> None:
+        text = McpManager._auth_failure_text("gitlab", self._exc())
+        assert "/mcp login gitlab" in text
+
+    def test_no_discoverable_oauth_does_not_promise_a_login(self) -> None:
+        """Datadog's shape: a 401 with no WWW-Authenticate. Claiming OAuth is
+        available when discovery found none sends the user at a dead command."""
+        text = McpManager._auth_failure_text("datadog", self._exc(oauth_available=False))
+        assert "/mcp login" not in text
+        assert "401" in text
+
+    def test_a_stale_stored_grant_says_reauth_not_login(self) -> None:
+        """The operator's ask: reaching this error means the stored grant could
+        not be refreshed, so a server we hold a row for is holding a dead one.
+        ``login`` would leave that credential in place."""
+        from local_operator.mcp.auth import McpAuthRequiredError
+
+        exc = McpAuthRequiredError("https://srv.example/mcp")
+        with mock.patch("local_operator.mcp.auth.server_has_stored_grant", return_value=True):
+            text = McpManager._auth_failure_text("gitlab", exc)
+        assert "/mcp reauth gitlab" in text
+        assert "/mcp login" not in text
+
+    def test_never_authorized_says_login_not_reauth(self) -> None:
+        from local_operator.mcp.auth import McpAuthRequiredError
+
+        exc = McpAuthRequiredError("https://srv.example/mcp")
+        with mock.patch("local_operator.mcp.auth.server_has_stored_grant", return_value=False):
+            text = McpManager._auth_failure_text("gitlab", exc)
+        assert "/mcp login gitlab" in text
+
+    def test_the_actionable_command_survives_a_narrow_terminal(self) -> None:
+        """Design constraint D1: the toast clamps to the card width and the
+        TAIL is what truncates, so the command has to lead."""
+        text = McpManager._auth_failure_text("launchdarkly", self._exc())
+        assert text.startswith("run /mcp login launchdarkly")
+        assert text.count("—") <= 1  # D4: not a chain of dashes
+
+    @pytest.mark.asyncio
+    async def test_a_401_on_the_mcp_endpoint_is_observed(self) -> None:
+        from local_operator.mcp.manager import _AuthChallengeWatcher
+
+        watcher = _AuthChallengeWatcher("https://srv.example/mcp")
+        await watcher.observe(
+            SimpleNamespace(
+                status_code=401,
+                request=SimpleNamespace(url="https://srv.example/mcp"),
+            )
+        )
+        assert watcher.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_a_401_from_a_metadata_probe_is_not_the_server_refusing_us(
+        self,
+    ) -> None:
+        """The same client carries the provider's discovery requests; a 401
+        from one of those is part of discovery, not the connect being denied."""
+        from local_operator.mcp.manager import _AuthChallengeWatcher
+
+        watcher = _AuthChallengeWatcher("https://srv.example/mcp")
+        await watcher.observe(
+            SimpleNamespace(
+                status_code=401,
+                request=SimpleNamespace(
+                    url="https://srv.example/.well-known/oauth-protected-resource"
+                ),
+            )
+        )
+        assert watcher.status_code is None
+
+    @pytest.mark.asyncio
+    async def test_a_non_auth_failure_is_never_relabelled_as_an_auth_problem(
+        self, tmp_path: Path
+    ) -> None:
+        """Routing a network outage into "run /mcp login" would be a worse
+        error than the opaque one this change replaces. No observed challenge
+        means no conversion."""
+        from local_operator.mcp.config import MCPHttpServerConfig
+        from local_operator.mcp.manager import _AuthChallengeWatcher
+
+        manager = McpManager(str(tmp_path))
+        cfg = MCPHttpServerConfig(url="https://srv.example/mcp")
+        watcher = _AuthChallengeWatcher("https://srv.example/mcp")  # nothing observed
+        assert await manager._challenge_error(cfg, watcher) is None
+        assert await manager._challenge_error(cfg, None) is None
+
+    @pytest.mark.asyncio
+    async def test_connect_round_reports_a_challenge_actionably(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """End to end through the surface the user screenshotted: the splash
+        notice reads from ``startup_failures``."""
+        from local_operator.mcp.config import MCPHttpServerConfig
+
+        manager = McpManager(str(tmp_path))
+        cfg = MCPHttpServerConfig(url="https://srv.example/mcp")
+
+        async def fake_connect(name: str, cfg: Any, **_: Any) -> ServerConnection:
+            raise self._exc()
+
+        monkeypatch.setattr(manager, "_connect_server", fake_connect)
+        result = await manager._connect_round({"gitlab": cfg}, {"gitlab": "codex"})
+        assert "/mcp login gitlab" in result.errors["gitlab"]
+        assert "Server returned an error response" not in result.errors["gitlab"]
+
+
+class TestAuthChallengeWatcherAttribution:
+    """Which response the watcher attributes to this connect (F1, F2)."""
+
+    URL = "https://srv.example/mcp"
+
+    def _response(self, status: int, url: str) -> Any:
+        return SimpleNamespace(status_code=status, request=SimpleNamespace(url=url))
+
+    @pytest.mark.asyncio
+    async def test_a_challenge_after_a_canonicalising_redirect_is_observed(self) -> None:
+        """F1. A server may 307 ``/mcp`` to ``/mcp/`` and only then challenge.
+        The client follows the redirect, so the final response's request URL is
+        not the configured string; comparing raw text dropped the challenge and
+        the user kept getting the SDK's opaque error."""
+        from local_operator.mcp.manager import _AuthChallengeWatcher
+
+        watcher = _AuthChallengeWatcher(self.URL)
+        await watcher.observe(self._response(307, self.URL))
+        await watcher.observe(self._response(401, "https://srv.example/mcp/"))
+        assert watcher.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_case_and_query_differences_still_match_the_endpoint(self) -> None:
+        from local_operator.mcp.manager import _AuthChallengeWatcher
+
+        watcher = _AuthChallengeWatcher(self.URL)
+        await watcher.observe(self._response(401, "https://SRV.example/mcp?session=abc"))
+        assert watcher.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_a_later_non_auth_response_supersedes_an_earlier_challenge(self) -> None:
+        """F2. The watcher used to latch the first 401 forever, so an attempt
+        that was challenged and then failed on a retry with a 500 was reported
+        as an authorization problem — exactly the misrouting of a non-auth
+        failure this feature promises not to do."""
+        from local_operator.mcp.manager import _AuthChallengeWatcher
+
+        watcher = _AuthChallengeWatcher(self.URL)
+        await watcher.observe(self._response(401, self.URL))
+        assert watcher.status_code == 401
+        await watcher.observe(self._response(500, self.URL))
+        assert watcher.status_code is None
+
+    @pytest.mark.asyncio
+    async def test_a_redirect_hop_never_clears_a_pending_verdict(self) -> None:
+        """A 3xx is the client being sent elsewhere, not the server's verdict."""
+        from local_operator.mcp.manager import _AuthChallengeWatcher
+
+        watcher = _AuthChallengeWatcher(self.URL)
+        await watcher.observe(self._response(401, self.URL))
+        await watcher.observe(self._response(307, self.URL))
+        assert watcher.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_a_metadata_probe_neither_sets_nor_clears(self) -> None:
+        """Discovery rides the same client; its responses are not verdicts on
+        the connect, in either direction."""
+        from local_operator.mcp.manager import _AuthChallengeWatcher
+
+        watcher = _AuthChallengeWatcher(self.URL)
+        await watcher.observe(self._response(401, self.URL))
+        await watcher.observe(
+            self._response(200, "https://srv.example/.well-known/oauth-protected-resource")
+        )
+        assert watcher.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_the_stored_grant_fact_comes_from_the_classifying_store(
+        self, tmp_path: Path
+    ) -> None:
+        """F4. The challenge already resolved this against the manager's own
+        (possibly injected) store; re-reading the default machine store here
+        answered a different question and rendered ``login`` for a server
+        demonstrably holding a grant."""
+        from local_operator.mcp.auth import McpAuthChallengeError
+
+        exc = McpAuthChallengeError(
+            "https://srv.example/mcp",
+            status_code=401,
+            oauth_available=True,
+            has_stored_grant=True,
+        )
+        # The default store is empty here, so a second lookup would say
+        # "login". The carried fact must win.
+        with mock.patch(
+            "local_operator.mcp.auth.server_has_stored_grant", return_value=False
+        ) as lookup:
+            text = McpManager._auth_failure_text("gitlab", exc)
+        assert "/mcp reauth gitlab" in text
+        assert lookup.call_count == 0
+
+    @pytest.mark.asyncio
+    async def test_the_challenge_error_carries_the_managers_store_verdict(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The manager's injected store is what classifies the failure."""
+        from local_operator.mcp.config import MCPHttpServerConfig
+        from local_operator.mcp.manager import _AuthChallengeWatcher
+
+        manager = McpManager(str(tmp_path))
+        cfg = MCPHttpServerConfig(url="https://srv.example/mcp")
+        watcher = _AuthChallengeWatcher("https://srv.example/mcp")
+        watcher.status_code = 401
+
+        async def fake_discover(url: str) -> object:
+            return object()
+
+        monkeypatch.setattr("local_operator.mcp.auth.discover_oauth_endpoints", fake_discover)
+        monkeypatch.setattr(
+            "local_operator.mcp.auth.server_has_stored_grant", lambda url, store=None: True
+        )
+        exc = await manager._challenge_error(cfg, watcher)
+        assert exc is not None and exc.has_stored_grant is True
+        assert "/mcp reauth" in McpManager._auth_failure_text("gitlab", exc)
+
+
+class TestChallengeIsBoundToTheTerminalRequest:
+    """F5: a challenge must not outlive the request that produced it.
+
+    Clearing only when a later RESPONSE arrives left the verdict latched when
+    the next request died at DNS/connect/TLS/read time — no response hook runs
+    then — so a terminal network failure was reported as an auth problem.
+    """
+
+    URL = "https://srv.example/mcp"
+
+    def _response(self, status: int, url: str) -> Any:
+        return SimpleNamespace(status_code=status, request=SimpleNamespace(url=url))
+
+    @pytest.mark.asyncio
+    async def test_a_request_that_never_answers_leaves_no_verdict(self) -> None:
+        """The exact F5 state: 401, then a retry that fails with no response."""
+        from local_operator.mcp.manager import _AuthChallengeWatcher
+
+        watcher = _AuthChallengeWatcher(self.URL)
+        await watcher.begin(SimpleNamespace(url=self.URL))
+        await watcher.observe(self._response(401, self.URL))
+        assert watcher.status_code == 401
+        # The retry starts and then dies at the socket: begin() runs, observe()
+        # never does.
+        await watcher.begin(SimpleNamespace(url=self.URL))
+        assert watcher.status_code is None
+
+    @pytest.mark.asyncio
+    async def test_a_network_failure_after_a_challenge_is_not_auth_advice(
+        self, tmp_path: Path
+    ) -> None:
+        """End to end through the classifier: no verdict means no /mcp login."""
+        from local_operator.mcp.config import MCPHttpServerConfig
+        from local_operator.mcp.manager import _AuthChallengeWatcher
+
+        manager = McpManager(str(tmp_path))
+        cfg = MCPHttpServerConfig(url=self.URL)
+        watcher = _AuthChallengeWatcher(self.URL)
+        await watcher.begin(SimpleNamespace(url=self.URL))
+        await watcher.observe(self._response(401, self.URL))
+        await watcher.begin(SimpleNamespace(url=self.URL))  # retry, then a socket error
+        assert await manager._challenge_error(cfg, watcher) is None
+
+    @pytest.mark.asyncio
+    async def test_a_request_to_another_url_never_clears_the_verdict(self) -> None:
+        """Discovery and token requests ride the same client; a probe starting
+        must not erase the endpoint's own challenge."""
+        from local_operator.mcp.manager import _AuthChallengeWatcher
+
+        watcher = _AuthChallengeWatcher(self.URL)
+        await watcher.begin(SimpleNamespace(url=self.URL))
+        await watcher.observe(self._response(401, self.URL))
+        await watcher.begin(
+            SimpleNamespace(url="https://srv.example/.well-known/oauth-protected-resource")
+        )
+        assert watcher.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_a_challenge_still_survives_to_classification(self) -> None:
+        """The ordinary path must keep working: begin() then a 401 classifies."""
+        from local_operator.mcp.manager import _AuthChallengeWatcher
+
+        watcher = _AuthChallengeWatcher(self.URL)
+        await watcher.begin(SimpleNamespace(url=self.URL))
+        await watcher.observe(self._response(401, self.URL))
+        assert watcher.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_the_eligibility_gate_uses_the_managers_effective_store(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """F6. With discovery offline, only the injected store can supply the
+        evidence — a store-less probe refuses a server this manager would
+        itself classify as needing reauth."""
+        from local_operator.mcp import auth as auth_mod
+        from local_operator.mcp.config import MCPHttpServerConfig
+
+        auth_mod.OAUTH_CHALLENGES.clear()
+
+        async def discovery_offline(url: str) -> None:
+            return None
+
+        monkeypatch.setattr(auth_mod, "discover_oauth_endpoints", discovery_offline)
+
+        from tests.unit.mcp.test_auth import FakeAuthStore
+
+        store = FakeAuthStore()
+        url = "https://srv.example/mcp"
+        auth_mod.McpTokenStorage(url, store)._write({"tokens": {"access_token": "a"}})
+
+        manager = McpManager(str(tmp_path))
+        manager.auth_store = cast(Any, store)
+        cfg = MCPHttpServerConfig(url=url)
+
+        # The store-less call both login paths used to make.
+        assert await auth_mod.probe_oauth_capability(cfg) is False
+        # The manager-owned operation consults its own store and allows it.
+        assert await manager.server_supports_oauth_login(cfg) is True

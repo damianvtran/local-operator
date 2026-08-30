@@ -15908,6 +15908,29 @@ class OperatorApp(App[None]):
         # unrelated operations on unrelated servers.
         self.run_worker(_reload, thread=False, group="mcp-reload", exclusive=True)
 
+    async def _mcp_login_allowed(self, manager: Any, cfg: Any) -> bool:
+        """Whether an explicit login on ``cfg`` may proceed, per ``manager``.
+
+        Routed through the manager so the eligibility question is answered
+        against ITS effective auth store. Both grant entry points (the local
+        worker and the owner-side one) share this, because a gate that
+        disagreed with the manager's own classification would refuse a login
+        for a server the manager had just told the user to ``reauth`` (F6).
+
+        A reduced host — a follower's read-only MCP facade — may not implement
+        the accessor. Falling back to the store-less probe there is correct
+        rather than lenient: such a facade owns no auth store to consult, and
+        the static refusals still apply.
+        """
+        checker = getattr(manager, "server_supports_oauth_login", None)
+        if callable(checker):
+            # ``manager`` is duck-typed here (a follower hands over a facade),
+            # so the accessor's return is untyped; it is an awaitable bool.
+            return bool(await cast("Awaitable[bool]", checker(cfg)))
+        from local_operator.mcp.auth import probe_oauth_capability
+
+        return await probe_oauth_capability(cfg)
+
     def _resolve_mcp_server(self, name: str) -> tuple[Any, Any] | str:
         """The authoritative ``(manager, config)`` for ``name``, or a notice body.
 
@@ -15930,8 +15953,26 @@ class OperatorApp(App[None]):
         cfg = get_config(name)
         if cfg is None:
             return f"MCP server {name!r} is not configured — see /mcp"
-        auth = getattr(cfg, "auth", None)
-        if auth is None or getattr(auth, "type", None) != "oauth":
+        # Only the STATICALLY impossible cases are refused here: a stdio
+        # server (no transport that can carry a bearer token) and one whose
+        # config declares a non-OAuth auth type, which is the user already
+        # telling us how that server authenticates.
+        #
+        # This used to refuse on ``auth.type != "oauth"``, which told a user
+        # with a Codex-imported server that the very command fixing their 401
+        # "does not use OAuth login" — that config carries only a ``url``,
+        # because Codex holds its grants elsewhere. Whether such a server takes
+        # OAuth is not decidable from the config, and this resolver is
+        # synchronous, so the remaining question is settled by a live
+        # capability probe in the async login path (``_mcp_login_worker``)
+        # rather than assumed either way here.
+        from local_operator.mcp.auth import server_rejects_oauth
+        from local_operator.mcp.config import MCPServerConfig
+
+        # ``get_config`` is read off a duck-typed manager (a follower's facade
+        # implements the same accessor), so its return is untyped here; the
+        # helper only reads ``auth``/``url`` off it.
+        if server_rejects_oauth(cast(MCPServerConfig, cfg)):
             return f"MCP server {name!r} does not use OAuth login."
         return manager, cfg
 
@@ -15961,7 +16002,14 @@ class OperatorApp(App[None]):
                 else f"MCP logout failed for {name!r} — see the owner transcript."
             )
         # login | reauth: the SAME interactive exchange ``_mcp_login_worker``
-        # runs, awaited here so the ack carries the settled outcome.
+        # runs, awaited here so the ack carries the settled outcome — including
+        # the capability gate, which must cover this path too or a follower
+        # would reach a grant the local terminal refuses (F3). Asked of the
+        # MANAGER rather than the auth module directly: the answer depends on
+        # this session's effective auth store, and a store-less probe refused
+        # servers whose grant lives in an injected store (F6).
+        if not await self._mcp_login_allowed(manager, cfg):
+            return f"MCP server {name!r} does not use OAuth login."
         if sub == "reauth":
             removed = self._mcp_logout(manager, name, cfg, verb="reauth", disconnect=False)
             if not removed:
@@ -16256,6 +16304,18 @@ class OperatorApp(App[None]):
         skipped while the grant proceeded.
         """
         from local_operator.mcp.auth import McpLoginCancelledError
+
+        # The half of the gate ``_resolve_mcp_server`` cannot answer: it is
+        # synchronous, and "does this server take an OAuth grant?" needs one
+        # metadata round trip whenever the config does not say. Without this,
+        # a deliberate login was enabled for every remote server including
+        # known-public and API-key ones, and a public server's 401 could open
+        # an unrelated OAuth attempt. Refused with the same wording as the
+        # static refusal, since to the user it is the same answer.
+        cfg = getattr(manager, "get_server_config", lambda _n: None)(name)
+        if cfg is not None and not await self._mcp_login_allowed(manager, cfg):
+            self._system_notice(f"MCP server {name!r} does not use OAuth login.", "warning")
+            return
 
         if disconnect_first:
             try:
