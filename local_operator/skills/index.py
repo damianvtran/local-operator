@@ -256,15 +256,28 @@ def _backend_meta(backend: EmbeddingBackend) -> Mapping[str, object]:
 def render_block(skills: list[Skill]) -> str:
     """Render selected guides and skills without rendering private hints.
 
-    Skill-only output remains byte-compatible. The stable base prompt owns the
-    ``guide://`` protocol rule, so a selected guide costs only its name and
-    short routing description here.
+    Skill-only output remains byte-compatible. The stable base prompt still
+    owns the ``guide://`` protocol rule in full; the one-line imperative here
+    is the local reminder that a selected guide is meant to be READ, which the
+    guides section previously left implicit while the skills section stated it
+    outright.
     """
     guides = [item for item in skills if item.resource_type == "guide"]
     user_skills = [item for item in skills if item.resource_type == "skill"]
     sections: list[str] = []
     if guides:
-        lines = ["<guides>"]
+        # The imperative mirrors the skills branch below. Without it this
+        # section was bare name/description lines and the only instruction to
+        # act on them lived far away in the base prompt, phrased as a
+        # conditional about questions on Local Operator itself - which a model
+        # asked to DO something (rather than answer a question) does not
+        # classify as a match. Costs its tokens only when a guide is selected.
+        lines = [
+            "Guides are procedures for this harness. If one matches your task, you MUST "
+            "read `guide://<name>` before acting, even if you think you already know the "
+            "answer.",
+            "<guides>",
+        ]
         lines.extend(f"- {guide.name}: {guide.description}" for guide in guides)
         lines.append("</guides>")
         sections.append("\n".join(lines))
