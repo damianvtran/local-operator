@@ -279,6 +279,23 @@ def _is_editable_direct_url() -> bool:
     return isinstance(dir_info, dict) and dir_info.get("editable") is True
 
 
+def _installer_metadata() -> str:
+    """Lower-cased dist-info ``INSTALLER``, or ``""`` when there is none.
+
+    pip, uv and pipx each write the file, so it states outright which tool
+    owns the install rather than inferring it from a path. Absent is no
+    evidence at all (a vendored tree, a distro package), never a negative.
+    """
+    try:
+        dist = distribution("local-operator")
+    except PackageNotFoundError:
+        return ""
+    text = dist.read_text("INSTALLER")
+    if not text:
+        return ""
+    return text.strip().lower()
+
+
 def _is_uv_tool(prefix: Path) -> bool:
     """uv tool is the documented end-user path (README + the ``lop`` launcher).
 
@@ -320,10 +337,26 @@ def _is_pipx(prefix: Path) -> bool:
 
 
 def _is_ordinary_pip(prefix: Path) -> bool:
-    """A venv or virtual-env prefix: the remaining README ``pip install`` path."""
+    """A venv prefix, or a dist-info that names pip: the README ``pip install`` path.
+
+    The two layout probes both miss a *base* interpreter (#396). A ``mise``,
+    ``pyenv`` or ``asdf`` toolchain reports ``sys.prefix == sys.base_prefix``
+    and writes no ``pyvenv.cfg``, so an ordinary ``pip install
+    local-operator`` there fell through to ``UNKNOWN`` and ``/update``
+    refused an upgrade that ``pip install -U`` performs fine — a reporter on
+    0.42.13 could not reach 0.42.19 at all.
+
+    ``INSTALLER`` is consulted last and only for the exact value ``pip``.
+    ``uv`` and ``pipx`` reach this line only once their own probes above have
+    declined, and answering "pip" for them would be the guess this module
+    exists to refuse: ``uv`` is also what ``uv pip install --system`` writes
+    into a base prefix, where ``uv tool upgrade`` is the wrong command.
+    """
     if (prefix / "pyvenv.cfg").is_file():
         return True
-    return sys.prefix != getattr(sys, "base_prefix", sys.prefix)
+    if sys.prefix != getattr(sys, "base_prefix", sys.prefix):
+        return True
+    return _installer_metadata() == "pip"
 
 
 def install_kind(
