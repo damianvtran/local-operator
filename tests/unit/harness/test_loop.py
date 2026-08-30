@@ -2552,3 +2552,171 @@ async def test_a_hard_cancel_keeps_the_text_that_already_streamed() -> None:
     assert (
         started["message"].text == "partial answer"
     ), "a hard cancel dropped the text that had already streamed"
+
+# ---------------------------------------------------------------------------
+# A pending fork rides the interrupt poll, but is NOT a steer
+# ---------------------------------------------------------------------------
+#
+# The asymmetry pinned here is the subtlest correctness point in `/fork`, and
+# both halves of it fail silently:
+#
+# - Too weak, and a fork requested during a ten-minute `wait` waits out the
+#   whole tool before the branch is taken.
+# - Too strong, and the fork SKIPS the parent's remaining tool calls — the
+#   parent's own turn is damaged by a command that was supposed to leave it
+#   completely alone.
+
+
+@pytest.mark.asyncio
+async def test_a_pending_fork_interrupts_an_interruptible_tool():
+    """A fork reaches its boundary promptly instead of waiting out the tool.
+
+    Same mechanism steering uses (the tool is re-runnable by construction,
+    which is what ``interruptible=True`` means), reached through the fork
+    predicate alone — no steering message is queued anywhere in this test.
+    """
+    tool_started = asyncio.Event()
+    outcome: dict[str, str] = {}
+
+    stream = ScriptedStream(
+        [
+            [
+                tool_call_delta(0, id="c1", name="block", args="{}"),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    context = LoopContext(
+        tools=[_blocking_tool("block", tool_started, interruptible=True, outcome=outcome)]
+    )
+    config = make_config(
+        stream,
+        interrupt_mode="immediate",
+        has_pending_fork=lambda: True,
+    )
+
+    messages = await AgentLoop().run_to_end([Message.user("go")], context, config, None)
+
+    assert outcome == {"block": "cancelled"}
+    results = [m for m in messages if isinstance(m, Message) and m.role == "tool"]
+    assert results[0].is_error
+
+
+@pytest.mark.asyncio
+async def test_a_pending_fork_does_not_skip_the_rest_of_the_batch():
+    """T7. THE test. A fork must not damage the parent's turn.
+
+    The control is ``test_steering_interrupts_between_exclusive_calls``, which
+    is this exact shape with a steering message instead of a fork and asserts
+    the opposite: there, ``b`` never runs and gets a SKIPPED result. Here every
+    planned call must still execute and produce a real result, because a fork
+    has not redirected the work — it is a copy of the conversation, taken to the
+    side, and the parent was told to carry on.
+    """
+    executed: list[str] = []
+    tool_a = echo_tool(executed, name="a", concurrency="exclusive")
+    tool_b = echo_tool(executed, name="b", concurrency="exclusive")
+
+    stream = ScriptedStream(
+        [
+            [
+                tool_call_delta(0, id="c1", name="a", args="{}"),
+                tool_call_delta(1, id="c2", name="b", args="{}"),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    context = LoopContext(tools=[tool_a, tool_b])
+    config = make_config(
+        stream,
+        interrupt_mode="immediate",
+        # Pending for the WHOLE run, which is the hostile case: every batch-slot
+        # check sees it and none of them may skip anything.
+        has_pending_fork=lambda: True,
+    )
+
+    messages = await AgentLoop().run_to_end([Message.user("go")], context, config, None)
+
+    assert executed == ["a", "b"], "a pending fork skipped the parent's remaining tool calls"
+    results = [m for m in messages if isinstance(m, Message) and m.role == "tool"]
+    assert len(results) == 2
+    assert not any(result.is_error for result in results)
+    assert not any("skipped" in result.text.lower() for result in results)
+
+
+@pytest.mark.asyncio
+async def test_a_pending_fork_injects_nothing_into_the_parents_context():
+    """T8. A fork is not a message.
+
+    A steer becomes a user turn the parent's model is given; a fork must leave
+    the conversation byte-identical to a run that never forked at all. Asserted
+    against a CONTROL run rather than against a hand-written expectation, so the
+    test cannot drift from what the loop actually produces.
+    """
+
+    def build() -> tuple[ScriptedStream, LoopContext, list[str]]:
+        executed: list[str] = []
+        stream = ScriptedStream(
+            [
+                [
+                    tool_call_delta(0, id="c1", name="echo", args="{}"),
+                    StreamEndEvent(stop_reason="toolUse"),
+                ],
+                [StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")],
+            ]
+        )
+        return stream, LoopContext(tools=[echo_tool(executed)]), executed
+
+    control_stream, control_context, _ = build()
+    await AgentLoop().run_to_end(
+        [Message.user("go")],
+        control_context,
+        make_config(control_stream, interrupt_mode="immediate"),
+        None,
+    )
+
+    fork_stream, fork_context, _ = build()
+    await AgentLoop().run_to_end(
+        [Message.user("go")],
+        fork_context,
+        make_config(fork_stream, interrupt_mode="immediate", has_pending_fork=lambda: True),
+        None,
+    )
+
+    def texts(context: LoopContext) -> list[tuple[str, str]]:
+        return [(m.role, m.text) for m in context.messages if isinstance(m, Message)]
+
+    assert texts(fork_context) == texts(control_context)
+
+
+@pytest.mark.asyncio
+async def test_a_raising_fork_predicate_never_breaks_the_turn():
+    """A host callback that raises costs an interrupt, never the run.
+
+    Same posture the steering peek has: the fork is a convenience on top of a
+    turn the user is waiting for, and a bug in the host's predicate must not be
+    able to take that turn down.
+    """
+    executed: list[str] = []
+
+    def boom() -> bool:
+        raise RuntimeError("host bug")
+
+    stream = ScriptedStream(
+        [
+            [
+                tool_call_delta(0, id="c1", name="echo", args="{}"),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    context = LoopContext(tools=[echo_tool(executed)])
+    config = make_config(stream, interrupt_mode="immediate", has_pending_fork=boom)
+
+    messages = await AgentLoop().run_to_end([Message.user("go")], context, config, None)
+
+    assert executed == ["echo"]
+    assert any(isinstance(m, Message) and m.text == "done" for m in messages)

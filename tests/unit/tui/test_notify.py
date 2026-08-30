@@ -462,6 +462,11 @@ def test_the_notifier_subprocess_cannot_stall_the_render_loop(monkeypatch: Any) 
     redirected stdio, a hung D-Bus activation or a cmux socket mid-restart
     holds the TUI's loop, and the child's output interleaves into the frame
     Textual is painting.
+
+    Patched in ``local_operator.proc``, which is where the spawn shape now
+    lives: ``notify._spawn_detached`` delegates to it so the fork spawn backends
+    and the notifier cannot drift apart on these guarantees. The property under
+    test is unchanged and is still asserted through the notifier's own door.
     """
     seen: dict[str, Any] = {}
 
@@ -470,7 +475,7 @@ def test_the_notifier_subprocess_cannot_stall_the_render_loop(monkeypatch: Any) 
         seen["argv"] = argv
         return object()
 
-    monkeypatch.setattr("local_operator.tui.notify.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("local_operator.proc.subprocess.Popen", fake_popen)
     _spawn_detached(["notify-send", "hi"])
     assert seen["start_new_session"] is True
     assert seen["stdin"] == subprocess.DEVNULL
@@ -485,5 +490,5 @@ def test_a_failing_notifier_spawn_is_silent(monkeypatch: Any) -> None:
     def boom(*a: Any, **k: Any) -> Any:
         raise FileNotFoundError("notify-send")
 
-    monkeypatch.setattr("local_operator.tui.notify.subprocess.Popen", boom)
+    monkeypatch.setattr("local_operator.proc.subprocess.Popen", boom)
     _spawn_detached(["notify-send", "hi"])  # must not raise

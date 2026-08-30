@@ -558,9 +558,23 @@ class Transcript:
     def latest_custom(self, custom_type: str) -> dict[str, Any] | None:
         """Details of the newest custom entry of ``custom_type`` (backward
         scan, first hit wins — each change appends a full snapshot)."""
+        entry = self.latest_custom_entry(custom_type)
+        return dict(entry.payload.get("details", {})) if entry is not None else None
+
+    def latest_custom_entry(self, custom_type: str) -> TranscriptEntry | None:
+        """The newest custom ENTRY of ``custom_type``, timestamp included.
+
+        The twin of :meth:`latest_custom` for the one caller that needs to know
+        WHEN the snapshot was written rather than only what it said: a forked
+        session tells its parent's inherited title from a title of its own by
+        comparing that timestamp against the moment of the fork (see
+        ``Session._is_unnamed_fork``). Kept as a separate method so the common
+        case still gets the details mapping and cannot accidentally depend on
+        entry internals.
+        """
         for entry in reversed(self._entries):
             if entry.type == ENTRY_CUSTOM and entry.payload.get("custom_type") == custom_type:
-                return dict(entry.payload.get("details", {}))
+                return entry
         return None
 
     def usages_since_compaction(self) -> list[dict[str, Any]]:

@@ -82,11 +82,12 @@ from __future__ import annotations
 import os
 import re
 import shutil
-import subprocess
 import sys
 import uuid
 from typing import Callable, Literal, Mapping
 
+from local_operator import terminals
+from local_operator.proc import spawn_detached
 from local_operator.tui.settings import settings_get
 
 #: Environment kill switch, mirroring ``LOCAL_OPERATOR_NO_TERMINAL_TITLE`` and
@@ -225,17 +226,17 @@ def detect_protocol(env: EnvMap | None = None) -> NotifyProtocol:
     an unrecognised terminal that silently swallowed OSC 9 would give the user
     nothing at all, whereas a BEL at worst rings.
     """
+    # The marker tests themselves live in ``local_operator.terminals`` — one
+    # definition shared with the glyph capability check and the fork spawn
+    # registry. Only the CONCLUSION (which protocol) is this module's business.
     source = os.environ if env is None else env
-    if source.get("KITTY_WINDOW_ID") or source.get("TERM", "").startswith("xterm-kitty"):
+    if terminals.is_kitty(source):
         return "osc99"
-    if source.get("GHOSTTY_RESOURCES_DIR") or source.get("GHOSTTY_BIN"):
+    if terminals.is_ghostty(source) or terminals.is_wezterm(source) or terminals.is_iterm(source):
         return "osc9"
-    if source.get("WEZTERM_PANE") or source.get("WEZTERM_EXECUTABLE"):
-        return "osc9"
-    if source.get("ITERM_SESSION_ID"):
-        return "osc9"
-    term_program = source.get("TERM_PROGRAM", "").lower()
-    if term_program in ("ghostty", "iterm.app", "wezterm", "warpterminal"):
+    # Warp speaks OSC 9 and has no marker beyond TERM_PROGRAM, so it is checked
+    # here rather than earning a predicate of its own.
+    if terminals.term_program(source) == terminals.TERM_PROGRAM_WARP:
         return "osc9"
     return "bell"
 
@@ -490,25 +491,13 @@ def should_use_desktop_fallback(
 def _spawn_detached(argv: list[str]) -> None:
     """Fire-and-forget a notifier process; never raise, never block.
 
-    ``start_new_session`` plus fully redirected stdio is what keeps a slow or
-    hung notifier (a stalled D-Bus activation, a cmux socket mid-restart) from
-    holding the TUI's event loop or writing bytes into the frame. The child is
-    never waited on: it is a side effect, and its exit status tells this app
-    nothing it can act on.
+    Thin alias over :func:`local_operator.proc.spawn_detached`, which owns the
+    start_new_session + DEVNULL + never-wait shape and the reasons for it. Kept
+    as a name here because this module's call sites read as notification code
+    and because the helper moved out only when the fork spawn backends needed
+    the same guarantees — one definition, two callers.
     """
-    try:
-        subprocess.Popen(
-            argv,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-    except Exception:
-        # Best-effort by design: a missing binary or a spawn failure must never
-        # surface as an error in a session, because the user asked for a task
-        # and not for a toast.
-        pass
+    spawn_detached(argv)
 
 
 class Notifier:

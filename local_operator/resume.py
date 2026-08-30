@@ -59,6 +59,23 @@ ORIGIN_NAME = "origin.json"
 #: scheduled run, a server-side session) is a new value and not a second file.
 ORIGIN_SUBAGENT = "subagent"
 
+#: ``origin`` value for a session ``/fork`` branched off another. Unlike
+#: :data:`ORIGIN_SUBAGENT` this marks the user's OWN work: the marker records
+#: PROVENANCE (which conversation this branched from, in its ``parent`` field),
+#: and provenance is not a reason to hide a row.
+ORIGIN_FORK = "fork"
+
+#: Origins that are still the user's own conversation, so :func:`is_user_session`
+#: keeps listing them.
+#:
+#: An ALLOW-LIST rather than an ``or`` bolted onto the predicate, because the
+#: default for a new origin must stay "not the user's" (see
+#: :func:`is_user_session`): visibility is opt-IN, so an author minting a new
+#: origin value has to come here and say so deliberately. That is exactly the
+#: "has to say so here" the predicate's docstring already demanded — this makes
+#: the place to say it a named constant instead of an edit to a boolean.
+USER_ORIGINS: frozenset[str] = frozenset({ORIGIN_FORK})
+
 #: Memoised ``origin.json`` verdicts for :func:`recent_sessions`, keyed on each
 #: marker's own ``(mtime, size)``.
 #:
@@ -869,14 +886,23 @@ def backfill_session_titles(config_dir: Path, limit: int = 500) -> int:
 def is_user_session(session_dir: Path) -> bool:
     """True when a human started this session, so a picker may offer it.
 
-    EVERY non-empty origin is hidden, not a listed set of them: a new value
-    added later (a scheduled run, a server-side session) is therefore opt-OUT
-    of the picker by default, and an author who wants a new origin to remain
-    listable has to say so here. That default is the safe direction — a value
-    is minted by whichever code path creates the directory, and the paths that
-    do so are the machine's own.
+    Every non-empty origin is hidden EXCEPT the ones named in
+    :data:`USER_ORIGINS`: a new value added later (a scheduled run, a
+    server-side session) is therefore opt-OUT of the picker by default, and an
+    author who wants a new origin to remain listable has to say so there. That
+    default is the safe direction — a value is minted by whichever code path
+    creates the directory, and the paths that do so are the machine's own.
+
+    ``fork`` is the first origin to take the opt-in, and it is worth stating why
+    it differs in kind from ``subagent``: a subagent directory is a machine's
+    delegated run that the user never opened, while a fork is a conversation the
+    user deliberately branched. Both carry a marker; only one of them is
+    somebody else's work. Four consumers read this predicate and a fork is
+    wanted in all four — the ``/resume`` picker, ``resume_dir``'s ``@latest``
+    scan, the multiplexer's crash-restore binding, and the mobile session list.
     """
-    return not session_origin(session_dir)
+    origin = session_origin(session_dir)
+    return not origin or origin in USER_ORIGINS
 
 
 def resume_dir(config_dir: Path, requested: str) -> Path:
@@ -1163,7 +1189,14 @@ def recent_sessions(config_dir: Path, limit: int | None = None) -> list[tuple[st
                         # could not confirm it, and ``merged`` below is built
                         # from the names seen here.
                         seen.discard(entry.name)
-                if origin:
+                # The same verdict :func:`is_user_session` reaches, spelled out
+                # here rather than delegated because this loop must not pay a
+                # second stat per directory to re-read the marker it just read.
+                # It is therefore the ONE place that has to be kept in step with
+                # that predicate by hand — ``USER_ORIGINS`` is the shared fact
+                # both consult, so a new user-visible origin is added there once
+                # rather than in two places that can drift.
+                if origin and origin not in USER_ORIGINS:
                     continue
             rows.append((entry.name, mtime))
     merged = {

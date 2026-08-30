@@ -53,6 +53,7 @@ from collections.abc import (
 )
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, TypeGuard
 
 from local_operator.compaction.tokens import IMAGE_TOKEN_ESTIMATE, approx_text_tokens
@@ -353,6 +354,28 @@ class _PendingCompaction:
     reason: str
     #: Ids of ``plan.llm_history[: plan.cut]`` — the span the summary replaces.
     summarized_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _ForkRequest:
+    """A ``/fork`` waiting for a safe boundary in a RUNNING turn.
+
+    Frozen: the request is decided once, by the host that took the user's
+    command, and the boundary only executes it. Nothing about which
+    conversation is being branched, or with what opening message, may change
+    between the request and the clone.
+    """
+
+    #: Where the sessions store lives. Carried on the request rather than read
+    #: at drain time so the clone cannot land in a different store than the one
+    #: the command was issued against.
+    config_dir: Path
+    #: The optional first user message for the fork (``""`` for none).
+    message: str
+    #: Called with the new session id once the clone lands, or with ``""`` when
+    #: it failed. The host owns everything user-visible from there (the receipt,
+    #: the spawn, the notice weight); the session's job ends at the clone.
+    on_complete: Callable[[str, str], None]
 
 
 def _configured_max_running() -> dict[str, int]:
@@ -1571,6 +1594,11 @@ class Session:
             tools=self._tools,
         )
         self._handlers: list[EventHandler] = []
+        # A ``/fork`` requested while a turn is running, waiting for a safe
+        # boundary. Not a steering message and not on the steering queue: a
+        # steer becomes a user turn in THIS conversation, while a fork must
+        # leave it exactly as it was. See :meth:`request_fork`.
+        self._fork_pending: _ForkRequest | None = None
         self._steering_queue: asyncio.Queue[AgentMessage] = asyncio.Queue()
         # Producer identity is transport provenance, not message identity. Keep
         # it beside queued messages so ordinary callers can still choose ids
@@ -3234,6 +3262,44 @@ class Session:
         if error is not None:
             logger.debug("conversation name write failed; will retry at dispose", exc_info=error)
 
+    def _is_unnamed_fork(self) -> bool:
+        """True while this session is a fork still wearing its parent's title.
+
+        A fork must be named for what it was forked to DO, not for what the
+        parent was doing — so the inherited title is declined until the fork has
+        one of its own (see :meth:`_load_conversation_name`).
+
+        "Of its own" is decided by TIME, not by a flag, because the parent's
+        title and the fork's own title are the same kind of entry in the same
+        copied file and nothing else distinguishes them. Any title journalled
+        AFTER the moment of the fork was written by this session; anything at or
+        before it came across in the copy. That makes the suppression one-shot
+        without any state to reset: the first name this fork writes lands after
+        ``forked_at``, and from then on every resume restores it normally.
+
+        Reads the origin marker, not a cached field, because this runs during
+        construction — before any of the session's own state exists — and is
+        asked once per boot. Tolerant of a missing or unreadable marker in the
+        direction that preserves existing behaviour: no marker means "not a
+        fork", so an ordinary session's restore is untouched.
+        """
+        try:
+            from local_operator.fork import fork_instant
+
+            forked_at = fork_instant(self._transcript.directory)
+        except Exception:
+            return False
+        if forked_at is None:
+            return False
+        entry = self._transcript.latest_custom_entry(CONVERSATION_NAME_CUSTOM_TYPE)
+        if entry is None:
+            # A fork of a conversation that was never named. Nothing to decline,
+            # and the naming path fires on its first turn like any new session.
+            return True
+        # ``>`` and not ``>=``: an entry written in the same instant as the fork
+        # is the parent's, since the clone necessarily happened after it.
+        return not entry.ts > forked_at
+
     def _load_conversation_name(self) -> None:
         """Adopt the title journalled by the session this one resumes.
 
@@ -3250,6 +3316,32 @@ class Session:
         restore is neither a rename nor a generation — it is the same name it
         already was.
         """
+        # A FORK THAT HAS NOT YET BEEN NAMED DELIBERATELY DECLINES THE
+        # INHERITANCE. A fork carries a byte-identical copy of its parent's
+        # transcript, so the parent's journalled title is sitting right there in
+        # it — and adopting it would name the branch after the work it left,
+        # then latch ``requested`` and never reconsider. The user forked to do
+        # something ELSE, and the name they will scan the picker for is the name
+        # of that something.
+        #
+        # Suppressed HERE, at adoption, rather than by editing the copied
+        # transcript or withholding the title sidecar. Both alternatives were
+        # considered and are worse:
+        #
+        # - Rewriting the clone to strip the entry would destroy the
+        #   byte-identity the fork's cache warmth depends on (the fork's first
+        #   request has to reproduce the parent's cached prefix exactly).
+        # - Not copying ``title.json`` would not work at all: the title arrives
+        #   through this transcript entry regardless, and the sidecar's real job
+        #   is to keep the fork's PICKER ROW labelled during the seconds before
+        #   its own name lands — without it a brand-new fork renders as a blank
+        #   row, since its opening message is the parent's.
+        #
+        # The suppression is one-shot by construction: it applies only while the
+        # fork has no title of its own, so once the naming path writes one, every
+        # later ``/resume`` of this fork restores that name normally.
+        if self._is_unnamed_fork():
+            return
         details = self._transcript.latest_custom(CONVERSATION_NAME_CUSTOM_TYPE)
         if not details:
             return
@@ -3581,6 +3673,93 @@ class Session:
         """
         self._steering_queue.put_nowait(message)
         self.refresh_frontend_state()
+
+    def request_fork(
+        self,
+        config_dir: Path,
+        *,
+        message: str = "",
+        on_complete: Callable[[str, str], None],
+    ) -> None:
+        """Branch this conversation into a new session at the next safe boundary.
+
+        The transcript on disk is the artifact a fork copies, so a fork is only
+        correct at a point where the run's messages are already persisted AND
+        the file does not end in an assistant ``tool_use`` with no
+        ``tool_result`` — a clone taken mid-batch would make the fork's very
+        first request a provider 400, in a different window, minutes later.
+
+        Two drain points, and BOTH are required:
+
+        * :meth:`_on_turn_end`, the tool-loop boundary, which is where a fork
+          requested during a multi-step run lands. That hook opens with
+          ``_persist_progress`` unconditionally, so the run's history is on disk
+          by the time the clone runs — exactly the precondition a file copy
+          needs.
+        * the post-run path after ``_persist_new_messages``, for a fork
+          requested during the FINAL model turn. ``on_turn_end`` fires only when
+          the loop will CONTINUE (``harness/loop.py`` guards it on
+          ``has_more_tool_calls``, because a terminal boundary is the post-run
+          pass's job), so a fork asked for near the end of a run never reaches
+          it. Implementing only the hook leaves that fork hanging until the
+          user's next turn, which presents as "sometimes /fork does nothing".
+
+        When no turn is running the caller should clone directly instead of
+        coming here: the transcript is already complete and consistent at idle,
+        so deferring would only add latency to the common case.
+
+        ``on_complete`` is called with ``(fork_id, error)`` — exactly one of
+        which is non-empty — on the session's own loop. The host owns everything
+        the user sees from there; the session's responsibility ends at the clone.
+        """
+        self._fork_pending = _ForkRequest(
+            config_dir=config_dir, message=message, on_complete=on_complete
+        )
+
+    def has_pending_fork(self) -> bool:
+        """Whether a fork is waiting for a boundary. Polled by the loop.
+
+        Wired to ``LoopConfig.has_pending_fork``, which ORs it into the
+        interrupt poll so an ``interruptible=True`` tool is torn down within one
+        poll interval (~250 ms) rather than the fork waiting out a ten-minute
+        ``wait``. It deliberately does NOT reach the batch-skip branch; see that
+        field's comment for why that asymmetry is the subtle part.
+        """
+        return self._fork_pending is not None
+
+    async def _drain_pending_fork(self) -> None:
+        """Perform a deferred fork, if one is pending. Never raises into a turn.
+
+        Called from both boundaries :meth:`request_fork` documents. The pending
+        request is cleared BEFORE the clone runs, so a failure cannot leave a
+        request that re-fires at every subsequent boundary for the rest of the
+        session.
+        """
+        request = self._fork_pending
+        if request is None:
+            return
+        self._fork_pending = None
+        from local_operator.fork import ForkError, fork_session
+
+        try:
+            # On a worker thread: the copy is small in practice (the largest
+            # transcript in a real store measured 216 KB) but its size is
+            # user-controlled, and a turn boundary is not a place to hold the
+            # loop for unbounded file I/O.
+            fork_id = await asyncio.to_thread(
+                fork_session,
+                request.config_dir,
+                self._session_id,
+                message=request.message,
+            )
+        except ForkError as exc:
+            request.on_complete("", str(exc))
+            return
+        except Exception as exc:  # noqa: BLE001 — a fork must never kill a turn
+            logger.exception("fork: unexpected failure cloning %s", self._session_id)
+            request.on_complete("", str(exc))
+            return
+        request.on_complete(fork_id, "")
 
     def recall_steering(self, message: AgentMessage) -> bool:
         """Remove ONE specific message from the steering queue, if present.
@@ -4422,6 +4601,11 @@ class Session:
                 get_steering_messages=self._drain_steering,
                 has_steering_messages=lambda: not self._steering_queue.empty(),
                 has_urgent_steering_messages=self._has_urgent_steering,
+                # Rides the SAME interrupt poll steering uses, so a fork
+                # requested mid-tool reaches its boundary in ~250 ms instead of
+                # after a long `wait`/`bash`/MCP call. It cannot skip the
+                # batch's remaining calls; see LoopConfig.has_pending_fork.
+                has_pending_fork=self.has_pending_fork,
                 get_aside_messages=self._drain_asides,
                 get_follow_up_messages=self._todo_continuation,
                 resolve_fallback_tool=self._fallback_tool_resolver,
@@ -4515,6 +4699,16 @@ class Session:
             # replayable cut target; re-appending those would resurrect
             # messages after the compaction entry that superseded them.
             await self._persist_new_messages(new_messages)
+
+            # The SECOND fork drain point, and it is not redundant with the one
+            # in ``_on_turn_end``. That hook fires only when the loop will
+            # CONTINUE, so a fork requested during the final model turn of a run
+            # — the common case of "type /fork while it is finishing up" —
+            # never reaches it. Without this line that fork silently waits for
+            # the user's next turn, which reads as the command doing nothing.
+            # Placed after the persist above for the same reason as the other
+            # site: the clone copies what is on disk.
+            await self._drain_pending_fork()
 
             # Snapshot the todo list when it moved this turn. Guarded by the
             # same full-list fingerprint the continuation guardrail uses, so an
@@ -5318,6 +5512,15 @@ class Session:
         # Idempotent by message id, so the post-run pass still writes each
         # message exactly once.
         await self._persist_progress(messages)
+        # The fork drains HERE, immediately after that persist and before the
+        # compaction decision below. Order is the whole argument: the clone is a
+        # file copy, so it needs the run's messages already on disk (the line
+        # above) and a transcript whose tail is not an unanswered ``tool_use``
+        # (this boundary is after the batch's results landed). Draining before
+        # any compaction also means the fork inherits the transcript the user
+        # was looking at when they typed the command, rather than a rewritten
+        # head they never saw.
+        await self._drain_pending_fork()
         try:
             from local_operator.compaction.api import CompactionSettings
         except ImportError:
