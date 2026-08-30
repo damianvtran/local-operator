@@ -158,11 +158,22 @@ class UserMessageStart(Message):
     prompt (and image count) so the TUI can paint it — the mobile→TUI half of
     keeping the two surfaces in step. The TUI's own prompt path already paints
     its UserBlock optimistically, so the app de-dupes on arrival. The field is
-    ``prompt``, not ``text``: Textual's ``Message`` reserves ``text``."""
+    ``prompt``, not ``text``: Textual's ``Message`` reserves ``text``.
 
-    def __init__(self, prompt: str, images: list[ImageContent] | int) -> None:
+    ``message_id`` is the announced ``Message``'s own id — the correlation key
+    the app's pending-echo registry matches on, in the same role
+    :class:`PeerMessageDelivered` uses it for. It is what tells a prompt this
+    TUI painted apart from a DISTINCT message that happens to carry identical
+    words (repeated "yes" / "continue" from the phone, issue #228); matching
+    those by text swallowed the foreign row. Defaults to empty for reduced
+    event producers and synthetic tests, where the app falls back to its
+    historical text match.
+    """
+
+    def __init__(self, prompt: str, images: list[ImageContent] | int, message_id: str = "") -> None:
         super().__init__()
         self.prompt = prompt
+        self.message_id = message_id
         # Integer remains accepted for older synthetic tests and reduced event
         # producers. Production carries immutable blocks; only that path can
         # render thumbnails, while the compatibility path preserves its receipt.
@@ -576,7 +587,11 @@ class EventController:
         # is the AgentMessage union, so pyright needs the isinstance.
         if isinstance(message, HarnessMessage) and message.role == "user":
             images = [b for b in message.content if isinstance(b, ImageContent)]
-            self._post(UserMessageStart(message.text, images))
+            # The message id rides along as the echo-dedup correlation key: the
+            # app registered the same id when it painted the row optimistically,
+            # so an event whose id it does not recognise is a genuinely new
+            # message and must be painted even when the words repeat (#228).
+            self._post(UserMessageStart(message.text, images, message.id))
             return
         self._assistant_buffer = ""
         self._assistant_seen = ""

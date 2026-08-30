@@ -1,0 +1,66 @@
+"""Drive a REAL Session and OBSERVE the announced MessageStartEvent ids.
+
+The registry is only correct if the id the TUI hands prompt()/steer_message()
+is the id that comes back on the announcement. Asserted against the real
+engine, not a fake and not the source text.
+"""
+import asyncio, sys
+import pathlib, tempfile
+
+# The repo root, derived from this file's own location rather than hardcoded:
+# committed evidence has to run from any checkout, not only the worktree it was
+# written in (round 1, F3). Falls back to argv[1] when the script is copied out
+# of docs/evidence/, which is how it is usually run.
+_here = pathlib.Path(__file__).resolve()
+_root = sys.argv[1] if len(sys.argv) > 1 else str(_here.parents[3])
+sys.path.insert(0, _root)
+
+from local_operator.harness.types import Message, MessageStartEvent, StreamEndEvent
+from local_operator.session.session import Session
+from local_operator.session.transcript import Transcript
+from tests.unit.session.test_session import MODEL, ScriptedStream
+
+
+async def main() -> int:
+    tmp = pathlib.Path(tempfile.mkdtemp())
+    announced: list[str] = []
+
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")]])
+    session = Session(
+        model=MODEL,
+        stream_fn=stream,
+        tools=[],
+        transcript=Transcript(tmp / "sess"),
+        system_blocks_provider=lambda: ["stable"],
+    )
+
+    def on_event(event):
+        if isinstance(event, MessageStartEvent):
+            msg = event.message
+            if isinstance(msg, Message) and msg.role == "user":
+                announced.append(str(msg.id))
+
+    session.subscribe(on_event)
+
+    # 1. The prompt path: the TUI mints the id and pushes it in.
+    await session.prompt("continue", message_id="tui-minted-id")
+    print(f"prompt(message_id='tui-minted-id') announced : {announced}")
+    ok_prompt = announced == ["tui-minted-id"]
+
+    # 2. The steer path: the queued object's own id is announced at the drain.
+    announced.clear()
+    steer = Message.user("continue")
+    session.steer_message(steer)
+    drained = await session._drain_steering()
+    print(f"steer_message(id={steer.id[:12]}...) announced  : "
+          f"{[a[:12] + '...' for a in announced]}")
+    ok_steer = announced == [steer.id] and len(drained) == 1
+
+    print()
+    print(f"prompt id round-trips : {ok_prompt}")
+    print(f"steer id round-trips  : {ok_steer}")
+    print("RESULT: " + ("PASS - the announced id is the id the TUI registered"
+                        if ok_prompt and ok_steer else "FAIL"))
+    return 0 if (ok_prompt and ok_steer) else 1
+
+sys.exit(asyncio.run(main()))
