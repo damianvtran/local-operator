@@ -1402,10 +1402,19 @@ async def test_expanded_footer_keeps_the_hotkey_column_fixed_while_scrolling() -
                     shapes.add("bare")  # the end state deliberately sheds the prefix
                     continue
                 columns.add(footer.index("ctrl+t"))
-                # Total, not ``int(...)``: the seam row carries no digits, and an
-                # assertion that dies parsing before it checks is not a guard.
-                digits = footer.split(" more")[0].removeprefix("↓ ").strip()
-                shapes.add("numbered" if digits.isdigit() else "numberless")
+                # The taxonomy is TOTAL (design round 3, D9). The widget paints
+                # four shapes, and folding the arrow-only row (``↓ ctrl+t``, at
+                # shed widths) into ``numberless`` would let the guard conflate
+                # two genuinely different layouts if the sweep were ever widened
+                # to a narrow geometry. Also note this parse must not assume a
+                # digit: an assertion that dies parsing before it checks is not
+                # a guard, which is how the round-2 version of this test missed
+                # the seam row entirely.
+                if "more" not in footer:
+                    shapes.add("arrowonly")
+                else:
+                    digits = footer.split(" more")[0].removeprefix("↓ ").strip()
+                    shapes.add("numbered" if digits.isdigit() else "numberless")
             # The sweep must actually reach every shape, or it proves nothing.
             assert shapes == {"numbered", "numberless", "bare"}, f"{size}: {shapes}"
             assert len(columns) == 1, f"{size}: ctrl+t moved between {sorted(columns)}"
@@ -1461,10 +1470,19 @@ async def test_expanded_footer_recomposes_when_only_the_width_changes() -> None:
     the hotkey.
 
     Asserts against a FRESH BOOT at each width, which is what the reader should
-    have got, rather than against a hand-written expectation."""
+    have got, rather than against a hand-written expectation.
+
+    The sweep walks BOTH directions (UX round 3, U11). A monotone narrowing walk
+    passes against a panel that recomposes on narrowing and no-ops on widening —
+    and that panel is broken for a reader who drags a split back open, unmaximizes
+    or rotates a tiling layout: at 60 columns it would still paint the 10-cell row
+    composed for 14, so the arrow and the count are both gone with todos hidden.
+    That is U1's "told this is everything" shape arriving through the resize door,
+    and one direction of sampling cannot see it."""
     from local_operator.tools import builtin
 
-    widths = (34, 26, 22, 20, 16)
+    # Narrowing, then widening back out past where it started.
+    widths = (34, 26, 22, 20, 16, 20, 26, 34, 60)
     fixture: list[dict[str, object]] = [
         {"name": "Todos", "items": [_item(f"task {n}", "pending") for n in range(20)]}
     ]
