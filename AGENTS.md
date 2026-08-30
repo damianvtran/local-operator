@@ -38,8 +38,13 @@ PYTEST_XDIST_AUTO_NUM_WORKERS=12 .venv/bin/python -m pytest tests/unit -q  # hon
 .venv/bin/python -m pytest tests/unit -n0 -q     # serialise for a debugger
 ```
 
-**CI is unaffected**: a 4-vCPU runner already resolves below the cap, so the
-hook changes nothing there. `--dist worksteal` is also in `addopts` — per-test
+**CI keeps every core.** The CPU share is skipped when `CI` is set: a hosted
+runner is dedicated and single-purpose, so the contention the share protects
+against does not exist there. Applying it anyway halved CI parallelism (a
+4-vCPU runner resolved to 2 workers instead of 4), which is a regression paid on
+every PR. The memory budget and the 2-8 clamp still apply on CI.
+
+`--dist worksteal` is also in `addopts` — per-test
 durations here vary by orders of magnitude, and the default `load` scheduler
 pre-assigns chunks, leaving workers idle at the tail while one grinds through
 the slow Textual pilot tests.

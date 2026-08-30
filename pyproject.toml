@@ -289,7 +289,8 @@ exclude = ["**/node_modules", "**/__pycache__", "**/.*", "docs"]
 # waiting for the event loop rather than on CPU, so a wide run buys nothing:
 # an interleaved A/B on tests/unit/server measured `-n 4` FASTER than `-n 14`
 # (5.3-5.9s vs 7.8-11.3s) under that contention. See conftest.py for the full
-# measurements and the fallback behaviour.
+# measurements and the fallback behaviour. CI is exempt from the CPU share (a
+# dedicated runner has no contention to protect against) and keeps every core.
 #
 # `auto` must stay literal here: an explicit `-n N` in addopts would make both
 # the hook and the env var inert.

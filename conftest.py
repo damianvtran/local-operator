@@ -44,7 +44,14 @@ WHAT THIS DOES NOT AFFECT
   (``-n0 --pdb -s``) and forcing a wide run (``-n 12``) both behave exactly as
   before.
 * ``PYTEST_XDIST_AUTO_NUM_WORKERS`` still wins, see below.
-* CI is unchanged in practice: a 4-vCPU runner already resolves below the cap.
+* **CI keeps every core.** A hosted runner is a dedicated, single-purpose box:
+  nothing else competes for it, there are no sibling worktrees, and it is torn
+  down after the job. The entire reason for the CPU share is contention that
+  does not exist there, and applying it anyway measurably HALVED CI parallelism
+  (a 4-vCPU runner resolved to 2 workers instead of 4) - a regression paid on
+  every PR. So the share is skipped when ``CI`` is set; the memory budget and
+  the 2..8 clamp still apply, because a runner that runs out of memory fails
+  exactly the way a laptop does.
 """
 
 from __future__ import annotations
@@ -69,8 +76,11 @@ _MB_PER_WORKER = 600
 #: machine is contended in the first place.
 _MEMORY_SHARE = 0.5
 
-#: Fraction of cores to claim. Leaving half idle is what keeps a second worktree's
-#: suite from turning into a swap storm; the A/B above shows we lose nothing.
+#: Fraction of cores to claim on a developer machine. Leaving half idle is what
+#: keeps a second worktree's suite from turning into a swap storm; the A/B above
+#: shows we lose nothing. Deliberately NOT applied on CI - see the module
+#: docstring: a dedicated runner has no contention to protect against, and
+#: halving its workers only makes every PR slower.
 _CPU_SHARE = 0.5
 
 #: Hard bounds. Below 2 the suite stops being parallel at all (and a one-worker
@@ -158,7 +168,11 @@ def pytest_xdist_auto_num_workers(config: pytest.Config) -> int:
                 )
 
         cpus = os.cpu_count() or 1
-        cap = max(1, int(cpus * _CPU_SHARE))
+        # `CI` is set by GitHub Actions and essentially every other provider.
+        # On a dedicated runner take all the cores; the share exists only to
+        # protect a shared developer machine.
+        on_ci = bool(os.environ.get("CI"))
+        cap = cpus if on_ci else max(1, int(cpus * _CPU_SHARE))
 
         available_mb = _available_memory_mb()
         if available_mb is not None:
