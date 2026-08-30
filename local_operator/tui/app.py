@@ -3284,9 +3284,10 @@ class OperatorApp(App[None]):
             # stayed None, so every provider command answered "session is still
             # starting..."). The bad value is carried into the setup state so
             # the guidance can name what is actually wrong.
-            bad_hosting = getattr(error, "hosting", None)
+            unknown = isinstance(error, HostingUnknownError)
             self._enter_setup_state(
-                unknown_hosting=bad_hosting if isinstance(error, HostingUnknownError) else None
+                unknown_hosting=getattr(error, "hosting", None) if unknown else None,
+                hosting_source=getattr(error, "source", "config") if unknown else "config",
             )
             return
         self._system_notice(f"session failed to start: {error}", "error")
@@ -3298,7 +3299,9 @@ class OperatorApp(App[None]):
         # accepted and painted where the app meant to say "session error".
         self._status.update(model_label="session error", model_name="", streaming=False)
 
-    def _enter_setup_state(self, *, unknown_hosting: str | None = None) -> None:
+    def _enter_setup_state(
+        self, *, unknown_hosting: str | None = None, hosting_source: str = "config"
+    ) -> None:
         """First-run setup: guide the user to `/login` with no session yet.
 
         Reached when the session could not be built because NOTHING is
@@ -3316,6 +3319,13 @@ class OperatorApp(App[None]):
         one message: telling a user whose config says `anthropicxyq` that "no
         provider is configured" contradicts the file they are looking at and
         sends them looking for the wrong problem.
+
+        ``hosting_source`` keeps that honesty one step further. `/login` writes
+        the CONFIG FILE, but precedence is agent > flag > config, so when the
+        bad value came from `--hosting` or an agent record a login cannot fix
+        it — the next boot resolves the same value and returns here. Promising
+        a remedy that cannot work is a loop the user cannot see the shape of,
+        so those cases name the real source instead.
         """
         self._setup_state = True
         # The bad value is remembered so the post-login rebuild can OVERWRITE it.
@@ -3334,23 +3344,49 @@ class OperatorApp(App[None]):
         # already carry "no provider configured", so leading with the remedy
         # spends the scarce columns on the one thing they do not.
         # Action-first in BOTH variants, for the reason above: the command
-        # survives truncation, the diagnosis is what may be cut. The bad-value
-        # variant still names the offending id early, because "which word in my
-        # config is wrong" is the one thing the user cannot work out from the
-        # remedy alone, and names real providers so the fix is a copy rather
-        # than a guess.
-        if unknown_hosting:
+        # survives truncation, the diagnosis is what may be cut.
+        #
+        # LENGTH is the other half of that constraint, and word order alone did
+        # not satisfy it. The first version of the unknown-provider line ran to
+        # 141 characters, so at 80 and 100 columns — the widths people actually
+        # use — it was cut mid-clause on "is not", and at 60 the offending value
+        # never appeared at all: the user was told to fix "this" without ever
+        # being told what "this" was, which is precisely what naming the value
+        # exists to prevent. Both lines are now short enough to survive 80
+        # columns whole.
+        #
+        # A runnable example (`/login openai`) replaces the `<provider>`
+        # placeholder plus a parenthetical example: the placeholder form spent
+        # ~30 of the scarcest columns saying the same thing twice, and the
+        # concrete command teaches the shape by itself. `/provider` is kept
+        # because it is the discovery affordance for "which providers exist".
+        if unknown_hosting and hosting_source != "config":
+            # `/login` writes config, and config is NOT what produced this
+            # value, so recommending it here would be a lie that loops. Name
+            # the real source and keep the line inside 80 columns.
+            origin = "--hosting" if hosting_source == "flag" else "the agent"
             self._announce_on_splash(
-                f"Run /login <provider> to fix this (e.g. /login openai) "
-                f"— '{unknown_hosting}' in your config is not a known provider, "
-                "or /provider to see the list.",
+                f"'{unknown_hosting}' from {origin} is not a known provider "
+                "(/provider lists them).",
                 "warning",
+                headline=f"Unknown provider '{unknown_hosting}'",
+            )
+        elif unknown_hosting:
+            self._announce_on_splash(
+                f"/login openai — '{unknown_hosting}' is not a known "
+                "provider (/provider lists all).",
+                "warning",
+                # The headline is passed rather than sniffed out of the text:
+                # the toast is the ONE element that is never truncated, so it
+                # is where the bad value is guaranteed to reach the user even
+                # on a narrow terminal.
+                headline=f"Unknown provider '{unknown_hosting}'",
             )
         else:
             self._announce_on_splash(
-                "Run /login <provider> to get started (e.g. /login openai) "
-                "— no provider configured yet, or /provider to see the list.",
+                "/login openai to get started — no provider configured " "(/provider lists all).",
                 "warning",
+                headline="No provider configured",
             )
         if self._status is not None:
             # "setup" rather than a model name: there is no model until the user
@@ -14347,39 +14383,34 @@ class OperatorApp(App[None]):
         """
         try:
             from local_operator.config import ConfigManager
-            from local_operator.model.defaults import default_model_for
             from local_operator.paths import config_dir
-            from local_operator.providers.registry import credential_provider_id
+            from local_operator.providers.login_defaults import plan_login_defaults
 
             manager = ConfigManager(config_dir())
-            configured = manager.get_config_value("hosting")
-            # "Already configured" only counts when it is configured to
-            # something REAL. A hosting the registry does not own is what put
-            # the app in the setup state, and leaving it in place made the
-            # login a no-op: the rebuild resolved the same bad value and fell
-            # back into setup, so the user logged in successfully and still had
-            # no session -- the same dead end this whole path exists to end.
-            # Compared against the value the boot failure actually reported
-            # rather than re-validating here, so this stays a config writer and
-            # the registry lookup keeps living in the resolver.
-            if configured and configured != self._invalid_hosting:
+            # The POLICY is shared with `local-operator login` (see
+            # providers/login_defaults): what to write for a given provider and
+            # current config is one function, because this rule previously
+            # existed twice and the copies drifted into writing different
+            # hosting ids and different models for identical input. The
+            # "is the current hosting broken?" test is the planner's REGISTRY
+            # lookup rather than this app's `_invalid_hosting` flag: the flag is
+            # strictly narrower (it only knows about a value THIS boot
+            # reported), so a config corrupted by another route was repaired by
+            # the CLI and ignored here.
+            plan = plan_login_defaults(
+                provider,
+                manager.get_config_value("hosting"),
+                manager.get_config_value("model_name"),
+            )
+            if plan.hosting is None:
                 return None
-            hosting = credential_provider_id(provider)
-            manager.set_config_value("hosting", hosting)
-            model = default_model_for(hosting) or ""
-            receipt = f"set default hosting to '{hosting}'"
-            # The stored model belonged to the provider we are replacing, so
-            # when we are REPAIRING a bad hosting it has to be replaced too:
-            # keeping it would point a real provider at a model id from a
-            # provider that never existed, turning a boot failure the app
-            # explains into a stream failure it cannot. A normal first-run
-            # login still only fills an EMPTY model, so a user who deliberately
-            # chose a model keeps it.
-            repairing = bool(configured) and configured == self._invalid_hosting
-            if model and (repairing or not manager.get_config_value("model_name")):
-                manager.set_config_value("model_name", model)
-                receipt += f", model to '{model}'"
-            return receipt
+            manager.set_config_value("hosting", plan.hosting)
+            # ``None`` = leave it; ``""`` = clear a model belonging to the
+            # provider just replaced. The explicit None test is what keeps the
+            # clearing case from being swallowed by a falsy check.
+            if plan.model_name is not None:
+                manager.set_config_value("model_name", plan.model_name)
+            return plan.receipt
         except Exception as error:  # noqa: BLE001 — never fail a completed login
             return f"logged in, but could not save default hosting/model: {error}"
 
@@ -16828,7 +16859,9 @@ class OperatorApp(App[None]):
             self._live_peer_receipts.add(message.message_id)
         self._append_block(PeerMessageBlock(message.body, message.sender))
 
-    def _announce_on_splash(self, text: str, kind: NoticeKind) -> None:
+    def _announce_on_splash(
+        self, text: str, kind: NoticeKind, *, headline: str | None = None
+    ) -> None:
         """Hold ``text`` on the splash and raise a toast for it.
 
         The splash is content-sized and rests on the input card, so a
@@ -16851,7 +16884,7 @@ class OperatorApp(App[None]):
         except NoMatches:
             return
         duration = TOAST_FAILURE_MS if kind in ("warning", "error") else TOAST_DEFAULT_MS
-        toast.show(_splash_toast_headline(text), duration_ms=duration)
+        toast.show(_splash_toast_headline(text, headline), duration_ms=duration)
 
     def _recall_queued_steers(self) -> None:
         """Esc: lift the newest still-queued steer back into the composer.
@@ -17498,8 +17531,12 @@ def _first_line(text: str) -> str:
     return ""
 
 
-def _splash_toast_headline(text: str) -> str:
+def _splash_toast_headline(text: str, headline: str | None = None) -> str:
     """The toast half of a splash announcement: a glance, not the reason.
+
+    ``headline`` is the caller's own glance for states it can name. Prefer it
+    over the text-sniffing fallbacks below: it cannot silently stop matching
+    when the message is reworded.
 
     The splash row already carries the full sentence. Repeating it in the
     toast made a two-row card that sat on the mark (design round 1, D1)
@@ -17508,6 +17545,8 @@ def _splash_toast_headline(text: str) -> str:
     zai/glm-5.3`` — because that is the model the next prompt will hit.
     Anything else stays one short clause, never the whole line.
     """
+    if headline:
+        return headline
     body = " ".join(text.split())
     if not body:
         return "Notice"
@@ -17522,6 +17561,15 @@ def _splash_toast_headline(text: str) -> str:
     # sentence lands mid-word ("…configured ye…") and repeats the greeting the
     # splash already owns (D5), so the setup notice gets its own clean headline
     # naming the condition rather than a truncated slice of the action line.
+    #
+    # Callers that KNOW the state pass ``headline`` explicitly instead of
+    # relying on the substring probe below. Deriving a headline by re-parsing
+    # prose is fragile in a way that already bit us: this branch matched the
+    # literal "no provider configured", so when the unknown-provider message
+    # was added — a sibling state one row away in the same function — it fell
+    # through to the blind cut and reintroduced the exact dangling-fragment
+    # defect D5 was raised against. A new message must not silently regress a
+    # fixed finding by failing to contain a magic phrase.
     if "no provider configured" in body.lower():
         return "No provider configured"
     # One clause, no wrap: the toast sits over the lockup, and a second

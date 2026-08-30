@@ -66,6 +66,95 @@ def test_apply_login_defaults_leaves_existing_hosting_untouched(
     assert reloaded.get_config_value("model_name") == "gpt-4o"
 
 
+@pytest.mark.parametrize(
+    ("provider", "expected_hosting", "expected_model"),
+    [
+        # Login FLAVOURS: authentication routes, not hosting ids. Each has no
+        # default model of its own, which is what made the first version of the
+        # repair leave the dead model in place beside the new hosting.
+        ("xai-oauth", "xai", "grok-3"),
+        ("openai-device", "openai", "gpt-4o"),
+        ("zai-oauth", "zai", "glm-5.3"),
+        # No default model even after alias resolution: the stale model must be
+        # CLEARED, not kept. An empty model_name is a state the resolver handles
+        # and explains; a model from a provider that never existed is not.
+        ("alibaba-token-plan", "alibaba-token-plan", ""),
+        # Ordinary provider with a default: the baseline case.
+        ("deepseek", "deepseek", "deepseek-chat"),
+    ],
+)
+def test_repair_never_leaves_a_model_from_the_replaced_provider(
+    provider: str, expected_hosting: str, expected_model: str
+) -> None:
+    """A repair must not produce a config that boots and then fails at stream time.
+
+    The regression this pins: writing the raw login-flavour id as hosting left
+    `model_name` untouched when that flavour had no default model, yielding e.g.
+    `hosting='xai-oauth' model_name='claude-sonnet-4-5'`. `configure_model`
+    ACCEPTS that pair, so boot succeeded and the failure moved to stream time as
+    a provider-side unknown-model error -- trading a boot failure the app
+    explains for a runtime failure it cannot.
+    """
+    from local_operator.providers.login_defaults import plan_login_defaults
+
+    plan = plan_login_defaults(provider, "anthropicxyq", "claude-sonnet-4-5")
+
+    assert plan.repairing is True
+    assert plan.hosting == expected_hosting
+    # Never None while repairing: the stale model is always overwritten, and ""
+    # (clear it) is a deliberate value rather than "leave it alone".
+    assert plan.model_name == expected_model
+    assert plan.model_name != "claude-sonnet-4-5"
+
+
+def test_plan_is_the_single_source_of_truth_for_both_login_front_ends() -> None:
+    """Both `/login` and `local-operator login` must plan identically.
+
+    The two copies of this rule had drifted on every axis that mattered (which
+    hosting id, which brokenness test, which model), which is the class of bug
+    the shared planner exists to make impossible. Asserting the front ends call
+    the planner rather than re-deriving the policy is what keeps them together.
+    """
+    import inspect
+
+    from local_operator.providers import auth_cli
+    from local_operator.tui import app as tui_app
+
+    for source in (
+        inspect.getsource(auth_cli._apply_login_defaults),
+        inspect.getsource(tui_app.OperatorApp._apply_login_defaults),
+    ):
+        assert "plan_login_defaults" in source
+        # The policy must not be re-implemented beside the call.
+        assert "default_model_for" not in source
+        assert "credential_provider_id" not in source
+
+
+def test_plan_leaves_a_usable_hosting_alone() -> None:
+    """Logging into a second provider must not repoint an existing default."""
+    from local_operator.providers.login_defaults import plan_login_defaults
+
+    plan = plan_login_defaults("deepseek", "openai", "gpt-4o")
+    assert plan.hosting is None
+    assert plan.model_name is None
+    assert plan.receipt is None
+
+
+def test_plan_treats_a_legacy_alias_as_usable() -> None:
+    """`noop` is not a registry id -- it maps to `test`, and must not be
+    mistaken for a corrupted value and silently replaced."""
+    from local_operator.providers.login_defaults import (
+        is_unusable_hosting,
+        plan_login_defaults,
+    )
+
+    assert is_unusable_hosting("noop") is False
+    assert is_unusable_hosting("anthropicxyq") is True
+    # Empty hosting is the separate nothing-configured case, not "unusable".
+    assert is_unusable_hosting("") is False
+    assert plan_login_defaults("deepseek", "noop", "m").hosting is None
+
+
 def test_apply_login_defaults_repairs_an_unknown_hosting(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

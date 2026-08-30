@@ -185,16 +185,16 @@ def _apply_login_defaults(provider_id: str) -> None:
 
     When hosting is ALREADY set we touch nothing and print nothing: a user
     logging into a second provider to switch models later has not asked to
-    change their default, and silently repointing it would be a surprise.
+    change their default, and silently repointing it would be a surprise. The
+    exception is a hosting that is set but names no provider the registry owns,
+    which is repaired rather than preserved.
 
-    The exception is a hosting that is set but names a provider the registry
-    does not own (a typo, a hand-edited config, an id dropped by an upgrade).
-    That config cannot boot, and the error it produces RECOMMENDS this command
-    as the remedy — so "already set, leave it alone" would send the user round
-    the same loop the paragraph above describes, just one level further in. The
-    stale ``model_name`` is replaced with it, because it belonged to the
-    provider being repaired and would point a real provider at a model id that
-    never existed.
+    The POLICY lives in :func:`providers.login_defaults.plan_login_defaults`,
+    shared with the TUI's ``/login``; this function only applies the plan and
+    prints the receipt. That split is deliberate: the two copies of this rule
+    had already drifted into writing different hosting ids and different models
+    for the same provider, which is the class of bug the shared planner exists
+    to make impossible.
 
     Imported lazily and guarded: this is a convenience on top of a login that
     already succeeded, so a config write failure (read-only dir) must not turn a
@@ -202,28 +202,25 @@ def _apply_login_defaults(provider_id: str) -> None:
     """
     try:
         from local_operator.config import ConfigManager
-        from local_operator.model.defaults import default_model_for
         from local_operator.paths import config_dir
+        from local_operator.providers.login_defaults import plan_login_defaults
 
         manager = ConfigManager(config_dir())
-        configured = manager.get_config_value("hosting")
-        # Asked of the registry, not of a hardcoded list, so this accepts
-        # exactly what the engine accepts (legacy aliases included) and cannot
-        # drift from the resolver's own validation.
-        repairing = bool(configured) and get_provider_definition(str(configured)) is None
-        if configured and not repairing:
-            return
-        manager.set_config_value("hosting", provider_id)
-        model = default_model_for(provider_id) or ""
-        message = (
-            f"Replaced unusable hosting '{configured}' with '{provider_id}'"
-            if repairing
-            else f"Set default hosting to '{provider_id}'"
+        plan = plan_login_defaults(
+            provider_id,
+            manager.get_config_value("hosting"),
+            manager.get_config_value("model_name"),
         )
-        if model and (repairing or not manager.get_config_value("model_name")):
-            manager.set_config_value("model_name", model)
-            message += f" and model to '{model}'"
-        print(f"{message}.")
+        if plan.hosting is None:
+            return
+        manager.set_config_value("hosting", plan.hosting)
+        # ``None`` means leave it alone; ``""`` means clear a model that
+        # belonged to the provider we just replaced. Compared against None
+        # explicitly so the clearing case is not swallowed by a falsy test.
+        if plan.model_name is not None:
+            manager.set_config_value("model_name", plan.model_name)
+        if plan.receipt:
+            print(f"{plan.receipt[:1].upper()}{plan.receipt[1:]}.")
     except Exception as exc:  # noqa: BLE001 — never fail a completed login
         print(f"Note: logged in, but could not set default hosting/model: {exc}")
 

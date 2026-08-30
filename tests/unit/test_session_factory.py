@@ -253,6 +253,54 @@ def test_resolve_unknown_hosting_is_distinguishable_from_unconfigured() -> None:
 
 
 @pytest.mark.parametrize(
+    ("source", "agent_hosting", "flag_hosting", "config_hosting", "expected_remedy"),
+    [
+        ("config", None, None, "anthropicxyq", "config edit hosting"),
+        ("flag", None, "anthropicxyq", "anthropic", "--hosting openai"),
+        ("agent", "anthropicxyq", None, "anthropic", "agent's hosting"),
+    ],
+)
+def test_unknown_hosting_names_the_source_it_actually_came_from(
+    source: str,
+    agent_hosting: str | None,
+    flag_hosting: str | None,
+    config_hosting: str,
+    expected_remedy: str,
+) -> None:
+    """The remedy must match where the value came from.
+
+    Precedence is agent > flag > config, but the in-app repair (`/login`) only
+    writes the CONFIG FILE. Telling a user whose bad value came from `--hosting`
+    or an agent record to run `/login` sends them round a loop that cannot
+    terminate: the login writes config, the next boot resolves the agent/flag
+    value again, and the app returns to setup having claimed it was fixed.
+    """
+    from local_operator.session_factory import HostingUnknownError
+
+    # Cast: the resolver only reads `.hosting`/`.model` off the agent, and a
+    # real AgentData needs a registry to construct.
+    agent = (
+        cast("AgentData", SimpleNamespace(hosting=agent_hosting, model="m"))
+        if agent_hosting
+        else None
+    )
+    config = cast(
+        "ConfigManager",
+        FakeConfigManager({"hosting": config_hosting, "model_name": "m"}),
+    )
+    with pytest.raises(HostingUnknownError) as caught:
+        resolve_hosting_model(agent, _args(hosting=flag_hosting), config)
+
+    error = caught.value
+    assert error.source == source
+    assert error.hosting == "anthropicxyq"
+    assert expected_remedy in str(error)
+    if source != "config":
+        # Must NOT recommend the config-only remedy for a value config cannot fix.
+        assert "local-operator login" not in str(error)
+
+
+@pytest.mark.parametrize(
     ("hosting", "model"),
     [
         ("anthropic", "claude-sonnet-4-5"),

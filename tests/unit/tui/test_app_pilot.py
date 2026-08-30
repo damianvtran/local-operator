@@ -769,6 +769,15 @@ async def test_setup_state_when_hosting_names_an_unknown_provider() -> None:
         # terminal, so the remedy must precede the diagnosis or it is what
         # drops. Asserted by POSITION, not just presence.
         assert notice.index("/login") < notice.index("anthropicxyq")
+        # LENGTH, not just order. The first version of this line ran to 141
+        # characters, so at 80 and 100 columns it was cut mid-clause and at 60
+        # the bad value never rendered at all -- the user was told to fix
+        # "this" without being told what "this" was. The splash paints a "! "
+        # prefix, so the budget is the terminal width minus that.
+        assert len(notice) <= 78, f"notice must survive an 80-col terminal: {len(notice)}"
+        # The value must be inside the part that survives the narrowest
+        # terminal we capture (60 cols), which is the whole point of naming it.
+        assert notice.index("anthropicxyq") + len("anthropicxyq") <= 58
         # It names the offending value and does not read as a crash.
         assert "anthropicxyq" in notice
         assert "not a known provider" in notice
@@ -776,6 +785,33 @@ async def test_setup_state_when_hosting_names_an_unknown_provider() -> None:
         # It must NOT claim nothing is configured -- something is, just wrongly.
         assert "no provider configured" not in notice
         assert app._welcome_visible is True
+
+
+@pytest.mark.asyncio
+async def test_setup_state_does_not_promise_a_login_it_cannot_honour() -> None:
+    """A bad value from --hosting or an agent record must not recommend /login.
+
+    Precedence is agent > flag > config, but `/login` writes the CONFIG FILE.
+    Recommending it for a value that came from argv or an agent record is a
+    loop the user cannot see the shape of: the login succeeds, writes config,
+    the next boot resolves the same flag/agent value, and the app returns to
+    setup having claimed it was fixed.
+    """
+    from local_operator.session_factory import HostingUnknownError
+
+    async def _flag_hosting_factory():
+        raise HostingUnknownError("…not a known provider.", "anthropicxyq", "flag")
+
+    app = OperatorApp(_flag_hosting_factory, provider_controller=FakeProviderController())
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _await_setup_state(app, pilot)
+        notice = app._splash_notice
+        assert notice is not None
+        # Names the real source, and does NOT tell the user to run /login.
+        assert "--hosting" in notice
+        assert "anthropicxyq" in notice
+        assert "/login" not in notice
+        assert len(notice) <= 78
 
 
 @pytest.mark.asyncio
@@ -864,6 +900,34 @@ def test_splash_toast_headline_names_the_fallback_target() -> None:
     )
     assert _splash_toast_headline("session failed to start") == "session failed to start"
     assert _splash_toast_headline("") == "Notice"
+
+
+def test_splash_toast_headline_prefers_an_explicit_headline() -> None:
+    """A caller that knows the state names it; no prose sniffing required.
+
+    This is the durable form of the D5 fix. That finding was addressed by
+    matching the literal substring "no provider configured", which silently
+    stopped applying when the sibling unknown-provider message was added: it
+    contains no such phrase, so it fell through to the blind 35-cell cut and
+    reproduced the dangling-fragment defect D5 existed to remove. An explicit
+    headline cannot regress by being reworded.
+    """
+    long_line = "Run /login openai — 'anthropicxyq' is not a known provider (/provider lists them)."
+    # Without a headline the long line is blind-cut mid-parenthetical.
+    assert _splash_toast_headline(long_line).endswith("…")
+    # With one, the toast is a clean glance carrying the bad value — and the
+    # toast is the one element that is never truncated by terminal width.
+    assert (
+        _splash_toast_headline(long_line, "Unknown provider 'anthropicxyq'")
+        == "Unknown provider 'anthropicxyq'"
+    )
+    # The explicit headline wins over the legacy substring probe too, so the
+    # two setup states are headlined by the same mechanism rather than one
+    # each.
+    assert (
+        _splash_toast_headline("… no provider configured …", "No provider configured")
+        == "No provider configured"
+    )
 
 
 @pytest.mark.asyncio

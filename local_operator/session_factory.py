@@ -281,12 +281,42 @@ class HostingUnknownError(HostingNotConfiguredError):
     first time either is reworded.
     """
 
-    def __init__(self, message: str, hosting: str = "") -> None:
+    def __init__(self, message: str, hosting: str = "", source: str = "config") -> None:
         super().__init__(message)
         self.hosting = hosting
+        #: WHERE the bad value came from: ``"config"``, ``"flag"`` (``--hosting``)
+        #: or ``"agent"`` (an agent record). Carried because the in-app repair
+        #: writes the CONFIG FILE, so it can only fix the config case: precedence
+        #: is agent > flag > config, and a login that rewrites config while the
+        #: bad value comes from argv or an agent record changes nothing the next
+        #: boot will read. The UI uses this to avoid promising a repair it cannot
+        #: perform — telling the user to run `/login` against a `--hosting` typo
+        #: is a loop, and a wrong instruction is worse than none.
+        self.source = source
 
 
-def _unknown_hosting_message(hosting: str) -> str:
+#: How the user changes a bad hosting value, per source. Keyed by
+#: :attr:`HostingUnknownError.source`, because the remedy genuinely differs: only
+#: the config case is fixed by `login`/`config edit`, and naming the wrong one
+#: sends the user round a loop that cannot terminate.
+_HOSTING_SOURCE_REMEDY = {
+    "config": (
+        "Set a supported one with `local-operator config edit hosting <provider>` "
+        "or `local-operator login <provider>` (e.g. openai, anthropic, google); "
+        "`local-operator provider` lists them all."
+    ),
+    "flag": (
+        "It came from the --hosting flag, so correct that flag (e.g. "
+        "--hosting openai); `local-operator provider` lists the supported ids."
+    ),
+    "agent": (
+        "It came from the agent's own record, which overrides config, so update "
+        "the agent's hosting; `local-operator provider` lists the supported ids."
+    ),
+}
+
+
+def _unknown_hosting_message(hosting: str, source: str = "config") -> str:
     """Error text for a hosting id the provider registry does not know.
 
     Names the offending value AND the remedy, because the message this replaces
@@ -301,12 +331,13 @@ def _unknown_hosting_message(hosting: str) -> str:
     non-tty). The TUI writes its own action-first phrasing for the same
     condition, because its splash line truncates from the right.
     """
-    return (
-        f"Hosting '{hosting}' in your configuration is not a known provider. "
-        "Set a supported one with `local-operator config edit hosting <provider>` "
-        "or `local-operator login <provider>` (e.g. openai, anthropic, google); "
-        "`local-operator provider` lists them all."
-    )
+    where = {
+        "config": "in your configuration",
+        "flag": "passed with --hosting",
+        "agent": "on the agent record",
+    }.get(source, "in your configuration")
+    remedy = _HOSTING_SOURCE_REMEDY.get(source, _HOSTING_SOURCE_REMEDY["config"])
+    return f"Hosting '{hosting}' {where} is not a known provider. {remedy}"
 
 
 def _no_model_message(hosting: str) -> str:
@@ -333,10 +364,13 @@ def resolve_hosting_model(
     Raises ``ValueError`` with the legacy message shapes when either value is
     missing, so the CLI's red-banner handler reports it exactly like before.
     """
-    hosting: str | None = getattr(agent, "hosting", None) if agent is not None else None
-    hosting = (
-        hosting or getattr(args, "hosting", None) or config_manager.get_config_value("hosting")
-    )
+    # The SOURCE is tracked alongside the value, not just the value: the repair
+    # offered when this turns out to be unusable writes the config file, which
+    # is only the last of these three. See HostingUnknownError.source.
+    agent_hosting: str | None = getattr(agent, "hosting", None) if agent is not None else None
+    flag_hosting: str | None = getattr(args, "hosting", None)
+    hosting = agent_hosting or flag_hosting or config_manager.get_config_value("hosting")
+    hosting_source = "agent" if agent_hosting else "flag" if flag_hosting else "config"
     model_name: str | None = getattr(agent, "model", None) if agent is not None else None
     model_name = (
         model_name or getattr(args, "model", None) or config_manager.get_config_value("model_name")
@@ -363,7 +397,9 @@ def resolve_hosting_model(
         # Before the default-model lookup below: an unknown provider has no
         # default model either, so checking the model first reported the missing
         # model (a symptom) and buried the unknown provider (the cause).
-        raise HostingUnknownError(_unknown_hosting_message(hosting), hosting)
+        raise HostingUnknownError(
+            _unknown_hosting_message(hosting, hosting_source), hosting, hosting_source
+        )
     if not model_name:
         # A hosting with no model is not a dead end: every mainstream provider
         # has a reasonable default, so resolve to it rather than raising. Only
