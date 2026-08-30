@@ -20,6 +20,7 @@ from typing import Any
 
 import pytest
 from textual import messages
+from textual.events import AppBlur
 from textual.widgets import Static
 
 from local_operator.tui import animation
@@ -478,6 +479,36 @@ async def test_shimmer_disabled_path_is_unchanged_by_focus(
         await pilot.pause()
         assert welcome._pulse_timer is None
         assert not animation.motion_enabled()
+
+
+@pytest.mark.asyncio
+async def test_a_keystroke_unthrottles_an_app_that_never_got_a_focus_event() -> None:
+    """Typing into a blurred-looking session must restore full animation.
+
+    Textual sets its `app_focus` reactive DIRECTLY when a key or mouse-down
+    arrives while it believes the app is blurred, and that assignment posts no
+    AppFocus event. A gate wired only to `on_app_focus` therefore never hears
+    about it, and a host that reports blur but not focus leaves a session the
+    user is actively typing into stuck at the reduced rate. Verified against
+    the real app before the fix: `app_focus` True, animation gate False.
+    """
+    app = _running_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(80):
+            await pilot.pause()
+            if app._session is not None:
+                break
+        app.post_message(AppBlur())
+        await pilot.pause()
+        await pilot.pause()
+        assert not animation.animation_focused()
+
+        await pilot.press("a")
+        await pilot.pause()
+        await pilot.pause()
+
+        assert app.app_focus is True
+        assert animation.animation_focused() is True
 
 
 def test_focus_flag_defaults_focused_and_reports_only_real_changes() -> None:

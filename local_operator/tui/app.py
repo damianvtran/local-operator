@@ -8922,6 +8922,28 @@ class OperatorApp(App[None]):
         self._notifier.set_focused(False)
         self._flush_pending_question()
 
+    def _watch_app_focus(self, focus: bool) -> None:
+        """Follow Textual's OWN focus reactive, not just the AppFocus event.
+
+        `on_app_focus`/`on_app_blur` cover the terminal reporting focus, but
+        they are not the only way `app_focus` moves. Textual sets the reactive
+        directly in `App.on_event` when a key or mouse-down arrives while it
+        believes the app is blurred, and that assignment posts NO AppFocus
+        event — so the handler below would never run and a session whose host
+        reports blur but not focus (or which never reports focus at all) would
+        stay throttled while the user was actively typing into it. Verified
+        against the real app: after a blur then a keypress, `app_focus` is True
+        while the animation gate was still False.
+
+        Watching the reactive closes that gap, because every path that changes
+        Textual's mind about focus goes through it. The base class implements
+        this hook, so the super call is not optional: it restores focus to the
+        last-focused widget and updates node styles, and dropping it would
+        leave the app unable to type after an alt-tab.
+        """
+        super()._watch_app_focus(focus)
+        self._set_animation_focused(focus)
+
     def _set_animation_focused(self, focused: bool) -> None:
         """Record focus and re-rate every animated surface on this screen.
 
