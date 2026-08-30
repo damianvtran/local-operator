@@ -21,6 +21,7 @@ from rich.cells import cell_len
 
 from local_operator import settings_io
 from local_operator.config import ConfigManager
+from local_operator.settings_io import Kind
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.settings_view import SettingsView
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
@@ -248,9 +249,20 @@ async def test_reset_restores_the_default(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_arrows_wrap_and_page_clamps() -> None:
-    """The repo's convention: arrows WRAP (a deliberate press), page and wheel
-    CLAMP (a gesture that teleported would read as the list resetting itself)."""
+async def test_every_movement_on_the_page_clamps_at_the_ends() -> None:
+    """The ends HOLD, under every movement this page has.
+
+    Regression for the v0.43.0 report: ``action_move`` wrapped
+    (``indices[(position + delta) % len(indices)]``), so holding ``down`` at the
+    bottom of a 60-row scrolled list threw the reader back to the top with the
+    viewport following. This page is AGENTS.md's documented exception to the
+    arrows-wrap convention — see ``SettingsView.action_move`` — and the point of
+    the exception is that the whole page agrees: a page where ``down`` clamps
+    and ``pagedown`` wraps is worse than either rule applied uniformly.
+
+    Pressed REPEATEDLY at each end rather than once, because a single press
+    cannot tell a clamp from an off-by-one that still moves.
+    """
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(120, 32)) as pilot:
         await pilot.pause()
@@ -258,24 +270,135 @@ async def test_arrows_wrap_and_page_clamps() -> None:
         view = app.query_one(SettingsView)
         await pilot.pause()
 
-        view.action_jump(0)
-        first = view._selected
-        view.action_move(-1)
-        assert view._selected > first, "up from the first row did not wrap"
-
         view.action_jump(1)
         last = view._selected
-        # Paging past the end CLAMPS.
+        assert last == view._selectable()[-1]
+        for _ in range(10):
+            view.action_move(1)
+        assert view._selected == last, "down at the bottom did not hold"
+
+        view.action_jump(0)
+        first = view._selected
+        assert first == view._selectable()[0]
+        for _ in range(10):
+            view.action_move(-1)
+        assert view._selected == first, "up at the top did not hold"
+
+        # Paging past the end CLAMPS — and lands on the SAME end the other
+        # gestures reach, not on the last section's first row (UX round 1, U3).
+        view.action_jump(0)
         for _ in range(20):
             view.action_section(1)
-        assert view._selected <= last
+        assert view._selected == last, "pagedown stopped short of the last row"
+        for _ in range(20):
+            view.action_section(-1)
+        assert view._selected == first, "pageup stopped short of the first row"
 
-        # The wheel clamps too.
+        # The wheel clamps too, at both ends.
         view.action_jump(0)
-        top = view._selected
         for _ in range(10):
             view._scroll_rows(-1)
-        assert view._selected == top
+        assert view._selected == first
+        view.action_jump(1)
+        for _ in range(10):
+            view._scroll_rows(1)
+        assert view._selected == last
+
+
+@pytest.mark.asyncio
+async def test_arriving_at_the_top_shows_the_section_header_that_owns_the_row() -> None:
+    """The top end reads as arrival, the way the bottom already does.
+
+    Travelling up to the first row settled at ``scroll_y=1``: the row was on
+    screen but the ``Model`` header that names its section was one line off the
+    top edge, and the scrollbar thumb was not quite at the start of its track,
+    so the top gave weaker "you have arrived" feedback than the bottom. The
+    clamp is what made users dwell there long enough for it to matter (UX round
+    1, U1).
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._open_settings_view()
+        view = app.query_one(SettingsView)
+        await pilot.pause()
+        await pilot.pause()
+
+        # Premise: row 0 is an unselectable header owning the first row, so
+        # scrolling to the SELECTION alone leaves the title off screen.
+        assert view._rows[0].kind == "header"
+
+        view.action_jump(1)
+        await pilot.pause()
+        for _ in range(80):
+            view.action_move(-1)
+        await pilot.pause()
+        assert view._selected == view._selectable()[0]
+        assert view._body.scroll_offset.y == 0, "the owning section header is scrolled off"
+
+        # `home` agrees with holding `up`.
+        view.action_jump(1)
+        await pilot.pause()
+        view.action_jump(0)
+        await pilot.pause()
+        assert view._body.scroll_offset.y == 0
+
+
+@pytest.mark.asyncio
+async def test_a_retired_row_stops_advertising_keys_that_cannot_act() -> None:
+    """The footer names what the keys do on THIS row.
+
+    The last six rows of the page are ``Kind.READONLY``: ``enter`` only reports
+    that the setting is retired and ``r`` returns without resetting. The clamp
+    turned the bottom of the list from a waypoint into a place users park, under
+    a footer still promising ``enter change · r default`` (UX round 1, U2).
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 32)) as pilot:
+        await pilot.pause()
+        app._open_settings_view()
+        view = app.query_one(SettingsView)
+        await pilot.pause()
+
+        view.action_jump(1)
+        await pilot.pause()
+        row = view._current()
+        assert row is not None and row.setting is not None
+        assert row.setting.kind is Kind.READONLY, "premise: the last row is retired"
+        hints = view.rendered_hints()
+        assert "change" not in hints, hints
+        assert "default" not in hints, hints
+        # The way OUT is never shed, and moving is still offered.
+        assert "esc" in hints and "move" in hints, hints
+
+        # An ordinary row still advertises both.
+        view.action_jump(0)
+        await pilot.pause()
+        hints = view.rendered_hints()
+        assert "change" in hints and "default" in hints, hints
+
+
+@pytest.mark.asyncio
+async def test_the_side_panes_still_cycle() -> None:
+    """←→ between the read-only panes CYCLES, and is meant to.
+
+    The clamp above is about losing your place in a long scrolled list. Two
+    tabs that are both on screen have no ends and nothing that scrolls, so
+    clamping them would make the second press of a two-tab toggle silently
+    dead — the stuck key the wrap convention exists to prevent.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 32)) as pilot:
+        await pilot.pause()
+        app._open_settings_view()
+        view = app.query_one(SettingsView)
+        await pilot.pause()
+
+        start = view._pane
+        view.action_pane(1)
+        assert view._pane != start
+        view.action_pane(1)
+        assert view._pane == start, "the panes stopped cycling"
 
 
 @pytest.mark.asyncio
@@ -549,6 +672,156 @@ async def test_the_page_never_makes_the_screen_scrollable() -> None:
             await pilot.pause()
             assert app.screen.virtual_size.height <= app.screen.size.height, size
             assert not app.screen.show_vertical_scrollbar, size
+
+
+@pytest.mark.parametrize("size", [(80, 24), (100, 30), (140, 40)])
+@pytest.mark.asyncio
+async def test_the_page_takes_the_whole_view_when_opened_from_the_splash(
+    size: tuple[int, int],
+) -> None:
+    """Opened over the BOOT screen, the page gets the same geometry it gets over
+    a conversation — in BOTH dimensions.
+
+    Regression for the v0.43.0 report. ``Screen.boot`` is a whole second layout
+    (docked centred card, bottom-aligned transcript, and rows reserved BELOW the
+    card in the dock's own padding by ``_sync_boot_composition``). Opening the
+    mode only added ``Screen.settings``, so both layouts applied at once and the
+    page got the leftovers around a card still holding its clamp.
+
+    THE COLLISION IS NOT THE SAME SHAPE AT EVERY SIZE, which is why both
+    dimensions are asserted and why the sizes are parameterised rather than
+    looped (a loop reports the first failing size and hides the rest):
+
+    - at 140x40 it is VERTICAL — the reserve costs the page rows, 26 of 38.
+    - at 100x30, the size the report was filed from, it is entirely
+      HORIZONTAL. The boot composition reserves ZERO rows there, so the page
+      gets its full 21 either way and every row-based assertion passes on the
+      broken tree; what is wrong is the card, still clamped to 73 cells and
+      centred at column 12 instead of spanning 96 from column 1. That is the
+      half the operator photographed, and an earlier version of this test could
+      not see it (review round 1, F1).
+
+    So the horizontal assertions below are load-bearing, not decoration: the
+    ``boot-card`` class IS the clamp, and ``#input-shell``'s width and x are
+    what it does. Likewise the dock's OUTER size is what carries the vertical
+    reserve, so comparing outer to inner is what catches a reserve left behind —
+    an assertion on the dock's content height alone passes against the broken
+    tree at every size.
+    """
+    from local_operator.tui.widgets.transcript import UserBlock
+
+    async def measure(app: OperatorApp, seed_conversation: bool) -> tuple[int, int, int, int]:
+        async with app.run_test(size=size) as pilot:
+            await pilot.pause()
+            if seed_conversation:
+                app._append_block(UserBlock("hello"))
+                await pilot.pause()
+                # Content retires the splash, so this path never had the bug.
+                assert not app.screen.has_class("boot"), size
+            else:
+                # The splash is up and nothing has been typed: this IS the boot
+                # layout, which is the state the report was filed from.
+                assert app.screen.has_class("boot"), size
+            app._open_settings_view()
+            await pilot.pause()
+            await pilot.pause()
+            view = app.query_one(SettingsView)
+            dock = app.query_one("#input-dock")
+            shell = app.query_one("#input-shell")
+            screen = app.screen
+
+            # -- horizontal: the card's clamp must be gone --------------------
+            assert not screen.has_class("boot-card"), (
+                f"{size}: the boot card's width clamp survived into the mode "
+                f"(#input-shell is {shell.size.width} cells at x={shell.region.x})"
+            )
+            # The dock spans the page rather than floating inset over it.
+            assert shell.size.width == view.size.width, size
+            assert shell.region.x == view.region.x, size
+
+            # -- vertical: the composition's reserve must be gone -------------
+            assert dock.outer_size.height == dock.size.height, (
+                f"{size}: the boot composition reserve survived into the mode "
+                f"({dock.outer_size.height} outer vs {dock.size.height} inner)"
+            )
+            assert dock.styles.padding.bottom == 0, size
+            # Every row of the screen is spoken for by the page and the dock.
+            assert view.outer_size.height + dock.outer_size.height == screen.size.height, size
+            assert screen.virtual_size.height <= screen.size.height, size
+            return (view.size.height, view.size.width, shell.size.width, shell.region.x)
+
+    from_boot = await measure(OperatorApp(lambda: _factory(FakeSession())), False)
+    # The same page over a CONVERSATION is the reference: the mode is one
+    # layout, so where it was opened from may not change ANY of its geometry.
+    reference = await measure(OperatorApp(lambda: _factory(FakeSession())), True)
+    assert from_boot == reference, (
+        f"{size}: /settings from the splash got (view.h, view.w, shell.w, shell.x)="
+        f"{from_boot}, but {reference} from a conversation"
+    )
+
+
+@pytest.mark.asyncio
+async def test_leaving_the_page_restores_the_boot_layout() -> None:
+    """Esc out of ``/settings`` puts the splash composition back, intact.
+
+    The boot layout is suppressed while the mode is up rather than remembered,
+    so this pins the other half of that decision: the class, the card clamp and
+    the rows ``_sync_boot_composition`` reserves below the card all have to come
+    back — and come back as the app RE-DERIVES them, since a ``/clear`` or a
+    session swap can move the splash's own state while the page is open.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(140, 40)) as pilot:
+        await pilot.pause()
+        dock = app.query_one("#input-dock")
+        before = (
+            app.screen.has_class("boot"),
+            app.screen.has_class("boot-card"),
+            dock.outer_size.height,
+            dock.styles.padding.bottom,
+            app._welcome.size.height if app._welcome is not None else None,
+        )
+
+        app._open_settings_view()
+        await pilot.pause()
+        await pilot.pause()
+        assert not app.screen.has_class("boot")
+
+        app._close_settings_view()
+        await pilot.pause()
+        await pilot.pause()
+        after = (
+            app.screen.has_class("boot"),
+            app.screen.has_class("boot-card"),
+            dock.outer_size.height,
+            dock.styles.padding.bottom,
+            app._welcome.size.height if app._welcome is not None else None,
+        )
+        assert after == before, f"the boot composition came back changed: {before} -> {after}"
+        assert app._welcome is not None and app._welcome.display
+
+
+@pytest.mark.asyncio
+async def test_the_splash_survives_a_settings_round_trip_over_a_conversation() -> None:
+    """The suppression is keyed on the LIVE state, not on a snapshot.
+
+    A transcript that has content must not gain a splash because the page was
+    opened and closed over it — the failure a remembered-and-restored boot flag
+    would produce.
+    """
+    from local_operator.tui.widgets.transcript import UserBlock
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 32)) as pilot:
+        await pilot.pause()
+        app._append_block(UserBlock("hello"))
+        await pilot.pause()
+        app._open_settings_view()
+        await pilot.pause()
+        app._close_settings_view()
+        await pilot.pause()
+        assert not app.screen.has_class("boot")
+        assert app._welcome is not None and not app._welcome.display
 
 
 @pytest.mark.asyncio
@@ -1151,8 +1424,10 @@ async def test_a_commit_that_inserts_rows_does_not_strand_the_cursor(
     a commit on ``+ add a chain`` inserts the chain row, its hops and an
     ``+ add a hop`` row ABOVE the cursor. Stepping from the stale index landed
     back on ``+ add a chain``: the user pressed an arrow and did not move,
-    which is the stuck-key failure ``action_move``'s own docstring says
-    wrapping exists to avoid.
+    which is the stuck-key failure the identity-anchored rebuild in
+    ``action_move`` exists to prevent. Independent of the end-clamping the
+    test above pins — this is about a press in the MIDDLE of the list landing
+    on the right row, not about what the ends do.
     """
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:

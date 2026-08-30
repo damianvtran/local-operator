@@ -77,3 +77,9 @@ The `confirm-long-*` frames use a 26-character chain name for the same reason.
 frames demonstrated none of the ask's width behaviour — they hid both the
 over-clipping at 100 and 140 columns (D12) and the shed the 80-column frame was
 captioned for (D13).
+
+Every frame here seeds a conversation before opening the page, which is what
+made the boot-layout collision invisible to the whole set: seeding retires the
+splash, and the splash is the condition the second layout hangs off. The
+`boot` state and its frames live in
+[`../settings-boot-layout/`](../settings-boot-layout/README.md).

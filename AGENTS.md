@@ -302,6 +302,30 @@ change.
 - **Wrapping vs clamping.** Arrow keys wrap (a discrete, deliberate press);
   wheel and page movement **clamp**. A scroll gesture that teleports to the
   other end of the list reads as the list resetting itself.
+
+  **Documented exception — a list that IS the whole page clamps its arrows
+  too. Today that is `/settings` and nothing else.** The wrap rule is written
+  for a picker: a short list overlaid on a screen the user is still looking at,
+  where coming round is a shortcut to a row already visible. It does not
+  transfer to a full-page mode whose list is several times its viewport
+  (`/settings`: 60-odd rows against 14 at 100x30). There the bottom is a
+  destination the user travels to deliberately, and wrapping threw them out of
+  the section they were working in and scrolled the viewport with them, which
+  is what the report against v0.43.0 said. So `SettingsView.action_move`
+  clamps, and every movement on that page clamps with it — a page where `down`
+  clamps and `pagedown` wraps is worse than either rule applied uniformly.
+
+  Tab or pane CYCLING is outside both rules: a small closed set of tabs that
+  are all on screen (`←→` between the teams and agents panes) has no ends to
+  clamp against and nothing that scrolls, so it keeps cycling.
+
+  The trigger is "the list is the whole page", NOT "the list scrolls", and the
+  difference is load-bearing: `model_picker.move` windows a catalogue of
+  hundreds of rows and still WRAPS, correctly, because it is an overlay on the
+  conversation rather than a place the user has navigated to
+  (`command_picker.move` likewise). Do not read this exception as licence to
+  clamp them. `session_picker._move_to` already clamps, and it is a full
+  surface too.
 - **Rows are load-bearing.** The welcome splash is content-sized and rests on
   the input card, so anything that changes its line count moves the whole
   block. Animated content must reserve its row even when it has nothing to

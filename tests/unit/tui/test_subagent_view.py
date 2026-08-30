@@ -668,6 +668,62 @@ async def _open(pilot: Any, app: OperatorApp, job: Any) -> SubagentView:
     return app.query_one(SubagentView)
 
 
+@pytest.mark.parametrize("size", [(100, 30), (140, 40)])
+@pytest.mark.asyncio
+async def test_the_page_takes_the_whole_view_when_opened_from_the_splash(
+    size: tuple[int, int],
+) -> None:
+    """The child page gets the same geometry from the splash as over a
+    conversation.
+
+    ``Screen.boot`` is a whole second layout (centred width-clamped input card,
+    plus rows reserved below it in the dock's own padding), and this mode
+    replaces the region it lays out, so with both applied the page rendered into
+    the leftovers around a card that still held its clamp.
+
+    BOTH dimensions are asserted because the collision changes shape with the
+    terminal: at 140x40 it costs the page rows, while at 100x30 the composition
+    reserves none and the damage is purely horizontal — the shell clamped to 73
+    cells at column 12 instead of 96 at column 1. A rows-only assertion passes
+    against the broken tree at that size (review round 1, F1/F2).
+    """
+
+    async def measure(seed_conversation: bool) -> tuple[int, int, int, int]:
+        session = FakeSession()
+        session.jobs = _fake_jobs(_Job("sub-1", "audit the ingest path"))
+        app = OperatorApp(_async_factory(session))
+        async with app.run_test(size=size) as pilot:
+            for _ in range(80):
+                await pilot.pause()
+                if app._session is not None:
+                    break
+            if seed_conversation:
+                app._append_block(UserBlock("audit the ingest path"))
+                await pilot.pause()
+                assert not app.screen.has_class("boot"), size
+            else:
+                # Opened straight off the splash: no block is appended, so the
+                # boot layout is still up. This is the route that was broken.
+                assert app.screen.has_class("boot"), size
+            app._refresh_band()
+            await pilot.pause()
+            app._open_subagent_view("sub-1")
+            await pilot.pause()
+            await pilot.pause()
+            view = app.query_one(SubagentView)
+            dock = app.query_one("#input-dock")
+            shell = app.query_one("#input-shell")
+            assert not app.screen.has_class("boot-card"), (
+                f"{size}: the boot card's clamp survived into the page "
+                f"(#input-shell is {shell.size.width} cells at x={shell.region.x})"
+            )
+            assert dock.outer_size.height == dock.size.height, size
+            assert app.screen.virtual_size.height <= app.screen.size.height, size
+            return (view.size.height, view.size.width, shell.size.width, shell.region.x)
+
+    assert await measure(False) == await measure(True), size
+
+
 @pytest.mark.asyncio
 async def test_peer_keys_cycle_all_siblings_in_opposite_directions() -> None:
     jobs = [
