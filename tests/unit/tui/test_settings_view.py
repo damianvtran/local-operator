@@ -2626,6 +2626,125 @@ async def test_paging_lands_on_the_true_end_of_the_list() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_key_that_writes_reveals_its_row_before_it_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`enter` on an OFF-SCREEN bool scrolls the row into view, then toggles it.
+
+    The wheel moves the viewport and leaves the cursor behind, so the cursor can
+    sit off screen while the user reads elsewhere. This page writes immediately:
+    measured at 100x30 with the cursor parked on `retry.enabled` and the view
+    wheeled 15 notches away, `enter` wrote config.yml and left all 14 painted
+    rows byte-identical — a write with no feedback anywhere on the frame (UX
+    round 1, U1).
+
+    ORDERING, not end state. The assertion is made from INSIDE the write: the
+    real `settings_io.write_setting` is wrapped so the viewport is sampled at
+    the moment the value is stored, and the config file is asserted still
+    untouched until the acted-on row is visible. An end-state check would pass
+    on an implementation that wrote first and scrolled afterwards in the same
+    frame, which is exactly the "nothing visibly changed" complaint.
+    """
+    seen: dict[str, Any] = {}
+    real_write = settings_io.write_setting
+
+    def _spy(manager: Any, setting: Any, value: Any) -> Any:
+        # Sampled BEFORE the value reaches disk, so `bytes_at_write` is what the
+        # file held while the row was still being revealed.
+        config = tmp_path / "config.yml"
+        seen["bytes_at_write"] = config.read_bytes() if config.exists() else b""
+        offset = view._body.scroll_offset.y
+        seen["visible_at_write"] = offset <= view._selected < offset + view._body.size.height
+        return real_write(manager, setting, value)
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._open_settings_view()
+        view = app.query_one(SettingsView)
+        await pilot.pause()
+
+        index = _select(view, "retry.enabled")
+        view._scroll_to_selection()
+        await pilot.pause()
+        assert _cursor_on_screen(view), "premise: the row starts on screen"
+
+        before = (
+            (tmp_path / "config.yml").read_bytes() if (tmp_path / "config.yml").exists() else b""
+        )
+        for _ in range(15):
+            view._list.post_message(_wheel(view._list, down=True))
+        await pilot.pause()
+        assert view._selected == index, "premise: the wheel left the cursor alone"
+        assert not _cursor_on_screen(view), "premise: the wheel carried the cursor off screen"
+
+        monkeypatch.setattr(settings_io, "write_setting", _spy)
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert seen, "`enter` on the off-screen row did not reach the write at all"
+        assert seen["bytes_at_write"] == before, (
+            "config was written before the acted-on row was revealed: "
+            f"{seen['bytes_at_write']!r} != {before!r}"
+        )
+        assert seen["visible_at_write"], (
+            "the write landed while the cursor was still off screen — the user "
+            "saw no frame change for a setting that changed"
+        )
+        # And the press still DID the thing, first try: revealing must not cost
+        # the key its action (the interlock this deliberately is not).
+        # Stored at its nested `path`, `("retry", "enabled")`, not under the
+        # flat key — the same shape the maxRetries tests above assert.
+        assert _values(tmp_path)["retry"]["enabled"] is False
+        assert _cursor_on_screen(view), "the revealed row did not stay on screen"
+
+
+@pytest.mark.asyncio
+async def test_an_expansion_opened_from_off_screen_is_revealed(tmp_path: Path) -> None:
+    """An enum expanded while its row is off screen brings its CHOICES into view.
+
+    `_scroll_to_expansion` exists so a `▾` marker never appears with nothing
+    under it. Its guard only caught a group hanging off the BOTTOM edge
+    (`last >= offset + height`), so with the cursor wheeled off the TOP the enum
+    opened — `_expanded` set, `max_scroll_y` grown 46 -> 48 — while the viewport
+    never moved and neither choice row was on screen (UX round 1, U3).
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._open_settings_view()
+        view = app.query_one(SettingsView)
+        await pilot.pause()
+
+        _select(view, "providers.openai.api")
+        view._scroll_to_selection()
+        await pilot.pause()
+
+        for _ in range(15):
+            view._list.post_message(_wheel(view._list, down=True))
+        await pilot.pause()
+        assert not _cursor_on_screen(view), "premise: the cursor is off screen"
+
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert view._expanded == "providers.openai.api", "premise: the enum opened"
+        offset = view._body.scroll_offset.y
+        height = view._body.size.height
+        choices = [index for index, row in enumerate(view._rows) if row.kind == "choice"]
+        assert choices, "premise: the expansion produced choice rows"
+        visible = [index for index in choices if offset <= index < offset + height]
+        assert visible, (
+            "the enum opened with every choice off screen, so the frame did not "
+            f"change and the press reads as having failed: choices={choices} "
+            f"viewport={offset}..{offset + height - 1}"
+        )
+        # The owning row is on screen too: choices without the label that says
+        # what is being chosen are meaningless.
+        assert _cursor_on_screen(view), "the choices were revealed without their owning row"
+
+
+@pytest.mark.asyncio
 async def test_the_wheel_step_follows_the_apps_scroll_sensitivity() -> None:
     """One gesture, one speed — at whatever sensitivity the app is set to.
 

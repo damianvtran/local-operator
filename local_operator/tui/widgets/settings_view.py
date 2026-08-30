@@ -612,7 +612,7 @@ class SettingsView(Vertical):
         self._pane = panes[position]
         self._repaint()
 
-    def _scroll_to_selection(self) -> None:
+    def _scroll_to_selection(self, *, immediate: bool = False) -> None:
         """Keep the cursor row inside the scrolled viewport.
 
         The body is a ScrollableContainer around ONE painted Static, so there
@@ -621,9 +621,17 @@ class SettingsView(Vertical):
         no size until it is laid out, and a first movement before layout would
         divide by a zero height.
 
-        This is the CURSOR's claim on the viewport, and it runs only from a key
-        that moved the cursor. The wheel has its own claim and the two are kept
-        apart on purpose — see :meth:`_scroll_rows`.
+        This is the CURSOR's claim on the viewport, and it runs from a key that
+        moved the cursor, or from :meth:`_reveal_cursor` before a key acts on
+        one. The wheel has its own claim and the two are kept apart on purpose —
+        see :meth:`_scroll_rows`.
+
+        ``immediate`` applies the move now rather than on the next refresh.
+        Callers that only MOVE the cursor can leave it deferred, because the
+        next frame carries both the new cursor and the new offset. A caller that
+        is about to WRITE needs it now, so the reveal is ordered before the
+        write rather than merely painted in the same frame — see
+        :meth:`_reveal_cursor`.
         """
         try:
             height = self._body.size.height
@@ -645,9 +653,39 @@ class SettingsView(Vertical):
         while top > 0 and self._rows[top - 1].kind == "header":
             top -= 1
         if top < offset:
-            self._body.scroll_to(y=top, animate=False)
+            self._body.scroll_to(y=top, animate=False, immediate=immediate)
         elif self._selected >= offset + height:
-            self._body.scroll_to(y=self._selected - height + 1, animate=False)
+            self._body.scroll_to(y=self._selected - height + 1, animate=False, immediate=immediate)
+
+    def _reveal_cursor(self) -> None:
+        """Bring the cursor into view BEFORE a key acts on it.
+
+        The wheel moves the viewport and leaves the cursor behind
+        (:meth:`_scroll_rows`), so the cursor can sit off screen while the user
+        reads somewhere else. This page writes IMMEDIATELY, with no undo beyond
+        ``r``, so without this the keys the footer advertises act on a row that
+        is nowhere on screen and the frame does not change: measured at 100x30,
+        ``enter`` on an off-screen ``retry.enabled`` wrote config.yml and left
+        all 14 painted rows byte-identical (UX round 1, U1). That is the same
+        "wrote a setting they never chose" hazard the class docstring records
+        for the focus slip (UX round 3, U19), reopened from a new direction by
+        the scroll model.
+
+        REVEAL, NOT INTERLOCK. The press still does what it says on the first
+        try; it just scrolls the target into view first, so the write is one the
+        user watches happen. An earlier revision made the first press re-centre
+        and only the second act — that is a second, competing rule on the
+        activate/commit paths the edit-mode redesign (#440) rewrites, and it
+        broke 19 tests. This adds no rule to those paths at all: it moves the
+        VIEWPORT, which is this page's own scroll concern.
+
+        Applied ``immediate``, so the scroll is ordered BEFORE the write rather
+        than landing in the same frame by luck — the assertion a regression test
+        can actually make is "config bytes unchanged until the row is visible".
+        A no-op when the cursor is already on screen, which is every press that
+        does not follow a wheel gesture, so a click-then-enter never jumps.
+        """
+        self._scroll_to_selection(immediate=True)
 
     # -- activation ---------------------------------------------------------
     def action_activate(self) -> None:
@@ -662,6 +700,10 @@ class SettingsView(Vertical):
         row = self._current()
         if row is None:
             return
+        # Show the user the row this is about to act on. The wheel can leave the
+        # cursor off screen, and this page writes immediately — see
+        # `_reveal_cursor`. A no-op when the cursor is already visible.
+        self._reveal_cursor()
         # Any action that is not `d` or `esc` DISARMS a pending delete. The ask
         # was cleared by a cursor move and by `esc`, but not by a key acting on
         # the same row: `enter` toggled the chain open underneath a question
@@ -794,6 +836,14 @@ class SettingsView(Vertical):
             return
         if height <= 0:
             return
+        # The cursor itself may be ABOVE the viewport — the wheel leaves it
+        # behind, so an expansion opened from off screen had `_expanded` set and
+        # `max_scroll_y` grown while the frame never changed, which reads as the
+        # press having failed (UX round 1, U3). The `last >= offset + height`
+        # test below only catches a group hanging off the BOTTOM edge, so the
+        # owning row is revealed first and the group-fitting logic then works
+        # from a viewport that already contains it.
+        self._reveal_cursor()
         last = self._selected
         for index in range(self._selected + 1, len(self._rows)):
             # Choices belong to an enum row; hops (and the trailing "+ add a
@@ -829,6 +879,9 @@ class SettingsView(Vertical):
         # class as the hint clipping in D16 (UX round 4, follow-up).
         disarmed = self._confirm_delete is not None
         self._confirm_delete = None
+        # `r` writes too (it deletes the stored key), so it reveals its target
+        # for the same reason `action_activate` does.
+        self._reveal_cursor()
         row = self._current()
         if row is None or row.setting is None or row.kind != "setting":
             if disarmed:
@@ -1514,6 +1567,18 @@ class SettingsView(Vertical):
         (:meth:`_scroll_to_selection`), and the two claims can no longer fight
         because only one of them is driven by any given gesture.
 
+        THE RETURN TRIP is the cost of that, and it is worth stating plainly:
+        once the cursor is off screen, the next key that touches it snaps the
+        view back to wherever it was parked — measured at 100x30, 12 notches
+        down and then `down` moves the viewport 22 rows in one frame, and the
+        content the user was reading is gone. The destination is correct (the
+        cursor did move by exactly the one row asked for) and the user can wheel
+        straight back, but it is a jump with no cue (UX round 1, U2). Every key
+        that acts on the cursor now behaves the same way, including `enter` and
+        `r` (:meth:`_reveal_cursor`), so the page is at least consistent about
+        it; softening the jump itself would need a cue on the frame and belongs
+        with the edit-mode redesign that owns this page's chrome (#440).
+
         Clamping is unchanged and now comes from the container, which cannot
         scroll past either end — so the wheel still never teleports to the other
         end of the list (AGENTS.md, "Wrapping vs clamping").
@@ -1529,8 +1594,9 @@ class SettingsView(Vertical):
         value because they glanced elsewhere would be the worse surprise. The
         consequence to know about is that the editor stays live and
         keyboard-reachable while scrolled off screen: keystrokes go on entering
-        it, and ``enter`` commits it, with nothing about it on the frame
-        (review round 1, S2).
+        it, and ``enter`` commits it, with nothing about it on the frame. That
+        is bounded by :meth:`_reveal_cursor`, which brings the editing row back
+        into view before ``enter`` acts on it (review round 1, S2).
         """
         try:
             # Accumulated from `scroll_target_y`, NOT from `scroll_relative`.
