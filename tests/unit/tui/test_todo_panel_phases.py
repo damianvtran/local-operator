@@ -1067,3 +1067,461 @@ async def test_expanded_shows_an_item_at_the_floor_flat_and_phased() -> None:
             assert scroll.max_scroll_y > 0
             assert app.query_one("#input-shell").region.height > 0
             builtin.TODO_STORE.clear()
+
+
+# --------------------------------------------------------------------------- #
+# Expanded overflow/position footer (#264 U4, #265 U5)
+# --------------------------------------------------------------------------- #
+
+
+async def _booted_panel(  # type: ignore[no-untyped-def]
+    app: OperatorApp, pilot, phases: list[dict[str, object]]
+) -> TodoPanel:
+    """Seed the store once the SESSION exists, repaint, and hand back the panel.
+
+    Waits for ``app._session`` rather than a frame count. The app paints before
+    its session exists (the factory is awaited in a boot worker) and the panel
+    reads the store keyed by ``session_id``, so a repaint landing in that window
+    finds no todos and hides the panel — which reads as an assertion about
+    footers failing for a reason that has nothing to do with footers.
+    ``test_band_panels.py`` documents the same race and waits the same way.
+    """
+    for _ in range(200):
+        await pilot.pause()
+        if app._session is not None:
+            break
+    from local_operator.tools import builtin
+
+    builtin.TODO_STORE["sess"] = phases
+    app._refresh_band()
+    await pilot.pause()
+    return app.query_one(TodoPanel)
+
+
+async def _settled_expand(app: OperatorApp, pilot) -> TodoPanel:  # type: ignore[no-untyped-def]
+    """Press ``ctrl+t`` and wait for the scroll region's virtual size to settle.
+
+    The panel repaints in the tick the flag flips (``request_toggle`` ->
+    ``_refresh_band``), but ``max_scroll_y`` is a function of a virtual size the
+    compositor computes a frame later. A single ``pause`` therefore reads
+    ``max_scroll_y == 0`` on a list that does overflow, which is the shape of a
+    flake rather than a defect — the footer's own text is already correct at that
+    point. Settling here keeps the OVERFLOW PRECONDITION honest: a test asserting
+    an overflow footer must first prove the list actually overflows.
+    """
+    panel = app.query_one(TodoPanel)
+    await pilot.press("ctrl+t")
+    for _ in range(40):
+        await pilot.pause()
+        if panel._scroll.max_scroll_y > 0:
+            break
+    return panel
+
+
+def _trailing_chrome_phases() -> list[dict[str, object]]:
+    """A plan whose LAST body line is chrome, not a todo.
+
+    A trailing phase with no items (a shape the tool schema accepts, and the
+    natural rendering of work not yet started) contributes a header row and no
+    item rows, so body lines outlast todo rows. This is the only fixture that can
+    reach the footer's numberless seam — the position where the arrow is on
+    because the body has more to show while the todo remainder is zero — so any
+    guard over "every footer shape" has to run on THIS list, not on
+    ``_long_multi_phase``.
+    """
+    return [
+        {"name": "Alpha", "items": [_item(f"alpha {n}", "pending") for n in range(9)]},
+        {"name": "Beta", "items": [_item(f"beta {n}", "pending") for n in range(6)]},
+        {"name": "Gamma", "items": []},
+    ]
+
+
+def _long_multi_phase() -> list[dict[str, object]]:
+    """A 17-item plan that overflows the expanded budget on a 100x30 terminal.
+
+    Deliberately longer than ``_big_multi_phase``: that one FITS at a normal
+    height (it is the fixture proving expand reveals everything), so it can never
+    exercise the overflow footer. The counts here are asserted against
+    ``sum(len(phase items))`` rather than restated, so a fixture edit cannot make
+    a wrong position number look right.
+    """
+    return [
+        {"name": "Discovery", "items": [_item(f"discovery task {n}", "done") for n in range(4)]},
+        {
+            "name": "Implementation",
+            "items": [
+                _item("implementation task 0", "done"),
+                *[_item(f"implementation task {n}", "pending") for n in range(1, 6)],
+                _item("implementation task 6", "blocked", reason="waiting on review"),
+            ],
+        },
+        {
+            "name": "Validation",
+            "items": [
+                *[_item(f"validation task {n}", "pending") for n in range(5)],
+                _item("validation task 5", "dropped"),
+            ],
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_expanded_overflow_footer_states_the_remainder_below() -> None:
+    """U4 + U5 as ONE footer: an expanded list that overflows reads
+    ``↓ N more · ctrl+t to collapse``.
+
+    The scrollbar thumb was the only signal content continued — invisible to a
+    keyboard-only reader and easy to miss on a short window. The number is a
+    REMAINDER, not a position (UX round 1, U2): ``N of M`` reads as "the item I
+    am looking at" by every terminal convention, and no visible row carries an
+    ordinal that could confirm it. A remainder is checkable by scrolling, and it
+    mirrors the collapsed ``+N more`` the reader saw one keypress earlier."""
+    from local_operator.tools import builtin
+
+    session = FakeSession()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        phases = _long_multi_phase()
+        total = sum(len(phase["items"]) for phase in phases)  # type: ignore[arg-type]
+        await _booted_panel(app, pilot, phases)
+        panel = await _settled_expand(app, pilot)
+
+        # Precondition: this list really does overflow, or the footer is vacuous.
+        assert panel._scroll.max_scroll_y > 0
+        footer = _affordance_text(panel)
+        assert footer.endswith("ctrl+t to collapse"), footer
+        assert footer.startswith("↓ "), footer
+        assert " more · " in footer, footer
+        # The remainder counts TODOS, not painted rows: phase headers and the
+        # root line are chrome and must not inflate it. At the top of the scroll
+        # some todos are visible, so the remainder is strictly between 0 and all.
+        remaining = int(footer.split(" more")[0].removeprefix("↓ ").strip())
+        assert 0 < remaining < total, footer
+        builtin.TODO_STORE.clear()
+
+
+@pytest.mark.asyncio
+async def test_expanded_footer_absent_when_the_whole_list_is_visible() -> None:
+    """No overflow, no cue. An expanded list the reader can see in full is not a
+    place to be lost in, and a permanent ``5 of 5`` would be chrome that never
+    changes — collapsed does not confess a remainder it does not have either."""
+    from local_operator.tools import builtin
+
+    session = FakeSession()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        panel = await _booted_panel(
+            app,
+            pilot,
+            [
+                {"name": "Auth", "items": [_item("token exchange", "pending")]},
+                {"name": "Cleanup", "items": [_item("remove the shim", "pending")]},
+            ],
+        )
+        await pilot.press("ctrl+t")
+        await pilot.pause()
+
+        assert panel._scroll.max_scroll_y == 0  # precondition: nothing hidden
+        assert _affordance_text(panel) == "ctrl+t to collapse"
+        builtin.TODO_STORE.clear()
+
+
+@pytest.mark.asyncio
+async def test_expanded_footer_tracks_the_keyboard_scroll_and_drops_the_arrow() -> None:
+    """The position follows ``ctrl+down``/``ctrl+up`` (U2's real key path), and
+    reaching the end drops the ``↓`` while the count reads ``M of M``.
+
+    A scroll repaints nothing on its own — ``sync``'s equality guard covers the
+    store, the budget, the expanded flag and the hidden set, none of which a
+    scroll moves — so this is the regression guard for the ``scroll_y`` watcher.
+    A footer frozen at its first-paint numbers would be worse than none: it would
+    claim more content below after the reader had already reached the end."""
+    from local_operator.tools import builtin
+
+    session = FakeSession()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        phases = _long_multi_phase()
+        total = sum(len(phase["items"]) for phase in phases)  # type: ignore[arg-type]
+        await _booted_panel(app, pilot, phases)
+        panel = await _settled_expand(app, pilot)
+        assert panel._scroll.max_scroll_y > 0  # precondition: it really overflows
+        at_top = _affordance_text(panel)
+        assert at_top.startswith("↓ "), at_top
+
+        # The REAL binding, not the scroll API: this is the path a user takes.
+        await pilot.press("ctrl+down")
+        for _ in range(12):
+            await pilot.pause()
+        assert panel._scroll.scroll_y == panel._scroll.max_scroll_y
+        # At the end there is no remainder, so the prefix is gone ENTIRELY and
+        # the row is byte-identical to the no-overflow footer — both mean
+        # "nothing is hidden" (UX round 1, U4). Absence can carry that meaning
+        # only because the widest-fit rule stops the prefix vanishing for any
+        # other reason.
+        at_end = _affordance_text(panel)
+        assert at_end == "ctrl+t to collapse", at_end
+        assert str(total) not in at_end, at_end
+
+        await pilot.press("ctrl+up")
+        for _ in range(12):
+            await pilot.pause()
+        assert _affordance_text(panel) == at_top
+        builtin.TODO_STORE.clear()
+
+
+@pytest.mark.asyncio
+async def test_expanded_footer_sheds_whole_before_it_eats_the_hotkey() -> None:
+    """Narrow width: the position prefix is dropped ENTIRE, never truncated into
+    the ``ctrl+t`` token.
+
+    The row is ``no_wrap``/``ellipsis`` and clipped against the screen, so a
+    footer that merely grew would spend a narrow width on the count and leave
+    ``ctrl+t to colla…`` — keeping the summary and shedding the affordance, the
+    exact inversion ``usage_panel._hint_row`` documents. The hotkey is the only
+    signal the toggle exists; position is polish."""
+    from local_operator.tools import builtin
+
+    session = FakeSession()
+    for width in (16, 20, 40):
+        session = FakeSession()
+        app = OperatorApp(_async_factory(session))
+        async with app.run_test(size=(width, 30)) as pilot:
+            panel = await _booted_panel(app, pilot, _long_multi_phase())
+            await pilot.press("ctrl+t")
+            await pilot.pause()
+
+            footer = _affordance_text(panel)
+            # ``ctrl+t`` survives at every width — the one non-negotiable token.
+            assert "ctrl+t" in footer, f"w={width}: {footer!r}"
+            if " more · " in footer:
+                # Wide enough for both: the hotkey phrase stays WHOLE behind the
+                # prefix, never clipped to pay for the count.
+                assert footer.endswith("ctrl+t to collapse"), f"w={width}: {footer!r}"
+            elif footer.startswith("↓"):
+                # Too narrow for the number but not for the cue: the NUMBER is
+                # what goes, never the arrow. The arrow is U4's finding; the
+                # count is only U5's orientation.
+                assert footer == "↓ · ctrl+t to collapse", f"w={width}: {footer!r}"
+            else:
+                # Shed WHOLE: the row is exactly what it was before this feature,
+                # with no count fragment and no orphaned separator.
+                assert footer.startswith("ctrl+t to"), f"w={width}: {footer!r}"
+                assert "·" not in footer, f"w={width}: {footer!r}"
+            builtin.TODO_STORE.clear()
+
+
+@pytest.mark.asyncio
+async def test_collapsed_affordance_is_unchanged_by_the_expanded_footer() -> None:
+    """The collapsed row keeps its ``+N more · ctrl+t to expand`` exactly: the
+    new footer is an EXPANDED-only addition, and the collapsed goldens
+    (``test_band_panels.py``) must not move."""
+    from local_operator.tools import builtin
+
+    session = FakeSession()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        panel = await _booted_panel(app, pilot, _long_multi_phase())
+        assert panel._expanded is False
+        footer = _affordance_text(panel)
+        assert footer.endswith("· ctrl+t to expand"), footer
+        assert footer.startswith("+"), footer
+        assert "↓" not in footer, footer
+        builtin.TODO_STORE.clear()
+
+
+@pytest.mark.asyncio
+async def test_expanded_footer_arrow_follows_the_body_not_the_todo_count() -> None:
+    """Design round 1, D2: the arrow answers "is there more to SEE", so it is
+    derived from the viewport, never from the todo remainder.
+
+    A plan whose last phase has no items (a shape the tool schema accepts, and
+    the natural rendering of work not yet started) puts a phase HEADER below the
+    fold with no todo behind it. Deriving the arrow from the todo count painted
+    "nothing below" while that header was hidden — contradicting the scrollbar
+    thumb in the same frame, which is precisely the failure #264 exists to
+    prevent. The counts stay todo-based; only the arrow moved."""
+    from local_operator.tools import builtin
+
+    session = FakeSession()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _booted_panel(app, pilot, _trailing_chrome_phases())
+        panel = await _settled_expand(app, pilot)
+        max_scroll = panel._scroll.max_scroll_y
+        assert max_scroll > 0
+
+        for offset in range(max_scroll + 1):
+            panel._scroll.scroll_to(y=offset, animate=False)
+            for _ in range(8):
+                await pilot.pause()
+            footer = _affordance_text(panel)
+            more_below = offset < max_scroll
+            assert ("↓" in footer) is more_below, f"y={offset}: {footer!r}"
+        builtin.TODO_STORE.clear()
+
+
+@pytest.mark.asyncio
+async def test_expanded_footer_keeps_the_hotkey_column_fixed_while_scrolling() -> None:
+    """Design round 1, D1: the ``ctrl+t`` token must not move under a reader who
+    is only scrolling.
+
+    D1 measured a two-cell jump when the arrow dropped under the old ``N of M``
+    wording. ``N more`` sheds the whole prefix at the end instead, but the same
+    defect class survives the rewording as a one-cell shift at every
+    power-of-ten boundary (``↓ 10 more`` -> ``↓ 9 more``) — mid-scroll, with the
+    reader watching. The remainder is padded to the widest number's width so the
+    column is pinned across every position the prefix is shown at.
+
+    Runs on ``_trailing_chrome_phases`` and over several geometries, because the
+    round-1 version of this guard was structurally blind (design round 2, D6):
+    it used a fixture that can never reach a zero remainder, so it could not
+    render the NUMBERLESS seam row — which was the one shape that had not been
+    padded, and which moved the hotkey three cells one notch before the
+    deliberate end-state move. The parse below therefore must not assume a digit
+    either: the round-1 version would have raised ``ValueError`` on that row and
+    died before reaching its own assertion, which is not a guard."""
+    from local_operator.tools import builtin
+
+    for size in ((100, 30), (100, 24), (60, 30), (45, 30)):
+        session = FakeSession()
+        app = OperatorApp(_async_factory(session))
+        async with app.run_test(size=size) as pilot:
+            await _booted_panel(app, pilot, _trailing_chrome_phases())
+            panel = await _settled_expand(app, pilot)
+            assert panel._scroll.max_scroll_y > 0, size
+
+            columns: set[int] = set()
+            shapes: set[str] = set()
+            for offset in range(panel._scroll.max_scroll_y + 1):
+                panel._scroll.scroll_to(y=offset, animate=False)
+                for _ in range(8):
+                    await pilot.pause()
+                footer = _affordance_text(panel)
+                if "↓" not in footer:
+                    shapes.add("bare")  # the end state deliberately sheds the prefix
+                    continue
+                columns.add(footer.index("ctrl+t"))
+                # The taxonomy is TOTAL (design round 3, D9). The widget paints
+                # four shapes, and folding the arrow-only row (``↓ ctrl+t``, at
+                # shed widths) into ``numberless`` would let the guard conflate
+                # two genuinely different layouts if the sweep were ever widened
+                # to a narrow geometry. Also note this parse must not assume a
+                # digit: an assertion that dies parsing before it checks is not
+                # a guard, which is how the round-2 version of this test missed
+                # the seam row entirely.
+                if "more" not in footer:
+                    shapes.add("arrowonly")
+                else:
+                    digits = footer.split(" more")[0].removeprefix("↓ ").strip()
+                    shapes.add("numbered" if digits.isdigit() else "numberless")
+            # The sweep must actually reach every shape, or it proves nothing.
+            assert shapes == {"numbered", "numberless", "bare"}, f"{size}: {shapes}"
+            assert len(columns) == 1, f"{size}: ctrl+t moved between {sorted(columns)}"
+            builtin.TODO_STORE.clear()
+
+
+@pytest.mark.asyncio
+async def test_expanded_footer_cue_never_vanishes_mid_scroll_at_narrow_widths() -> None:
+    """UX round 1, U1: the cue's presence is a property of the width and the list
+    length, never of the number's current digit count.
+
+    Width-testing the prefix against its CURRENT text made the cue survive
+    ``↓ 9 more`` and vanish at ``↓ 10 more``, so a reader at 34 columns was shown
+    the exact pre-change "this is everything" row with todos still hidden. That
+    is worse than never showing a cue, because absence had been taught to mean
+    something. Sizing on the widest remainder makes the cue stable: shown at
+    every position, or at none."""
+    from local_operator.tools import builtin
+
+    session = FakeSession()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(34, 16)) as pilot:
+        await _booted_panel(app, pilot, _long_multi_phase())
+        panel = await _settled_expand(app, pilot)
+        max_scroll = panel._scroll.max_scroll_y
+        assert max_scroll > 0
+
+        # Every position before the end must carry the cue — no gaps.
+        blind = []
+        for offset in range(max_scroll):
+            panel._scroll.scroll_to(y=offset, animate=False)
+            for _ in range(8):
+                await pilot.pause()
+            footer = _affordance_text(panel)
+            if "↓" not in footer:
+                blind.append((offset, footer))
+        assert not blind, f"cue vanished mid-scroll at {blind}"
+        builtin.TODO_STORE.clear()
+
+
+@pytest.mark.asyncio
+async def test_expanded_footer_recomposes_when_only_the_width_changes() -> None:
+    """UX round 2, U7: a width-only resize must not leave the row composed for
+    the width it no longer has.
+
+    ``sync``'s equality guard held the budget (a HEIGHT) but not
+    ``_row_cells()``, so an edge drag that changed only the width returned early
+    and kept a 30-cell footer. Rows are clipped against the width, and the
+    compositor then cropped that row into a much narrower region — cutting
+    ``ctrl+t`` itself, which is the one token that must always survive and the
+    exact invariant this panel sets for itself. ``main`` never showed this on the
+    expanded row only because its 18-cell row was too short to be cropped past
+    the hotkey.
+
+    Asserts against a FRESH BOOT at each width, which is what the reader should
+    have got, rather than against a hand-written expectation.
+
+    The sweep walks BOTH directions (UX round 3, U11). A monotone narrowing walk
+    passes against a panel that recomposes on narrowing and no-ops on widening —
+    and that panel is broken for a reader who drags a split back open, unmaximizes
+    or rotates a tiling layout: at 60 columns it would still paint the 10-cell row
+    composed for 14, so the arrow and the count are both gone with todos hidden.
+    That is U1's "told this is everything" shape arriving through the resize door,
+    and one direction of sampling cannot see it."""
+    from local_operator.tools import builtin
+
+    # Narrowing, then widening back out past where it started.
+    widths = (34, 26, 22, 20, 16, 20, 26, 34, 60)
+    fixture: list[dict[str, object]] = [
+        {"name": "Todos", "items": [_item(f"task {n}", "pending") for n in range(20)]}
+    ]
+
+    # What each width looks like when the panel is built for it from the start.
+    fresh: dict[int, str] = {}
+    for width in widths:
+        session = FakeSession()
+        app = OperatorApp(_async_factory(session))
+        async with app.run_test(size=(width, 24)) as pilot:
+            await _booted_panel(app, pilot, fixture)
+            panel = await _settled_expand(app, pilot)
+            panel._scroll.scroll_to(y=4, animate=False)
+            for _ in range(8):
+                await pilot.pause()
+            fresh[width] = _affordance_text(panel)
+            builtin.TODO_STORE.clear()
+
+    # The same widths reached by narrowing an already-expanded panel.
+    session = FakeSession()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(60, 24)) as pilot:
+        await _booted_panel(app, pilot, fixture)
+        panel = await _settled_expand(app, pilot)
+        panel._scroll.scroll_to(y=4, animate=False)
+        for _ in range(8):
+            await pilot.pause()
+
+        for width in widths:
+            await pilot.resize_terminal(width, 24)
+            for _ in range(12):
+                await pilot.pause()
+            resized = _affordance_text(panel)
+            assert (
+                resized == fresh[width]
+            ), f"w={width}: resize left {resized!r}, fresh boot paints {fresh[width]!r}"
+            # The invariant the crop was breaking: the hotkey stays readable in
+            # what the region can actually show, not merely in the composed Text.
+            cells = panel._row_cells()
+            painted = resized[:cells] if cells else resized
+            assert "ctrl+t" in painted, f"w={width}: ctrl+t cropped away from {painted!r}"
+        builtin.TODO_STORE.clear()
