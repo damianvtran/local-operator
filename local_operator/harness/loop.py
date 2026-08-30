@@ -873,7 +873,6 @@ class AgentLoop:
             async for event in stream:
                 if isinstance(event, StreamTextDelta):
                     text_parts.append(event.delta)
-                    assistant.content = [TextContent(text="".join(text_parts))]
                     yield MessageUpdateEvent(message=assistant, delta=event.delta)
                 elif isinstance(event, StreamToolCallDelta):
                     state = tool_states.setdefault(
@@ -973,6 +972,15 @@ class AgentLoop:
                         # see is the exact bug this stop_reason exists to fix.
                         error = "model refused the request (no details from provider)"
         except asyncio.CancelledError:
+            # Assemble before re-raising. A hard cancel skips the tail of this
+            # function entirely, so without this the message a consumer still
+            # holds from ``MessageStartEvent`` would keep the empty content it
+            # was created with, where before the per-delta rebuild it held every
+            # delta received up to the cut. Nothing downstream reaches
+            # ``context.messages`` on this path, but the object is observable,
+            # and losing the partial answer on cancel is a behaviour change this
+            # optimization has no business making.
+            assistant.content = [TextContent(text="".join(text_parts))]
             raise
         except Exception as exc:
             # `error` below is handed straight to the UI, which prints it as a
@@ -996,6 +1004,30 @@ class AgentLoop:
             # run, instead of the abort having to be re-detected in each place.
             stop_reason = "aborted"
 
+        # Assemble the text ONCE, here, rather than on every delta.
+        #
+        # This assignment used to live inside the delta loop, rebuilding the
+        # whole accumulated string per token. That is quadratic in the length
+        # of the response: a 2000-delta answer allocates ~2.4 GB of
+        # immediately-dead strings to hold 2.4 MB of live text, and the churn
+        # outruns the allocator's ability to return pages, so RSS climbs into
+        # the gigabytes. With several subagents streaming at once it exhausted
+        # system memory on a 36 GB machine.
+        #
+        # Consumers of MessageUpdateEvent must therefore append ``event.delta``
+        # rather than re-read the message: the TUI keeps ``_assistant_buffer``,
+        # the mobile projection appends to ``row.text`` (and documents "never
+        # re-read the whole message"), headless print writes the delta, and the
+        # server bridge in ``server/utils/operator.py`` accumulates its own
+        # ``record.message`` for exactly this reason. The message itself does
+        # not reach ``context.messages`` until the turn completes, and
+        # MessageEndEvent carries the authoritative final text.
+        #
+        # Placed after the abort/error handling so a cut or failed stream still
+        # reports the text that did arrive — the frozen row on an aborted turn
+        # is what the user is left reading. The hard-cancel path re-raises
+        # above and assembles there for the same reason.
+        assistant.content = [TextContent(text="".join(text_parts))]
         assistant.tool_calls = [
             self._assemble_tool_call(state) for _, state in sorted(tool_states.items())
         ]

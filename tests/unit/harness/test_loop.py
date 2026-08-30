@@ -32,6 +32,7 @@ from local_operator.harness.types import (
     CustomMessage,
     LoopConfig,
     Message,
+    MessageStartEvent,
     ModelSpec,
     NoticeEvent,
     StreamEndEvent,
@@ -2445,3 +2446,51 @@ async def test_empty_length_retry_clamps_the_resolved_model_too():
     assert stream.requests[0].model.reasoning_effort == "high"
     assert stream.requests[1].model.reasoning_effort == "medium"
     assert isinstance(events[-1], AgentEndEvent)
+
+
+@pytest.mark.asyncio
+async def test_a_hard_cancel_keeps_the_text_that_already_streamed() -> None:
+    """A cancelled turn must still carry the partial answer it received.
+
+    The assistant message is assembled once when the turn ends, because
+    rebuilding it on every delta was quadratic in response length. A hard
+    cancel never reaches that assembly, so it assembles in the
+    ``CancelledError`` handler instead — without which a consumer still holding
+    the message from ``MessageStartEvent`` would find it empty where it
+    previously held every delta up to the cut.
+
+    Asserted through the real ``_model_turn`` rather than by calling the
+    handler, because the point is that the cancellation path reaches it.
+    """
+    started: dict[str, Message] = {}
+
+    async def parked_stream(request: ChatRequest, signal: AbortSignal | None):
+        yield StreamTextDelta(delta="partial ")
+        yield StreamTextDelta(delta="answer")
+        await asyncio.sleep(60)  # park mid-stream; the cancel lands here
+        yield StreamEndEvent(stop_reason="stop")
+
+    loop = AgentLoop()
+    context = LoopContext(tools=[])
+    config = make_config(parked_stream)
+
+    async def drive() -> None:
+        async for event in loop._model_turn(context, config, None):
+            # Narrow to Message: the field is the AgentMessage union, and only
+            # a real assistant Message carries the text this asserts on.
+            if isinstance(event, MessageStartEvent) and isinstance(event.message, Message):
+                started["message"] = event.message
+
+    task = asyncio.create_task(drive())
+    # Let both deltas land before cutting, so there is text to lose.
+    for _ in range(100):
+        await asyncio.sleep(0.01)
+        if started.get("message") is not None:
+            break
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert (
+        started["message"].text == "partial answer"
+    ), "a hard cancel dropped the text that had already streamed"
