@@ -24,6 +24,12 @@ STATE selects what the page is showing:
     enum       an enum row expanded into its choices
     error      a text editor open with a rejected value and its inline error
     cascade    the failover cascade editor with a chain open
+    cascade-row  the failover cascade SETTING row highlighted (OUT.svg) and
+               activated (OUT.open.svg). What `enter` does on that row is the
+               subject of #440: it used to open a free-text editor seeded with
+               the cascade's Python repr, and committing that repr destroyed
+               every chain, so a still of the resting row alone cannot show
+               the fix
     confirm    `d` on a chain row, asking before it deletes the whole chain
     confirm-long  the same ask on a 26-character chain name, which is what
                shows whether the ask is budgeted against the row it is
@@ -208,6 +214,17 @@ async def main() -> None:
             view.action_activate()
             await pilot.pause()
             app.save_screenshot(out)
+        elif state == "cascade-row":
+            # TWO frames, for the reason the `theme` state takes two: the bug
+            # is in what ACTIVATION does, not in how the row rests. Before the
+            # #440 fix the second frame shows an inline editor holding
+            # `{'default': [...]}` on a row that has no scalar to edit.
+            _select(view, "retry.fallbackChains")
+            await pilot.pause()
+            app.save_screenshot(out)
+            view.action_activate()
+            await pilot.pause()
+            app.save_screenshot(out.replace(".svg", ".open.svg"))
         elif state == "confirm-long":
             # The SAME ask on a 26-character chain name. The `confirm` frames
             # use `default` (7 characters), which fits everywhere and therefore

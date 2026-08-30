@@ -63,6 +63,20 @@ from local_operator.tui.widgets.tool_card import truncate_cells
 #: `max-width` and `_card_width`.
 _PANE_WIDTH = 34
 
+#: Kinds the inline text editor may open on. Written as an ALLOW-list, not a
+#: deny-list, so a kind added to `settings_io.Kind` without an
+#: `action_activate` branch is refused by default rather than silently handed
+#: to a free-text editor. That silence is what made #440 destructive:
+#: `Kind.CASCADE` fell through, the editor seeded itself with the mapping's
+#: Python repr, and committing it overwrote the user's whole failover cascade
+#: with a string. A missing branch should cost a key that says it cannot act,
+#: never a config the user cannot get back.
+#:
+#: `Kind.LIST` is in here on purpose — `web_search.providers` is stored as a
+#: list and genuinely edited as comma-separated text (see `settings_io.coerce`),
+#: which is why this is keyed on the interaction rather than on the stored type.
+_TEXT_EDITABLE_KINDS = frozenset({Kind.INT, Kind.FLOAT, Kind.TEXT, Kind.LIST})
+
 #: One line of the read-only pane, as its styled segments. A LIST of segments
 #: rather than one string plus one style, because a provider row carries two
 #: inks on one line (the id in `muted`, its state in `faint`) and the pane's
@@ -670,7 +684,49 @@ class SettingsView(Vertical):
             self._error = "this setting is retired and cannot be changed"
             self._repaint()
             return
+        if setting.kind is Kind.CASCADE:
+            # A cascade has NO scalar to edit — it is a mapping of chains to
+            # ordered hops, and its editor is the two levels of rows already
+            # painted underneath this one. Without this branch the row fell
+            # through to `_begin_edit`, which seeded a free-text editor with
+            # `str(dict)`, and accepting that repr stored it as a STRING:
+            # `read_chains` then returned `{}`, the whole cascade was gone, and
+            # `r` could not bring it back because the stored value was no
+            # longer a mapping. A silent, unrecoverable loss of the user's own
+            # configuration from one press of the key the footer advertises
+            # (#440).
+            #
+            # `enter` therefore travels INTO the group rather than doing
+            # nothing: the footer offers `enter change` on this row, and a lit
+            # hint whose key is inert is the same "nothing happens when I
+            # click" complaint U5 records. The first selectable row below is
+            # the first chain, or `+ add a chain` when no chain exists yet —
+            # either way it is where an edit of this setting begins.
+            self._enter_cascade()
+            return
         self._begin_edit(row)
+
+    def _enter_cascade(self) -> None:
+        """Put the cursor on the first row of the cascade's own editor.
+
+        Resolved by SCANNING FORWARD from the cascade setting row rather than
+        by a fixed offset: `_cascade_rows` emits an unselectable
+        ``no cascade configured`` line when the mapping is empty, and the hops
+        of an already-open chain sit inside the group too. The first selectable
+        row after the setting is the right target in every one of those shapes.
+        """
+        for index in range(self._selected + 1, len(self._rows)):
+            row = self._rows[index]
+            # The group ends at the next row that belongs to something else —
+            # a header, or another setting. Everything the cascade owns is one
+            # of its own kinds.
+            if row.kind not in ("empty", "chain", "hop", "hop_add", "chain_add"):
+                break
+            if row.selectable:
+                self._selected = index
+                self._repaint()
+                self._scroll_to_selection()
+                return
 
     def _scroll_to_expansion(self) -> None:
         """Bring the highlighted row AND the group it just opened into view.
@@ -835,6 +891,25 @@ class SettingsView(Vertical):
             self._editing = "chainadd"
             self._buffer = ""
         elif row.setting is not None:
+            if row.setting.kind not in _TEXT_EDITABLE_KINDS:
+                # Belt and braces for the #440 class of defect. Every kind that
+                # is NOT edited as text has its own branch in
+                # `action_activate`, so reaching here means a kind was added
+                # without one — and the failure mode of that omission is not a
+                # dead key but a DESTRUCTIVE one: the editor seeds itself with
+                # `str(stored_value)` and commits whatever that renders as, in
+                # `Kind.CASCADE`'s case a Python repr written over the user's
+                # own mapping. Refusing to open is the safe half of that pair,
+                # and it says so rather than swallowing the press.
+                #
+                # Guarded on the KIND and not on the value's shape because
+                # `Kind.LIST` legitimately stores a list and legitimately edits
+                # as comma-separated text; "is this a scalar" would have to
+                # carve that out and would still miss a scalar-valued kind that
+                # needs its own widget.
+                self._error = "this setting is not edited as text"
+                self._repaint()
+                return
             self._editing = row.setting.key
             self._buffer = _edit_seed(settings_io.read_setting(self._manager, row.setting))
         else:
