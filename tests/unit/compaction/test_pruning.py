@@ -1,6 +1,6 @@
-from typing import Any
-
 """Cache-aware pruning: superseded reads, useless blanking, and every guard."""
+
+from typing import Any
 
 from local_operator.compaction.pruning import (
     MIN_PRUNE_TOKENS,
@@ -36,6 +36,7 @@ def test_superseded_read_blanked_with_pairing_intact():
     out, changed = prune_tool_outputs(messages, NOW, ACTIVE)
     assert changed is True
     assert len(out) == 4  # never deleted
+    assert old_read.text == "[Superseded by a newer result for the same resource]"
     assert old_read.text == SUPERSEDED_NOTICE
     assert old_read.provider_payload is not None
     assert old_read.provider_payload["pruned"] is True
@@ -306,6 +307,18 @@ def test_a_declared_key_supersedes_re_reads_of_one_resource() -> None:
     assert _text_len(pruned) < before * 0.35
     # The newest result must survive intact: it alone describes reality.
     assert "x" * 1200 in _first_text(pruned[-1])
+
+
+def test_path_and_declared_key_namespaces_cannot_collide() -> None:
+    """A path that resembles a declaration must remain a different resource."""
+    path = _observer("path", "read", {"path": "declared:/etc/passwd"})
+    declared = _observer("declared", "read", {"supersede_key": "/etc/passwd:full"})
+
+    before = _text_len([path, declared])
+    pruned, changed = prune_tool_outputs([path, declared], now_ms=0, last_activity_ms=0)
+
+    assert changed is False
+    assert _text_len(pruned) == before
 
 
 def test_a_declared_key_never_blanks_a_different_result() -> None:

@@ -7,10 +7,10 @@ details. The flags never reach provider wire formats.
 
 Two passes (``pruneSupersededToolResults``):
 
-(a) **Superseded reads** — a later tool result for the same path makes the
-    earlier output dead weight (the model re-read precisely because the old
-    copy was stale). The supersede key is ``details['path']``; results without
-    a path group by tool name.
+(a) **Superseded results** — a later tool result for the same path, or with
+    the same explicitly declared ``details['supersede_key']``, makes the
+    earlier output dead weight. Results with neither key are exempt: grouping
+    pathless results by tool name would collapse legitimately distinct output.
 (b) **Useless-flagged results** — tools self-flag contextually worthless
     output (zero-match search, timed-out wait); blanked once consumed.
 
@@ -55,7 +55,7 @@ __all__ = [
 MIN_PRUNE_TOKENS = 50
 
 #: Exact placeholder written over a superseded tool result.
-SUPERSEDED_NOTICE = "[Superseded by a newer read of this file]"
+SUPERSEDED_NOTICE = "[Superseded by a newer result for the same resource]"
 
 #: Exact placeholder written over an elided useless tool result.
 USELESS_NOTICE = "[Uneventful result elided]"
@@ -173,7 +173,9 @@ def _supersede_key(message: Message) -> str | None:
         return None
     path = details.get("path")
     if isinstance(path, str) and path:
-        return f"{message.tool_name}:{path}:{details.get('range') or 'full'}"
+        # The namespace marker prevents a path crafted like a declared key
+        # from colliding with a tool's explicit opt-in contract.
+        return f"{message.tool_name}:path:{path}:{details.get('range') or 'full'}"
     declared = details.get("supersede_key")
     if isinstance(declared, str) and declared:
         return f"{message.tool_name}:declared:{declared}"
