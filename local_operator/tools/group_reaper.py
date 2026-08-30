@@ -99,16 +99,28 @@ _REAPING_IS_SUPPORTED = _PLATFORM != "win32"
 _CMD_LOG_CHARS = 120
 
 #: Hard bound on how long a ledger-lock acquire may retry before degrading to
-#: running unlocked. Deliberately SHORT: this is a best-effort hygiene lock on
-#: the teardown path, not a correctness-critical one (losing it costs at worst
-#: the pre-existing lost-append, never a wrong kill — see ``_ledger_lock``), and
-#: the contended case is a leaked husk from a SIGKILLed peer that will never
-#: release. A generous timeout here would not fix anything, it would only move
-#: the freeze: ``/reload`` runs ``kill_own_groups()`` AFTER the TUI has restored
-#: the terminal, so every second spent waiting is a second the user stares at a
-#: dead shell prompt. Contention is rare and momentary in the honest case (a
-#: sibling append mid-compaction, microseconds), so a few hundred ms buys the
-#: entire realistic win.
+#: running unlocked. Deliberately SHORT: this is a best-effort hygiene lock, not
+#: a correctness-critical one (losing it costs at worst the pre-existing
+#: lost-append, never a wrong kill — see ``_ledger_lock``).
+#:
+#: The contender worth sizing for is a LIVE peer that is itself wedged, holding
+#: the lock while parked. Note it is NOT a lock leaked by a dead process:
+#: ``flock`` is dropped by the kernel when the last fd on the open-file
+#: description closes, and that includes a ``SIGKILL`` (measured — after killing
+#: the holder the lock is granted in 0.000s). What a hard death leaks is the
+#: ``.lock`` FILE, which ``_sweep_orphan_locks`` cleans; the LOCK itself is
+#: already gone. A wedged live holder is the case that never releases, and it
+#: was observed on this machine: 3 of 14 live ``lop`` processes parked in
+#: ``flock``+``close``, two burning ~149% CPU for 800+ minutes. One wedged
+#: process parks the next, and the freeze propagates between sessions.
+#:
+#: A generous timeout would not fix that, it would only move the freeze, so the
+#: bound is sized off the HONEST contender instead: a sub-``PIPE_BUF`` append or
+#: a small read-filter-rewrite, microseconds to low milliseconds. 0.3s leaves
+#: about two orders of magnitude of headroom before an honest contender degrades
+#: while staying imperceptible to a user. This deliberately diverges from
+#: ``auth.LOCK_ACQUIRE_TIMEOUT_S`` (15s): that lock guards a destructive
+#: rotating-token double-spend, this one guards an append whose loss is benign.
 _LOCK_ACQUIRE_TIMEOUT_S = 0.3
 
 #: Retry cadence for the non-blocking acquire, with the same gentle geometric
@@ -383,13 +395,21 @@ def _try_lock_ledger(fd: int, *, exclusive: bool) -> bool:
     Non-blocking is REQUIRED here, not a style choice. ``LOCK_NB`` is what keeps
     the caller off the kernel wait queue, and on macOS/BSD a thread parked in
     ``flock(fd)`` blocks any other thread's ``os.close(fd)`` until that
-    ``flock()`` returns — which, against a lock leaked by a SIGKILLed peer, is
-    never. Reached from ``kill_own_groups()`` on the ``/reload`` teardown path
-    that runs after the terminal is restored, a parked acquire wedges the event
-    loop with no TUI left to show it and no SIGINT able to break it (the soft
-    death handler deliberately spares SIGINT, and the main thread is inside a C
-    syscall where no Python handler can run). This is the same bug shape as #401
-    in the MCP OAuth refresh lock. Retrying a non-blocking attempt is strictly
+    ``flock()`` returns — which, against a live peer that is itself wedged while
+    holding the lock, is never (see ``_LOCK_ACQUIRE_TIMEOUT_S`` for why a wedged
+    LIVE holder, and not a dead one, is the contender that matters).
+
+    The callers that reach this are ``register_group`` (SHARED) and
+    ``_rewrite_without_pgid`` via ``unregister_group`` (EXCLUSIVE) — the BASH
+    path, which runs them on asyncio worker threads. ``kill_own_groups`` does NOT
+    take this lock; it is only where the damage becomes visible, because
+    ``concurrent.futures`` joins those worker threads at interpreter shutdown, so
+    one parked worker means the process never exits. On ``/reload`` that lands
+    after the TUI has restored the terminal and before ``replace_self()``: a
+    shell prompt, a process that never dies, and a Ctrl+C that cannot help (the
+    soft-death handler deliberately spares SIGINT, and the parked thread is
+    inside a C syscall where no Python handler runs). Same bug shape as #401 in
+    the MCP OAuth refresh lock. Retrying a non-blocking attempt is strictly
     weaker than blocking and is the only shape that cannot hang, so do NOT
     "simplify" this back into ``fcntl.flock(fd, fcntl.LOCK_EX)``.
 
@@ -461,12 +481,13 @@ def _ledger_lock(path: Path, *, exclusive: bool) -> Iterator[None]:
 
     The acquire is BOUNDED and NON-BLOCKING, which is what makes that promise
     true rather than aspirational. It once was not: a bare blocking ``flock``
-    here honoured the docstring only when the lock happened to be free, and a
-    husk leaked by a SIGKILLed peer froze the whole process on ``/reload``.
-    :func:`_try_lock_ledger` carries the full reasoning, including why macOS
-    turns a parked acquire into a dead event loop. Do not reintroduce a blocking
-    acquire, and do not stretch ``_LOCK_ACQUIRE_TIMEOUT_S`` into a long wait —
-    that only relocates the hang.
+    here honoured the docstring only when the lock happened to be free, so a
+    live peer wedged while holding it parked the acquiring worker thread for
+    good and the process could no longer exit on ``/reload``.
+    :func:`_try_lock_ledger` carries the full reasoning — which callers actually
+    reach this, and why macOS turns a parked acquire into a dead event loop. Do
+    not reintroduce a blocking acquire, and do not stretch
+    ``_LOCK_ACQUIRE_TIMEOUT_S`` into a long wait — that only relocates the hang.
 
     The fd is opened, retried on, and closed all on the CALLING thread, so no
     other thread can ever close a descriptor this one is inside a lock call on

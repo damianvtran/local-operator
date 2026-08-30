@@ -802,11 +802,18 @@ def test_ledger_lock_degrades_when_unavailable(tmp_path, monkeypatch):
 def _hold_ledger_lock(config_dir, owner_pid):
     """Hold this owner's ledger lock EXCLUSIVELY from another process.
 
-    Another process, not another thread, because that is the real failure: a
-    husk leaked by a SIGKILLed peer (or a sibling mid-compaction) holds the
-    flock with nobody left to release it. A same-process holder would prove
-    nothing, since flock is per open-file-description and the reaper's own fd
-    would be granted the lock immediately.
+    A separate process, not another thread, because it models the real failure:
+    a live peer wedged while holding the lock, which is what was observed in the
+    wild (several live ``lop`` processes parked in ``flock``+``close`` for hours)
+    and what never releases. Note a SIGKILLed peer would NOT do — the kernel
+    drops a flock when the holder dies, so the lock is granted immediately; what
+    a hard death leaks is the ``.lock`` file, not the lock.
+
+    A same-process holder would in fact contend (``_ledger_lock`` opens a fresh
+    fd, hence a fresh open-file-description: measured errno 35 on darwin), so it
+    is not that it would prove nothing — the separate process is chosen because
+    it is the honest model of a cross-session contender and cannot be defeated
+    by fd reuse inside the test.
 
     Returns (Popen, lock_path); the caller must kill the holder.
     """
@@ -838,11 +845,17 @@ def test_ledger_lock_never_blocks_when_held_by_another_process(tmp_path):
     """Every ledger-touching entry point returns promptly against a held lock.
 
     This is the #401 bug shape in the reaper: the acquire used to be a bare
-    blocking ``flock``, so a lock held by anyone else parked the caller forever.
-    On ``/reload`` that lands in ``kill_own_groups()`` AFTER the TUI restored the
-    terminal, and on macOS a thread parked in ``flock(fd)`` also blocks the event
-    loop's ``os.close(fd)`` — the user gets a shell prompt, a live process that
-    never exits, and a Ctrl+C that only echoes.
+    blocking ``flock``, so a lock held by a wedged live peer parked the caller
+    forever. The callers that actually park are ``register_group`` and
+    ``unregister_group`` on the bash path — ``kill_own_groups`` never takes this
+    lock and returns in 0.00s even pre-fix — and they run on asyncio worker
+    threads that interpreter shutdown joins, so on ``/reload`` the process cannot
+    exit after the TUI has restored the terminal. On macOS a parked thread also
+    blocks the event loop's ``os.close(fd)``. The user gets a shell prompt, a
+    live process that never exits, and a Ctrl+C that only echoes.
+
+    ``kill_own_groups`` is asserted anyway: it must STAY prompt, since it is the
+    teardown call the user is waiting on when the freeze becomes visible.
 
     NOTE the failure mode this test is built for: pre-fix it does not fail an
     assertion, it HANGS. The bound below is therefore a real timeout, not a
