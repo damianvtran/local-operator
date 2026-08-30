@@ -63,6 +63,48 @@ _AMBIENT_VARS = (
 )
 
 
+@pytest.fixture(scope="session", autouse=True)
+def warm_tiktoken_encoding() -> None:
+    """Download the BPE table ONCE, before any test measures the event loop.
+
+    ``tiktoken.get_encoding`` caches under ``tempfile.gettempdir()`` and
+    DOWNLOADS the table on a miss. Measured here: 1239 ms cold, 0 ms warm. The
+    compaction rulers call it inline on the event loop for small histories —
+    correct, because the thread hop costs more than the encode it saves — but
+    nothing in that threshold anticipated a multi-second network call hiding
+    behind the first invocation.
+
+    That made ``test_the_loop_stays_responsive_while_several_subagents_run``
+    fail on CI and pass locally: a developer box has run the tokenizer before,
+    a fresh runner has not. It is the same class of problem
+    ``isolate_environment`` exists for — a test must not depend on ambient
+    machine state, and "has this machine downloaded the BPE table?" is exactly
+    that.
+
+    Warming rather than loosening the assertion is deliberate. That bound is
+    calibrated evidence (1353 ms before the compaction fix, 139 ms after), so
+    widening it to swallow a cold download would blind it to the regression it
+    exists to catch.
+
+    Warmed through the project's own ``_get_encoding`` rather than by calling
+    ``tiktoken.get_encoding`` directly, so it primes the module-level cache the
+    rulers actually read as well as the on-disk BPE file. Under ``xdist`` each
+    worker is its own process and runs this fixture itself; only the first pays
+    the download, because the disk cache is shared.
+
+    Session-scoped and best-effort: a sandboxed or offline machine must still
+    run the suite, so a failure here is swallowed. Such a box pays the cold
+    cost inside whichever test hits the tokenizer first, which is the status
+    quo this fixture improves on rather than a new failure mode.
+    """
+    try:
+        from local_operator.compaction.tokens import _get_encoding
+
+        _get_encoding()
+    except Exception:  # noqa: BLE001 — warming is an optimisation, never a gate
+        pass
+
+
 @pytest.fixture(autouse=True)
 def isolate_environment(tmp_path_factory, monkeypatch):
     """Point HOME at a scratch dir and clear provider/config env vars.
