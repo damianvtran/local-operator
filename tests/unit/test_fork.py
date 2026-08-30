@@ -774,3 +774,118 @@ class TestTheSwitchReceiptCannotNarrateTheWrongSession:
         assert (
             "self._pending_fork_receipt = None" in source
         ), "the failed-transition branch does not drop the fork receipt"
+
+
+class TestTheForkInheritsItsParentsCacheKey:
+    """R9. The fork's warm-prefix inheritance, pinned at the two places it can
+    silently break.
+
+    A fork replays a byte-identical transcript, so its first request reproduces
+    the parent's cached prefix exactly and must be ROUTED to it. On the
+    OpenAI-shaped wire that routing is a ``prompt_cache_key``, and it is
+    inherited from the parent rather than defaulted to the fork's own id.
+
+    Nothing in the suite covered this before, and its failure is entirely
+    silent: a fork that loses the key still works, still answers, and merely
+    pays full price for a prefix that was already warm. Measured live on
+    ``openai/gpt-5.4`` over a real Responses endpoint, the inherited key read
+    the parent's prefix in 16/16 trials while a non-matching key read in 3/8 —
+    so losing it is a real regression, not a theoretical one. The evidence is
+    in ``docs/evidence/fork-cache/``.
+
+    Two distinct failure modes are pinned:
+
+    1. **The boot path.** ``session_factory`` is what turns ``origin.json`` into
+       a ``cache_lineage_id``. A synthetic ``SessionStreamFn`` built by hand in
+       a test can pass while the REAL boot never plumbs the id through, so the
+       wiring is asserted against the factory's own source rather than against a
+       stand-in.
+    2. **The scope separation.** The cache key and the sticky-credential scope
+       must remain SEPARATE values. Collapsing them (an inviting "simplification"
+       — they are equal for every non-fork session) would make two sessions
+       sharing a cache key also share a PINNED CREDENTIAL ROW, which is a
+       genuine bug rather than a lost optimisation.
+    """
+
+    def _stream_fn(self, session_dir: Path):
+        """A stream fn wired EXACTLY as ``session_factory`` wires one."""
+        from local_operator.model.configure import create_stream_fn
+
+        class _Auth:  # only the resolved ids are inspected; nothing is streamed
+            pass
+
+        return create_stream_fn(
+            _Auth(),  # type: ignore[arg-type]
+            settings={},
+            session_id=session_dir.name,
+            cache_lineage_id=fork_parent(session_dir) or None,
+        )
+
+    def test_a_fork_takes_the_parents_cache_key_and_its_own_credential_scope(
+        self, tmp_path: Path
+    ) -> None:
+        _seed_parent(tmp_path)
+        fork_id = fork_session(tmp_path, PARENT_ID)
+        fork_dir = tmp_path / "sessions" / fork_id
+
+        stream = self._stream_fn(fork_dir)
+
+        assert stream._cache_lineage_id == PARENT_ID, "the fork did not inherit the cache key"
+        assert stream._session_id == fork_id
+        # The safety property, not a restatement of the line above: sticky
+        # credential selection keys on `_session_id` alone, so the fork must not
+        # share the parent's pinned credential row.
+        assert stream._cache_lineage_id != stream._session_id
+
+    def test_an_ordinary_session_keys_its_cache_on_its_own_id(self, tmp_path: Path) -> None:
+        """The default must survive: only a fork diverges the two values."""
+        parent = _seed_parent(tmp_path)
+        stream = self._stream_fn(parent)
+
+        assert stream._cache_lineage_id == PARENT_ID
+        assert stream._session_id == PARENT_ID
+
+    def test_the_real_boot_path_plumbs_the_lineage_id(self) -> None:
+        """The highest-risk assumption in the feature, asserted on the REAL
+        factory: a hand-built stream fn proves nothing about what boot does."""
+        import inspect
+
+        from local_operator import session_factory
+
+        source = inspect.getsource(session_factory)
+        assert (
+            "cache_lineage_id=fork_parent(transcript_dir) or None" in source
+        ), "session_factory no longer derives the fork's cache key from origin.json"
+
+    def test_the_key_reaches_the_openai_wire_body(self, tmp_path: Path) -> None:
+        """The inherited id is only worth anything if it is actually SENT.
+
+        ``_build_responses_body`` is the sole place the key reaches the wire,
+        gated on ``supports_prompt_cache``; the chat-completions body never
+        carries it. This drives the real builder rather than asserting on
+        source, so a change to the gate or the field name fails here.
+        """
+        from local_operator.harness.types import ChatRequest, Message
+        from local_operator.model.configure import build_model_spec
+        from local_operator.providers.clients import OpenAICompatClient
+
+        _seed_parent(tmp_path)
+        fork_id = fork_session(tmp_path, PARENT_ID)
+        fork_dir = tmp_path / "sessions" / fork_id
+        lineage = self._stream_fn(fork_dir)._cache_lineage_id
+
+        spec = build_model_spec("openai", "gpt-5.4")
+        assert spec.supports_prompt_cache, "the gate this key rides on is off for gpt-5.4"
+
+        client = OpenAICompatClient(base_url="https://api.openai.com/v1", openai_api="responses")
+        body = client._build_responses_body(
+            ChatRequest(
+                model=spec,
+                system_blocks=["stable prefix"],
+                messages=[Message.user("go")],
+                prompt_cache_key=lineage,
+            )
+        )
+
+        assert body["prompt_cache_key"] == PARENT_ID
+        assert body["prompt_cache_retention"] == "24h"
