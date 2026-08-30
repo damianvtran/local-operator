@@ -404,7 +404,14 @@ def test_the_memo_cannot_grow_without_bound() -> None:
     by orders of magnitude — an entry count would bound the wrong quantity and
     let the map retain tens of MB for the life of the process."""
     _REBOUND_CACHE.clear()
-    for index in range(40):
+    # 22, not 40. The cap saturates at 16 entries / ~30.5 MB by roughly the
+    # 17th image; every iteration past that re-proves the same invariant while
+    # allocating another ~12 MB of incompressible RGB. At 40 this was the
+    # heaviest test in the suite (1047 MB peak, 30 s). 22 still overshoots the
+    # saturation point by six evictions, so it exercises eviction rather than
+    # merely filling the map, and the assertions below are unchanged.
+    iterations = 22
+    for index in range(iterations):
         # Distinct sizes, so every one is a distinct cache key. Photographic
         # noise, so each result is genuinely large rather than a flat PNG that
         # compresses to nothing and would never reach the cap.
@@ -413,6 +420,10 @@ def test_the_memo_cannot_grow_without_bound() -> None:
     retained = sum(len(data) for data, _ in _REBOUND_CACHE.values())
     assert retained <= _REBOUND_CACHE_MAX_BYTES
     assert _REBOUND_CACHE, "the cap evicted so aggressively that nothing is ever cached"
+    # The point of the bound is that it EVICTS. Without this the test would
+    # still pass if the cap were raised high enough to hold everything, which
+    # is the regression it exists to catch.
+    assert len(_REBOUND_CACHE) < iterations, "nothing was ever evicted; the cap is not binding"
 
 
 # ---------------------------------------------------------------------------

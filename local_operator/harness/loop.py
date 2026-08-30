@@ -873,7 +873,6 @@ class AgentLoop:
             async for event in stream:
                 if isinstance(event, StreamTextDelta):
                     text_parts.append(event.delta)
-                    assistant.content = [TextContent(text="".join(text_parts))]
                     yield MessageUpdateEvent(message=assistant, delta=event.delta)
                 elif isinstance(event, StreamToolCallDelta):
                     state = tool_states.setdefault(
@@ -996,6 +995,28 @@ class AgentLoop:
             # run, instead of the abort having to be re-detected in each place.
             stop_reason = "aborted"
 
+        # Assemble the text ONCE, here, rather than on every delta.
+        #
+        # This assignment used to live inside the delta loop, rebuilding the
+        # whole accumulated string per token. That is quadratic in the length
+        # of the response: a 2000-delta answer allocates ~2.4 GB of
+        # immediately-dead strings to hold 2.4 MB of live text, and the churn
+        # outruns the allocator's ability to return pages, so RSS climbs into
+        # the gigabytes. With several subagents streaming at once it exhausted
+        # system memory on a 36 GB machine.
+        #
+        # Nothing needs the partial text mid-stream, which is what makes
+        # hoisting it safe: EVERY consumer of MessageUpdateEvent reads
+        # ``event.delta`` and appends it (TUI buffer, mobile projection —
+        # which documents "never re-read the whole message" — headless print,
+        # and the server bridge, which takes only id/role off the message).
+        # The message itself does not reach ``context.messages`` until the turn
+        # completes, and MessageEndEvent carries the final text.
+        #
+        # Placed BEFORE the abort/error exits below so a cut or failed stream
+        # still reports the text that did arrive: the frozen row on an aborted
+        # turn is what the user is left reading.
+        assistant.content = [TextContent(text="".join(text_parts))]
         assistant.tool_calls = [
             self._assemble_tool_call(state) for _, state in sorted(tool_states.items())
         ]
