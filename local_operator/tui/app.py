@@ -5648,6 +5648,31 @@ class OperatorApp(App[None]):
         WOULD take is resolved here and the class only goes on when the ground left
         beside it is wide enough to read as a margin. Computing a width in Python
         for want of a media query is the same move ``Toast._refit`` already makes.
+
+        A LIVE PROMPT stands the card down entirely (#168). The card composition
+        is the empty-state splash resting on a clamped composer, and a question
+        the turn is parked on is not part of it: it is about work that already
+        happened. The clamp only ever reached ``#input-shell``, while the prompt
+        docked above it kept ``width: 1fr`` — so ``Ctrl+L`` under a live ask hung
+        the question 58 cells past the composer it belongs to on a 160-column
+        terminal (measured: card=156 against shell=98).
+
+        Clamping ``#prompt-host`` to match would be the other repair, and it is
+        the one NOT taken: the tcss note on ``AskPickerScreen`` records that its
+        ``width: 1fr`` is "the ONLY statement of how wide the question is", after
+        a second, older width statement capped the ink a third of the way short
+        of the panel's own fill. A clamp above the card would reinstate exactly
+        that second statement. Standing the card down keeps ONE owner for the
+        width and hands the dock back the full-width geometry it has the moment
+        the first prompt is submitted.
+
+        It stands down the whole composition, not just the clamp, and that is
+        deliberate: boot notices centre on the card's axis
+        (``_sync_boot_column_width``), so releasing the clamp while leaving the
+        class on would centre a notice against a card that is no longer there.
+        With no card the notices sit on the full-width spine under a
+        screen-centred splash, which is the same honest degradation a terminal
+        too narrow for a card already gets.
         """
         # The content box, not the terminal: `Screen`'s inset is outside the
         # percentage the sheet resolves. The width test alone is not enough: the
@@ -5658,9 +5683,34 @@ class OperatorApp(App[None]):
         # class honest on every re-resolution, not only on the boot path.
         box = max(0, terminal_width - SCREEN_INSET)
         card = boot_card_width(box)
-        card_up = self.screen.has_class(BOOT_LAYOUT_CLASS) and box - card >= BOOT_CARD_MIN_INSET
+        card_up = (
+            self.screen.has_class(BOOT_LAYOUT_CLASS)
+            and not self._prompt_is_live()
+            and box - card >= BOOT_CARD_MIN_INSET
+        )
         self.screen.set_class(card_up, BOOT_CARD_CLASS)
         self._sync_boot_column_width(box)
+
+    def _prompt_is_live(self) -> bool:
+        """Is the dock holding a question the user still has to answer?
+
+        RE-DERIVED from the host on every call rather than tracked as a flag, the
+        same discipline ``_sync_boot_layout_class`` states for the boot class: a
+        remembered copy can go stale under a prompt that was settled by a path
+        that did not think to clear it, and a stale "a prompt is live" is a boot
+        card that never comes back.
+
+        ``display`` is the authoritative term, not the child count. The host is
+        hidden while it holds a prompt too short to draw itself
+        (``_sync_prompt_host``), and a question painting nothing must not go on
+        suppressing the card — that would leave a narrow terminal with neither a
+        card nor a visible question to justify its absence.
+        """
+        try:
+            host = self.query_one("#prompt-host", Container)
+        except Exception:  # pragma: no cover - before the dock is composed
+            return False
+        return bool(host.display) and bool(host.children)
 
     def _sync_boot_column_width(self, box: int) -> None:
         """Reconcile every boot notice against the card it shares an axis with.
@@ -7217,6 +7267,12 @@ class OperatorApp(App[None]):
         # The host reserves rows only while it holds something, so the dock
         # collapses back to the composer when nothing is being asked.
         host.display = True
+        # The boot card stands down under a live prompt (#168), so the layout is
+        # reconciled HERE and not only on the deferred `_sync_prompt_host` below:
+        # the clamp is a property of the frame this mount is part of, and one
+        # refresh of delay is one painted frame of the question overhanging the
+        # composer — the exact artifact this fixes, merely briefer.
+        self._sync_boot_layout()
         # ...and only while that something can actually be drawn. On a terminal
         # too short for even the card's footer the card hides itself, and a host
         # left visible would keep its own separation row for a prompt painting
@@ -7272,6 +7328,11 @@ class OperatorApp(App[None]):
         host.display = bool(children) and any(
             getattr(child, "is_drawable", True) for child in children
         )
+        # `display` is the term `_prompt_is_live` reads, so the boot card has to
+        # be re-decided whenever this writes it: a card that lost the ability to
+        # draw itself on a shrinking terminal stops suppressing the boot card,
+        # and one that regains it suppresses it again (#168).
+        self._sync_boot_layout()
 
     def _unmount_prompt(self, card: Widget) -> None:
         """Take a prompt out of the dock and hand focus back to the composer.
@@ -7336,6 +7397,10 @@ class OperatorApp(App[None]):
         # this module exists to remove (F1, agent review round 1).
         remaining = [child for child in host.children if child is not card]
         host.display = bool(remaining)
+        # Nothing is being asked any more, so the boot card comes back if the
+        # splash is still up (#168). Reconciled from here rather than left to the
+        # next resize, which on an answered question may never come.
+        self._sync_boot_layout()
         # The card's own restore target can be missing or stale, and then focus
         # has nowhere to land: the widget is gone but the screen still names it
         # as focused, so every later keystroke goes to a removed node and the

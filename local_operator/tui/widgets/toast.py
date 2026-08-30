@@ -58,6 +58,28 @@ TOAST_MAX_WIDTH = 60
 TOAST_WIDTH_RESERVE = 6
 TOAST_MIN_WIDTH = 20
 
+#: Narrowest the card is ever DRAWN, so consecutive receipts share one left
+#: edge (#170). The card is right-anchored and fits itself to its text, so
+#: without a floor a digit crossing 9→10 moved the border a cell between two
+#: cards seconds apart: ``copied 8 characters`` is 21 cells and ``copied 60
+#: characters`` is 22, and the user saw the card twitch rather than the number
+#: change.
+#:
+#: 24 is measured from the receipt family rather than chosen for roundness. The
+#: widest routine receipt is ``copied 6000 characters`` at 24 cells, and the
+#: rest — every character count from one to four digits, and every ``copied N
+#: lines`` — is narrower, so one floor holds them all to a single edge. Five
+#: digits would twitch again; a copy that large is not a gesture anyone repeats
+#: back to back, which is the case a shared edge is worth paying padding for.
+#:
+#: SUBORDINATE TO THE BOX, always. It is applied inside the
+#: :func:`toast_max_width` clamp, never beside it: a floor that beat the screen
+#: is the exact bug ``test_the_card_stays_inside_a_terminal_narrower_than_the
+#: _floor`` pins, where a 20-cell floor painted two cells past an 18-cell box
+#: and the compositor clipped the ellipsis off the truncated text. On any
+#: terminal below 26 cells this floor simply does not apply.
+TOAST_MIN_CARD_WIDTH = 24
+
 #: The card's own left+right padding (see the tcss rule), subtracted to get the
 #: cells actually available to text.
 TOAST_PADDING_CELLS = 2
@@ -431,7 +453,11 @@ class Toast(Static):
         if not self._message:
             return cap
         longest = max(cell_len(line) for line in self._message.split("\n"))
-        return max(1, min(cap, longest + TOAST_PADDING_CELLS))
+        # The floor is raised INSIDE the cap, so the screen box still has the
+        # last word on width (#170, and see ``TOAST_MIN_CARD_WIDTH``): a card
+        # wider than the terminal is hard-clipped by the compositor, which eats
+        # the ellipsis that says the text was cut.
+        return max(1, min(cap, max(TOAST_MIN_CARD_WIDTH, longest + TOAST_PADDING_CELLS)))
 
     def _refit(self) -> None:
         """Clamp the card, then pull its HOST over to hug it.
@@ -444,7 +470,20 @@ class Toast(Static):
         the notice actually occupies.
         """
         width = self._card_width()
-        self.styles.max_width = toast_max_width(self.app.size.width)
+        cap = toast_max_width(self.app.size.width)
+        self.styles.max_width = cap
+        # The floor is written onto the WIDGET as well, and it has to be: the
+        # card is `width: auto`, so Textual sizes it to its text and `_card_width`
+        # alone would only move the offset — widening the gap on the left while
+        # the right edge crept in, which is the same twitch mirrored (#170).
+        # `min_width` makes the card itself hold the floor, and the offset above
+        # is then computed from the same number, so the two cannot disagree.
+        #
+        # Clamped by `cap` rather than set raw: `min_width` beats `max_width` in
+        # Textual, so an unclamped floor on a terminal narrower than it would
+        # paint straight past the screen's edge padding — the failure
+        # `test_the_card_stays_inside_a_terminal_narrower_than_the_floor` pins.
+        self.styles.min_width = min(TOAST_MIN_CARD_WIDTH, cap)
         parent = self.parent
         # The HOST is offset, never the screen: a Toast mounted straight onto the
         # screen would otherwise shift the whole app sideways, which is a far

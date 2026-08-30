@@ -25,6 +25,7 @@ from local_operator.tui.widgets.toast import (
     TOAST_DEFAULT_MS,
     TOAST_FAILURE_MS,
     TOAST_MAX_WIDTH,
+    TOAST_MIN_CARD_WIDTH,
     TOAST_MIN_WIDTH,
     Toast,
     format_mcp_startup,
@@ -356,6 +357,72 @@ async def test_the_card_stays_inside_a_terminal_narrower_than_the_floor() -> Non
             await pilot.pause()
             assert toast.region.right <= width - 1, width
             assert toast.region.x >= 1, width
+
+
+@pytest.mark.asyncio
+async def test_consecutive_receipts_of_different_digit_counts_share_one_edge() -> None:
+    """#170: the card is right-anchored and fits its text, so a digit crossing
+    9→10 moved the left border a cell between two receipts seconds apart
+    (``copied 8 characters`` at x=58 w=21, then ``copied 60 characters`` at
+    x=57 w=22). The floor holds the whole routine receipt family — one to four
+    digits of characters, and every ``copied N lines`` — to a single edge.
+
+    The RIGHT edge is asserted too: an anchor that drifted right would hide a
+    left-edge twitch behind a compensating move rather than remove it.
+    """
+    receipts = [
+        "copied 1 character",
+        "copied 8 characters",
+        "copied 60 characters",
+        "copied 600 characters",
+        "copied 6000 characters",
+        "copied 2 lines",
+        "copied 120 lines",
+    ]
+    async with ToastApp().run_test(size=(80, 24)) as pilot:
+        toast = pilot.app.query_one(Toast)
+        seen = set()
+        for message in receipts:
+            toast.show(message, duration_ms=60_000)
+            await pilot.pause()
+            await pilot.pause()
+            seen.add((toast.region.x, toast.region.right))
+        assert len(seen) == 1, sorted(seen)
+
+
+@pytest.mark.asyncio
+async def test_a_message_past_the_floor_still_sizes_to_its_own_text() -> None:
+    """The floor is a MINIMUM, not a fixed width. A startup summary is wider
+    than any receipt, and pinning every card to the floor would truncate it."""
+    async with ToastApp().run_test(size=(80, 24)) as pilot:
+        toast = pilot.app.query_one(Toast)
+        long_message = "\u2299 MCP ready: 2 servers, 9 tools"
+        toast.show(long_message, duration_ms=60_000)
+        await pilot.pause()
+        await pilot.pause()
+        assert toast.region.width == cell_len(long_message) + 2
+        assert toast.region.width > TOAST_MIN_CARD_WIDTH
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("width", [16, 20, 21, 22, 23, 24, 25, 26])
+async def test_the_floor_never_beats_the_screen_box(width: int) -> None:
+    """The constraint the floor had to respect (#170). ``TOAST_MIN_CARD_WIDTH``
+    is 24, so every width below 26 asks for a card wider than the box — the
+    same shape as the bug ``toast_max_width``'s own floor already caused, where
+    a 20-cell floor painted two cells past an 18-cell box and the compositor
+    clipped the ellipsis off the truncated text.
+
+    ``min_width`` is the specific hazard: it BEATS ``max_width`` in Textual, so
+    a floor written raw onto the widget would overflow whatever the cap said.
+    """
+    async with ToastApp().run_test(size=(width, 12)) as pilot:
+        toast = pilot.app.query_one(Toast)
+        toast.show("copied 8 characters", duration_ms=60_000)
+        await pilot.pause()
+        await pilot.pause()
+        assert toast.region.right <= width - 1, (width, toast.region)
+        assert toast.region.x >= 1, (width, toast.region)
 
 
 @pytest.mark.asyncio
