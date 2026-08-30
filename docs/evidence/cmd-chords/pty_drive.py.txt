@@ -1,0 +1,121 @@
+#!/usr/bin/env python3
+"""Drive the real TUI over a pty THIS SCRIPT OWNS BOTH ENDS OF.
+
+Why this harness replaced the AppleScript one (ux round 1 U1, code round 1 F4).
+The earlier approach raised a terminal with `activate` and sent keystrokes with
+System Events, which types into whatever window is frontmost. `activate` raises
+an APP, not a window, so a process-name assertion passes while ANOTHER session's
+window is in front — and that is not hypothetical: it typed a gesture into one
+of the operator's live sessions and cleared its draft.
+
+The window-title guard written to prevent a repeat cannot actually cover the
+terminal this defect is about. Measured on this machine:
+
+    System Events -> count of windows of process "Terminal"  ->  0
+    System Events -> count of windows of process "Ghostty"   ->  0
+    System Events -> count of windows of process "Finder"    ->  1   (control)
+
+So the AX-title route is unavailable for both terminals here, and Ghostty
+publishes no window title by any route at all, which makes a title-matching
+guard structurally impossible there rather than merely broken.
+
+This harness sidesteps the whole problem instead of hardening the guard: it
+allocates its own pty, spawns the app on it, and writes key encodings directly
+into the master fd. No key is ever sent through the window server, so there is
+no frontmost window to assert about and no way to reach another session. It is
+also a STRONGER test than `pilot.press()`, because it exercises the real path
+bytes -> XTermParser -> app -> composer with the exact byte sequences captured
+from Ghostty in `bytes/`, rather than injecting a key object named `super+v`
+and assuming the parser would have produced it.
+
+What it does NOT cover, stated plainly so the next reader does not overtrust it:
+it proves what the APP does with the bytes a terminal sends, not what any
+terminal sends. That half is the byte captures in `bytes/`, taken from the real
+Ghostty and the real Terminal.app, and the two halves together are the claim.
+
+Usage:  python3 pty_drive.py            (run from the worktree root)
+"""
+
+from __future__ import annotations
+
+import os
+import pty
+import re
+import select
+import subprocess
+import sys
+import time
+
+# The exact byte sequences captured from the real terminals; see bytes/*.bin.
+# CSI-u is `CSI <codepoint> ; <modifiers> u`, modifiers = 1 + bitmask,
+# Super = 8 and Ctrl = 4, so Cmd+v is 118;9 and Ctrl+v is 118;5.
+KEYS = {
+    "super+v": b"\x1b[118;9u",
+    "super+c": b"\x1b[99;9u",
+    "ctrl+v": b"\x1b[118;5u",
+    "ctrl+c": b"\x1b[99;5u",
+    "shift+left": b"\x1b[1;2D",
+}
+
+
+def drain(fd: int, seconds: float) -> str:
+    """Read everything the app paints for `seconds`.
+
+    `select()` rather than a non-blocking poll loop: the polling version races
+    the child for the tty and captures nothing, which reads as "the app ignored
+    the key" and cost real time to diagnose the first time.
+    """
+    out, deadline = [], time.time() + seconds
+    while time.time() < deadline:
+        ready, _, _ = select.select([fd], [], [], 0.2)
+        if not ready:
+            continue
+        try:
+            chunk = os.read(fd, 65536)
+        except OSError:
+            break
+        if not chunk:
+            break
+        out.append(chunk.decode("utf-8", "replace"))
+    return "".join(out)
+
+
+def visible(raw: str) -> str:
+    """Strip ANSI so an assertion can be made against what the user sees."""
+    return re.sub(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07\x1b]*(\x07|\x1b\\)", "", raw)
+
+
+def main() -> int:
+    master, slave = pty.openpty()
+    env = {
+        **os.environ,
+        "TERM": "xterm-256color",
+        "COLUMNS": "100",
+        "LINES": "30",
+        "LOCAL_OPERATOR_NO_TERMINAL_TITLE": "1",
+    }
+    env.pop("NO_COLOR", None)
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "local_operator.cli", "chat"],
+        stdin=slave,
+        stdout=slave,
+        stderr=slave,
+        env=env,
+        close_fds=True,
+    )
+    os.close(slave)
+    try:
+        drain(master, 12.0)  # boot
+        for key in ("shift+left", "shift+left", "super+c"):
+            os.write(master, KEYS[key])
+            time.sleep(0.6)
+        print(visible(drain(master, 3.0))[-2000:])
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
+        os.close(master)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

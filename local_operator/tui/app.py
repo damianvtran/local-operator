@@ -14466,22 +14466,36 @@ class OperatorApp(App[None]):
         # `cmd+v` gets its own row because the claim is CONDITIONAL and a
         # conditional claim needs the words to qualify it. The chord reaches
         # the app only where the terminal implements the kitty keyboard
-        # protocol (Ghostty, kitty, WezTerm, iTerm2 nightly, ...) and is
-        # swallowed whole by Terminal.app, so this is the one surface with room
-        # to say "works here, not there" — the composer placeholder has a
-        # single line and must name the key that always works, and the splash
-        # tip is a one-clause row. Naming Terminal.app explicitly rather than
-        # hedging with "some terminals": a user in Terminal.app needs to know
-        # the key will not work FOR THEM, and a user anywhere else needs to
-        # know it will.
+        # protocol and is swallowed whole by Terminal.app, so this is the one
+        # surface with room to say "works here, not there" — the composer
+        # placeholder is a single line and the splash tip is a one-clause row.
+        # Naming Terminal.app explicitly rather than hedging with "some
+        # terminals": a user in Terminal.app needs to know the key will not
+        # work FOR THEM, and a user anywhere else needs to know it will.
         #
-        # 73 cells composed against the 76-cell content box at 80 columns, so
-        # it does not wrap - the constraint `paste_note` above was shortened
-        # for (design round 1, D2).
+        # MEASURED WIDTH, and the budget is tighter than it looks. At 80
+        # columns the painted row may be at most 78 cells (the screen's own
+        # 2-cell inset), and the block adds a further 2-cell spine indent, so
+        # the composed `name_width + description` must be <= 74. The first
+        # revision of this row ran to 75 and wrapped at exactly 80 columns —
+        # the single most common terminal width — putting `Terminal.app)` at
+        # column 0 in the KEY gutter, where it reads as another key row. That
+        # is #402's design round 1 D2 verbatim, which is what `paste_note`
+        # above was shortened for, so this row reintroduced the defect its own
+        # neighbour exists as the fix for (design round 1 D1, code round 1 F1,
+        # ux round 1 U2 — all three reviewers found it independently).
+        #
+        # The semicolon buys the four cells the parenthesis spent while
+        # keeping the restriction, which is the half of this row a stranded
+        # Terminal.app user actually needs. `name_width` is DERIVED from the
+        # longest command name, so this budget moves when a command is added:
+        # `test_help_notes.py` pins both rows against the real painted width
+        # rather than against a fixed string, so the next command that widens
+        # the gutter fails the test instead of silently wrapping the row.
         cmd_paste_note = Text()
         cmd_paste_note.append("cmd+v".ljust(name_width), style=muted)
         cmd_paste_note.append(
-            "same, where the terminal forwards it (not Terminal.app)",
+            "same, where the terminal forwards it; not Terminal.app",
             style=dim,
         )
         lines.append(cmd_paste_note)

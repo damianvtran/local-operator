@@ -154,9 +154,18 @@ key it receives (`keylog_app.py`). Not synthesised events.
 | Ctrl+V | image-only PNG | `system_paste` ran and replaced the selection |
 
 Frames in `frames/`: `after_real_cmdv.png` (image attached from a real Cmd+V),
-`final_cmdc.png` (copy receipt on screen), `before_help.svg`/`after_help.svg`
-(the new `cmd+v` row), `before_splash.svg`/`after_splash.svg` (the placeholder
-returning to `Message Local Operator…`).
+`final_cmdc.png` (copy receipt on screen), `before_splash.svg`/
+`after_splash.svg` (the placeholder returning to `Message Local Operator…`),
+and `before_help_80col.svg`/`after_help_80col.svg` (the new `cmd+v` row).
+
+The help pair is captured at **80 columns specifically**. The round-1 frame was
+taken at ~97 columns, which is above the wrap threshold, so it showed a clean
+row while the row was in fact broken for anyone at a default-width terminal —
+the capture width was itself why the defect went unnoticed (design round 1 D2,
+code round 1 F3). The `before` frame here is rendered with the wrapping copy in
+place so the pair shows the defect and its fix rather than two clean frames:
+`Terminal.app)` hangs at column 0 in the KEY gutter on the before side, and
+both key rows are single lines on the after side.
 
 ### Harness note, recorded because it cost real time
 
@@ -212,12 +221,48 @@ sessions (the transcript showed `draft cleared — ↑ to recover`). Cause:
 only the frontmost PROCESS name, which passed while another session's Terminal
 window was frontmost.
 
-Fixed in `term_guard.sh`: the harness now generates a unique per-run token
-(`LOPCHK-<epoch>`), sets it as the window's custom title, and asserts the
-frontmost window's accessibility title CONTAINS that token immediately before
-every keystroke, aborting hard and sending nothing otherwise. The guard was
-observed refusing correctly four times (`PROC:Arc`, `PROC:cmux`,
-`WIN:damian — 120×30`, `WIN:<none>`) before any key was sent.
+First fix, `term_guard.sh`: generate a unique per-run token (`LOPCHK-<epoch>`),
+set it as the window's custom title, and assert the frontmost window's
+accessibility title CONTAINS that token immediately before every keystroke,
+aborting hard otherwise. It was observed refusing correctly four times
+(`PROC:Arc`, `PROC:cmux`, `WIN:damian — 120×30`, `WIN:<none>`) before any key
+was sent, and it did keep the Terminal.app run safe.
+
+**That guard has since been DELETED, because shipping it implied coverage it
+did not have** (ux round 1 U1, code round 1 F4). Two measured problems:
+
+1. It hardcodes `if name of p is not "Terminal"`, so it can never pass for
+   Ghostty — the terminal this defect was actually reported from, and the one
+   where the Cmd chords arrive at all. The Ghostty gestures therefore ran under
+   the WEAKER process-name check in `drive_tui.sh`, i.e. the very check that
+   caused the incident above. Nothing leaked on those runs, but the strict
+   guard sitting in the directory made it look as though they were covered.
+2. The AX-title route it depends on is unavailable here regardless. Measured on
+   this machine, with a control to prove the query works at all:
+
+   ```
+   System Events -> count of windows of process "Terminal"  ->  0
+   System Events -> count of windows of process "Ghostty"   ->  0
+   System Events -> count of windows of process "Finder"    ->  1   (control)
+   ```
+
+   Ghostty additionally publishes no window title by any route, so a
+   title-matching guard is structurally impossible there rather than merely
+   unreliable.
+
+**The replacement removes the hazard instead of hardening the guard.**
+`pty_drive.py.txt` / `pty_gestures.py.txt` allocate a pty the harness owns both
+ends of, spawn the app on it, and write the captured CSI-u bytes straight into
+the master fd. No key passes through the window server, so there is no
+frontmost window to assert about and no path to another session at all. It is
+also a stronger test than `pilot.press()`, since it exercises
+bytes -> `XTermParser` -> app -> composer with the exact sequences in `bytes/`.
+
+The honest boundary: the pty harness proves what the APP does with the bytes a
+terminal sends; it does not prove what any terminal sends. That half is the
+byte captures in `bytes/`, taken from the real Ghostty and the real
+Terminal.app. The two halves together are the claim, and neither is sufficient
+alone.
 
 A second, unrelated harness trap worth recording: `osascript -e 'tell
 application "System Events" to <multi-line body>'` parses but silently runs
@@ -227,8 +272,28 @@ the app ignored them". Gestures must be script FILES.
 ## Harness files in this directory
 
 `probe2.py.txt` (raw byte capture), `keylog_app.py.txt` (the instrumented real
-app), `term_guard.sh` (the window-title assertion), and the `run*.sh` drivers
-are stored with `.txt` extensions where they are Python: they are captured
+app), `pty_drive.py.txt` and `pty_gestures.py.txt` (the owned-pty drivers that
+replaced the AppleScript route), and the `run*.sh` byte-capture drivers are
+stored with `.txt` extensions where they are Python: they are captured
 evidence rather than shipped code, and CI's flake8/isort gates run over the
 whole tree. Renaming keeps them readable without asking the linters to hold
 throwaway probe scripts to the codebase's standards.
+
+## Round-1 remediation: gestures re-driven on the owned pty
+
+Re-run after the round-1 fixes, against the current head, using
+`pty_gestures.py.txt`. Real app, real pty, the exact byte sequences from
+`bytes/`, no global keystrokes:
+
+| gesture | bytes written | observed |
+|---|---|---|
+| Cmd+V, image-only clipboard | `ESC[118;9u` | composer shows `[Image #1, 920x1568]` |
+| Ctrl+V, image-only clipboard | `ESC[118;5u` | image attached (no regression) |
+| Cmd+C over a `shift+left` range | `ESC[99;9u` | `copied 5 characters` receipt |
+| Ctrl+C over a `shift+left` range | `ESC[99;5u` | copy receipt (no regression) |
+| Cmd+C, NO selection | `ESC[99;9u` | no copy, no receipt, draft `draft must survive` still painted |
+
+The no-selection case is the one worth stating precisely: `super+c` carries no
+interrupt meaning, so the correct behaviour is that it does nothing at all and
+costs the user nothing. Verified by forcing a repaint after the key and
+confirming the draft is still on screen.

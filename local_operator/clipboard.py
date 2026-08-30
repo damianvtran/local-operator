@@ -39,9 +39,16 @@ Terminal.app   PNG screenshot      Cmd+V      **0** — still nothing
 =============  ==================  =========  =================================
 
 So ``Cmd+V`` is reachable exactly where the terminal implements the kitty
-keyboard protocol (kitty, Ghostty 1.0+, WezTerm opt-in, foot, Alacritty 0.13+,
-contour, iTerm2 nightly, Windows Terminal, xterm.js) and unreachable where it
-does not (Terminal.app, xterm, urxvt, st, PuTTY, Konsole, VTE/GNOME Terminal).
+keyboard protocol and unreachable where it does not. **Only Ghostty and
+Terminal.app were measured here**, one on each side; every other name below is
+reported by its own project rather than tested by us, and versions move, so
+treat the lists as orientation and the bytes as authority. Reported to
+implement it: kitty, Ghostty 1.0+, WezTerm (opt-in), foot, Alacritty 0.13+,
+contour, xterm.js (opt-in), and more recently iTerm2 and Windows Terminal.
+Reported NOT to: Terminal.app, xterm, urxvt, st, PuTTY, Konsole, VTE/GNOME
+Terminal. Nothing in this module branches on a terminal NAME — the code
+answers the bytes that actually arrive, which is why an out-of-date list here
+is a documentation defect and never a behavioural one.
 The editor binds ``ctrl+v,super+v`` to one action for that reason: Ctrl+V is
 the portable baseline that arrives everywhere, and Cmd+V is bound beside it
 where it arrives at all. Note the two Ghostty paste rows are DISJOINT — with

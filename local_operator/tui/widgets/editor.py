@@ -56,10 +56,13 @@ The mechanism is the kitty keyboard protocol, which encodes every key as
 ``CSI <codepoint> ; <modifiers> u`` with modifiers ``1 + bitmask`` and
 **Super=8** — so Cmd+c arrives as ``ESC[99;9u`` and Cmd+v as ``ESC[118;9u``.
 Textual's ``linux_driver`` already pushes the flags that ask for this
-(``ESC[>25u``), so the keys arrive with no driver change here. Terminals that
-implement it: kitty, Ghostty 1.0+, WezTerm (opt-in), foot, Alacritty 0.13+,
-contour, iTerm2 nightly, Windows Terminal, xterm.js. Terminals that do NOT:
-**Terminal.app**, xterm, urxvt, st, PuTTY, Konsole, VTE/GNOME Terminal.
+(``ESC[>25u``), so the keys arrive with no driver change here. **Ghostty and
+Terminal.app are the two this project measured**, one on each side of the
+line; the rest are reported by their own projects and are orientation, not
+tested coverage. Reported to implement it: kitty, Ghostty 1.0+, WezTerm
+(opt-in), foot, Alacritty 0.13+, contour, xterm.js (opt-in), and more recently
+iTerm2 and Windows Terminal. Reported NOT to: **Terminal.app**, xterm, urxvt,
+st, PuTTY, Konsole, VTE/GNOME Terminal.
 
 In Terminal.app the two chords deliver ZERO bytes and are unreachable by any
 application, so ``Ctrl+C``/``Ctrl+V`` remain the portable baseline and the only
@@ -905,9 +908,10 @@ class Editor(TextArea):
     #: binding map holds ``alt+left`` AND ``ctrl+left``).
     #: NOTE the vertical chords are deliberately ABSENT from this table. They
     #: are handled in :meth:`_on_key` by :attr:`VERTICAL_CHORD_KEYS` instead,
-    #: because a ``Binding`` fires through the action system and never enters
-    #: ``_on_key`` — which is exactly how a previous revision destroyed a typed
-    #: slash command (code round 2 F5, ux round 2 U6). See that table.
+    #: because a key with a ``Binding`` and NO ``_on_key`` branch reaches the
+    #: action and nothing else — which is exactly how a previous revision
+    #: destroyed a typed slash command (code round 2 F5, ux round 2 U6). See
+    #: that table.
     #: ``ctrl+v`` is THE clipboard paste in this composer, and it OVERRIDES
     #: ``TextArea``'s own ``ctrl+v`` → ``action_paste`` rather than sitting
     #: beside it. Two separate facts make this binding the whole fix for
@@ -939,15 +943,23 @@ class Editor(TextArea):
     #: here the keys collide.
     #:
     #: ``super+v`` rides the SAME binding, and that placement is deliberate.
-    #: The vertical chords above are handled in :meth:`_on_key` precisely
-    #: because a ``Binding`` fires through the action system and never enters
-    #: ``_on_key`` — which is how a previous revision destroyed a typed slash
-    #: command (code round 2 F5, ux round 2 U6). Paste has the opposite shape:
-    #: NOTHING in ``_on_key`` inspects ``ctrl+v``, no other handler claims the
-    #: key, and there is no picker or mode whose state the press has to be
-    #: read against. So the binding is the whole behaviour and bypassing
-    #: ``_on_key`` costs nothing. ``super+c`` is the case that goes the other
-    #: way — see :meth:`_on_key`, where it joins ``ctrl+c``.
+    #:
+    #: THE DISPATCH RULE, measured against textual 8.2.8 rather than assumed,
+    #: because an earlier revision of this file stated it backwards and the
+    #: wrong version is load-bearing enough to mislead: ``_on_key`` runs
+    #: FIRST, and a binding fires only if ``_on_key`` did not consume the key
+    #: with ``event.stop()``. A normal ``Binding`` does not bypass ``_on_key``
+    #: at all — ``super+v`` enters it exactly like ``ctrl+v``, finds no branch
+    #: claiming the key, and falls through to this action. (The one shape that
+    #: genuinely skips ``_on_key`` is a PRIORITY binding, which is dispatched
+    #: ahead of the focused widget entirely. None here are priority.)
+    #:
+    #: So the choice is not "binding or ``_on_key``" but whether the press has
+    #: to be read against state ``_on_key`` owns. Paste does not: NOTHING in
+    #: ``_on_key`` inspects ``ctrl+v``, no other handler claims the key, and no
+    #: picker or mode changes what it means. The binding is therefore the whole
+    #: behaviour. ``super+c`` is the case that goes the other way — see
+    #: :meth:`_on_key`, where it joins ``ctrl+c``.
     #:
     #: Binding it CANNOT double-paste, which is the load-bearing measurement.
     #: Ghostty forwards ``super+v`` only when it has nothing to paste itself:
@@ -980,9 +992,10 @@ class Editor(TextArea):
     #: load-bearing. ``up``/``down`` are claimed by FOUR handlers in this widget
     #: — the model picker, the command picker, history navigation, and finally
     #: TextArea's caret move — and every one of them lives inside ``_on_key``
-    #: and gates on the literal key name. A ``Binding`` bypasses ``_on_key``
-    #: entirely, so ``alt+up`` reached only a reimplementation of the last two
-    #: rungs and silently closed an open picker, overwriting a half-typed slash
+    #: and gates on the literal key name. A bound chord with no ``_on_key``
+    #: branch of its own passes straight through those four rungs to its
+    #: action, so ``alt+up`` reached only a reimplementation of the last two
+    #: and silently closed an open picker, overwriting a half-typed slash
     #: command with a history entry on exactly the terminals where the key had
     #: previously been a harmless no-op.
     #:
@@ -2122,9 +2135,12 @@ class Editor(TextArea):
             # to the binding it already had. `TextArea.BINDINGS` carries
             # `ctrl+c,super+c` -> `copy`, so Cmd+C already reached
             # `action_copy` on a kitty-protocol terminal and already produced
-            # the receipt — but a `Binding` fires through the action system and
-            # never enters `_on_key`, so it reached ONLY `action_copy` and
-            # skipped the click-chain collapse below. Measured on the tree
+            # the receipt — but with no `super+c` branch here to consume it,
+            # the key fell straight through to that binding, so it reached ONLY
+            # `action_copy` and skipped the click-chain collapse below. (The
+            # rule is that `_on_key` runs FIRST and a binding fires only on the
+            # keys it does not consume; adding this branch is what claims the
+            # chord.) Measured on the tree
             # before this change, with a double-click selection live: `ctrl+c`
             # left the selection collapsed at `((0,11),(0,11))` while
             # `super+c` left it at `((0,6),(0,11))`. A range that never
@@ -3551,9 +3567,9 @@ class Editor(TextArea):
 
           Whether cmd+C ARRIVES at all is the terminal's decision, not this
           widget's: a kitty-protocol terminal forwards it as ``super+c``
-          (Ghostty, kitty, WezTerm, foot, Alacritty, contour, iTerm2 nightly,
-          Windows Terminal), and Terminal.app consumes it and delivers zero
-          bytes. Ctrl+C is the chord that works on both, which is why it is
+          (Ghostty measured; kitty, WezTerm, foot, Alacritty and contour
+          reported), and Terminal.app consumes it and delivers zero bytes
+          (measured). Ctrl+C is the chord that works on both, which is why it is
           the one the UI advertises. An earlier version of this note said cmd+C
           never arrives anywhere; that was measured only against Terminal.app.
           See ``docs/evidence/cmd-chords/MEASURED.md``.
