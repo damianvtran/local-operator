@@ -16,11 +16,12 @@ Two invariants run through the whole file and are each pinned by name:
 
 from __future__ import annotations
 
+import time
 from typing import Any, cast
 
 import pytest
 from textual import messages
-from textual.events import AppBlur
+from textual.events import AppBlur, AppFocus
 from textual.widgets import Static
 
 from local_operator.tui import animation
@@ -295,7 +296,18 @@ async def test_refocus_repaints_so_no_surface_shows_a_stale_frame() -> None:
         app._set_animation_focused(False)
         await pilot.pause()
 
-        # State moves while the terminal is away.
+        # State moves while the terminal is away. The job's start_time is
+        # pinned rather than the painted string left alone, because the 1 Hz
+        # job poll recomputes elapsed from the ledger on every fire and would
+        # overwrite an injected `_elapsed` with the real duration ("100d+"
+        # against the 2023 fixture timestamp) whenever a poll landed inside
+        # the window — which is exactly how this test failed one CI leg and
+        # passed another. Setting the START makes every recomputation agree
+        # with the assertion instead of racing it.
+        session = app._session
+        assert session is not None
+        job = cast(Any, session).jobs.list()[0]
+        job.start_time = time.time() - 252.0
         view._elapsed = "4m12s"
         spy = _UpdateSpy(view)
         app._set_animation_focused(True)
@@ -634,3 +646,36 @@ def test_an_idle_band_stays_stopped_across_a_focus_change() -> None:
 
     assert len(dock.intervals) == before, "an idle band was given a spinner"
     animation.reset_animation_focus()
+
+
+@pytest.mark.asyncio
+async def test_a_blur_and_refocus_cycle_keeps_the_keyboard() -> None:
+    """Alt-tabbing away and back must leave the user able to type.
+
+    Textual's ``Reactive._check_watchers`` invokes BOTH watcher spellings —
+    ``_watch_app_focus`` and then ``watch_app_focus`` — and the base
+    implementation is not idempotent: on blur it stashes ``screen.focused``
+    and then clears focus, so a second call re-reads the ``None`` it just
+    wrote and destroys the memory. Refocus then restores nothing and the user
+    has to click before the keyboard works again.
+
+    That is invisible to every other test here (the whole file passed 18/18
+    with the bug present) and to all four static gates, because it is a
+    property of the app's INPUT path rather than of its paint path. Caught by
+    agent review round 3 (R12); this test is what holds it.
+    """
+    app = _running_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(80):
+            await pilot.pause()
+            if app._session is not None:
+                break
+        focused_before = app.screen.focused
+        assert focused_before is not None, "fixture must start with a focused widget"
+
+        app.post_message(AppBlur())
+        await pilot.pause()
+        app.post_message(AppFocus())
+        await pilot.pause()
+
+        assert app.screen.focused is focused_before, "refocus lost the keyboard"

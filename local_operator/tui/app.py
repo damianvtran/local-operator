@@ -8947,16 +8947,22 @@ class OperatorApp(App[None]):
     def watch_app_focus(self, focus: bool) -> None:
         """The PUBLIC spelling of the same hook, as insurance.
 
-        Textual resolves reactive watchers by name and calls the private
-        ``_watch_<name>`` spelling, which is what the method above overrides.
-        A future Textual that prefers the public spelling — or calls both —
-        would otherwise leave the animation gate un-synced on the reactive
-        path while still receiving the events, and the failure would be
-        exactly the one R2 fixed: a session stuck at the reduced cadence
-        while the user types into it. One delegating line costs nothing and
-        makes the seam name-independent.
+        Textual's ``Reactive._check_watchers`` calls BOTH spellings — the
+        private ``_watch_app_focus`` and then this one — so this must not
+        delegate to the private override: that would run ``super()``'s
+        implementation twice, and it is not idempotent. On blur the base
+        stashes ``screen.focused`` and then clears focus, so a second call
+        re-reads the ``None`` it just wrote and overwrites the memory; refocus
+        then has nothing to restore and the user has to click before they can
+        type again (agent review round 3, R12).
+
+        Only the animation gate is re-run here, which IS idempotent
+        (``set_animation_focused`` returns False and fans out nothing when the
+        answer has not changed). That keeps the insurance this method exists
+        for — if a future Textual resolves only the public name, the gate
+        still syncs — without paying the base implementation twice.
         """
-        self._watch_app_focus(focus)
+        self._set_animation_focused(focus)
 
     def _set_animation_focused(self, focused: bool) -> None:
         """Record focus and re-rate every animated surface on this screen.
