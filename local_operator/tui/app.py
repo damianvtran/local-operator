@@ -14522,8 +14522,8 @@ class OperatorApp(App[None]):
         # and `notifications` - two `lop config edit` toggles - reads as a
         # settings footnote rather than a key reference (design round 1, D2).
         #
-        # The copy is 51 cells so the composed row is 71 against the 76-cell
-        # content box at 80 columns. The previous wording was 77 and was the
+        # The copy is 51 cells so the composed row is 71 against the 74-cell
+        # ceiling at 80 columns. The previous wording was 77 and was the
         # only note in the block that wrapped WITHOUT the `ljust(name_width)`
         # continuation its neighbours use, so its second line hung at column 0
         # (D2). Shortened rather than given a continuation line: one row is
@@ -14535,10 +14535,68 @@ class OperatorApp(App[None]):
             "attaches an image or file from the system clipboard",
             style=dim,
         )
+        # `ctrl+c` is documented for the same reason as `ctrl+v` above, and has
+        # the same gap to close: it is not a slash command, so the table cannot
+        # carry it. The composer's copy gesture is otherwise advertised only in
+        # `welcome.TIPS`, and `WelcomeView.display` goes False after the first
+        # message — so the splash teaches the key to a user who has not started
+        # working yet and is unreachable by the mid-draft user who actually
+        # wants it. `/help` is the surface still there an hour in (#169; the
+        # splash tip's own note records this limit).
+        #
+        # It states the RULE, not just the key, because the half users get wrong
+        # is what the second press does. A live range makes ctrl+c a copy every
+        # time; the key returns to the draft and interrupt rungs when the caret
+        # moves and the highlight collapses. Saying only "ctrl+c copies" would
+        # leave a user with a range still up believing the interrupt is gone,
+        # which is why `esc` is named on the same row: it stops the agent
+        # whether or not anything is highlighted.
+        #
+        # Two lines with the `ljust(name_width)` continuation its neighbours
+        # use, so the second line aligns under the first description rather than
+        # hanging at column 0.
+        #
+        # MEASURED WIDTH: composed `name_width + description` must be <= 74 at
+        # 80 columns, the same ceiling the `cmd+v` note below carries. These
+        # rows compose to 64 and 71, so both have headroom — but a rewording
+        # that reaches 75 WRAPS, and the tail lands at the key gutter where it
+        # reads as another key row, which is #402's design round 1 D2 verbatim.
+        #
+        # THE CEILING IS `terminal width - 6`, MEASURED through the real
+        # compositor at three widths rather than computed (80 -> 74, 90 -> 84,
+        # 100 -> 94; one cell more wraps in every case). Do not re-derive it
+        # from a single subtraction: an earlier revision of this comment said
+        # "a 78-cell painted row less the block's 2-cell spine indent", which
+        # works out to 76 and is how a 76 came to be asserted here at all
+        # (review round 2 F3, round 3 F4). The six cells are four separate
+        # reservations, no two of them declared in the same place:
+        #
+        #     1  `TranscriptView` left padding   (`padding: 1 0 1 1`)
+        #     1  reserved scrollbar column       (`scrollbar-gutter: stable`, D27)
+        #     2  the block's spine indent        (`SPINE_INDENT`, D20)
+        #     2  `RichBlock`'s own `Padding(renderable, (0, 2))`
+        #
+        # `test_help_documents_the_composer_copy_key_and_its_release` pins the
+        # 74, and the bound is mutation-checked: a row padded to 75 fails it.
+        copy_note = Text()
+        copy_note.append("ctrl+c".ljust(name_width), style=muted)
+        copy_note.append("copies the highlighted range in the composer", style=dim)
+        copy_note_more = Text()
+        copy_note_more.append("".ljust(name_width), style=muted)
+        copy_note_more.append(
+            "move the caret to hand the key back; esc interrupts",
+            style=dim,
+        )
         # The key reference joins the COMMAND TABLE directly, with no blank line
         # between: it answers "what can I press", which is the question the
         # rows above answer, and the trailing notes below are a different
         # subject (see the placement note on `paste_note`).
+        #
+        # `ctrl+c` leads the pair: copying is the gesture a user reaches for far
+        # more often than pasting an image, and the two-line entry reads better
+        # above a one-line neighbour than wedged under it.
+        lines.append(copy_note)
+        lines.append(copy_note_more)
         lines.append(paste_note)
         # `cmd+v` gets its own row because the claim is CONDITIONAL and a
         # conditional claim needs the words to qualify it. The chord reaches
@@ -14551,11 +14609,11 @@ class OperatorApp(App[None]):
         # work FOR THEM, and a user anywhere else needs to know it will.
         #
         # MEASURED WIDTH, and THIS ROW HAS ZERO HEADROOM — read this before
-        # editing the string. At 80 columns the painted row may be at most 78
-        # cells (the screen's own 2-cell inset), and the block adds a further
-        # 2-cell spine indent, so the composed `name_width + description` must
-        # be <= 74. This row composes to EXACTLY 74. One more character wraps
-        # it. Measured from the painted compositor, not arithmetic:
+        # editing the string. The composed `name_width + description` must be
+        # <= `terminal width - 6`, i.e. 74 at 80 columns; see the `ctrl+c` note
+        # above for where all six reserved cells come from. This row composes
+        # to EXACTLY 74. One more character wraps it. Measured from the painted
+        # compositor, not arithmetic:
         #
         #     W=81  painted 78  fits
         #     W=80  painted 78  fits          <- exactly at the limit

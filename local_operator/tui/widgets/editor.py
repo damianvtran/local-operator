@@ -1266,16 +1266,6 @@ class Editor(TextArea):
         #: user's copied draft on the widget buys nothing (review round 2, F9).
         #: See :meth:`edit` and :meth:`load_text`.
         self._copied = False
-        #: The GESTURE claim, distinct from the receipt flag above and with a
-        #: different lifetime. `_copied` answers "is the receipt on screen still
-        #: true?", which ends at the first EDIT to the copied text. This answers
-        #: "is a hand still completing a copy?", which ends as soon as the
-        #: highlight the copy took stops being the highlight on screen. Fusing
-        #: them gave one of the two the wrong lifetime in whichever direction
-        #: the fusion leaned (R18-1, agent review round 18).
-        self._copy_gesture = False
-        #: The selection `_copy_drag` took, while `_copy_gesture` holds.
-        self._copied_selection: Selection | None = None
         #: The range the CLICK CHAIN made, while it is still the live one.
         #:
         #: A double-click is reflexive where a drag or shift+arrow is
@@ -1283,8 +1273,8 @@ class Editor(TextArea):
         #: an accidental range gives the key back to the exit ladder once it
         #: has been copied, a deliberate one keeps copying (R1-2). Holding the
         #: SELECTION rather than a bare flag is what makes "still the same
-        #: highlight" checkable — the same discipline `_copied_selection` uses,
-        #: after three flag lifetimes in this widget each cost a lost draft.
+        #: highlight" checkable, after three flag lifetimes in this widget each
+        #: cost a lost draft.
         self._click_selection: Selection | None = None
         #: When a multi-click last produced NO RANGE, as a monotonic timestamp.
         #:
@@ -3586,7 +3576,7 @@ class Editor(TextArea):
 
     @property
     def copy_in_flight(self) -> bool:
-        """Is a copy gesture still in progress or still visible on screen?
+        """Is a copy gesture still in progress?
 
         THE predicate the app's Ctrl+C rung asks, named once here rather than
         duck-typed from outside. It was previously two `getattr` probes into
@@ -3595,13 +3585,23 @@ class Editor(TextArea):
         failing (R17 MINOR-2). A property breaks loudly instead, and gives the
         question a name that says what it means.
 
-        Two moments, because a copy spans both: the drag itself, and the window
-        after release in which the highlight it took is still the highlight on
-        screen. `watch_selection` ends the second the moment that stops being
-        true, so neither flag can outlive the gesture the way three earlier
-        predicates did.
+        ONE moment, not two. This used to also test a `_copy_gesture` flag
+        covering the window after a release in which the copied highlight was
+        still on screen — the release-copies rule the composer no longer has.
+        Dropping that rule (see :meth:`_copy_drag`) removed the only place the
+        flag was ever set, so it sat permanently False and this predicate had
+        quietly reduced to `_selecting` alone. It is spelled that way now: a
+        term that can never be true is not protection, it is a reader being
+        told the key is deferred through a window that does not exist.
+
+        The explicit press needs no window of its own. `action_copy` documents
+        why the press deliberately claims no gesture flag: a highlight outlives
+        the press that copied it, so deferring the NEXT Ctrl+C for as long as
+        the highlight happens to remain is D17/D20's lost draft. A live range
+        makes the next press a copy on its own merits, and collapsing the caret
+        hands the key back to the draft and interrupt rungs.
         """
-        return self._selecting or self._copy_gesture
+        return self._selecting
 
     @property
     def barren_multi_click(self) -> bool:
@@ -3703,16 +3703,17 @@ class Editor(TextArea):
         for every gesture, or the toast becomes evidence about which key
         carried it.
 
-        The gesture flags are deliberately NOT set here. ``_copy_gesture`` is
-        what defers Ctrl+C's interrupt meaning while a copy's highlight is on
-        screen, and a highlight outlives every gesture — it sits there until
-        the caret moves. A press is over the instant it lands, so leaving the
-        gesture armed after one would defer the NEXT press for as long as the
-        stale highlight happens to remain: the user presses Ctrl+C on a
-        minutes-old range expecting the draft rung and gets a re-copy instead,
-        with the exit ladder's second tap a lost draft away (D17/D20). The
-        receipt flag IS set — the toast it drives is a claim about the
-        clipboard, and editing the copied text falsifies it (D3).
+        No gesture claim is raised here, and that is deliberate rather than an
+        omission. A press is over the instant it lands, but the highlight it
+        copied outlives it — that range sits there until the caret moves — so a
+        claim armed by the press would defer the NEXT Ctrl+C for as long as the
+        stale highlight happened to remain: the user presses on a minutes-old
+        range expecting the draft rung and gets a re-copy instead, with the exit
+        ladder's second tap a lost draft away (D17/D20). A flag for that window
+        did once exist (``_copy_gesture``) and was deleted once the composer
+        stopped copying on release, because nothing set it any more. The receipt
+        flag IS set — the toast it drives is a claim about the clipboard, and
+        editing the copied text falsifies it (D3).
 
         A live range on a subsequent press copies AGAIN rather than
         interrupting: that is the explicit-copy rule itself, not a leftover
@@ -3748,48 +3749,32 @@ class Editor(TextArea):
         return DEFAULT_PLACEHOLDER
 
     def watch_selection(self, selection: Selection) -> None:
-        """Retire the copy receipt's GESTURE claim when the highlight changes.
+        """Retire the CLICK-CHAIN claim when the highlight it describes changes.
 
-        ``_copied`` is edit-scoped: `edit` and `load_text` clear it, because the
-        receipt on screen is a claim about text the user can still see. But the
-        app's Ctrl+C rung asks a GESTURE-scoped question — "is a hand still
-        completing a copy?" — and an edit-scoped flag answers it wrongly in two
-        directions that each cost a user their draft (D20, then D22).
+        ``_copied`` is edit-scoped and deliberately survives this seam: `edit`
+        and `load_text` clear it, because the receipt on screen is a claim about
+        text the user can still see, and moving the caret is not the user
+        editing that text. Posting ``EditorCopyStale`` here would take down a
+        toast that is still perfectly true (design round 1, D3; R18-1).
 
-        Retiring here makes the flag answer both questions with one lifetime:
-        the copy's claim ends when the highlight it took stops being the
-        highlight on screen, whether that is a caret move collapsing it or a new
-        selection replacing it. `_copied_selection` is what makes "the same
-        highlight" checkable rather than merely "a highlight".
-
-        Deliberately NOT posting ``EditorCopyStale``: moving the caret is not
-        the user editing the text their receipt describes, so the toast remains
-        true and stays up. Only ``_copy_gesture`` ends here, and it is a
-        SEPARATE field from ``_copied`` for exactly that reason — pointing the
-        receipt flag at this lifetime left a receipt on screen asserting a copy
-        of characters the user had since deleted, which is design round 1's D3
-        verbatim (R18-1, agent review round 18).
+        This seam used to also retire a ``_copy_gesture`` flag standing for "a
+        hand is still completing a copy", which covered the window between a
+        release-copy and its highlight leaving the screen. The composer has no
+        release-copy any more (see :meth:`_copy_drag`), so nothing set that flag
+        and nothing here could retire it; it and its ``_copied_selection``
+        companion are gone rather than left as a lifetime rule with no subject.
+        The explicit press needs no such window — see :attr:`copy_in_flight`.
         """
         super_watch = getattr(super(), "watch_selection", None)
         if super_watch is not None:
             super_watch(selection)
-        # `getattr` with a default because a reactive watcher can fire during
-        # base-class construction, before this subclass has set its own
-        # attributes — an AttributeError there takes the whole widget down.
-        if getattr(self, "_copy_gesture", False) and selection != getattr(
-            self, "_copied_selection", None
-        ):
-            self._copy_gesture = False
-            self._copied_selection = None
         # The click-chain claim has the same lifetime for the same reason: it
         # describes ONE highlight, so it ends the moment that stops being the
         # highlight on screen. A bare flag would outlive its subject and hand
         # the exit ladder a range the user made some other way (R1-2).
-        # Spelled as an explicit `!=` to match the `_copy_gesture` guard above:
-        # `not in (None, selection)` reads as a set-membership test on a field
-        # whose whole point is the identity of ONE specific range, and two
-        # spellings of one lifetime rule in adjacent lines is what this field's
-        # own docstring warns against (agent review round 2, R2-4).
+        # Spelled as an explicit `!=`: `not in (None, selection)` reads as a
+        # set-membership test on a field whose whole point is the identity of
+        # ONE specific range (agent review round 2, R2-4).
         claim = getattr(self, "_click_selection", None)
         if claim is not None and claim != selection:
             self._click_selection = None
@@ -4406,8 +4391,6 @@ class Editor(TextArea):
         result = super().edit(edit)
         if stale_receipt:
             self._copied = False
-            self._copy_gesture = False
-            self._copied_selection = None
             self.post_message(EditorCopyStale())
         self._sync_picker()
         if touched:
@@ -4477,8 +4460,6 @@ class Editor(TextArea):
         up, is about a copy that remains perfectly true.
         """
         self._copied = False
-        self._copy_gesture = False
-        self._copied_selection = None
         # The FIFTH retirement seam, for the same reason the receipt is stood
         # down here: this funnel bypasses ``edit()`` entirely, so the keystroke
         # seam never runs for it. A barren claim raised just before an Up-arrow

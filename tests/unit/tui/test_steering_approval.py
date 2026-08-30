@@ -3015,9 +3015,9 @@ async def test_moving_the_caret_after_a_copy_gives_ctrl_c_back_to_the_draft() ->
 
         # A REAL explicit copy, driven through the widget's own key path
         # rather than by hand-setting flags. Round 19 (MAJOR-1) caught a
-        # hand-set stand-in going vacuous when `copy_in_flight` moved from
-        # `_copied` to `_copy_gesture`. The press itself does not claim the
-        # gesture flag (a highlight outlives the press, and deferring the
+        # hand-set stand-in going vacuous when the predicate behind
+        # `copy_in_flight` changed underneath it. The press claims no gesture
+        # window at all (a highlight outlives the press, and deferring the
         # next Ctrl+C for that long is D17/D20); what this test pins is that
         # collapsing the highlight hands the key back to the draft.
         await _composer_copy(app, pilot, _cell(editor, 0, 0), _cell(editor, 0, 10))
@@ -3028,13 +3028,22 @@ async def test_moving_the_caret_after_a_copy_gives_ctrl_c_back_to_the_draft() ->
         # user can see that it is.
         await pilot.press("right")
         await pilot.pause()
+        # The HIGHLIGHT is what this step is about, so it keeps its own direct
+        # assertion: `copy_in_flight` is already False before the press (the
+        # explicit copy claims no gesture window — see `Editor.action_copy`), so
+        # it cannot witness the collapse on its own and would leave this step
+        # asserting nothing about the caret move it describes (review round 1,
+        # F1).
         assert not editor.selected_text, "the highlight should be gone"
-        # The GESTURE claim retires with the highlight it took; the RECEIPT
-        # flag does not, because the toast it drives is still true (the text
-        # really is on the clipboard). Asserting both is what keeps the two
-        # lifetimes from being fused again — doing so cost a stale receipt once
-        # already (R18-1).
-        assert not editor._copy_gesture, "the gesture claim should retire with its highlight"
+        # The copy is not in flight either, so the key is back with the draft
+        # rung; the RECEIPT flag survives, because the toast it drives is still
+        # true (the text really is on the clipboard). Asserting both is what
+        # keeps the two lifetimes from being fused again — doing so cost a stale
+        # receipt once already (R18-1). `copy_in_flight` rather than a private
+        # flag: it is the predicate the app's Ctrl+C rung actually consults, so
+        # this stays a statement about the guarded behaviour instead of about a
+        # field's name.
+        assert not editor.copy_in_flight, "the copy should no longer divert the key"
         assert editor._copied, "the receipt is still true and must not be retired here"
 
         await pilot.press("ctrl+c")
