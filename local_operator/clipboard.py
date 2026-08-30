@@ -24,13 +24,34 @@ Terminal.app   PNG screenshot      Ctrl+V     1 (``\\x16``)
 Ghostty        PNG screenshot      Ctrl+V     1 (``\\x16``)
 =============  ==================  =========  =================================
 
-With an image-only pasteboard the terminal sends NOTHING AT ALL. No bytes
-means no ``Paste`` event, so a handler keyed on an empty paste is unreachable
-on exactly the terminals it was written for. ``Cmd+V`` cannot be hooked from
-inside a TUI: the terminal swallows it and there is no protocol by which we
-can ask for pasteboard bytes. ``Ctrl+V`` does arrive, on both terminals, which
-is why :meth:`~local_operator.tui.widgets.editor.Editor.action_system_paste`
-is bound to it and is the reachable caller of this module.
+That capture was taken WITHOUT the kitty keyboard protocol enabled, and the
+Ghostty row is an artifact of that. Re-measured with the protocol on — which
+is what Textual's driver actually does (``ESC[>25u``) — Ghostty forwards the
+chord instead of dropping it:
+
+=============  ==================  =========  =================================
+terminal       clipboard           keystroke  bytes delivered on stdin
+=============  ==================  =========  =================================
+Ghostty        PNG screenshot      Cmd+V      8 (``ESC[118;9u``, i.e. super+v)
+Ghostty        text                Cmd+V      21 (``ESC[200~…ESC[201~``)
+Ghostty        PNG screenshot      Ctrl+V     8 (``ESC[118;5u``, i.e. ctrl+v)
+Terminal.app   PNG screenshot      Cmd+V      **0** — still nothing
+=============  ==================  =========  =================================
+
+So ``Cmd+V`` is reachable exactly where the terminal implements the kitty
+keyboard protocol (kitty, Ghostty 1.0+, WezTerm opt-in, foot, Alacritty 0.13+,
+contour, iTerm2 nightly, Windows Terminal, xterm.js) and unreachable where it
+does not (Terminal.app, xterm, urxvt, st, PuTTY, Konsole, VTE/GNOME Terminal).
+The editor binds ``ctrl+v,super+v`` to one action for that reason: Ctrl+V is
+the portable baseline that arrives everywhere, and Cmd+V is bound beside it
+where it arrives at all. Note the two Ghostty paste rows are DISJOINT — with
+text to paste the terminal bracket-pastes and never forwards the key — so
+binding the chord cannot double-paste. Full captures in
+``docs/evidence/cmd-chords/MEASURED.md``.
+
+What has not changed is the reason this module exists: no terminal exposes
+BINARY clipboard data by any protocol, so the image bytes must still be read
+natively here no matter which key delivered the press.
 
 The gap stayed invisible for a long time because it does not reproduce in the
 one place the code was developed. **cmux** watches the pasteboard and writes an

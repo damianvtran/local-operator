@@ -47,21 +47,35 @@ SCREEN selection, which a ``TextArea`` can neither paint nor copy, so the
 gesture users reach for first in an input box highlighted nothing and the
 Ctrl+C that followed cleared the draft instead of copying.
 
-``cmd+C`` is NOT one of them and cannot be made to be: the terminal binds it
-(Ghostty's ``super+c=copy_to_clipboard:mixed``, no ``performable:``) and eats
-the key before the app is reachable. A real-pty probe confirms the shape of
-this precisely — under a terminal that DOES forward it (kitty encoding), the
-app receives ``super+c`` and the composer's own handler runs; under Ghostty's
-default binding the key never arrives at all. So Ctrl+C is the composer's copy
-key, and the only one this widget can promise.
+``cmd+C`` reaches this widget on SOME terminals, and whether it does is a
+property of the terminal rather than of this code. An earlier revision of this
+docstring asserted it "cannot be made to" work; that was measured only against
+Terminal.app and is FALSE for the terminal the defect was reported from.
 
-Because that failure is SILENT — the terminal eats the key, so a Mac user
-reaching for cmd+C sees no toast, no flicker, nothing — the key is advertised
-where a user will actually meet it: one entry in ``TIPS``
-(``widgets/welcome.py``), the splash's rotating hint row. This paragraph is
-documentation for us and reaches no user; the tip is the surface (design round
-1, D4, and agent review round 1, R1-6, which caught the docstring being
-described as though it were discoverability).
+The mechanism is the kitty keyboard protocol, which encodes every key as
+``CSI <codepoint> ; <modifiers> u`` with modifiers ``1 + bitmask`` and
+**Super=8** — so Cmd+c arrives as ``ESC[99;9u`` and Cmd+v as ``ESC[118;9u``.
+Textual's ``linux_driver`` already pushes the flags that ask for this
+(``ESC[>25u``), so the keys arrive with no driver change here. Terminals that
+implement it: kitty, Ghostty 1.0+, WezTerm (opt-in), foot, Alacritty 0.13+,
+contour, iTerm2 nightly, Windows Terminal, xterm.js. Terminals that do NOT:
+**Terminal.app**, xterm, urxvt, st, PuTTY, Konsole, VTE/GNOME Terminal.
+
+In Terminal.app the two chords deliver ZERO bytes and are unreachable by any
+application, so ``Ctrl+C``/``Ctrl+V`` remain the portable baseline and the only
+keys this widget can promise everywhere. Both chords are therefore bound: the
+Ctrl pair works on every terminal, and the Cmd pair is bound IN ADDITION where
+the terminal forwards it. Neither replaces the other. See
+``docs/evidence/cmd-chords/MEASURED.md`` for the byte captures behind each
+claim.
+
+Because the Terminal.app failure is SILENT — the terminal eats the key, so a
+Mac user reaching for cmd+C there sees no toast, no flicker, nothing — the
+portable key is advertised where a user will actually meet it: one entry in
+``TIPS`` (``widgets/welcome.py``), the splash's rotating hint row. This
+paragraph is documentation for us and reaches no user; the tip is the surface
+(design round 1, D4, and agent review round 1, R1-6, which caught the docstring
+being described as though it were discoverability).
 
 The caret is SOLID and never blinks, and on an EMPTY composer it gets a cell of
 its own to the left of the placeholder rather than inverting the placeholder's
@@ -825,39 +839,18 @@ class ArgumentHighlightChanged(Message):
 #: The composer's resting prose. Named rather than inlined because the app
 #: swaps it for :data:`READ_ONLY_PLACEHOLDER` while the full-page subagent
 #: view is open and has to be able to put this one back.
+#:
+#: It carried a ``ctrl+v pastes an image`` suffix for one release, added as the
+#: discoverability answer for a user whose `Cmd+V` was swallowed by the
+#: terminal with no way to learn the key that worked. That argument no longer
+#: holds: `Cmd+V` is now bound and arrives on every terminal implementing the
+#: kitty keyboard protocol, so the Mac gesture a user already knows simply
+#: works and needs no teaching. Terminal.app still cannot deliver the chord,
+#: and ``/help`` names ``ctrl+v`` as the fallback there — a conditional
+#: statement needs room to qualify itself, which a one-line placeholder does
+#: not have and a help table does. Removed rather than reworded because
+#: permanent composer real estate is the most expensive surface in the app.
 DEFAULT_PLACEHOLDER = "Message Local Operator…"
-
-#: The resting placeholder with the paste key named, shown until the user has
-#: pasted something with it once.
-#:
-#: THE ONLY AFFORDANCE THAT REACHES THE STRANDED USER. The reported journey is
-#: mid-session: the user has been working, takes a screenshot, presses `Cmd+V`
-#: and gets a beep. The terminal delivers ZERO bytes for that gesture (see
-#: :mod:`local_operator.clipboard`), so no app code runs and no reactive notice
-#: is possible — the affordance has to be something already on screen. Every
-#: other surface fails that test:
-#:
-#: * ``welcome.TIPS`` — `WelcomeView.display` goes False on the first prompt,
-#:   so it is absent mid-session by construction. Measured on the splash it is
-#:   also weak: median 84 s to first sighting, P(seen within 30 s) = 0.18, and
-#:   0% for a user who types straight away. With animation disabled
-#:   `_sync_tip_timer` creates no timer at all and the row holds at `TIPS[0]`
-#:   forever, so those users never meet it (design/ux round 2, D9/U1).
-#: * ``welcome.HINTS`` — static, so it survives the animation gate, but still
-#:   splash-only AND a fourth row costs the splash a terminal row, which the
-#:   height ladder spends on the logo.
-#: * ``/help`` — a reference for someone who already suspects the key exists,
-#:   not a discovery path.
-#:
-#: The composer placeholder is visible in exactly the state a user is in when
-#: they reach for a paste: mid-session, composer empty, about to type. It costs
-#: no layout (the row is already painted) and no width tier.
-#:
-#: RETIRED ON FIRST USE, which is what keeps it from being nag copy. Once the
-#: user has pasted with `ctrl+v` the key is learned and the placeholder returns
-#: to :data:`DEFAULT_PLACEHOLDER` for the rest of the session. It teaches once
-#: and then gets out of the way.
-PASTE_HINT_PLACEHOLDER = "Message Local Operator…  ctrl+v pastes an image"
 
 #: What the composer says while it refuses input. It names the state AND the
 #: consequence, because the only useful thing to tell someone whose keys are
@@ -920,13 +913,17 @@ class Editor(TextArea):
     #: beside it. Two separate facts make this binding the whole fix for
     #: issue #372 outside cmux, and both were measured rather than assumed:
     #:
-    #: 1. **``Cmd+V`` cannot be hooked.** With an image-only pasteboard,
-    #:    Terminal.app and Ghostty deliver ZERO bytes on ``Cmd+V`` and beep.
-    #:    Not an empty bracketed paste — nothing at all, captured with a
-    #:    raw-mode PTY probe. No bytes means no ``Paste`` event, so any
-    #:    handler keyed on the keystroke is unreachable. ``Ctrl+V`` delivers
-    #:    ``\x16`` on both terminals, so it is the only key a TUI can use for
-    #:    this. See :mod:`local_operator.clipboard` for the byte table.
+    #: 1. **``Cmd+V`` is only reachable on some terminals.** With an image-only
+    #:    pasteboard, Terminal.app delivers ZERO bytes on ``Cmd+V`` and beeps —
+    #:    not an empty bracketed paste, nothing at all, captured with a
+    #:    raw-mode PTY probe — so there it is unreachable by any application.
+    #:    Ghostty, which speaks the kitty keyboard protocol, instead FORWARDS
+    #:    it as ``ESC[118;9u`` (Super+v), which Textual decodes as ``super+v``.
+    #:    ``Ctrl+V`` delivers on both, so it is the portable key; ``super+v``
+    #:    is bound beside it below rather than instead of it. An earlier
+    #:    revision of this note claimed both terminals sent nothing, which was
+    #:    true only of Terminal.app. See
+    #:    ``docs/evidence/cmd-chords/MEASURED.md``.
     #: 2. **Textual's ``ctrl+v`` pastes the WRONG buffer.**
     #:    ``TextArea.action_paste`` inserts ``App.clipboard``, Textual's
     #:    INTERNAL buffer, which a copy made in any other application never
@@ -941,6 +938,30 @@ class Editor(TextArea):
     #: merging was the point — same mechanism, different consequence, because
     #: here the keys collide.
     #:
+    #: ``super+v`` rides the SAME binding, and that placement is deliberate.
+    #: The vertical chords above are handled in :meth:`_on_key` precisely
+    #: because a ``Binding`` fires through the action system and never enters
+    #: ``_on_key`` — which is how a previous revision destroyed a typed slash
+    #: command (code round 2 F5, ux round 2 U6). Paste has the opposite shape:
+    #: NOTHING in ``_on_key`` inspects ``ctrl+v``, no other handler claims the
+    #: key, and there is no picker or mode whose state the press has to be
+    #: read against. So the binding is the whole behaviour and bypassing
+    #: ``_on_key`` costs nothing. ``super+c`` is the case that goes the other
+    #: way — see :meth:`_on_key`, where it joins ``ctrl+c``.
+    #:
+    #: Binding it CANNOT double-paste, which is the load-bearing measurement.
+    #: Ghostty forwards ``super+v`` only when it has nothing to paste itself:
+    #: with TEXT on the clipboard it consumes the key and bracket-pastes (21
+    #: bytes, ``ESC[200~…ESC[201~``, no key event), and only with an
+    #: image-only pasteboard does the app see ``ESC[118;9u``. The two cases are
+    #: disjoint, so this action and the terminal's own paste can never both
+    #: run for one press.
+    #:
+    #: Do NOT recommend ``performable:super+v=paste_from_clipboard`` to make
+    #: this more reliable: measured, that prefix makes the image-only case
+    #: deliver ZERO bytes, i.e. strictly worse. The default binding already
+    #: forwards.
+    #:
     #: ``show=False`` to match every other binding in this app; the key is
     #: taught in ``/help`` and in the paste notice instead.
     BINDINGS = [
@@ -948,7 +969,7 @@ class Editor(TextArea):
         Binding("alt+right", "cursor_word_right", "Cursor word right", show=False),
         Binding("alt+shift+left", "cursor_word_left(True)", "Select word left", show=False),
         Binding("alt+shift+right", "cursor_word_right(True)", "Select word right", show=False),
-        Binding("ctrl+v", "system_paste", "Paste from the system clipboard", show=False),
+        Binding("ctrl+v,super+v", "system_paste", "Paste from the system clipboard", show=False),
     ]
 
     #: The CSI-modifier spelling of every vertical option chord, mapped to the
@@ -1076,7 +1097,7 @@ class Editor(TextArea):
 
     def __init__(
         self,
-        placeholder: str = PASTE_HINT_PLACEHOLDER,
+        placeholder: str = DEFAULT_PLACEHOLDER,
         commands: list[SlashCommand] | None = None,
     ) -> None:
         # Built BEFORE super().__init__: TextArea's constructor loads its
@@ -1273,12 +1294,6 @@ class Editor(TextArea):
         #: the near-miss pair described in `_on_click`. Only ever read to decide
         #: whether two singles were one gesture; it never makes a selection.
         self._single_click_at: tuple[float, Offset] | None = None
-        #: Whether `ctrl+v` has successfully pasted in this session, which is
-        #: what retires the placeholder that teaches it. Set once and never
-        #: cleared: the key is learned, and re-teaching it after the composer
-        #: happens to pass through another mode would make a one-time
-        #: affordance into recurring nag copy. See `PASTE_HINT_PLACEHOLDER`.
-        self._paste_hint_used = False
         #: Bang-mode: Enter runs a local shell command instead of sending a
         #: prompt. Owned here because it is a property of the COMPOSER (the
         #: same way the slash picker is), not of the app: the key that enters
@@ -2102,7 +2117,28 @@ class Editor(TextArea):
             event.stop()
             event.prevent_default()
             return
-        if key == "ctrl+c":
+        if key in ("ctrl+c", "super+c"):
+            # BOTH chords copy, and `super+c` is routed HERE rather than left
+            # to the binding it already had. `TextArea.BINDINGS` carries
+            # `ctrl+c,super+c` -> `copy`, so Cmd+C already reached
+            # `action_copy` on a kitty-protocol terminal and already produced
+            # the receipt — but a `Binding` fires through the action system and
+            # never enters `_on_key`, so it reached ONLY `action_copy` and
+            # skipped the click-chain collapse below. Measured on the tree
+            # before this change, with a double-click selection live: `ctrl+c`
+            # left the selection collapsed at `((0,11),(0,11))` while
+            # `super+c` left it at `((0,6),(0,11))`. A range that never
+            # collapses is a Cmd+C that can never hand the key back to the
+            # draft and interrupt rungs — R1-2's bug, reintroduced for the
+            # other chord. One route for both keys is what stops the two
+            # drifting apart again.
+            #
+            # `super+c` deliberately carries NO interrupt meaning: the `else`
+            # branch below is gated on the key. Cmd+C is not an interrupt
+            # gesture on macOS, nothing binds `super+c` at app level, and the
+            # exit ladder stays Ctrl+C's alone — a Cmd+C that cleared the draft
+            # would be a new way to lose work, not a convenience.
+            #
             # A REAL RANGE makes this press a copy, ahead of its interrupt
             # meaning. ``TextArea``'s ``ctrl+c`` binding never runs — the key
             # is consumed here first — so the highlight-then-Ctrl+C sequence
@@ -2172,8 +2208,18 @@ class Editor(TextArea):
                     # leaves the user positioned to type on after the text they
                     # just took.
                     self.selection = Selection(self.selection.end, self.selection.end)
-            else:
+            elif key == "ctrl+c":
                 self.post_message(InterruptRequested())
+            else:
+                # `super+c` with nothing selected: do nothing, and consume the
+                # key so it cannot fall through to `TextArea`'s own
+                # `ctrl+c,super+c` -> `copy` binding, which would raise
+                # `SkipAction` and let the press keep walking the chain. There
+                # is no app-level `super+c` to reach, so the visible result is
+                # the same either way — but consuming it here keeps this method
+                # the single authority on what the chord means rather than
+                # leaving half the answer in an inherited binding.
+                pass
             event.stop()
             event.prevent_default()
             return
@@ -3493,14 +3539,24 @@ class Editor(TextArea):
           ``None``.
 
         * **No key can rescue it on its own.** ``TextArea`` binds
-          ``ctrl+c,super+c`` to ``action_copy``, and neither key arrives:
-          cmd+C is eaten by the terminal (Ghostty binds
-          ``super+c=copy_to_clipboard:mixed`` without ``performable:``), and
-          Ctrl+C is consumed by :meth:`_on_key` as this app's interrupt before
-          any binding runs. That is deliberate — the interrupt cannot become
-          conditional on a live highlight. :meth:`_on_key` therefore routes
-          the press to :meth:`action_copy` itself when a real range is live,
-          which is the one copy sequence the composer has.
+          ``ctrl+c,super+c`` to ``action_copy``, and neither binding is what
+          runs here: :meth:`_on_key` consumes BOTH chords first, Ctrl+C
+          because it is also this app's interrupt and Cmd+C so the two keys
+          share one route. That is deliberate — the interrupt cannot become
+          conditional on a live highlight, and a copy chord that skipped
+          ``_on_key`` skipped the click-chain collapse with it.
+          :meth:`_on_key` therefore routes the press to :meth:`action_copy`
+          itself when a real range is live, which is the one copy sequence the
+          composer has.
+
+          Whether cmd+C ARRIVES at all is the terminal's decision, not this
+          widget's: a kitty-protocol terminal forwards it as ``super+c``
+          (Ghostty, kitty, WezTerm, foot, Alacritty, contour, iTerm2 nightly,
+          Windows Terminal), and Terminal.app consumes it and delivers zero
+          bytes. Ctrl+C is the chord that works on both, which is why it is
+          the one the UI advertises. An earlier version of this note said cmd+C
+          never arrives anywhere; that was measured only against Terminal.app.
+          See ``docs/evidence/cmd-chords/MEASURED.md``.
 
         An earlier version of this method copied on an ARMED release
         (``copy_on_release``, set by an explicit copy so the next drag
@@ -3616,9 +3672,10 @@ class Editor(TextArea):
         """Copy the live range. THE composer's copy gesture.
 
         The composer cannot rely on Textual's binding reaching this method on
-        its own: cmd+C is eaten by the terminal and Ctrl+C is the app's
-        interrupt (see :meth:`_copy_drag`), so :meth:`_on_key` routes the
-        highlight-then-Ctrl+C sequence here directly. This override exists so
+        its own: Ctrl+C is the app's interrupt (see :meth:`_copy_drag`), and
+        the inherited ``ctrl+c,super+c`` binding bypasses :meth:`_on_key` and
+        with it the click-chain collapse. So :meth:`_on_key` routes both copy
+        chords here directly. This override exists so
         that path — and any other caller of the ``copy`` action — writes the
         clipboard through the SAME message a transcript copy uses, rather than
         ``super().action_copy()``: Textual's base writes silently, and this
@@ -3652,15 +3709,23 @@ class Editor(TextArea):
     def resting_placeholder(self) -> str:
         """The placeholder for a composer in no special mode.
 
-        THE ONE AUTHORITY on that question, because there are now two answers.
-        Until the user has pasted with `ctrl+v` the resting copy names the key
-        (:data:`PASTE_HINT_PLACEHOLDER`); afterwards it is the plain
-        :data:`DEFAULT_PLACEHOLDER`. Every caller that returns the composer to
-        rest — leaving bang-mode, closing the aside, handing the composer back
-        from the subagent page — has to ask rather than assume, or it silently
-        retires a hint the user has not used yet.
+        ONE answer now: :data:`DEFAULT_PLACEHOLDER`. This used to choose
+        between that and a variant naming the paste key, retiring the hint once
+        the user had pasted. The hint is gone — the native ``Cmd+V`` works on
+        every terminal that forwards it, so a Mac user reaches for the gesture
+        they already know and it simply works, and permanent composer real
+        estate is too expensive for a key that no longer needs teaching.
+        Terminal.app still cannot deliver the chord and ``ctrl+v`` remains the
+        fallback there; ``/help`` documents both, which is the right home for a
+        conditional statement.
+
+        Kept as a PROPERTY rather than inlined at its four call sites: the
+        modes that own the composer's voice (bang-mode, the aside, read-only,
+        the subagent page hand-back) each need to ask "what does a resting
+        composer say?" on the way out, and one authority is what stops them
+        drifting apart if that answer ever gains a second case again.
         """
-        return DEFAULT_PLACEHOLDER if self._paste_hint_used else PASTE_HINT_PLACEHOLDER
+        return DEFAULT_PLACEHOLDER
 
     def watch_selection(self, selection: Selection) -> None:
         """Retire the copy receipt's GESTURE claim when the highlight changes.
@@ -3749,11 +3814,13 @@ class Editor(TextArea):
         Textual's ``XTermParser`` turns into ``Paste(text='')`` — is false
         about the terminal, and the parser half of it is true but irrelevant.
         MEASURED with a raw-mode PTY probe: with a PNG on the pasteboard,
-        Terminal.app and Ghostty deliver **zero bytes** on ``Cmd+V`` and beep.
-        No bytes, no ``Paste`` event, so this branch never ran on the emulators
-        it was written for and issue #372 stayed open. The reachable route is
-        ``Ctrl+V`` -> :meth:`action_system_paste`; see this class's
-        ``BINDINGS`` and :mod:`local_operator.clipboard` for the byte table.
+        Terminal.app delivers **zero bytes** on ``Cmd+V`` and beeps, and a
+        kitty-protocol terminal forwards the chord as ``super+v`` rather than
+        as a paste. Either way there is no ``Paste`` event, so this branch
+        never ran on the emulators it was written for and issue #372 stayed
+        open. The reachable routes are ``Ctrl+V`` and ``Cmd+V`` ->
+        :meth:`action_system_paste`; see this class's ``BINDINGS`` and
+        :mod:`local_operator.clipboard` for the byte table.
 
         This branch survives because a host that DOES synthesise an empty paste
         (a multiplexer, a helper bracketing an empty selection) still reaches
@@ -4028,11 +4095,13 @@ class Editor(TextArea):
         """``Ctrl+V``: paste what is on the SYSTEM clipboard.
 
         The reachable half of issue #372, and the reason this action exists
-        rather than the composer relying on ``Cmd+V``: the terminal swallows
-        ``Cmd+V`` and, with an image on the pasteboard, sends the app NOTHING
-        at all (measured \u2014 see this class's ``BINDINGS`` for the byte table).
-        ``Ctrl+V`` is the only paste keystroke a TUI can observe, so it is the
-        only place this can live. **Do not "simplify" this back onto the paste
+        rather than the composer relying on the terminal's own paste: with an
+        image on the pasteboard Terminal.app swallows ``Cmd+V`` and sends the
+        app NOTHING at all (measured \u2014 see this class's ``BINDINGS`` for the
+        byte table). ``Ctrl+V`` is the paste keystroke every terminal delivers,
+        so it is the portable one; ``Cmd+V`` is bound to this same action and
+        reaches it on terminals that speak the kitty keyboard protocol, where
+        it arrives as ``super+v``. **Do not "simplify" this back onto the paste
         event**; that is the shape that shipped broken.
 
         It REPLACES ``TextArea.action_paste``, which inserts ``App.clipboard``
@@ -4083,16 +4152,6 @@ class Editor(TextArea):
         result = self._replace_via_keyboard(pasted, *self.selection)
         if result is not None:
             self.move_cursor(result.end_location)
-        # THE HINT HAS DONE ITS JOB. `PASTE_HINT_PLACEHOLDER` names this key
-        # because nothing else on screen can (the terminal swallows `Cmd+V`
-        # whole), and a user who has now pasted with it does not need telling
-        # again — leaving it up would turn a one-time affordance into standing
-        # nag copy. Only the RESTING placeholder is replaced: a mode that owns
-        # the composer (bang-mode, the aside, read-only) is showing its own
-        # voice and must not have it overwritten by this.
-        self._paste_hint_used = True
-        if self.placeholder == PASTE_HINT_PLACEHOLDER:
-            self.placeholder = self.resting_placeholder
 
     async def _attach_pasted_images(self, pasted: str) -> str | None:
         """Load every path in ``pasted`` as an attachment; return the markers.

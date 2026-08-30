@@ -47,6 +47,7 @@ from local_operator.tui.widgets.approval import ApprovalPrompt
 from local_operator.tui.widgets.assistant import AssistantBlock
 from local_operator.tui.widgets.editor import (
     ASIDE_PLACEHOLDER,
+    DEFAULT_PLACEHOLDER,
     SHELL_PLACEHOLDER,
     Editor,
 )
@@ -1931,7 +1932,7 @@ async def test_bang_inside_a_draft_is_just_a_character() -> None:
         await pilot.pause()
         assert editor.shell_mode is False
         assert editor.text == "hi!"
-        assert editor.placeholder == editor.resting_placeholder
+        assert editor.placeholder == DEFAULT_PLACEHOLDER
 
 
 @pytest.mark.asyncio
@@ -1952,7 +1953,7 @@ async def test_escape_and_empty_backspace_leave_shell_mode() -> None:
         await pilot.pause()
         assert editor.shell_mode is False
         assert editor.text == "ls"
-        assert editor.placeholder == editor.resting_placeholder
+        assert editor.placeholder == DEFAULT_PLACEHOLDER
         assert not app.query_one("#input-dock").has_class(COMPOSER_SHELL_CLASS)
         assert session.aborts == []
 

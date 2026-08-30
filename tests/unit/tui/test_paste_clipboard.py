@@ -1507,63 +1507,15 @@ async def test_ctrl_v_and_the_empty_paste_produce_the_same_marker(monkeypatch) -
 
 
 @pytest.mark.asyncio
-async def test_the_composer_names_ctrl_v_until_the_key_has_been_used(monkeypatch) -> None:
-    """The one affordance that reaches the STRANDED user (design/ux round 2, U1).
-
-    The reported journey is mid-session: the user has been working, takes a
-    screenshot, presses `Cmd+V` and gets a beep. The terminal delivers zero
-    bytes for that gesture, so no app code runs and no reactive notice is
-    possible — whatever teaches the key has to be on screen already.
-    `welcome.TIPS` is not: `WelcomeView` is hidden after the first prompt, and
-    with animation disabled its rotation never runs at all. The composer
-    placeholder is visible in exactly the empty-composer state a user is in
-    when they reach for a paste.
-
-    It retires on first successful use, so it teaches once instead of nagging.
-    """
-    _stub_clipboard(monkeypatch, text="pasted")
-    app = Host()
-    async with app.run_test() as pilot:
-        editor = app.query_one(Editor)
-        editor.focus()
-        await pilot.pause()
-
-        assert editor.placeholder == editor_module.PASTE_HINT_PLACEHOLDER
-        assert "ctrl+v" in str(editor.placeholder)
-
-        await _ctrl_v(app, pilot)
-
-        assert editor.placeholder == editor_module.DEFAULT_PLACEHOLDER, (
-            "the hint must retire once the user has used the key, or a one-time "
-            "affordance becomes standing nag copy"
-        )
-        assert editor.resting_placeholder == editor_module.DEFAULT_PLACEHOLDER
-
-
-@pytest.mark.asyncio
-async def test_a_failed_paste_keeps_the_hint_up(monkeypatch) -> None:
-    """Retirement is keyed on the key having WORKED, not on it having been
-    pressed. A user whose clipboard was empty has learned nothing about
-    pasting an image, so the placeholder still owes them the key."""
-    _stub_clipboard(monkeypatch)
-    app = Host()
-    async with app.run_test() as pilot:
-        editor = app.query_one(Editor)
-        editor.focus()
-        await pilot.pause()
-        await _ctrl_v(app, pilot)
-
-        assert editor.placeholder == editor_module.PASTE_HINT_PLACEHOLDER
-
-
-@pytest.mark.asyncio
-async def test_a_mode_placeholder_is_not_overwritten_by_the_paste_hint(monkeypatch) -> None:
+async def test_leaving_a_mode_restores_the_resting_placeholder(monkeypatch) -> None:
     """A mode that owns the composer is showing its own voice, and returning to
-    rest must ask what the resting copy currently is rather than assume.
+    rest must go through `resting_placeholder` rather than hardcoding a string.
 
-    Hardcoding `DEFAULT_PLACEHOLDER` on a mode exit silently retires a hint the
-    user has not used yet, which is why `resting_placeholder` is the single
-    authority every restore path goes through.
+    The composer no longer advertises the paste key at all (the native Cmd+V
+    works wherever the terminal forwards it, and `/help` carries the fallback),
+    so the resting copy has one value again. This still asserts the round trip:
+    the modes are the reason `resting_placeholder` exists as one authority, and
+    a mode exit that invented its own string would be the drift it prevents.
     """
     _stub_clipboard(monkeypatch, text="pasted")
     app = Host()
@@ -1575,16 +1527,12 @@ async def test_a_mode_placeholder_is_not_overwritten_by_the_paste_hint(monkeypat
         editor.set_shell_mode(True)
         assert editor.placeholder == editor_module.SHELL_PLACEHOLDER
         editor.set_shell_mode(False)
-        assert (
-            editor.placeholder == editor_module.PASTE_HINT_PLACEHOLDER
-        ), "leaving a mode must not retire an unused hint"
+        assert editor.placeholder == editor_module.DEFAULT_PLACEHOLDER
 
         await _ctrl_v(app, pilot)
-        editor.set_shell_mode(True)
-        editor.set_shell_mode(False)
         assert (
             editor.placeholder == editor_module.DEFAULT_PLACEHOLDER
-        ), "and must not resurrect a hint the user has already acted on"
+        ), "a paste must not change what the resting composer says"
 
 
 @pytest.mark.asyncio
