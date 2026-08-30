@@ -1889,10 +1889,18 @@ def _painted_frame(app: OperatorApp) -> str:
     import re
 
     svg = app.export_screenshot()
-    return " ".join(
+    text = " ".join(
         html.unescape(re.sub(r"<[^>]+>", "", match.group(1)))
         for match in re.finditer(r"<text[^>]*>(.*?)</text>", svg, re.S)
     )
+    # NON-BREAKING spaces, folded to ordinary ones. The exporter emits U+00A0
+    # between words so the SVG's text runs keep their spacing, which means every
+    # multi-word phrase a caller searches for is absent from the raw string —
+    # `"no cascade configured" not in frame` was TRUE of a frame containing that
+    # exact line. Folding here rather than at each call site, because the trap is
+    # the helper's and a caller cannot see it: the docstring promises what the
+    # user sees, and a user does not see the encoding.
+    return text.replace("\xa0", " ")
 
 
 @pytest.mark.asyncio
@@ -2002,3 +2010,359 @@ async def test_r_on_an_armed_chain_row_repaints_the_disarmed_ask(tmp_path: Path)
             "the footer still offers `esc cancel` for an ask that no longer exists, so "
             f"`esc` will leave the page instead:\n{disarmed}"
         )
+
+
+@pytest.mark.asyncio
+async def test_enter_on_the_cascade_row_does_not_destroy_the_cascade(tmp_path: Path) -> None:
+    """#440: `enter` on the failover cascade SETTING row used to open a
+    free-text editor seeded with the mapping's Python repr, and committing that
+    repr stored it as a STRING — `read_chains` then returned `{}` and the whole
+    cascade was gone, unrecoverably, because `r` cannot restore a value that is
+    no longer a mapping.
+
+    Asserted on the STORED VALUE rather than on whether an editor opened: the
+    editor is the mechanism, the destroyed config is the bug, and a test that
+    only checked `view._editing` would pass against any future fall-through
+    that still wrote through some other door.
+    """
+    chains = {"default": ["anthropic/claude-opus-5", "openrouter/deepseek"]}
+    settings_io.write_chains(ConfigManager(tmp_path), dict(chains))
+
+    def stored() -> Any:
+        # The RAW value on disk, not what `read_chains` makes of it: the repr
+        # write is only visible before `read_chains` discards it.
+        return _values(tmp_path)["retry"]["fallbackChains"]
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 32)) as pilot:
+        await pilot.pause()
+        app._open_settings_view()
+        view = app.query_one(SettingsView)
+        await pilot.pause()
+
+        _select(view, "retry.fallbackChains")
+        # A real key press through the app's own binding, not a direct call:
+        # the fall-through was on the activation path a user actually travels.
+        await pilot.press("enter")
+        await pilot.pause()
+        # Type a character and accept it, which is what turned the seeded repr
+        # into a committed value. Harmless once the row no longer opens an
+        # editor, and the only way to reach the destructive commit if it does.
+        await pilot.press("x")
+        await pilot.press("enter")
+        await pilot.pause()
+
+        view._manager.reload()
+        assert isinstance(stored(), dict), (
+            "retry.fallbackChains is no longer a mapping after `enter` on the cascade "
+            f"row — the cascade has been destroyed: {stored()!r}"
+        )
+        assert settings_io.read_chains(view._manager) == chains, (
+            "the cascade did not survive `enter` on its row: "
+            f"{settings_io.read_chains(view._manager)!r}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_enter_on_the_cascade_row_opens_its_own_editor(tmp_path: Path) -> None:
+    """The other half of #440: `enter` must not merely be inert. The footer
+    offers `enter change` on this row, so the key travels INTO the cascade's
+    own two-level editor — a lit hint whose key does nothing is the same
+    complaint one step earlier."""
+    settings_io.write_chains(ConfigManager(tmp_path), {"default": ["anthropic/a"]})
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 32)) as pilot:
+        await pilot.pause()
+        app._open_settings_view()
+        view = app.query_one(SettingsView)
+        await pilot.pause()
+
+        _select(view, "retry.fallbackChains")
+        await pilot.press("enter")
+        await pilot.pause()
+        assert view._editing is None, "a text editor opened on a row with no scalar value"
+        current = view._current()
+        assert current is not None and current.kind == "chain" and current.chain == "default"
+
+        # And it works from there: the chain opens into its hops.
+        await pilot.press("enter")
+        await pilot.pause()
+        assert view._chain == "default"
+
+
+@pytest.mark.asyncio
+async def test_begin_edit_refuses_a_kind_that_is_not_edited_as_text(tmp_path: Path) -> None:
+    """The belt-and-braces guard behind #440.
+
+    Every non-text kind has its own `action_activate` branch, so `_begin_edit`
+    is only reachable on one by a MISSING branch — and the cost of that
+    omission was a destroyed config, not a dead key. Driven directly at
+    `_begin_edit`, because the whole point is what happens when the branch that
+    should have caught the row is not there.
+    """
+    settings_io.write_chains(ConfigManager(tmp_path), {"default": ["anthropic/a"]})
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 32)) as pilot:
+        await pilot.pause()
+        app._open_settings_view()
+        view = app.query_one(SettingsView)
+        await pilot.pause()
+
+        for kind in (Kind.CASCADE, Kind.BOOL, Kind.ENUM, Kind.READONLY):
+            index = next(
+                (
+                    index
+                    for index, row in enumerate(view._rows)
+                    if row.kind == "setting"
+                    and row.setting is not None
+                    and row.setting.kind is kind
+                ),
+                None,
+            )
+            assert index is not None, f"no shipped row of kind {kind}"
+            view._begin_edit(view._rows[index])
+            assert view._editing is None, f"_begin_edit opened a text editor on {kind}"
+            assert view._error, f"_begin_edit refused {kind} silently"
+
+        # A kind that IS edited as text still opens, so the guard did not turn
+        # the editor off wholesale.
+        index = _select(view, "retry.maxRetries")
+        view._begin_edit(view._rows[index])
+        assert view._editing == "retry.maxRetries"
+
+
+#: The exact bytes v0.43.10 left in a victim's `config.yml`. The pre-#440 page
+#: seeded its free-text editor with `str(mapping)`, so what got stored is the
+#: mapping's Python repr with whatever the user typed appended — reproduced
+#: here through the page's own writer rather than hand-written into YAML, so
+#: this pins the state the shipped bug actually produced.
+_CORRUPT_CASCADE = "{'default': ['anthropic/claude-opus-5', 'openrouter/deepseek']}x"
+
+
+def _corrupt_the_cascade(tmp_path: Path) -> None:
+    """Store the #440 wreckage the way the shipped bug stored it.
+
+    Goes through `settings_io.coerce` + `write_setting` — the exact pair
+    `_commit_edit` calls — because a test that wrote the string straight into
+    `config.yml` would prove nothing about whether that state is reachable.
+    `coerce` returns the text unchanged for a kind it has no parser for, and
+    `validate` has no `Kind.CASCADE` arm, which together are why a repr could be
+    committed over a mapping in the first place.
+    """
+    setting = settings_io.resolve_key("retry.fallbackChains")
+    assert setting is not None
+    manager = ConfigManager(tmp_path)
+    settings_io.write_setting(manager, setting, settings_io.coerce(setting, _CORRUPT_CASCADE))
+    assert _values(tmp_path)["retry"]["fallbackChains"] == _CORRUPT_CASCADE
+
+
+@pytest.mark.asyncio
+async def test_r_clears_a_malformed_cascade_and_the_frame_does_not_contradict_itself(
+    tmp_path: Path,
+) -> None:
+    """A user already hit by #440 can recover, and the page stops lying to them.
+
+    Two halves of one defect (UX round 1, U1). The page showed the corrupt
+    Python repr in the VALUE column while the group line directly underneath
+    read `no cascade configured` — two contradictory statements one row apart,
+    from which a user cannot tell whether their chains exist. And `r`, which
+    the footer advertises on this row and which is the page's documented
+    mitigation for immediate-write having no undo, returned before
+    `reset_setting`: the corrupt string survived and the notice told the user
+    to delete a chain with `d` on a row that is not painted, because
+    `read_chains` returns `{}` for an unreadable value.
+    """
+    _corrupt_the_cascade(tmp_path)
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 32)) as pilot:
+        await pilot.pause()
+        app._open_settings_view()
+        view = app.query_one(SettingsView)
+        await pilot.pause()
+
+        _select(view, "retry.fallbackChains")
+        view._scroll_to_selection()
+        await pilot.pause()
+
+        # Half one: the frame. Read as EXPORTED, so this asserts about what the
+        # compositor actually painted rather than about a model string.
+        corrupt_frame = _painted_frame(app)
+        assert "{'default'" not in corrupt_frame, (
+            "the value column still paints the corrupt Python repr as if it were the "
+            f"setting's value:\n{corrupt_frame}"
+        )
+        assert "no cascade configured" not in corrupt_frame, (
+            "the page says `no cascade configured` under a row whose value column is "
+            f"showing something — the two halves of the row disagree:\n{corrupt_frame}"
+        )
+        assert "malformed cascade" in corrupt_frame, (
+            "nothing on the page says the stored value is malformed, so a victim of "
+            f"#440 has no way to know why their chains vanished:\n{corrupt_frame}"
+        )
+
+        # Half two: `r` — the key the footer lights on this row — repairs it.
+        await pilot.press("r")
+        await pilot.pause()
+
+        view._manager.reload()
+        stored = _values(tmp_path).get("retry", {})
+        assert "fallbackChains" not in stored, (
+            "`r` left the corrupt value in place, so the page's own documented "
+            f"mitigation cannot fix the config it is describing: {stored!r}"
+        )
+        assert settings_io.read_chains(view._manager) == {}
+        assert (
+            "malformed" in view.notice_text
+        ), f"`r` cleared the value without saying so: {view.notice_text!r}"
+        assert view.error_text == "", "clearing a malformed value is not an error"
+
+        # And the recovered page reads as an ordinary empty cascade, not as a
+        # third state with its own vocabulary. The detail row still REPORTS
+        # what `r` just did — that is the answer to the keypress and it dies
+        # with the cursor — but the row and its group line are back to the
+        # unset wording.
+        healed_frame = _painted_frame(app)
+        assert (
+            "no cascade configured" in healed_frame
+        ), f"the cleared cascade does not read as an empty one:\n{healed_frame}"
+        assert "press r to clear it" not in healed_frame, (
+            "the row still warns about a malformed value it no longer holds, and offers "
+            f"a key that would now do nothing:\n{healed_frame}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_r_on_a_healthy_cascade_still_explains_itself_without_writing(
+    tmp_path: Path,
+) -> None:
+    """The malformed carve-out must not turn `r` destructive on a real cascade.
+
+    A healthy cascade has no shipped default to restore — the chains are
+    entirely the user's own — so `r` explains rather than deletes (UX round 1,
+    U5). Asserted on the config BYTES, because "the chains are still there"
+    would also pass if `r` had rewritten the file with the same content.
+    """
+    chains = {"default": ["anthropic/claude-opus-5", "openrouter/deepseek"]}
+    settings_io.write_chains(ConfigManager(tmp_path), dict(chains))
+    before = (tmp_path / "config.yml").read_bytes()
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 32)) as pilot:
+        await pilot.pause()
+        app._open_settings_view()
+        view = app.query_one(SettingsView)
+        await pilot.pause()
+
+        _select(view, "retry.fallbackChains")
+        await pilot.press("r")
+        await pilot.pause()
+
+        assert (tmp_path / "config.yml").read_bytes() == before, "`r` wrote to a healthy cascade"
+        view._manager.reload()
+        assert settings_io.read_chains(view._manager) == chains
+        assert "delete a chain with d" in view.notice_text
+
+
+@pytest.mark.asyncio
+async def test_enter_into_the_cascade_does_not_carry_the_previous_row_notice(
+    tmp_path: Path,
+) -> None:
+    """`_enter_cascade` settles the row it leaves (review round 1, B2).
+
+    `r` then `enter` is a natural sequence on exactly this row: `r` answers
+    with a notice pointing at `d` on a chain row, and `enter` is how the user
+    gets to that chain row. Moving the cursor by assigning `_selected` skipped
+    `_leave_row`, so they arrived with the previous row's instruction still on
+    screen and no `d deletes it` hint for the row they were now on — the same
+    "model changed, paint did not" class as the armed-delete bug. Reaching the
+    same row with `down` always painted correctly, which is the comparison this
+    test makes.
+    """
+    settings_io.write_chains(ConfigManager(tmp_path), {"default": ["anthropic/claude-opus-5"]})
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 32)) as pilot:
+        await pilot.pause()
+        app._open_settings_view()
+        view = app.query_one(SettingsView)
+        await pilot.pause()
+
+        _select(view, "retry.fallbackChains")
+        await pilot.press("r")
+        await pilot.pause()
+        assert view.notice_text, "the setup press produced no notice to go stale"
+
+        await pilot.press("enter")
+        await pilot.pause()
+
+        current = view._current()
+        assert current is not None and current.kind == "chain"
+        assert view.notice_text == "", (
+            "the notice from `r` on the cascade row followed the cursor onto the chain "
+            f"row: {view.notice_text!r}"
+        )
+        detail = view.render_lines_for_test()[-1]
+        assert (
+            "enter opens the chain" in detail
+        ), f"the chain row's own contract is not on screen after `enter`: {detail!r}"
+
+
+@pytest.mark.asyncio
+async def test_the_text_editable_kinds_allow_list_is_pinned(tmp_path: Path) -> None:
+    """The guard's carve-out has to be asserted, not merely commented.
+
+    `_TEXT_EDITABLE_KINDS` is the belt-and-braces half of the #440 fix, and its
+    membership is a judgement about each kind's INTERACTION: `Kind.LIST` is in
+    it because `web_search.providers` genuinely edits as comma-separated text,
+    while `Kind.CASCADE` is out because it has no scalar at all. Deleting
+    `Kind.LIST` from the set left the whole settings suite green while the
+    ordered-providers row became uneditable (review round 1, M1), so the set is
+    pinned by NAME here and each member is exercised through the real editor
+    below — a membership assertion alone would pass on a kind that no longer
+    opens.
+    """
+    from local_operator.tui.widgets.settings_view import _TEXT_EDITABLE_KINDS
+
+    assert _TEXT_EDITABLE_KINDS == frozenset({Kind.INT, Kind.FLOAT, Kind.TEXT, Kind.LIST}), (
+        "the allow-list changed. Adding a kind here hands it to a free-text editor "
+        "seeded with `str(stored_value)`, which is what destroyed the cascade in #440; "
+        "removing one makes its row silently uneditable. Change this assertion only "
+        "with the reason written down."
+    )
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 32)) as pilot:
+        await pilot.pause()
+        app._open_settings_view()
+        view = app.query_one(SettingsView)
+        await pilot.pause()
+
+        # One real row per allowed kind, driven through the app's own `enter`
+        # binding. `web_search.providers` is named explicitly because it is the
+        # ONLY `Kind.LIST` row and therefore the entire justification for that
+        # member: it is the row that went uneditable with no test objecting.
+        for key in ("retry.maxRetries", "retry.usageReservePercent", "hosting"):
+            _select(view, key)
+            await pilot.press("enter")
+            await pilot.pause()
+            assert view.editing_key == key, f"{key} no longer opens a text editor"
+            await pilot.press("escape")
+            await pilot.pause()
+
+        _select(view, "web_search.providers")
+        await pilot.press("enter")
+        await pilot.pause()
+        assert view.editing_key == "web_search.providers", (
+            "the ordered-providers row is uneditable — `Kind.LIST` has been dropped from "
+            "the allow-list, which no other test in this file notices"
+        )
+        # It edits as the comma-separated text the LIST comment claims, not as
+        # a repr: the seed is what the guard's reasoning rests on.
+        assert (
+            "," in view._buffer and "[" not in view._buffer
+        ), f"the providers editor is not seeded with comma-separated text: {view._buffer!r}"
+        await pilot.press("escape")
+        await pilot.pause()

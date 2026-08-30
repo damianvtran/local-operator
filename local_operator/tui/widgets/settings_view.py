@@ -63,6 +63,20 @@ from local_operator.tui.widgets.tool_card import truncate_cells
 #: `max-width` and `_card_width`.
 _PANE_WIDTH = 34
 
+#: Kinds the inline text editor may open on. Written as an ALLOW-list, not a
+#: deny-list, so a kind added to `settings_io.Kind` without an
+#: `action_activate` branch is refused by default rather than silently handed
+#: to a free-text editor. That silence is what made #440 destructive:
+#: `Kind.CASCADE` fell through, the editor seeded itself with the mapping's
+#: Python repr, and committing it overwrote the user's whole failover cascade
+#: with a string. A missing branch should cost a key that says it cannot act,
+#: never a config the user cannot get back.
+#:
+#: `Kind.LIST` is in here on purpose — `web_search.providers` is stored as a
+#: list and genuinely edited as comma-separated text (see `settings_io.coerce`),
+#: which is why this is keyed on the interaction rather than on the stored type.
+_TEXT_EDITABLE_KINDS = frozenset({Kind.INT, Kind.FLOAT, Kind.TEXT, Kind.LIST})
+
 #: One line of the read-only pane, as its styled segments. A LIST of segments
 #: rather than one string plus one style, because a provider row carries two
 #: inks on one line (the id in `muted`, its state in `faint`) and the pane's
@@ -370,7 +384,18 @@ class SettingsView(Vertical):
         rows: list[_Row] = []
         chains = settings_io.read_chains(self._manager)
         if not chains:
-            rows.append(_Row(kind="empty", text="no cascade configured"))
+            # A cascade the page cannot read says WHY it shows nothing, and
+            # names the key that fixes it. Without this the only signal a #440
+            # victim got was `no cascade configured` under a value column
+            # showing their repr, and nothing on the page ever admitted the
+            # stored value was broken (UX round 1, U2). Same predicate as the
+            # value column and as `action_reset`, so the three cannot drift.
+            text = (
+                "malformed cascade — press r to clear it"
+                if self._cascade_is_malformed(setting)
+                else "no cascade configured"
+            )
+            rows.append(_Row(kind="empty", text=text))
         for key, hops in sorted(chains.items()):
             rows.append(_Row(kind="chain", chain=key, setting=setting))
             if self._chain == key:
@@ -379,6 +404,20 @@ class SettingsView(Vertical):
                 rows.append(_Row(kind="hop_add", chain=key))
         rows.append(_Row(kind="chain_add", setting=setting))
         return rows
+
+    def _cascade_is_malformed(self, setting: Setting) -> bool:
+        """Whether the cascade's STORED value is not a mapping at all.
+
+        `read_chains` answers ``{}`` for both "unset" and "unreadable", so it
+        cannot tell those apart — and they are different things to say to a
+        user. The raw read can: an unset key falls back to the setting's ``{}``
+        default, while the #440 wreckage reads back as the ``str`` that was
+        written over it. THE one predicate for that state, shared by the row
+        painter, the empty-state line and ``action_reset``, because three
+        copies of it would be three chances for the frame to contradict itself
+        again (UX round 1, U1/U2).
+        """
+        return not isinstance(settings_io.read_setting(self._manager, setting), Mapping)
 
     def _selectable(self) -> list[int]:
         return [index for index, row in enumerate(self._rows) if row.selectable]
@@ -670,7 +709,61 @@ class SettingsView(Vertical):
             self._error = "this setting is retired and cannot be changed"
             self._repaint()
             return
+        if setting.kind is Kind.CASCADE:
+            # A cascade has NO scalar to edit — it is a mapping of chains to
+            # ordered hops, and its editor is the two levels of rows already
+            # painted underneath this one. Without this branch the row fell
+            # through to `_begin_edit`, which seeded a free-text editor with
+            # `str(dict)`, and accepting that repr stored it as a STRING:
+            # `read_chains` then returned `{}`, the whole cascade was gone, and
+            # `r` could not bring it back because the stored value was no
+            # longer a mapping. A silent, unrecoverable loss of the user's own
+            # configuration from one press of the key the footer advertises
+            # (#440).
+            #
+            # `enter` therefore travels INTO the group rather than doing
+            # nothing: the footer offers `enter change` on this row, and a lit
+            # hint whose key is inert is the same "nothing happens when I
+            # click" complaint U5 records. The first selectable row below is
+            # the first chain, or `+ add a chain` when no chain exists yet —
+            # either way it is where an edit of this setting begins.
+            self._enter_cascade()
+            return
         self._begin_edit(row)
+
+    def _enter_cascade(self) -> None:
+        """Put the cursor on the first row of the cascade's own editor.
+
+        Resolved by SCANNING FORWARD from the cascade setting row rather than
+        by a fixed offset: `_cascade_rows` emits an unselectable
+        ``no cascade configured`` line when the mapping is empty, and the hops
+        of an already-open chain sit inside the group too. The first selectable
+        row after the setting is the right target in every one of those shapes.
+        """
+        # This is a cursor MOVE, so it settles the row it leaves exactly as
+        # `action_move` does. Setting `_selected` directly skipped `_leave_row`
+        # and therefore skipped the line that clears `_notice`, so `r` then
+        # `enter` — the natural sequence on this row, since `r`'s own answer
+        # points at `d` on a chain row — carried `r resets one setting…` onto
+        # the chain row the user had just travelled to, hiding that row's own
+        # `d deletes it` contract. The notice answers a keypress on ONE row and
+        # stops being true when the cursor leaves it (review round 1, B2; the
+        # same "model changed, paint did not" class as the armed-delete bug
+        # `action_reset` documents).
+        if not self._leave_row():
+            return
+        for index in range(self._selected + 1, len(self._rows)):
+            row = self._rows[index]
+            # The group ends at the next row that belongs to something else —
+            # a header, or another setting. Everything the cascade owns is one
+            # of its own kinds.
+            if row.kind not in ("empty", "chain", "hop", "hop_add", "chain_add"):
+                break
+            if row.selectable:
+                self._selected = index
+                self._repaint()
+                self._scroll_to_selection()
+                return
 
     def _scroll_to_expansion(self) -> None:
         """Bring the highlighted row AND the group it just opened into view.
@@ -725,16 +818,34 @@ class SettingsView(Vertical):
             if disarmed:
                 self._repaint()
             return
+        cleared_notice = ""
         if row.setting.kind is Kind.CASCADE:
-            # A cascade has no shipped default to restore — the chains are
-            # entirely the user's own — so `r` cannot mean here what it means
-            # everywhere else. It SAYS so rather than swallowing the press,
-            # because the footer advertises `r default` on this row and a lit
-            # hint whose key does nothing is the "nothing happens when I click"
-            # bug one step earlier (UX round 1, U5).
-            self._notice = "r resets one setting; delete a chain with d on its row"
-            self._repaint()
-            return
+            stored = settings_io.read_setting(self._manager, row.setting)
+            if isinstance(stored, Mapping):
+                # A HEALTHY cascade has no shipped default to restore — the
+                # chains are entirely the user's own — so `r` cannot mean here
+                # what it means everywhere else. It SAYS so rather than
+                # swallowing the press, because the footer advertises
+                # `r default` on this row and a lit hint whose key does nothing
+                # is the "nothing happens when I click" bug one step earlier
+                # (UX round 1, U5).
+                self._notice = "r resets one setting; delete a chain with d on its row"
+                self._repaint()
+                return
+            # A cascade that is NOT a mapping is the wreckage of #440: every
+            # user who pressed `enter` on this row before that fix has the
+            # mapping's Python repr stored here as a STRING. For that value
+            # "reset this setting" is both meaningful and exactly what is
+            # wanted, so it falls through to `reset_setting` below, which
+            # deletes the key and puts the row back to a clean empty cascade.
+            # The early return above is right for the healthy case and wrong
+            # for this one: it left the corrupt string in place while telling
+            # the user to delete a chain with `d` on a row that does not exist
+            # (`read_chains` returns `{}`, so no chain row is painted), which
+            # is advice they cannot act on from the one key they would reach
+            # for (UX round 1, U1). Their original hops are gone either way —
+            # destroyed by the shipped bug — but the page stops lying about it.
+            cleared_notice = "cleared a malformed cascade"
         if row.setting.kind is Kind.READONLY:
             # Same rule as the exit above: `_leave_row` makes an armed ask on a
             # read-only row unreachable today, but the guard is on the EXIT
@@ -749,6 +860,10 @@ class SettingsView(Vertical):
         self.post_message(
             SettingsChanged(setting.key, settings_io.read_setting(self._manager, setting))
         )
+        # Set AFTER `_save`, which clears `_notice` on success. Empty for every
+        # ordinary reset, so this adds no message where the value column
+        # already shows the change landing.
+        self._notice = cleared_notice
         self._repaint()
 
     def _save(self, action: Callable[[], None]) -> bool:
@@ -835,6 +950,25 @@ class SettingsView(Vertical):
             self._editing = "chainadd"
             self._buffer = ""
         elif row.setting is not None:
+            if row.setting.kind not in _TEXT_EDITABLE_KINDS:
+                # Belt and braces for the #440 class of defect. Every kind that
+                # is NOT edited as text has its own branch in
+                # `action_activate`, so reaching here means a kind was added
+                # without one — and the failure mode of that omission is not a
+                # dead key but a DESTRUCTIVE one: the editor seeds itself with
+                # `str(stored_value)` and commits whatever that renders as, in
+                # `Kind.CASCADE`'s case a Python repr written over the user's
+                # own mapping. Refusing to open is the safe half of that pair,
+                # and it says so rather than swallowing the press.
+                #
+                # Guarded on the KIND and not on the value's shape because
+                # `Kind.LIST` legitimately stores a list and legitimately edits
+                # as comma-separated text; "is this a scalar" would have to
+                # carve that out and would still miss a scalar-valued kind that
+                # needs its own widget.
+                self._error = "this setting is not edited as text"
+                self._repaint()
+                return
             self._editing = row.setting.key
             self._buffer = _edit_seed(settings_io.read_setting(self._manager, row.setting))
         else:
@@ -1509,6 +1643,16 @@ class SettingsView(Vertical):
         value_style = fg if changed else dim
         if setting.kind is Kind.READONLY:
             value_style = dim
+        if setting.kind is Kind.CASCADE and self._cascade_is_malformed(setting):
+            # NOT `_render_value`, which would fall through to `str(value)` and
+            # paint the corrupt Python repr as if it were the setting's value —
+            # directly above a group line saying there is no cascade. The frame
+            # then stated two contradictory things at once and a user could not
+            # tell from it whether their chains existed (UX round 1, U1). `—`
+            # is the page's existing glyph for "nothing to show here", and the
+            # line below carries the explanation.
+            line.append("—", style=dim)
+            return line
         line.append(_render_value(value), style=value_style)
         if setting.kind is Kind.ENUM and self._expanded == setting.key:
             line.append(" ▾", style=dim)
