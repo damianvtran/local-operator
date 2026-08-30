@@ -96,12 +96,47 @@ class FrozenMapping(Mapping[str, JsonValue]):
     __slots__ = ("_items",)
 
     def __init__(self, values: Mapping[str, Any]) -> None:
-        _validate_metadata(values)
-        object.__setattr__(
-            self,
-            "_items",
-            tuple((key, _freeze_json(value)) for key, value in sorted(values.items())),
-        )
+        # A Mapping may be stateful or adversarial. Traverse each mapping exactly
+        # once while validating and freezing that owned snapshot, so
+        # time-of-check and time-of-use cannot observe different data.
+        frozen = self._from_mapping(values, path="metadata", depth=0)
+        object.__setattr__(self, "_items", frozen._items)
+
+    @classmethod
+    def _from_mapping(
+        cls,
+        values: Mapping[str, Any],
+        *,
+        path: str,
+        depth: int,
+    ) -> "FrozenMapping":
+        if depth > MAX_METADATA_DEPTH:
+            raise ValueError(f"{path} exceeds maximum nesting depth {MAX_METADATA_DEPTH}")
+        snapshot = tuple(values.items())
+        keys = [key for key, _value in snapshot]
+        if len(keys) != len(set(keys)):
+            raise ValueError("metadata mapping contains duplicate keys")
+        frozen_items: list[tuple[str, Any]] = []
+        for key, value in snapshot:
+            if not isinstance(key, str):
+                raise ValueError(f"{path} object keys must be strings")
+            if _METADATA_KEY_RE.fullmatch(key) is None:
+                raise ValueError(
+                    f"{path} keys must match [A-Za-z0-9_.:-]{{1,{MAX_IDENTIFIER_LENGTH}}}"
+                )
+            frozen_items.append(
+                (
+                    key,
+                    _freeze_metadata_value(
+                        value,
+                        path=f"{path}.{key}",
+                        depth=depth + 1,
+                    ),
+                )
+            )
+        instance = object.__new__(cls)
+        object.__setattr__(instance, "_items", tuple(sorted(frozen_items)))
+        return instance
 
     def __setattr__(self, name: str, value: object) -> None:
         raise AttributeError(f"{type(self).__name__} is immutable")
@@ -125,12 +160,12 @@ class FrozenMapping(Mapping[str, JsonValue]):
         return f"FrozenMapping({_thaw_json(self)!r})"
 
     def __eq__(self, other: object) -> bool:
-        if not isinstance(other, Mapping):
+        # Ordinary Mapping implementations have their own, often untyped,
+        # equality rules (notably True == 1). Interoperability is canonical JSON,
+        # so Python equality is deliberately closed to this immutable value type.
+        if not isinstance(other, FrozenMapping):
             return NotImplemented
-        try:
-            return _typed_json_key(self) == _typed_json_key(other)
-        except (TypeError, ValueError):
-            return False
+        return _typed_json_key(self) == _typed_json_key(other)
 
     def __hash__(self) -> int:
         return hash(_typed_json_key(self))
@@ -596,6 +631,20 @@ def _scale_clamped_axis(
     return math.floor(value * destination_size / source_size)
 
 
+def _validate_metadata_items(
+    items: tuple[tuple[Any, Any], ...],
+    *,
+    path: str = "metadata",
+    depth: int = 0,
+) -> None:
+    for key, item in items:
+        if not isinstance(key, str):
+            raise ValueError(f"{path} object keys must be strings")
+        if _METADATA_KEY_RE.fullmatch(key) is None:
+            raise ValueError(f"{path} keys must match [A-Za-z0-9_.:-]{{1,{MAX_IDENTIFIER_LENGTH}}}")
+        _validate_metadata(item, path=f"{path}.{key}", depth=depth + 1)
+
+
 def _validate_metadata(value: Any, *, path: str = "metadata", depth: int = 0) -> None:
     """Enforce the portable, resource-bounded JSON subset at the RPC boundary."""
     if depth > MAX_METADATA_DEPTH:
@@ -613,26 +662,36 @@ def _validate_metadata(value: Any, *, path: str = "metadata", depth: int = 0) ->
             _validate_metadata(item, path=f"{path}[{index}]", depth=depth + 1)
         return
     if isinstance(value, Mapping):
-        for key, item in value.items():
-            if not isinstance(key, str):
-                raise ValueError(f"{path} object keys must be strings")
-            # Dynamic keys use an ASCII subset whose code-point and UTF-16 sort
-            # orders are identical across Python and JavaScript adapters.
-            if _METADATA_KEY_RE.fullmatch(key) is None:
-                raise ValueError(
-                    f"{path} keys must match [A-Za-z0-9_.:-]{{1,{MAX_IDENTIFIER_LENGTH}}}"
-                )
-            _validate_metadata(item, path=f"{path}.{key}", depth=depth + 1)
+        # Dynamic keys use an ASCII subset whose code-point and UTF-16 sort
+        # orders are identical across Python and JavaScript adapters.
+        _validate_metadata_items(tuple(value.items()), path=path, depth=depth)
         return
     raise ValueError(f"{path} contains unsupported value type {type(value).__name__}")
 
 
-def _freeze_json(value: Any) -> Any:
-    if isinstance(value, Mapping):
-        return FrozenMapping(value)
+def _freeze_metadata_value(value: Any, *, path: str, depth: int) -> Any:
+    if depth > MAX_METADATA_DEPTH:
+        raise ValueError(f"{path} exceeds maximum nesting depth {MAX_METADATA_DEPTH}")
+    if value is None or isinstance(value, (str, bool)):
+        return value
+    if isinstance(value, int):
+        if not -MAX_SAFE_JSON_INTEGER <= value <= MAX_SAFE_JSON_INTEGER:
+            raise ValueError(f"{path} integer exceeds the portable JSON-safe range")
+        return value
+    if isinstance(value, float):
+        raise ValueError(f"{path} floats are not supported; use a string or integer")
     if isinstance(value, (list, tuple)):
-        return tuple(_freeze_json(item) for item in value)
-    return value
+        return tuple(
+            _freeze_metadata_value(item, path=f"{path}[{index}]", depth=depth + 1)
+            for index, item in enumerate(value)
+        )
+    if isinstance(value, Mapping):
+        return FrozenMapping._from_mapping(value, path=path, depth=depth)
+    raise ValueError(f"{path} contains unsupported value type {type(value).__name__}")
+
+
+def _freeze_json(value: Any) -> Any:
+    return _freeze_metadata_value(value, path="metadata", depth=0)
 
 
 def _thaw_json(value: Any) -> JsonValue:

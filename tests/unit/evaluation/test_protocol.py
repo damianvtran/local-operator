@@ -7,6 +7,7 @@ import json
 import pickle
 import subprocess
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 from types import MappingProxyType
 
@@ -301,13 +302,64 @@ def test_frozen_mapping_equality_preserves_recursive_json_scalar_types() -> None
     ]
     for boolean_map, integer_map in pairs:
         assert boolean_map != integer_map
-        assert boolean_map != dict(integer_map)
         assert len({boolean_map, integer_map}) == 2
         assert {boolean_map: "bool", integer_map: "int"}[boolean_map] == "bool"
     left = FrozenMapping({"value": [True, {"count": 1}]})
     right = FrozenMapping({"value": (True, FrozenMapping({"count": 1}))})
     assert left == right
     assert hash(left) == hash(right)
+
+
+def test_frozen_mapping_never_equals_ordinary_or_custom_mappings() -> None:
+    frozen = FrozenMapping({"value": True})
+    ordinary = {"value": True}
+    custom = MappingProxyType(ordinary)
+    assert not frozen == ordinary
+    assert not ordinary == frozen
+    assert not frozen == custom
+    assert not custom == frozen
+    assert FrozenMapping.__eq__(frozen, ordinary) is NotImplemented
+
+
+def test_frozen_mapping_snapshots_stateful_mapping_exactly_once() -> None:
+    class ChangingMapping(Mapping[str, object]):
+        def __init__(self) -> None:
+            self.iterations = 0
+
+        def __iter__(self):
+            self.iterations += 1
+            return iter(("value",))
+
+        def __len__(self) -> int:
+            return 1
+
+        def __getitem__(self, key: str) -> object:
+            if key != "value":
+                raise KeyError(key)
+            return True if self.iterations == 1 else float("nan")
+
+    source = ChangingMapping()
+    frozen = FrozenMapping(source)
+    assert source.iterations == 1
+    assert frozen == FrozenMapping({"value": True})
+    assert frozen["value"] is True
+    assert hash(pickle.loads(pickle.dumps(frozen))) == hash(frozen)
+    assert copy.deepcopy(frozen) is frozen
+
+
+def test_frozen_mapping_rejects_duplicate_keys_from_hostile_mapping() -> None:
+    class DuplicateMapping(Mapping[str, int]):
+        def __iter__(self):
+            return iter(("same", "same"))
+
+        def __len__(self) -> int:
+            return 2
+
+        def __getitem__(self, key: str) -> int:
+            return 1
+
+    with pytest.raises(ValueError, match="duplicate keys"):
+        FrozenMapping(DuplicateMapping())
 
 
 def test_protocol_model_equality_tracks_type_distinct_canonical_metadata() -> None:
