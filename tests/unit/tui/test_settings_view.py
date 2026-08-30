@@ -3747,3 +3747,54 @@ async def test_the_first_discarded_edit_of_a_session_says_so_once(tmp_path: Path
         assert "discarded" not in view.notice_text, (
             f"the migration notice fired twice: {view.notice_text!r}"
         )
+
+
+@pytest.mark.parametrize("size", [(140, 40), (100, 30), (80, 24)])
+@pytest.mark.asyncio
+async def test_the_detail_clause_sheds_whole_rather_than_clipping(
+    tmp_path: Path, size: tuple[int, int]
+) -> None:
+    """#440 §4.4's shedding rule, at three widths.
+
+    The model adds two clauses to the detail row — `· default: <value>` and,
+    while choosing, `· nothing is saved until you press enter`. Both are
+    appended to a help string that already competes for the row, so on a narrow
+    terminal something has to give.
+
+    It must be the WHOLE clause. Half of "nothing is saved until you press
+    enter" is worse than none of it: a sentence cut mid-clause reads as a
+    rendering fault rather than as an abbreviation, which is the reasoning
+    design round 1's D4 used for the label budget and D8 for the delete ask.
+    The clause also sheds BEFORE the help, which answers "what is this" and is
+    the more load-bearing half for a user who is lost.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        view = await _open_page(pilot, app)
+
+        _select(view, "tui.theme")
+        await pilot.press("enter")
+        await pilot.pause()
+        detail = view.render_lines_for_test()[-1]
+        clause = "nothing is saved until you press enter"
+        # Either the clause is there whole, or it is absent — never a prefix of
+        # it, which is what a clip would leave behind.
+        if "nothing is saved" in detail:
+            assert clause in detail, f"the choosing clause was clipped mid-sentence: {detail!r}"
+            assert cell_len(detail) <= view._detail_width(), (cell_len(detail), detail)
+        await pilot.press("escape")
+        await pilot.pause()
+
+        _select(view, "retry.maxRetries")
+        await pilot.press("enter")
+        for _ in range(len(view._buffer)):
+            await pilot.press("backspace")
+        for char in "4":
+            await pilot.press(char)
+        await pilot.press("enter")
+        await pilot.pause()
+        detail = view.render_lines_for_test()[-1]
+        if "default:" in detail:
+            assert "default: 10" in detail, f"the default clause was clipped: {detail!r}"
+            assert cell_len(detail) <= view._detail_width(), (cell_len(detail), detail)

@@ -1021,6 +1021,32 @@ class SettingsView(Vertical):
         # for the same reason `action_activate` does.
         self._reveal_cursor()
         row = self._current()
+        # A CHOICE row resets the setting that OWNS it. `r` is advertised there
+        # whenever it would act (see `_reset_applies`), and the footer and the
+        # key have to agree: refusing here would light a hint that does nothing,
+        # while acting on the owner is what the user is looking at — the
+        # expansion names the default it would restore two rows up. The
+        # expansion is closed afterwards for the reason a commit closes it, so
+        # the frame does not leave a choice list open over a value it no longer
+        # describes.
+        if row is not None and row.kind == "choice" and row.setting is not None:
+            owner = row.setting
+            if settings_io.is_default(self._manager, owner):
+                if disarmed:
+                    self._repaint()
+                return
+            if not self._save(lambda: settings_io.reset_setting(self._manager, owner)):
+                return
+            self.post_message(
+                SettingsChanged(owner.key, settings_io.read_setting(self._manager, owner))
+            )
+            self._revert_preview()
+            self._expanded = None
+            self._repaint()
+            self._select_setting_row(owner.key)
+            self._repaint()
+            self._scroll_to_selection()
+            return
         if row is None or row.setting is None or row.kind != "setting":
             if disarmed:
                 self._repaint()
@@ -2416,40 +2442,49 @@ class SettingsView(Vertical):
             text.append("enter, then type: <provider>/<model>", style=faint)
         elif row.setting is not None:
             text.append(row.setting.help, style=faint)
-            # The clauses this row sheds FIRST, and in this order, because the
-            # help answers "what is this" — the question a lost user has — while
-            # these answer "what would this key do", which only matters once
-            # they know where they are (#440 §4.4).
-            for clause in self._detail_clauses(row):
-                text.append(f" · {clause}", style=faint)
+            # The clause SHEDS rather than being clipped (#440 §4.4). It is
+            # measured against the row it is painted into and dropped whole
+            # when it will not fit, because half of "nothing is saved until you
+            # press enter" is worse than none of it — a sentence cut mid-clause
+            # reads as a rendering fault, which is the same reasoning D4 used
+            # for the label budget and D8 for the delete ask. It sheds BEFORE
+            # the help, which answers "what is this" and is the more
+            # load-bearing half for a user who is lost.
+            clause = self._detail_clause(row)
+            if clause:
+                key_room = cell_len(row.setting.key) + 3
+                used = cell_len(text.plain) + key_room
+                if used + cell_len(f" · {clause}") <= self._detail_width():
+                    text.append(f" · {clause}", style=faint)
             text.append(f"   {row.setting.key}", style=Style(color=theme_mod.semantic_color("dim")))
         self._detail_text = text
         self._detail.update(text)
 
-    def _detail_clauses(self, row: "_Row") -> list[str]:
-        """The state-dependent clauses appended to a setting row's help.
+    def _detail_clause(self, row: "_Row") -> str:
+        """The state-dependent clause appended to a setting row's help.
 
-        Two, both new with #440's model and both answering a question the page
-        could not answer before:
+        At most ONE, never two, because they are mutually exclusive states and
+        because the row's whole shedding discipline rests on the help being the
+        last thing to give way. Both are new with #440's model and both answer
+        a question the page could not answer before:
 
         - While CHOOSING, that browsing this list is free. It is the sentence
-          the whole redesign exists to make true, and the expansion is exactly
-          where a user is deciding whether to trust it.
+          the redesign exists to make true, and the expansion is exactly where
+          a user decides whether to trust it.
         - On an off-default row, WHAT ``r`` would restore. `r` has no confirm —
           it is definitionally a return to a known state — so naming the value
-          is what lets a user predict it before pressing. Only on rows where
-          the key is offered, so the detail line and the footer cannot disagree
-          about whether `r` does anything here.
+          is what lets a user predict it before pressing. Gated on the same
+          predicate that decides whether the key is offered at all, so the
+          detail line and the footer cannot disagree about it.
         """
         setting = row.setting
         if setting is None:
-            return []
-        clauses: list[str] = []
+            return ""
         if self._expanded == setting.key:
-            clauses.append("nothing is saved until you press enter")
-        elif not settings_io.is_default(self._manager, setting):
-            clauses.append(f"default: {_render_value(setting.default)}")
-        return clauses
+            return "nothing is saved until you press enter"
+        if not settings_io.is_default(self._manager, setting):
+            return f"default: {_render_value(setting.default)}"
+        return ""
 
     #: Narrowest page that still shows BOTH columns. Below it the pane is
     #: hidden and the settings list takes the whole body: the pane is context,
@@ -2980,7 +3015,18 @@ class SettingsView(Vertical):
             # `_current_is_readonly` documents.
             return True
         row = self._current()
-        if row is None or row.setting is None or row.kind != "setting":
+        if row is None:
+            return True
+        if row.kind == "choice" and row.setting is not None:
+            # A CHOICE row: `action_reset` refuses outright here (it requires a
+            # `setting` row), so the honest answer is the owning setting's. A
+            # user browsing `retry.enabled`'s two members must not be offered
+            # `r default` when the flag is already at its default and the key
+            # would do nothing on either row — a lit hint whose key is inert is
+            # the "nothing happens when I click" bug one step earlier, the rule
+            # this whole predicate exists to extend.
+            return not settings_io.is_default(self._manager, row.setting)
+        if row.setting is None or row.kind != "setting":
             # A chain, hop or add row: `r` says why it does not apply there,
             # which is a real answer and worth advertising.
             return True
