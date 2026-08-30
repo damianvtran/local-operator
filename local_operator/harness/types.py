@@ -361,6 +361,41 @@ class WakeSchedulerProtocol(Protocol):
 
 
 @runtime_checkable
+class PeerArrivalProtocol(Protocol):
+    """A wakeable signal that an inbound peer message (``lop send``) landed.
+
+    Exists so a blocking tool can park on peer arrival WITHOUT importing the
+    session. ``wait`` is the only consumer today and the only one that should
+    be: it is a read-only sleep, so waking it early costs nothing, and the
+    message it wakes for is already in the session's journal by then. Do NOT
+    reuse this to preempt a MUTATING tool — mailbox delivery is
+    non-interrupting by contract (``guides/peer-messaging/GUIDE.md``), and
+    cancelling a ``bash`` mid-side-effect to hand the model "skipped" is a
+    price only a human pressing Esc gets to charge.
+
+    Threading: the session's implementation sets the event on the loop that
+    owns the session, because every registrant path hops there first
+    (``mobile/tui_handle.py``, ``mobile/owned.py`` both use
+    ``run_coroutine_threadsafe``). A future caller that invokes
+    ``receive_peer_message`` from its own thread WITHOUT that hop would need
+    ``loop.call_soon_threadsafe`` — ``asyncio.Event.set`` is not thread-safe.
+    """
+
+    def event(self) -> asyncio.Event:
+        """An Event set on each inbound peer message.
+
+        Never cleared by the producer. Consumers snapshot :meth:`count` before
+        parking and compare after waking, which is what makes a message that
+        arrives BETWEEN two parks impossible to miss.
+        """
+        ...
+
+    def count(self) -> int:
+        """Monotonic count of peer messages delivered to this session."""
+        ...
+
+
+@runtime_checkable
 class VariableStoreProtocol(Protocol):
     """The slice of a variable store the variables tools read.
 
@@ -688,6 +723,13 @@ class ToolContext(BaseModel):
     # advertised at all (createIf) rather than advertised and always
     # failing.
     jobs: JobManagerProtocol | None = None
+    # Set by the session on each inbound ``lop send`` delivery so a blocking
+    # ``wait`` can return early and let the model read its mailbox. Declared
+    # rather than probed for, per this class's contract above. ``None`` means
+    # the host has no peer surface, and ``wait`` keeps exactly its old three
+    # wake sources (job settle / abort / deadline) — this field only ever adds
+    # a fourth, it never removes one.
+    peer_arrival: PeerArrivalProtocol | None = None
     # The parent↔child messaging surface behind the ``hub`` tool
     # (``harness.comms.SubagentComms``). Typed ``Any`` for the same import-
     # cycle reason ``jobs`` is a Protocol: ``harness.comms`` imports this

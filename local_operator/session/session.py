@@ -245,6 +245,40 @@ _MAX_CONTINUATIONS = 8
 SESSION_CAPABILITY_TOOLS: tuple[str, ...] = ("task", "wait", "jobs", "wake", "hub", "ask")
 
 
+class _PeerArrival:
+    """Session-owned :class:`PeerArrivalProtocol` behind ``ToolContext``.
+
+    Satisfies the tool-side contract with the smallest possible surface: a
+    blocking ``wait`` parks on :meth:`event` and decides with :meth:`count`.
+
+    The event is only ever SET and the count only ever INCREMENTS, which is
+    the whole correctness argument. A consumer snapshots the count before
+    parking and compares it after waking, so a message that lands between two
+    parks is still seen; an ``is_set()`` check plus a producer-side ``clear()``
+    would drop exactly that message, and the resulting lost wakeup would delay
+    delivery by a whole turn while looking intermittent. Do not "simplify"
+    this to a bare Event.
+    """
+
+    __slots__ = ("_event", "_count")
+
+    def __init__(self) -> None:
+        self._event = asyncio.Event()
+        self._count = 0
+
+    def event(self) -> asyncio.Event:
+        return self._event
+
+    def count(self) -> int:
+        return self._count
+
+    def mark(self) -> None:
+        """Record an arrival and wake anything parked on it."""
+
+        self._count += 1
+        self._event.set()
+
+
 @dataclass(frozen=True, slots=True)
 class _CompactionPlan:
     """One compaction pass, decided but not yet committed.
@@ -1545,6 +1579,11 @@ class Session:
         # settled by the decrement happening at the same drain the delivery
         # does.
         self._courtesy_wake_count = 0
+        # Peer-arrival signal behind ToolContext.peer_arrival, so a blocking
+        # `wait` can park on "a message reached my mailbox" alongside its job
+        # settle events. Owned by the session because the ToolContext is
+        # rebuilt every turn and this has to outlive one.
+        self._peer_arrival = _PeerArrival()
         # Host-registered teardown (see add_dispose_hook): resources the
         # composition root owns but the session's lifetime governs.
         self._dispose_hooks: list[Callable[[], Awaitable[None] | None]] = []
@@ -3638,10 +3677,12 @@ class Session:
                 # drains; appending here too would double-write.
                 self.steer(str(message.details["body"]), message_id=message.id)
                 await self._emit_peer_receipt(message, sender)
+                self._peer_arrival.mark()
                 return "delivered mid-turn (steered)"
             # Idle steer has nothing to interrupt: open a turn so the message is
             # still delivered and read. _prompt_messages persists the row once.
             await self._emit_peer_receipt(message, sender)
+            self._peer_arrival.mark()
             self._spawn_background(self._prompt_messages([message]))
             return "delivered (opened a turn)"
         # mode == "mailbox"
@@ -3649,6 +3690,7 @@ class Session:
             # _prompt_messages persists the row through the pipeline — a
             # separate transcript/context append here would double-write.
             await self._emit_peer_receipt(message, sender)
+            self._peer_arrival.mark()
             self._spawn_background(self._prompt_messages([message]))
             return "delivered and woke the session"
         # Record-only (idle without wake, or busy): persist durably NOW so the
@@ -3668,6 +3710,17 @@ class Session:
         await self._transcript.append_message(message)
         self._append_or_park_journal(message)
         await self._emit_peer_receipt(message, sender)
+        # LAST, deliberately: this wakes a blocking `wait`, and the woken tool
+        # returns into the loop's injection boundary where _drain_steering
+        # flushes the journal. Marking BEFORE the park above would let that
+        # flush run before the message was parked - a lost wakeup that delays
+        # delivery by a whole extra turn.
+        #
+        # Note what this does NOT do: it appends nothing to context. The
+        # message reaches the model through the unchanged park -> flush path
+        # at the post-batch boundary, which is what keeps the splice hazard
+        # documented above from being reintroduced here.
+        self._peer_arrival.mark()
         return "delivered to the mailbox (will be read on the next turn)"
 
     async def _emit_peer_receipt(self, message: CustomMessage, sender: dict[str, Any]) -> None:
@@ -4610,6 +4663,7 @@ class Session:
             browser=self._browser,
             subagent_launcher=self._launch_subagent,
             jobs=self.jobs,
+            peer_arrival=self._peer_arrival,
             subagent_comms=self.subagent_comms,
             variables=self._variables,
             # The ``ask`` tool stores secret answers straight into the store;

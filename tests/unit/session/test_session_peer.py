@@ -244,3 +244,58 @@ async def test_steer_while_busy_routes_through_the_steer_queue(tmp_path):
     # The steered text reached the follow-up model call.
     assert any("redirect now" in m.text for m in stream.requests[1].messages)
     await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_every_delivery_path_marks_a_peer_arrival(tmp_path):
+    """The wake half of the mailbox fix.
+
+    `wait` parks on this signal, so a delivery path that forgets to mark it is
+    a message the waiting session does not see until its budget expires. The
+    count is monotonic and the event is never cleared by the producer —
+    re-arming is the consumer's job (see PeerArrivalProtocol).
+    """
+    stream = ScriptedStream(
+        [
+            [StreamTextDelta(delta="ack"), StreamEndEvent(stop_reason="stop")],
+            [StreamTextDelta(delta="ack"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    session = make_session(tmp_path, stream)
+    peer = session._peer_arrival
+
+    assert peer.count() == 0
+    assert not peer.event().is_set()
+
+    # Record-only (idle, no wake): the path a blocking `wait` has to observe.
+    await session.receive_peer_message("mailbox note", mode="mailbox", wake=False)
+    assert peer.count() == 1
+    assert peer.event().is_set(), "a parked wait must be woken"
+
+    # Wake-an-idle-session path.
+    await session.receive_peer_message("wake note", mode="mailbox", wake=True)
+    assert peer.count() == 2
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_mailbox_wake_appends_nothing_extra_to_context(tmp_path):
+    """The splice-hazard guard.
+
+    Waking a `wait` must set an event and NOTHING else. The message reaches
+    context through the unchanged park -> flush path at the loop's post-batch
+    boundary; a context append here would be the C1-class splice bug the
+    record-only branch documents at length.
+    """
+    stream = ScriptedStream([[StreamTextDelta(delta="ack"), StreamEndEvent(stop_reason="stop")]])
+    session = make_session(tmp_path, stream)
+
+    before = len(session._context.messages)
+    await session.receive_peer_message("mailbox note", mode="mailbox", wake=False)
+
+    rows = _peer_rows(session)
+    assert len(rows) == 1, "exactly one durable row, as before the wake was added"
+    # Idle appends straight through: exactly ONE message, not a doubled splice.
+    assert len(session._context.messages) == before + 1
+    assert session._peer_arrival.count() == 1
+    await session.dispose()

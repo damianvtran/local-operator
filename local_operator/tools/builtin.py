@@ -7011,6 +7011,60 @@ async def execute_wait(
         ]
 
     deadline = time.monotonic() + params.wait_ms / 1000.0
+    # Snapshot the peer count and RE-ARM the event before parking.
+    #
+    # Two halves, both load-bearing. The COUNT is what the wake decision reads
+    # (not `is_set()`), so a message that landed between two waits, or before
+    # this wait began, is still seen exactly once. The CLEAR is what stops a
+    # stale set event from making `asyncio.wait` return instantly on every
+    # iteration, which would spin this `while` loop at full speed until the
+    # deadline — the same event-loop burn `_await_any_settled` documents for
+    # evicted job rows, and worse than the poll it replaced.
+    #
+    # The producer only ever sets and increments; re-arming is the consumer's
+    # job. No `await` separates the snapshot from the clear, so the sequence is
+    # atomic with respect to the loop, and the producer runs on that same loop
+    # (see PeerArrivalProtocol), so a message cannot slip between them and be
+    # lost: it either lands before the snapshot and is counted, or after the
+    # clear and re-sets the event. Do NOT "tidy" this by moving the count and
+    # the clear adjacent to each other or by reordering them — what matters is
+    # only that nothing awaits in between.
+    peer = context.peer_arrival if context is not None else None
+    peer_event = peer.event() if peer is not None else None
+    peer_seen = peer.count() if peer is not None else 0
+    if peer_event is not None:
+        peer_event.clear()
+
+    def _peer_interrupt(reason: str) -> ToolResult:
+        """The still-running payload for a wait cut short by a peer/steer.
+
+        Deliberately the SAME shape the deadline branch returns, so the model
+        gets the job id and status back and can simply re-issue the wait. The
+        jobs are untouched: nothing is cancelled and, critically, nothing is
+        consumed, so auto-delivery still hands over the result later.
+        """
+
+        running = _still_running()
+        # The note must agree with details["interrupted_by"]: the text is what
+        # the model actually reads, so rendering "steering" for a cancel we
+        # cannot attribute would keep the mislabelled claim alive in the one
+        # place it matters (review finding N1).
+        note = (
+            "a message arrived from another session"
+            if reason == "peer_message"
+            else "the wait was cancelled"
+        )
+        return _text(
+            tool_call_id,
+            "wait",
+            f"job {', '.join(running or job_ids)} still running ({note})",
+            details={
+                "job_id": (running or job_ids)[0],
+                "status": "running",
+                "interrupted_by": reason,
+            },
+        )
+
     job = _settled()
     while job is None:
         if signal is not None and signal.aborted:
@@ -7030,8 +7084,50 @@ async def execute_wait(
                 f"job {', '.join(running or job_ids)} still running after {params.wait_ms}ms",
                 details={"job_id": (running or job_ids)[0], "status": "running"},
             )
-        await _await_any_settled(jobs, job_ids, remaining, signal)
+        try:
+            await _await_any_settled(jobs, job_ids, remaining, signal, peer_event)
+        except asyncio.CancelledError:
+            # `lop send --now` steers, which makes interruptible_runner cancel
+            # this tool task and hand the model SKIPPED_RESULT_TEXT - losing
+            # the job id and telling it the wait never happened. Reporting the
+            # still-running payload ourselves makes --now and the mailbox path
+            # return the same shape.
+            #
+            # ABORT MUST STAY STRONGER THAN STEERING. Esc sets signal.aborted
+            # and expects the tool to stop; a tool that swallows
+            # CancelledError unconditionally defeats that contract outright
+            # (see the abort/steer split in harness/loop.py). So re-raise when
+            # the signal is aborted, and only absorb the plain steer cancel.
+            if signal is not None and signal.aborted:
+                raise
+            # A cancel with NO signal at all cannot be a steer: steering rides
+            # interruptible_runner, which always passes one. Absorbing it here
+            # would invent a steering event on a host that has no steering, so
+            # let it propagate as the plain cancellation it is.
+            if signal is None:
+                raise
+            # Steering is not the only remaining cancel source - a batch
+            # teardown (`GeneratorExit` in _execute_batch's finally) cancels
+            # the task with a live, non-aborted signal too, and the tool
+            # cannot tell the two apart from here: ToolContext deliberately
+            # exposes no steering capability, and adding one just to label a
+            # string would put loop state in a tool for no behavioural gain.
+            # `interrupted_by` is machine-readable and "steering" is the one
+            # value implying a human or peer acted, so report the neutral,
+            # always-true cause instead of guessing. The still-running payload
+            # (the point of this branch) is unchanged either way.
+            return _peer_interrupt("cancelled")
+        # Settle BEFORE peer: when a job settles on the same loop iteration as
+        # a message arrives, the finished result is strictly more valuable than
+        # "a message arrived", and reporting the peer branch would describe a
+        # completed job as running (and, via _still_running() == [], pin the
+        # WRONG job id in details - the exact failure _still_running's
+        # docstring exists to prevent). The message is not lost either way: it
+        # is already parked in the session journal and lands at the next
+        # turn-safe boundary.
         job = _settled()
+        if job is None and peer is not None and peer.count() > peer_seen:
+            return _peer_interrupt("peer_message")
         if job is None and all(jobs.get(job_id) is None for job_id in job_ids):
             return _error(tool_call_id, "wait", f"job {', '.join(job_ids)} disappeared")
     # Handing the result to the model HERE means auto-delivery must not
@@ -7065,9 +7161,10 @@ async def _await_any_settled(
     job_ids: list[str],
     remaining: float,
     signal: AbortSignal | None = None,
+    peer_event: asyncio.Event | None = None,
 ) -> None:
-    """Sleep until one of ``job_ids`` settles, the wait is aborted, or
-    ``remaining`` seconds pass.
+    """Sleep until one of ``job_ids`` settles, the wait is aborted, a peer
+    message arrives, or ``remaining`` seconds pass.
 
     Event-driven where the host supports it. The measured problem this fixes:
     across recorded sessions, 70% of ``wait`` calls hit their deadline, and the
@@ -7109,12 +7206,20 @@ async def _await_any_settled(
     except Exception:  # noqa: BLE001 - a manager that cannot make events polls
         await asyncio.sleep(min(0.1, remaining))
         return
-    if not events and signal is None:
+    if not events and signal is None and peer_event is None:
+        # The peer event has to be in this condition: with no live job rows
+        # and no signal, sleeping out the remainder here would silently drop
+        # the peer waiter and leave the mailbox wake dead on the no-jobs path.
         await asyncio.sleep(remaining)
         return
     waiters = [asyncio.ensure_future(event.wait()) for event in events]
     if signal is not None:
         waiters.append(asyncio.ensure_future(signal.wait()))
+    if peer_event is not None:
+        # Raced alongside the settle events for the same reason the abort is:
+        # checking it between sleeps would make it observable only after some
+        # OTHER wake source fired, which on a job that never settles is never.
+        waiters.append(asyncio.ensure_future(peer_event.wait()))
     try:
         await asyncio.wait(waiters, timeout=remaining, return_when=asyncio.FIRST_COMPLETED)
     finally:

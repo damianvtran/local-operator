@@ -62,6 +62,10 @@ from …`) in both the TUI and the phone — distinct from the user's own turns.
 - **default (mailbox, record-only):** the message is durably written to the
   target's history immediately and the model reads it on its *next* turn. An
   idle target stays idle — non-interrupting. Use for a non-urgent hand-off.
+  A target parked in a blocking `wait` is the one exception, and it is not a
+  preemption: the wait returns early reporting its job still running, so the
+  message is read at the next turn boundary instead of after the wait's full
+  budget. A running `bash`, `eval` or MCP call is never interrupted.
 - **`--wake`:** mailbox delivery, plus drive a turn now if the target is idle.
   Use when the target should act on the message immediately. (While the target
   is already busy, `--wake` is a no-op: the running turn will read it anyway.)
