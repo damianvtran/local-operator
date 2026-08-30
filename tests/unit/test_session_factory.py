@@ -181,12 +181,92 @@ def test_resolve_missing_values_raise_legacy_messages() -> None:
     assert resolve_hosting_model(None, _args(hosting="openai"), config) == ("openai", "gpt-4o")
 
 
-def test_resolve_unknown_hosting_no_default_still_raises_for_model() -> None:
+def test_resolve_known_hosting_no_default_still_raises_for_model() -> None:
     """A provider with NO known default still errors on a missing model, now
-    naming current models to choose from (item 3)."""
+    naming current models to choose from (item 3).
+
+    Uses ``ollama`` — a REGISTRY-KNOWN provider that has no entry in
+    ``DEFAULT_MODEL_NAMES``. The case previously used a fictional hosting id,
+    which now trips the unknown-provider guard first and would assert the wrong
+    error; the provider must be real for this to still be about the MODEL.
+    """
     config = cast("ConfigManager", FakeConfigManager({}))
     with pytest.raises(ValueError, match="no default is known"):
-        resolve_hosting_model(None, _args(hosting="some-custom-host"), config)
+        resolve_hosting_model(None, _args(hosting="ollama"), config)
+
+
+def test_resolve_unknown_hosting_is_recoverable_setup_not_a_crash() -> None:
+    """A hosting the registry does not own raises the RECOVERABLE error type.
+
+    This is the regression guard for the hotfix: a corrupted/typo'd
+    ``hosting:`` value used to sail through this resolver and detonate later in
+    ``configure_model`` as a bare ValueError, which the TUI painted as a dead
+    "session failed to start" with no session — so the user could not switch
+    provider from inside the app either. Catching it HERE, as a subclass of the
+    error the setup-state gate already classifies, is what makes it survivable.
+    """
+    from local_operator.session_factory import (
+        HostingNotConfiguredError,
+        HostingUnknownError,
+    )
+
+    config = cast(
+        "ConfigManager",
+        FakeConfigManager({"hosting": "anthropicxyq", "model_name": "claude-sonnet-4-5"}),
+    )
+    with pytest.raises(HostingUnknownError) as caught:
+        resolve_hosting_model(None, _args(), config)
+
+    error = caught.value
+    # Recoverable-setup by TYPE: this is what the CLI preflight and the TUI
+    # boot handler branch on, so the subclassing is load-bearing, not cosmetic.
+    assert isinstance(error, HostingNotConfiguredError)
+    # ValueError ancestry preserved for legacy ``except ValueError`` callers.
+    assert isinstance(error, ValueError)
+    # The offending value is carried structurally so a UI can phrase its own
+    # message without scraping it back out of the sentence.
+    assert error.hosting == "anthropicxyq"
+    # The message names the problem AND the remedy — the old one named neither
+    # a remedy nor a valid provider.
+    text = str(error)
+    assert "anthropicxyq" in text
+    assert "not a known provider" in text
+    assert "login" in text
+
+
+def test_resolve_unknown_hosting_is_distinguishable_from_unconfigured() -> None:
+    """The two setup conditions stay separable, so the messages can differ.
+
+    Telling a user whose config says ``anthropicxyq`` that "nothing is
+    configured" contradicts the file in front of them; the shared base class
+    must not collapse that distinction.
+    """
+    from local_operator.session_factory import (
+        HostingNotConfiguredError,
+        HostingUnknownError,
+    )
+
+    empty = cast("ConfigManager", FakeConfigManager({}))
+    with pytest.raises(HostingNotConfiguredError) as caught:
+        resolve_hosting_model(None, _args(), empty)
+    assert not isinstance(caught.value, HostingUnknownError)
+
+
+@pytest.mark.parametrize(
+    ("hosting", "model"),
+    [
+        ("anthropic", "claude-sonnet-4-5"),
+        ("openai", "gpt-4o"),
+        # Legacy alias: `noop` is not a registry id, it MAPS to `test`. The
+        # validation goes through get_provider_definition precisely so an alias
+        # the engine still accepts is not newly rejected as a bad provider.
+        ("noop", "mock-model"),
+    ],
+)
+def test_resolve_valid_hosting_and_aliases_unaffected(hosting: str, model: str) -> None:
+    """The new guard must not narrow what the engine already accepts."""
+    config = cast("ConfigManager", FakeConfigManager({"hosting": hosting, "model_name": model}))
+    assert resolve_hosting_model(None, _args(), config) == (hosting, model)
 
 
 # --- Compaction coercion (CL-01) --------------------------------------------------

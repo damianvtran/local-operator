@@ -1499,6 +1499,12 @@ class OperatorApp(App[None]):
         #: `/login` that resolves it. While set, a successful login reloads the
         #: session (there is none yet) rather than only re-polling the splash.
         self._setup_state = False
+        #: The unknown provider id that put us in the setup state, when that is
+        #: why we are here (``None`` for the nothing-configured case). Read by
+        #: `_apply_login_defaults`, which must OVERWRITE a hosting that is set
+        #: but invalid — its "only adopt when empty" rule is right for a user
+        #: adding a second provider and wrong for a config that cannot boot.
+        self._invalid_hosting: str | None = None
         #: Invoked before a post-login session rebuild so the launch-time config
         #: manager (captured by the session factory closure) re-reads the
         #: hosting/model that `/login` just wrote to disk. ``None`` outside the
@@ -3264,10 +3270,24 @@ class OperatorApp(App[None]):
         # `/login` affordance and the `/model` / `/provider` surfaces are the
         # setup UI — no separate wizard. Imported lazily beside every other
         # session_factory reference in this module.
-        from local_operator.session_factory import HostingNotConfiguredError
+        from local_operator.session_factory import (
+            HostingNotConfiguredError,
+            HostingUnknownError,
+        )
 
         if isinstance(error, HostingNotConfiguredError):
-            self._enter_setup_state()
+            # HostingUnknownError is a SUBCLASS, so a config naming a provider
+            # the registry does not own lands here too, and deliberately: its
+            # remedy is the same `/login` / `/provider` the unconfigured case
+            # uses, and treating it as a crash instead left the user unable to
+            # switch away from the bad value from inside the app (`_session`
+            # stayed None, so every provider command answered "session is still
+            # starting..."). The bad value is carried into the setup state so
+            # the guidance can name what is actually wrong.
+            bad_hosting = getattr(error, "hosting", None)
+            self._enter_setup_state(
+                unknown_hosting=bad_hosting if isinstance(error, HostingUnknownError) else None
+            )
             return
         self._system_notice(f"session failed to start: {error}", "error")
         assert self._status is not None
@@ -3278,19 +3298,33 @@ class OperatorApp(App[None]):
         # accepted and painted where the app meant to say "session error".
         self._status.update(model_label="session error", model_name="", streaming=False)
 
-    def _enter_setup_state(self) -> None:
+    def _enter_setup_state(self, *, unknown_hosting: str | None = None) -> None:
         """First-run setup: guide the user to `/login` with no session yet.
 
         Reached when the session could not be built because NOTHING is
-        configured (see :meth:`_on_boot_failed`). No parallel wizard: the splash
-        already owns the empty-state real estate and carries a notice row, so the
-        guidance lives there, the status band says "setup" instead of a model
-        name, and the existing `/login` / `/model` / `/provider` commands do the
-        work. A successful `/login` sets hosting + a default model and reloads
-        the session (see :meth:`_login_flow`), which lands the user in a normal
-        working app.
+        configured, or because what IS configured names a provider the registry
+        does not own (see :meth:`_on_boot_failed`). No parallel wizard: the
+        splash already owns the empty-state real estate and carries a notice row,
+        so the guidance lives there, the status band says "setup" instead of a
+        model name, and the existing `/login` / `/model` / `/provider` commands
+        do the work. A successful `/login` sets hosting + a default model and
+        reloads the session (see :meth:`_login_flow`), which lands the user in a
+        normal working app.
+
+        ``unknown_hosting`` names the bad value for the second case. The two
+        conditions share this ONE state on purpose (identical remedy), but not
+        one message: telling a user whose config says `anthropicxyq` that "no
+        provider is configured" contradicts the file they are looking at and
+        sends them looking for the wrong problem.
         """
         self._setup_state = True
+        # The bad value is remembered so the post-login rebuild can OVERWRITE it.
+        # Without this the recovery is a loop: `_apply_login_defaults` only
+        # adopts a provider when hosting is empty, and here it is not empty --
+        # it is wrong -- so a successful `/login` would write nothing, the
+        # rebuild would resolve the same bad hosting, and the app would drop
+        # straight back into this state having told the user it was starting.
+        self._invalid_hosting = unknown_hosting
         # A notice, not a red error: the splash paints this in the warning voice
         # beside its `/login` hint, which is exactly the affordance the user
         # needs. Toast headline included so it is noticed on a busy first frame.
@@ -3299,11 +3333,25 @@ class OperatorApp(App[None]):
         # BEFORE the diagnosis or it is what drops (D2). The band and toast
         # already carry "no provider configured", so leading with the remedy
         # spends the scarce columns on the one thing they do not.
-        self._announce_on_splash(
-            "Run /login <provider> to get started (e.g. /login openai) "
-            "— no provider configured yet, or /provider to see the list.",
-            "warning",
-        )
+        # Action-first in BOTH variants, for the reason above: the command
+        # survives truncation, the diagnosis is what may be cut. The bad-value
+        # variant still names the offending id early, because "which word in my
+        # config is wrong" is the one thing the user cannot work out from the
+        # remedy alone, and names real providers so the fix is a copy rather
+        # than a guess.
+        if unknown_hosting:
+            self._announce_on_splash(
+                f"Run /login <provider> to fix this (e.g. /login openai) "
+                f"— '{unknown_hosting}' in your config is not a known provider, "
+                "or /provider to see the list.",
+                "warning",
+            )
+        else:
+            self._announce_on_splash(
+                "Run /login <provider> to get started (e.g. /login openai) "
+                "— no provider configured yet, or /provider to see the list.",
+                "warning",
+            )
         if self._status is not None:
             # "setup" rather than a model name: there is no model until the user
             # picks a provider, and leaving MODEL_PENDING up would read as a
@@ -14304,13 +14352,31 @@ class OperatorApp(App[None]):
             from local_operator.providers.registry import credential_provider_id
 
             manager = ConfigManager(config_dir())
-            if manager.get_config_value("hosting"):
+            configured = manager.get_config_value("hosting")
+            # "Already configured" only counts when it is configured to
+            # something REAL. A hosting the registry does not own is what put
+            # the app in the setup state, and leaving it in place made the
+            # login a no-op: the rebuild resolved the same bad value and fell
+            # back into setup, so the user logged in successfully and still had
+            # no session -- the same dead end this whole path exists to end.
+            # Compared against the value the boot failure actually reported
+            # rather than re-validating here, so this stays a config writer and
+            # the registry lookup keeps living in the resolver.
+            if configured and configured != self._invalid_hosting:
                 return None
             hosting = credential_provider_id(provider)
             manager.set_config_value("hosting", hosting)
             model = default_model_for(hosting) or ""
             receipt = f"set default hosting to '{hosting}'"
-            if model and not manager.get_config_value("model_name"):
+            # The stored model belonged to the provider we are replacing, so
+            # when we are REPAIRING a bad hosting it has to be replaced too:
+            # keeping it would point a real provider at a model id from a
+            # provider that never existed, turning a boot failure the app
+            # explains into a stream failure it cannot. A normal first-run
+            # login still only fills an EMPTY model, so a user who deliberately
+            # chose a model keeps it.
+            repairing = bool(configured) and configured == self._invalid_hosting
+            if model and (repairing or not manager.get_config_value("model_name")):
                 manager.set_config_value("model_name", model)
                 receipt += f", model to '{model}'"
             return receipt
@@ -14367,6 +14433,10 @@ class OperatorApp(App[None]):
             # is hidden right now because the notice above is a transcript block.
             if self._setup_state:
                 self._setup_state = False
+                # Cleared with the state that owns it: the repair is written,
+                # and a LATER `/login` (the user adding a second provider) must
+                # not be read as another repair and overwrite their hosting.
+                self._invalid_hosting = None
                 # Reconcile the launch-time config manager with what
                 # `_apply_login_defaults` just wrote, or the rebuild resolves the
                 # same empty config and drops back into setup.

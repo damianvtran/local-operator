@@ -187,6 +187,15 @@ def _apply_login_defaults(provider_id: str) -> None:
     logging into a second provider to switch models later has not asked to
     change their default, and silently repointing it would be a surprise.
 
+    The exception is a hosting that is set but names a provider the registry
+    does not own (a typo, a hand-edited config, an id dropped by an upgrade).
+    That config cannot boot, and the error it produces RECOMMENDS this command
+    as the remedy — so "already set, leave it alone" would send the user round
+    the same loop the paragraph above describes, just one level further in. The
+    stale ``model_name`` is replaced with it, because it belonged to the
+    provider being repaired and would point a real provider at a model id that
+    never existed.
+
     Imported lazily and guarded: this is a convenience on top of a login that
     already succeeded, so a config write failure (read-only dir) must not turn a
     successful login into a failure.
@@ -197,12 +206,21 @@ def _apply_login_defaults(provider_id: str) -> None:
         from local_operator.paths import config_dir
 
         manager = ConfigManager(config_dir())
-        if manager.get_config_value("hosting"):
+        configured = manager.get_config_value("hosting")
+        # Asked of the registry, not of a hardcoded list, so this accepts
+        # exactly what the engine accepts (legacy aliases included) and cannot
+        # drift from the resolver's own validation.
+        repairing = bool(configured) and get_provider_definition(str(configured)) is None
+        if configured and not repairing:
             return
         manager.set_config_value("hosting", provider_id)
         model = default_model_for(provider_id) or ""
-        message = f"Set default hosting to '{provider_id}'"
-        if model and not manager.get_config_value("model_name"):
+        message = (
+            f"Replaced unusable hosting '{configured}' with '{provider_id}'"
+            if repairing
+            else f"Set default hosting to '{provider_id}'"
+        )
+        if model and (repairing or not manager.get_config_value("model_name")):
             manager.set_config_value("model_name", model)
             message += f" and model to '{model}'"
         print(f"{message}.")

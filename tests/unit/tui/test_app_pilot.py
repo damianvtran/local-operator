@@ -692,6 +692,26 @@ async def test_boot_typing_sends_prompt() -> None:
         assert len(transcript.blocks()) == 1
 
 
+async def _await_setup_state(app: Any, pilot: Any) -> None:
+    """Pause until the boot task has actually reached the setup state.
+
+    A fixed number of pauses plus a sleep is not enough: boot runs as a worker
+    task, and under a loaded runner (xdist, or simply a filtered selection that
+    packs these cases together) it routinely needs longer than the budget. That
+    made the assertion a race that passed when the test ran alone and failed
+    when it ran beside others -- observed on origin/main before this change,
+    not introduced by it. Polling for the state the test is about removes the
+    timing from the assertion while still failing (on timeout) if the state is
+    never reached.
+    """
+    for _ in range(100):
+        await pilot.pause()
+        if app._setup_state:
+            return
+        await asyncio.sleep(0.05)
+    await pilot.pause()
+
+
 @pytest.mark.asyncio
 async def test_first_run_setup_state_when_hosting_unconfigured() -> None:
     """A boot that fails with HostingNotConfiguredError enters the guided setup
@@ -703,11 +723,7 @@ async def test_first_run_setup_state_when_hosting_unconfigured() -> None:
 
     app = OperatorApp(_no_hosting_factory, provider_controller=FakeProviderController())
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
-        for _ in range(6):
-            await pilot.pause()
-        await asyncio.sleep(0.2)
-        await pilot.pause()
+        await _await_setup_state(app, pilot)
         # The setup flag is set and the band says "setup", not a model or error.
         assert app._setup_state is True
         assert app._status is not None
@@ -718,6 +734,120 @@ async def test_first_run_setup_state_when_hosting_unconfigured() -> None:
         assert "no provider configured" in app._splash_notice
         # The splash was NOT retired: it is still the empty-state block.
         assert app._welcome_visible is True
+
+
+@pytest.mark.asyncio
+async def test_setup_state_when_hosting_names_an_unknown_provider() -> None:
+    """A corrupted `hosting:` value lands in the SAME recoverable setup state.
+
+    The hotfix regression guard. A typo'd provider used to reach the TUI as a
+    bare ValueError out of `configure_model`, which painted a red "session
+    failed to start: Unsupported hosting platform: anthropicxyq" and left
+    `_session` None -- so `/model`, `/provider` and the rest all answered
+    "session is still starting..." and the user could not switch away from the
+    bad value without hand-editing YAML outside the app.
+    """
+    from local_operator.session_factory import HostingUnknownError
+
+    async def _bad_hosting_factory():
+        raise HostingUnknownError(
+            "Hosting 'anthropicxyq' ... not a known provider.", "anthropicxyq"
+        )
+
+    app = OperatorApp(_bad_hosting_factory, provider_controller=FakeProviderController())
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _await_setup_state(app, pilot)
+        # Setup state, not a dead session: the band must not say "session error".
+        assert app._setup_state is True
+        assert app._status is not None
+        assert app._status._model_label == "setup"
+        # The bad value is remembered so the post-login rebuild can overwrite it.
+        assert app._invalid_hosting == "anthropicxyq"
+        assert app._splash_notice is not None
+        notice = app._splash_notice
+        # Action-first: the splash truncates from the right on a narrow
+        # terminal, so the remedy must precede the diagnosis or it is what
+        # drops. Asserted by POSITION, not just presence.
+        assert notice.index("/login") < notice.index("anthropicxyq")
+        # It names the offending value and does not read as a crash.
+        assert "anthropicxyq" in notice
+        assert "not a known provider" in notice
+        assert "failed" not in notice.lower()
+        # It must NOT claim nothing is configured -- something is, just wrongly.
+        assert "no provider configured" not in notice
+        assert app._welcome_visible is True
+
+
+@pytest.mark.asyncio
+async def test_login_from_bad_provider_setup_state_repairs_the_config(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The RECOVERY half: `/login` from the bad-provider setup state must write.
+
+    Landing in setup state is only half a fix. `_apply_login_defaults` adopts a
+    provider ONLY when hosting is empty, and in this state it is not empty --
+    it is wrong -- so without the repair branch the login wrote nothing, the
+    rebuild resolved the same bad value, and the user was told "starting
+    session..." before dropping straight back into setup.
+    """
+    from local_operator.config import ConfigManager
+    from local_operator.paths import CONFIG_DIR_ENV
+    from local_operator.session_factory import HostingUnknownError
+
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(tmp_path))
+    seed = ConfigManager(tmp_path)
+    seed.set_config_value("hosting", "anthropicxyq")
+    seed.set_config_value("model_name", "claude-sonnet-4-5")
+
+    async def _bad_hosting_factory():
+        raise HostingUnknownError(
+            "Hosting 'anthropicxyq' ... not a known provider.", "anthropicxyq"
+        )
+
+    app = OperatorApp(_bad_hosting_factory, provider_controller=FakeProviderController())
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _await_setup_state(app, pilot)
+        assert app._setup_state is True
+
+        # The write half of the `/login` flow, run against the real config.
+        receipt = app._apply_login_defaults("deepseek")
+
+    assert receipt is not None
+    assert "deepseek" in receipt
+    repaired = ConfigManager(tmp_path)
+    assert repaired.get_config_value("hosting") == "deepseek"
+    # The model belonged to the provider that was replaced, so it is replaced
+    # too -- otherwise a real provider is pointed at a model that never existed.
+    assert repaired.get_config_value("model_name") == "deepseek-chat"
+
+
+@pytest.mark.asyncio
+async def test_login_outside_setup_state_still_leaves_hosting_alone(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The repair must not leak into the ordinary add-a-second-provider login.
+
+    `_invalid_hosting` is None outside the bad-provider setup state, so a user
+    logging into another provider keeps the default they chose.
+    """
+    from local_operator.config import ConfigManager
+    from local_operator.paths import CONFIG_DIR_ENV
+
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(tmp_path))
+    seed = ConfigManager(tmp_path)
+    seed.set_config_value("hosting", "openai")
+    seed.set_config_value("model_name", "gpt-4o")
+
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session), provider_controller=FakeProviderController())
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        assert app._invalid_hosting is None
+        assert app._apply_login_defaults("deepseek") is None
+
+    unchanged = ConfigManager(tmp_path)
+    assert unchanged.get_config_value("hosting") == "openai"
+    assert unchanged.get_config_value("model_name") == "gpt-4o"
 
 
 def test_splash_toast_headline_names_the_fallback_target() -> None:

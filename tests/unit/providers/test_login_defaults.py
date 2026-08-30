@@ -66,6 +66,53 @@ def test_apply_login_defaults_leaves_existing_hosting_untouched(
     assert reloaded.get_config_value("model_name") == "gpt-4o"
 
 
+def test_apply_login_defaults_repairs_an_unknown_hosting(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`login` REPLACES a hosting the registry does not own.
+
+    The unknown-hosting error recommends this exact command, so the "already
+    set, leave it alone" rule had to gain an exception: without it the login
+    stored a credential, wrote nothing, and the next run failed to boot on the
+    same corrupted value — the remedy looping back to the problem it fixes.
+    The stale model goes with it: it belonged to the provider being replaced.
+    """
+    from local_operator.paths import CONFIG_DIR_ENV
+    from local_operator.providers import auth_cli
+
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(tmp_path))
+    manager = ConfigManager(tmp_path)
+    manager.set_config_value("hosting", "anthropicxyq")
+    manager.set_config_value("model_name", "claude-sonnet-4-5")
+
+    auth_cli._apply_login_defaults("deepseek")
+
+    reloaded = ConfigManager(tmp_path)
+    assert reloaded.get_config_value("hosting") == "deepseek"
+    assert reloaded.get_config_value("model_name") == "deepseek-chat"
+
+
+def test_apply_login_defaults_leaves_a_legacy_alias_hosting_untouched(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A legacy ALIAS is a valid hosting and must not be treated as corrupt.
+
+    `noop` is not a registry id — it maps to `test`. The repair check asks the
+    registry (which resolves aliases) rather than testing membership against
+    ids, so a working alias config is not silently repointed by a later login.
+    """
+    from local_operator.paths import CONFIG_DIR_ENV
+    from local_operator.providers import auth_cli
+
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(tmp_path))
+    manager = ConfigManager(tmp_path)
+    manager.set_config_value("hosting", "noop")
+
+    auth_cli._apply_login_defaults("deepseek")
+
+    assert ConfigManager(tmp_path).get_config_value("hosting") == "noop"
+
+
 def test_resolve_hosting_model_falls_back_to_default_model(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
