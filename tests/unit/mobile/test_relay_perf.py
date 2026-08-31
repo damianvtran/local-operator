@@ -287,6 +287,50 @@ async def test_summaries_rows_carry_unseen_key(tmp_path, monkeypatch) -> None:
         assert isinstance(row["unseen"], bool)
 
 
+@pytest.mark.asyncio
+async def test_unseen_rows_sort_above_newer_seen_rows(tmp_path, monkeypatch) -> None:
+    """An OLD unread session outranks a NEWER read one inside its section.
+
+    This is the headline of the feature: without ``unseen`` in the sort tuple
+    the mark renders but the list stays in plain mtime order, so the unread
+    session the user is meant to notice sits wherever recency puts it.
+    """
+    import os
+
+    cfg = tmp_path / "config"
+    old_dir = cfg / "sessions" / "old-unread"
+    new_dir = cfg / "sessions" / "new-read"
+    old_dir.mkdir(parents=True)
+    new_dir.mkdir(parents=True)
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+    await _write_turns_async(old_dir, 1)
+    await _write_turns_async(new_dir, 1)
+
+    # The OLD session is the older transcript; the NEW one is newer, so plain
+    # recency ordering would put "new-read" first.
+    old_transcript = old_dir / "transcript.jsonl"
+    new_transcript = new_dir / "transcript.jsonl"
+    os.utime(old_transcript, (1_000_000, 1_000_000))
+    os.utime(new_transcript, (2_000_000, 2_000_000))
+
+    table = SessionTable()
+    store = table.seen_store
+    # Both observed at their current mtimes (baseline), then the older one
+    # gains activity the phone has not seen while the newer one is marked read.
+    await table.summaries()
+    os.utime(old_transcript, (1_500_000, 1_500_000))
+    store.mark_seen("new-read", now=3_000_000.0)
+    table.invalidate_summaries_cache()
+
+    rows = await table.summaries()
+    ordered = [row["session_id"] for row in rows]
+    by_id = {row["session_id"]: row for row in rows}
+    assert by_id["old-unread"]["unseen"] is True
+    assert by_id["new-read"]["unseen"] is False
+    # The unread row wins despite being the OLDER transcript.
+    assert ordered.index("old-unread") < ordered.index("new-read")
+
+
 # ---------------------------------------------------------------------------
 # Seen store
 # ---------------------------------------------------------------------------

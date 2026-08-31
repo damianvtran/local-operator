@@ -360,6 +360,12 @@ class SessionTable:
             key=lambda summary: (
                 summary["section"] != "active",
                 not summary["needs_attention"],
+                # Unread outranks streaming and recency inside its section: an
+                # unseen session is work waiting on the reader's attention, and
+                # burying it under plain mtime order is what made the mark
+                # decorative. Ranked BELOW needs_attention because a pending
+                # ask blocks a turn outright, while unread only means unlooked-at.
+                not summary["unseen"],
                 not summary["streaming"],
                 -summary["mtime"],
                 summary["session_id"],
