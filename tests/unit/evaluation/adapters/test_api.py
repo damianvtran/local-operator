@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -79,10 +80,23 @@ def cleanup_plan() -> CleanupPlan:
 
 
 def test_package_root_does_not_import_discovery_or_worker() -> None:
-    import local_operator.evaluation.adapters  # noqa: F401
-
-    assert "local_operator.evaluation.adapters.discovery" not in sys.modules
-    assert "local_operator.evaluation.adapters.worker" not in sys.modules
+    probe = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            (
+                f"import sys;sys.path.insert(0,{str(Path.cwd())!r});"
+                "import local_operator.evaluation.adapters;"
+                "assert 'local_operator.evaluation.adapters.discovery' not in sys.modules;"
+                "assert 'local_operator.evaluation.adapters.worker' not in sys.modules"
+            ),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert probe.returncode == 0, probe.stderr
 
 
 def test_selector_rejects_relative_paths(tmp_path: Path) -> None:

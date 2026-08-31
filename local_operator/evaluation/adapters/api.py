@@ -7,13 +7,12 @@ must not discover or import an adapter distribution.
 
 from __future__ import annotations
 
-import hashlib
 import os
 import platform
 import sys
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Annotated, Any, Literal, Protocol, TypeAlias, runtime_checkable
+from typing import Any, Literal, Protocol, TypeAlias, runtime_checkable
 
 from pydantic import Field, field_validator, model_validator
 
