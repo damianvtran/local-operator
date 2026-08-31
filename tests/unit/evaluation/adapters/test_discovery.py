@@ -4,6 +4,8 @@ import base64
 import csv
 import hashlib
 import importlib.metadata
+import importlib.util
+import marshal
 import os
 import shutil
 import sys
@@ -15,6 +17,8 @@ import pytest
 from local_operator.evaluation.adapters.api import AdapterSelector
 from local_operator.evaluation.adapters.discovery import (
     AdapterDiscoveryError,
+    _execute_verified_chain,
+    _verified_module_chain,
     distribution_digest,
     load_selected_adapter,
     resolve_launch,
@@ -161,8 +165,13 @@ def test_unrecorded_package_init_is_rejected_before_it_executes(
     side_effect = f"from pathlib import Path\nPath({str(marker)!r}).write_text('ran')\n"
     (package / "__init__.py").write_text(side_effect)
     (package / "sub" / "__init__.py").write_text(side_effect)
+    # The leaf imports through its package, so removing the ancestor check does
+    # not merely skip verification: the import system then really executes both
+    # unrecorded __init__ files. That is what makes the marker assertion below
+    # evidence rather than decoration.
+    (package / "sub" / "helper.py").write_text("VALUE = 1\n")
     leaf = package / "sub" / "mod.py"
-    leaf.write_text("def create():\n    return object()\n")
+    leaf.write_text("from . import helper\n\n\ndef create():\n    return helper.VALUE\n")
 
     def load() -> object:
         raise AssertionError("entry point loaded before verification")
@@ -185,9 +194,93 @@ def test_unrecorded_package_init_is_rejected_before_it_executes(
         update={"entry_point": "pkg.sub.mod:create"}
     )
     monkeypatch.setattr(importlib.metadata, "distribution", lambda _: distribution)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    for name in ("pkg", "pkg.sub", "pkg.sub.mod"):
+        monkeypatch.delitem(sys.modules, name, raising=False)
     with pytest.raises(AdapterDiscoveryError, match="not RECORD-covered"):
         load_selected_adapter(selector)
     assert not marker.exists()
+
+
+def _forge_pycache(module: Path, source_code: str) -> Path:
+    """Write a cache entry whose header matches the source but whose code differs.
+
+    CPython validates a cached file by mtime and size only, both of which an
+    attacker able to write ``__pycache__`` also controls, so this forgery is
+    accepted by a normal import even though the source hash is untouched.
+    """
+
+    source = module.read_bytes()
+    attacker = compile(source_code, str(module), "exec")
+    cache = Path(importlib.util.cache_from_source(str(module)))
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    info = module.stat()
+    cache.write_bytes(
+        importlib.util.MAGIC_NUMBER
+        + (0).to_bytes(4, "little")
+        + int(info.st_mtime).to_bytes(4, "little")
+        + len(source).to_bytes(4, "little")
+        + marshal.dumps(attacker)
+    )
+    return cache
+
+
+def test_forged_bytecode_cannot_execute_in_place_of_hashed_source(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The bytes that execute must be the bytes that were hashed."""
+
+    marker = tmp_path / "attacker-ran.marker"
+
+    def load() -> object:
+        raise AssertionError("entry point must not be imported by the import system")
+
+    # Build the distribution first, then give the module its real body, so the
+    # RECORD hash and the forged cache header describe the same source bytes.
+    distribution = fake_distribution(tmp_path, [FakeEntryPoint(load)])
+    module = tmp_path / "tiny_adapter.py"
+    module.write_text("def create():\n    return 'verified'\n")
+    distribution.make_record()
+    cache = _forge_pycache(
+        module,
+        f"from pathlib import Path\n"
+        f"Path({str(marker)!r}).write_text('pwned')\n"
+        f"def create():\n    return 'attacker'\n",
+    )
+    assert cache.exists()
+    selector = selected(tmp_path, distribution_digest(distribution))
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    # A normal import of this module runs the forged cache, which is the attack
+    # this loader has to refuse; assert that first so the test cannot pass
+    # against a host where the forgery simply failed to take.
+    for name in ("tiny_adapter",):
+        sys.modules.pop(name, None)
+    try:
+        import tiny_adapter as attacked  # noqa: PLC0415
+
+        assert marker.exists(), "forged cache did not take effect on this host"
+        assert attacked.create() == "attacker"
+    finally:
+        sys.modules.pop("tiny_adapter", None)
+    marker.unlink()
+
+    # The source is genuinely RECORD-covered, so verification must succeed while
+    # still refusing to run the forged cache.
+    attribute, chain = _verified_module_chain(distribution, selector)
+    assert attribute == "create"
+    assert chain[-1].source == module.read_bytes()
+    try:
+        loaded = _execute_verified_chain(chain)
+        assert not marker.exists()
+        assert loaded.create() == "verified"
+    finally:
+        sys.modules.pop("tiny_adapter", None)
+    # The executed object descends from the verified byte string, not the cache.
+    assert (
+        hashlib.sha256(chain[-1].source).hexdigest()
+        == hashlib.sha256(module.read_bytes()).hexdigest()
+    )
 
 
 def test_record_rejects_absolute_and_traversal_paths(tmp_path: Path) -> None:

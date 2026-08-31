@@ -6,14 +6,16 @@ import base64
 import csv
 import hashlib
 import importlib.metadata
-import inspect
+import importlib.util
 import json
 import os
 import posixpath
 import stat
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from types import ModuleType
 from typing import Any, cast
 
 from local_operator.evaluation.adapters.api import (
@@ -299,23 +301,36 @@ def _verify_recorded_file(
     distribution: importlib.metadata.Distribution,
     rows: dict[str, list[str]],
     relative: str,
-) -> Path:
+) -> tuple[Path, bytes]:
+    """Return the path and the exact bytes whose hash matched RECORD.
+
+    The bytes are returned, not re-read later, because any second read is a
+    different observation than the one that was verified.
+    """
+
     path = Path(str(distribution.locate_file(relative)))
     _symlink_free(path)
     encoded_hash = rows[relative][1].split("=", 1)[1].rstrip("=")
-    actual = (
-        base64.urlsafe_b64encode(hashlib.sha256(path.read_bytes()).digest())
-        .rstrip(b"=")
-        .decode("ascii")
-    )
+    data = path.read_bytes()
+    actual = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode("ascii")
     if actual != encoded_hash:
         raise AdapterDiscoveryError("adapter module RECORD hash differs")
-    return path
+    return path, data
 
 
-def _verified_entry_module(
+@dataclass(frozen=True)
+class _VerifiedModule:
+    name: str
+    path: Path
+    source: bytes
+    is_package: bool
+
+
+def _verified_module_chain(
     distribution: importlib.metadata.Distribution, selector: AdapterSelector
-) -> tuple[str, Path]:
+) -> tuple[str, tuple[_VerifiedModule, ...]]:
+    """Return every module that must execute, with its exact verified bytes."""
+
     module, separator, attribute = selector.entry_point.partition(":")
     if separator != ":" or not module or not attribute or ":" in attribute:
         raise AdapterDiscoveryError("adapter entry point must be module:attribute")
@@ -323,23 +338,73 @@ def _verified_entry_module(
     if not all(part.isidentifier() for part in parts):
         raise AdapterDiscoveryError("adapter entry module is not a dotted identifier")
     rows = {row[0]: row for row in _record_rows(distribution)}
+    chain: list[_VerifiedModule] = []
     # Importing pkg.sub.mod executes every ancestor __init__ first, so an
     # unrecorded ancestor would run arbitrary code before any verification.
     # Each ancestor must be RECORD-covered and hash-matched, or genuinely absent
     # from disk (a real namespace package).
     for depth in range(1, len(parts)):
+        name = ".".join(parts[:depth])
         ancestor = "/".join(parts[:depth]) + "/__init__.py"
-        on_disk = Path(str(distribution.locate_file(ancestor)))
         if ancestor in rows:
-            _verify_recorded_file(distribution, rows, ancestor)
+            path, source = _verify_recorded_file(distribution, rows, ancestor)
+            chain.append(_VerifiedModule(name=name, path=path, source=source, is_package=True))
             continue
-        if on_disk.exists():
+        if Path(str(distribution.locate_file(ancestor))).exists():
             raise AdapterDiscoveryError("adapter package init is not RECORD-covered")
     candidates = {f"{'/'.join(parts)}.py", f"{'/'.join(parts)}/__init__.py"}
     matches = sorted(candidates & rows.keys())
     if len(matches) != 1:
         raise AdapterDiscoveryError("adapter entry module is not uniquely RECORD-covered")
-    return module, _verify_recorded_file(distribution, rows, matches[0])
+    path, source = _verify_recorded_file(distribution, rows, matches[0])
+    chain.append(
+        _VerifiedModule(
+            name=module,
+            path=path,
+            source=source,
+            is_package=matches[0].endswith("/__init__.py"),
+        )
+    )
+    return attribute, tuple(chain)
+
+
+def _execute_verified_chain(chain: tuple[_VerifiedModule, ...]) -> ModuleType:
+    """Compile and run the verified bytes themselves, never a cached artifact.
+
+    Hashing ``.py`` source and then delegating to a normal import is not a
+    verification: CPython prefers ``__pycache__/<name>.<tag>.pyc`` whenever its
+    header matches the source mtime and size, both of which an attacker who can
+    write the cache also controls. The hashed bytes and the executed bytes are
+    then unrelated, and ``-I -s -E`` do not help because they constrain sys.path
+    and the environment, not bytecode trust.
+
+    Refusing to load when a ``__pycache__`` entry exists would be a denylist over
+    a cache location CPython is free to change, and it stays racy: the cache can
+    reappear between the check and the import. Compiling the verified bytes in
+    process removes the question instead of policing it — the object that runs is
+    derived from the byte string that was hashed, so the invariant is structural.
+    """
+
+    loaded: ModuleType | None = None
+    for entry in chain:
+        specification = importlib.util.spec_from_file_location(entry.name, entry.path)
+        if specification is None:
+            raise AdapterDiscoveryError("adapter module specification is unavailable")
+        created = importlib.util.module_from_spec(specification)
+        if entry.is_package:
+            created.__path__ = [str(entry.path.parent)]
+        code = compile(entry.source, str(entry.path), "exec", dont_inherit=True)
+        # Registering before execution keeps intra-package imports resolvable,
+        # exactly as the import system would during a normal package import.
+        sys.modules[entry.name] = created
+        try:
+            exec(code, created.__dict__)
+        except BaseException:
+            sys.modules.pop(entry.name, None)
+            raise
+        loaded = created
+    assert loaded is not None
+    return loaded
 
 
 def load_selected_adapter(selector: AdapterSelector) -> EvaluationAdapter:
@@ -357,16 +422,16 @@ def load_selected_adapter(selector: AdapterSelector) -> EvaluationAdapter:
         raise AdapterDiscoveryError(
             "selected distribution must expose exactly one exact entry point"
         )
-    module, module_path = _verified_entry_module(distribution, selector)
+    attribute, chain = _verified_module_chain(distribution, selector)
     try:
-        factory = cast(Callable[[], Any], matches[0].load())
-        factory_module = getattr(factory, "__module__", "")
-        source = inspect.getsourcefile(factory)
-        if factory_module != module and not factory_module.startswith(f"{module}."):
-            raise AdapterDiscoveryError("adapter factory comes from another module")
-        if source is None or Path(source).resolve(strict=True) != module_path.resolve(strict=True):
-            raise AdapterDiscoveryError("adapter factory source differs from verified module")
+        # The entry point is resolved against the module built from verified
+        # bytes, so `.load()` is never given the chance to import a cached
+        # artifact we did not hash.
+        loaded = _execute_verified_chain(chain)
+        factory = cast(Callable[[], Any], getattr(loaded, attribute))
         adapter = factory()
+    except AdapterDiscoveryError:
+        raise
     except Exception as error:
         raise AdapterDiscoveryError("selected adapter entry point failed to load") from error
     if not isinstance(adapter, EvaluationAdapter):
