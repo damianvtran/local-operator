@@ -1014,11 +1014,13 @@ def _default_tools_with_agent() -> list[AgentTool]:
 
     A context carrying only ``agent_registry`` builds 15 of the 23 tools: every
     ``createIf``-gated one drops out, and five of those (``task``, ``hub``,
-    ``jobs``, ``wake``, ``ask``) declare enums of their own. Auditing enum
-    members over that reduced set would let an empty member ship in any of them
-    while a test named for the full bundle stayed green — the same class of gap
-    that let the ``agent`` effort sentinel reach a provider. Every capability is
-    therefore attached so the audit sees the whole emitted surface.
+    ``jobs``, ``wake``, ``team``) declare enums of their own. ``ask`` is gated
+    too but has no enum; it is still in the floor so a silent drop of the ask
+    hook still fails here. Auditing enum members over that reduced set would
+    let an empty member ship in any of the five while a test named for the
+    full bundle stayed green — the same class of gap that let the ``agent``
+    effort sentinel reach a provider. Every capability is therefore attached
+    so the audit sees the whole emitted surface.
     """
 
     tools = create_tools(
@@ -1040,7 +1042,7 @@ def _default_tools_with_agent() -> list[AgentTool]:
     # is excluded from the floor because its builder probes a real CMUX surface
     # that CI does not have.
     names = {tool.name for tool in tools}
-    assert {"agent", "task", "hub", "jobs", "wake", "ask"} <= names
+    assert {"agent", "task", "hub", "jobs", "wake", "ask", "team"} <= names
     return tools
 
 
