@@ -5979,6 +5979,84 @@ async def test_mcp_server_rows_are_reachable_by_typing_not_just_by_setting_text(
 
 
 @pytest.mark.asyncio
+async def test_home_then_end_keeps_an_open_argument_list() -> None:
+    """#393: ``home`` then ``end`` closed an ARGUMENT list and never reopened it.
+
+    The COMMAND list survives the same pair of keys, so the two lists disagreed
+    about what a round trip to the start of the line and back should do. Driven
+    through the real ``OperatorApp`` with real key presses — the same sequence
+    the issue names — because the defect is a caret-move / queued-refresh race
+    that assigning the buffer never reaches.
+
+    ``home`` is an ordinary caret gesture, not a dismissal. Escape is the key
+    that means "I do not want this list".
+    """
+    from unittest.mock import patch
+
+    from local_operator.mcp.config import (
+        MCPAuthConfig,
+        MCPHttpServerConfig,
+        MCPStdioServerConfig,
+    )
+
+    configs = {
+        "linear": MCPHttpServerConfig(
+            url="https://mcp.linear.app/mcp", auth=MCPAuthConfig(type="oauth")
+        ),
+        "filesystem": MCPStdioServerConfig(command="npx"),
+    }
+    sources = {"linear": "/tmp/x/.local-operator/mcp.json", "filesystem": "/tmp/x/.claude.json"}
+    manager = FakeMcpManager(["linear", "filesystem"], ["linear"])
+    manager._configs = configs
+    session = McpSession(manager=manager, startup=McpStartupOutcome())
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(6):
+            await pilot.pause()
+        app.query_one(Toast).dismiss_toast()
+        editor = app.query_one(Editor)
+        picker = editor.picker
+        with (
+            patch(
+                "local_operator.mcp.config.load_all_mcp_configs",
+                return_value=(configs, sources),
+            ),
+            patch(
+                "local_operator.mcp.auth.mcp_logged_out_servers",
+                return_value={"https://mcp.linear.app/mcp"},
+            ),
+        ):
+            # COMMAND list: the control that already works.
+            await _type_into_editor(pilot, app, "/mc")
+            assert picker.is_open()
+            command_rows = [n for n, _ in picker.suggestions()]
+            await pilot.press("home")
+            for _ in range(4):
+                await pilot.pause()
+            await pilot.press("end")
+            for _ in range(8):
+                await pilot.pause()
+            assert picker.is_open(), "COMMAND list closed on home+end"
+            assert [n for n, _ in picker.suggestions()] == command_rows
+
+            # ARGUMENT list: the one that closed and never came back.
+            await _type_into_editor(pilot, app, "/mcp ")
+            assert picker.is_open()
+            argument_rows = [n for n, _ in picker.suggestions()]
+            assert argument_rows, "the verb list never opened"
+            await pilot.press("home")
+            for _ in range(4):
+                await pilot.pause()
+            await pilot.press("end")
+            for _ in range(8):
+                await pilot.pause()
+            assert picker.is_open(), "ARGUMENT list closed on home+end and did not reopen"
+            assert [n for n, _ in picker.suggestions()] == argument_rows
+            assert editor.text == "/mcp "
+            assert editor.selection.end == (0, 5)
+
+
+@pytest.mark.asyncio
 async def test_the_destructive_gate_is_armed_on_the_TYPED_path() -> None:
     """#378's fuzzy-Enter guard reads the highlighted row's ``alert`` flag, so
     it is only as good as the list being open.
