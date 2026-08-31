@@ -15,13 +15,14 @@ from threading import RLock
 from typing import Any, Literal, Self, cast
 from weakref import WeakValueDictionary
 
-from pydantic import Field, PrivateAttr, field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 
 from local_operator.evaluation.protocol import ArtifactRef, ProtocolModel
 from local_operator.evaluation.receipts import (
     MAX_DECLARATIONS,
     ZERO_DIGEST,
     AuthorityModel,
+    AuthorityRecord,
     BudgetAuthorization,
     BudgetCommitment,
     BudgetReconciliation,
@@ -30,6 +31,8 @@ from local_operator.evaluation.receipts import (
     SafeCount,
     SealedPreflight,
     StrictIdentifier,
+    _lookup_authority,
+    _register_authority,
 )
 
 MAX_CLEANUP_ATTEMPTS = 32
@@ -56,14 +59,6 @@ _LINEAGE_REGISTRY_LOCK = RLock()
 _LIVE_LINEAGES: WeakValueDictionary[str, _EpisodeLineage] = WeakValueDictionary()
 
 
-def _attach_lifecycle_authority(model: AuthorityModel, **private_values: Any) -> None:
-    """Attach fresh process-local authority after ordinary model validation."""
-
-    object.__setattr__(model, "_authority", object())
-    for name, value in private_values.items():
-        object.__setattr__(model, name, value)
-
-
 def _identity(kind: str, payload: Any) -> str:
     encoded = json.dumps(
         {"identity_kind": kind, "payload": payload},
@@ -76,17 +71,17 @@ def _identity(kind: str, payload: Any) -> str:
 
 
 @contextmanager
-def _authority_locks(*locks: RLock) -> Iterator[None]:
+def _authority_locks(*records: AuthorityRecord) -> Iterator[None]:
     """Acquire process-local authority locks in one deadlock-safe order."""
 
-    ordered = sorted({id(lock): lock for lock in locks}.values(), key=id)
-    for lock in ordered:
-        lock.acquire()
+    ordered = sorted({id(record): record for record in records}.values(), key=id)
+    for record in ordered:
+        record.lock.acquire()
     try:
         yield
     finally:
-        for lock in reversed(ordered):
-            lock.release()
+        for record in reversed(ordered):
+            record.lock.release()
 
 
 def _state_identity(payload: dict[str, Any]) -> str:
@@ -215,11 +210,6 @@ def record_cleanup(
 class CleanupResult(AuthorityModel):
     """Factory-only aggregate over exact cleanup receipt evidence."""
 
-    _authority: object = PrivateAttr()
-    _receipts: tuple[CleanupReceipt, ...] = PrivateAttr()
-    _lock: RLock = PrivateAttr(default_factory=RLock)
-    _consumed: bool = PrivateAttr(default=False)
-
     cleanup_plan_id: Digest
     succeeded_action_ids: tuple[StrictIdentifier, ...]
     not_needed_action_ids: tuple[StrictIdentifier, ...]
@@ -272,14 +262,16 @@ class CleanupResult(AuthorityModel):
     def __reduce__(self) -> Any:
         raise TypeError("cleanup result authority cannot be pickled")
 
-    def authority_lock(self) -> RLock:
-        return self._lock
+    def authority_record(self) -> AuthorityRecord:
+        return _lookup_authority(self, "cleanup-result")
 
     def assert_authority(self) -> None:
-        if self._consumed or getattr(self, "_authority", None) is None:
-            raise ValueError("cleanup result lacks factory authority")
+        try:
+            record = self.authority_record()
+        except ValueError as error:
+            raise ValueError("cleanup result lacks factory authority") from error
         actual: list[str] = []
-        for receipt in getattr(self, "_receipts", ()):
+        for receipt in record.receipts:
             expected = _identity(
                 "cleanup-receipt-v1",
                 receipt.model_dump(mode="json", exclude={"receipt_id"}),
@@ -297,8 +289,7 @@ class CleanupResult(AuthorityModel):
             raise ValueError("cleanup result authority was mutated")
 
     def consume_authority(self) -> None:
-        self._consumed = True
-        object.__setattr__(self, "_authority", None)
+        self.authority_record().consumed = True
 
 
 def aggregate_cleanup(
@@ -341,21 +332,12 @@ def aggregate_cleanup(
     result = CleanupResult.model_validate(
         {**payload, "cleanup_result_id": _identity("cleanup-result-v1", payload)}
     )
-    _attach_lifecycle_authority(
-        result,
-        _receipts=snapshot,
-        _lock=RLock(),
-        _consumed=False,
-    )
+    _register_authority(result, "cleanup-result", receipts=snapshot)
     return result
 
 
 class SideEffectPermit(AuthorityModel):
     """Single-use in-process authority bound to one sealed episode budget."""
-
-    _authority: object = PrivateAttr()
-    _lock: RLock = PrivateAttr(default_factory=RLock)
-    _consumed: bool = PrivateAttr(default=False)
 
     episode_id: StrictIdentifier
     plan_id: Digest
@@ -382,12 +364,14 @@ class SideEffectPermit(AuthorityModel):
     def __reduce__(self) -> Any:
         raise TypeError("side-effect permit authority cannot be pickled")
 
-    def authority_lock(self) -> RLock:
-        return self._lock
+    def authority_record(self) -> AuthorityRecord:
+        return _lookup_authority(self, "side-effect-permit")
 
     def assert_authority(self) -> None:
-        if self._consumed or getattr(self, "_authority", None) is None:
-            raise ValueError("side-effect permit lacks factory authority")
+        try:
+            self.authority_record()
+        except ValueError as error:
+            raise ValueError("side-effect permit lacks factory authority") from error
         expected = _identity(
             "side-effect-permit-v1",
             self.model_dump(mode="json", exclude={"permit_id"}),
@@ -396,8 +380,7 @@ class SideEffectPermit(AuthorityModel):
             raise ValueError("side-effect permit authority was mutated")
 
     def consume_authority(self) -> None:
-        self._consumed = True
-        object.__setattr__(self, "_authority", None)
+        self.authority_record().consumed = True
 
 
 def mint_side_effect_permit(
@@ -425,7 +408,7 @@ def mint_side_effect_permit(
     permit = SideEffectPermit.model_validate(
         {**payload, "permit_id": _identity("side-effect-permit-v1", payload)}
     )
-    _attach_lifecycle_authority(permit, _lock=RLock(), _consumed=False)
+    _register_authority(permit, "side-effect-permit")
     return permit
 
 
@@ -469,11 +452,6 @@ class EpisodeLifecycle(AuthorityModel):
     private marker checked by every transition. This constrains cooperative
     adapters rather than hostile code which ignores the contract entirely.
     """
-
-    _authority: object = PrivateAttr()
-    _lock: RLock = PrivateAttr(default_factory=RLock)
-    _consumed: bool = PrivateAttr(default=False)
-    _lineage: _EpisodeLineage = PrivateAttr()
 
     episode_id: StrictIdentifier
     plan_id: Digest
@@ -607,9 +585,14 @@ class EpisodeLifecycle(AuthorityModel):
     def __deepcopy__(self, memo: dict[int, Any] | None = None) -> Self:
         raise TypeError("episode lifecycle authority cannot be copied")
 
+    def _authority_record(self) -> AuthorityRecord:
+        try:
+            return _lookup_authority(self, "episode-lifecycle")
+        except ValueError as error:
+            raise ValueError("episode lifecycle lacks transition authority") from error
+
     def _assert_authority(self) -> None:
-        if self._consumed or getattr(self, "_authority", None) is None:
-            raise ValueError("episode lifecycle lacks transition authority")
+        self._authority_record()
         expected = _state_identity(self.model_dump(mode="json", exclude={"state_id"}))
         if self.state_id != expected:
             raise ValueError("episode lifecycle authority was mutated")
@@ -629,22 +612,20 @@ class EpisodeLifecycle(AuthorityModel):
         payload.update(previous_state_id=self.state_id, operation=operation, **updates)
         payload["state_id"] = _state_identity(payload)
         child = type(self).model_validate(payload)
-        _attach_lifecycle_authority(
+        _register_authority(
             child,
-            _lineage=self._lineage,
-            _lock=RLock(),
-            _consumed=False,
+            "episode-lifecycle",
+            lineage=self._authority_record().lineage,
         )
         return child
 
     def _consume_source(self) -> None:
-        self._consumed = True
-        object.__setattr__(self, "_authority", None)
+        self._authority_record().consumed = True
 
     def _consume_transition(self, expected: EpisodeState, operation: str, **updates: Any) -> Self:
         """Atomically mint one child and consume this process-local authority."""
 
-        with self._lock:
+        with self._authority_record().lock:
             child = self._transition(expected, operation, **updates)
             self._consume_source()
             return child
@@ -664,7 +645,7 @@ class EpisodeLifecycle(AuthorityModel):
     ) -> tuple[Self, SideEffectPermit]:
         # The seal is reusable plan evidence; the episode parent is the
         # single-use authority that prevents two authorized children.
-        with self._lock:
+        with self._authority_record().lock:
             self._assert_authority()
             seal.assert_authority()
             if self.state != "preflighted" or self.preflight_seal_id != seal.seal_id:
@@ -695,7 +676,11 @@ class EpisodeLifecycle(AuthorityModel):
         # These guards are deliberately process-local. Cooperative adapters get
         # exactly-once authority within this runtime; serialized evidence alone
         # never recreates authority in another process.
-        with _authority_locks(self._lock, permit.authority_lock(), commitment.authority_lock()):
+        with _authority_locks(
+            self._authority_record(),
+            permit.authority_record(),
+            commitment.authority_record(),
+        ):
             self._assert_authority()
             if self.state != "authorized":
                 raise ValueError(f"illegal episode transition from {self.state}")
@@ -805,7 +790,7 @@ class EpisodeLifecycle(AuthorityModel):
             )
         if permit is None:
             raise ValueError("authorized failure requires its side-effect permit")
-        with _authority_locks(self._lock, permit.authority_lock()):
+        with _authority_locks(self._authority_record(), permit.authority_record()):
             self._assert_authority()
             permit.assert_authority()
             if (
@@ -828,7 +813,7 @@ class EpisodeLifecycle(AuthorityModel):
             return failed
 
     def finish_cleanup(self, result: CleanupResult) -> Self:
-        with _authority_locks(self._lock, result.authority_lock()):
+        with _authority_locks(self._authority_record(), result.authority_record()):
             self._assert_authority()
             result.assert_authority()
             if result.cleanup_plan_id != self.cleanup_plan_id:
@@ -901,10 +886,5 @@ def plan_episode(
             {key: value for key, value in payload.items() if key != "state_id"}
         )
         root = EpisodeLifecycle.model_validate(payload)
-        _attach_lifecycle_authority(
-            root,
-            _lineage=lineage,
-            _lock=RLock(),
-            _consumed=False,
-        )
+        _register_authority(root, "episode-lifecycle", lineage=lineage)
         return root

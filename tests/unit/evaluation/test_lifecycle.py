@@ -8,7 +8,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import pytest
 from pydantic import ValidationError
@@ -23,9 +23,10 @@ from local_operator.evaluation.lifecycle import (
     aggregate_cleanup,
     record_cleanup,
 )
-from local_operator.evaluation.protocol import ArtifactRef, ProtocolModel
+from local_operator.evaluation.protocol import ArtifactRef
 from local_operator.evaluation.receipts import (
     BUDGET_RESOURCES,
+    AuthorityModel,
     AvailableUsage,
     BudgetAuthorization,
     BudgetCommitment,
@@ -256,7 +257,7 @@ def test_cleanup_requires_exactly_one_receipt_and_attempted_is_not_clean() -> No
     assert attempted.rescue_required
     assert attempted.incomplete_action_ids == ("session",)
     parsed = CleanupResult.from_canonical_json(attempted.to_canonical_json())
-    with pytest.raises(ValueError, match="lacks factory authority"):
+    with pytest.raises(ValueError, match="lacks factory authority|process-local authority"):
         parsed.assert_authority()
     clean = _cleanup(plan)
     assert not clean.rescue_required
@@ -269,7 +270,7 @@ def test_permit_cannot_be_constructed_or_deserialized_by_callers() -> None:
         SideEffectPermit.model_validate(payload),
         SideEffectPermit.from_canonical_json(permit.to_canonical_json()),
     ):
-        with pytest.raises(ValueError, match="lacks factory authority"):
+        with pytest.raises(ValueError, match="lacks factory authority|process-local authority"):
             parsed.assert_authority()
     with pytest.raises(ValidationError):
         SideEffectPermit(
@@ -639,10 +640,10 @@ def test_forged_preflight_seal_cannot_preflight_or_authorize() -> None:
     plan, budget, _cleanup_value, planned = _planned()
     seal = _seal(plan)
     forged = SealedPreflight.model_construct(**seal.model_dump())
-    with pytest.raises(ValueError, match="lacks factory authority"):
+    with pytest.raises(ValueError, match="lacks factory authority|process-local authority"):
         planned.preflight(forged)
     preflighted = planned.preflight(seal)
-    with pytest.raises(ValueError, match="lacks factory authority"):
+    with pytest.raises(ValueError, match="lacks factory authority|process-local authority"):
         preflighted.authorize(forged, budget)
 
 
@@ -656,7 +657,7 @@ def test_forged_cleanup_result_cannot_complete_episode() -> None:
     )
     result = _cleanup(cleanup)
     forged = CleanupResult.model_construct(**result.model_dump())
-    with pytest.raises(ValueError, match="lacks factory authority"):
+    with pytest.raises(ValueError, match="lacks factory authority|process-local authority"):
         cleaning.finish_cleanup(forged)
 
 
@@ -688,7 +689,7 @@ def test_forged_side_effect_permit_cannot_start() -> None:
     _plan_value, budget, _cleanup_value, authorized, permit = _authorized()
     reservation = _reservation(budget)
     forged = SideEffectPermit.model_construct(**permit.model_dump())
-    with pytest.raises(ValueError, match="lacks factory authority"):
+    with pytest.raises(ValueError, match="lacks factory authority|process-local authority"):
         authorized.start(forged, budget, _commitment(budget, reservation))
 
 
@@ -828,7 +829,7 @@ def test_finish_cleanup_is_atomic_and_rolls_back_construction_failure(
         .begin_finalization()
         .finish_finalization(_reconciliation(budget2, reservation2), _score(plan2))
     )
-    with pytest.raises(ValueError, match="lacks factory authority"):
+    with pytest.raises(ValueError, match="lacks factory authority|process-local authority"):
         cleaning2.finish_cleanup(result)
     assert cleanup2.episode_id != cleanup.episode_id
 
@@ -1095,6 +1096,7 @@ def test_unreachable_lineage_releases_weak_registry_lease() -> None:
     import weakref
 
     from local_operator.evaluation.lifecycle import _LIVE_LINEAGES
+    from local_operator.evaluation.receipts import _lookup_authority
 
     episode_id = f"lineage-gc-{next(_EPISODES)}"
     plan = _plan(episode_id)
@@ -1107,7 +1109,7 @@ def test_unreachable_lineage_releases_weak_registry_lease() -> None:
         cleanup_plan_id=cleanup.cleanup_plan_id,
     )
     child = root.preflight(_seal(plan))
-    lineage_ref = weakref.ref(child._lineage)
+    lineage_ref = weakref.ref(_lookup_authority(child, "episode-lifecycle").lineage)
     assert episode_id in _LIVE_LINEAGES
     del root
     gc.collect()
@@ -1128,7 +1130,12 @@ def test_unreachable_lineage_releases_weak_registry_lease() -> None:
 def test_lineage_is_private_unforgeable_and_shared_by_children() -> None:
     plan, budget, _cleanup_value, root = _planned()
     child = root.preflight(_seal(plan))
-    assert root._lineage is child._lineage
+    from local_operator.evaluation.receipts import _lookup_authority
+
+    assert (
+        _lookup_authority(root, "episode-lifecycle", allow_consumed=True).lineage
+        is _lookup_authority(child, "episode-lifecycle").lineage
+    )
     payload = child.model_dump()
     assert "lineage" not in payload
     forged = EpisodeLifecycle.model_construct(**payload)
@@ -1160,9 +1167,7 @@ def test_every_authority_model_blocks_copy_and_constructed_private_injection() -
         }
         construct: Any = type(live).model_construct
         constructed = construct(**live.model_dump(), **private_values)
-        assert getattr(constructed, "_authority", None) is not getattr(live, "_authority", None)
-        if isinstance(live, EpisodeLifecycle):
-            assert getattr(constructed, "_lineage", None) is not live._lineage
+        assert constructed.__pydantic_private__ in (None, {})
         if isinstance(constructed, EpisodeLifecycle):
             with pytest.raises(ValueError, match="lacks transition authority"):
                 constructed.begin_finalization()
@@ -1178,8 +1183,8 @@ def test_every_authority_model_blocks_copy_and_constructed_private_injection() -
         for module in (receipts_module, lifecycle_module)
         for value in vars(module).values()
         if inspect.isclass(value)
-        and issubclass(value, ProtocolModel)
-        and "_authority" in value.__private_attributes__
+        and issubclass(value, AuthorityModel)
+        and value is not AuthorityModel
     }
     assert authority_classes == {
         SealedPreflight,
@@ -1200,36 +1205,17 @@ def test_constructed_authority_clones_cannot_consume_originals() -> None:
     plan, budget, cleanup, authorized, permit = _authorized()
     reservation = _reservation(budget)
     commitment = _commitment(budget, reservation)
-    cloned_lifecycle = EpisodeLifecycle.model_construct(
-        **authorized.model_dump(),
-        _authority=authorized._authority,
-        _lineage=authorized._lineage,
-        _lock=authorized._lock,
-        _consumed=False,
-    )
-    cloned_permit = SideEffectPermit.model_construct(
-        **permit.model_dump(), _authority=permit._authority, _lock=permit._lock, _consumed=False
-    )
-    cloned_commitment = BudgetCommitment.model_construct(
-        **commitment.model_dump(),
-        _authority=commitment._authority,
-        _lock=commitment._lock,
-        _consumed=False,
-    )
+    cloned_lifecycle = EpisodeLifecycle.model_construct(**authorized.model_dump())
+    cloned_permit = SideEffectPermit.model_construct(**permit.model_dump())
+    cloned_commitment = BudgetCommitment.model_construct(**commitment.model_dump())
     with pytest.raises(ValueError, match="lacks transition authority"):
         cloned_lifecycle.start(cloned_permit, budget, cloned_commitment)
     running = authorized.start(permit, budget, commitment)
     finalizing = running.begin_finalization()
     cleaning = finalizing.finish_finalization(_reconciliation(budget, reservation), _score(plan))
     result = _cleanup(cleanup)
-    cloned_result = CleanupResult.model_construct(
-        **result.model_dump(),
-        _authority=result._authority,
-        _lock=result._lock,
-        _consumed=False,
-        _receipts=result._receipts,
-    )
-    with pytest.raises(ValueError, match="lacks factory authority"):
+    cloned_result = CleanupResult.model_construct(**result.model_dump())
+    with pytest.raises(ValueError, match="lacks factory authority|process-local authority"):
         cleaning.finish_cleanup(cloned_result)
     assert cleaning.finish_cleanup(result).state == "completed"
 
@@ -1269,15 +1255,19 @@ def test_validation_context_never_mints_authority_for_any_model() -> None:
             adapter.validate_json(encoded, context=hostile_context),
         )
         for parsed in parsed_values:
-            assert getattr(parsed, "_authority", None) is None
+            assert parsed.__pydantic_private__ in (None, {})
             if isinstance(parsed, EpisodeLifecycle):
                 with pytest.raises(ValueError, match="lacks transition authority"):
                     parsed.begin_finalization()
             elif isinstance(parsed, BudgetCommitment):
-                with pytest.raises(ValueError, match="lacks factory authority"):
+                with pytest.raises(
+                    ValueError, match="lacks factory authority|process-local authority"
+                ):
                     parsed.assert_authority(budget)
             else:
-                with pytest.raises(ValueError, match="lacks factory authority"):
+                with pytest.raises(
+                    ValueError, match="lacks factory authority|process-local authority"
+                ):
                     parsed.assert_authority()
 
 
@@ -1301,11 +1291,22 @@ def test_factory_objects_retain_live_receipts_lineage_and_authority() -> None:
     seal = _seal(plan)
     commitment = _commitment(budget, reservation)
     result = _cleanup(cleanup)
-    for live in (seal, commitment, result, permit, authorized):
-        assert getattr(live, "_authority", None) is not None
-    assert seal._receipts
-    assert result._receipts
-    assert authorized._lineage.episode_id == authorized.episode_id
+    from local_operator.evaluation.receipts import _lookup_authority
+
+    records = (
+        _lookup_authority(seal, "preflight-seal"),
+        _lookup_authority(commitment, "budget-commitment"),
+        _lookup_authority(result, "cleanup-result"),
+        _lookup_authority(permit, "side-effect-permit"),
+        _lookup_authority(authorized, "episode-lifecycle"),
+    )
+    assert all(
+        live.__pydantic_private__ in (None, {})
+        for live in (seal, commitment, result, permit, authorized)
+    )
+    assert records[0].receipts
+    assert records[2].receipts
+    assert records[4].lineage.episode_id == authorized.episode_id
 
 
 def test_authorized_failure_revokes_permit_and_wrong_permit_is_retryable() -> None:
@@ -1320,7 +1321,7 @@ def test_authorized_failure_revokes_permit_and_wrong_permit_is_retryable() -> No
         kind="infrastructure", reason="allocator unavailable", permit=permit
     )
     assert failed.state == "failed"
-    with pytest.raises(ValueError, match="lacks factory authority"):
+    with pytest.raises(ValueError, match="lacks factory authority|process-local authority"):
         permit.assert_authority()
     assert failed.score_id is None
     assert plan.plan_id == failed.plan_id
@@ -1354,3 +1355,133 @@ def test_authorized_fail_and_start_race_has_exactly_one_child() -> None:
     assert len(errors) == 1
     assert children[0].state in ("running", "failed")
     assert "authority" in str(errors[0])
+
+
+def test_base_model_copy_paths_never_copy_registry_authority() -> None:
+    from pydantic import BaseModel
+
+    from local_operator.evaluation.receipts import _lookup_authority
+
+    plan, budget, cleanup, authorized, permit = _authorized()
+    reservation = _reservation(budget)
+    originals = (
+        _seal(plan),
+        _commitment(budget, reservation),
+        _cleanup(cleanup),
+        permit,
+        authorized,
+    )
+    for original in originals:
+        with pytest.raises(TypeError, match="cannot be copied"):
+            BaseModel.model_copy(original)
+        clones = (
+            BaseModel.copy(original),
+            BaseModel.__copy__(original),
+            BaseModel.__deepcopy__(original),
+        )
+        for clone in clones:
+            clone = cast(AuthorityModel, clone)
+            assert clone is not original
+            with pytest.raises(ValueError, match="process-local authority"):
+                _lookup_authority(clone, "episode-lifecycle")
+            assert clone.__pydantic_private__ in (None, {})
+        # TypeAdapter may return the same already-validated instance; this is
+        # aliasing and still leaves only one consumable registry identity.
+        from pydantic import TypeAdapter
+
+        assert TypeAdapter(type(original)).validate_python(original) is original
+
+
+def test_registry_is_identity_keyed_and_weakly_releases_retained_receipts() -> None:
+    import gc
+    import weakref
+
+    from pydantic import BaseModel
+
+    from local_operator.evaluation.receipts import (
+        _authority_registry_size,
+        _lookup_authority,
+    )
+
+    plan = _plan(f"registry-gc-{next(_EPISODES)}")
+    seal = _seal(plan)
+    receipt_ref = weakref.ref(_lookup_authority(seal, "preflight-seal").receipts[0])
+    baseline = _authority_registry_size()
+    clone = cast(SealedPreflight, BaseModel.copy(seal))
+    assert clone == seal and clone is not seal
+    with pytest.raises(ValueError, match="process-local authority"):
+        _lookup_authority(clone, "preflight-seal")
+    del clone
+    del seal
+    gc.collect()
+    assert receipt_ref() is None
+    assert _authority_registry_size() < baseline
+
+
+def test_registry_dead_callback_cannot_remove_reused_identity_entry() -> None:
+    import weakref
+
+    from local_operator.evaluation.receipts import (
+        _AUTHORITY_REGISTRY,
+        _AUTHORITY_REGISTRY_LOCK,
+        AuthorityRecord,
+        _remove_authority,
+    )
+
+    first = _seal(_plan(f"callback-first-{next(_EPISODES)}"))
+    second = _seal(_plan(f"callback-second-{next(_EPISODES)}"))
+    stale_reference: Any = weakref.ref(first)
+    current_reference: Any = weakref.ref(second)
+    synthetic_id = -1
+    with _AUTHORITY_REGISTRY_LOCK:
+        _AUTHORITY_REGISTRY[synthetic_id] = (
+            current_reference,
+            AuthorityRecord(kind="preflight-seal"),
+        )
+    _remove_authority(synthetic_id, stale_reference)
+    with _AUTHORITY_REGISTRY_LOCK:
+        assert _AUTHORITY_REGISTRY[synthetic_id][0] is current_reference
+        del _AUTHORITY_REGISTRY[synthetic_id]
+
+
+def test_authority_models_store_no_private_capabilities_or_serialized_state() -> None:
+    from local_operator.evaluation.receipts import AuthorityModel
+
+    plan, budget, cleanup, authorized, permit = _authorized()
+    reservation = _reservation(budget)
+    models = (
+        _seal(plan),
+        _commitment(budget, reservation),
+        _cleanup(cleanup),
+        permit,
+        authorized,
+    )
+    forbidden = ("authority", "lineage", "lock", "consumed", "receipts")
+    for model in models:
+        assert isinstance(model, AuthorityModel)
+        assert model.__pydantic_private__ in (None, {})
+        canonical = model.to_canonical_json().decode()
+        assert not any(name in canonical for name in forbidden)
+
+
+def test_base_copy_duplicate_path_rejects_and_originals_complete_once() -> None:
+    from pydantic import BaseModel
+
+    plan, budget, cleanup, authorized, permit = _authorized()
+    reservation = _reservation(budget)
+    commitment = _commitment(budget, reservation)
+    cloned_lifecycle = cast(EpisodeLifecycle, BaseModel.copy(authorized))
+    cloned_permit = cast(SideEffectPermit, BaseModel.copy(permit))
+    cloned_commitment = cast(BudgetCommitment, BaseModel.copy(commitment))
+    with pytest.raises(ValueError, match="transition authority|process-local authority"):
+        cloned_lifecycle.start(cloned_permit, budget, cloned_commitment)
+    cleaning = (
+        authorized.start(permit, budget, commitment)
+        .begin_finalization()
+        .finish_finalization(_reconciliation(budget, reservation), _score(plan))
+    )
+    result = _cleanup(cleanup)
+    cloned_result = cast(CleanupResult, BaseModel.copy(result))
+    with pytest.raises(ValueError, match="process-local authority"):
+        cleaning.finish_cleanup(cloned_result)
+    assert cleaning.finish_cleanup(result).state == "completed"

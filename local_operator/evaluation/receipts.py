@@ -12,7 +12,9 @@ import base64
 import hashlib
 import json
 import re
+import weakref
 from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass, field
 from datetime import date as Date
 from datetime import datetime, timezone
 from threading import RLock
@@ -23,7 +25,6 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pydantic import (
     Field,
     JsonValue,
-    PrivateAttr,
     TypeAdapter,
     field_serializer,
     field_validator,
@@ -67,12 +68,76 @@ def _thaw(value: Any) -> JsonValue:
     return value
 
 
-class AuthorityModel(ProtocolModel):
-    """Guard normal Python/Pydantic APIs from recreating private authority.
+@dataclass(slots=True)
+class AuthorityRecord:
+    """Non-serializable process-local capability stored outside model instances."""
 
-    These controls constrain cooperative in-process callers. Python code that
-    deliberately mutates ``PrivateAttr`` storage through low-level object APIs is
-    hostile and outside this contract; serialized fields never contain a token.
+    kind: str
+    lock: RLock = field(default_factory=RLock)
+    consumed: bool = False
+    lineage: Any = None
+    receipts: tuple[Any, ...] = ()
+
+
+_AUTHORITY_REGISTRY_LOCK = RLock()
+_AUTHORITY_REGISTRY: dict[int, tuple[weakref.ReferenceType[AuthorityModel], AuthorityRecord]] = {}
+
+
+def _remove_authority(model_id: int, reference: weakref.ReferenceType[AuthorityModel]) -> None:
+    """Drop only the exact dead reference, protecting a subsequently reused id."""
+
+    with _AUTHORITY_REGISTRY_LOCK:
+        current = _AUTHORITY_REGISTRY.get(model_id)
+        if current is not None and current[0] is reference:
+            del _AUTHORITY_REGISTRY[model_id]
+
+
+def _register_authority(
+    model: AuthorityModel,
+    kind: str,
+    *,
+    lineage: Any = None,
+    receipts: tuple[Any, ...] = (),
+) -> AuthorityRecord:
+    model_id = id(model)
+
+    def remove(reference: weakref.ReferenceType[AuthorityModel]) -> None:
+        _remove_authority(model_id, reference)
+
+    reference = weakref.ref(model, remove)
+    record = AuthorityRecord(kind=kind, lineage=lineage, receipts=receipts)
+    with _AUTHORITY_REGISTRY_LOCK:
+        _AUTHORITY_REGISTRY[model_id] = (reference, record)
+    return record
+
+
+def _lookup_authority(
+    model: AuthorityModel,
+    kind: str,
+    *,
+    allow_consumed: bool = False,
+) -> AuthorityRecord:
+    with _AUTHORITY_REGISTRY_LOCK:
+        current = _AUTHORITY_REGISTRY.get(id(model))
+        if current is None or current[0]() is not model or current[1].kind != kind:
+            raise ValueError("model lacks process-local authority")
+        record = current[1]
+    if record.consumed and not allow_consumed:
+        raise ValueError("model lacks process-local authority")
+    return record
+
+
+def _authority_registry_size() -> int:
+    with _AUTHORITY_REGISTRY_LOCK:
+        return len(_AUTHORITY_REGISTRY)
+
+
+class AuthorityModel(ProtocolModel):
+    """Guard normal APIs while authority lives only in an identity registry.
+
+    Cooperative callers cannot mint or duplicate capabilities through model
+    APIs. Hostile Python mutating this private module registry is out of scope;
+    durable cross-process authority belongs to a future evidence store.
     """
 
     def copy(
@@ -109,14 +174,6 @@ class AuthorityModel(ProtocolModel):
 
     def __reduce__(self) -> Any:
         raise TypeError("authority models cannot be pickled")
-
-
-def _attach_authority(model: AuthorityModel, **private_values: Any) -> None:
-    """Attach non-serializable live authority after ordinary public validation."""
-
-    object.__setattr__(model, "_authority", object())
-    for name, value in private_values.items():
-        object.__setattr__(model, name, value)
 
 
 class _MetadataModel(ProtocolModel):
@@ -559,9 +616,6 @@ class RedactionSet:
 class SealedPreflight(AuthorityModel):
     """Factory-only attestation over the exact validated preflight receipts."""
 
-    _authority: object = PrivateAttr()
-    _receipts: tuple[PreflightReceipt, ...] = PrivateAttr()
-
     plan_id: Digest
     required_requirement_ids: tuple[StrictIdentifier, ...]
     passed_requirement_ids: tuple[StrictIdentifier, ...]
@@ -625,9 +679,11 @@ class SealedPreflight(AuthorityModel):
         raise TypeError("preflight seal authority cannot be pickled")
 
     def assert_authority(self) -> None:
-        if getattr(self, "_authority", None) is None:
-            raise ValueError("preflight seal lacks factory authority")
-        receipts = getattr(self, "_receipts", ())
+        try:
+            record = _lookup_authority(self, "preflight-seal")
+        except ValueError as error:
+            raise ValueError("preflight seal lacks factory authority") from error
+        receipts = record.receipts
         actual_digests: list[str] = []
         for receipt in receipts:
             expected = _identity(
@@ -705,7 +761,7 @@ def seal_preflight(
     sealed = SealedPreflight.model_validate(
         {**payload, "seal_id": _identity("sealed-preflight-v1", payload)}
     )
-    _attach_authority(sealed, _receipts=snapshot)
+    _register_authority(sealed, "preflight-seal", receipts=snapshot)
     return sealed
 
 
@@ -883,10 +939,6 @@ def reserve_budget(
 class BudgetCommitment(AuthorityModel):
     """Factory-only authority over the complete validated reservation set."""
 
-    _authority: object = PrivateAttr()
-    _lock: RLock = PrivateAttr(default_factory=RLock)
-    _consumed: bool = PrivateAttr(default=False)
-
     episode_id: StrictIdentifier
     budget_id: Digest
     authorization_digest: Digest
@@ -923,12 +975,14 @@ class BudgetCommitment(AuthorityModel):
     def __reduce__(self) -> Any:
         raise TypeError("budget commitment authority cannot be pickled")
 
-    def authority_lock(self) -> RLock:
-        return self._lock
+    def authority_record(self) -> AuthorityRecord:
+        try:
+            return _lookup_authority(self, "budget-commitment")
+        except ValueError as error:
+            raise ValueError("budget commitment lacks factory authority") from error
 
     def assert_authority(self, authorization: BudgetAuthorization) -> None:
-        if self._consumed or getattr(self, "_authority", None) is None:
-            raise ValueError("budget commitment lacks factory authority")
+        self.authority_record()
         if (
             self.episode_id != authorization.episode_id
             or self.budget_id != authorization.budget_id
@@ -943,8 +997,7 @@ class BudgetCommitment(AuthorityModel):
             raise ValueError("budget commitment authority was mutated")
 
     def consume_authority(self) -> None:
-        self._consumed = True
-        object.__setattr__(self, "_authority", None)
+        self.authority_record().consumed = True
 
 
 def commit_budget(
@@ -968,7 +1021,7 @@ def commit_budget(
     commitment = BudgetCommitment.model_validate(
         {**payload, "commitment_id": _identity("budget-commitment-v1", payload)}
     )
-    _attach_authority(commitment, _lock=RLock(), _consumed=False)
+    _register_authority(commitment, "budget-commitment")
     return commitment
 
 
