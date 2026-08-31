@@ -3,9 +3,12 @@ import pytest
 from local_operator.model.configure import build_model_spec
 from local_operator.model.registry import (
     ModelInfo,
+    RecommendedOpenRouterModelIds,
+    RecommendedRadientModelIds,
     _anthropic_family,
     anthropic_family_model_info,
     anthropic_models,
+    deepseek_models,
     get_model_info,
     qwencloud_token_plan_models,
     static_models,
@@ -399,3 +402,44 @@ def test_a_family_answer_is_never_the_registrys_own_object() -> None:
     assert first is not None
     first.context_window = 1
     assert anthropic_models["claude-opus-5"].context_window == 1_000_000
+
+
+def test_deepseek_dated_flash_snapshot_is_not_recommended() -> None:
+    """#383: the dated V4 Flash snapshot must not be steered toward.
+
+    It measured 0/5 on the harness's most basic agentic task, emitting literal
+    `<|DSML|>` markup as assistant text instead of tool calls, so a new user
+    picking the recommended option gets an agent that narrates actions it never
+    performs. Both surfaces are asserted because they are read by different
+    callers: `RecommendedOpenRouterModelIds` drives the `recommended` flag the
+    server computes for OpenRouter/Radient listings, while the catalogue row's
+    own `recommended` field is what the direct-DeepSeek listing returns.
+    """
+    assert "deepseek/deepseek-v4-flash-0731" not in RecommendedOpenRouterModelIds
+    # Radient derives from the OpenRouter list, so it inherits the withdrawal;
+    # asserted rather than assumed, since a future edit could fork the lists.
+    assert "deepseek/deepseek-v4-flash-0731" not in RecommendedRadientModelIds
+    assert deepseek_models["deepseek-v4-flash-0731"].recommended is False
+
+
+def test_withdrawn_deepseek_snapshot_still_resolves_for_existing_configs() -> None:
+    """Withdrawing a recommendation must not break a user who already pinned it.
+
+    Deleting the catalogue row would resolve these lookups to the 128k unknown
+    default, silently mis-setting the compaction threshold for a 1M-window
+    model — a worse outcome than the bad recommendation. The row therefore
+    stays; only the flag changes.
+    """
+    info = get_model_info("deepseek", "deepseek-v4-flash-0731")
+    assert info.context_window == 1_048_576
+    assert info.max_tokens == 32_768
+    # Pricing must survive too, or an existing session's cost ledger silently
+    # falls back to the unknown-model zero.
+    assert info.input_price == 0.09 and info.output_price == 0.18
+
+    spec = build_model_spec("deepseek", "deepseek-v4-flash-0731")
+    assert spec.context_window == 1_048_576
+
+    # The undated alias is a DIFFERENT id and keeps its recommendation: the
+    # measured failure is specific to the July snapshot.
+    assert "deepseek/deepseek-v4-flash" in RecommendedOpenRouterModelIds

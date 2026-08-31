@@ -161,7 +161,15 @@ RecommendedOpenRouterModelIds = [
     "mistralai/mistral-large",
     "x-ai/grok-3-beta",
     "google/gemini-2.5-pro-preview",
-    "deepseek/deepseek-v4-flash-0731",
+    # `deepseek/deepseek-v4-flash-0731` is deliberately ABSENT despite still
+    # shipping a catalogue row below. Measured 0/5 on the harness's most basic
+    # agentic task ("create a file called test.txt"): instead of emitting tool
+    # calls it returns literal `<|DSML|>tool_calls>` markup as assistant TEXT,
+    # so no tool ever executes and the agent narrates work it never performed.
+    # In a tool-calling harness that reads as the product being broken, which
+    # is worse than recommending nothing. The undated `deepseek-v4-flash` alias
+    # stays because the failure is a regression in that pinned snapshot; do not
+    # re-add the dated id without re-measuring it.
     "deepseek/deepseek-v4-flash",
     "deepseek/deepseek-v4-pro",
     "deepseek/deepseek-chat-v3.1",
@@ -1254,7 +1262,12 @@ deepseek_models: Dict[str, ModelInfo] = {
         cache_writes_price=0.09,
         cache_reads_price=0.009,
         description="Pinned July 2026 V4 Flash snapshot",
-        recommended=True,
+        # The ROW stays so a user who already pinned this model keeps correct
+        # pricing and a 1M context window (dropping it would resolve them to the
+        # 128k unknown default and silently mis-set compaction). Only the
+        # recommendation is withdrawn — see RecommendedOpenRouterModelIds above
+        # for the 0/5 tool-calling measurement behind it.
+        recommended=False,
     ),
     "deepseek-v4-pro": ModelInfo(
         id="deepseek-v4-pro",

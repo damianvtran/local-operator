@@ -974,10 +974,76 @@ def _enum_members(node: Any) -> list[Any]:
     return members
 
 
-def _default_tools_with_agent() -> list[AgentTool]:
-    """Build the real default inventory with the capability exposing ``agent``."""
+class _FakeScheduler:
+    """Just enough surface for build_wake_tool's capability check."""
 
-    return create_tools(ToolContext(cwd=".", agent_registry=object()))
+    @property
+    def schedules(self) -> list[Any]:
+        return []
+
+    async def update(self, schedules: Any) -> None:
+        pass
+
+
+class _FakeJobs:
+    """Just enough surface for the job-tracking tools' capability check."""
+
+    def get(self, job_id: str, *, owner_id: str | None = None) -> Any:
+        return None
+
+    def list(self, *, owner_id: str | None = None) -> list[Any]:
+        return []
+
+    async def cancel(self, job_id: str, *, owner_id: str | None = None) -> bool:
+        return False
+
+
+class _FakeComms:
+    """Just enough surface for build_hub_tool: the role test it branches on."""
+
+    def is_child(self, job_id: str | None) -> bool:
+        return False
+
+
+async def _ask_user(questions: list[Any]) -> dict[str, list[str]] | None:
+    return None
+
+
+def _default_tools_with_agent() -> list[AgentTool]:
+    """Build the genuinely COMPLETE inventory, not merely the ungated part.
+
+    A context carrying only ``agent_registry`` builds 15 of the 23 tools: every
+    ``createIf``-gated one drops out, and five of those (``task``, ``hub``,
+    ``jobs``, ``wake``, ``team``) declare enums of their own. ``ask`` is gated
+    too but has no enum; it is still in the floor so a silent drop of the ask
+    hook still fails here. Auditing enum members over that reduced set would
+    let an empty member ship in any of the five while a test named for the
+    full bundle stayed green — the same class of gap that let the ``agent``
+    effort sentinel reach a provider. Every capability is therefore attached
+    so the audit sees the whole emitted surface.
+    """
+
+    tools = create_tools(
+        ToolContext(
+            cwd=".",
+            agent_registry=object(),
+            team_registry=object(),
+            wake_scheduler=_FakeScheduler(),
+            jobs=_FakeJobs(),
+            subagent_comms=_FakeComms(),
+            subagent_launcher=lambda label, prompt, **kwargs: "job-fake",
+            has_ui=True,
+            ask_user=_ask_user,
+        )
+    )
+    # The point of this helper is coverage breadth, so assert the breadth rather
+    # than trusting it: a future gate that silently drops a tool must fail here
+    # instead of quietly narrowing every audit built on top of it. ``browser``
+    # is excluded from the floor because its builder probes a real CMUX surface
+    # that CI does not have.
+    names = {tool.name for tool in tools}
+    assert {"agent", "task", "hub", "jobs", "wake", "ask", "team"} <= names
+    return tools
 
 
 async def test_openrouter_gemini_full_tool_bundle_has_no_empty_enum_member() -> None:
