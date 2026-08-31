@@ -53,7 +53,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from local_operator.harness.types import AgentMessage, CustomMessage, Message, TextContent
+from local_operator.harness.types import (
+    AgentMessage,
+    CustomMessage,
+    Message,
+    TextContent,
+)
 from local_operator.session.attachments import AttachmentStore
 from local_operator.session.transcript import (
     ENTRY_COMPACTION,

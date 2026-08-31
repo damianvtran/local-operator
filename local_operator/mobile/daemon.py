@@ -1205,7 +1205,9 @@ class MobileDaemon:
                 # one store is a claim race.
                 if self.dial_registrants:
                     from local_operator.paths import config_dir
-                    from local_operator.session_lease import reap_proven_dead_session_claim
+                    from local_operator.session_lease import (
+                        reap_proven_dead_session_claim,
+                    )
 
                     await asyncio.to_thread(
                         reap_proven_dead_session_claim,

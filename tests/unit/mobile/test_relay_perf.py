@@ -16,10 +16,7 @@ from starlette.testclient import TestClient
 
 from local_operator.harness.types import Message
 from local_operator.mobile.daemon import MobileDaemon, SessionTable, build_app
-from local_operator.mobile.durable import (
-    CustomSnapshotCache,
-    DurableFoldCache,
-)
+from local_operator.mobile.durable import CustomSnapshotCache, DurableFoldCache
 from local_operator.mobile.projection import (
     FRAME_CAP_RESULT_CHARS,
     PROJECTION_FRAME_SOFT_CAP_BYTES,
