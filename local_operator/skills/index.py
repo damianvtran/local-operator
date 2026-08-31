@@ -32,6 +32,7 @@ from pathlib import Path
 
 from local_operator.skills.discovery import Skill
 from local_operator.skills.embeddings import EmbeddingBackend, LocalEmbedder
+from local_operator.skills.protocol import resource_url
 from local_operator.skills.vectors import VectorMatrix, deserialize
 
 logger = logging.getLogger(__name__)
@@ -284,7 +285,7 @@ def render_block(skills: list[Skill]) -> str:
         # Naming the already-selected resources removes the inference step that
         # led models to search the filesystem for SKILL.md instead of using the
         # virtual resource protocol. This cost stays local to selected skills.
-        selected_urls = ", ".join(f"`skill://{skill.name}`" for skill in user_skills)
+        selected_urls = ", ".join(f"`{resource_url('skill', skill.name)}`" for skill in user_skills)
         lines = [
             f"Read these selected skills before proceeding: {selected_urls}. The skill "
             "body ends with its reference files; read those with "

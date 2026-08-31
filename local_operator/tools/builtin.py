@@ -3249,7 +3249,7 @@ async def execute_glob(
         # Skills are virtual resources, not files the model should discover.
         # Correct only this observed misuse so every ordinary glob error keeps
         # its concise, generic diagnostic.
-        if Path(pattern).is_absolute() and pattern.lower().endswith("skill.md"):
+        if Path(pattern).is_absolute() and Path(pattern).name.casefold() == "skill.md":
             # A conservative resource segment avoids reflecting path syntax or
             # prose into a URL while still covering normal catalog names.
             skill_name = Path(pattern).parent.name

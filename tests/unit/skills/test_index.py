@@ -300,6 +300,20 @@ class TestRenderBlock:
             "</skills>"
         )
 
+    def test_selected_url_encodes_frontmatter_name_for_resolver(self) -> None:
+        skill = Skill(
+            name="team/support",
+            description="support workflow",
+            file_path=Path("/x/support/SKILL.md"),
+            base_dir=Path("/x/support"),
+            source="test",
+        )
+
+        block = render_block([skill])
+
+        assert "`skill://team%2Fsupport`" in block
+        assert "`skill://team/support`" not in block
+
     def test_empty_list_returns_empty_string(self) -> None:
         assert render_block([]) == ""
 
