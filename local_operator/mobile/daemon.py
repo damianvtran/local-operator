@@ -360,13 +360,19 @@ class SessionTable:
             key=lambda summary: (
                 summary["section"] != "active",
                 not summary["needs_attention"],
-                # Unread outranks streaming and recency inside its section: an
-                # unseen session is work waiting on the reader's attention, and
-                # burying it under plain mtime order is what made the mark
-                # decorative. Ranked BELOW needs_attention because a pending
-                # ask blocks a turn outright, while unread only means unlooked-at.
-                not summary["unseen"],
+                # ONE ladder serves the sort and the render: NEEDS DECISION >
+                # WORKING > UNREAD > IDLE (see the client's SessionCard, which
+                # states the same order). Unread outranks recency — burying the
+                # mark under plain mtime order is what made it decorative — but
+                # sits BELOW streaming, because the client renders "new" only
+                # for COMPLETED unviewed activity and suppresses it on an
+                # in-flight row. Ranking unseen above streaming here hoisted a
+                # streaming+unseen row over newer rows while it rendered no
+                # mark to explain the position: a sort the surface contradicts.
+                # And below needs_attention, because a pending ask blocks a
+                # turn outright while unread only means unlooked-at.
                 not summary["streaming"],
+                not summary["unseen"],
                 -summary["mtime"],
                 summary["session_id"],
             )

@@ -280,6 +280,83 @@ async def test_summaries_invalidation_forces_rescan(tmp_path, monkeypatch) -> No
 
 
 @pytest.mark.asyncio
+async def test_streaming_outranks_unseen_matching_the_render_ladder(
+    tmp_path, monkeypatch
+) -> None:
+    """The sort ladder must match the render ladder (A14, and D5's substance).
+
+    The client renders NEEDS DECISION > WORKING > UNREAD > IDLE and suppresses
+    the `new` mark on a streaming row, because "new" means COMPLETED unviewed
+    activity. Ranking unseen ABOVE streaming in the daemon therefore hoisted a
+    streaming+unseen row over newer rows while it rendered no mark to explain
+    why it was there — a position the surface contradicts.
+
+    Both rows are LIVE so the comparison lands inside one section and the
+    section term cannot decide it, and the streaming row is the OLDER one so
+    recency cannot either: only the ladder can. Exercises the real
+    ``summaries()`` output rather than a reimplementation of the sort key — a
+    test that re-derives the ordering it checks proves nothing.
+    """
+    import os
+    import time
+
+    from local_operator.mobile.daemon import SessionEntry
+    from local_operator.mobile.types import SessionProjection, SessionRecord
+
+    cfg = tmp_path / "config"
+    unread_dir = cfg / "sessions" / "unread-live"
+    streaming_dir = cfg / "sessions" / "streaming-live"
+    unread_dir.mkdir(parents=True)
+    streaming_dir.mkdir(parents=True)
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+    await _write_turns_async(unread_dir, 1)
+    await _write_turns_async(streaming_dir, 1)
+    # The STREAMING row is the OLDER transcript: with unseen ranked first the
+    # unread row wins, with streaming ranked first the live row does.
+    os.utime(streaming_dir / "transcript.jsonl", (1_000_000, 1_000_000))
+    os.utime(unread_dir / "transcript.jsonl", (2_000_000, 2_000_000))
+
+    def live(pid: int, session_id: str, *, streaming: bool) -> SessionEntry:
+        record = SessionRecord(
+            pid=pid,
+            kind="tui",
+            session_id=session_id,
+            conversation_name=session_id,
+            cwd="/tmp",
+            model_label="m",
+            control_port=1,
+            control_key="k",
+        )
+        record.started_at = time.time()
+        entry = SessionEntry(record)
+        entry.projection = SessionProjection(
+            session_id=session_id, pid=pid, kind="tui", streaming=streaming
+        )
+        return entry
+
+    table = SessionTable()
+    table.entries[5150] = live(5150, "streaming-live", streaming=True)
+    table.entries[5151] = live(5151, "unread-live", streaming=False)
+    await table.summaries()
+    # unread-live gains activity nobody has seen; the streaming row is read.
+    os.utime(unread_dir / "transcript.jsonl", (2_500_000, 2_500_000))
+    table.seen_store.mark_seen("streaming-live", now=3_000_000.0)
+    table.invalidate_summaries_cache()
+
+    rows = await table.summaries()
+    by_id = {row["session_id"]: row for row in rows}
+    assert by_id["unread-live"]["unseen"] is True
+    assert by_id["streaming-live"]["streaming"] is True
+    assert by_id["streaming-live"]["unseen"] is False
+    # Same section, so the ladder — not the section term — decides.
+    assert by_id["unread-live"]["section"] == by_id["streaming-live"]["section"]
+    ordered = [row["session_id"] for row in rows]
+    assert ordered.index("streaming-live") < ordered.index("unread-live"), (
+        "a streaming row must outrank an unread one, matching the render ladder"
+    )
+
+
+@pytest.mark.asyncio
 async def test_projection_repaints_do_not_rescan_the_store(tmp_path, monkeypatch) -> None:
     """A streaming session's repaints must NOT re-run the durable scan (A3).
 
