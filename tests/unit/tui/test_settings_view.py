@@ -335,10 +335,13 @@ async def test_reset_on_a_default_row_leaves_config_byte_identical(tmp_path: Pat
         # differently-shaped write that happened to round-trip.
         view._manager.reload()
         assert settings_io.read_setting(view._manager, other) == 7
-        # It REPORTS rather than swallowing the press: the footer advertises
-        # `r default` on this row, and a lit hint whose key does nothing
-        # silently is the bug one step earlier (UX round 1, U5).
-        assert "default" in view.notice_text, view.notice_text
+        # #440 sheds `r` from the footer on a default row (the same rule
+        # read-only rows already follow), so the press is silent rather than
+        # explained. Main's later safety patch kept the hint lit and reported
+        # "already at its default"; that notice would advertise a key the
+        # footer no longer offers. The byte assertion above is the load-bearing
+        # half either way.
+        assert view.notice_text == "", view.notice_text
         assert view.error_text == "", "a row at its default is not an ERROR state"
 
 
