@@ -1319,6 +1319,15 @@ Screen.subagent-compact #band {
     height: 1;
 }
 
+/* The truncation note is page chrome: it sits between the rule and the
+ * scrolling body so it cannot leave the screen. Height auto because the
+ * wording wraps at narrow widths; display is toggled from the view when
+ * the fold first reports the cap. */
+.subagent-view-truncation {
+    height: auto;
+    padding: 1 0 0 0;
+}
+
 /* One row of air under the rule. Without it the rule sits directly on the
  * first block, and when that block is a tool card — i.e. whenever the reader
  * has scrolled — a faint full-width line resting on a tinted slab reads as

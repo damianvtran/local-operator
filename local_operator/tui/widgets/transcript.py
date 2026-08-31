@@ -126,6 +126,16 @@ class TailAnchor:
         """Re-acquire deliberately: the caller is asking to sit at the end."""
         self._following = True
 
+    def release(self) -> None:
+        """Stop following: the caller has chosen an offset that is not the tail.
+
+        Distinct from :meth:`note_user_scroll`, which is a person moving the
+        viewport. A landing snap that pulled back from a wrap fragment is
+        this widget choosing a row head, and the next extent change must
+        not `_scroll_to_tail` onto the fragment it just left.
+        """
+        self._following = False
+
     @contextmanager
     def programmatic_scroll(self) -> Iterator[None]:
         """Mark the scroll performed inside as this widget's own, not a user's."""
