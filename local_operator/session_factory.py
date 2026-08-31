@@ -1171,6 +1171,163 @@ def _transcript_dir_and_agent_id(
     return config_dir / "sessions" / session_dir, "main"
 
 
+#: The one store-maintenance pass this process will run, or ``None`` before the
+#: first session is constructed. Store maintenance is a property of the STORE,
+#: not of a session, so it is scoped to the process rather than to the call:
+#: ``/new`` and ``/resume`` go through ``create_session`` exactly as boot does,
+#: and re-sweeping a store this same process swept seconds earlier is pure
+#: latency. Holding the task (not just a bool) also keeps a reference to it, so
+#: the loop cannot garbage-collect a task nobody awaits.
+_STORE_MAINTENANCE_TASK: "asyncio.Task[None] | None" = None
+
+
+def reset_store_maintenance_for_tests() -> None:
+    """Forget that maintenance ran, so a test can drive it again.
+
+    The once-per-process guard is deliberate production behaviour and a test
+    that needs the sweeps to run twice would otherwise be asserting against
+    state left by an earlier test in the same interpreter. Applied by an
+    autouse fixture in ``tests/conftest.py``, not per test.
+    """
+    global _STORE_MAINTENANCE_TASK
+    _STORE_MAINTENANCE_TASK = None
+
+
+async def await_store_maintenance_for_tests() -> None:
+    """Wait for this process's maintenance pass, if one was dispatched.
+
+    Production never waits — that is the entire point of the change — so this
+    exists for tests that assert on what the passes DID (a directory reaped, a
+    sidecar stamped). Without it such a test races the background task and
+    fails intermittently, which is a worse outcome than the latency it is
+    guarding. Swallows the task's failure because every pass is best-effort:
+    the caller is asserting on effects, not on the task's success.
+    """
+    task = _STORE_MAINTENANCE_TASK
+    if task is None:
+        return
+    try:
+        await task
+    except Exception:  # noqa: BLE001 — best-effort, exactly as in production
+        pass
+
+
+async def _run_store_maintenance(
+    config_manager: ConfigManager, config_dir: Path, live_dir: Path | None
+) -> None:
+    """Run every whole-store maintenance pass, in a worker thread, in order.
+
+    Each pass is a disk walk over OTHER sessions' directories and none of them
+    has anything to do with the session being constructed; they are triggered by
+    a session starting only because that is when the store is known to be quiet.
+    They run sequentially rather than gathered because they share one disk and
+    the origin/title backfills walk the same directories — the win here came
+    from taking them OFF the critical path, not from overlapping them, and
+    serial keeps the I/O pattern (and the failure attribution) simple.
+
+    Every pass is best-effort in the strongest sense: this coroutine can fail in
+    any way at all and a session must neither fail nor be delayed by it, which
+    is why the caller never awaits it and why each pass carries its own guard.
+    """
+    from local_operator.resume import backfill_session_origins, backfill_session_titles
+    from local_operator.session.retention import sweep_from_config
+    from local_operator.tools.group_reaper import sweep_orphan_groups
+
+    # Reap EMPTY session directories left by runs that exited before writing a
+    # turn. This is the only automated cleanup of sessions/ that exists and the
+    # only one that is safe to run automatically: a transcript — any directory
+    # holding content — is never deleted by the harness, only by an explicit
+    # user action.
+    passes: list[tuple[str, Callable[[], Any]]] = [
+        (
+            "retention sweep",
+            lambda: sweep_from_config(config_manager, config_dir, live_dir),
+        ),
+        # Hard-death process-group reaper (tools/group_reaper.py): reaps a bash
+        # process group only when the lop process that spawned it is provably
+        # dead — the one leak _kill() cannot cover, because a SIGKILLed owner
+        # runs no in-process cleanup and start_new_session already stripped the
+        # group's SIGHUP. Owner liveness is the ONLY signal, so a live session's
+        # long command (e.g. a 10h trainer) is never touched.
+        ("orphan process-group sweep", lambda: sweep_orphan_groups(config_dir)),
+        # Stamp session directories that predate the origin marker, so the
+        # ``/resume`` picker stops offering delegated runs on the FIRST launch
+        # after an upgrade rather than once natural churn has cleared the store.
+        ("session origin backfill", lambda: backfill_session_origins(config_dir)),
+        # Stamp the title sidecar alongside the origin marker, so a pre-existing
+        # session is findable by every name it has borne on the first launch
+        # after upgrade rather than only after its next rename.
+        ("session title backfill", lambda: backfill_session_titles(config_dir)),
+    ]
+
+    for label, work in passes:
+        try:
+            await asyncio.to_thread(work)
+        except asyncio.CancelledError:
+            # The process is shutting down mid-pass. Every pass is idempotent
+            # and re-runs on the next launch, so stopping here loses nothing.
+            raise
+        except Exception:  # noqa: BLE001 — best-effort; never disturb a session
+            # Debug, not warning: this is unattended housekeeping the user did
+            # not ask for, and a store that cannot be swept is not a problem the
+            # user can act on mid-session. Same level these carried when they
+            # ran inline.
+            logger.debug("%s failed", label, exc_info=True)
+
+
+def _start_store_maintenance(
+    config_manager: ConfigManager, config_dir: Path, live_dir: Path | None
+) -> None:
+    """Dispatch store maintenance ONCE per process, without blocking the caller.
+
+    The four passes were previously awaited inline in ``_prepare``. They were
+    already ``to_thread``'d, so the event loop was never blocked — but awaiting
+    them kept them on the session-construction CRITICAL PATH, where they cost
+    boot ~545 ms and, because ``/new`` and ``/resume`` re-enter the same
+    ``create_session``, cost EVERY ``/resume`` the same again on a store the
+    process had already swept. Measured on a 3574-session store, the sweeps were
+    77% of a boot's ``create_session`` and the dominant term of a ``/resume``.
+
+    Two changes, together:
+
+    - **Not awaited.** The session is returned as soon as it is built; the
+      maintenance runs behind first paint. Nothing in it is read by session
+      construction, so there is nothing to wait for. This is the same
+      fire-and-track shape the deferred MCP wiring uses.
+    - **Once per process.** Maintenance answers a question about the STORE, and
+      the store does not become dirty again because the user pressed
+      ``/resume``. The first session in the process runs it; later ones find the
+      task already dispatched and return immediately.
+
+    ``live_dir`` is the FIRST session's directory, and that is correct rather
+    than incidental: it is the only ``live_dir`` the sweep will ever see in this
+    process, and every LATER session protects itself with its claim marker
+    (written synchronously before its directory exists — see ``_prepare``),
+    which is the belt that protects concurrent sessions in OTHER processes too.
+    The ``live_dir`` skip is a redundant second belt for the local case, not the
+    load-bearing one.
+
+    A crash before first paint means the sweeps do not run this launch. That is
+    acceptable by design: the cost is an unreaped empty directory, which is
+    bytes rather than correctness, and the next launch reaps it. Every pass is
+    idempotent for exactly this reason.
+
+    Silently does nothing when called with no running loop (a synchronous test
+    harness or a benchmark entry point): there is nowhere to schedule the work,
+    and maintenance must never be the reason such a caller fails.
+    """
+    global _STORE_MAINTENANCE_TASK
+    if _STORE_MAINTENANCE_TASK is not None:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    _STORE_MAINTENANCE_TASK = loop.create_task(
+        _run_store_maintenance(config_manager, config_dir, live_dir)
+    )
+
+
 async def _prepare(
     args: argparse.Namespace,
     config_manager: ConfigManager,
@@ -1217,68 +1374,14 @@ async def _prepare(
     claim_session(transcript_dir)
     transcript_dir.mkdir(parents=True, exist_ok=True)
 
-    # Reap EMPTY session directories left by runs that exited before writing
-    # a turn. This is the only automated cleanup of sessions/ that exists and
-    # the only one that is safe to run automatically: a transcript — any
-    # directory holding content — is never deleted by the harness, only by an
-    # explicit user action. Best-effort by construction (see
-    # retention.sweep_sessions): cleanup must never be the reason a session
-    # fails to start.
-    #
-    # OFF THE LOOP, unlike the claim/lease above. The sweep and the two
-    # backfills below are pure disk walks over OTHER sessions' directories —
-    # hundreds of stats and reads on a long-lived store — and this coroutine
-    # runs on the Textual loop for the TUI boot path, where they measured one
-    # solid 460-490 ms stall warm (2 s cold) before the first frame. Nothing
-    # they touch is shared with THIS session's construction: the current
-    # directory was claimed synchronously above, so a concurrent sweep can
-    # never reap it, and the claim-marker probe (``os.kill(pid, 0)``) is
-    # thread-safe. The lease/claim stay on the loop deliberately — sole-writer
-    # ordering (lease before transcript creation) is an invariant, and putting
-    # a yield inside that window is how two cold resumes lose the race the
-    # lease exists to arbitrate.
-    from local_operator.session.retention import sweep_from_config
-
-    await asyncio.to_thread(
-        sweep_from_config, config_manager, Path(agent_registry.config_dir), transcript_dir
-    )
-
-    # Hard-death process-group reaper (tools/group_reaper.py). Runs beside the
-    # retention sweep and for the same reasons: it is a disk walk over OTHER
-    # processes' ledgers plus ps/os.kill probes, none of which touches THIS
-    # session's construction, so it goes off-loop to stay out of the boot stall;
-    # and it is best-effort, so a sweep error must never fail session start.
-    # It reaps a bash process group only when the lop process that spawned it is
-    # provably dead — the one leak _kill() cannot cover, because a SIGKILLed
-    # owner runs no in-process cleanup and start_new_session already stripped the
-    # group's SIGHUP. Owner liveness is the ONLY signal, so a live session's long
-    # command (e.g. a 10h trainer) is never touched.
-    from local_operator.tools.group_reaper import sweep_orphan_groups
-
-    try:
-        await asyncio.to_thread(sweep_orphan_groups, Path(agent_registry.config_dir))
-    except Exception:  # noqa: BLE001 — best-effort; never block session start
-        logger.debug("orphan process-group sweep failed", exc_info=True)
-
-    # Stamp session directories that predate the origin marker, so the
-    # ``/resume`` picker stops offering delegated runs on the FIRST launch
-    # after an upgrade rather than once natural churn has cleared the store.
-    # Runs beside the sweep for the same reason it does: startup is when the
-    # store is quiet, and both are best-effort by construction. A no-op on
-    # every later launch — each directory is answered once and never
-    # re-stamped.
-    from local_operator.resume import backfill_session_origins, backfill_session_titles
-
-    # Same thread treatment as the sweep above: the origin backfill reads each
-    # unmarked transcript's opening, and the title backfill FULLY reads every
-    # transcript that has neither sidecar nor scan sentinel — the measured
-    # 323 ms term of the boot stall on a real store.
-    await asyncio.to_thread(backfill_session_origins, Path(agent_registry.config_dir))
-    # Stamp the title sidecar alongside the origin marker, so a pre-existing
-    # session is findable by every name it has borne on the first launch after
-    # upgrade rather than only after its next rename. Same best-effort,
-    # once-per-session-ever contract as the origin backfill above.
-    await asyncio.to_thread(backfill_session_titles, Path(agent_registry.config_dir))
+    # Whole-store maintenance (retention sweep, orphan-group reaper, origin and
+    # title backfills) is DISPATCHED here and deliberately NOT awaited. See
+    # :func:`_start_store_maintenance` for what runs and why none of it belongs
+    # on this path. The lease/claim above stay synchronous and on the loop —
+    # sole-writer ordering (lease before transcript creation) is an invariant,
+    # and putting a yield inside that window is how two cold resumes lose the
+    # race the lease exists to arbitrate.
+    _start_store_maintenance(config_manager, Path(agent_registry.config_dir), transcript_dir)
 
     # --- model + stream fn (stream B contracts) ---------------------------
     from local_operator.env import get_env_config
