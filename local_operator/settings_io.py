@@ -165,6 +165,22 @@ class Setting:
     #: settings whose empty string is a real value (``searxng_endpoint``
     #: unset IS ""), on where empty means "no opinion" (``hosting``).
     empty_unsets: bool = False
+    #: The browsing cursor APPLIES this value to the running app without
+    #: storing it, so a user can see a choice before accepting it (#440 §3).
+    #:
+    #: Opt-IN rather than inferred from the kind, because previewing is not a
+    #: property of having choices — it is a claim that the value has a live
+    #: apply path AND a reliable revert, and every target is another revert
+    #: route that has to be correct on every exit from the expansion. Only
+    #: ``tui.theme`` sets it: it already repaints live through
+    #: ``OperatorApp._apply_theme``, and the page captures the applied value on
+    #: open and restores it on every cancel route. ``display.*`` is the other
+    #: candidate and is deliberately left off until that revert is earned.
+    #:
+    #: Consumed by the settings page only. Nothing in this module previews
+    #: anything — a preview must never reach a writer, which is exactly why the
+    #: flag lives beside the write facade rather than inside it.
+    preview: bool = False
 
     @property
     def resolved_choices(self) -> tuple[Choice, ...]:
@@ -477,6 +493,12 @@ SETTINGS: tuple[Setting, ...] = (
         default="dark",
         choices_source=_theme_choices,
         help="Colour ramp. /theme switches it live with an arrow-key preview.",
+        # The one previewing setting. `/theme` already browses with a live
+        # arrow-key preview and restores on cancel, so this makes the settings
+        # page offer the same affordance through the same live-apply path
+        # rather than being the one place a theme can only be tried by keeping
+        # it (#440 §3).
+        preview=True,
     ),
     # The five display flags below are the FLAT-DOTTED case: each `path` is a
     # single element containing a dot, because `tui/settings.py` reads
