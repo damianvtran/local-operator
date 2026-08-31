@@ -53,13 +53,23 @@ GAMMA_START = SAMPLE.index("gamma")
 
 
 async def _boot(pilot: Any, app: OperatorApp) -> Editor:
-    """Wait for the session and focus the composer, as the app's own tests do."""
-    for _ in range(200):
-        if app._session is not None:
-            break
-        await pilot.pause()
-        await asyncio.sleep(0.01)
-    assert app._session is not None, "the session never booted"
+    """Wait for the session and focus the composer.
+
+    Waits on the boot WORKER, not on a 2 s frame budget. ``on_mount`` hands
+    ``_boot_session`` to ``run_worker(group="session")`` so first paint does
+    not wait on the factory, and every assertion below reads through that
+    session. The previous 200 × 10 ms loop was a bet that 2 s outlasts the
+    factory, which is the same class #461 converted in ``test_subagent_stats``.
+    Under contention that budget lost as a stylesheet lookup against an
+    unmounted editor (``KeyError: No 'text-area--gutter' key``, #463).
+    """
+    workers = [w for w in app.workers if w.group == "session"]
+    if workers:
+        await app.workers.wait_for_complete(workers)
+    assert app._session is not None, (
+        "no session worker is pending and no session was adopted — the "
+        "boot worker never ran, so waiting here would have waited on nothing"
+    )
     editor = app.query_one(Editor)
     editor.focus()
     await pilot.pause()
@@ -322,7 +332,19 @@ async def test_real_teardown_settles_a_held_escape_and_leaks_no_callback() -> No
         assert editor._pending_escape is not None, "the escape is held"
 
         await editor.remove()
-        await _settle(pilot)
+        # Wait on the REAL unmount conditions, not on a handful of pauses.
+        # ``_settle`` of 5 turns was enough on an idle box and lost under CI
+        # load (#463): a CSS refresh timer then restyled the removed editor
+        # (``KeyError: text-area--gutter``) on the way out of ``run_test``.
+        for _ in range(80):
+            if not editor.is_attached and editor._pending_escape is None:
+                break
+            await pilot.pause()
+        else:
+            raise AssertionError(
+                f"teardown never settled (attached={editor.is_attached}, "
+                f"pending={editor._pending_escape is not None})"
+            )
 
         assert fired == ["escape"], "blur wins the race and flushes"
         assert editor._pending_escape is None, "nothing is left pending"
