@@ -106,8 +106,8 @@ function SessionCard({
 			className="flex w-full flex-col gap-0.5 rounded-md px-2 py-1.5 text-left select-none active:bg-elevated"
 		>
 			<div className="flex items-center gap-2">
-				{/* ONE reserved indicator slot serving all four states, so every
-				    title starts at the same x forever — indicators change colour,
+				{/* ONE reserved indicator slot serving every state, so every title
+				    starts at the same x forever — indicators change colour,
 				    never geometry.
 
 				    The slot is sized to the LARGEST occupant (the 12px spinner)
@@ -117,12 +117,27 @@ function SessionCard({
 				    ~19.5px right of every other row's, so the reserved-slot
 				    promise held for three states and broke on the fourth — the
 				    one that changes most often. Spinner itself is untouched; it
-				    is a shared component and its own size is correct. */}
+				    is a shared component and its own size is correct.
+
+				    THE LADDER decides what occupies the slot, not `streaming`.
+				    An approval gate runs INSIDE a turn (the harness blocks in
+				    _execute_tool_calls, between agent_start and agent_end), so
+				    the ordinary "may I run this?" carries streaming AND pending
+				    at once. Testing `streaming` first therefore replaced the red
+				    pulse with a neutral spinner on exactly the loudest state in
+				    the ladder — the pulse is the only motion reserved for danger,
+				    and it was being spent on ordinary work. Decision wins the
+				    slot; "working" is still carried on that row by the title's
+				    shimmer (applied below whenever `s.streaming`), which is
+				    sufficient and costs no geometry — a second mark would have
+				    to come out of the same 12px box the alignment depends on. */}
 				<span
 					className="flex size-3 shrink-0 items-center justify-center"
-					aria-hidden={s.streaming ? undefined : true}
+					aria-hidden={!decision && s.streaming ? undefined : true}
 				>
-					{s.streaming ? (
+					{decision ? (
+						<span className="lo-pulse inline-block size-1.5 rounded-full bg-danger" />
+					) : s.streaming ? (
 						/* The obvious in-progress mark beside the title: a small
 						   loading wheel, not just the text sweep — the sweep alone
 						   was too subtle to catch at a glance. */
@@ -131,11 +146,7 @@ function SessionCard({
 						<span
 							className={cn(
 								"inline-block size-1.5 rounded-full",
-								decision
-									? "lo-pulse bg-danger"
-									: unread
-										? "bg-accent"
-										: "bg-transparent",
+								unread ? "bg-accent" : "bg-transparent",
 							)}
 						/>
 					)}

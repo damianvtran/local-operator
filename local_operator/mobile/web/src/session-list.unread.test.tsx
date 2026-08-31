@@ -126,6 +126,39 @@ describe("SessionCard attention ladder", () => {
 		expect(slot(card).className).toContain("size-3");
 	});
 
+	it("keeps the danger dot when a decision row is ALSO streaming", () => {
+		/* D6: the approval gate runs INSIDE a turn — the harness blocks in
+		   _execute_tool_calls between agent_start and agent_end — so an
+		   ordinary "may I run this?" carries streaming AND pending at once.
+		   An earlier slot tested `streaming` first and replaced the red pulse
+		   with a neutral spinner on the loudest state in the ladder. */
+		sessionList = [
+			summary({
+				session_id: "ds",
+				conversation_name: "Blocked while streaming",
+				needs_attention: true,
+				pending_kind: "approval",
+				streaming: true,
+			}),
+		];
+		render(<SessionListScreen />);
+		const card = cardByName("Blocked while streaming");
+
+		const marker = dot(card);
+		expect(marker.className).toContain("bg-danger");
+		expect(marker.className).toContain("lo-pulse");
+		/* The spinner must NOT have taken the slot. */
+		expect(slot(card).querySelector(".lo-spinner")).toBeNull();
+		/* The decision word still renders on the right. */
+		expect(card.textContent).toContain("approval");
+		/* "Working" is still conveyed — by the title shimmer, which costs no
+		   geometry — so the row does not read as idle-but-blocked. */
+		const title = slot(card).nextElementSibling as HTMLElement;
+		expect(title.className).toContain("lo-shimmer");
+		/* And the slot geometry is unchanged, so the title does not shift. */
+		expect(slot(card).className).toContain("size-3");
+	});
+
 	it("gives every state the SAME indicator slot, so titles never shift", () => {
 		/* D2/U1: the reserved-slot promise held for three states and broke on
 		   streaming, which rendered the spinner IN ADDITION to the slot. One
@@ -135,11 +168,11 @@ describe("SessionCard attention ladder", () => {
 			summary({ session_id: "b", conversation_name: "Working", streaming: true }),
 			summary({ session_id: "c", conversation_name: "Unread", unseen: true }),
 			summary({ session_id: "d", conversation_name: "Idle" }),
+			summary({ session_id: "e", conversation_name: "Deciding", needs_attention: true, pending_kind: "ask", streaming: true }),
 		];
 		render(<SessionListScreen />);
-		const slots = ["Decide", "Working", "Unread", "Idle"].map((name) =>
-			slot(cardByName(name)),
-		);
+		const names = ["Decide", "Working", "Unread", "Idle", "Deciding"];
+		const slots = names.map((name) => slot(cardByName(name)));
 		/* Identical slot geometry across all four; only the contents differ. */
 		for (const s of slots) {
 			expect(s.className).toContain("size-3");
@@ -147,7 +180,7 @@ describe("SessionCard attention ladder", () => {
 		}
 		/* And the title is the slot's next sibling in every state — nothing is
 		   inserted between the slot and the name. */
-		for (const name of ["Decide", "Working", "Unread", "Idle"]) {
+		for (const name of names) {
 			const card = cardByName(name);
 			const title = slot(card).nextElementSibling as HTMLElement;
 			expect(title.textContent).toBe(name);
