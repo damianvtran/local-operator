@@ -4,12 +4,15 @@ import base64
 import csv
 import hashlib
 import importlib
+import importlib.machinery
 import importlib.metadata
 import importlib.util
 import marshal
 import os
 import shutil
+import subprocess
 import sys
+import sysconfig
 from io import StringIO
 from pathlib import Path
 from types import ModuleType
@@ -548,6 +551,110 @@ def test_sourceless_bytecode_under_owned_root_never_executes(
         assert not marker.exists()
     finally:
         _forget_package()
+
+
+def _compile_extension(tmp_path: Path, module_name: str) -> Path:
+    """Compile a real extension, skipping when this host cannot build one.
+
+    A hand-written fake ``.so`` would prove nothing here: the point is that the
+    ordinary loader really dlopens the verified path, which only a genuine
+    module with a ``PyInit`` symbol exercises.
+    """
+
+    compiler = shutil.which("cc") or shutil.which("gcc")
+    include = sysconfig.get_paths()["include"]
+    if compiler is None or not Path(include, "Python.h").exists():
+        pytest.skip("no C compiler or CPython headers available")
+
+    source = tmp_path / f"{module_name}.c"
+    source.write_text(
+        "#include <Python.h>\n"
+        "static PyObject *value(PyObject *self, PyObject *args) {\n"
+        "    (void)self; (void)args;\n"
+        '    return PyUnicode_FromString("native-verified");\n'
+        "}\n"
+        "static PyMethodDef Methods[] = {\n"
+        '    {"value", value, METH_NOARGS, "marker"},\n'
+        "    {NULL, NULL, 0, NULL}\n"
+        "};\n"
+        "static struct PyModuleDef mod = {PyModuleDef_HEAD_INIT, "
+        f'"{module_name}", NULL, -1, Methods}};\n'
+        f"PyMODINIT_FUNC PyInit_{module_name}(void) {{ return PyModule_Create(&mod); }}\n"
+    )
+    built = tmp_path / f"{module_name}{importlib.machinery.EXTENSION_SUFFIXES[0]}"
+    result = subprocess.run(
+        [
+            compiler,
+            "-shared",
+            "-undefined",
+            "dynamic_lookup",
+            f"-I{include}",
+            "-o",
+            str(built),
+            str(source),
+        ],
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        pytest.skip(f"extension build unsupported here: {result.stderr.decode()[:200]}")
+    source.unlink()
+    return built
+
+
+@pytest.mark.parametrize("placement", ["in-package", "top-level"])
+def test_record_covered_extension_loads_and_is_hash_verified(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, placement: str
+) -> None:
+    """A recorded extension must load wherever it sits, and only if it matches."""
+
+    package = tmp_path / "advpkg"
+    package.mkdir()
+    (package / "__init__.py").write_text("")
+    built = _compile_extension(tmp_path, "_speedups")
+    if placement == "in-package":
+        extension = package / built.name
+        built.rename(extension)
+        (package / "entry.py").write_text(
+            "from . import _speedups\n\n\ndef create():\n    return _speedups.value()\n"
+        )
+    else:
+        extension = built
+        (package / "entry.py").write_text(
+            "import _speedups\n\n\ndef create():\n    return _speedups.value()\n"
+        )
+
+    def load() -> object:
+        raise AssertionError("entry point must not be imported by the import system")
+
+    entry_point = FakeEntryPoint(load)
+    entry_point.name = "adv"
+    entry_point.value = "advpkg.entry:create"
+    distribution = FakeDistribution(tmp_path, [entry_point])
+    distribution.make_record()
+    rows = {row[0]: row for row in _record_rows(distribution)}
+    assert str(extension.relative_to(tmp_path)) in rows
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    try:
+        with _verified_imports(cast(importlib.metadata.Distribution, distribution), rows):
+            module = importlib.import_module("advpkg.entry")
+            assert module.create() == "native-verified"
+    finally:
+        _forget_package()
+        sys.modules.pop("_speedups", None)
+
+    # Same size, different bytes: only a hash comparison catches this, so it
+    # proves the extension is verified rather than merely located.
+    mutated = bytearray(extension.read_bytes())
+    mutated[-1] ^= 0xFF
+    extension.write_bytes(bytes(mutated))
+    try:
+        with pytest.raises(AdapterDiscoveryError, match="RECORD hash differs"):
+            with _verified_imports(cast(importlib.metadata.Distribution, distribution), rows):
+                importlib.import_module("advpkg.entry")
+    finally:
+        _forget_package()
+        sys.modules.pop("_speedups", None)
 
 
 def _two_root_distribution(tmp_path: Path) -> FakeDistribution:

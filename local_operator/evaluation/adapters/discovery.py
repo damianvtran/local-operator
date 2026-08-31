@@ -299,6 +299,27 @@ def verify_distribution(selector: AdapterSelector) -> importlib.metadata.Distrib
     return distribution
 
 
+def _module_stem(filename: str) -> str:
+    """Strip an importable suffix so a file name yields its module name.
+
+    Extension suffixes are checked longest-first because ``.abi3.so`` and
+    ``.so`` overlap, and the shorter one would otherwise leave ``.abi3``
+    attached and silently fail the identifier test. Handling extensions here is
+    what makes an owned root independent of whether the module ships as source
+    or as a compiled artifact.
+    """
+
+    suffixes = sorted(
+        [*importlib.machinery.SOURCE_SUFFIXES, *importlib.machinery.EXTENSION_SUFFIXES],
+        key=len,
+        reverse=True,
+    )
+    for suffix in suffixes:
+        if filename.endswith(suffix):
+            return filename[: -len(suffix)]
+    return filename
+
+
 def _verify_recorded_file(
     distribution: importlib.metadata.Distribution,
     rows: dict[str, list[str]],
@@ -409,6 +430,13 @@ class _VerifiedDistributionFinder:
     little against the real threat model: an adapter is already arbitrary code
     in an isolated worker and can simply inline whatever it wants in its own
     verified source.
+
+    Compiled extensions are SUPPORTED when RECORD covers them, at top level and
+    inside a package alike, because real adapter wheels ship them and the
+    package digest already attests to their bytes. Refusing them would reject
+    the exact artifact the pin covers. Bytecode is the opposite case and stays
+    refused: a ``.pyc`` is never a match, so a sourceless module always falls
+    through to ``_refuse_unrecorded_artifacts``.
     """
 
     def __init__(
@@ -421,7 +449,7 @@ class _VerifiedDistributionFinder:
         self._owned: set[str] = set()
         for relative in rows:
             head, _, tail = relative.partition("/")
-            name = head[:-3] if not tail and head.endswith(".py") else head
+            name = head if tail else _module_stem(head)
             if name.isidentifier():
                 self._owned.add(name)
 
@@ -443,10 +471,19 @@ class _VerifiedDistributionFinder:
             *importlib.machinery.EXTENSION_SUFFIXES,
         ]
         for suffix in suffixes:
-            if Path(str(self._distribution.locate_file(f"{stem}{suffix}"))).exists():
-                raise AdapterDiscoveryError("adapter module is not RECORD-covered")
-            if Path(str(self._distribution.locate_file(f"{stem}/__init__{suffix}"))).exists():
-                raise AdapterDiscoveryError("adapter package init is not RECORD-covered")
+            for relative, message in (
+                (f"{stem}{suffix}", "adapter module is not RECORD-covered"),
+                (f"{stem}/__init__{suffix}", "adapter package init is not RECORD-covered"),
+            ):
+                if relative in self._rows:
+                    # Only bytecode can reach this branch while recorded, since
+                    # source and extensions are candidates above. Saying it is
+                    # uncovered would be a lie about a file RECORD does cover.
+                    raise AdapterDiscoveryError(
+                        "adapter bytecode is never loaded even when RECORD-covered"
+                    )
+                if Path(str(self._distribution.locate_file(relative))).exists():
+                    raise AdapterDiscoveryError(message)
 
     def find_spec(self, fullname: str, path: Any = None, target: Any = None) -> Any:
         del path, target
@@ -456,9 +493,16 @@ class _VerifiedDistributionFinder:
         if not all(part.isidentifier() for part in parts):
             raise AdapterDiscoveryError("adapter module name is not a dotted identifier")
         stem = "/".join(parts)
-        package_init = f"{stem}/__init__.py"
-        module_file = f"{stem}.py"
-        matches = sorted({package_init, module_file} & self._rows.keys())
+        # Extensions are candidates alongside source because RECORD covers them
+        # and ``package_digest`` already accounts for their bytes; refusing them
+        # would reject the very artifact the pin attests to. Bytecode is
+        # deliberately absent: a `.pyc` is never a match, so it always falls
+        # through to refusal.
+        candidates: dict[str, bool] = {f"{stem}.py": False, f"{stem}/__init__.py": True}
+        for suffix in importlib.machinery.EXTENSION_SUFFIXES:
+            candidates[f"{stem}{suffix}"] = False
+            candidates[f"{stem}/__init__{suffix}"] = True
+        matches = sorted(candidates.keys() & self._rows.keys())
         if len(matches) > 1:
             raise AdapterDiscoveryError("adapter module is ambiguously RECORD-covered")
         if not matches:
@@ -474,12 +518,28 @@ class _VerifiedDistributionFinder:
             return None
         relative = matches[0]
         verified_path, source = _verify_recorded_file(self._distribution, self._rows, relative)
-        is_package = relative.endswith("/__init__.py")
+        is_package = candidates[relative]
+        search = [str(verified_path.parent)] if is_package else None
+        if relative.endswith(".py"):
+            return importlib.util.spec_from_file_location(
+                fullname,
+                verified_path,
+                loader=_VerifiedSourceLoader(verified_path, source),
+                submodule_search_locations=search,
+            )
+        # Verification of an extension means the file's bytes matched RECORD and
+        # the ordinary loader is then pointed at that exact verified path. It is
+        # weaker than the source guarantee by one specific step: source executes
+        # from the in-memory bytes that were hashed, whereas dlopen re-reads the
+        # file, so a swap between the hash and the dlopen is undetected. That
+        # residual TOCTOU is the same class as the executable one documented on
+        # ResolvedLaunch, and is accepted for the same reason -- the alternative
+        # is refusing artifacts the package digest already attests to.
         return importlib.util.spec_from_file_location(
             fullname,
             verified_path,
-            loader=_VerifiedSourceLoader(verified_path, source),
-            submodule_search_locations=[str(verified_path.parent)] if is_package else None,
+            loader=importlib.machinery.ExtensionFileLoader(fullname, str(verified_path)),
+            submodule_search_locations=search,
         )
 
 
