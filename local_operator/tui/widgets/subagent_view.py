@@ -2385,11 +2385,17 @@ class SubagentView(Vertical):
         # for the life of the page.
         self._arm_arrows()
         spinner = SPINNER_FRAMES[self._spinner_index] if self._running else ""
-        # The tool COUNT, not the entry count: the memo has to key on what the
-        # title renders, or a row replaced by one of a different kind at equal
-        # length paints a stale header. Sound on its own, rather than by way
-        # of the spinner happening to repaint eight times a second.
-        tools = sum(1 for entry in self._entries if entry.kind == "tool")
+        # Counts come from the FOLDED rows the body already trusts, rather than
+        # re-interpreting raw events in the chrome. Attempts remain visible while
+        # settled errors add the outcome signal; an in-flight row has no outcome
+        # yet and therefore must not be presented as a failure.
+        tool_entries = [entry for entry in self._entries if entry.kind == "tool"]
+        tools = len(tool_entries)
+        failed_tools = sum(1 for entry in tool_entries if entry.outcome == "error")
+        # The tool COUNTS, not the entry count: the memo has to key on what the
+        # title renders, or a row settling from running to failed at equal length
+        # paints a stale header. Sound on its own, rather than by way of the
+        # spinner happening to repaint eight times a second.
         # Role and effort are part of what the title paints, so they belong in
         # the memo key: without them a page retargeted from a task to a scout
         # (same label width, different role) would keep the stale header.
@@ -2399,6 +2405,7 @@ class SubagentView(Vertical):
             self._queued,
             self._elapsed,
             tools,
+            failed_tools,
             width,
             spinner,
             self._agent_role,
@@ -2422,7 +2429,7 @@ class SubagentView(Vertical):
         # that (see `assistant.py`'s frozen-epoch check); it is a module global
         # read, so carrying it costs nothing per tick.
         epoch = theme_mod.get_theme_epoch()
-        self._title_text = self._title_row(width, spinner, tools)
+        self._title_text = self._title_row(width, spinner, tools, failed_tools)
         # Keyed on WIDTH alone: the row is a pure function of it, while the
         # memo above also carries the spinner and therefore fires eight times
         # a second — re-measuring five candidate rungs and layout-refreshing
@@ -2483,8 +2490,8 @@ class SubagentView(Vertical):
             )
             self._rule.update(self._rule_text, layout=False)
 
-    def _title_row(self, width: int, spinner: str, tools: int) -> Text:
-        """``Subagent · <role> · <label>  <glyph> <status> · <effort> · <elapsed> · <n> tools``.
+    def _title_row(self, width: int, spinner: str, tools: int, failed_tools: int = 0) -> Text:
+        """Build the adaptive title, including attempted and failed tool counts.
 
         The breadcrumb is dim and the LABEL carries the base ink, which
         inverts the usage card's ``Usage  <target>`` weighting on purpose:
@@ -2580,7 +2587,12 @@ class SubagentView(Vertical):
             for word_choice in word_choices if keep_word else [word_choices[-1]]:
                 tail: list[tuple[str, Style]] = []
                 if tools:
-                    tail.append((f" · {tools} tool{'' if tools == 1 else 's'}", dim))
+                    attempts = f"{tools} tool{'' if tools == 1 else 's'}"
+                    failures = f" · {failed_tools} failed" if failed_tools else ""
+                    # Attempt and failure counts are one indivisible field: the
+                    # existing whole-field ladder may keep both or drop both,
+                    # but can never leave a clipped number that changes meaning.
+                    tail.append((f" · {attempts}{failures}", dim))
                 tail.append((f" · {self._elapsed}", dim))
                 # Effort sits AFTER elapsed in the list, so it is dropped LATER
                 # (the ladder peels ``tail`` from the front): the tier is part
