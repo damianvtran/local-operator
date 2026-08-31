@@ -3,8 +3,12 @@ name: Browser extension
 on:
   push:
     branches:
+      # `main` only, matching ci.yml: a `dev-*` branch with an open PR fired this
+      # workflow twice for the same commit (a push run and a pull_request run)
+      # for one identical result. Paths-gating kept the volume low enough that
+      # it never dominated the queue, but the duplication was the same defect
+      # and is fixed the same way.
       - main
-      - 'dev-*'
     paths:
       - 'extension/**'
       - 'local_operator/browser_bridge/protocol.py'
@@ -16,9 +20,17 @@ on:
       - 'local_operator/browser_bridge/gen_ts.py'
   workflow_dispatch:
 
+# Matches ci.yml, including the per-SHA group for `main` so a merge commit's
+# run can never be evicted by the next merge. See the long note in ci.yml for
+# why the SHA is in the key rather than `queue: max`.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.ref == 'refs/heads/main' && github.sha || 'shared' }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

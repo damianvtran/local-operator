@@ -29,6 +29,10 @@ jobs:
   # ---------------------------------------------------------------------------
   extension-release:
     runs-on: ubuntu-latest
+    # Bounded so a wedged step cannot hold one of the account's 20 concurrency
+    # slots for GitHub's 360-minute default. This is the RELEASE path, so a
+    # squatting job here blocks publishing, not just a branch's CI.
+    timeout-minutes: 15
     permissions:
       contents: write  # upload the zip as a release asset
     steps:
@@ -118,6 +122,7 @@ jobs:
 
   release-build:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     outputs:
       skip_build: ${{ steps.tag-check.outputs.skip_build }}
 
@@ -179,6 +184,7 @@ jobs:
 
   pypi-publish:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     needs:
       - release-build
     if: ${{ needs.release-build.result == 'success' && needs.release-build.outputs.skip_build == 'false' }}
