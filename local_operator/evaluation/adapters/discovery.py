@@ -9,6 +9,7 @@ import importlib.metadata
 import inspect
 import json
 import os
+import posixpath
 import stat
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -249,7 +250,12 @@ def _record_rows(distribution: Any) -> list[list[str]]:
         algorithm, separator, digest = encoded_hash.partition("=")
         if separator != "=" or algorithm != "sha256" or not digest:
             raise AdapterDiscoveryError("adapter RECORD must use sha256 hashes")
-        file_path = Path(distribution.locate_file(path))
+        # A RECORD path is attacker-controlled data: normalize before it can be
+        # joined onto the install root, so no entry escapes the distribution.
+        normalized = posixpath.normpath(path)
+        if normalized != path or posixpath.isabs(path) or normalized.split("/")[0] == "..":
+            raise AdapterDiscoveryError("adapter RECORD path is not a normalized relative path")
+        file_path = Path(str(distribution.locate_file(path)))
         try:
             info = file_path.stat()
             data = file_path.read_bytes()
@@ -260,7 +266,9 @@ def _record_rows(distribution: Any) -> list[list[str]]:
         actual = (
             base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode("ascii")
         )
-        if actual != digest:
+        # Wheel RECORD hashes are unpadded by PEP 376, but a conformant padded
+        # value must not read as a content mismatch.
+        if actual != digest.rstrip("="):
             raise AdapterDiscoveryError("adapter RECORD hash differs from installed file")
         canonical.append([path, encoded_hash, size])
     if not canonical:
@@ -287,26 +295,51 @@ def verify_distribution(selector: AdapterSelector) -> importlib.metadata.Distrib
     return distribution
 
 
+def _verify_recorded_file(
+    distribution: importlib.metadata.Distribution,
+    rows: dict[str, list[str]],
+    relative: str,
+) -> Path:
+    path = Path(str(distribution.locate_file(relative)))
+    _symlink_free(path)
+    encoded_hash = rows[relative][1].split("=", 1)[1].rstrip("=")
+    actual = (
+        base64.urlsafe_b64encode(hashlib.sha256(path.read_bytes()).digest())
+        .rstrip(b"=")
+        .decode("ascii")
+    )
+    if actual != encoded_hash:
+        raise AdapterDiscoveryError("adapter module RECORD hash differs")
+    return path
+
+
 def _verified_entry_module(
     distribution: importlib.metadata.Distribution, selector: AdapterSelector
 ) -> tuple[str, Path]:
     module, separator, attribute = selector.entry_point.partition(":")
     if separator != ":" or not module or not attribute or ":" in attribute:
         raise AdapterDiscoveryError("adapter entry point must be module:attribute")
-    candidates = {f"{module.replace('.', '/')}.py", f"{module.replace('.', '/')}/__init__.py"}
+    parts = module.split(".")
+    if not all(part.isidentifier() for part in parts):
+        raise AdapterDiscoveryError("adapter entry module is not a dotted identifier")
     rows = {row[0]: row for row in _record_rows(distribution)}
+    # Importing pkg.sub.mod executes every ancestor __init__ first, so an
+    # unrecorded ancestor would run arbitrary code before any verification.
+    # Each ancestor must be RECORD-covered and hash-matched, or genuinely absent
+    # from disk (a real namespace package).
+    for depth in range(1, len(parts)):
+        ancestor = "/".join(parts[:depth]) + "/__init__.py"
+        on_disk = Path(str(distribution.locate_file(ancestor)))
+        if ancestor in rows:
+            _verify_recorded_file(distribution, rows, ancestor)
+            continue
+        if on_disk.exists():
+            raise AdapterDiscoveryError("adapter package init is not RECORD-covered")
+    candidates = {f"{'/'.join(parts)}.py", f"{'/'.join(parts)}/__init__.py"}
     matches = sorted(candidates & rows.keys())
     if len(matches) != 1:
         raise AdapterDiscoveryError("adapter entry module is not uniquely RECORD-covered")
-    module_path = Path(str(distribution.locate_file(matches[0])))
-    _symlink_free(module_path)
-    encoded_hash = rows[matches[0]][1].split("=", 1)[1]
-    actual = base64.urlsafe_b64encode(hashlib.sha256(module_path.read_bytes()).digest()).rstrip(
-        b"="
-    )
-    if actual.decode() != encoded_hash:
-        raise AdapterDiscoveryError("adapter entry module RECORD hash differs")
-    return module, module_path
+    return module, _verify_recorded_file(distribution, rows, matches[0])
 
 
 def load_selected_adapter(selector: AdapterSelector) -> EvaluationAdapter:

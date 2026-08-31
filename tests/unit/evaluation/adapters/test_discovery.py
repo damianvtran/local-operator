@@ -150,6 +150,71 @@ def test_hardlinked_interpreter_is_accepted_and_content_mutation_detected(
         validate_resolved_launch(resolved)
 
 
+def test_unrecorded_package_init_is_rejected_before_it_executes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An ancestor __init__ runs before the leaf module, so it must be recorded."""
+
+    marker = tmp_path / "init-executed.marker"
+    package = tmp_path / "pkg"
+    (package / "sub").mkdir(parents=True)
+    side_effect = f"from pathlib import Path\nPath({str(marker)!r}).write_text('ran')\n"
+    (package / "__init__.py").write_text(side_effect)
+    (package / "sub" / "__init__.py").write_text(side_effect)
+    leaf = package / "sub" / "mod.py"
+    leaf.write_text("def create():\n    return object()\n")
+
+    def load() -> object:
+        raise AssertionError("entry point loaded before verification")
+
+    entry = FakeEntryPoint(load)
+    entry.name = "tiny"
+    entry.value = "pkg.sub.mod:create"
+    distribution = FakeDistribution(tmp_path, [entry])
+    # RECORD covers only the leaf module, exactly like the crafted attack.
+    data = leaf.read_bytes()
+    digest = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode()
+    rows = [
+        ["pkg/sub/mod.py", f"sha256={digest}", str(len(data))],
+        ["tiny_adapter-1.0.dist-info/RECORD", "", ""],
+    ]
+    target = StringIO()
+    csv.writer(target, lineterminator="\n").writerows(rows)
+    distribution._record = target.getvalue()
+    selector = selected(tmp_path, distribution_digest(distribution)).model_copy(
+        update={"entry_point": "pkg.sub.mod:create"}
+    )
+    monkeypatch.setattr(importlib.metadata, "distribution", lambda _: distribution)
+    with pytest.raises(AdapterDiscoveryError, match="not RECORD-covered"):
+        load_selected_adapter(selector)
+    assert not marker.exists()
+
+
+def test_record_rejects_absolute_and_traversal_paths(tmp_path: Path) -> None:
+    distribution = fake_distribution(tmp_path, [])
+    rows = list(csv.reader(distribution._record.splitlines()))
+    escaped = [["../outside.py", rows[0][1], rows[0][2]], rows[-1]]
+    target = StringIO()
+    csv.writer(target, lineterminator="\n").writerows(escaped)
+    distribution._record = target.getvalue()
+    with pytest.raises(AdapterDiscoveryError, match="normalized relative path"):
+        distribution_digest(distribution)
+
+
+def test_record_accepts_padded_base64_hash(tmp_path: Path) -> None:
+    distribution = fake_distribution(tmp_path, [])
+    rows = list(csv.reader(distribution._record.splitlines()))
+    padded = []
+    for row in rows:
+        if row[1].startswith("sha256="):
+            row = [row[0], row[1] + "==", row[2]]
+        padded.append(row)
+    target = StringIO()
+    csv.writer(target, lineterminator="\n").writerows(padded)
+    distribution._record = target.getvalue()
+    assert distribution_digest(distribution)
+
+
 def test_workspace_content_mutation_changes_digest(tmp_path: Path) -> None:
     base = selected(tmp_path, "a" * 64)
     workspace = Path(base.workspace)
