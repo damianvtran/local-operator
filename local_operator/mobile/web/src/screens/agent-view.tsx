@@ -59,29 +59,64 @@ function normalizeText(text: string): string {
 	return text.replace(/\s+/g, " ").trim();
 }
 
+/** Bound the daemon applies to a row's `prompt` before it reaches the wire.
+ * Mirrors `SUBAGENT_PROMPT_PREVIEW_CHARS` in `local_operator/mobile/projection.py`,
+ * where `_compact` emits `text[: limit - 1] + "…"` — so a preview that was
+ * actually truncated is exactly this long, and a SHORTER prompt ending in `…`
+ * ends that way because its author typed the character. */
+const SUBAGENT_PROMPT_PREVIEW_CHARS = 1_000;
+
+/** The row text plus each of its paragraph-delimited suffixes, longest first.
+ *
+ * A launch message is structurally `{preamble}\n\n{prompt}`, and every
+ * preamble builder (`AgentProfile.preamble`, `Team.member_preamble`,
+ * `SCOUT_PREAMBLE`, the specialist join) terminates on a blank line — so the
+ * launch task always begins right after a paragraph break, or at offset 0 when
+ * there is no preamble at all. Splitting there is what lets the comparison stay
+ * anchored to a real structural boundary: a steer that merely CLOSES by
+ * restating the task ("Actually ignore that and Implement the route") has no
+ * blank line in front of the restatement and so never yields a matching
+ * candidate, while a genuine launch row does.
+ *
+ * Whitespace inside each candidate is normalised by the caller because the
+ * wire `prompt` has already been flattened by `_compact`; only the paragraph
+ * boundaries themselves must survive long enough to be split on. */
+function launchCandidates(text: string): string[] {
+	const candidates = [text];
+	const separator = /\n[ \t]*\n/g;
+	for (let match = separator.exec(text); match; match = separator.exec(text)) {
+		candidates.push(text.slice(match.index + match[0].length));
+	}
+	return candidates;
+}
+
 /** Does this `parent_message` row already carry the child's LAUNCH task?
  *
  * Identity first: an id equal to `launch_message_id` is conclusive. Legacy and
- * summary-stripped rows have no such id, so fall back to the prompt text —
- * but anchored at the END, not as a loose substring, because the launch row is
- * `{role preamble}\n\n{prompt}` while a steer that merely quotes the task
- * ("Implement the route more narrowly") would satisfy a substring test and
- * wrongly suppress the head.
+ * summary-stripped rows have no such id, so fall back to the prompt text — but
+ * anchored to the paragraph boundary the launch task starts at, never as a
+ * loose substring, because a steer that quotes the task ("Implement the route
+ * more narrowly") would satisfy a substring test and wrongly suppress the head.
  *
- * `prompt` arrives as a bounded PREVIEW (`SUBAGENT_PROMPT_PREVIEW_CHARS`
- * compacts it and appends an ellipsis), so a truncated preview is matched as a
- * prefix of the row instead. That branch is only reachable at ~1000 characters
- * of agreement, far past coincidence. */
+ * `prompt` arrives as a bounded PREVIEW, so a genuinely truncated one is
+ * matched as a PREFIX of its candidate rather than by equality. That looser
+ * comparison is gated on the preview bound as well as the trailing ellipsis:
+ * keying on the character alone put an author's own "…" — which costs a human
+ * one keystroke — on the loose path and reopened the false positive the
+ * anchoring exists to close. */
 function isLaunchHead(entry: TranscriptEntry, detail: SubagentDetail): boolean {
 	if (detail.launch_message_id && entry.id === detail.launch_message_id) return true;
 	const prompt = normalizeText(detail.prompt);
 	if (!prompt) return false;
-	const text = normalizeText(entry.text);
-	if (prompt.endsWith("…")) {
-		const head = prompt.slice(0, -1);
-		return head.length > 0 && text.includes(head);
-	}
-	return text === prompt || text.endsWith(` ${prompt}`);
+	// `- 1` tolerates a preview whose flattening trimmed a character; the cap is
+	// ~1000, so the loose path still demands that much agreement to be reached.
+	const truncated = prompt.endsWith("…") && prompt.length >= SUBAGENT_PROMPT_PREVIEW_CHARS - 1;
+	const needle = truncated ? prompt.slice(0, -1) : prompt;
+	if (!needle) return false;
+	return launchCandidates(entry.text).some((candidate) => {
+		const text = normalizeText(candidate);
+		return truncated ? text.startsWith(needle) : text === needle;
+	});
 }
 
 /** The launch prompt is durable child history, while `prompt` is the raw

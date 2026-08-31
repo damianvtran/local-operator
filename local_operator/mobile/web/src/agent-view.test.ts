@@ -91,15 +91,54 @@ describe("agent conversation composition", () => {
 		expect(messages.filter((m) => m.kind === "parent_message")).toHaveLength(2);
 	});
 
-	// `prompt` arrives as a bounded preview, so a truncated head still matches.
+	// `prompt` arrives as a bounded preview (SUBAGENT_PROMPT_PREVIEW_CHARS = 1000,
+	// `_compact` emitting `text[: limit - 1] + "…"`), so a head truncated by that
+	// cap must still match — as a PREFIX, since its tail was cut off.
 	it("recognises a truncated prompt preview as the launch head", () => {
-		const launch = entry("launch", "parent_message", `Preamble\n\n${"x".repeat(40)} tail`);
+		const body = "x".repeat(999);
+		const launch = entry("launch", "parent_message", `Preamble\n\n${body} tail`);
 		const messages = agentConversationEntries(detail({
-			prompt: `${"x".repeat(40)}…`,
+			prompt: `${body}…`,
 			launch_message_id: "",
 			transcript: [launch],
 		}));
 		expect(messages).toEqual([launch]);
+	});
+
+	// Finding 8. `…` is one keystroke for a human, so "ends in an ellipsis" is
+	// not evidence of truncation. A SHORT prompt ending that way must stay on
+	// the anchored path — taking the loose prefix path let a steer that merely
+	// quotes the task suppress the head, the exact defect the anchoring closed.
+	it("does not treat an author's own trailing ellipsis as a truncated preview", () => {
+		const prompt = "Investigate why the retry loop stalls…";
+		const steer = entry("s1", "parent_message", `About 'Investigate why the retry loop stalls' - focus on retries first`);
+		const messages = agentConversationEntries(detail({
+			prompt,
+			launch_message_id: "",
+			transcript: [steer],
+		}));
+		expect(messages).toEqual([
+			expect.objectContaining({ kind: "parent_message", text: prompt }),
+			steer,
+		]);
+	});
+
+	// Finding 9. End-anchoring alone accepted a steer that CLOSES by restating
+	// the task. The launch row is structurally `{preamble}\n\n{prompt}`, so the
+	// task always begins at a paragraph boundary; a restatement mid-sentence
+	// does not, and must not suppress the head.
+	it("does not treat a steer that ends by restating the task as the launch head", () => {
+		const prompt = "Implement the route";
+		const steer = entry("s1", "parent_message", "Actually ignore that and Implement the route");
+		const messages = agentConversationEntries(detail({
+			prompt,
+			launch_message_id: "",
+			transcript: [steer],
+		}));
+		expect(messages).toEqual([
+			expect.objectContaining({ kind: "parent_message", text: prompt }),
+			steer,
+		]);
 	});
 });
 

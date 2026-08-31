@@ -14,6 +14,10 @@ they labelled as what the parent did?":
     single row; the multiset renders both.
   * A NOTE envelope with no fact in the window, which the hardcoded label
     reported as a redirection the parent never made.
+  * A MIXED-VINTAGE pair: one steer carrying its fact's id (post-upgrade) and
+    an identical one with a legacy id whose own fact is off-page. The id arm
+    used to suppress its row without spending the fact, leaving a count the
+    legacy row was then wrongly consumed by — two redirections, one row.
 
 Both must render the parent's words and never the ``<parent-message>`` XML.
 """
@@ -62,6 +66,28 @@ async def seed(directory: Path) -> Transcript:
             Message.user(
                 SubagentComms._format_to_child("Focus on retries", expects_reply=False, steer=True),
                 id=f"legacy-{index}",
+            )
+        )
+    # Mixed vintage: an id-correlated steer plus an identical legacy one. A
+    # distinct body keeps this shape's fact budget independent of the pair
+    # above, so the frame shows the two defects separately rather than as one
+    # aggregate count.
+    await transcript.append_custom(
+        HUB_COMMUNICATION_CUSTOM_TYPE,
+        {
+            "direction": "to_child",
+            "body": "Cover the timeout path",
+            "kind": "steer",
+            "communication_id": "m1",
+        },
+    )
+    for message_id in ("m1", "legacy-timeout"):
+        await transcript.append_message(
+            Message.user(
+                SubagentComms._format_to_child(
+                    "Cover the timeout path", expects_reply=False, steer=True
+                ),
+                id=message_id,
             )
         )
     # A note envelope with no fact at all: the label must follow its kind.

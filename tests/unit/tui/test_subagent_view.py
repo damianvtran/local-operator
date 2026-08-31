@@ -1628,6 +1628,61 @@ async def test_two_identical_legacy_steers_render_two_rows(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_mixed_vintage_pair_of_identical_steers_renders_two_rows(tmp_path) -> None:
+    """A child steered identically BEFORE and AFTER the id fix shows two rows.
+
+    The two correlation arms draw on one budget: ``communication_bodies`` counts
+    the facts available to supersede a row. The id arm suppressed its row
+    without spending the matching fact's count, so the leftover count was still
+    on the books when the older, id-less envelope carrying the same words
+    arrived — and that row was suppressed too, by a fact already consumed by its
+    successor. Two redirections delivered, one rendered.
+
+    This is the mixed-vintage shape specifically: one fact carries a
+    ``communication_id`` matching its own row, while the legacy row's own fact
+    sits on an unloaded page (the page boundary the fallback arm exists for).
+    """
+    transcript = Transcript(tmp_path / "child")
+    await transcript.append_custom(
+        HUB_COMMUNICATION_CUSTOM_TYPE,
+        {
+            "direction": "to_child",
+            "body": "Focus on retries",
+            "kind": "steer",
+            "communication_id": "m1",
+        },
+    )
+    # Post-upgrade: the envelope carries its fact's id, so it correlates by id.
+    await transcript.append_message(Message.user(_steer_envelope("Focus on retries"), id="m1"))
+    # Pre-upgrade: same words, unrelated id, and no fact of its own in the
+    # window. It must fall through to the labelled fallback, not be eaten by
+    # the id-matched row's fact.
+    await transcript.append_message(Message.user(_steer_envelope("Focus on retries"), id="legacy"))
+
+    job = _job_with([], status="completed")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    session._subagent_comms = type(
+        "Comms", (), {"session_dir_of": lambda self, _job_id: transcript.directory}
+    )()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(90, 28)) as pilot:
+        view = await _open(pilot, app, job)
+        await _wait_history(pilot, view)
+
+        redirected = [
+            entry.text
+            for entry in view._history_entries
+            if entry.text == "Parent · redirected\nFocus on retries"
+        ]
+        assert redirected == [
+            "Parent · redirected\nFocus on retries",
+            "Parent · redirected\nFocus on retries",
+        ]
+        assert "<parent-message>" not in " ".join(view.rendered_rows())
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("steer", "expects_reply", "label"),
     [

@@ -620,6 +620,17 @@ def fold_transcript_entries(
                 # person either way.
                 body = parent_message.body
                 if entry.id in communication_ids:
+                    # Correlated by id, so this row's fact is accounted for.
+                    # Consume its body count too: the counter is a budget of
+                    # facts still available to supersede a LEGACY row, and a
+                    # fact already spent on an id match must not be spent again.
+                    # A mixed-vintage child (steered both before and after
+                    # steers began carrying their fact's id) otherwise leaves
+                    # the id-matched fact's count behind for an identical
+                    # legacy row to consume, and two delivered steers render as
+                    # one.
+                    if communication_bodies[body]:
+                        communication_bodies[body] -= 1
                     continue
                 if communication_bodies[body]:
                     # Consume this occurrence so a SECOND identical steer is
