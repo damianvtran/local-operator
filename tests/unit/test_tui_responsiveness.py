@@ -71,13 +71,16 @@ class StallRecorder:
 
     Call-site ceilings are site-appropriate, not global. The reconnect and
     connect tests use the strict 50 ms CPU bar (healthy sample 0 ms,
-    regression 116 ms). Sites with legitimate loop CPU — the title-scan
-    test records a healthy 36-38 ms — use a 200 ms CPU bar, because the
-    same work measured 2.4× slower on ubuntu-latest in
-    ``test_launch_subagent.py`` (393-492 ms on a dev box, 1056-1156 ms on
-    CI), and a 50 ms bar would flake a green tree. The wall ceiling is
-    2000 ms everywhere: 3× the worst observed scheduler-noise gap, and
-    still well below the multi-second regressions.
+    regression 90-130 ms). Sites with legitimate loop CPU use a 500 ms CPU
+    bar: ``_prepare`` records a healthy 130-206 ms of loop CPU on a loaded
+    CI runner (measured on the merge run of this probe), so any ceiling
+    below that flakes a green tree, while a multi-second block still blows
+    through it. The title-scan test's REAL guard is structural, not the
+    ceiling — ``threading_get_ident() not in seen_threads`` proves the scan
+    ran off the loop, and it catches the regression even when the CPU
+    numbers overlap. The wall ceiling is 2000 ms everywhere: 3× the worst
+    observed scheduler-noise gap, and still well below the multi-second
+    regressions.
     """
 
     def __init__(self, stall_ms: float = STALL_MS) -> None:
@@ -143,17 +146,20 @@ class StallRecorder:
         )
 
     def assert_no_stall_loaded(
-        self, cpu_ceiling_ms: float = 200.0, wall_ceiling_ms: float = 2000.0
+        self, cpu_ceiling_ms: float = 500.0, wall_ceiling_ms: float = 2000.0
     ) -> None:
-        """Loaded bar: 200 ms of loop-thread CPU, same 2 s wall backstop.
+        """Loaded bar: 500 ms of loop-thread CPU, same 2 s wall backstop.
 
-        The title-scan test records a healthy 36-38 ms of loop CPU for a
-        120-session scan. The same class of CPU-bound work measured 2.4×
-        slower on ubuntu-latest than on a dev box
-        (``test_launch_subagent.py``, 393-492 ms vs 1056-1156 ms), so a
-        50 ms bar would flake a green tree on a slow CI core (~90 ms).
-        200 ms is 2× that projected CI cost and still well below the
-        multi-second regressions (a 2 s scan, a 5 s pricing block).
+        ``_prepare`` records a healthy 130-206 ms of loop CPU on a loaded CI
+        runner (measured on the merge run of this probe, where a 200 ms
+        ceiling flaked a green tree at 206 ms). 500 ms is 2.4× that observed
+        healthy max and still well below the multi-second regressions (a 2 s
+        scan, a 5 s pricing block).
+
+        For the title-scan test specifically, this ceiling is a catastrophic
+        backstop, not the primary guard: ``threading_get_ident() not in
+        seen_threads`` proves the scan ran off the loop and catches the
+        regression even when healthy and regressed CPU numbers overlap.
 
         The wall ceiling is the same catastrophic backstop as
         :meth:`assert_no_stall`: a pure blocking sleep is invisible to the
