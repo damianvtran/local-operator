@@ -487,6 +487,13 @@ class SettingsView(Vertical):
         self._enter_hint = HintButton("enter", lambda: self.action_activate())
         self._reset_hint = HintButton("r", lambda: self.action_reset())
         self._pane_hint = HintButton("←→", lambda: self.action_pane(1))
+        # Shown ONLY while a suggestion dropdown is live, in place of `r`/`←→`
+        # (which do nothing useful there). It advertises tab-completion — the
+        # accelerator that was otherwise undiscoverable below ~140 cols, since
+        # the inline row contract sheds it first (review round 1, D1/U1).
+        # Clicking it completes the highlighted suggestion, the same action Tab
+        # takes, so the footer stays a real affordance for a mouse user.
+        self._tab_hint = HintButton("tab", self._complete_highlighted_suggestion)
         self._exit_hint = HintButton("esc", self._leave)
         self._hints = Horizontal(classes="settings-view-hints")
         self._title_text = Text()
@@ -512,6 +519,12 @@ class SettingsView(Vertical):
         yield self._detail
         with self._hints:
             yield self._move_hint
+            # Composed right after `↑↓` so the dropdown footer reads
+            # `↑↓ suggestions · tab complete · enter save · esc` in that order —
+            # footer hints paint in DOM order, so `leads` ordering alone can't
+            # place it. Hidden (`display = False`) in every non-dropdown state,
+            # so its compose position is invisible there.
+            yield self._tab_hint
             yield self._enter_hint
             yield self._reset_hint
             yield self._pane_hint
@@ -2000,16 +2013,33 @@ class SettingsView(Vertical):
                 self._cancel_edit()
                 self._repaint()
                 return
-            if key in ("up", "down") and has_suggestions:
-                # The dropdown owns the arrows while it is showing — there is no
-                # cursor to move on the page (the editor holds it), so the arrows
-                # have nothing else to do and browsing the list is what a user
-                # reaches for. Wraps, like the model picker's own move.
+            if key in ("up", "down", "ctrl+p", "ctrl+n") and has_suggestions:
+                # The dropdown owns the arrows AND the readline pair while it is
+                # showing — there is no cursor to move on the page (the editor
+                # holds it), so browsing the list is what a user reaches for.
+                # `ctrl+p`/`ctrl+n` move the highlight exactly as `/model`'s
+                # picker binds them (review round 1, U2): a user who learned that
+                # surface must not press ctrl+n mid-edit and be thrown to another
+                # section with their typing gone. Wraps, like the model picker's
+                # own `move`.
                 event.stop()
                 event.prevent_default()
                 count = len(self._suggestions())
-                delta = -1 if key == "up" else 1
+                delta = -1 if key in ("up", "ctrl+p") else 1
                 self._suggest_index = (self._suggest_index + delta) % max(count, 1)
+                self._repaint()
+                return
+            if key in ("pageup", "pagedown") and has_suggestions:
+                # Page the highlight by a windowful, CLAMPED (not wrapping),
+                # mirroring `ModelPicker.page` — a PgDn that silently returned to
+                # the top of the list would read as the list resetting itself.
+                # The step is the visible window so one press moves a screenful
+                # of suggestions, matching `/model`.
+                event.stop()
+                event.prevent_default()
+                count = len(self._suggestions())
+                step = _SUGGEST_ROWS * (1 if key == "pagedown" else -1)
+                self._suggest_index = max(0, min(count - 1, self._suggest_index + step))
                 self._repaint()
                 return
             if key == "tab" and has_suggestions:
@@ -2035,8 +2065,23 @@ class SettingsView(Vertical):
                 # value the catalogue does not match has no highlight, so Enter
                 # saves the typed text directly — the "suggestions assist, never
                 # constrain" contract.
+                #
+                # GATED ON A NON-EMPTY BUFFER (review round 1, BLOCKER). An empty
+                # buffer still yields a highlight — `_suggestions()` returns the
+                # WHOLE catalogue when nothing is typed, so row 0 (`anthropic`)
+                # is "highlighted" over content the user never chose. Accepting
+                # it would write that provider instead of honouring the
+                # `empty_unsets` clear-to-unset gesture: clearing `hosting` and
+                # pressing Enter must UNSET it, not silently store the top row
+                # (the U1 blocker `_commit_edit` fixes and this guard must not
+                # re-open). So an empty buffer falls straight through to
+                # `_commit_edit`, whose `empty_unsets` branch does the unset.
                 suggestion = self._highlighted_suggestion()
-                if suggestion is not None and self._buffer.strip() != suggestion.value:
+                if (
+                    suggestion is not None
+                    and self._buffer.strip()
+                    and self._buffer.strip() != suggestion.value
+                ):
                     self._accept_suggestion(suggestion)
                 self._commit_edit()
                 return
@@ -2086,6 +2131,23 @@ class SettingsView(Vertical):
                     # and left the user 25 rows from where they were.
                     self._caret = 0 if key == "home" else len(self._buffer)
                     self._repaint()
+                return
+            if key in ("pageup", "pagedown", "ctrl+p", "ctrl+n"):
+                # SWALLOWED as a no-op whenever no dropdown is live to page —
+                # the dropdown branches above already consumed these when it was
+                # (review round 1, U2). An OPEN EDITOR must own every navigation
+                # key the same way it owns the printable ones (this method's own
+                # docstring), and these leaked to the page bindings: mid-edit
+                # they cancelled the editor, DISCARDED the typed value and
+                # teleported the cursor to another section — the exact leak
+                # `left/right/home/end` were intercepted to stop, simply omitted
+                # from that fix. Inert here rather than paging is correct: with
+                # no dropdown there is nothing to page, and losing the edit is
+                # never the right answer to a scroll gesture. Covers both the
+                # suggest editor with the list dismissed/empty and every other
+                # text editor on the page (`retry.maxRetries`, an endpoint).
+                event.stop()
+                event.prevent_default()
                 return
             char = getattr(event, "character", None)
             if char and char.isprintable():
@@ -2184,14 +2246,20 @@ class SettingsView(Vertical):
         event.stop()
         row = self._rows[index]
         if row.kind == "suggest" and row.suggestion is not None:
-            # A click on a dropdown row highlights it and accepts it in one
-            # gesture — completing the buffer to that value, exactly as the model
-            # picker's own click chooses a row. It does NOT save: the page's
-            # contract is that only Enter on the chosen value writes (#440), so
-            # a stray click completes and leaves the confirming Enter to the
-            # user, matching what Tab on the same row does.
+            # A click on a dropdown row completes the buffer to its value, then
+            # a SECOND click on that same already-completed row SAVES — the
+            # click-once-select / click-again-activate rhythm the setting rows
+            # themselves use just below, extended so a mouse user has a path to
+            # the write (review round 1, U4). Without it, clicking a suggestion
+            # filled the buffer and then dead-ended: a second click re-completed
+            # to no effect and only the keyboard's Enter could save. The commit
+            # still goes through the one Enter path, so `empty_unsets` and
+            # validation behave identically to pressing Enter.
+            already = self._suggest_index == row.hop_index and self._buffer == row.suggestion.value
             self._suggest_index = row.hop_index
             self._accept_suggestion(row.suggestion)
+            if already:
+                self._commit_edit()
             return
         if not row.selectable:
             return
@@ -2489,6 +2557,16 @@ class SettingsView(Vertical):
             line.append(row.suggestion.label, style=fg if highlighted else muted)
             if row.suggestion.detail:
                 line.append(f"  {row.suggestion.detail}", style=faint)
+            # A `pos/total` cue on the HIGHLIGHTED row, only when the list is
+            # windowed (more matches than fit), so a user arrowing a long
+            # catalogue can tell where they are and how many remain — the
+            # position/count the `/model` picker carries in its footer (review
+            # round 1, U3). Only on the highlight and only when it means
+            # something (windowed), so it never clutters a short list that shows
+            # in full. `hop_index` is 0-based; +1 reads as a human position.
+            total = len(self._suggestions())
+            if highlighted and total > _SUGGEST_ROWS:
+                line.append(f"  {row.hop_index + 1}/{total}", style=dim)
             return line
 
         marker = f"{_CURSOR} " if selected else "  "
@@ -2657,18 +2735,26 @@ class SettingsView(Vertical):
         # the clause advertised a behaviour the row does not have.
         contract = "  enter saves · esc cancels"
         setting = settings_io.resolve_key(self._editing or "")
-        # When a suggestion dropdown is live the contract names the keys that
-        # drive it, or the affordance is undiscoverable: the footer hint contract
-        # has to stay honest (a lit affordance with no advertised key is the "why
-        # doesn't anything happen" complaint U5 records). Preferred over
-        # `clear to unset` because a user staring at a list of choices needs
-        # "how do I pick one" more than "how do I empty this", and both do not
-        # fit; `_suggest_rows` being non-empty is exactly "a dropdown is shown".
+        # When a suggestion dropdown is live the contract names the browse and
+        # complete keys, SHORTENED so it survives the value column at 100 cols
+        # (review round 1, D1/U1). The old long form (`↑↓ suggestions · tab
+        # completes · enter saves · esc`, ~52 cells) only fit at ~140 cols and
+        # was shed to `enter saves ·…` at every common width, so the two new
+        # accelerators were advertised nowhere. `↑↓ · tab · enter saves` is
+        # ~22 cells and fits the ~23-cell room at 100 cols; the footer now
+        # carries the fuller `↑↓ suggestions · tab complete · enter save`
+        # legend, so the row hint can be terse without losing discoverability.
+        # A widest-first ladder keeps the fuller inline form where it fits.
         if self._suggest_rows():
-            full = "  ↑↓ suggestions · tab completes · enter saves · esc"
             room = self._list_width() - _VALUE_COLUMN - cell_len(editor.plain)
-            if cell_len(full) <= room:
-                contract = full
+            for candidate in (
+                "  ↑↓ suggestions · tab completes · enter saves · esc",
+                "  ↑↓ browse · tab complete · enter saves",
+                "  ↑↓ · tab · enter saves",
+            ):
+                if cell_len(candidate) <= room:
+                    contract = candidate
+                    break
         elif setting is not None and setting.empty_unsets:
             full = "  enter saves · esc cancels · clear to unset"
             room = self._list_width() - _VALUE_COLUMN - cell_len(editor.plain)
@@ -2867,6 +2953,20 @@ class SettingsView(Vertical):
         self._suggest_index = 0
         self._suggest_dismissed = False
         self._repaint()
+
+    def _complete_highlighted_suggestion(self) -> None:
+        """Footer `tab` hint's click action: complete the highlighted row.
+
+        The mouse counterpart to pressing Tab — a `None`-returning wrapper
+        because ``HintButton`` takes a ``Callable[[], None]`` and
+        ``_accept_suggestion`` already returns None, but routing the click here
+        (rather than binding the method directly) keeps the guard in one place:
+        a stray click on the hint when no suggestion is highlighted must do
+        nothing rather than raise.
+        """
+        suggestion = self._highlighted_suggestion()
+        if suggestion is not None:
+            self._accept_suggestion(suggestion)
 
     def _reopen_suggestions(self) -> None:
         """Un-dismiss the dropdown and reset the highlight — for buffer edits.
@@ -3733,6 +3833,15 @@ class SettingsView(Vertical):
         enter: _Hint = (self._enter_hint, " change", True)
         reset: _Hint = (self._reset_hint, " default", True)
         pane: _Hint = (self._pane_hint, " panes", True)
+        tab: _Hint = (self._tab_hint, " complete", True)
+        # Is a suggestion dropdown live right now? The footer's editing state
+        # splits on this: a plain text editor keeps `↑↓ move cancel`, but with a
+        # dropdown open ↑↓ browses the list and `tab` completes, so the footer
+        # must say THOSE (review round 1, D1/D2/U1). The always-visible hint is
+        # what a user scans; leaving it reading `move cancel`/`panes` while the
+        # keys browse suggestions and move the caret is the footer-vs-behaviour
+        # disagreement D7 exists to forbid.
+        dropdown_open = bool(self._suggest_rows())
 
         # The footer states what the keys do RIGHT NOW, per state, because it
         # is the row users scan for exactly that. Two states rewrite it:
@@ -3767,8 +3876,16 @@ class SettingsView(Vertical):
         if self._expanded is not None:
             enter = (self._enter_hint, " choose", True)
         if self._editing is not None:
-            move = (self._move_hint, " move cancel", False)
-            enter = (self._enter_hint, " save", True)
+            if dropdown_open:
+                # ↑↓ browses the suggestions and `tab` completes — the real keys
+                # for this state, named where they are always legible instead of
+                # only in the row contract the value column sheds first. `enter`
+                # saves the highlighted/typed value.
+                move = (self._move_hint, " suggestions", False)
+                enter = (self._enter_hint, " save", True)
+            else:
+                move = (self._move_hint, " move cancel", False)
+                enter = (self._enter_hint, " save", True)
 
         def rung(
             leads: list[tuple[HintButton, str, bool]], esc_label: str
@@ -3789,7 +3906,15 @@ class SettingsView(Vertical):
         # change · r default` on a row that honours neither (UX round 1, U2).
         # The detail line already says WHY the row is retired; the footer's job
         # is only to stop advertising keys that will not act.
-        if self._current_is_readonly():
+        if dropdown_open:
+            # The dropdown state offers its own three keys and NOT `r`/`←→`:
+            # `r default` types `r` into the buffer (the #425 anti-pattern
+            # `_reset_applies` already guards) and `←→` moves the caret, not the
+            # pane. Ordered `↑↓ suggestions · tab complete · enter save` so the
+            # browse key leads, the accelerator sits beside it, and the commit
+            # closes the row — the same reading order as the inline contract.
+            leads = [move, tab, enter]
+        elif self._current_is_readonly():
             leads = [move]
         elif not self._reset_applies():
             # The SAME rule, one step finer (#440 §4.4). `r` deletes the stored
@@ -3801,7 +3926,10 @@ class SettingsView(Vertical):
             # a default row as soon as the terminal was narrow enough to shed
             # the pane hint, which is the regression invariant 3 warns about.
             leads = [move, enter]
-        if self._pane_fits():
+        if self._pane_fits() and not dropdown_open:
+            # `←→` moves the caret while an editor is open, so the pane hint is
+            # withheld in the dropdown state where the footer names the caret's
+            # real keys instead (it was already meaningless there).
             leads.append(pane)
         # The narrow rungs shed to a one-word `esc` label, except in the
         # confirm and choosing states where `cancel` IS the one word and
@@ -3840,6 +3968,7 @@ class SettingsView(Vertical):
             self._enter_hint,
             self._reset_hint,
             self._pane_hint,
+            self._tab_hint,
             self._exit_hint,
         ):
             hint.display = hint in visible
@@ -3885,10 +4014,15 @@ class SettingsView(Vertical):
 
     def rendered_hints(self) -> str:
         """The footer as one string, for the width-shedding assertions."""
+        # DOM order — the order the footer actually paints (`compose` yields
+        # `move, tab, enter, reset, pane, esc`), so the assembled string matches
+        # the frame a user reads rather than a bookkeeping order that would put
+        # `tab` after `enter` on screen.
         return "".join(
             hint.rendered()
             for hint in (
                 self._move_hint,
+                self._tab_hint,
                 self._enter_hint,
                 self._reset_hint,
                 self._pane_hint,
