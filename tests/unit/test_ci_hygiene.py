@@ -175,51 +175,46 @@ def test_configured_pyright_excludes_are_a_superset_of_the_running_defaults() ->
 
 
 def test_pipeline_does_not_swallow_a_126_from_a_broken_console_script() -> None:
-    """`cmd | tail` reports tail's 0 even when cmd exited 126.
+    """`cmd | tail` reports tail's 0 even when cmd failed.
 
     That is the #423 mechanism: a stale shebang makes `.venv/bin/black`
-    fail with `bad interpreter` / rc=126, and a gate script that pipes
-    the output looks green. The documented gates (`python -m`, `uvx`)
-    and `make lint`/`format`/`type-check` must not be that pipeline.
+    fail (macOS bash: 126 "bad interpreter"; Linux bash: 127 "required
+    file not found"), and a gate script that pipes the output looks
+    green because it reports `tail`'s 0. The documented gates
+    (`python -m`, `uvx`) and `make lint`/`format`/`type-check` must
+    not be that pipeline.
 
-    This test does not invoke the real `.venv/bin/black` — that would
-    pass on a healthy venv and fail only on a stale one, which is the
-    opposite of a guard. It builds a 126-exiting fake and shows that
-    (a) a pipeline swallows it and (b) `python -m` does not consult
-    that shebang at all.
+    Pinning rc==126 is how this assertion passed on macOS 3.14, then
+    failed on CI 3.12 (PATH continuation found the real flake8, rc=0)
+    and CI 3.13 (absolute path, rc=127). The defect is the swallow,
+    not the errno. Accept any non-zero from the fake as "the script
+    failed"; assert the pipeline then reports 0.
 
-    The fake is invoked by absolute path, not via PATH lookup. Linux
+    The fake is a unique name invoked by absolute path. Linux
     bash/dash continue searching PATH after a bad shebang, so a fake
-    named `flake8` on PATH is skipped and the real flake8 in the venv
-    runs (rc=0) — which is how this assertion passed locally on macOS
-    (no PATH continuation) and then failed on CI 3.12 by detecting it
-    was not exercising the defect. An absolute path cannot be skipped.
+    named `flake8` on PATH is skipped and the real flake8 runs —
+    which is not the defect.
     """
     with tempfile.TemporaryDirectory() as tmp:
-        # Unique name, not `flake8`: even with an absolute-path
-        # invocation we must not share a name with a real console
-        # script, because a future edit that switches back to PATH
-        # lookup would silently start testing the real flake8 again.
         fake = Path(tmp) / "lop-stale-script"
         # A shebang pointing at a path that does not exist is how the
         # real console scripts fail after a worktree is deleted. The
-        # kernel returns 126 ("bad interpreter") before the script body
-        # runs, so the body here is unreachable on purpose.
+        # body is unreachable on purpose.
         fake.write_text("#!/this/interpreter/does/not/exist\n")
         fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
 
         # Direct execve of a missing-interpreter shebang raises
         # FileNotFoundError; a gate script sees the *shell*
-        # translation, which is 126. Drive bash explicitly so we are
-        # not at the mercy of `/bin/sh` being dash vs bash.
+        # translation. Drive bash explicitly so we are not at the
+        # mercy of `/bin/sh` being dash vs bash.
         bash = ["/bin/bash", "-c"]
         direct = subprocess.run(
             [*bash, f"{fake} --version"],
             capture_output=True,
             text=True,
         )
-        assert direct.returncode == 126, (
-            "the fake did not fail with 126 at its own boundary "
+        assert direct.returncode != 0, (
+            "the fake succeeded at its own boundary "
             f"(rc={direct.returncode}, stderr={direct.stderr!r}); "
             "the rest of this test is not exercising the defect"
         )
@@ -230,10 +225,12 @@ def test_pipeline_does_not_swallow_a_126_from_a_broken_console_script() -> None:
             text=True,
         )
         assert piped.returncode == 0, (
-            "the #423 mechanism itself changed: a 126 inside a pipeline "
-            f"no longer reports 0 (rc={piped.returncode}). If shells "
-            "started honouring pipefail by default this test would need "
-            "rewriting, but the Makefile still must not pipe."
+            "the #423 mechanism itself changed: a failing console "
+            "script inside a pipeline no longer reports 0 "
+            f"(direct rc={direct.returncode}, piped rc={piped.returncode}). "
+            "If shells started honouring pipefail by default this "
+            "test would need rewriting, but the Makefile still must "
+            "not pipe."
         )
 
         # `python -m` looks up the module on sys.path; it never execs
