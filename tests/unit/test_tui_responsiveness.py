@@ -72,16 +72,9 @@ class StallRecorder:
     Call-site ceilings are site-appropriate, not global. The reconnect and
     connect tests use the strict 50 ms CPU bar (healthy sample 0 ms,
     regression 90-130 ms). The loaded default is 200 ms of CPU, which suits
-    the boot and turn paths that record ~0 ms healthy CPU. The ONE exception
-    is the title-scan test, which drives ``_prepare`` and records a healthy
-    206 ms of loop CPU on a loaded CI runner (measured on the merge run of
-    this probe; 130-206 ms locally), so it passes ``cpu_ceiling_ms=500``
-    explicitly rather than raising the shared default. Its REAL guard is
-    structural, not the ceiling — ``threading_get_ident() not in
-    seen_threads`` proves the scan ran off the loop, and it catches the
-    regression even when the CPU numbers overlap. The wall ceiling is
-    2000 ms everywhere: 3× the worst observed scheduler-noise gap, and
-    still well below the multi-second regressions.
+    the boot and turn paths that record ~0 ms healthy CPU. The wall ceiling is
+    2000 ms everywhere: 3× the worst observed scheduler-noise gap, and still
+    well below the multi-second regressions.
     """
 
     def __init__(self, stall_ms: float = STALL_MS) -> None:
@@ -287,76 +280,104 @@ def test_sentinel_write_preserves_directory_mtime(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_prepare_store_scans_do_not_stall_the_loop(
+async def test_store_maintenance_callbacks_run_off_the_event_loop_thread(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The sweep and backfills run off the loop: no tick gap above the bar.
+    """Every whole-store pass runs on a worker while preserving its effects.
 
-    Mirrors the design's harness: ``loop.slow_callback_duration`` plus a tick
-    probe over a store shaped like the operator's (many title-less sessions).
-    The scans themselves still RUN (their effects are asserted); only their
-    thread placement is under test.
+    Healthy and regressed CPU samples overlap at this loaded ``_prepare`` site,
+    so no timing ceiling can distinguish correct dispatch from a frozen loop.
+    Thread identity directly detects the regression: moving even one callback
+    out of ``asyncio.to_thread`` puts that callback on the captured loop thread.
 
-    They are also no longer AWAITED by ``_prepare`` — they are dispatched as a
-    background task so session construction does not pay for them — so the wait
-    below is what makes "did they run" answerable at all. Without it this test
-    races the task it is asserting about.
+    Maintenance is dispatched in the background, so the explicit test wait
+    below makes both callback counts and effects deterministic.
     """
+    import os
+
     from local_operator import resume as resume_mod
+    from local_operator.session import retention as retention_mod
+    from local_operator.session.retention import EMPTY_DIR_GRACE_SECONDS
     from local_operator.session_factory import (
         _prepare,
         _start_store_maintenance,
         await_store_maintenance_for_tests,
     )
+    from local_operator.tools import group_reaper as group_reaper_mod
     from tests.unit.test_session_factory import FakeConfigManager, FakeRegistry, _args
 
     config_dir = tmp_path / ".local-operator"
     config_dir.mkdir()
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
-    for index in range(120):
-        _titleless_session(tmp_path, f"{index:08x}abcd")
+    titleless = [_titleless_session(config_dir, f"{index:08x}abcd") for index in range(120)]
+    abandoned = config_dir / "sessions" / "deadbeefcafe"
+    abandoned.mkdir()
+    old = time.time() - EMPTY_DIR_GRACE_SECONDS - 60
+    os.utime(abandoned, (old, old))
 
-    seen_threads: set[int] = set()
-    real_titles = resume_mod.backfill_session_titles
+    loop_thread = threading_get_ident()
+    callback_threads: dict[str, list[int]] = {
+        "retention": [],
+        "group_reaper": [],
+        "origins": [],
+        "titles": [],
+    }
 
-    def titles_from(*_a: Any, **_k: Any) -> int:
-        seen_threads.add(threading_get_ident())
-        return real_titles(*_a, **_k)
+    def record_real(name: str, callback: Any) -> Any:
+        def wrapped(*args: Any, **kwargs: Any) -> Any:
+            callback_threads[name].append(threading_get_ident())
+            return callback(*args, **kwargs)
 
-    monkeypatch.setattr(resume_mod, "backfill_session_titles", titles_from)
+        return wrapped
+
+    monkeypatch.setattr(
+        retention_mod,
+        "sweep_from_config",
+        record_real("retention", retention_mod.sweep_from_config),
+    )
+    monkeypatch.setattr(
+        group_reaper_mod,
+        "sweep_orphan_groups",
+        record_real("group_reaper", group_reaper_mod.sweep_orphan_groups),
+    )
+    monkeypatch.setattr(
+        resume_mod,
+        "backfill_session_origins",
+        record_real("origins", resume_mod.backfill_session_origins),
+    )
+    monkeypatch.setattr(
+        resume_mod,
+        "backfill_session_titles",
+        record_real("titles", resume_mod.backfill_session_titles),
+    )
 
     from local_operator.credentials import CredentialManager
+    from local_operator.resume import TITLE_SCAN_SENTINEL_NAME
 
+    config_manager = FakeConfigManager({"hosting": "test", "model_name": "test-model"})
     args = _args(hosting="test", model="test-model", yolo=True)
     args.resume = None
-    recorder = StallRecorder()
-    await recorder.start()
-    try:
-        plan = await _prepare(
-            args,
-            cast_config(FakeConfigManager({"hosting": "test", "model_name": "test-model"})),
-            CredentialManager(config_dir),
-            cast_registry(FakeRegistry(config_dir)),
-            has_ui=True,
-            cwd=str(tmp_path),
-        )
-        _start_store_maintenance(
-            cast_config(FakeConfigManager({"hosting": "test", "model_name": "test-model"})),
-            config_dir,
-            plan.session_kwargs["transcript"].directory,
-        )
-        await await_store_maintenance_for_tests()
-    finally:
-        await recorder.stop()
-    # 500 ms, not the 200 ms loaded default: this test drives ``_prepare``,
-    # which records a healthy 206 ms of loop CPU on a loaded CI runner
-    # (measured on the merge run of the dual-signal probe). The default would
-    # flake a green tree here, and the real guard is the structural assertion
-    # below anyway — the ceiling is only a catastrophic backstop.
-    recorder.assert_no_stall_loaded(cpu_ceiling_ms=500)
-    # And the scan genuinely ran — in a worker thread, not on the loop.
-    assert seen_threads, "the title backfill never executed"
-    assert threading_get_ident() not in seen_threads
+    plan = await _prepare(
+        args,
+        cast_config(config_manager),
+        CredentialManager(config_dir),
+        cast_registry(FakeRegistry(config_dir)),
+        has_ui=True,
+        cwd=str(tmp_path),
+    )
+    _start_store_maintenance(
+        cast_config(config_manager),
+        config_dir,
+        plan.session_kwargs["transcript"].directory,
+    )
+    await await_store_maintenance_for_tests()
+
+    assert callback_threads.keys() == {"retention", "group_reaper", "origins", "titles"}
+    for name, thread_ids in callback_threads.items():
+        assert len(thread_ids) == 1, f"{name} ran {len(thread_ids)} times instead of once"
+        assert thread_ids[0] != loop_thread, f"{name} ran on the event-loop thread"
+    assert not abandoned.exists(), "the real retention sweep did not reap an abandoned store"
+    assert all((directory / TITLE_SCAN_SENTINEL_NAME).exists() for directory in titleless)
 
 
 def cast_config(value: Any) -> Any:
