@@ -45,11 +45,13 @@ STATE selects what the page is showing:
     reset-default  a row that IS at its shipped default (OUT.svg), then the
                same row after pressing `r` (OUT.pressed.svg). `r` used to WRITE
                here — on a config with no file at all it created one — so the
-               subject of this pair is the footer: whether the page offers a
-               key that has nothing to restore. A third frame,
-               OUT.offdefault.svg, is the SAME row once it is off-default,
-               which is what proves the hint is being withheld by state rather
-               than removed (#440)
+               subject of this pair is the DETAIL LINE: the press now reports
+               `already at its default (...)` instead of rewriting the file.
+               A third frame, OUT.offdefault.svg, is the SAME row once it is
+               off-default, which is what proves `r` still resets when there
+               is something to undo. The footer still offers `r default` on
+               both sides — withholding it is the #440 redesign, not this
+               safety patch
     retired    scrolled to the retired section — the read-only bottom row the
                clamp now parks users on, whose footer must not advertise keys
                that cannot act on it
@@ -324,11 +326,11 @@ async def main() -> None:
             await pilot.pause()
             app.save_screenshot(out.replace(".svg", ".open.svg"))
         elif state == "reset-default":
-            # THREE frames. The `r` affordance is a footer question, and a
-            # single still of a row cannot answer it: the pair that matters is
-            # the same row at default and off-default, because only the
-            # difference between them shows the hint is state-driven rather
-            # than simply gone. `tui.shimmer` is used because `_seed_config`
+            # THREE frames. The `r` safety patch is a DETAIL-LINE question, not
+            # a footer one: the hint stays lit on a default row (withholding it
+            # is the #440 redesign), and the pair that matters is the same row
+            # at default (press reports, file unchanged) and off-default (press
+            # still resets). `display.shimmer` is used because `_seed_config`
             # writes it, so both sides are reachable on one config.
             _select(view, "display.shimmer")
             settings_io.reset_setting(view._manager, _require("display.shimmer"))
