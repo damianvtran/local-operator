@@ -14,6 +14,8 @@ from local_operator.evaluation.adapters.discovery import (
     AdapterDiscoveryError,
     distribution_digest,
     load_selected_adapter,
+    resolve_launch,
+    validate_resolved_launch,
     verify_distribution,
     worker_argv,
 )
@@ -87,6 +89,34 @@ def selected(tmp_path: Path, digest: str) -> AdapterSelector:
         workspace=str(workspace),
         route_capability="computer",
     )
+
+
+def test_launch_rejects_symlink_and_lexical_aliases(tmp_path: Path) -> None:
+    real_python = Path(sys.executable).resolve()
+    python_link = tmp_path / "python-link"
+    python_link.symlink_to(real_python)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    base = selected(tmp_path, "a" * 64)
+    with pytest.raises(AdapterDiscoveryError, match="symlink|alias"):
+        resolve_launch(base.model_copy(update={"python_executable": str(python_link)}))
+    workspace_link = tmp_path / "workspace-link"
+    workspace_link.symlink_to(workspace, target_is_directory=True)
+    with pytest.raises(AdapterDiscoveryError, match="symlink|alias"):
+        resolve_launch(base.model_copy(update={"workspace": str(workspace_link)}))
+    alias = str(tmp_path / "workspace" / ".." / "workspace")
+    with pytest.raises(Exception, match="normalized|alias"):
+        resolve_launch(base.model_copy(update={"workspace": alias}))
+
+
+def test_launch_identity_detects_swap(tmp_path: Path) -> None:
+    base = selected(tmp_path, "a" * 64)
+    resolved = resolve_launch(base)
+    workspace = Path(base.workspace)
+    workspace.rmdir()
+    workspace.mkdir()
+    with pytest.raises(AdapterDiscoveryError, match="identity changed"):
+        validate_resolved_launch(resolved)
 
 
 def test_exact_record_digest_and_worker_flags(tmp_path: Path) -> None:

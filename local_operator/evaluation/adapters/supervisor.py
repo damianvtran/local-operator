@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import signal
 import stat
@@ -46,7 +47,9 @@ from local_operator.evaluation.adapters.api import (
     validate_observation,
 )
 from local_operator.evaluation.adapters.discovery import (
-    validate_launch_paths,
+    ResolvedLaunch,
+    resolve_launch,
+    validate_resolved_launch,
     worker_argv,
 )
 from local_operator.evaluation.adapters.rpc import RpcClient
@@ -65,6 +68,7 @@ if os.name != "posix":  # pragma: no cover - import itself is the explicit diagn
 MAX_DIAGNOSTIC_TAIL = 64 * 1024
 TERM_GRACE_SECONDS = 5.0
 OWNER_FD_ENV = "LO_ADAPTER_OWNER_FD"
+LAUNCH_IDENTITY_ENV = "LO_ADAPTER_LAUNCH_IDENTITY"
 REQUEST_FD_ENV = "LO_ADAPTER_REQUEST_FD"
 RESPONSE_FD_ENV = "LO_ADAPTER_RESPONSE_FD"
 _RESCUE_FILE = "rescue.json"
@@ -189,6 +193,12 @@ def supervise_worker(argv: Sequence[str]) -> int:
         os.environ,
         protocol_fds={REQUEST_FD_ENV: request_fd, RESPONSE_FD_ENV: response_fd},
     )
+    identity_payload = os.environ.pop(LAUNCH_IDENTITY_ENV, "")
+    try:
+        resolved = ResolvedLaunch(**json.loads(identity_payload))
+    except (TypeError, ValueError, json.JSONDecodeError) as error:
+        raise SupervisionError("supervisor launch identity is missing or malformed") from error
+    validate_resolved_launch(resolved)
     child = subprocess.Popen(
         list(argv),
         stdin=subprocess.DEVNULL,
@@ -229,7 +239,7 @@ class AdapterSupervisor:
         *,
         environment: Mapping[str, str] | None = None,
     ) -> "AdapterSupervisor":
-        validate_launch_paths(selector)
+        resolved = resolve_launch(selector)
         owner_read, owner_write = os.pipe()
         request_read, request_write = os.pipe()
         response_read, response_write = os.pipe()
@@ -239,6 +249,7 @@ class AdapterSupervisor:
             RESPONSE_FD_ENV: response_write,
         }
         env = minimal_environment(environment or os.environ, protocol_fds=protocol_fds)
+        env[LAUNCH_IDENTITY_ENV] = json.dumps(resolved.__dict__, sort_keys=True)
         argv = (
             selector.python_executable,
             "-I",
@@ -251,6 +262,10 @@ class AdapterSupervisor:
         )
         process: subprocess.Popen[bytes] | None = None
         try:
+            # The supervisor cannot make subprocess.exec race-free, but comparing
+            # captured dev/inode/mode immediately before spawn closes alias and
+            # ordinary swap attacks at both parent and leader boundaries.
+            validate_resolved_launch(resolved)
             process = subprocess.Popen(
                 argv,
                 cwd=selector.workspace,
