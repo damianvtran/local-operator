@@ -160,9 +160,7 @@ class StallRecorder:
         CPU clock, and 2000 ms sits 3× above the worst observed scheduler
         noise so that noise cannot trip it.
         """
-        self.assert_no_stall(
-            cpu_ceiling_ms=cpu_ceiling_ms, wall_ceiling_ms=wall_ceiling_ms
-        )
+        self.assert_no_stall(cpu_ceiling_ms=cpu_ceiling_ms, wall_ceiling_ms=wall_ceiling_ms)
 
 
 # --- A2: the title backfill answers a no-title directory once ----------------
@@ -1011,12 +1009,15 @@ async def test_dispose_during_deferred_wiring_cancels_cleanly(
 
 @pytest.mark.asyncio
 async def test_s1_boot_paints_and_stays_responsive_over_the_first_seconds() -> None:
-    """S1: over the app's first 3 s, no loop stall above the design's 50 ms
-    bar, and the model label lands on the band — the two facts the "startup
-    waits for MCP" report was made of. The boot session is a fake (the real
-    factory's loop work is covered by the unit tests above); what this test
-    measures is the app's own boot composition — paint, adoption, timers —
-    against the same bar the design set for the real boot."""
+    """S1: over the app's first 3 s, no loop stall above the loaded bar, and
+    the model label lands on the band — the two facts the "startup waits for
+    MCP" report was made of. The boot session is a fake (the real factory's
+    loop work is covered by the unit tests above); what this test measures
+    is the app's own boot composition — paint, adoption, timers. The loaded
+    bar (200 ms CPU / 2 s wall) is the right one here: boot has legitimate
+    loop CPU from Textual layout, and the reconnect/connect tests are the
+    ones that assert the strict 50 ms CPU bar against the parse regression.
+    """
     from local_operator.tui.app import OperatorApp
     from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
@@ -1107,9 +1108,10 @@ async def test_s2_send_to_agent_end_keeps_the_loop_under_the_bar() -> None:
             await asyncio.sleep(0.02)
         discovery.available_models = original  # type: ignore[assignment]
         configure.invalidate_model_info_cache()
-        # Loaded ceiling: under `-n auto` the probe contends with sibling
-        # workers; the strict 50 ms evidence lives in the wall-clock assert
-        # above and in bench/before.json vs after.json.
+        # Loaded bar (200 ms CPU / 2 s wall): this path has legitimate loop
+        # CPU from Textual layout, and the reconnect/connect tests are the
+        # ones that assert the strict 50 ms CPU bar against the parse
+        # regression. Bench numbers live in bench/before.json vs after.json.
         recorder.assert_no_stall_loaded()
 
 
