@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import itertools
 import json
 import subprocess
 import sys
@@ -45,13 +46,14 @@ from local_operator.evaluation.receipts import (
 
 REPO = Path(__file__).resolve().parents[3]
 DIGEST = "0123456789abcdef" * 4
+_EPISODES = itertools.count(1)
 
 
-def _plan() -> DependencyPlan:
+def _plan(episode_id: str = "episode-1") -> DependencyPlan:
     return DependencyPlan(
         release_id="release-1",
         task_id="task-1",
-        attempt_id="attempt-1",
+        attempt_id=episode_id,
         requirements=(
             ComputeRequirement(
                 requirement_id="compute",
@@ -76,9 +78,9 @@ def _seal(plan: DependencyPlan) -> SealedPreflight:
     return seal_preflight(plan, (receipt,), RedactionSet.from_resolved_values(()))
 
 
-def _budget() -> BudgetAuthorization:
+def _budget(episode_id: str = "episode-1") -> BudgetAuthorization:
     return BudgetAuthorization(
-        episode_id="episode-1",
+        episode_id=episode_id,
         allowances=tuple(
             CappedAllowance(resource=resource, value=100, reporting="required")
             for resource in BUDGET_RESOURCES
@@ -86,9 +88,9 @@ def _budget() -> BudgetAuthorization:
     )
 
 
-def _cleanup_plan() -> CleanupPlan:
+def _cleanup_plan(episode_id: str = "episode-1") -> CleanupPlan:
     return CleanupPlan(
-        episode_id="episode-1",
+        episode_id=episode_id,
         actions=(
             CleanupAction(
                 action_id="session",
@@ -168,7 +170,7 @@ def _reconciliation(
 
 def _score(plan: DependencyPlan) -> ScoreReceipt:
     return ScoreReceipt(
-        episode_id="episode-1",
+        episode_id=plan.attempt_id,
         plan_id=plan.plan_id,
         score_artifact=ArtifactRef(
             sha256=DIGEST,
@@ -179,6 +181,24 @@ def _score(plan: DependencyPlan) -> ScoreReceipt:
     )
 
 
+def _planned() -> tuple[DependencyPlan, BudgetAuthorization, CleanupPlan, EpisodeLifecycle]:
+    episode_id = f"episode-{next(_EPISODES)}"
+    plan = _plan(episode_id)
+    budget = _budget(episode_id)
+    cleanup = _cleanup_plan(episode_id)
+    return (
+        plan,
+        budget,
+        cleanup,
+        EpisodeLifecycle.planned(
+            episode_id=episode_id,
+            plan_id=plan.plan_id,
+            budget_id=budget.budget_id,
+            cleanup_plan_id=cleanup.cleanup_plan_id,
+        ),
+    )
+
+
 def _authorized() -> tuple[
     DependencyPlan,
     BudgetAuthorization,
@@ -186,12 +206,13 @@ def _authorized() -> tuple[
     EpisodeLifecycle,
     SideEffectPermit,
 ]:
-    plan = _plan()
+    episode_id = f"episode-{next(_EPISODES)}"
+    plan = _plan(episode_id)
     seal = _seal(plan)
-    budget = _budget()
-    cleanup = _cleanup_plan()
+    budget = _budget(episode_id)
+    cleanup = _cleanup_plan(episode_id)
     episode = EpisodeLifecycle.planned(
-        episode_id="episode-1",
+        episode_id=episode_id,
         plan_id=plan.plan_id,
         budget_id=budget.budget_id,
         cleanup_plan_id=cleanup.cleanup_plan_id,
@@ -258,16 +279,8 @@ def test_permit_cannot_be_constructed_or_deserialized_by_callers() -> None:
 
 
 def test_side_effect_start_is_impossible_before_seal_permit_and_reservation() -> None:
-    plan = _plan()
-    budget = _budget()
-    cleanup = _cleanup_plan()
-    planned = EpisodeLifecycle.planned(
-        episode_id="episode-1",
-        plan_id=plan.plan_id,
-        budget_id=budget.budget_id,
-        cleanup_plan_id=cleanup.cleanup_plan_id,
-    )
-    _, _, _, authorized, permit = _authorized()
+    _plan_value, _budget_value, _cleanup_value, planned = _planned()
+    _, budget, _, authorized, permit = _authorized()
     reservation = _reservation(budget)
     with pytest.raises(ValueError, match="illegal episode transition"):
         planned.start(permit, budget, _commitment(budget, reservation))
@@ -343,26 +356,13 @@ def test_crash_and_cancel_after_running_must_flow_through_cleanup() -> None:
 
 
 def test_preflight_and_infrastructure_failures_are_unscored() -> None:
-    plan = _plan()
-    budget = _budget()
-    cleanup = _cleanup_plan()
-    planned = EpisodeLifecycle.planned(
-        episode_id="episode-1",
-        plan_id=plan.plan_id,
-        budget_id=budget.budget_id,
-        cleanup_plan_id=cleanup.cleanup_plan_id,
-    )
+    plan, budget, cleanup, planned = _planned()
     failed = planned.fail_before_running(kind="preflight", reason="display unavailable")
     assert failed.state == "failed"
     assert failed.score_id is None
     with pytest.raises(ValueError, match="illegal"):
         failed.begin_finalization()
-    planned = EpisodeLifecycle.planned(
-        episode_id="episode-1",
-        plan_id=plan.plan_id,
-        budget_id=budget.budget_id,
-        cleanup_plan_id=cleanup.cleanup_plan_id,
-    )
+    plan, budget, cleanup, planned = _planned()
     preflighted = planned.preflight(_seal(plan))
     infrastructure = preflighted.fail_before_running(
         kind="infrastructure", reason="allocator unavailable"
@@ -406,19 +406,10 @@ def test_illegal_transition_table(state: str, operation: str) -> None:
     plan, budget, cleanup, authorized, permit = _authorized()
     reservation = _reservation(budget)
     if state == "planned":
-        episode = EpisodeLifecycle.planned(
-            episode_id="episode-1",
-            plan_id=plan.plan_id,
-            budget_id=budget.budget_id,
-            cleanup_plan_id=cleanup.cleanup_plan_id,
-        )
+        _other_plan, _other_budget, _other_cleanup, episode = _planned()
     elif state == "preflighted":
-        episode = EpisodeLifecycle.planned(
-            episode_id="episode-1",
-            plan_id=plan.plan_id,
-            budget_id=budget.budget_id,
-            cleanup_plan_id=cleanup.cleanup_plan_id,
-        ).preflight(_seal(plan))
+        other_plan, _other_budget, _other_cleanup, other_planned = _planned()
+        episode = other_planned.preflight(_seal(other_plan))
     elif state == "authorized":
         episode = authorized
     else:
@@ -640,16 +631,8 @@ def test_lifecycle_rejects_reconciliation_from_mutated_authorization() -> None:
 
 
 def test_forged_preflight_seal_cannot_preflight_or_authorize() -> None:
-    plan = _plan()
+    plan, budget, _cleanup_value, planned = _planned()
     seal = _seal(plan)
-    budget = _budget()
-    cleanup = _cleanup_plan()
-    planned = EpisodeLifecycle.planned(
-        episode_id="episode-1",
-        plan_id=plan.plan_id,
-        budget_id=budget.budget_id,
-        cleanup_plan_id=cleanup.cleanup_plan_id,
-    )
     forged = SealedPreflight.model_construct(**seal.model_dump())
     with pytest.raises(ValueError, match="lacks factory authority"):
         planned.preflight(forged)
@@ -842,7 +825,7 @@ def test_finish_cleanup_is_atomic_and_rolls_back_construction_failure(
     )
     with pytest.raises(ValueError, match="lacks factory authority"):
         cleaning2.finish_cleanup(result)
-    assert cleanup2.cleanup_plan_id == cleanup.cleanup_plan_id
+    assert cleanup2.episode_id != cleanup.episode_id
 
     plan3, budget3, cleanup3, authorized3, permit3 = _authorized()
     reservation3 = _reservation(budget3)
@@ -910,16 +893,9 @@ def test_authorize_and_finalization_edges_are_atomic_under_race() -> None:
     from concurrent.futures import ThreadPoolExecutor
     from threading import Barrier
 
-    plan = _plan()
+    plan, budget, _cleanup_value, planned = _planned()
     seal = _seal(plan)
-    budget = _budget()
-    cleanup = _cleanup_plan()
-    preflighted = EpisodeLifecycle.planned(
-        episode_id=budget.episode_id,
-        plan_id=plan.plan_id,
-        budget_id=budget.budget_id,
-        cleanup_plan_id=cleanup.cleanup_plan_id,
-    ).preflight(seal)
+    preflighted = planned.preflight(seal)
     barrier = Barrier(2)
 
     def authorize() -> object:
@@ -1008,15 +984,12 @@ def test_running_competing_edges_and_constructor_rollback(
 
 
 def test_reusable_seal_stays_plan_bound_while_episode_authorities_do_not_cross() -> None:
-    plan = _plan()
+    plan = _plan("shared-plan-attempt")
     seal = _seal(plan)
-    cleanup = _cleanup_plan()
+    cleanup = _cleanup_plan("shared-plan-attempt")
     budgets = (
-        _budget(),
-        BudgetAuthorization(
-            episode_id="episode-2",
-            allowances=_budget().allowances,
-        ),
+        _budget(f"seal-reuse-{next(_EPISODES)}"),
+        _budget(f"seal-reuse-{next(_EPISODES)}"),
     )
     episodes = tuple(
         EpisodeLifecycle.planned(
@@ -1040,3 +1013,119 @@ def test_reusable_seal_stays_plan_bound_while_episode_authorities_do_not_cross()
     with pytest.raises(ValueError, match="does not match this episode"):
         authorized2.start(permit1, budgets[1], commit_budget(budgets[1], (reservation2,)))
     assert authorized1.episode_id != authorized2.episode_id
+
+
+def test_live_episode_lineage_rejects_duplicate_root_and_full_duplicate_path() -> None:
+    episode_id = f"lineage-live-{next(_EPISODES)}"
+    plan = _plan(episode_id)
+    budget = _budget(episode_id)
+    cleanup = _cleanup_plan(episode_id)
+    root = EpisodeLifecycle.planned(
+        episode_id=episode_id,
+        plan_id=plan.plan_id,
+        budget_id=budget.budget_id,
+        cleanup_plan_id=cleanup.cleanup_plan_id,
+    )
+    with pytest.raises(ValueError, match="already has a live lineage"):
+        EpisodeLifecycle.planned(
+            episode_id=episode_id,
+            plan_id=plan.plan_id,
+            budget_id=budget.budget_id,
+            cleanup_plan_id=cleanup.cleanup_plan_id,
+        )
+    child = root.preflight(_seal(plan))
+    with pytest.raises(ValueError, match="already has a live lineage"):
+        EpisodeLifecycle.planned(
+            episode_id=episode_id,
+            plan_id=DIGEST,
+            budget_id=budget.budget_id,
+            cleanup_plan_id=cleanup.cleanup_plan_id,
+        )
+    assert child.episode_id == episode_id
+
+
+def test_episode_root_mint_is_atomic_and_independent_by_identity() -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    episode_id = f"lineage-race-{next(_EPISODES)}"
+    plan = _plan(episode_id)
+    budget = _budget(episode_id)
+    cleanup = _cleanup_plan(episode_id)
+    barrier = Barrier(2)
+
+    def mint() -> object:
+        barrier.wait()
+        try:
+            return EpisodeLifecycle.planned(
+                episode_id=episode_id,
+                plan_id=plan.plan_id,
+                budget_id=budget.budget_id,
+                cleanup_plan_id=cleanup.cleanup_plan_id,
+            )
+        except ValueError as error:
+            return error
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = tuple(executor.map(lambda _index: mint(), (0, 1)))
+    assert sum(isinstance(item, EpisodeLifecycle) for item in outcomes) == 1
+    assert sum(isinstance(item, ValueError) for item in outcomes) == 1
+
+    first = f"lineage-independent-{next(_EPISODES)}"
+    second = f"lineage-independent-{next(_EPISODES)}"
+    roots = tuple(
+        EpisodeLifecycle.planned(
+            episode_id=value,
+            plan_id=_plan(value).plan_id,
+            budget_id=_budget(value).budget_id,
+            cleanup_plan_id=_cleanup_plan(value).cleanup_plan_id,
+        )
+        for value in (first, second)
+    )
+    assert roots[0].episode_id != roots[1].episode_id
+
+
+def test_unreachable_lineage_releases_weak_registry_lease() -> None:
+    import gc
+    import weakref
+
+    from local_operator.evaluation.lifecycle import _LIVE_LINEAGES
+
+    episode_id = f"lineage-gc-{next(_EPISODES)}"
+    plan = _plan(episode_id)
+    budget = _budget(episode_id)
+    cleanup = _cleanup_plan(episode_id)
+    root = EpisodeLifecycle.planned(
+        episode_id=episode_id,
+        plan_id=plan.plan_id,
+        budget_id=budget.budget_id,
+        cleanup_plan_id=cleanup.cleanup_plan_id,
+    )
+    child = root.preflight(_seal(plan))
+    lineage_ref = weakref.ref(child._lineage)
+    assert episode_id in _LIVE_LINEAGES
+    del root
+    gc.collect()
+    assert episode_id in _LIVE_LINEAGES
+    del child
+    gc.collect()
+    assert lineage_ref() is None
+    assert episode_id not in _LIVE_LINEAGES
+    retry = EpisodeLifecycle.planned(
+        episode_id=episode_id,
+        plan_id=plan.plan_id,
+        budget_id=budget.budget_id,
+        cleanup_plan_id=cleanup.cleanup_plan_id,
+    )
+    assert retry.episode_id == episode_id
+
+
+def test_lineage_is_private_unforgeable_and_shared_by_children() -> None:
+    plan, budget, _cleanup_value, root = _planned()
+    child = root.preflight(_seal(plan))
+    assert root._lineage is child._lineage
+    payload = child.model_dump()
+    assert "lineage" not in payload
+    forged = EpisodeLifecycle.model_construct(**payload)
+    with pytest.raises(ValueError, match="lacks transition authority"):
+        forged.authorize(_seal(plan), budget)

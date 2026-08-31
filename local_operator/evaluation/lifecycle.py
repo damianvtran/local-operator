@@ -13,6 +13,7 @@ from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from threading import RLock
 from typing import Any, Literal, Self, cast
+from weakref import WeakValueDictionary
 
 from pydantic import (
     Field,
@@ -42,6 +43,25 @@ MAX_FAILURE_LENGTH = 2_000
 _PERMIT_FACTORY = object()
 _CLEANUP_RESULT_FACTORY = object()
 _LIFECYCLE_FACTORY = object()
+
+
+class _EpisodeLineage:
+    """Process-live uniqueness lease shared by every state in one episode.
+
+    The weak registry prevents two cooperative roots while any state from the
+    lineage remains reachable. It is intentionally not durable replay defense:
+    a future evidence store must provide cross-process exactly-once semantics.
+    """
+
+    __slots__ = ("__weakref__", "episode_id", "root_lock")
+
+    def __init__(self, episode_id: str) -> None:
+        self.episode_id = episode_id
+        self.root_lock = RLock()
+
+
+_LINEAGE_REGISTRY_LOCK = RLock()
+_LIVE_LINEAGES: WeakValueDictionary[str, _EpisodeLineage] = WeakValueDictionary()
 
 
 def _identity(kind: str, payload: Any) -> str:
@@ -463,6 +483,7 @@ class EpisodeLifecycle(ProtocolModel):
     _authority: object = PrivateAttr()
     _lock: RLock = PrivateAttr(default_factory=RLock)
     _consumed: bool = PrivateAttr(default=False)
+    _lineage: _EpisodeLineage = PrivateAttr()
 
     episode_id: StrictIdentifier
     plan_id: Digest
@@ -504,6 +525,9 @@ class EpisodeLifecycle(ProtocolModel):
         context = info.context if isinstance(info.context, dict) else {}
         if context.get("lifecycle_factory") is not _LIFECYCLE_FACTORY:
             raise ValueError("episode lifecycle authority can only be factory minted")
+        lineage = context.get("episode_lineage")
+        if not isinstance(lineage, _EpisodeLineage) or lineage.episode_id != self.episode_id:
+            raise ValueError("episode lifecycle requires its process-live lineage lease")
         if len(self.reservation_ids) != len(set(self.reservation_ids)):
             raise ValueError("episode contains duplicate reservations")
         if tuple(sorted(self.reservation_ids)) != self.reservation_ids:
@@ -570,6 +594,7 @@ class EpisodeLifecycle(ProtocolModel):
         if self.state_id != expected:
             raise ValueError("episode lifecycle state identity does not match its evidence")
         object.__setattr__(self, "_authority", _LIFECYCLE_FACTORY)
+        object.__setattr__(self, "_lineage", lineage)
         return self
 
     @classmethod
@@ -628,7 +653,10 @@ class EpisodeLifecycle(ProtocolModel):
         payload["state_id"] = _state_identity(payload)
         return type(self).model_validate(
             payload,
-            context={"lifecycle_factory": _LIFECYCLE_FACTORY},
+            context={
+                "lifecycle_factory": _LIFECYCLE_FACTORY,
+                "episode_lineage": self._lineage,
+            },
         )
 
     def _consume_source(self) -> None:
@@ -846,21 +874,31 @@ def plan_episode(
     budget_id: Digest,
     cleanup_plan_id: Digest,
 ) -> EpisodeLifecycle:
-    """Mint the public plan as the root of a private transition authority chain."""
+    """Mint one process-live root; unreachable lineages release the weak lease."""
 
-    payload = {
-        "episode_id": episode_id,
-        "plan_id": plan_id,
-        "budget_id": budget_id,
-        "cleanup_plan_id": cleanup_plan_id,
-        "state": "planned",
-        "operation": "plan",
-        "state_id": ZERO_DIGEST,
-    }
-    payload["state_id"] = _state_identity(
-        {key: value for key, value in payload.items() if key != "state_id"}
-    )
-    return EpisodeLifecycle.model_validate(
-        payload,
-        context={"lifecycle_factory": _LIFECYCLE_FACTORY},
-    )
+    with _LINEAGE_REGISTRY_LOCK:
+        if episode_id in _LIVE_LINEAGES:
+            # Episode IDs are fail-closed global identities within this process;
+            # a different plan does not make reusing one safe.
+            raise ValueError("episode identity already has a live lineage")
+        lineage = _EpisodeLineage(episode_id)
+        _LIVE_LINEAGES[episode_id] = lineage
+        payload = {
+            "episode_id": episode_id,
+            "plan_id": plan_id,
+            "budget_id": budget_id,
+            "cleanup_plan_id": cleanup_plan_id,
+            "state": "planned",
+            "operation": "plan",
+            "state_id": ZERO_DIGEST,
+        }
+        payload["state_id"] = _state_identity(
+            {key: value for key, value in payload.items() if key != "state_id"}
+        )
+        return EpisodeLifecycle.model_validate(
+            payload,
+            context={
+                "lifecycle_factory": _LIFECYCLE_FACTORY,
+                "episode_lineage": lineage,
+            },
+        )
