@@ -408,19 +408,30 @@ class TeamRegistry:
             raise KeyError(f"Team with id {team_id} not found")
         return self._load_briefs(team)
 
-    def get_team_by_name(self, name: str) -> Team | None:
-        self._refresh_if_needed()
+    def _find_cached_team_by_name(self, name: str) -> Team | None:
+        """Find metadata in the current snapshot without refresh or hydration.
+
+        Mutation paths must validate collisions against the SAME snapshot as
+        the object they mutate. Calling a public getter mid-mutation can refresh
+        ``_teams`` and orphan an already-hydrated canonical object.
+        """
         key = (name or "").strip().casefold()
         if not key:
             return None
-        for team in self._teams.values():
-            if team.name.casefold() == key:
-                return self._load_briefs(team)
-        return None
+        return next((team for team in self._teams.values() if team.name.casefold() == key), None)
+
+    def get_team_by_name(self, name: str) -> Team | None:
+        self._refresh_if_needed()
+        team = self._find_cached_team_by_name(name)
+        return self._load_briefs(team) if team is not None else None
 
     def create_team(self, fields: TeamEditFields) -> Team:
         name = validate_team_name(fields.name or "")
-        if self.get_team_by_name(name) is not None:
+        # Refresh once, then keep duplicate detection and save on this snapshot.
+        # Hydrating a colliding row is unnecessary, while a second public
+        # lookup could replace the cache when refresh_interval is zero.
+        self._refresh_if_needed()
+        if self._find_cached_team_by_name(name) is not None:
             raise ValueError(f"Team with name {name} already exists")
         team = Team(
             id=str(uuid.uuid4()),
@@ -435,11 +446,20 @@ class TeamRegistry:
         return self.save_team(team)
 
     def update_team(self, team_id: str, fields: TeamEditFields) -> Team:
-        current = self.get_team(team_id)
+        # Refresh exactly once before choosing the canonical object. A later
+        # public getter may refresh again (notably at refresh_interval=0),
+        # replacing ``_teams`` and making explicit brief edits look like an
+        # unsafe transported object when save_team validates loadedness.
+        self._refresh_if_needed()
+        current = self._teams.get(team_id)
+        if current is None:
+            raise KeyError(f"Team with id {team_id} not found")
+        self._load_briefs(current)
+
         updates = fields.model_dump(exclude_unset=True)
         if "name" in updates and updates["name"] is not None:
             new_name = validate_team_name(updates["name"])
-            occupant = self.get_team_by_name(new_name)
+            occupant = self._find_cached_team_by_name(new_name)
             if occupant is not None and occupant.id != team_id:
                 raise ValueError(f"Team with name {new_name} already exists")
             current.name = new_name

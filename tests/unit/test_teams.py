@@ -475,6 +475,52 @@ def test_update_team_explicit_empty_briefs_clear_the_files(tmp_path: Path) -> No
     assert after.project == ""
 
 
+def test_update_name_and_briefs_share_one_immediately_refreshed_snapshot(tmp_path: Path) -> None:
+    """R3-1: a rename cannot orphan the hydrated object before brief writes."""
+    registry = TeamRegistry(tmp_path, refresh_interval=0)
+    team = registry.create_team(TeamEditFields(name="ops", instructions="KEEP I", project="KEEP P"))
+
+    updated = registry.update_team(
+        team.id,
+        TeamEditFields(name="renamed", instructions="", project="NEW P"),
+    )
+    assert (updated.name, updated.instructions, updated.project) == (
+        "renamed",
+        "",
+        "NEW P",
+    )
+
+    reloaded = TeamRegistry(tmp_path).get_team_by_name("renamed")
+    assert reloaded is not None
+    assert (reloaded.name, reloaded.instructions, reloaded.project) == (
+        "renamed",
+        "",
+        "NEW P",
+    )
+
+
+def test_update_name_collision_survives_immediately_due_refresh(tmp_path: Path) -> None:
+    """R3-1: collision checks use the same refreshed snapshot as mutation."""
+    registry = TeamRegistry(tmp_path, refresh_interval=0)
+    first = registry.create_team(
+        TeamEditFields(name="ops", instructions="KEEP I", project="KEEP P")
+    )
+    registry.create_team(TeamEditFields(name="other"))
+
+    with pytest.raises(ValueError, match="Team with name other already exists"):
+        registry.update_team(
+            first.id,
+            TeamEditFields(name="other", instructions="", project="NEW P"),
+        )
+
+    reloaded = TeamRegistry(tmp_path).get_team(first.id)
+    assert (reloaded.name, reloaded.instructions, reloaded.project) == (
+        "ops",
+        "KEEP I",
+        "KEEP P",
+    )
+
+
 def test_create_team_with_briefs_writes_them(tmp_path: Path) -> None:
     """R2-1 regression 6: the create path is not collateral damage.
 
