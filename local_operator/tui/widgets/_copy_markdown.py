@@ -120,6 +120,41 @@ def _first_word(text: str) -> str:
     return fallback
 
 
+#: A whitespace-delimited token that is ONLY quote-bar glyphs. In a SOURCE line
+#: such a token is the model's own text -- a document may legitimately open a
+#: quoted line with ``▌`` -- but the row Rich paints from it is
+#: indistinguishable from the bar Rich paints as furniture, and ``_row_word``
+#: skips both. The source-side anchor has to skip it too, or the two sides can
+#: never agree on a word and the row is left unplaced (issue #392).
+_BAR_TOKEN_RE = re.compile(r"▌+")
+
+
+def _source_anchor(line: str) -> str:
+    """The word :func:`align` anchors a rendered row to, for source ``line``.
+
+    ``_row_word`` reads the rendered side and skips every leading structure
+    glyph, the quote bar included. Reading the source side with ``_first_word``
+    alone is therefore ASYMMETRIC: a quoted line whose own text opens with
+    ``▌`` anchors on that bar while its rendered row anchors on the word after
+    it, so the two never match and the row is never placed. ``align`` then hands
+    ``furniture_width`` no source line, its documented ``source_line is None``
+    branch strips nothing, and the whole rendered row -- painted bar included --
+    reaches the clipboard (issue #392).
+
+    Skipping the bar tokens restores the symmetry. It is safe in the direction
+    that matters: ``_row_word`` can never RETURN a bar (they are all in
+    ``_MARKER_TOKEN_RE``), so an anchor of ``▌`` could only ever have matched
+    nothing. The original chain is kept as the fallback so a line that is
+    NOTHING but bars still has something to anchor on rather than an empty word,
+    which matches no row and would silently lose the line.
+    """
+    body = _strip_markup(line)
+    tokens = body.split()
+    while tokens and _BAR_TOKEN_RE.fullmatch(tokens[0]):
+        tokens.pop(0)
+    return _first_word(" ".join(tokens)) or _first_word(body) or _first_word(line)
+
+
 def _row_word(rendered_row: str) -> str:
     """A rendered row's first content word, structure markers stripped.
 
@@ -263,7 +298,7 @@ def align(source: str, rendered_rows: list[str]) -> list[int | None]:
                     # the ``•`` (design round 2, D2-4).
                     if _QUOTE_RE.match(line) and not _strip_markup(line):
                         continue
-                    anchor = _first_word(_strip_markup(line)) or _first_word(line)
+                    anchor = _source_anchor(line)
                     if word and anchor and word == anchor:
                         starts_structural = True
                     break
@@ -319,7 +354,7 @@ def align(source: str, rendered_rows: list[str]) -> list[int | None]:
                     continue
                 if not line.strip():
                     continue  # content is further on; blanks pair with blank rows
-                anchor = _first_word(_strip_markup(line)) or _first_word(line)
+                anchor = _source_anchor(line)
                 if word and anchor and word == anchor:
                     placed = look
                     break
@@ -558,10 +593,48 @@ def _number_opens_row(rendered_row: str, first_cell: str, table_column: int | No
     return head == number
 
 
-#: The quote bar as Rich paints it, repeated once per nesting level. A quote's
-#: CONTINUATION rows carry it too, which is what makes it furniture on every row
-#: of the construct rather than a marker that identifies the first one.
-_RENDERED_QUOTE_PREFIX_RE = re.compile(r"^(?:▌ ?)+")
+#: One level of source quote marker, so the levels on a line can be COUNTED.
+#: ``_QUOTE_RE`` matches the whole run at once and cannot report its depth.
+_QUOTE_LEVEL_RE = re.compile(r">\s?")
+
+
+def _quote_depth(source_line: str) -> int:
+    """How many quote levels ``source_line`` opens with.
+
+    Rich paints exactly one ``▌`` per level, so this is the number of bars on
+    the row that are FURNITURE. Every bar after them is the model's own text.
+    """
+    match = _QUOTE_RE.match(source_line)
+    if match is None:
+        return 0
+    return len(_QUOTE_LEVEL_RE.findall(match.group(0)))
+
+
+def _painted_quote_width(row: str, depth: int) -> int:
+    """Leading cells of ``row`` that are the quote bars RICH painted.
+
+    Counted by DEPTH rather than matched by glyph, which is the distinction
+    issue #392 is about. ``_RENDERED_QUOTE_PREFIX_RE`` is greedy and the glyph
+    carries no evidence of who wrote it, so on ``> ▌ literal bar`` -- painted
+    ``▌ ▌ literal bar`` -- it consumed BOTH bars and the copy lost the one the
+    model typed. The source line says how many levels Rich opened, and that is
+    the only thing that can tell a painted bar from a literal one.
+
+    Stops early if the row runs out of bars, so a row whose furniture Rich
+    painted differently than the depth suggests strips what is actually there
+    rather than slicing into content.
+    """
+    width = 0
+    for _ in range(depth):
+        if not row.startswith("▌", width):
+            break
+        width += 1
+        # The single space Rich puts after each bar. Guarded rather than assumed:
+        # the last bar of a row whose content is empty carries no trailing space.
+        if row.startswith(" ", width):
+            width += 1
+    return width
+
 
 #: A rendered list marker and the space after it, with its leading indent. Only
 #: the row that OPENS the item carries this; a continuation is indented to the
@@ -645,9 +718,10 @@ def furniture_width(row: str, source_line: str | None, *, opens_line: bool, fenc
     width = 0
     remainder = source_line
     if _QUOTE_RE.match(remainder):
-        match = _RENDERED_QUOTE_PREFIX_RE.match(row)
-        if match:
-            width = match.end()
+        # By the source line's quote DEPTH, not by a greedy glyph match: the two
+        # differ exactly when the model's own quoted text opens with ``▌``, and
+        # the greedy match then strips a bar the reader typed (issue #392).
+        width = _painted_quote_width(row, _quote_depth(remainder))
         # Peel the quote marker so the line can be re-tested for what it CONTAINS
         # — the same source line is both a quote line and a list item.
         remainder = _QUOTE_RE.sub("", remainder, count=1)
@@ -988,17 +1062,45 @@ def slice_markdown(source: str, mapping: list[int | None], first_row: int, last_
     if last_row >= n_rows - 1:
         picked.update(range(hi, len(lines)))
 
-    # Rich renders a quote's consecutive ``>`` lines as ONE wrapped block, so a
-    # selection that reaches into a quote has highlighted the WHOLE merged block
-    # even though only the first source line anchored. Extend the slice to the
-    # end of the quote run — stopping at the first line that is not itself a
-    # quote (a blank ends the run, so a following paragraph or heading is never
-    # absorbed). The run-stop is what the F1 finding's blanket fill lacked.
+    # Rich REFLOWS a quote's consecutive ``>`` lines into one paragraph, so a
+    # rendered row can carry text from two source lines and a selection that
+    # lights one row has highlighted both. Extend the slice over the lines that
+    # were merged into the picked one so the copy states what the reader lit.
+    #
+    # Bounded to lines the mapping placed NOWHERE, which is what makes the
+    # extension answer the merge instead of the whole construct. A merged line
+    # has no rendered row of its own -- its text was folded into a sibling's
+    # rows -- so ``align`` never places it, and that absence is the evidence
+    # this needs. A line that DID get its own row is a separate item the reader
+    # did not light, and absorbing it is issue #416: every item of a quoted list
+    # renders on its own row and every one was placed, so a one-row take on the
+    # first of three copied all three. Measured across widths 30-72: the merged
+    # paragraph leaves its second line unplaced at every width, while the quoted
+    # list places all three items at every width -- so the narrower rule is
+    # exactly as strong on the merge and silent on the list.
+    #
+    # ``placed_lines`` is read from the WHOLE mapping rather than from the
+    # selected rows: a line placed on a row outside this selection is still a
+    # line with its own row, and judging only the selection would call it
+    # unplaced and re-absorb it.
+    #
+    # A quote line with no text of its own (a bare ``>`` separating two quoted
+    # paragraphs) is excluded for the same reason, one step further: it paints
+    # nothing, so it was never reflowed into anybody's row and is unplaced for
+    # a different reason than a merged line is. Absorbing it appended a stray
+    # ``>`` to the copy. This is the predicate ``align`` already applies to a
+    # bare ``>`` in its structural scan.
     n = len(lines)
+    placed_lines = {source for source in mapping if source is not None}
     last = max(picked)
     if _QUOTE_RE.match(lines[last]):
         j = last + 1
-        while j < n and _QUOTE_RE.match(lines[j]):
+        while (
+            j < n
+            and _QUOTE_RE.match(lines[j])
+            and j not in placed_lines
+            and _strip_markup(lines[j])
+        ):
             picked.add(j)
             j += 1
 

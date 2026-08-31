@@ -3980,6 +3980,324 @@ async def test_a_mis_mapped_quoted_continuation_still_measures_its_furniture() -
                 ), f"width {width} row {index}: format flips with start cell: {answers}"
 
 
+#: A quote whose own text OPENS with the glyph Rich paints for the quote bar.
+#: Rich paints ``▌ ▌ literal bar ...`` -- the first bar is furniture, the second
+#: is the model's text -- and nothing about the glyph says which is which.
+LITERAL_BAR_QUOTE = "> ▌ literal bar in the quote text here"
+
+#: The same shape one nesting level deeper, so the depth count is exercised
+#: rather than a hard-coded "strip one bar".
+LITERAL_BAR_NESTED_QUOTE = "> > ▌ literal bar inside a nested quote here"
+
+#: Three quoted list items, the fixture issue #416 was measured on. Each item
+#: renders on its OWN row, which is what distinguishes it from a quoted
+#: PARAGRAPH whose consecutive lines Rich reflows into one.
+QUOTED_LIST_THREE_ITEMS = "> - first quoted item\n> - second quoted item\n> - third quoted item"
+
+#: The unquoted twin of the above. It already returned one line per row on
+#: base, which is what made #416 specific to the quoted form -- so it is the
+#: control that says the fix moved the quoted case ONTO the correct behaviour
+#: rather than inventing a new one.
+UNQUOTED_LIST_THREE_ITEMS = "- first quoted item\n- second quoted item\n- third quoted item"
+
+#: A quoted PARAGRAPH written as two source lines. Rich REFLOWS these into one
+#: paragraph, so a rendered row can carry text from both and the second line
+#: gets no row of its own. This is the construct ``slice_markdown``'s quote-run
+#: extension exists for, and the case that must NOT regress when #416 narrows
+#: that extension.
+MERGED_QUOTE_PARAGRAPH = (
+    "> a quoted paragraph that is long enough to wrap across several rows\n"
+    "> and continues here with more text inside of it to force a fold"
+)
+
+
+@pytest.mark.asyncio
+async def test_a_quote_opening_with_a_bar_keeps_the_bar_it_wrote() -> None:
+    """Issue #392: a literal ``▌`` survives, and the painted one does not.
+
+    ``align`` could not place this row at all: ``_row_word`` skips every leading
+    marker glyph to find the row's content word, while the SOURCE side anchored
+    on the bar the model typed, so the two could never agree. With no placement
+    ``furniture_width`` took its ``source_line is None`` branch, stripped
+    nothing, and the whole painted row -- both bars -- reached the clipboard.
+
+    The assertion is EQUALITY against the source line, not a bar count: the
+    payload is that the copy is the markdown the model wrote, and a count would
+    pass on a copy that stripped the right number of bars off the wrong text.
+    """
+    for width in (44, 60, 80):
+        app = StyledTranscriptApp()
+        async with app.run_test(size=(width, 40)) as pilot:
+            block = AssistantBlock()
+            await _mounted(app, block)
+            block.update_text(LITERAL_BAR_QUOTE)
+            block.finalize_text()
+            await pilot.pause()
+
+            rows = _rendered_rows(block)
+            index, _, _ = _find(rows, "literal bar")
+            # The frame really does paint two bars, or this proves nothing.
+            assert rows[index].count("▌") == 2, f"width {width}: {rows[index]!r}"
+
+            selection = Selection.from_offsets(
+                Offset(x=0, y=index), Offset(x=len(rows[index].rstrip()), y=index)
+            )
+            copied = block.get_selection(selection)
+            assert copied is not None
+            assert (
+                copied[0] == LITERAL_BAR_QUOTE
+            ), f"width {width}: a quote opening with a bar did not round-trip: {copied[0]!r}"
+
+
+@pytest.mark.asyncio
+async def test_a_nested_quote_opening_with_a_bar_strips_only_painted_bars() -> None:
+    """#392 at depth two: the strip is COUNTED, not matched.
+
+    Rich paints one ``▌`` per quote level, so this row opens with three bars of
+    which two are furniture. A glyph match is greedy and cannot stop at the
+    right one; the source line's quote DEPTH is the only thing that can say how
+    many Rich painted, which is why ``_painted_quote_width`` counts levels
+    instead of matching ``_RENDERED_QUOTE_PREFIX_RE``.
+    """
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(60, 40)) as pilot:
+        block = AssistantBlock()
+        await _mounted(app, block)
+        block.update_text(LITERAL_BAR_NESTED_QUOTE)
+        block.finalize_text()
+        await pilot.pause()
+
+        rows = _rendered_rows(block)
+        index, _, _ = _find(rows, "literal bar")
+        assert rows[index].count("▌") == 3, f"the fixture must paint three bars: {rows[index]!r}"
+
+        selection = Selection.from_offsets(
+            Offset(x=0, y=index), Offset(x=len(rows[index].rstrip()), y=index)
+        )
+        copied = block.get_selection(selection)
+        assert copied is not None
+        assert copied[0] == LITERAL_BAR_NESTED_QUOTE, f"{copied[0]!r}"
+
+
+@pytest.mark.asyncio
+async def test_a_sub_line_take_on_a_bar_led_quote_keeps_the_literal_bar() -> None:
+    """The depth count, asserted on the GLYPH path where it is the only answer.
+
+    A whole-row take copies the SOURCE line, so it cannot tell a greedy glyph
+    strip from a counted one: both round-trip to the same markdown. A sub-line
+    take copies the painted cells past the furniture, so the furniture WIDTH
+    is the payload: greedy ``_RENDERED_QUOTE_PREFIX_RE`` eats the model's bar
+    along with Rich's and the copy loses it; counting by the source line's
+    quote depth keeps it.
+
+    The drag is from column 0 to a column SHORT of the row's last glyph, which
+    is what sends it down the glyph path. The word ``literal`` is located on
+    the frame rather than hard-coded as a column, so a change in how Rich
+    paints the bar cannot silently shift the assertion onto the wrong cells.
+    """
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(60, 40)) as pilot:
+        block = AssistantBlock()
+        await _mounted(app, block)
+        block.update_text(LITERAL_BAR_QUOTE)
+        block.finalize_text()
+        await pilot.pause()
+
+        rows = _rendered_rows(block)
+        index, start, end = _find(rows, "literal")
+        # Stop short of the row's last glyph so this is a sub-line take, not a
+        # whole-row one that would go down the markdown path and hide the
+        # furniture-width difference this exists to pin.
+        selection = Selection.from_offsets(Offset(x=0, y=index), Offset(x=end, y=index))
+        copied = block.get_selection(selection)
+        assert copied is not None
+        assert (
+            copied[0] == "▌ literal"
+        ), f"the model's bar was eaten with the furniture: {copied[0]!r}"
+
+
+@pytest.mark.asyncio
+async def test_one_row_of_a_quoted_list_copies_only_that_item() -> None:
+    """Issue #416: a one-row gesture takes ONE item, not the rest of the list.
+
+    ``slice_markdown`` extended every quoted slice to the end of the quote run,
+    which is right for a quoted PARAGRAPH (Rich reflows its lines, so one row
+    carries two) and wrong for a quoted LIST (every item gets its own row). A
+    whole-row take on item 1 of three therefore copied all three.
+
+    Asserted as an exact source-line match per row rather than a line COUNT: a
+    count passes on a copy that returns one line of the wrong item, which is the
+    substitution this path's earlier rounds were repeatedly bitten by.
+    """
+    items = QUOTED_LIST_THREE_ITEMS.split("\n")
+    for width in (44, 60, 80):
+        app = StyledTranscriptApp()
+        async with app.run_test(size=(width, 40)) as pilot:
+            block = AssistantBlock()
+            await _mounted(app, block)
+            block.update_text(QUOTED_LIST_THREE_ITEMS)
+            block.finalize_text()
+            await pilot.pause()
+
+            rows = _rendered_rows(block)
+            for item in items:
+                text = item.removeprefix("> - ")
+                index, _, _ = _find(rows, text)
+                selection = Selection.from_offsets(
+                    Offset(x=0, y=index), Offset(x=len(rows[index].rstrip()), y=index)
+                )
+                copied = block.get_selection(selection)
+                assert copied is not None
+                assert copied[0] == item, (
+                    f"width {width}: a one-row take on {text!r} copied "
+                    f"{len(copied[0].split(chr(10)))} line(s): {copied[0]!r}"
+                )
+
+
+@pytest.mark.asyncio
+async def test_the_quoted_list_matches_its_unquoted_twin() -> None:
+    """#416's differential: quoting a list must not change how much a row takes.
+
+    The unquoted list already returned exactly one line per row, and that
+    asymmetry is what identified the defect as specific to the quoted form.
+    Asserting the two forms agree row-for-row pins the fix to that reading, so a
+    future change that re-widens the quoted branch fails here even if the
+    absolute assertions above were somehow satisfied.
+    """
+    for width in (44, 60):
+        app = StyledTranscriptApp()
+        async with app.run_test(size=(width, 40)) as pilot:
+            quoted, plain = AssistantBlock(), AssistantBlock()
+            await _mounted(app, quoted, plain)
+            quoted.update_text(QUOTED_LIST_THREE_ITEMS)
+            quoted.finalize_text()
+            plain.update_text(UNQUOTED_LIST_THREE_ITEMS)
+            plain.finalize_text()
+            await pilot.pause()
+
+            for block, prefix in ((quoted, "> - "), (plain, "- ")):
+                rows = _rendered_rows(block)
+                for item in (
+                    QUOTED_LIST_THREE_ITEMS if prefix.startswith(">") else UNQUOTED_LIST_THREE_ITEMS
+                ).split("\n"):
+                    text = item.removeprefix(prefix)
+                    index, _, _ = _find(rows, text)
+                    selection = Selection.from_offsets(
+                        Offset(x=0, y=index), Offset(x=len(rows[index].rstrip()), y=index)
+                    )
+                    copied = block.get_selection(selection)
+                    assert copied is not None
+                    assert len(copied[0].split("\n")) == 1, (
+                        f"width {width}: {prefix!r} form took "
+                        f"{len(copied[0].split(chr(10)))} lines for one row: {copied[0]!r}"
+                    )
+
+
+@pytest.mark.asyncio
+async def test_a_reflowed_quote_paragraph_still_copies_both_its_lines() -> None:
+    """The case #416's narrowing must NOT break, asserted where it is reachable.
+
+    Rich reflows a blockquote's consecutive ``>`` lines into one paragraph, so
+    at the right widths the second source line gets no rendered row of its own
+    and a reader lighting any row has highlighted both lines. That is why the
+    quote-run extension exists, and narrowing it to lines the mapping placed
+    NOWHERE has to leave this intact.
+
+    The widths are chosen by MEASUREMENT, not by taste: the reflow only hides a
+    line at widths where it happens, so the test asserts the precondition (the
+    second line is genuinely unplaced) before asserting the payload. Without
+    that guard this would pass vacuously at any width where both lines render
+    separately -- exactly the shape of a guard that cannot fail at its boundary.
+    """
+    for width in (48, 56, 64, 72):
+        app = StyledTranscriptApp()
+        async with app.run_test(size=(width, 40)) as pilot:
+            block = AssistantBlock()
+            await _mounted(app, block)
+            block.update_text(MERGED_QUOTE_PARAGRAPH)
+            block.finalize_text()
+            await pilot.pause()
+
+            rows = _rendered_rows(block)
+            mapping = _copy_markdown.align(block._full_text, rows)
+            placed = {source for source in mapping if source is not None}
+            assert 1 not in placed, (
+                f"width {width}: the second quote line got its own row, so this "
+                f"width does not exercise the reflow: {mapping}"
+            )
+
+            index, _, _ = _find(rows, "a quoted paragraph")
+            selection = Selection.from_offsets(
+                Offset(x=0, y=index), Offset(x=len(rows[index].rstrip()), y=index)
+            )
+            copied = block.get_selection(selection)
+            assert copied is not None
+            assert (
+                copied[0] == MERGED_QUOTE_PARAGRAPH
+            ), f"width {width}: the reflowed line was dropped from the copy: {copied[0]!r}"
+
+
+@pytest.mark.asyncio
+async def test_a_bare_quote_separator_is_not_appended_to_the_copy() -> None:
+    """A bare ``>`` between quoted paragraphs paints nothing and copies nothing.
+
+    It is unplaced like a reflowed line, but for a different reason -- it has no
+    text to reflow -- so the run extension has to exclude it by the same
+    predicate ``align`` already uses for a bare ``>``. Absorbing it appended a
+    stray ``>`` to the clipboard.
+    """
+    source = "> first quoted paragraph here\n>\n> second quoted paragraph here"
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(60, 40)) as pilot:
+        block = AssistantBlock()
+        await _mounted(app, block)
+        block.update_text(source)
+        block.finalize_text()
+        await pilot.pause()
+
+        rows = _rendered_rows(block)
+        index, _, _ = _find(rows, "first quoted paragraph")
+        selection = Selection.from_offsets(
+            Offset(x=0, y=index), Offset(x=len(rows[index].rstrip()), y=index)
+        )
+        copied = block.get_selection(selection)
+        assert copied is not None
+        assert copied[0] == "> first quoted paragraph here", f"{copied[0]!r}"
+
+
+@pytest.mark.asyncio
+async def test_a_multi_row_quoted_list_drag_still_takes_every_lit_item() -> None:
+    """Narrowing the run extension must not cost a GENUINE multi-row selection.
+
+    #416 is about taking more than was lit; the opposite failure -- a drag over
+    two items copying one -- would be worse, because a silently short paste is
+    not visible to the reader the way an over-copy is. Swept over every start
+    and end pair so an off-by-one at either edge fails here.
+    """
+    items = QUOTED_LIST_THREE_ITEMS.split("\n")
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(44, 40)) as pilot:
+        block = AssistantBlock()
+        await _mounted(app, block)
+        block.update_text(QUOTED_LIST_THREE_ITEMS)
+        block.finalize_text()
+        await pilot.pause()
+
+        rows = _rendered_rows(block)
+        indices = [_find(rows, item.removeprefix("> - "))[0] for item in items]
+        for first in range(len(items)):
+            for last in range(first, len(items)):
+                selection = Selection.from_offsets(
+                    Offset(x=0, y=indices[first]),
+                    Offset(x=len(rows[indices[last]].rstrip()), y=indices[last]),
+                )
+                copied = block.get_selection(selection)
+                assert copied is not None
+                assert copied[0] == "\n".join(
+                    items[first : last + 1]
+                ), f"a drag over items {first}..{last} copied {copied[0]!r}"
+
+
 @pytest.mark.asyncio
 async def test_a_wrapped_items_continuation_row_does_not_flip_format() -> None:
     """Issue #395: the D2-4 property, asserted on a CONTINUATION row.
