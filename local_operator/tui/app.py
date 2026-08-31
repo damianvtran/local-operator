@@ -11279,6 +11279,8 @@ class OperatorApp(App[None]):
             teams=self._settings_team_rows(),
             agents=self._agent_profile_rows(),
             providers=self._settings_provider_rows(),
+            provider_catalogue=self._settings_provider_catalogue(),
+            model_catalogue=self._settings_model_catalogue(),
         )
 
     def _settings_team_rows(self) -> list[tuple[str, str, str]]:
@@ -11327,6 +11329,53 @@ class OperatorApp(App[None]):
         except Exception:  # noqa: BLE001 — never crash the page on a store read
             logger.debug("settings: provider rows unavailable", exc_info=True)
         return rows
+
+    def _settings_provider_catalogue(self) -> list[tuple[str, str]]:
+        """Loginable providers as ``(id, display_name)`` for the Default provider
+        suggestion dropdown.
+
+        The WHOLE login registry, not just the signed-in providers
+        ``_settings_provider_rows`` returns: the Default provider field is where
+        a user names the provider they intend to boot on, which may be one they
+        have not logged into yet, so constraining the suggestions to current
+        credentials would hide exactly the choice they are reaching for. Same
+        registry ``/login`` and ``/provider`` enumerate, in registry order, so
+        the page cannot offer a provider those surfaces do not. Never raises: an
+        unreadable registry degrades to an empty catalogue, which falls the field
+        back to a plain free-text editor.
+        """
+        rows: list[tuple[str, str]] = []
+        providers = self._providers
+        if providers is None:
+            return rows
+        try:
+            for definition in providers.login_providers():
+                rows.append((definition.id, definition.name))
+        except Exception:  # noqa: BLE001 — the page must open without a catalogue
+            logger.debug("settings: provider catalogue unavailable", exc_info=True)
+        return rows
+
+    def _settings_model_catalogue(self) -> list[ModelRow]:
+        """The model catalogue for the Default model suggestion dropdown.
+
+        The SAME rows ``/model`` shows, through the SAME ``_catalogue_rows``
+        filter (usable providers, the current model rescued in), so the two
+        surfaces rank an identical set by the identical matcher and cannot drift.
+        The static registry only — no live provider fetch — because this runs
+        synchronously on the page-open path and a network round-trip there would
+        stall the mode; ``/model``'s own live refresh already covers the rows
+        that shipped too late for the registry, and the Default model field is a
+        boot preference a user can also just type. Degrades to an empty
+        catalogue (plain free-text editor) on any failure.
+        """
+        try:
+            rows, _note = self._catalogue_rows(
+                self._providers.static_catalogue() if self._providers else []
+            )
+            return rows
+        except Exception:  # noqa: BLE001 — the page must open without a catalogue
+            logger.debug("settings: model catalogue unavailable", exc_info=True)
+            return []
 
     def _close_settings_view(self) -> bool:
         """Leave the settings mode and put the conversation back. True if open.
