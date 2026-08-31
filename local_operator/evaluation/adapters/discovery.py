@@ -12,7 +12,8 @@ import os
 import posixpath
 import stat
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
@@ -318,58 +319,33 @@ def _verify_recorded_file(
     return path, data
 
 
-@dataclass(frozen=True)
-class _VerifiedModule:
-    name: str
-    path: Path
-    source: bytes
-    is_package: bool
-
-
-def _verified_module_chain(
+def _verified_entry_target(
     distribution: importlib.metadata.Distribution, selector: AdapterSelector
-) -> tuple[str, tuple[_VerifiedModule, ...]]:
-    """Return every module that must execute, with its exact verified bytes."""
+) -> tuple[str, str]:
+    """Validate the entry point and confirm its module is RECORD-covered.
+
+    Ancestor ``__init__`` files are not walked here: the finder verifies every
+    module the distribution owns as the import system requests it, which covers
+    ancestors and their own imports alike.
+    """
 
     module, separator, attribute = selector.entry_point.partition(":")
     if separator != ":" or not module or not attribute or ":" in attribute:
         raise AdapterDiscoveryError("adapter entry point must be module:attribute")
+    if not attribute.isidentifier():
+        raise AdapterDiscoveryError("adapter entry attribute is not an identifier")
     parts = module.split(".")
     if not all(part.isidentifier() for part in parts):
         raise AdapterDiscoveryError("adapter entry module is not a dotted identifier")
     rows = {row[0]: row for row in _record_rows(distribution)}
-    chain: list[_VerifiedModule] = []
-    # Importing pkg.sub.mod executes every ancestor __init__ first, so an
-    # unrecorded ancestor would run arbitrary code before any verification.
-    # Each ancestor must be RECORD-covered and hash-matched, or genuinely absent
-    # from disk (a real namespace package).
-    for depth in range(1, len(parts)):
-        name = ".".join(parts[:depth])
-        ancestor = "/".join(parts[:depth]) + "/__init__.py"
-        if ancestor in rows:
-            path, source = _verify_recorded_file(distribution, rows, ancestor)
-            chain.append(_VerifiedModule(name=name, path=path, source=source, is_package=True))
-            continue
-        if Path(str(distribution.locate_file(ancestor))).exists():
-            raise AdapterDiscoveryError("adapter package init is not RECORD-covered")
     candidates = {f"{'/'.join(parts)}.py", f"{'/'.join(parts)}/__init__.py"}
-    matches = sorted(candidates & rows.keys())
-    if len(matches) != 1:
+    if len(candidates & rows.keys()) != 1:
         raise AdapterDiscoveryError("adapter entry module is not uniquely RECORD-covered")
-    path, source = _verify_recorded_file(distribution, rows, matches[0])
-    chain.append(
-        _VerifiedModule(
-            name=module,
-            path=path,
-            source=source,
-            is_package=matches[0].endswith("/__init__.py"),
-        )
-    )
-    return attribute, tuple(chain)
+    return module, attribute
 
 
-def _execute_verified_chain(chain: tuple[_VerifiedModule, ...]) -> ModuleType:
-    """Compile and run the verified bytes themselves, never a cached artifact.
+class _VerifiedSourceLoader:
+    """Execute the exact bytes that were hashed, never a cached artifact.
 
     Hashing ``.py`` source and then delegating to a normal import is not a
     verification: CPython prefers ``__pycache__/<name>.<tag>.pyc`` whenever its
@@ -377,34 +353,128 @@ def _execute_verified_chain(chain: tuple[_VerifiedModule, ...]) -> ModuleType:
     write the cache also controls. The hashed bytes and the executed bytes are
     then unrelated, and ``-I -s -E`` do not help because they constrain sys.path
     and the environment, not bytecode trust.
-
-    Refusing to load when a ``__pycache__`` entry exists would be a denylist over
-    a cache location CPython is free to change, and it stays racy: the cache can
-    reappear between the check and the import. Compiling the verified bytes in
-    process removes the question instead of policing it — the object that runs is
-    derived from the byte string that was hashed, so the invariant is structural.
     """
 
-    loaded: ModuleType | None = None
-    for entry in chain:
-        specification = importlib.util.spec_from_file_location(entry.name, entry.path)
-        if specification is None:
-            raise AdapterDiscoveryError("adapter module specification is unavailable")
-        created = importlib.util.module_from_spec(specification)
-        if entry.is_package:
-            created.__path__ = [str(entry.path.parent)]
-        code = compile(entry.source, str(entry.path), "exec", dont_inherit=True)
-        # Registering before execution keeps intra-package imports resolvable,
-        # exactly as the import system would during a normal package import.
-        sys.modules[entry.name] = created
-        try:
-            exec(code, created.__dict__)
-        except BaseException:
-            sys.modules.pop(entry.name, None)
-            raise
-        loaded = created
-    assert loaded is not None
-    return loaded
+    def __init__(self, path: Path, source: bytes) -> None:
+        self._path = path
+        self._source = source
+
+    def create_module(self, spec: Any) -> ModuleType | None:
+        del spec
+        return None
+
+    def get_source(self, fullname: str) -> str:
+        del fullname
+        return self._source.decode("utf-8")
+
+    def exec_module(self, module: ModuleType) -> None:
+        code = compile(self._source, str(self._path), "exec", dont_inherit=True)
+        exec(code, module.__dict__)
+
+
+class _VerifiedDistributionFinder:
+    """Serve only RECORD-covered source for one distribution's own modules.
+
+    Verifying a chain of modules can never be complete, because the chain is
+    discovered before the code that performs the importing has run: an entry
+    module doing ``from . import helper`` sends ``helper`` back through the
+    ordinary loader, which happily executes a forged cache. Scoping the rule to
+    the whole distribution removes that gap — every module the distribution owns
+    is served from verified bytes, and anything under those roots that RECORD
+    does not cover is refused rather than imported.
+
+    Scope is deliberately narrow. Only names whose top-level component is owned
+    by this distribution's RECORD are claimed; every other import (stdlib,
+    pydantic, local_operator itself) returns ``None`` here and proceeds through
+    the normal machinery untouched.
+
+    Coverage boundary, measured rather than assumed: the finder is active for
+    the duration of the load, so it governs the entry module, its ancestors, and
+    anything they import while executing — including imports inside the factory
+    call. It does NOT govern an import an adapter defers until after loading has
+    returned, because by then the finder has been removed so it cannot dictate
+    the worker's later imports. Modules already imported under it stay verified
+    in ``sys.modules``; a genuinely new deferred import would fall back to the
+    ordinary loader. Closing that remaining window means keeping the adapter's
+    own modules unresolvable afterwards, which is a separate decision about
+    worker-lifetime import policy, not part of load verification.
+    """
+
+    def __init__(
+        self,
+        distribution: importlib.metadata.Distribution,
+        rows: dict[str, list[str]],
+    ) -> None:
+        self._distribution = distribution
+        self._rows = rows
+        self._owned: set[str] = set()
+        for relative in rows:
+            head, _, tail = relative.partition("/")
+            name = head[:-3] if not tail and head.endswith(".py") else head
+            if name.isidentifier():
+                self._owned.add(name)
+
+    @property
+    def owned_roots(self) -> frozenset[str]:
+        return frozenset(self._owned)
+
+    def find_spec(self, fullname: str, path: Any = None, target: Any = None) -> Any:
+        del path, target
+        if fullname.split(".")[0] not in self._owned:
+            return None
+        parts = fullname.split(".")
+        if not all(part.isidentifier() for part in parts):
+            raise AdapterDiscoveryError("adapter module name is not a dotted identifier")
+        stem = "/".join(parts)
+        package_init = f"{stem}/__init__.py"
+        module_file = f"{stem}.py"
+        matches = sorted({package_init, module_file} & self._rows.keys())
+        if len(matches) > 1:
+            raise AdapterDiscoveryError("adapter module is ambiguously RECORD-covered")
+        if not matches:
+            # A directory with no recorded __init__ is a genuine namespace
+            # package; anything else present on disk is unrecorded code.
+            if Path(str(self._distribution.locate_file(package_init))).exists():
+                raise AdapterDiscoveryError("adapter package init is not RECORD-covered")
+            if Path(str(self._distribution.locate_file(module_file))).exists():
+                raise AdapterDiscoveryError("adapter module is not RECORD-covered")
+            return None
+        relative = matches[0]
+        verified_path, source = _verify_recorded_file(self._distribution, self._rows, relative)
+        is_package = relative.endswith("/__init__.py")
+        return importlib.util.spec_from_file_location(
+            fullname,
+            verified_path,
+            loader=_VerifiedSourceLoader(verified_path, source),
+            submodule_search_locations=[str(verified_path.parent)] if is_package else None,
+        )
+
+
+@contextmanager
+def _verified_imports(
+    distribution: importlib.metadata.Distribution,
+    rows: dict[str, list[str]],
+) -> Iterator[_VerifiedDistributionFinder]:
+    """Install the finder for the load only, unwinding whatever it created.
+
+    The finder is removed unconditionally so it cannot govern the worker's later
+    execution, and every module it introduced is dropped when the load fails, so
+    a half-imported distribution is never left behind for a retry to inherit.
+    """
+
+    finder = _VerifiedDistributionFinder(distribution, rows)
+    before = set(sys.modules)
+    sys.meta_path.insert(0, cast(Any, finder))
+    try:
+        yield finder
+    except BaseException:
+        for name in set(sys.modules) - before:
+            if name.split(".")[0] in finder.owned_roots:
+                sys.modules.pop(name, None)
+        raise
+    finally:
+        with suppress(ValueError):
+            sys.meta_path.remove(cast(Any, finder))
 
 
 def load_selected_adapter(selector: AdapterSelector) -> EvaluationAdapter:
@@ -422,14 +492,25 @@ def load_selected_adapter(selector: AdapterSelector) -> EvaluationAdapter:
         raise AdapterDiscoveryError(
             "selected distribution must expose exactly one exact entry point"
         )
-    attribute, chain = _verified_module_chain(distribution, selector)
+    module_name, attribute = _verified_entry_target(distribution, selector)
+    rows = {row[0]: row for row in _record_rows(distribution)}
     try:
-        # The entry point is resolved against the module built from verified
-        # bytes, so `.load()` is never given the chance to import a cached
-        # artifact we did not hash.
-        loaded = _execute_verified_chain(chain)
-        factory = cast(Callable[[], Any], getattr(loaded, attribute))
-        adapter = factory()
+        # Importing under the finder means every module this distribution owns —
+        # the entry module, its ancestors, and anything they import later during
+        # execution — is served from verified bytes, so `.load()` and the
+        # ordinary loader never get a chance to run a cached artifact.
+        with _verified_imports(distribution, rows):
+            for stale in [
+                name
+                for name in sys.modules
+                if name == module_name.split(".")[0]
+                or name.startswith(f"{module_name.split('.')[0]}.")
+            ]:
+                # A pre-existing entry would otherwise be returned unverified.
+                del sys.modules[stale]
+            loaded = importlib.import_module(module_name)
+            factory = cast(Callable[[], Any], getattr(loaded, attribute))
+            adapter = factory()
     except AdapterDiscoveryError:
         raise
     except Exception as error:
