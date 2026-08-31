@@ -15,7 +15,6 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from collections.abc import Sequence
 from typing import Any, Callable
 
 import pytest
@@ -29,7 +28,6 @@ from local_operator.harness.types import (
     AsideResult,
     ChatRequest,
     CustomMessage,
-    ImageContent,
     Message,
     MessageEndEvent,
     ModelSpec,
@@ -259,13 +257,15 @@ class FakeChild:
     def __init__(self) -> None:
         self.asides: list[Callable[[], AsideResult]] = []
         self.steers: list[str] = []
+        self.steer_messages: list[Message] = []
         self.handlers: list[Callable[[AgentEvent], Any]] = []
 
     def queue_aside(self, thunk: Callable[[], AsideResult]) -> None:
         self.asides.append(thunk)
 
-    def steer(self, text: str, images: Sequence[ImageContent] | None = None) -> None:
-        self.steers.append(text)
+    def steer_message(self, message: Message) -> None:
+        self.steers.append(message.text)
+        self.steer_messages.append(message)
 
     def subscribe(self, handler: Callable[[AgentEvent], Any]) -> Callable[[], None]:
         self.handlers.append(handler)
@@ -695,6 +695,39 @@ def test_steer_is_a_real_user_message_not_an_aside():
     assert child.asides == []
     assert "stop after the first failing test" in child.steers[0]
     assert "changes your instructions" in child.steers[0]
+
+
+def test_steer_passes_the_journaled_communication_id_to_the_child():
+    """The persisted steer row must carry the SAME id as the journaled
+    communication fact.
+
+    Human-facing surfaces (the TUI subagent view, the mobile projection)
+    correlate the fact with the replay-visible row by id and render the fact
+    instead of the model-facing ``<parent-message>`` envelope. Before this fix
+    ``comms.steer`` went through ``steer`` — which mints a fresh Message id —
+    so the correlation could never match and the envelope rendered beside the
+    fact. The fix routes through the identity-preserving ``steer_message``
+    seam with a caller-built Message carrying the fact's id.
+    """
+    comms, _jobs, child, _parent = wire()
+
+    journaled_ids: list[str | None] = []
+    original_journal = comms._journal_communication
+
+    def record_journal(record, *, direction, body, communication_id=None, **kwargs):
+        journaled_ids.append(communication_id)
+        return original_journal(
+            record, direction=direction, body=body, communication_id=communication_id, **kwargs
+        )
+
+    comms._journal_communication = record_journal  # type: ignore[method-assign]
+
+    delivery = comms.steer("job-1", "stop after the first failing test")
+
+    assert delivery.outcome == "injected"
+    assert len(journaled_ids) == 1
+    assert journaled_ids[0] is not None
+    assert [message.id for message in child.steer_messages] == [journaled_ids[0]]
 
 
 def test_resolve_addresses_by_id_label_and_all():

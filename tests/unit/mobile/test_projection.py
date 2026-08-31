@@ -578,6 +578,66 @@ def test_note_peer_message_appends_optimistic_row() -> None:
     assert row.details["sender"]["pid"] == 7
 
 
+def _steer_envelope(body: str) -> str:
+    """The model-facing wrapper ``SubagentComms._format_to_child`` builds for a
+    steer, restated here so the fold tests pin the render contract against the
+    exact shape a persisted steer row carries."""
+    return (
+        "<parent-message>\n"
+        "This changes your instructions. Apply it from now on, and drop work it "
+        "makes pointless.\n\n"
+        f"{body}\n"
+        "</parent-message>"
+    )
+
+
+def test_history_fold_renders_a_persisted_steer_as_the_parents_words() -> None:
+    """A hub steer persists as a plain user Message whose text is the
+    model-facing envelope. The phone must show the parent's own words as a
+    parent_message row, never the XML — the phone's history fold sees only
+    LLM-visible messages (the journaled fact is a custom row that never
+    replays), so body extraction is its only path."""
+    from local_operator.mobile.projection import fold_messages_to_entries
+
+    steer = Message.user(_steer_envelope("Focus on retries"), id="steer-1")
+    entries = fold_messages_to_entries([Message.user("do the thing"), steer])
+
+    assert [(entry.kind, entry.text) for entry in entries] == [
+        ("user", "do the thing"),
+        ("parent_message", "Focus on retries"),
+    ]
+    assert "<parent-message>" not in " ".join(entry.text for entry in entries)
+
+
+def test_fold_history_renders_a_persisted_steer_as_the_parents_words() -> None:
+    """The attach rebuild applies the same rule as the lazy-load fold, so an
+    attaching phone and a paged history agree about the row."""
+    fold = make_fold()
+    fold.fold_history([Message.user(_steer_envelope("Focus on retries"), id="steer-1")])
+
+    rows = fold.projection.transcript
+    assert len(rows) == 1
+    assert rows[0].kind == "parent_message"
+    assert rows[0].text == "Focus on retries"
+    assert "<parent-message>" not in rows[0].text
+
+
+def test_a_live_delivered_steer_never_renders_the_envelope() -> None:
+    """A hub steer delivered mid-turn announces itself as a user
+    MessageStartEvent carrying the envelope text. The fold must paint the
+    parent's words, not the XML, exactly like the durable folds."""
+    fold = make_fold()
+    message = Message.user(_steer_envelope("Focus on retries"), id="steer-1")
+
+    added = fold.absorb_user_event(message)
+
+    assert added is True
+    row = fold.projection.transcript[-1]
+    assert row.kind == "parent_message"
+    assert row.text == "Focus on retries"
+    assert "<parent-message>" not in row.text
+
+
 def test_transcript_is_capped_from_the_front() -> None:
     fold = make_fold()
     for i in range(PROJECTION_TRANSCRIPT_LIMIT + 25):

@@ -77,6 +77,49 @@ HUB_MESSAGE_TYPE = "hub_message"
 #: only to correlate the parent's action with a later child reply.
 HUB_COMMUNICATION_CUSTOM_TYPE = "hub_communication"
 
+#: Opening tag of the model-facing envelope :meth:`SubagentComms._format_to_child`
+#: wraps parent→child text in. A hub steer persists as a plain role=user
+#: Message carrying this envelope, so human-facing surfaces match on the tag
+#: to keep the XML away from the reader (see
+#: :func:`extract_parent_message_body`).
+PARENT_MESSAGE_TAG = "<parent-message>"
+
+
+def extract_parent_message_body(text: str) -> str | None:
+    """The human-facing body of a model-facing ``<parent-message>`` envelope.
+
+    Returns None when ``text`` is not such an envelope. The shape parsed is
+    exactly what :meth:`SubagentComms._format_to_child` builds:
+    ``<parent-message>\\n{instruction}\\n\\n{body}\\n</parent-message>`` — the
+    body is everything after the first blank line, before the closing tag.
+
+    WHY this exists as a shared helper: a hub steer is persisted as a plain
+    role=user Message whose text is the envelope built for the MODEL, while
+    the human-facing fact is a separate custom row. Human-facing surfaces
+    (the TUI subagent view, the mobile projection) must show the body the
+    parent authored and never the XML wrapper — including for transcripts
+    persisted before steers carried their communication fact's id, where
+    body-text correlation is the only match left. Both surfaces import this
+    one parser so the builder and its inverse cannot drift apart.
+    """
+    stripped = text.strip()
+    if not stripped.startswith(PARENT_MESSAGE_TAG):
+        return None
+    end = stripped.rfind("</parent-message>")
+    if end < 0:
+        return None
+    inner = stripped[len(PARENT_MESSAGE_TAG) : end]
+    # Drop the leading newline, then the instruction line: the body starts
+    # after the FIRST blank line. A missing separator means the text does not
+    # follow the builder's shape; treat the whole interior as the body rather
+    # than leaking the instruction line into what is shown to a person.
+    if inner.startswith("\n"):
+        inner = inner[1:]
+    separator = inner.find("\n\n")
+    body = inner[separator + 2 :] if separator >= 0 else inner
+    return body.strip()
+
+
 #: How many child records to keep. A record is ~4 short strings and outlives
 #: its job row on purpose (job rows are swept 5 minutes after settling, and
 #: resuming a child an hour later is a legitimate thing to want). The cap
@@ -244,14 +287,14 @@ class ChildSession(Protocol):
     Narrower than :class:`~local_operator.session.session.Session` on
     purpose: it is the whole coupling between the parent's channel and a
     child, stated in one place. Notes and questions go through
-    ``queue_aside``, course changes through ``steer``, and the reply watcher
-    rides ``subscribe``. Anything a future op needs from a child belongs here
-    first, where the cost of the coupling is visible.
+    ``queue_aside``, course changes through ``steer_message``, and the reply
+    watcher rides ``subscribe``. Anything a future op needs from a child
+    belongs here first, where the cost of the coupling is visible.
     """
 
     def queue_aside(self, thunk: Callable[[], AsideResult]) -> None: ...
 
-    def steer(self, text: str) -> None: ...
+    def steer_message(self, message: Message) -> None: ...
 
     def subscribe(self, handler: Callable[[AgentEvent], Any]) -> Callable[[], None]: ...
 
@@ -1228,7 +1271,19 @@ class SubagentComms:
             communication_id=message.id,
             kind="steer",
         )
-        record.child.steer(str(message.details["text"]))
+        # ``steer_message`` (not ``steer``) so the persisted row carries the
+        # SAME id as the journaled communication fact: human-facing surfaces
+        # (the TUI subagent view, the mobile projection) correlate the two by
+        # id and render the fact instead of the model-facing
+        # ``<parent-message>`` XML envelope. ``steer`` would mint a fresh
+        # Message id the correlation could never match — which is exactly how
+        # the envelope leaked beside the fact. ``steer_message`` is the
+        # identity-preserving seam: it queues the caller-built Message
+        # verbatim. On a follower-owned child the id rides the wire as the
+        # ContinuationCommand id, which the owner's handle hands back to
+        # ``Session.steer`` as ``message_id``, so the correlation survives
+        # that path too.
+        record.child.steer_message(Message.user(str(message.details["text"]), id=message.id))
         return Delivery(job_id, record.label, "injected")
 
     async def _await_child(self, record: _ChildRecord, timeout_s: float) -> bool:

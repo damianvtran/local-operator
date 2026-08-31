@@ -65,7 +65,11 @@ from textual.message import Message
 from textual.widgets import Static
 
 from local_operator.ansi import strip_control_sequences
-from local_operator.harness.comms import HUB_COMMUNICATION_CUSTOM_TYPE, HUB_MESSAGE_TYPE
+from local_operator.harness.comms import (
+    HUB_COMMUNICATION_CUSTOM_TYPE,
+    HUB_MESSAGE_TYPE,
+    extract_parent_message_body,
+)
 from local_operator.harness.jobs import CANCELLED_BEFORE_START, TRAJECTORY_SEQ_KEY
 from local_operator.session.transcript import (
     CUSTOM_KIND_CUSTOM,
@@ -522,17 +526,26 @@ def fold_transcript_entries(
                     duration,
                 )
     communication_ids: set[str] = set()
+    communication_bodies: set[str] = set()
     # Host communication facts supersede their replay-visible custom message:
     # the former include replies and correlation while the latter contain XML
-    # wrappers intended for the model, never for a person.
+    # wrappers intended for the model, never for a person. The to-child bodies
+    # are retained too: a hub steer persists as a plain user row, and
+    # transcripts written before steers carried their fact's id can only be
+    # correlated by body text.
     for entry in entries:
         if (
             entry.type == ENTRY_CUSTOM
             and entry.payload.get("custom_type") == HUB_COMMUNICATION_CUSTOM_TYPE
         ):
-            communication_id = entry.payload.get("details", {}).get("communication_id")
+            details = entry.payload.get("details") or {}
+            communication_id = details.get("communication_id")
             if communication_id:
                 communication_ids.add(str(communication_id))
+            if details.get("direction") == "to_child":
+                fact_body = strip_control_sequences(str(details.get("body") or "")).strip()
+                if fact_body:
+                    communication_bodies.add(fact_body)
     for entry in entries:
         payload = entry.payload
         if entry.type == ENTRY_CUSTOM:
@@ -579,6 +592,23 @@ def fold_transcript_entries(
         role = payload.get("role")
         text = strip_control_sequences(_content_text(payload)).strip()
         if role == "user":
+            body = extract_parent_message_body(text)
+            if body is not None:
+                # A persisted hub steer: model-facing XML around the parent's
+                # own words. The human-facing fact row supersedes it — by id
+                # once steers carry their fact's id, and by body text for
+                # transcripts written before that (legacy ids never match).
+                # When NO fact exists in the loaded window (it may sit on an
+                # unloaded page), render the extracted body as the parent row
+                # instead: the XML is for the model and must never reach a
+                # person either way.
+                if entry.id not in communication_ids and body not in communication_bodies:
+                    folded.append(
+                        SubagentEntry(
+                            entry.id, "parent_message", text=f"Parent · redirected\n{body}"
+                        )
+                    )
+                continue
             if text:
                 folded.append(SubagentEntry(entry.id, "user", text=text))
             continue

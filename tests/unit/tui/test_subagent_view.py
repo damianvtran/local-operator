@@ -1514,6 +1514,66 @@ async def test_durable_communications_are_human_facing_and_correlated(tmp_path) 
         assert "<parent-message>" not in " ".join(view.rendered_rows())
 
 
+def _steer_envelope(body: str) -> str:
+    """The model-facing wrapper ``SubagentComms._format_to_child`` builds for a
+    steer, restated here so the view tests pin the render contract against the
+    exact shape a persisted steer row carries."""
+    return (
+        "<parent-message>\n"
+        "This changes your instructions. Apply it from now on, and drop work it "
+        "makes pointless.\n\n"
+        f"{body}\n"
+        "</parent-message>"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("correlated", [True, False])
+async def test_a_persisted_steer_never_renders_the_model_facing_envelope(
+    tmp_path, correlated: bool
+) -> None:
+    """A hub steer persists as a plain user Message carrying the model-facing
+    ``<parent-message>`` XML. The human-facing fact supersedes it, so the page
+    shows exactly one ``Parent · redirected`` row and never the XML.
+
+    ``correlated`` covers both transcript generations: a steer persisted after
+    the id fix carries its fact's id (the primary correlation), while a LEGACY
+    steer carries a fresh id that can only match by body text. Both must render
+    one fact row and no envelope.
+    """
+    transcript = Transcript(tmp_path / "child")
+    await transcript.append_custom(
+        HUB_COMMUNICATION_CUSTOM_TYPE,
+        {
+            "direction": "to_child",
+            "body": "Focus on retries",
+            "kind": "steer",
+            "communication_id": "s1",
+        },
+    )
+    steer_id = "s1" if correlated else "legacy-uuid"
+    await transcript.append_message(Message.user(_steer_envelope("Focus on retries"), id=steer_id))
+
+    job = _job_with([], status="completed")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    session._subagent_comms = type(
+        "Comms", (), {"session_dir_of": lambda self, _job_id: transcript.directory}
+    )()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(90, 28)) as pilot:
+        view = await _open(pilot, app, job)
+        await _wait_history(pilot, view)
+
+        redirected = [
+            entry.text
+            for entry in view._history_entries
+            if entry.text == "Parent · redirected\nFocus on retries"
+        ]
+        assert redirected == ["Parent · redirected\nFocus on retries"]
+        assert "<parent-message>" not in " ".join(view.rendered_rows())
+
+
 @pytest.mark.asyncio
 async def test_history_unavailable_and_error_retry_keep_trajectory_fallback(
     tmp_path, monkeypatch
