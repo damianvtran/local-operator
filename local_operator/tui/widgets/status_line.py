@@ -114,14 +114,6 @@ ICON_AGENTS = "◍"
 #: so the band's width arithmetic stays correct while the glyph is invisible.
 ICON_JOBS = "▣"
 ICON_CONTEXT = "▦"
-#: Deferred history: messages a bounded resume holds off-screen until the
-#: reader scrolls up. A CATEGORY marker like every other icon here; ``▴``
-#: points UP, which is the direction the deferred rows are in, and it is the
-#: EFFORT glyph mirrored rather than reused because the two never co-occur
-#: (``▴ high`` is a model setting, this is a transcript state) — still, a
-#: DIFFERENT glyph was preferred over a shared one since the reader meets
-#: both in the same row. Stays in U+25xx per the hard constraint above.
-ICON_DEFERRED = "▾"
 ICON_COST = "◈"
 ICON_DURATION = "◷"
 #: MCP servers. ``⊙`` (U+2299) is the reference's glyph and measures ONE cell
@@ -363,14 +355,6 @@ _DROP_LADDER: tuple[str, ...] = (
     # these the other way round, which contradicted this very ladder's rationale.
     "cwd",
     "context",
-    # The deferred-history count (UX1, U3): sits in the ladder between the
-    # numbers an operator acts on and the MCP lamp. It is re-derivable the
-    # same way `duration` is — scroll up and the rows are there — so it could
-    # have gone at the top, but a cramped band is exactly when the user most
-    # needs the reminder that the transcript is bounded, so it outlives the
-    # cwd/context pair and yields to the pending-fork state and the two
-    # alarms below.
-    "deferred",
     # A PENDING fork, and it outlives every reading above for the reason the
     # approval alarm does: it is a transient STATE the user can still act on
     # (esc withdraws it), not a figure they can re-derive. It exists at all only
@@ -988,12 +972,6 @@ class StatusLine:
         self._context_window: int = 0
         self._subagents: int = 0
         self._jobs: int = 0
-        # Messages a bounded resume holds off-screen (UX1, U3). 0 = nothing
-        # deferred: the segment is absent, so an ordinary session's band is
-        # byte-for-byte what it was before the segment existed. Only the
-        # OperatorApp pushes this, from `_resume_pending_head` — the band never
-        # reaches into resume state, same as every other segment here.
-        self._deferred: int = 0
         self._streaming: bool = False
         self._cost: str = ""
         self._conversation_name: str = ""
@@ -1185,7 +1163,6 @@ class StatusLine:
         context_window: int | None = None,
         subagents: int | None = None,
         jobs: int | None = None,
-        deferred: int | None = None,
         streaming: bool | None = None,
         cost: str | None = None,
         conversation_name: str | None = None,
@@ -1222,8 +1199,6 @@ class StatusLine:
             self._subagents = subagents
         if jobs is not None:
             self._jobs = jobs
-        if deferred is not None:
-            self._deferred = deferred
         if mcp is not None:
             self._mcp = mcp
         if approvals_auto is not None:
@@ -1809,23 +1784,11 @@ class StatusLine:
             jobs = format_jobs(self._jobs)
             if jobs:
                 parts.append((ICON_JOBS, jobs, Style(color=theme_mod.semantic_color("label"))))
-        if "deferred" not in dropped:
-            # The deferred-history count (UX1, U3): the at-rest signal that a
-            # resumed transcript is bounded. Lives in the RIGHT group with the
-            # other counters and takes `label` like they do — it is a count,
-            # not a reading the operator acts on, so it must not warm the way
-            # the context number can. Placed beside the counters rather than
-            # the cwd/model identity group because it MOVES while the user
-            # reads (every page mount shrinks it) and a moving figure beside
-            # static identity reads as noise.
-            if self._deferred:
-                parts.append(
-                    (
-                        ICON_DEFERRED,
-                        f"{self._deferred} older",
-                        Style(color=theme_mod.semantic_color("label")),
-                    )
-                )
+        # The `▾ N older` deferred-history segment that painted here was
+        # REMOVED by operator decision: the bounded state of a resumed
+        # transcript is still signalled by the in-transcript "older messages
+        # above" notice on scroll, so the at-rest counter is not needed — do
+        # not re-add it to "fix" discoverability.
         if "context" not in dropped:
             tokens, window = self._shown_context()
             usage = format_context_usage(tokens, window)
