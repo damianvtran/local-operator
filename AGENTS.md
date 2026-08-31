@@ -374,10 +374,11 @@ await asyncio.sleep(2.0)              # "surely it finished by now"
 assert store.detail is not None
 ```
 
-**Do** wait on a publication from the code under test. `tests/unit/harness/
-test_comms.py` has the pattern: `ChangeSignal` subscribes to notifications the
-code already emits, and `wait_for` re-tests the predicate after each one. The
-subscriptions are what make it work, so build and release it in full:
+**Do** wait on a publication from the code under test.
+`tests/unit/harness/test_comms.py` has the pattern: `ChangeSignal` subscribes
+to notifications the code already emits, and `wait_for` re-tests the predicate
+after each one. The subscriptions are what make it work, so build and release
+it in full:
 
 ```python
 signal = ChangeSignal().watch_comms(comms).watch_session(parent)
@@ -417,10 +418,10 @@ landing. `tests/unit/session/test_launch_subagent.py` carries the full account
 under "WHY THIS IS A STRUCTURAL SPY AND NOT A TIME BOUND": a flat 1.0 s wall
 bound failed, a calibrated bound failed, converting to `time.thread_time`
 removed the *load* sensitivity but not the *core-speed* sensitivity, and the
-conclusion was that **no portable numeric bound exists** for that site — CI's
-healthy 1056-1156 ms sat above the box's 1315 ms regression threshold. It was
-converted to a structural spy. Read that docstring before you reach for a
-number.
+conclusion was that **no portable numeric bound exists** for that site — the
+only window left was between CI's healthy 1156 ms and this box's 1315 ms
+regression, which is too narrow to sit a bound in. It was converted to a
+structural spy. Read that docstring before you reach for a number.
 
 Reach for a number only when no structural fact expresses the property.
 
@@ -494,10 +495,13 @@ watch it fail:
 
 This is not hypothetical. In `test_tui_responsiveness.py` the loaded bar was
 raised to 500 ms to stop it flaking, which meant a 200-500 ms stall at the
-boot and turn sites — whose only guard is that bar — would have passed
-unnoticed. The strict 50 ms bar on the reconnect/connect sites was deliberately
-left alone precisely so the 90-130 ms parse regression stayed catchable. When
-you widen a ceiling, name what you just stopped catching.
+boot and turn sites — whose only guard is that bar — would pass unnoticed.
+That trade was made deliberately and on evidence: those sites recorded 321 ms
+and 413 ms of *legitimate* loop CPU on CI, so a tighter bar failed green trees
+instead. The strict 50 ms bar on the reconnect/connect sites was left alone
+precisely so the 90-130 ms parse regression stayed catchable. When you widen a
+ceiling, name what you just stopped catching — and record the measurements that
+forced your hand.
 
 Then check the other direction: run the file several times under load
 (`for i in $(seq 1 5)` with a few CPU spinners) and confirm it stays green.
@@ -521,14 +525,15 @@ behind it — which is the other half of why `wait_for` carries
 `DEADLOCK_GUARD_S`.
 
 **A deadlock defeats every technique above.** If the failure mode is the event
-loop freezing rather than running slowly, no in-process probe reports anything,
-because the process that would report is the one that is stuck. That class is
-covered by `tests/e2e/watchdog.py`, whose
-`faulthandler.dump_traceback_later(exit=True)` survives a kernel-level deadlock
-and takes the process down with a full thread dump. It runs as its own CI stage
-(`tui-e2e`, both Linux and macOS) rather than in the unit run, since firing it
-under `-n auto` would kill a worker carrying unrelated tests. If you are
-guarding against a hang rather than a stall, that is the file to read.
+loop freezing at the C level rather than running slowly, a Python-level probe
+reports nothing — the coroutine that would record the sample never gets
+scheduled either. That class is covered by `tests/e2e/watchdog.py`, whose
+`faulthandler.dump_traceback_later(exit=True)` is armed in C and fires from a
+separate OS thread, so it survives a wedged interpreter and takes the process
+down with a full thread dump. It runs as its own CI stage (`tui-e2e`, both
+Linux and macOS) rather than in the unit run, since firing it under `-n auto`
+would kill a worker carrying unrelated tests. If you are guarding against a
+hang rather than a stall, that is the file to read.
 
 ## TUI conventions worth knowing before you edit a widget
 
