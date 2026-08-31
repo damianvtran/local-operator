@@ -318,3 +318,28 @@ async def test_the_ancestry_walk_has_an_off_loop_entry_point(monkeypatch) -> Non
     resolved = await peer_send.peer_sender_identity_async(100)
     assert resolved["conversation_name"] == "owning session"
     assert resolved["pid"] == 900
+
+
+def test_a_non_dict_sender_cannot_escape_the_handler(monkeypatch) -> None:
+    """The recovery path must not re-run the expression that threw.
+
+    ``sender`` is whatever the wire's JSON decoded to, so it is not necessarily
+    a dict. Building the fallback INSIDE the except arm meant ``dict(sender)``
+    raised in the try and raised again in the handler, so the exception escaped
+    to the receive path ahead of the transcript write and dropped a message the
+    peer had already accepted (round 3, MINOR-8).
+    """
+    monkeypatch.setattr(peer_send.registry, "scan", _scan([]))
+    # Deliberately ill-typed: the wire hands us whatever JSON decoded to, so the
+    # runtime contract is wider than the annotation.
+    hostile_inputs: "list[Any]" = [["not", "a", "dict"], "a string", 42, 3.5, object(), (1, 2, 3)]
+    for hostile in hostile_inputs:
+        assert peer_send.resolve_sender_identity(hostile) == {}, hostile
+
+    class _HostileMapping(dict[str, Any]):
+        """A mapping whose copy misbehaves — the handler is guarded for it too."""
+
+        def keys(self):  # noqa: ANN201
+            raise RuntimeError("hostile keys")
+
+    assert peer_send.resolve_sender_identity(_HostileMapping()) == {}

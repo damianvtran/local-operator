@@ -338,8 +338,25 @@ def resolve_sender_identity(sender: "dict[str, Any] | None") -> "dict[str, Any]"
     Cheap enough to call inline (one registry scan, no subprocess) — unlike the
     send-side ancestry walk, which needs a thread.
     """
+    # The fallback is built BEFORE the risky region, and the handler only
+    # returns it. Doing the conversion inside the handler instead meant the
+    # recovery path re-ran the very expression that had just thrown — a
+    # non-dict `sender` (the wire hands us whatever JSON decoded to) raised
+    # TypeError/ValueError from `dict(...)` in the `try`, then raised it again
+    # from the `except`, so the exception escaped to the receive path ahead of
+    # the transcript write and dropped a delivered message. A handler that can
+    # itself fail is not a guarantee.
+    fallback: dict[str, Any] = {}
     try:
-        resolved: dict[str, Any] = dict(sender or {})
+        if isinstance(sender, dict):
+            fallback = dict(sender)
+    except Exception:
+        # Even this is guarded: `sender` may be a mapping subclass whose copy
+        # misbehaves. An unlabelled message still beats a lost one.
+        fallback = {}
+
+    try:
+        resolved: dict[str, Any] = dict(fallback)
         pid = resolved.get("pid")
         if not isinstance(pid, int) or isinstance(pid, bool):
             return resolved
@@ -353,4 +370,4 @@ def resolve_sender_identity(sender: "dict[str, Any] | None") -> "dict[str, Any]"
     except Exception:
         # Broad on purpose (see above): a malformed record, an unexpected
         # attribute, or a scan fault must cost the label, never the message.
-        return dict(sender or {})
+        return fallback
