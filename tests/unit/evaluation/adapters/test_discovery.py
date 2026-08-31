@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import csv
 import hashlib
+import importlib
 import importlib.metadata
 import importlib.util
 import marshal
@@ -11,6 +12,7 @@ import shutil
 import sys
 from io import StringIO
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -254,11 +256,9 @@ def test_forged_bytecode_cannot_execute_in_place_of_hashed_source(
     # A normal import of this module runs the forged cache, which is the attack
     # this loader has to refuse; assert that first so the test cannot pass
     # against a host where the forgery simply failed to take.
-    for name in ("tiny_adapter",):
-        sys.modules.pop(name, None)
+    sys.modules.pop("tiny_adapter", None)
     try:
-        import tiny_adapter as attacked  # noqa: PLC0415
-
+        attacked = importlib.import_module("tiny_adapter")
         assert marker.exists(), "forged cache did not take effect on this host"
         assert attacked.create() == "attacker"
     finally:
@@ -267,7 +267,9 @@ def test_forged_bytecode_cannot_execute_in_place_of_hashed_source(
 
     # The source is genuinely RECORD-covered, so verification must succeed while
     # still refusing to run the forged cache.
-    attribute, chain = _verified_module_chain(distribution, selector)
+    attribute, chain = _verified_module_chain(
+        cast(importlib.metadata.Distribution, distribution), selector
+    )
     assert attribute == "create"
     assert chain[-1].source == module.read_bytes()
     try:
