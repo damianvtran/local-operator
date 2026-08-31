@@ -24,6 +24,7 @@ safe to call from any thread that serializes calls per session.
 from __future__ import annotations
 
 import json
+import logging
 import time
 from collections.abc import Mapping
 from typing import Any
@@ -66,6 +67,8 @@ from local_operator.mobile.types import (
     TranscriptEntry,
 )
 from local_operator.session.peer import PEER_MESSAGE_MESSAGE_TYPE
+
+logger = logging.getLogger(__name__)
 
 #: How much of a tool result's text the expand payload carries. The phone's
 #: expanded row is a readable window, not a log file — beyond this the right
@@ -135,6 +138,21 @@ FRAME_CAP_ERROR_CHARS = 400
 #: the newest few rows and pages the rest from /history, which is exactly the
 #: scroll contract the 80-row cap already established.
 FRAME_CAP_TRANSCRIPT_FLOOR = 16
+
+#: Per-row text bound applied by the LAST tier, once dropping details and
+#: trimming the tail have not been enough. A single row can exceed the whole
+#: cap on its own — a pasted file or a long tool output — and the operator's
+#: real store contains 33 transcript lines over the soft cap, the largest
+#: 946,552 B, so this is a reachable case rather than a theoretical one.
+#: Truncating the row's TEXT is the last thing to give up because it is the
+#: content the reader came for, but a dropped frame shows them nothing at all;
+#: the full text remains one /history fetch away.
+FRAME_CAP_ENTRY_TEXT_CHARS = 4_000
+
+#: Hard floor the text tier walks down to when even 4,000 chars/row does not
+#: fit (many rows, each individually modest). Below this a row is a stub and
+#: the frame is structurally as small as this function can make it.
+FRAME_CAP_ENTRY_TEXT_FLOOR = 200
 
 
 def _message_text(message: AgentMessage) -> str:
@@ -235,6 +253,65 @@ def _frame_bytes(data: dict[str, Any]) -> int:
     return len(json.dumps(data).encode("utf-8"))
 
 
+#: Cheap upper bound on the bytes a frame will serialize to, used to skip the
+#: measuring ``json.dumps`` on the overwhelmingly common under-cap repaint.
+#: Summing variable-length strings plus a fixed per-row envelope charge is
+#: ~100x cheaper than serializing. The divisor is the safety margin for JSON
+#: escaping (worst case ~2x on quote/backslash-dense text); it is validated by
+#: ``test_frame_cheap_proxy_never_lets_an_oversized_frame_through``, which
+#: fuzzes deep rosters and escape-dense text against the real serializer.
+_FRAME_CHEAP_PROXY_DIVISOR = 3
+
+#: Per-row charge for the JSON envelope a row carries regardless of its text
+#: (its keys, numeric fields, booleans). Without it the proxy under-counts a
+#: frame made of many SHORT rows — measured 3.5x under on a 90-row roster —
+#: which is precisely the deep-roster shape the cap exists for. Derived from
+#: the empty serialized size of each dataclass, rounded up.
+_FRAME_ROW_ENVELOPE_BYTES = 400
+_FRAME_SUBAGENT_ENVELOPE_BYTES = 500
+_FRAME_TODO_ENVELOPE_BYTES = 80
+
+
+def _frame_text_total(projection: SessionProjection) -> int:
+    """Cheap size estimate for a projection, without serializing it.
+
+    Text plus a fixed envelope charge per row. Deliberately an OVER-estimate:
+    it gates a short-circuit that must never let a genuinely oversized frame
+    past as "not degraded".
+    """
+    total = 0
+    for entry in projection.transcript:
+        total += _FRAME_ROW_ENVELOPE_BYTES
+        total += len(entry.text) + len(entry.summary) + len(entry.error)
+        total += len(entry.tool_name) + len(entry.tool_call_id) + len(entry.intent)
+        total += sum(len(str(ref)) for ref in entry.images)
+        details = entry.details
+        if details:
+            # A rough charge for the expand payload rather than a walk: it is
+            # dropped wholesale by tier 2 anyway, so precision buys nothing.
+            total += sum(len(str(value)) for value in details.values())
+    for row in projection.subagents:
+        total += (
+            len(row.prompt)
+            + len(row.result_text)
+            + len(row.error_text)
+            + len(row.progress)
+            + len(row.activity)
+        )
+        # A deep roster's lineage lists are the one non-text payload that
+        # scales with roster depth rather than with a fixed row count, so they
+        # have to be charged or the proxy under-counts exactly the deep-roster
+        # frame this cap was written for.
+        for lineage in (row.ancestors, row.ancestor_ids, row.child_ids, row.peer_ids):
+            total += sum(len(item) + 4 for item in lineage)
+        total += _FRAME_SUBAGENT_ENVELOPE_BYTES + len(row.job_id) + len(row.label)
+    for phase in projection.todos:
+        total += _FRAME_TODO_ENVELOPE_BYTES + len(phase.name)
+        for item in phase.items:
+            total += _FRAME_TODO_ENVELOPE_BYTES + len(item.text) + len(item.reason)
+    return total
+
+
 def cap_projection_frame(
     projection: SessionProjection, *, cap_bytes: int = PROJECTION_FRAME_SOFT_CAP_BYTES
 ) -> tuple[dict[str, Any], bool]:
@@ -256,11 +333,27 @@ def cap_projection_frame(
     3. The transcript tail halves toward ``FRAME_CAP_TRANSCRIPT_FLOOR``,
        keeping the pinned opening user message — the same scroll contract the
        80-row cap already establishes, just tighter.
+    4. Row TEXT (plus ``summary``/``error``) is truncated, walking down from
+       ``FRAME_CAP_ENTRY_TEXT_CHARS`` to ``FRAME_CAP_ENTRY_TEXT_FLOOR``. This
+       is last because the text is what the reader came for — but one pasted
+       file can exceed the whole cap by itself, and tiers 1-3 cannot touch it,
+       so without this the function returned a frame the socket then dropped
+       whole. The full text stays one /history fetch away.
+
+    A frame still over ``cap_bytes`` after every tier is logged at WARNING
+    rather than returned silently: the caller cannot fix it, but a dropped
+    repaint that nobody can see is exactly the failure mode this cap exists to
+    make impossible, so it must at least be visible in the log.
 
     The projection itself is never mutated (the fold owns it and republishes
     it; the daemon retains it): degradation happens on the serialized dict.
     """
     data = projection.to_json()
+    # The under-cap repaint is the hot path (~30/s per streaming session), and
+    # measuring it by serializing the whole frame doubled the cost of every
+    # push. Clear the cheap text proxy first and skip the measurement entirely.
+    if _frame_text_total(projection) <= cap_bytes // _FRAME_CHEAP_PROXY_DIVISOR:
+        return data, False
     if _frame_bytes(data) <= cap_bytes:
         return data, False
 
@@ -298,6 +391,33 @@ def cap_projection_frame(
         if _frame_bytes(data) <= cap_bytes:
             return data, True
         limit = max(FRAME_CAP_TRANSCRIPT_FLOOR, limit // 2)
+
+    # Tier 4: truncate row text. Tiers 1-3 cannot shrink a single oversized
+    # row, so this is the only tier that bounds the pasted-file case.
+    text_limit = FRAME_CAP_ENTRY_TEXT_CHARS
+    while True:
+        for entry in data.get("transcript") or []:
+            for field in ("text", "summary", "error"):
+                value = entry.get(field)
+                if isinstance(value, str) and len(value) > text_limit:
+                    entry[field] = _compact_multiline(value, text_limit)
+        if _frame_bytes(data) <= cap_bytes:
+            return data, True
+        if text_limit <= FRAME_CAP_ENTRY_TEXT_FLOOR:
+            break
+        text_limit = max(FRAME_CAP_ENTRY_TEXT_FLOOR, text_limit // 4)
+
+    # Every tier is spent. The frame is as small as this function can make it;
+    # say so loudly rather than handing the socket a line it will drop whole.
+    final_size = _frame_bytes(data)
+    if final_size > cap_bytes:
+        logger.warning(
+            "mobile projection frame for session %s is %d bytes after every "
+            "degradation tier (cap %d) — the control socket will drop it",
+            data.get("session_id", "?"),
+            final_size,
+            cap_bytes,
+        )
     return data, True
 
 

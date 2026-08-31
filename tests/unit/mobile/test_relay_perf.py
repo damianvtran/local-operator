@@ -429,6 +429,100 @@ def test_frame_cap_small_frame_passes_through_unchanged() -> None:
     assert frame["subagents"][0]["result_text"] == "ok"
 
 
+def test_frame_cap_bounds_a_single_undegradable_row() -> None:
+    """A projection tiers 1-3 cannot shrink is STILL bounded (A2/A8).
+
+    One pasted file in a single row exceeds the whole cap on its own: no
+    subagent text to trim, no details to drop, and the tail floor keeps the
+    row. Before the text tier this returned a 2,000,644-byte frame that the
+    daemon's 1 MB control reader dropped whole — the silent-repaint-loss the
+    cap exists to prevent.
+    """
+    from local_operator.mobile.types import TranscriptEntry
+
+    projection = SessionProjection(session_id="s1", pid=1, kind="tui")
+    projection.transcript.append(TranscriptEntry(id="u1", kind="user", text="X" * 2_000_000))
+    frame, degraded = cap_projection_frame(projection)
+    assert degraded is True
+    size = len(json.dumps(frame).encode("utf-8"))
+    assert size <= PROJECTION_FRAME_SOFT_CAP_BYTES
+    # And comfortably under the daemon's hard control-socket limit.
+    assert size < (1 << 20)
+
+
+def test_frame_cap_bounds_many_individually_large_rows() -> None:
+    """Many rows that each survive the tail floor are still bounded."""
+    from local_operator.mobile.types import TranscriptEntry
+
+    projection = SessionProjection(session_id="s1", pid=1, kind="tui")
+    for i in range(40):
+        projection.transcript.append(
+            TranscriptEntry(id=f"a{i}", kind="assistant", text="Y" * 80_000)
+        )
+    frame, degraded = cap_projection_frame(projection)
+    assert degraded is True
+    assert len(json.dumps(frame).encode("utf-8")) < (1 << 20)
+
+
+def test_frame_cheap_proxy_never_lets_an_oversized_frame_through() -> None:
+    """The A7 short-circuit must be an OVER-estimate, always (A7 safety).
+
+    ``cap_projection_frame`` skips its measuring ``json.dumps`` when the cheap
+    text/envelope estimate clears a margin. If that estimate ever UNDER-counts
+    a real frame, an oversized payload returns as ``degraded=False`` and the
+    socket drops it — the exact silent loss the cap prevents. Fuzzed over deep
+    rosters, escape-dense text and many short rows, which is where an earlier
+    text-only proxy measured 3.5x under.
+    """
+    import random
+    import string
+
+    from local_operator.mobile.projection import (
+        _FRAME_CHEAP_PROXY_DIVISOR,
+        _frame_text_total,
+    )
+    from local_operator.mobile.types import SubagentRow, TodoItem, TodoPhase, TranscriptEntry
+
+    random.seed(11)
+    threshold = PROJECTION_FRAME_SOFT_CAP_BYTES // _FRAME_CHEAP_PROXY_DIVISOR
+    for _ in range(120):
+        projection = SessionProjection(session_id="s", pid=1, kind="tui")
+        for i in range(random.randint(0, 60)):
+            alphabet = '"\\\n' if random.random() < 0.5 else string.ascii_letters
+            projection.transcript.append(
+                TranscriptEntry(
+                    id=f"t{i}",
+                    kind="assistant",
+                    text="".join(random.choice(alphabet) for _ in range(random.randint(0, 2000))),
+                )
+            )
+        for j in range(random.randint(0, 60)):
+            projection.subagents.append(
+                SubagentRow(
+                    job_id=f"job-{j}" * 3,
+                    label="L" * 20,
+                    result_text="Z" * random.randint(0, 1500),
+                    ancestors=["anc" * 10] * random.randint(0, 8),
+                    ancestor_ids=["id" * 12] * random.randint(0, 8),
+                    child_ids=["c" * 12] * random.randint(0, 8),
+                    peer_ids=["p" * 12] * random.randint(0, 8),
+                )
+            )
+        for _k in range(random.randint(0, 4)):
+            projection.todos.append(
+                TodoPhase(
+                    name="P" * 20,
+                    items=[TodoItem(text="t" * 80) for _ in range(random.randint(0, 20))],
+                )
+            )
+        proxy = _frame_text_total(projection)
+        real = len(json.dumps(projection.to_json()).encode("utf-8"))
+        if proxy <= threshold:
+            assert real <= PROJECTION_FRAME_SOFT_CAP_BYTES, (
+                f"proxy {proxy} short-circuited a {real}-byte frame"
+            )
+
+
 def test_frame_cap_tier2_drops_transcript_details() -> None:
     """When subagent trims are not enough, transcript expand details go next."""
     from local_operator.mobile.types import TranscriptEntry
