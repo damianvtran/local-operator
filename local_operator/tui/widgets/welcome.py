@@ -357,7 +357,7 @@ TIPS: tuple[str, ...] = (
     "Ask for parallel work and the agent fans out subagents",
     "! on an empty composer runs a shell command",
     "/fork branches; /fork <message> starts divergent work",
-    "/settings → Fork → Where a fork opens changes default",
+    "/settings → Fork → Where a fork opens sets placement",
     "Under cmux, Where it opens sets workspace or surface",
     "lop detects terminal or multiplexer, then picks placement",
 )

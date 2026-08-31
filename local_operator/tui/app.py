@@ -10259,23 +10259,38 @@ class OperatorApp(App[None]):
             return
         self._fork_cmux_name = clean
 
+        if getattr(self, "_fork_cmux_name_worker_running", False):
+            return
+        self._fork_cmux_name_worker_running = True
+
         async def rename() -> None:
             from local_operator.multiplexer.cmux import rename_fork_target
             from local_operator.spawn.policy import fork_cmux_placement
 
+            applied = ""
             try:
-                await asyncio.to_thread(
-                    rename_fork_target,
-                    dict(os.environ),
-                    clean,
-                    placement=fork_cmux_placement(self._config_values()),
-                )
-            except Exception:
-                # A label is decoration; cmux restart/closure must never disturb
-                # the conversation or roll back the title already stored.
-                logger.debug("fork cmux rename failed", exc_info=True)
+                # One serial drain owns the subprocess boundary. A newer title
+                # arriving during a slow rename replaces the pending value; the
+                # old call may finish, but the drain always applies the newest
+                # value afterwards, making the externally visible result latest-wins.
+                while applied != getattr(self, "_fork_cmux_name", ""):
+                    pending = self._fork_cmux_name
+                    try:
+                        await asyncio.to_thread(
+                            rename_fork_target,
+                            dict(os.environ),
+                            pending,
+                            placement=fork_cmux_placement(self._config_values()),
+                        )
+                    except Exception:
+                        # A label is decoration; cmux restart/closure must never
+                        # disturb the conversation or roll back the stored title.
+                        logger.debug("fork cmux rename failed", exc_info=True)
+                    applied = pending
+            finally:
+                self._fork_cmux_name_worker_running = False
 
-        self.run_worker(rename(), exclusive=False)
+        self.run_worker(rename(), group="fork-cmux-name", exclusive=False, exit_on_error=False)
 
     def _clock(self) -> float:
         """Monotonic seconds, as one overridable seam.
