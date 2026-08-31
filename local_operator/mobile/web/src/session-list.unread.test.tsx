@@ -50,7 +50,10 @@ function cardByName(name: string): HTMLButtonElement {
    the centred dot, so every title starts at the same x in all four states. */
 function slot(card: HTMLButtonElement): HTMLElement {
 	const row = card.querySelector("div")!;
-	return row.firstElementChild as HTMLElement;
+	/* Selected by its own geometry class rather than by position: a
+	   decision+streaming row also carries an sr-only status node in this row,
+	   so "first child" is no longer the slot. */
+	return row.querySelector(".size-3") as HTMLElement;
 }
 
 /* The dot inside the slot. Streaming rows have a spinner there instead. */
@@ -153,10 +156,60 @@ describe("SessionCard attention ladder", () => {
 		expect(card.textContent).toContain("approval");
 		/* "Working" is still conveyed — by the title shimmer, which costs no
 		   geometry — so the row does not read as idle-but-blocked. */
-		const title = slot(card).nextElementSibling as HTMLElement;
+		let title = slot(card).nextElementSibling as HTMLElement;
+		if (title.className.includes("sr-only")) {
+			title = title.nextElementSibling as HTMLElement;
+		}
 		expect(title.className).toContain("lo-shimmer");
 		/* And the slot geometry is unchanged, so the title does not shift. */
 		expect(slot(card).className).toContain("size-3");
+	});
+
+	it("announces `working` to assistive tech on every streaming row", () => {
+		/* D7: the spinner carries the only role="status" aria-label="working",
+		   and on a decision+streaming row the ladder gives the slot to the
+		   danger dot and hides the slot — so AT heard the pending word and
+		   nothing about the turn being in flight. The shimmer is a pure CSS
+		   paint and conveys nothing. Restored as TEXT so it costs no geometry. */
+		sessionList = [
+			summary({
+				session_id: "ds",
+				conversation_name: "Deciding while streaming",
+				needs_attention: true,
+				pending_kind: "approval",
+				streaming: true,
+			}),
+			summary({ session_id: "st", conversation_name: "Just streaming", streaming: true }),
+			summary({ session_id: "id", conversation_name: "Idle here" }),
+		];
+		render(<SessionListScreen />);
+
+		/* The decision+streaming row: danger dot in the slot AND a working
+		   announcement in the accessibility tree. */
+		const decisionCard = cardByName("Deciding while streaming");
+		expect(dot(decisionCard).className).toContain("bg-danger");
+		const status = decisionCard.querySelector('[role="status"]') as HTMLElement;
+		expect(status).toBeTruthy();
+		expect(status.textContent).toBe("working");
+		/* sr-only keeps it out of the layout, so it cannot revive D2's shift. */
+		expect(status.className).toContain("sr-only");
+
+		/* A plain streaming row still announces working exactly once — the
+		   spinner already carries it there, so the sr-only node is rendered
+		   only for the decision row that lost it. */
+		const streamingCard = cardByName("Just streaming");
+		const announced = Array.from(
+			streamingCard.querySelectorAll('[role="status"], [aria-label="working"]'),
+		);
+		expect(announced.length).toBe(1);
+		expect(streamingCard.querySelector(".sr-only")).toBeNull();
+		/* And the decision row announces it exactly once too. */
+		expect(
+			decisionCard.querySelectorAll('[role="status"], [aria-label="working"]').length,
+		).toBe(1);
+
+		/* An idle row says nothing about working. */
+		expect(cardByName("Idle here").querySelector('[role="status"]')).toBeNull();
 	});
 
 	it("gives every state the SAME indicator slot, so titles never shift", () => {
@@ -182,7 +235,12 @@ describe("SessionCard attention ladder", () => {
 		   inserted between the slot and the name. */
 		for (const name of names) {
 			const card = cardByName(name);
-			const title = slot(card).nextElementSibling as HTMLElement;
+			/* The title is the first element after the slot that is not the
+			   sr-only status node, so nothing VISIBLE separates them. */
+			let title = slot(card).nextElementSibling as HTMLElement;
+			if (title.className.includes("sr-only")) {
+				title = title.nextElementSibling as HTMLElement;
+			}
 			expect(title.textContent).toBe(name);
 		}
 	});

@@ -151,6 +151,22 @@ function SessionCard({
 						/>
 					)}
 				</span>
+				{decision && s.streaming ? (
+					/* The "working" announcement for assistive tech, carried as TEXT
+					   rather than as a mark in the slot. The spinner owns
+					   role="status" aria-label="working" and covers every OTHER
+					   streaming row; but the ladder gives the slot to the danger
+					   dot on a decision+streaming row and hides the slot there, so
+					   a screen-reader user heard the pending word and nothing about
+					   the turn being mid-flight — the shimmer is a pure CSS paint
+					   and conveys nothing to AT. Rendered ONLY for that row, so a
+					   plain streaming row is not announced twice. Zero geometry
+					   cost: sr-only is clipped out of the layout, so this cannot
+					   revive the title shift D2 fixed. */
+					<span className="sr-only" role="status">
+						working
+					</span>
+				) : null}
 				<span
 					className={cn(
 						"min-w-0 flex-1 truncate text-body-sm font-medium",
