@@ -3109,16 +3109,13 @@ async def test_an_evicted_message_end_does_not_uncommit_a_settled_row() -> None:
 
 @pytest.mark.asyncio
 async def test_a_history_page_lands_below_the_truncation_note(tmp_path) -> None:
-    """The prepend index accounts for the head block (review round 1, N1).
+    """A history prepend on a truncated child keeps durable rows in order.
 
-    `prefix` is counted over ENTRIES, which exclude the truncation note, but
-    `TranscriptView.insert_blocks` indexes the BODY's list, which holds that
-    note at 0 — `_sync_body` mounts it outside the diffed sequence and keeps it
-    out of `self._blocks` (measured: `view._blocks` 168 against a body of 169).
-    Both a truncated trajectory and a durable history page are needed at once
-    for the skew to show, which is why it went unnoticed; without the offset
-    the history page is inserted ABOVE the note that is supposed to head the
-    page.
+    The truncation note is page chrome (``_truncation``), not a body block,
+    so `prefix` and the body's index agree — there is no head-offset to
+    apply. The previous write-up described the note occupying body index 0
+    while being excluded from `_entries`; pinning it out of the column
+    removed that skew (review round 1, N1).
     """
     transcript = Transcript(tmp_path / "child")
     for index in range(140):
@@ -3264,20 +3261,55 @@ async def test_the_truncation_note_stays_in_the_viewport_when_the_body_scrolls()
         # And it is NOT in the scrolling column, so a Home/End cycle
         # cannot hide it.
         assert view._head_block not in view._body.blocks()
+        # One CONTENT row at 62 columns: the previous wording wrapped so
+        # `kept` sat alone on line 2 (design round 1, D2). Region height
+        # is 2 because the stylesheet pads one row above the chrome;
+        # wrapping is a newline in the renderable.
+        painted = str(view._truncation.renderable)
+        assert "\n" not in painted, (
+            f"truncation note wrapped at width {view._truncation.region.width}: " f"{painted!r}"
+        )
+
+
+def _landing_owner_top(view: SubagentView) -> tuple[float, float | None]:
+    """Scroll offset and the top of the block that currently owns it."""
+    body = view._body
+    offset = body.scroll_offset.y
+    owner_top = None
+    for block in body.blocks():
+        if block is view._head_block:
+            continue
+        top = block.virtual_region.y
+        if top <= offset < block.virtual_region.bottom:
+            owner_top = top
+            break
+    return offset, owner_top
 
 
 @pytest.mark.asyncio
-async def test_a_narrow_viewport_opens_on_a_row_head_not_a_wrap_fragment() -> None:
+async def test_a_narrow_viewport_opens_on_a_row_head_not_a_wrap_fragment(
+    tmp_path,
+) -> None:
     """At 62x24 the first visible transcript line must be a row HEAD.
 
     Sticky-tail following can bisect a wrapping notice so the glyph sits
     above the fold and the first glance is a hanging-indented continuation
     in the notice's own red (issue #407). The wrap is correct; the landing
-    is not. Mutation: skip ``_snap_landing_to_row_head`` and a wrap that
-    straddles the offset makes ``rows_into_owner > 0``.
+    is not.
+
+    A real child always has a transcript directory. The comms-less fixture
+    this used to drive snapped the trajectory-only body, then the initial
+    history page grew the extent and sticky-follow put the fragment back
+    (review round 1, F1). Mutation: keep the one-shot burning on the
+    pre-history body and this assertion dies with ``into > 0``.
     """
+    transcript = Transcript(tmp_path / "child")
+    for index in range(20):
+        await transcript.append_message(
+            Message.assistant(f"durable {index}: applying the review fixes to the widget.")
+        )
     events: list[dict[str, Any]] = []
-    # Two short rows above the wrapping notice: enough that sticky-tail
+    # Two short live rows above the wrapping notice: enough that sticky-tail
     # following overflows, not so many that the notice sits entirely
     # below the fold. The notice itself is taller than the 9-row body,
     # which is what puts a continuation line at the top of the viewport
@@ -3297,26 +3329,35 @@ async def test_a_narrow_viewport_opens_on_a_row_head_not_a_wrap_fragment() -> No
     job = _job_with(events, status="running")
     session = FakeSession()
     session.jobs = _fake_jobs(job)
+    session._subagent_comms = type(
+        "Comms", (), {"session_dir_of": lambda self, _job_id: transcript.directory}
+    )()
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(62, 24)) as pilot:
         view = await _open(pilot, app, job)
+        await _wait_history(pilot, view)
         for _ in range(12):
             await pilot.pause()
-        body = view._body
-        offset = body.scroll_offset.y
-        owner_top = None
-        for block in body.blocks():
-            if block is view._head_block:
-                continue
-            top = block.virtual_region.y
-            if top <= offset < block.virtual_region.bottom:
-                owner_top = top
-                break
+        offset, owner_top = _landing_owner_top(view)
         assert owner_top is not None, (
             f"no block owns the landing offset {offset}; "
-            f"starts={[b.virtual_region.y for b in body.blocks()[:12]]}"
+            f"starts={[b.virtual_region.y for b in view._body.blocks()[:12]]}"
         )
         assert owner_top == offset, (
             f"landing sits {offset - owner_top} rows into a block "
-            f"(offset={offset}, owner_top={owner_top}, max={body.max_scroll_y})"
+            f"(offset={offset}, owner_top={owner_top}, max={view._body.max_scroll_y})"
+        )
+        # Not just ANY row head — the wrapping error is the first glance
+        # a tail-following open is trying to show. A one-shot spent on the
+        # pre-history body freezes the offset on an earlier durable row
+        # that also happens to be a head, which is how the comms-less
+        # fixture hid F1.
+        notice = next(
+            block
+            for block in view._body.blocks()
+            if isinstance(block, NoticeBlock) and "Invalid arguments" in block.text()
+        )
+        assert notice.virtual_region.y == offset, (
+            f"landed on {type(view._body.blocks()[0]).__name__} at {offset}, "
+            f"not the wrapping notice at {notice.virtual_region.y}"
         )

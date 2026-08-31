@@ -150,7 +150,12 @@ SCROLLBAR_GUTTER_CELLS = 1
 #: lost an opening it still has. That is the safe direction of the error: the
 #: note costs a row, and its absence costs a wrong conclusion. A precise
 #: answer needs a dropped-count on the job, which the engine does not record.
-TRUNCATION_NOTE = f"earlier activity dropped — the last {TRAJECTORY_MAX_EVENTS} events are kept"
+#:
+#: Worded to stay one row at the 62-column viewport that made ``kept`` an
+#: orphan on line 2 of the previous phrasing (design round 1, D2). The
+#: em dash is the same seam the rest of the page uses; dropping "the"/"are"
+#: is what buys the cells, not a different mark.
+TRUNCATION_NOTE = f"earlier activity dropped — last {TRAJECTORY_MAX_EVENTS} events kept"
 
 #: What the page says once the ledger has swept the job (retention is five
 #: minutes past settle — an ordinary dwell time on a page whose whole purpose
@@ -1882,6 +1887,10 @@ class SubagentView(Vertical):
         self._history_unavailable = True
         self._paint_history_state()
         self._reconcile_current_body()
+        # The initial open still owes a first glance, even when there is
+        # no durable page to prepend. Without this the one-shot waits
+        # forever on `_initial_tail_pending` and the wrap fragment stays.
+        self._settle_initial_landing()
 
     def _finish_history_error(self, generation: int) -> None:
         if generation != self._history_generation:
@@ -1890,6 +1899,37 @@ class SubagentView(Vertical):
         self._history_error = True
         self._paint_history_state()
         self._reconcile_current_body()
+        self._settle_initial_landing()
+
+    def _settle_initial_landing(self) -> None:
+        """First glance after the initial history attempt, success or not.
+
+        The trajectory-only body is not the first glance a real child
+        shows: every live job has a transcript directory, and the durable
+        page prepends after the one-shot used to have already fired
+        (review round 1, F1). Re-arm here, scroll to the *current* tail
+        immediately, then snap onto a row head so sticky-follow cannot
+        bisect a wrapping notice on the next extent change.
+        """
+        if not self._initial_tail_pending and not self._landing_snap_pending:
+            return
+
+        def settle() -> None:
+            # Immediate, not Textual's deferred ``scroll_end``: that API
+            # re-measures a frame later and lands short of a body that
+            # is still growing (the same reason ``TranscriptView``
+            # documents ``_scroll_to_tail``). Re-arming is load-bearing
+            # — the pre-history layout may already have consumed the
+            # one-shot on a trajectory-only body. Clear the history
+            # gate BEFORE the snap: `_snap_landing_to_row_head` refuses
+            # while `_initial_tail_pending` is set, which is what kept
+            # the one-shot off the pre-history body.
+            self._initial_tail_pending = False
+            self._landing_snap_pending = True
+            self._body._scroll_to_tail()
+            self._snap_landing_to_row_head()
+
+        self.call_after_refresh(settle)
 
     def _apply_history_page(
         self, generation: int, page: TranscriptPage, *, anchor: float | None, initial: bool
@@ -1930,22 +1970,7 @@ class SubagentView(Vertical):
             prepend=not initial and not page.reconciled and bool(added_rows),
         )
         if initial:
-
-            def settle_tail() -> None:
-                self._body.scroll_end(animate=False)
-                # A wrap fragment at the top of a short viewport is a
-                # continuation line with no glyph and no owning row — the
-                # ``✗`` that would explain it sits above the fold. Snap
-                # the landing onto the nearest row HEAD so the first
-                # glance is a statement, not a mid-sentence scrap
-                # (issue #407). Applied AFTER ``scroll_end`` because that
-                # is what put the fragment on screen; applied only on
-                # the initial open so a reader who has already scrolled
-                # is not yanked.
-                self._snap_landing_to_row_head()
-                self._initial_tail_pending = False
-
-            self.call_after_refresh(settle_tail)
+            self._settle_initial_landing()
 
     def _chronological_entries(self) -> list[SubagentEntry]:
         """Compose durable and live rows in conversation order.
@@ -2263,7 +2288,13 @@ class SubagentView(Vertical):
 
         self._blocks = [*body_blocks, *([tail_block] if tail_block is not None else [])]
         self._entries = list(entries)
-        if self._landing_snap_pending:
+        # Not while the initial history page is still in flight: that
+        # prepend is the first glance a real child shows, and snapping
+        # the trajectory-only body consumes the one-shot so sticky-tail
+        # follow after the page lands bisects the wrapping notice again
+        # (review round 1, F1). Comms-less fixtures never set the flag
+        # and still snap here.
+        if self._landing_snap_pending and not self._initial_tail_pending:
             # Two refreshes, not one: the first lays the blocks out, the
             # body's sticky-tail follow then moves the offset onto the
             # newest content (and, on a short viewport, onto a wrap
@@ -2297,6 +2328,11 @@ class SubagentView(Vertical):
         """
         if not self._landing_snap_pending:
             return
+        # The trajectory-only body is not the first glance. Keep the
+        # one-shot until `_settle_initial_landing` has the durable page
+        # (or has learned there isn't one).
+        if self._initial_tail_pending:
+            return
         body = self._body
         if not body.is_mounted or not body.size.height:
             return
@@ -2324,6 +2360,14 @@ class SubagentView(Vertical):
         if target != offset:
             with body._tail_anchor.programmatic_scroll():
                 body.scroll_to(y=target, animate=False, immediate=True)
+            # A snap that pulled back from the tail is a landing, not a
+            # follow. Leaving following armed lets `_size_updated` on the
+            # next extent change `_scroll_to_tail` onto the wrap fragment
+            # this just left (review round 1, F1). Released AFTER the
+            # programmatic context: ``note_user_scroll`` is a no-op while
+            # that depth is non-zero.
+            if target < body.max_scroll_y:
+                body._tail_anchor.release()
         self._landing_snap_pending = False
 
     def _empty_state(self) -> str:
