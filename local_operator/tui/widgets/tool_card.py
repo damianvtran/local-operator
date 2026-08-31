@@ -395,6 +395,40 @@ def _scalar_text(value: object) -> str:
     return ""
 
 
+#: Cell cap on the send row's message preview. The row builder truncates from
+#: the right anyway, but an unbounded preview would push the delivery-mode
+#: marker out of every realistic width before the ellipsis ever touched it —
+#: and the marker is the one word that tells a quiet mailbox drop from a wake.
+_SEND_PREVIEW_CELLS = 40
+
+
+def _send_summary(args: dict[str, object]) -> str:
+    """The send row: WHO gets it, HOW it lands, then a preview of the body.
+
+    Ordering is the audit argument: the row builder sheds from the right, so
+    the target and the delivery-mode marker survive any truncation and the
+    message preview is what gives way. The marker distinguishes the three
+    delivery promises — ``now`` steers mid-turn, ``quiet`` is the wake=False
+    mailbox drop, ``wake`` is the default that wakes an idle peer — which is
+    exactly the distinction this row exists to make visible, since a quiet
+    drop and a wake are otherwise identical lines.
+    """
+    pid = args.get("pid")
+    session = _scalar_text(args.get("session"))
+    target = _scalar_text(args.get("target"))
+    if isinstance(pid, int) and not isinstance(pid, bool):
+        who = f"pid {pid}"
+    elif session:
+        who = f"session {session}"
+    else:
+        who = target
+    mode = "now" if args.get("now") else ("quiet" if args.get("wake") is False else "wake")
+    message = _scalar_text(args.get("message"))
+    preview = truncate_cells(message, _SEND_PREVIEW_CELLS) if message else ""
+    parts = [part for part in (who, mode, preview) if part]
+    return " · ".join(parts)
+
+
 def _summary_from_args(tool_name: str, args: dict[str, object]) -> str:
     """One-line summary of WHAT the tool is acting on.
 
@@ -405,6 +439,12 @@ def _summary_from_args(tool_name: str, args: dict[str, object]) -> str:
     is recognisably an identity — an unknown or MCP-provided tool — the
     generic first-two-scalars scan still applies, in argument order.
     """
+    if tool_name == "send":
+        # A dedicated branch rather than the identity scan: the generic path
+        # would join target + message and lose the delivery-mode marker, the
+        # one word that says whether the peer was woken, steered, or quietly
+        # mailboxed.
+        return _send_summary(args) or tool_name
     parts = [
         text
         for key, value in args.items()
