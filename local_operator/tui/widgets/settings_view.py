@@ -39,7 +39,7 @@ out of a click handler.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from typing import Any
+from typing import Any, NamedTuple
 
 from rich.cells import cell_len
 from rich.style import Style
@@ -52,6 +52,9 @@ from textual.widgets import Static
 from local_operator import settings_io
 from local_operator.settings_io import Kind, Section, Setting
 from local_operator.tui import theme as theme_mod
+from local_operator.tui.autocomplete import score_command_text_match
+from local_operator.tui.widgets.command_picker import ghost_for
+from local_operator.tui.widgets.model_picker import ModelRow, rank_rows
 from local_operator.tui.widgets.subagent_view import HintButton
 from local_operator.tui.widgets.tool_card import truncate_cells
 
@@ -76,6 +79,60 @@ _PANE_WIDTH = 34
 #: list and genuinely edited as comma-separated text (see `settings_io.coerce`),
 #: which is why this is keyed on the interaction rather than on the stored type.
 _TEXT_EDITABLE_KINDS = frozenset({Kind.INT, Kind.FLOAT, Kind.TEXT, Kind.LIST})
+
+#: Setting keys whose free-text editor is augmented with a filtered suggestion
+#: dropdown and inline ghost text. Both remain ordinary `Kind.TEXT` settings —
+#: the suggestions ASSIST, they do not constrain, so a custom endpoint id the
+#: catalogue has never heard of still coerces and saves exactly as before
+#: (see `_commit_edit`, unchanged). Keyed here rather than on a new `Kind`
+#: because the interaction is "type freely, with help", which is what TEXT
+#: already is; a new kind would force `coerce`/`validate`/the CLI to grow a
+#: branch for a value space that is deliberately open.
+#:
+#: `hosting` draws from the provider login catalogue (a bounded, known set, so
+#: its suggestions read as an enum you can also free-type past); `model_name`
+#: draws from the SAME model catalogue `/model` shows, ranked by the SAME
+#: `rank_rows` fuzzy matcher, so a user who has learned how `/model` filters
+#: does not learn a second behaviour here.
+_HOSTING_KEY = "hosting"
+_MODEL_KEY = "model_name"
+_SUGGEST_KEYS = frozenset({_HOSTING_KEY, _MODEL_KEY})
+
+#: Rows of the inline suggestion dropdown painted under the editor at most. A
+#: cap rather than the whole catalogue: the settings body is a scrolled region
+#: shared with fifty other rows, and a dropdown that pushed every following
+#: section off the screen would bury the page it is a part of. Eight is the
+#: `/model` picker's own visible-window feel at this height and leaves the
+#: section under the edited row reachable without scrolling.
+_SUGGEST_ROWS = 8
+
+
+class _Suggestion(NamedTuple):
+    """One row of the inline suggestion dropdown.
+
+    Unifies the two sources behind one painter and one accept path. ``value``
+    is what an Enter/Tab writes into the buffer, and it matches what each key
+    STORES: a bare provider id for ``hosting`` and a bare MODEL ID for
+    ``model_name`` — NOT the ``provider/id`` selector. This is load-bearing:
+    ``_persist_default_from_picker`` in app.py writes ``model_name =
+    row.model_id`` (bare) beside ``hosting = row.provider``, and `bootstrap`
+    reads the two keys independently, so storing a selector here would leave
+    ``model_name`` holding ``anthropic/claude-opus-5`` under an ``anthropic``
+    hosting and boot a model id no provider owns.
+
+    ``label`` is display-only and carries the ``provider/id`` SELECTOR for a
+    model row, so the dropdown disambiguates the two catalogue entries that can
+    share one model id (a direct provider and an aggregator). ``detail`` is the
+    dim right-hand note (a provider's proper name, a model's provider+price),
+    never parsed back. The ghost text completes toward ``value`` (the bare id),
+    so a fuzzy match on the selector shows a dropdown row without a dishonest
+    inline ghost — the append-only rule in `_suggest_ghost`.
+    """
+
+    value: str
+    label: str
+    detail: str = ""
+
 
 #: One line of the read-only pane, as its styled segments. A LIST of segments
 #: rather than one string plus one style, because a provider row carries two
@@ -163,6 +220,43 @@ _TOO_SHORT = "terminal too short for settings — make it taller"
 #: roster it could not write would be worse than one that admits the boundary.
 _PANE_TEAMS = "teams"
 _PANE_AGENTS = "agents"
+
+
+class _ChromeStatic(Static):
+    """A ``Static`` the drag-to-select walk skips (``ALLOW_SELECT = False``).
+
+    WHY THIS EXISTS
+    ===============
+
+    The settings page is chrome, not content. Its rows are painted into a
+    handful of ``Static`` surfaces (the list, the title, the rule, the detail
+    line, the side pane), and Textual 8.x arms a SCREEN text-selection on the
+    ``MouseDown`` of any widget whose ``allow_select`` is true — see
+    ``Screen._forward_event``. A user clicking a row to SELECT it (move the
+    ``›`` cursor there) therefore also began a drag-selection, and dragging
+    across the list painted the grey selection band the bug report shows
+    bleeding across labels and values. A settings row is a control, so a click
+    on it should name it, never highlight it for copy.
+
+    ``ALLOW_SELECT = False`` keeps these surfaces out of the selection walk
+    entirely, exactly as ``app.Chrome`` does for the status band and composer
+    chevron (chrome is not content, stated there in full). It is the class
+    attribute Textual reads through ``Widget.allow_select``; it gates ONLY the
+    selection state and touches neither the widget's own ``on_click`` nor the
+    page's ``SettingsView.on_click`` — the row-select-on-click path is
+    untouched, because click delivery and selection arming are independent in
+    ``Screen._forward_event`` (the ``allow_select`` branch builds
+    ``_select_state`` and nothing else). The cursor's own reverse/selected-row
+    ink lives in ``_row_text`` and is likewise unaffected: it is painted into
+    the row's ``Text``, not produced by the screen's selection highlight.
+
+    Defined LOCALLY rather than reusing ``app.Chrome``: ``app`` imports this
+    module (``SettingsView``), so importing ``Chrome`` back would close an
+    import cycle. The behaviour is one class attribute, so the small duplication
+    is cheaper than the coupling.
+    """
+
+    ALLOW_SELECT = False
 
 
 class SettingsViewDismissed(Message):
@@ -334,11 +428,42 @@ class SettingsView(Vertical):
         self._agents: list[tuple[str, str, str]] = []
         #: Provider login state, injected the same way and for the same reason.
         self._providers: list[tuple[str, str]] = []
+        #: The provider and model catalogues that feed the `hosting`/`model_name`
+        #: suggestion dropdowns, injected by the app for the same reason the
+        #: pane content is: the page never reaches into a registry or the
+        #: credential store itself, so a repaint stays free of I/O (see `load`).
+        #: `_provider_catalogue` is `(id, display_name)` in the app's registry
+        #: order; `_model_catalogue` is the SAME `ModelRow` list `/model` is
+        #: fed, so the two surfaces rank identically.
+        self._provider_catalogue: list[tuple[str, str]] = []
+        self._model_catalogue: list[ModelRow] = []
+        #: Index of the highlighted row within the CURRENT suggestion list.
+        #: Held on the widget beside the editor buffer/caret because the
+        #: suggestions are derived from that buffer on every keystroke — a
+        #: separate list would be a second source of truth that could disagree
+        #: with "is an editor for a suggest key open and does it have matches".
+        #: Clamped on every rebuild in `_suggest_rows`, since typing can shrink
+        #: the list under the cursor.
+        self._suggest_index = 0
+        #: Whether the dropdown has been explicitly DISMISSED for the open
+        #: editor (a first Esc). This is the extra rung the Esc ladder needed:
+        #: Esc closes the suggestions before it cancels the editor, so a user
+        #: who opened the list to look at it can back out of it without losing
+        #: the field. Reset to False the moment the buffer changes — typing
+        #: is a request to filter, which means "show me the list again" — so the
+        #: dismissal only suppresses the frame it was pressed on.
+        self._suggest_dismissed = False
 
-        self._detail = Static(classes="settings-view-detail")
-        self._title = Static(classes="settings-view-title")
-        self._rule = Static(classes="settings-view-rule")
-        self._list = Static(classes="settings-view-list")
+        # Every rendered surface is a `_ChromeStatic`, not a bare `Static`, so a
+        # click or drag on the page names a row instead of arming a text
+        # selection whose band bleeds across the rows (see `_ChromeStatic`). The
+        # list is the one the bug report shows, but the title/rule/detail/pane
+        # are chrome too — a drag that overshot the list onto any of them would
+        # otherwise resume the same highlight there.
+        self._detail = _ChromeStatic(classes="settings-view-detail")
+        self._title = _ChromeStatic(classes="settings-view-title")
+        self._rule = _ChromeStatic(classes="settings-view-rule")
+        self._list = _ChromeStatic(classes="settings-view-list")
         self._body = ScrollableContainer(self._list, classes="settings-view-body")
         # NOT focusable. With it in the focus chain, one `tab` moved focus from
         # the page to this container, which owns the scroll keys — so the arrows
@@ -354,7 +479,7 @@ class SettingsView(Vertical):
         # wheel, and `_scroll_to_selection` drives this container programmatically
         # rather than through focus.
         self._body.can_focus = False
-        self._pane_view = Static(classes="settings-view-pane")
+        self._pane_view = _ChromeStatic(classes="settings-view-pane")
         self._columns = Horizontal(self._body, self._pane_view, classes="settings-view-columns")
         # Footer hints, same vocabulary and same shedding ladder as the org
         # chart's, so the two modes read consistently.
@@ -426,6 +551,8 @@ class SettingsView(Vertical):
         teams: Sequence[tuple[str, str, str]] = (),
         agents: Sequence[tuple[str, str, str]] = (),
         providers: Sequence[tuple[str, str]] = (),
+        provider_catalogue: Sequence[tuple[str, str]] = (),
+        model_catalogue: Sequence[ModelRow] = (),
     ) -> None:
         """Point the page at the read-only content the app resolved for it.
 
@@ -434,10 +561,20 @@ class SettingsView(Vertical):
         flattened to rows. The page never reaches into a registry itself, which
         is what keeps a repaint free of I/O — the same split ``OrgChartView``
         makes when the app resolves the org tree and the widget only paints it.
+
+        ``provider_catalogue`` and ``model_catalogue`` feed the Default
+        provider / Default model suggestion dropdowns. They are resolved by the
+        app from the SAME sources the `/provider` and `/model` surfaces use — the
+        provider login registry and the model catalogue — so this page cannot
+        drift into offering a second, parallel set of choices. Both default to
+        empty: a host that supplies neither simply gets the old bare free-text
+        editor on those two rows, which still saves any value.
         """
         self._teams = list(teams)
         self._agents = list(agents)
         self._providers = list(providers)
+        self._provider_catalogue = list(provider_catalogue)
+        self._model_catalogue = list(model_catalogue)
         self._repaint()
 
     # -- rows ---------------------------------------------------------------
@@ -455,6 +592,15 @@ class SettingsView(Vertical):
             rows.append(_Row(kind="header", section=section))
             for setting in settings_io.settings_for(section.name):
                 rows.append(_Row(kind="setting", setting=setting))
+                if self._editing == setting.key and setting.key in _SUGGEST_KEYS:
+                    # The suggestion dropdown renders as its own unselectable
+                    # rows directly UNDER the edited setting, the same place the
+                    # enum expansion and the cascade's hops sit. `_suggest_rows`
+                    # returns `[]` unless a dropdown should actually show (an
+                    # open suggest editor, not dismissed, with matches), so this
+                    # is a no-op on every other row and on a custom value the
+                    # catalogue does not match.
+                    rows.extend(self._suggest_rows())
                 if setting.kind is Kind.CASCADE:
                     rows.extend(self._cascade_rows(setting))
                 elif self._expanded == setting.key:
@@ -1302,6 +1448,12 @@ class SettingsView(Vertical):
         self._edit_seed = self._buffer
         self._caret = len(self._buffer)
         self._error = ""
+        # Open the dropdown on the best match for whatever the editor was seeded
+        # with, and un-dismiss any prior close. On an unset row the seed is
+        # empty, so the list opens on the whole catalogue — "I opened the field"
+        # is a request to see the choices, matching `/model` opening its list.
+        self._suggest_index = 0
+        self._suggest_dismissed = False
         self._repaint()
 
     def _cancel_edit(self) -> None:
@@ -1310,6 +1462,12 @@ class SettingsView(Vertical):
         self._edit_seed = ""
         self._caret = 0
         self._error = ""
+        # The dropdown belongs to the open editor, so closing the editor closes
+        # it. Reset here rather than only where the editor opens, so a cancel by
+        # any route (Esc, a click away, a move) leaves no dropdown state that a
+        # later edit would inherit.
+        self._suggest_index = 0
+        self._suggest_dismissed = False
 
     def _settle_row(self) -> bool:
         """Put the current row back to rest. NOTHING here writes.
@@ -1823,17 +1981,78 @@ class SettingsView(Vertical):
         """
         key = event.key
         if self._editing is not None:
+            # Is a suggestion dropdown live for this editor? Computed once so the
+            # branches below read the same state, and only ever true on the two
+            # suggest keys with a fed catalogue and matches showing.
+            has_suggestions = bool(self._suggest_rows())
             if key == "escape":
                 event.stop()
                 event.prevent_default()
+                if has_suggestions:
+                    # The extra Esc rung the dropdown adds (mirrors the enum
+                    # expansion's own rung in the page-level Esc ladder below):
+                    # the first Esc closes the SUGGESTIONS, a second cancels the
+                    # editor. A user who opened the list to look at it backs out
+                    # of it without losing what they typed.
+                    self._suggest_dismissed = True
+                    self._repaint()
+                    return
                 self._cancel_edit()
                 self._repaint()
                 return
+            if key in ("up", "down") and has_suggestions:
+                # The dropdown owns the arrows while it is showing — there is no
+                # cursor to move on the page (the editor holds it), so the arrows
+                # have nothing else to do and browsing the list is what a user
+                # reaches for. Wraps, like the model picker's own move.
+                event.stop()
+                event.prevent_default()
+                count = len(self._suggestions())
+                delta = -1 if key == "up" else 1
+                self._suggest_index = (self._suggest_index + delta) % max(count, 1)
+                self._repaint()
+                return
+            if key == "tab" and has_suggestions:
+                # Tab COMPLETES the highlighted suggestion into the buffer and
+                # keeps the editor open, exactly as the model picker's Tab does
+                # (`_complete_model`). It never saves — only Enter on the chosen
+                # value writes (the page's #440 contract).
+                suggestion = self._highlighted_suggestion()
+                if suggestion is not None:
+                    event.stop()
+                    event.prevent_default()
+                    self._accept_suggestion(suggestion)
+                    return
             if key == "enter":
                 event.stop()
                 event.prevent_default()
+                # Enter on a live dropdown ACCEPTS the highlighted suggestion
+                # into the buffer first, THEN saves it — so arrowing to a row
+                # and pressing Enter stores that row without a separate Tab. When
+                # the buffer already equals the highlighted value (the common
+                # case: the user typed it in full, or Tab-completed it), the
+                # accept is a no-op and the save runs on what is there. A custom
+                # value the catalogue does not match has no highlight, so Enter
+                # saves the typed text directly — the "suggestions assist, never
+                # constrain" contract.
+                suggestion = self._highlighted_suggestion()
+                if suggestion is not None and self._buffer.strip() != suggestion.value:
+                    self._accept_suggestion(suggestion)
                 self._commit_edit()
                 return
+            if key == "right" and has_suggestions and self._caret == len(self._buffer):
+                # Right-at-the-end accepts the ghost, the composer's own gesture:
+                # the ghost previews what completing appends, and pushing the
+                # caret past the tail is the natural "take it". Only when a ghost
+                # is actually shown (caret at end AND an append-honest match),
+                # else `right` falls through to ordinary caret movement below.
+                if self._suggest_ghost():
+                    suggestion = self._highlighted_suggestion()
+                    if suggestion is not None:
+                        event.stop()
+                        event.prevent_default()
+                        self._accept_suggestion(suggestion)
+                        return
             if key == "backspace":
                 event.stop()
                 event.prevent_default()
@@ -1842,12 +2061,16 @@ class SettingsView(Vertical):
                 if self._caret > 0:
                     self._buffer = self._buffer[: self._caret - 1] + self._buffer[self._caret :]
                     self._caret -= 1
+                # Editing the buffer is a request to re-filter, so a dismissed
+                # dropdown comes back and the highlight resets to the best match.
+                self._reopen_suggestions()
                 self._repaint()
                 return
             if key == "delete":
                 event.stop()
                 event.prevent_default()
                 self._buffer = self._buffer[: self._caret] + self._buffer[self._caret + 1 :]
+                self._reopen_suggestions()
                 self._repaint()
                 return
             if key in ("left", "right", "home", "end"):
@@ -1870,6 +2093,9 @@ class SettingsView(Vertical):
                 event.prevent_default()
                 self._buffer = self._buffer[: self._caret] + char + self._buffer[self._caret :]
                 self._caret += 1
+                # Typing filters the list, so an earlier Esc-dismissal is undone
+                # and the highlight resets to the new best match.
+                self._reopen_suggestions()
                 self._repaint()
             return
         if key == "escape" and self._confirm_delete is not None:
@@ -1957,6 +2183,16 @@ class SettingsView(Vertical):
             return
         event.stop()
         row = self._rows[index]
+        if row.kind == "suggest" and row.suggestion is not None:
+            # A click on a dropdown row highlights it and accepts it in one
+            # gesture — completing the buffer to that value, exactly as the model
+            # picker's own click chooses a row. It does NOT save: the page's
+            # contract is that only Enter on the chosen value writes (#440), so
+            # a stray click completes and leaves the confirming Enter to the
+            # user, matching what Tab on the same row does.
+            self._suggest_index = row.hop_index
+            self._accept_suggestion(row.suggestion)
+            return
         if not row.selectable:
             return
         if index == self._selected:
@@ -2238,6 +2474,23 @@ class SettingsView(Vertical):
             line.append(row.text, style=dim)
             return line
 
+        if row.kind == "suggest" and row.suggestion is not None:
+            # A dropdown row under the edited setting. Indented one level in from
+            # the setting (like an enum choice) so it reads as belonging to that
+            # row, and highlighted by `_suggest_index` — NOT by `_selected`,
+            # which stays on the setting row while the list is browsed. The
+            # highlight is a reverse marker plus the accent-inked value, matching
+            # the `●`/cursor vocabulary the choice rows already use, so the
+            # highlighted row is legible on a monochrome terminal too.
+            highlighted = row.hop_index == self._suggest_index
+            line.append(" " * (_CHOICE_INDENT - 2))
+            marker_style = accent if highlighted else dim
+            line.append(f"{_CURSOR} " if highlighted else "  ", style=marker_style)
+            line.append(row.suggestion.label, style=fg if highlighted else muted)
+            if row.suggestion.detail:
+                line.append(f"  {row.suggestion.detail}", style=faint)
+            return line
+
         marker = f"{_CURSOR} " if selected else "  "
         base = fg if selected else (muted if hovered else muted)
 
@@ -2376,6 +2629,16 @@ class SettingsView(Vertical):
         editor.append(before, style=fg)
         editor.append("▏", style=accent)
         editor.append(after, style=fg)
+        # The GHOST rides just after the caret's tail, dimmed, previewing what
+        # Tab/enter would append. Only painted when the caret is at the end
+        # (`_suggest_ghost` enforces this) so `after` is empty and the ghost
+        # follows the caret with nothing between — the same inline-completion
+        # affordance the slash-command composer shows, using its own append-only
+        # honesty rule (`command_picker.ghost_for`). A fuzzy match that would
+        # rewrite typed characters shows no ghost; the dropdown row carries it.
+        ghost = self._suggest_ghost()
+        if ghost:
+            editor.append(ghost, style=faint)
         # The CONTRACT rides the row; the ERROR does not. The detail line below
         # already carries the rejection in full width, and printing it twice
         # read as two separate problems — the row's copy also had to compete
@@ -2394,7 +2657,19 @@ class SettingsView(Vertical):
         # the clause advertised a behaviour the row does not have.
         contract = "  enter saves · esc cancels"
         setting = settings_io.resolve_key(self._editing or "")
-        if setting is not None and setting.empty_unsets:
+        # When a suggestion dropdown is live the contract names the keys that
+        # drive it, or the affordance is undiscoverable: the footer hint contract
+        # has to stay honest (a lit affordance with no advertised key is the "why
+        # doesn't anything happen" complaint U5 records). Preferred over
+        # `clear to unset` because a user staring at a list of choices needs
+        # "how do I pick one" more than "how do I empty this", and both do not
+        # fit; `_suggest_rows` being non-empty is exactly "a dropdown is shown".
+        if self._suggest_rows():
+            full = "  ↑↓ suggestions · tab completes · enter saves · esc"
+            room = self._list_width() - _VALUE_COLUMN - cell_len(editor.plain)
+            if cell_len(full) <= room:
+                contract = full
+        elif setting is not None and setting.empty_unsets:
             full = "  enter saves · esc cancels · clear to unset"
             room = self._list_width() - _VALUE_COLUMN - cell_len(editor.plain)
             if cell_len(full) <= room:
@@ -2434,6 +2709,178 @@ class SettingsView(Vertical):
         start = max(0, caret - room + 4)
         start = min(start, max(0, len(self._buffer) - room))
         return (self._buffer[start:caret], self._buffer[caret:], start > 0)
+
+    # -- suggestions (Default provider / Default model) ---------------------
+    #
+    # The `hosting` and `model_name` rows keep the ordinary free-text editor —
+    # every key, the caret, the Esc/enter contract — and gain a filtered
+    # dropdown with inline ghost text ON TOP of it. The design deliberately
+    # REUSES the /model and /provider machinery rather than inventing a parallel
+    # one: models are ranked by `model_picker.rank_rows` (the exact matcher the
+    # /model list uses) and providers by `autocomplete.score_command_text_match`
+    # (the matcher /login and the command picker use), and the ghost is
+    # `command_picker.ghost_for`'s own append-only rule. A second source that
+    # could drift from those is the defect the slice was written to avoid.
+    def _suggest_key(self) -> str | None:
+        """The suggest key whose editor is open, or None.
+
+        A single predicate for "is a suggestion dropdown live", so the paint,
+        the key router and the ghost all ask the same question the same way.
+        Open means: an editor is open, it is one of the two suggest keys, and
+        the app injected the catalogue that key draws from — a host that fed no
+        catalogue falls back to the plain editor rather than an empty dropdown.
+        """
+        if self._editing not in _SUGGEST_KEYS:
+            return None
+        if self._editing == _HOSTING_KEY and not self._provider_catalogue:
+            return None
+        if self._editing == _MODEL_KEY and not self._model_catalogue:
+            return None
+        return self._editing
+
+    def _suggestions(self) -> list[_Suggestion]:
+        """The current suggestion list for the open editor, best first.
+
+        Filtered by the WHOLE buffer (not the slice before the caret): a setting
+        editor is a single short token, so there is no second word for a caret
+        to sit before, and matching the whole value is what lets a mid-string
+        edit still narrow the list. Empty buffer returns the whole catalogue in
+        its source order, exactly as `/model` and `/login` show everything when
+        nothing is typed — "I opened the field and have not typed" is a request
+        to see the set, not a failed match.
+
+        Returns `[]` when the typed value matches nothing, which is the case
+        that carries the "custom value still saves" contract: a bespoke endpoint
+        id the catalogue has never seen simply offers no rows, the dropdown
+        disappears, and the buffer commits as typed through the unchanged
+        `_commit_edit`. Suggestions assist; they never gate the write.
+        """
+        key = self._suggest_key()
+        if key is None:
+            return []
+        query = self._buffer.strip()
+        if key == _HOSTING_KEY:
+            # Providers are a bounded known set, so this reads as an enum you can
+            # also free-type past. Scored by the shared command matcher so
+            # `anthrpc` finds `anthropic` the same way `/login anthrpc` does.
+            scored: list[tuple[int, int, _Suggestion]] = []
+            for order, (provider_id, name) in enumerate(self._provider_catalogue):
+                if not query:
+                    scored.append((0, order, _Suggestion(provider_id, provider_id, name)))
+                    continue
+                # Best score across the id AND the display name, so typing the
+                # brand ("OpenAI") finds the id ("openai") the value stores.
+                best = max(
+                    score_command_text_match(query, provider_id),
+                    score_command_text_match(query, name),
+                )
+                if best > 0:
+                    scored.append((-best, order, _Suggestion(provider_id, provider_id, name)))
+            scored.sort(key=lambda item: (item[0], item[1]))
+            return [item[2] for item in scored]
+        # model_name: rank the SAME catalogue /model shows, by the SAME matcher.
+        # `value` is the BARE model id (what the key stores), `label` is the
+        # `provider/id` selector (what disambiguates two rows sharing an id).
+        # `rank_rows` matches on the selector, so a user typing `openrouter/`
+        # narrows by provider even though the accepted value is the bare id.
+        ranked = rank_rows(self._model_catalogue, query)
+        return [_Suggestion(row.model_id, row.selector, _suggestion_detail(row)) for row in ranked]
+
+    def _suggest_rows(self) -> list["_Row"]:
+        """The dropdown as painter rows, clamping `_suggest_index` to the list.
+
+        Returns `[]` when no dropdown should show — no open suggest editor, the
+        list dismissed by Esc, or nothing matches. The clamp lives here because
+        this runs on every repaint and every repaint follows a possible buffer
+        change: typing can drop the highlighted row out of the list, and an
+        index left dangling past the end would paint no highlight and accept the
+        wrong value on Enter.
+        """
+        if self._suggest_key() is None or self._suggest_dismissed:
+            return []
+        suggestions = self._suggestions()
+        if not suggestions:
+            return []
+        if self._suggest_index >= len(suggestions):
+            self._suggest_index = len(suggestions) - 1
+        if self._suggest_index < 0:
+            self._suggest_index = 0
+        # Window the list around the highlight so a catalogue of dozens does not
+        # push the rest of the page off screen — the same visible-window idea
+        # `model_picker` uses, kept simple here because the settings body scrolls
+        # as a whole and the dropdown is only ever a handful of rows.
+        start = 0
+        if len(suggestions) > _SUGGEST_ROWS:
+            start = min(
+                max(0, self._suggest_index - _SUGGEST_ROWS // 2),
+                len(suggestions) - _SUGGEST_ROWS,
+            )
+        window = suggestions[start : start + _SUGGEST_ROWS]
+        return [
+            _Row(kind="suggest", suggestion=item, hop_index=start + offset)
+            for offset, item in enumerate(window)
+        ]
+
+    def _highlighted_suggestion(self) -> _Suggestion | None:
+        """The suggestion Enter/Tab would accept, or None when none is shown."""
+        if self._suggest_key() is None or self._suggest_dismissed:
+            return None
+        suggestions = self._suggestions()
+        if not suggestions:
+            return None
+        index = max(0, min(self._suggest_index, len(suggestions) - 1))
+        return suggestions[index]
+
+    def _suggest_ghost(self) -> str:
+        """The dimmed completion of the top suggestion, appended after the caret.
+
+        Honest ghost only, borrowing `command_picker.ghost_for`'s rule verbatim:
+        the ghost is shown IF AND ONLY IF the highlighted value is a pure APPEND
+        to what the user typed. A fuzzy match that rewrites characters already on
+        screen (`ops` → `anthropic/claude-opus-5`) has no append that describes
+        it, so no ghost is shown there and the dropdown row carries the meaning
+        instead — a ghost that painted characters Tab would not insert is a lie
+        about the next keystroke.
+
+        Suppressed unless the caret is at the END of the buffer: a ghost is a
+        preview of what completing appends, and appending only makes sense at the
+        tail. Mid-string editing shows the dropdown but no inline ghost.
+        """
+        suggestion = self._highlighted_suggestion()
+        if suggestion is None or self._caret != len(self._buffer):
+            return ""
+        return ghost_for((suggestion.value, len(suggestion.value)), self._buffer)
+
+    def _accept_suggestion(self, suggestion: _Suggestion) -> None:
+        """Complete the buffer to ``suggestion`` and keep the editor open.
+
+        Tab-style completion: the value replaces the buffer and the caret goes
+        to the end, so the user sees the full selector and can still edit it or
+        press Enter to save. NOT an immediate write — the page's whole contract
+        is that only Enter on the chosen thing changes config (#440), and the
+        model-picker's own Tab behaves the same (`_complete_model` completes,
+        Enter acts). Filling the buffer re-filters the list to the exact value,
+        which leaves that one row highlighted for the confirming Enter.
+        """
+        self._buffer = suggestion.value
+        self._caret = len(self._buffer)
+        self._suggest_index = 0
+        self._suggest_dismissed = False
+        self._repaint()
+
+    def _reopen_suggestions(self) -> None:
+        """Un-dismiss the dropdown and reset the highlight — for buffer edits.
+
+        Typing, backspace and delete all mean "the value changed, re-filter",
+        which brings a dropdown a prior Esc closed back and puts the highlight on
+        the new best match. A no-op on non-suggest editors. The highlight resets
+        to 0 rather than trying to track the old row: after a filter the list is
+        a different set, so the top (best) match is the only stable anchor —
+        the same choice `model_picker._refilter` makes.
+        """
+        if self._editing in _SUGGEST_KEYS:
+            self._suggest_dismissed = False
+            self._suggest_index = 0
 
     #: Leads the delete confirmation so an ASK is distinguishable from a
     #: REPORT. Both occupy the detail row in the same danger ink, and a
@@ -3490,6 +3937,34 @@ class SettingsView(Vertical):
         """
         return self._notice
 
+    # -- suggestion accessors (assertable state) ----------------------------
+    def suggestion_labels_for_test(self) -> list[str]:
+        """The suggestion dropdown's DISPLAYED labels, best first ("" when none).
+
+        The labels are what the user reads (a `provider/id` selector for a
+        model, a bare id for a provider), so a test asserts filtering and
+        ordering against them exactly as they appear on the frame.
+        """
+        return [item.label for item in self._suggestions()]
+
+    def suggestion_values_for_test(self) -> list[str]:
+        """The values the dropdown would WRITE, best first ("" when none).
+
+        Distinct from the labels because a model suggestion shows the selector
+        but stores the bare id — the split a test has to be able to see, or a
+        regression that stored the selector would pass against the label alone.
+        """
+        return [item.value for item in self._suggestions()]
+
+    def ghost_text_for_test(self) -> str:
+        """The inline ghost completion currently shown ("" when none)."""
+        return self._suggest_ghost()
+
+    @property
+    def suggest_index_for_test(self) -> int:
+        """Which suggestion is highlighted, for the arrow-navigation assertions."""
+        return self._suggest_index
+
     # -- leaving ------------------------------------------------------------
     def _focus_self(self) -> None:
         """Focus the page (the move hint's click action).
@@ -3524,7 +3999,17 @@ class _Row:
     every field Optional on a frozen dataclass buys nothing over this.
     """
 
-    __slots__ = ("kind", "section", "setting", "choice", "chain", "hop", "hop_index", "text")
+    __slots__ = (
+        "kind",
+        "section",
+        "setting",
+        "choice",
+        "chain",
+        "hop",
+        "hop_index",
+        "text",
+        "suggestion",
+    )
 
     def __init__(
         self,
@@ -3537,6 +4022,7 @@ class _Row:
         hop: str | None = None,
         hop_index: int = -1,
         text: str = "",
+        suggestion: "_Suggestion | None" = None,
     ) -> None:
         self.kind = kind
         self.section = section
@@ -3544,8 +4030,15 @@ class _Row:
         self.choice = choice
         self.chain = chain
         self.hop = hop or ""
+        # For a ``suggest`` row this is the suggestion's ORDINAL within the open
+        # dropdown, which is what a click maps back to `_suggest_index`; for a
+        # ``hop`` row it is the hop's position in its chain. Same "position of
+        # this row within its group" meaning in both, so the slot is shared.
         self.hop_index = hop_index
         self.text = text
+        #: The offered value+label for a ``suggest`` row, else None. See
+        #: `_Suggestion`.
+        self.suggestion = suggestion
 
     @property
     def selectable(self) -> bool:
@@ -3554,8 +4047,16 @@ class _Row:
         Headers and the empty-state line are not selectable: there is nothing
         to do on them, and a cursor that stopped on them would make every
         section boundary cost an extra keypress to cross.
+
+        Suggestion rows are not selectable either: the cursor stays on the
+        edited setting row while the dropdown is open, and the highlighted
+        suggestion is tracked by `_suggest_index` rather than by `_selected`.
+        The two are kept apart for the reason the enum expansion keeps the
+        stored-choice cursor apart from the setting row — a dropdown is browsed
+        by a highlight that must survive the buffer being re-filtered under it,
+        which a `_selected` index into a rebuilt row list does not.
         """
-        return self.kind not in ("header", "empty")
+        return self.kind not in ("header", "empty", "suggest")
 
     @property
     def identity(self) -> tuple[str, str, int]:
@@ -3609,6 +4110,26 @@ def _choices_for(setting: Setting) -> tuple[settings_io.Choice, ...]:
     if setting.kind is Kind.BOOL:
         return _BOOL_CHOICES
     return setting.resolved_choices
+
+
+def _suggestion_detail(row: ModelRow) -> str:
+    """The dim right-hand note for a model suggestion — provider then price.
+
+    Kept terse and display-only (never parsed back): it answers "which of the
+    several rows named `claude-opus-5` is this" and "roughly what does it cost",
+    which is the same pair `/model`'s own rows carry. Reuses
+    `model_picker.format_price_pair` so a price reads identically on both
+    surfaces; the provider leads because two rows can share a model id across a
+    direct provider and an aggregator, and the provider is what tells them
+    apart.
+    """
+    from local_operator.tui.widgets.model_picker import format_price_pair
+
+    price = format_price_pair(row.input_price, row.output_price)
+    parts = [row.provider]
+    if price:
+        parts.append(price)
+    return " · ".join(parts)
 
 
 def _render_value(value: Any) -> str:

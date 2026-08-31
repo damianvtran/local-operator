@@ -24,6 +24,7 @@ from local_operator import settings_io
 from local_operator.config import ConfigManager
 from local_operator.settings_io import Kind
 from local_operator.tui.app import OperatorApp
+from local_operator.tui.widgets.model_picker import ModelRow
 from local_operator.tui.widgets.settings_view import SettingsView
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
@@ -4029,3 +4030,359 @@ async def test_the_detail_clause_sheds_whole_rather_than_clipping(
             "default: 10" in detail
         ), f"`r` is offered without naming what it restores at {size}: {detail!r}"
         assert cell_len(detail) <= view._detail_width(), (cell_len(detail), detail)
+
+
+# ---------------------------------------------------------------------------
+# Click-selection frame suppression (Issue 1) and the provider/model
+# suggestion dropdowns with inline ghost text (Issue 2).
+# ---------------------------------------------------------------------------
+
+#: A representative provider catalogue as ``load`` takes it: ``(id, name)`` in
+#: registry order. FakeSession supplies no providers, so the suggestion tests
+#: inject their own known set rather than depending on the machine's registry.
+_PROVIDER_CATALOGUE = [
+    ("anthropic", "Anthropic"),
+    ("openai", "OpenAI"),
+    ("openrouter", "OpenRouter"),
+    ("google", "Google"),
+    ("mistral", "Mistral"),
+    ("deepseek", "DeepSeek"),
+]
+
+#: A representative model catalogue as ``ModelRow`` list — the same shape the
+#: app resolves for the real page and hands to ``load``.
+_MODEL_CATALOGUE = [
+    ModelRow("anthropic", "claude-opus-5", "Claude Opus 5", 200_000, 15.0, 75.0),
+    ModelRow("anthropic", "claude-sonnet-4-5", "Claude Sonnet 4.5", 200_000, 3.0, 15.0),
+    ModelRow("openai", "gpt-5.2", "GPT-5.2", 400_000, 2.5, 10.0),
+    ModelRow("google", "gemini-3-pro", "Gemini 3 Pro", 1_000_000, 2.0, 12.0),
+    # A reseller row carrying the SAME model id as the direct anthropic row —
+    # the case the label (selector) exists to disambiguate.
+    ModelRow("openrouter", "claude-opus-5", "Claude Opus 5", 200_000, 16.0, 78.0, aggregated=True),
+]
+
+
+async def _open_page_with_catalogues(pilot: Any, app: OperatorApp) -> SettingsView:
+    """Open ``/settings`` and inject the provider + model suggestion catalogues."""
+    app._open_settings_view()
+    view = app.query_one(SettingsView)
+    view.load(
+        providers=[("anthropic", "signed in")],
+        provider_catalogue=_PROVIDER_CATALOGUE,
+        model_catalogue=_MODEL_CATALOGUE,
+    )
+    await pilot.pause()
+    return view
+
+
+@pytest.mark.asyncio
+async def test_click_selects_a_row_without_arming_a_text_selection() -> None:
+    """Issue 1: a click on a settings row moves the cursor and arms NO selection.
+
+    Textual 8.x begins a screen text-selection on the ``MouseDown`` of any
+    widget whose ``allow_select`` is true (``Screen._forward_event``), and the
+    page's rows are painted into ``Static`` surfaces — so a click that was only
+    meant to select a row also armed a drag whose highlight bled the grey
+    selection band across the labels the bug report shows. ``_ChromeStatic``
+    sets ``ALLOW_SELECT = False`` on those surfaces, which keeps them out of the
+    selection walk WITHOUT touching the click delivery the row-select depends
+    on. This asserts both halves at once: the cursor moved, and the screen holds
+    no selection.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        view = await _open_page_with_catalogues(pilot, app)
+        before = view._selected
+
+        body = view._body
+        # A row several lines down in the body, resolved to a settable row.
+        x = body.region.x + 6
+        y = body.region.y + 5
+        await pilot._post_mouse_events(
+            [events.MouseDown, events.MouseUp, events.Click], offset=(x, y), button=1
+        )
+        await pilot.pause()
+
+        assert view._selected != before, "the click did not move the cursor"
+        assert view._rows[view._selected].selectable
+        assert len(app.screen.selections) == 0, (
+            "a text selection was armed by a plain row click: "
+            f"{[type(w).__name__ for w in app.screen.selections]}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_drag_across_the_list_arms_no_selection() -> None:
+    """Issue 1: dragging across the rows never paints the selection frame.
+
+    The drag is the gesture the report photographs — press on one row, move
+    across several — and the fingerprint of the bug is ``Screen.selections``
+    filling with the list ``Static``. With ``ALLOW_SELECT = False`` on the
+    chrome surfaces the walk skips them, so the map stays empty however far the
+    drag travels.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        view = await _open_page_with_catalogues(pilot, app)
+
+        body = view._body
+        x = body.region.x + 4
+        y0 = body.region.y + 1
+        await pilot._post_mouse_events([events.MouseDown], offset=(x, y0), button=1)
+        for dy in range(1, 6):
+            await pilot._post_mouse_events(
+                [events.MouseMove], offset=(x + dy * 3, y0 + dy), button=1
+            )
+        await pilot.pause()
+
+        assert len(app.screen.selections) == 0, (
+            "dragging over the settings list armed a text selection: "
+            f"{[type(w).__name__ for w in app.screen.selections]}"
+        )
+        await pilot._post_mouse_events([events.MouseUp], offset=(x + 15, y0 + 5), button=1)
+
+
+@pytest.mark.asyncio
+async def test_the_chrome_surfaces_opt_out_of_selection() -> None:
+    """Issue 1: every rendered surface of the page has ``allow_select`` False.
+
+    The list is the one the report shows, but a drag that overshot onto the
+    title, rule, detail line or side pane would resume the same highlight there
+    — so all of them are ``_ChromeStatic``. Asserted directly, because the drag
+    test above only exercises the list.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        view = await _open_page_with_catalogues(pilot, app)
+        for surface in (
+            view._list,
+            view._title,
+            view._rule,
+            view._detail,
+            view._pane_view,
+        ):
+            assert surface.allow_select is False, type(surface).__name__
+
+
+@pytest.mark.asyncio
+async def test_provider_suggestions_filter_and_ghost() -> None:
+    """Issue 2: the Default provider editor offers filtered provider suggestions.
+
+    Typing ``a`` narrows to the providers whose id or name matches, best first,
+    and the top match completes as inline ghost text after the caret. The
+    suggestions are the bounded login set, so this reads as an enum you can also
+    free-type past.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 34)) as pilot:
+        await pilot.pause()
+        view = await _open_page_with_catalogues(pilot, app)
+
+        _select(view, "hosting")
+        await pilot.press("enter")
+        # Clear the seeded value, then type a filter.
+        for _ in range(len(view._buffer)):
+            await pilot.press("backspace")
+        await pilot.press("a")
+        await pilot.pause()
+
+        labels = view.suggestion_labels_for_test()
+        assert labels, "typing 'a' offered no provider suggestions"
+        assert labels[0] == "anthropic", labels
+        # Ghost completes the top match after what was typed.
+        assert view.ghost_text_for_test() == "nthropic", view.ghost_text_for_test()
+
+
+@pytest.mark.asyncio
+async def test_provider_suggestion_accepts_and_saves(tmp_path: Path) -> None:
+    """Issue 2: arrowing to a provider and pressing Enter saves the bare id.
+
+    Enter on a live dropdown accepts the highlighted row into the buffer and
+    then commits it, so one Enter after arrowing stores that provider. ``hosting``
+    stores the BARE id, which is what the config file must carry.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 34)) as pilot:
+        await pilot.pause()
+        view = await _open_page_with_catalogues(pilot, app)
+
+        _select(view, "hosting")
+        await pilot.press("enter")
+        for _ in range(len(view._buffer)):
+            await pilot.press("backspace")
+        await pilot.press("o")  # openai / openrouter both match; openai first
+        await pilot.pause()
+        assert view.suggestion_labels_for_test()[0] == "openai"
+        # Arrow down one to openrouter, then Enter.
+        await pilot.press("down")
+        await pilot.pause()
+        target = view.suggestion_labels_for_test()[view.suggest_index_for_test]
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert _values(tmp_path).get("hosting") == target == "openrouter"
+        assert view.editing_key is None, "the editor stayed open after a save"
+
+
+@pytest.mark.asyncio
+async def test_model_suggestions_fuzzy_filter_and_tab_completes() -> None:
+    """Issue 2: the Default model editor fuzzy-filters the model catalogue.
+
+    Typing ``opus`` ranks the two rows that carry that id (direct and reseller)
+    via the SAME ``rank_rows`` the ``/model`` picker uses, showing the
+    ``provider/id`` selector as the label so the two are distinguishable. Tab
+    completes the highlighted row into the buffer without saving, as the model
+    picker's own Tab does — the value written is the BARE model id.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 34)) as pilot:
+        await pilot.pause()
+        view = await _open_page_with_catalogues(pilot, app)
+
+        _select(view, "model_name")
+        await pilot.press("enter")
+        for _ in range(len(view._buffer)):
+            await pilot.press("backspace")
+        for ch in "opus":
+            await pilot.press(ch)
+        await pilot.pause()
+
+        labels = view.suggestion_labels_for_test()
+        values = view.suggestion_values_for_test()
+        assert labels == ["anthropic/claude-opus-5", "openrouter/claude-opus-5"], labels
+        # The label shows the selector; the value stores the bare id.
+        assert values[0] == "claude-opus-5", values
+
+        await pilot.press("tab")
+        await pilot.pause()
+        # Tab completed the buffer to the bare id and did NOT save.
+        assert view._buffer == "claude-opus-5", view._buffer
+        assert view.editing_key == "model_name", "Tab saved instead of completing"
+
+
+@pytest.mark.asyncio
+async def test_a_custom_model_value_saves_without_a_matching_suggestion(tmp_path: Path) -> None:
+    """Issue 2: a value the catalogue does not know still coerces and saves.
+
+    Suggestions ASSIST, they do not constrain. A bespoke endpoint id matches
+    nothing, so the dropdown disappears — and Enter saves the typed text
+    directly through the unchanged ``_commit_edit``, exactly as the plain
+    free-text editor always did.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 34)) as pilot:
+        await pilot.pause()
+        view = await _open_page_with_catalogues(pilot, app)
+
+        _select(view, "model_name")
+        await pilot.press("enter")
+        for _ in range(len(view._buffer)):
+            await pilot.press("backspace")
+        for ch in "my-endpoint/custom-v2":
+            await pilot.press(ch)
+        await pilot.pause()
+
+        assert view.suggestion_labels_for_test() == [], "a custom value matched a suggestion"
+        assert view.ghost_text_for_test() == ""
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert _values(tmp_path).get("model_name") == "my-endpoint/custom-v2"
+        assert view.editing_key is None
+
+
+@pytest.mark.asyncio
+async def test_the_esc_ladder_closes_suggestions_before_the_editor() -> None:
+    """Issue 2: the first Esc closes the dropdown, the second cancels the editor.
+
+    The dropdown adds a rung to the page's Esc ladder (editor → chain →
+    expansion → page). A user who opened the list to look at it backs out of it
+    without losing what they typed; only a second Esc cancels the field. Typing
+    after the dismissal reopens the list, since editing is a request to filter.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 34)) as pilot:
+        await pilot.pause()
+        view = await _open_page_with_catalogues(pilot, app)
+
+        _select(view, "hosting")
+        await pilot.press("enter")
+        for _ in range(len(view._buffer)):
+            await pilot.press("backspace")
+        await pilot.press("a")
+        await pilot.pause()
+        assert view.suggestion_labels_for_test(), "no dropdown to dismiss"
+
+        # First Esc: dropdown closes, editor stays open with the buffer intact.
+        await pilot.press("escape")
+        await pilot.pause()
+        assert view.editing_key == "hosting", "the first Esc cancelled the editor"
+        assert view._suggest_dismissed is True
+        assert view._suggest_rows() == [], "the dropdown survived the first Esc"
+
+        # Typing reopens it — editing is a filter request.
+        await pilot.press("n")
+        await pilot.pause()
+        assert view._suggest_rows(), "typing did not reopen the dismissed dropdown"
+
+        # Dismiss again, then a second Esc cancels the editor.
+        await pilot.press("escape")
+        await pilot.pause()
+        await pilot.press("escape")
+        await pilot.pause()
+        assert view.editing_key is None, "the second Esc did not cancel the editor"
+
+
+@pytest.mark.asyncio
+async def test_right_at_end_accepts_the_ghost() -> None:
+    """Issue 2: right-arrow at the buffer's end accepts the inline ghost.
+
+    The composer's own gesture — the ghost previews what completing appends, and
+    pushing the caret past the tail takes it. Only when a ghost is actually shown
+    (caret at end, append-honest match); otherwise ``right`` is ordinary caret
+    movement.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 34)) as pilot:
+        await pilot.pause()
+        view = await _open_page_with_catalogues(pilot, app)
+
+        _select(view, "hosting")
+        await pilot.press("enter")
+        for _ in range(len(view._buffer)):
+            await pilot.press("backspace")
+        await pilot.press("a")
+        await pilot.pause()
+        assert view.ghost_text_for_test() == "nthropic"
+
+        await pilot.press("right")
+        await pilot.pause()
+        assert view._buffer == "anthropic", view._buffer
+
+
+@pytest.mark.asyncio
+async def test_suggestions_are_absent_without_an_injected_catalogue() -> None:
+    """Issue 2: with no catalogue, the two rows keep the plain free-text editor.
+
+    The catalogues are optional. A host that feeds neither (or a store read that
+    failed) falls the field back to the bare editor, which still saves — the
+    dropdown must never be an empty box in that case.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        # No catalogues injected.
+        app._open_settings_view()
+        view = app.query_one(SettingsView)
+        view.load(providers=[("anthropic", "signed in")])
+        await pilot.pause()
+
+        _select(view, "model_name")
+        await pilot.press("enter")
+        await pilot.pause()
+        assert view.editing_key == "model_name"
+        assert view.suggestion_labels_for_test() == []
+        assert view._suggest_rows() == []
