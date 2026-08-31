@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+from threading import Barrier, BrokenBarrierError, Thread
 
 import pytest
 
@@ -20,6 +21,23 @@ from local_operator.teams import (
 @pytest.fixture()
 def registry(tmp_path: Path) -> TeamRegistry:
     return TeamRegistry(tmp_path)
+
+
+def test_constructing_unused_registry_does_not_create_config_tree(tmp_path: Path) -> None:
+    config_dir = tmp_path / "missing"
+    TeamRegistry(config_dir)
+
+    assert not config_dir.exists()
+
+
+def test_lock_sidecar_is_not_a_team_row(tmp_path: Path) -> None:
+    registry = TeamRegistry(tmp_path)
+    registry.create_team(TeamEditFields(name="ops"))
+
+    assert (tmp_path / ".teams.lock").is_file()
+    assert sorted(path.name for path in (tmp_path / "teams").iterdir()) == [
+        registry.list_teams()[0].id
+    ]
 
 
 def test_create_list_show_update_delete(registry: TeamRegistry) -> None:
@@ -57,6 +75,12 @@ def test_duplicate_name_is_refused(registry: TeamRegistry) -> None:
     registry.create_team(TeamEditFields(name="alpha", manager="manager"))
     with pytest.raises(ValueError, match="already exists"):
         registry.create_team(TeamEditFields(name="alpha", manager="manager"))
+
+
+def test_case_insensitive_name_collision_is_refused(registry: TeamRegistry) -> None:
+    registry.create_team(TeamEditFields(name="Beta", manager="manager"))
+    with pytest.raises(ValueError, match="Team with name beta already exists"):
+        registry.create_team(TeamEditFields(name="beta", manager="manager"))
 
 
 def test_name_rejects_spaces(registry: TeamRegistry) -> None:
@@ -380,6 +404,116 @@ def test_roundtripped_metadata_only_team_preserves_briefs_through_save(
     assert reloaded.instructions == "KEEP INSTRUCTIONS"
     assert reloaded.project == "KEEP PROJECT"
     assert reloaded.description == "mutated, not the briefs"
+
+
+def test_direct_json_save_refuses_rename_to_an_occupied_name(tmp_path: Path) -> None:
+    """R4-1: transported saves enforce uniqueness at the disk boundary."""
+    registry = TeamRegistry(tmp_path)
+    alpha = registry.create_team(TeamEditFields(name="alpha", instructions="ALPHA"))
+    beta = registry.create_team(TeamEditFields(name="beta", instructions="BETA"))
+    transported = Team.model_validate_json(alpha.model_dump_json())
+    transported.name = "beta"
+
+    with pytest.raises(ValueError, match="Team with name beta already exists"):
+        registry.save_team(transported)
+
+    reloaded = TeamRegistry(tmp_path)
+    assert {(team.id, team.name) for team in reloaded.list_teams()} == {
+        (alpha.id, "alpha"),
+        (beta.id, "beta"),
+    }
+    assert reloaded.get_team(alpha.id).instructions == "ALPHA"
+    assert reloaded.get_team(beta.id).instructions == "BETA"
+
+
+def test_stale_deleted_id_save_cannot_recreate_an_occupied_name(tmp_path: Path) -> None:
+    """R4-1: delete/recreate wins over a stale transported old-id save."""
+    registry = TeamRegistry(tmp_path)
+    old = registry.create_team(TeamEditFields(name="ops", project="OLD"))
+    stale = Team.model_validate_json(old.model_dump_json())
+    registry.delete_team(old.id)
+    new = registry.create_team(TeamEditFields(name="ops", project="NEW"))
+
+    with pytest.raises(ValueError, match="Team with name ops already exists"):
+        registry.save_team(stale)
+
+    rows = TeamRegistry(tmp_path).list_teams()
+    assert [(team.id, team.name) for team in rows] == [(new.id, "ops")]
+    assert not (tmp_path / "teams" / old.id).exists()
+
+
+def test_concurrent_registries_serialize_same_name_create(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R4-1: synchronized stale snapshots still publish exactly one row.
+
+    The wrapped refresh is the pre-fix race seam: without persistence locking,
+    both threads adopt the empty snapshot before either checks or writes. With
+    the lock, the first bounded wait expires and publishes; the second refreshes
+    afterward and sees that row. Catching ``BrokenBarrierError`` is deliberate
+    because lock serialization means both threads cannot reach the seam together.
+    """
+    first = TeamRegistry(tmp_path)
+    second = TeamRegistry(tmp_path)
+    barrier = Barrier(2)
+
+    # Pre-fix create refreshed here and then checked this snapshot outside any
+    # lock. Synchronizing the two refreshes makes both callers hold the same
+    # empty view before either can continue to collision-check and save.
+    for registry in (first, second):
+        real_load = registry._load
+
+        def synchronized_load(*, _real_load=real_load):
+            _real_load()
+            try:
+                barrier.wait(timeout=0.25)
+            except BrokenBarrierError:
+                pass
+
+        monkeypatch.setattr(registry, "_load", synchronized_load)
+
+    outcomes: list[Team | Exception] = []
+
+    def create(registry: TeamRegistry) -> None:
+        try:
+            outcomes.append(registry.create_team(TeamEditFields(name="Same")))
+        except Exception as exc:  # noqa: BLE001 - the assertion checks the public outcome
+            outcomes.append(exc)
+
+    threads = [Thread(target=create, args=(registry,)) for registry in (first, second)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert sum(isinstance(outcome, Team) for outcome in outcomes) == 1
+    errors = [outcome for outcome in outcomes if isinstance(outcome, Exception)]
+    assert len(errors) == 1
+    assert isinstance(errors[0], ValueError)
+    assert "already exists" in str(errors[0])
+    rows = TeamRegistry(tmp_path).list_teams()
+    assert len(rows) == 1
+    assert rows[0].name.casefold() == "same"
+
+
+def test_same_id_update_persists_under_registry_lock(tmp_path: Path) -> None:
+    """R4-1: collision enforcement must still permit same-row updates."""
+    registry = TeamRegistry(tmp_path)
+    team = registry.create_team(TeamEditFields(name="ops", instructions="OLD"))
+
+    updated = registry.update_team(
+        team.id,
+        TeamEditFields(name="OPS", description="revised", instructions="NEW"),
+    )
+
+    reloaded = TeamRegistry(tmp_path).get_team(team.id)
+    assert (updated.id, reloaded.name, reloaded.description, reloaded.instructions) == (
+        team.id,
+        "OPS",
+        "revised",
+        "NEW",
+    )
 
 
 def test_roundtripped_metadata_only_team_preserves_briefs_through_json_save(

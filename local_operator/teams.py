@@ -45,14 +45,18 @@ learn the concept.
 
 from __future__ import annotations
 
+import errno
 import logging
+import os
 import re
 import shutil
+import tempfile
 import time
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, Literal
+from typing import Iterable, Iterator, Literal
 
 import yaml
 from pydantic import BaseModel, Field, field_validator
@@ -67,6 +71,12 @@ MAX_TEAM_INSTRUCTIONS_CHARS = 8_000
 #: A team name is also a slash-command argument, so it cannot contain spaces
 #: or slashes — ``/team feature-release ship it`` has to parse unambiguously.
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+#: Persistence is normally a few local-file writes. A bounded retry keeps a
+#: wedged peer from parking a synchronous tool call forever while still making
+#: ordinary concurrent registry mutations serialize rather than fail spuriously.
+_TEAM_LOCK_TIMEOUT_S = 10.0
+_TEAM_LOCK_RETRY_S = 0.01
 
 #: How deep an org (a team whose members are themselves teams) may nest before
 #: the resolver stops descending. Eight levels is far past any real human org
@@ -275,6 +285,62 @@ def validate_team_name(name: str) -> str:
     ).name
 
 
+def _try_lock_exclusive(fd: int) -> bool:
+    """Take one non-blocking exclusive lock attempt on ``fd``."""
+    if os.name == "nt":  # pragma: no cover - platform specific
+        import msvcrt
+
+        try:
+            if os.fstat(fd).st_size == 0:
+                os.write(fd, b"\0")
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            return True
+        except OSError as exc:
+            if exc.errno in (errno.EDEADLOCK, errno.EACCES, errno.EAGAIN):
+                return False
+            raise
+
+    import fcntl
+
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except OSError as exc:
+        if exc.errno in (errno.EAGAIN, errno.EACCES, errno.EWOULDBLOCK):
+            return False
+        raise
+
+
+def _unlock(fd: int) -> None:
+    """Release a lock acquired by :func:`_try_lock_exclusive`."""
+    if os.name == "nt":  # pragma: no cover - platform specific
+        import msvcrt
+
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        return
+
+    import fcntl
+
+    fcntl.flock(fd, fcntl.LOCK_UN)
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Publish one complete text file without exposing a truncated target."""
+    fd, raw_tmp = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    tmp = Path(raw_tmp)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
 class TeamRegistry:
     """On-disk registry of teams under ``<config_dir>/teams``."""
 
@@ -425,65 +491,95 @@ class TeamRegistry:
         team = self._find_cached_team_by_name(name)
         return self._load_briefs(team) if team is not None else None
 
+    @contextmanager
+    def _persistence_lock(self) -> Iterator[None]:
+        """Serialize one registry mutation across processes.
+
+        The sidecar lives at config level rather than inside ``teams/`` so it
+        can never be mistaken for a team row. Construction remains read-only:
+        the config directory and lock file appear only on the first mutation.
+
+        Registry methods are synchronous local-filesystem calls already, so a
+        short synchronous wait matches their API. As with the project's OAuth
+        and process-ledger locks, each kernel attempt is NON-BLOCKING and the
+        retry is bounded; a dead peer can never park the caller indefinitely.
+        """
+        self.config_dir.mkdir(parents=True, exist_ok=True)
+        fd = os.open(self.config_dir / ".teams.lock", os.O_CREAT | os.O_RDWR, 0o600)
+        acquired = False
+        deadline = time.monotonic() + _TEAM_LOCK_TIMEOUT_S
+        try:
+            while not acquired:
+                acquired = _try_lock_exclusive(fd)
+                if acquired:
+                    break
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("Timed out waiting for the teams registry lock")
+                time.sleep(_TEAM_LOCK_RETRY_S)
+            yield
+        finally:
+            if acquired:
+                _unlock(fd)
+            os.close(fd)
+
     def create_team(self, fields: TeamEditFields) -> Team:
         name = validate_team_name(fields.name or "")
-        # Refresh once, then keep duplicate detection and save on this snapshot.
-        # Hydrating a colliding row is unnecessary, while a second public
-        # lookup could replace the cache when refresh_interval is zero.
-        self._refresh_if_needed()
-        if self._find_cached_team_by_name(name) is not None:
-            raise ValueError(f"Team with name {name} already exists")
-        team = Team(
-            id=str(uuid.uuid4()),
-            name=name,
-            created_date=datetime.now(timezone.utc),
-            description=(fields.description or "").strip(),
-            manager=(fields.manager or "manager").strip() or "manager",
-            members=list(fields.members or []),
-            instructions=_bounded(fields.instructions) if fields.instructions is not None else "",
-            project=_bounded(fields.project) if fields.project is not None else "",
-        )
-        return self.save_team(team)
+        with self._persistence_lock():
+            # The refresh is unconditional and occurs inside the same lock as
+            # validation and publication. Interval-gated snapshots cannot prove
+            # uniqueness when another process has written since our last read.
+            self._load()
+            team = Team(
+                id=str(uuid.uuid4()),
+                name=name,
+                created_date=datetime.now(timezone.utc),
+                description=(fields.description or "").strip(),
+                manager=(fields.manager or "manager").strip() or "manager",
+                members=list(fields.members or []),
+                instructions=(
+                    _bounded(fields.instructions) if fields.instructions is not None else ""
+                ),
+                project=_bounded(fields.project) if fields.project is not None else "",
+            )
+            return self._save_team_locked(team, briefs_authoritative=True)
 
     def update_team(self, team_id: str, fields: TeamEditFields) -> Team:
-        # Refresh exactly once before choosing the canonical object. A later
-        # public getter may refresh again (notably at refresh_interval=0),
-        # replacing ``_teams`` and making explicit brief edits look like an
-        # unsafe transported object when save_team validates loadedness.
-        self._refresh_if_needed()
-        current = self._teams.get(team_id)
-        if current is None:
-            raise KeyError(f"Team with id {team_id} not found")
-        self._load_briefs(current)
+        with self._persistence_lock():
+            # Refresh exactly once under the writer lock, then mutate and save
+            # that canonical object without re-locking or replacing the cache.
+            self._load()
+            current = self._teams.get(team_id)
+            if current is None:
+                raise KeyError(f"Team with id {team_id} not found")
+            self._load_briefs(current)
 
-        updates = fields.model_dump(exclude_unset=True)
-        if "name" in updates and updates["name"] is not None:
-            new_name = validate_team_name(updates["name"])
-            occupant = self._find_cached_team_by_name(new_name)
-            if occupant is not None and occupant.id != team_id:
-                raise ValueError(f"Team with name {new_name} already exists")
-            current.name = new_name
-        if "description" in updates and updates["description"] is not None:
-            current.description = updates["description"].strip()
-        if "manager" in updates and updates["manager"] is not None:
-            manager = updates["manager"].strip()
-            if not manager:
-                raise ValueError("manager is required")
-            current.manager = manager
-        if "members" in fields.model_fields_set and fields.members is not None:
-            # ``model_dump`` recursively turns Pydantic children into dicts.
-            # Keep the validated TeamMember objects: roster rendering and
-            # orchestration call ``member.role`` / ``member.count`` immediately
-            # after an update, before a reload can rehydrate them from YAML.
-            current.members = list(fields.members)
-        if "instructions" in updates and updates["instructions"] is not None:
-            # An explicit "" is a DELIBERATE clear (R1-1's other edge): the
-            # sentinel only ever means "never read", so normalizing to ""
-            # here keeps update_team's save writing exactly what was asked.
-            current.instructions = _bounded(updates["instructions"])
-        if "project" in updates and updates["project"] is not None:
-            current.project = _bounded(updates["project"])
-        return self.save_team(current)
+            updates = fields.model_dump(exclude_unset=True)
+            if "name" in updates and updates["name"] is not None:
+                new_name = validate_team_name(updates["name"])
+                occupant = self._find_cached_team_by_name(new_name)
+                if occupant is not None and occupant.id != team_id:
+                    raise ValueError(f"Team with name {new_name} already exists")
+                current.name = new_name
+            if "description" in updates and updates["description"] is not None:
+                current.description = updates["description"].strip()
+            if "manager" in updates and updates["manager"] is not None:
+                manager = updates["manager"].strip()
+                if not manager:
+                    raise ValueError("manager is required")
+                current.manager = manager
+            if "members" in fields.model_fields_set and fields.members is not None:
+                # ``model_dump`` recursively turns Pydantic children into dicts.
+                # Keep the validated TeamMember objects: roster rendering and
+                # orchestration call ``member.role`` / ``member.count`` immediately
+                # after an update, before a reload can rehydrate them from YAML.
+                current.members = list(fields.members)
+            if "instructions" in updates and updates["instructions"] is not None:
+                # An explicit "" is a DELIBERATE clear. This path hydrated first,
+                # so the empty string is authoritative rather than transported.
+                current.instructions = _bounded(updates["instructions"])
+            if "project" in updates and updates["project"] is not None:
+                current.project = _bounded(updates["project"])
+            return self._save_team_locked(current, briefs_authoritative=True)
 
     def save_team(self, team: Team) -> Team:
         """Write ``team`` to disk and adopt it as this registry's current row.
@@ -503,50 +599,79 @@ class TeamRegistry:
         string: that path hydrates first, so the clear lands on a loaded
         object and persists.
         """
-        # Hydrate BEFORE the directory is created and BEFORE writing (R2-1,
-        # and R1-1 before it). An unloaded team reaches here carrying ""
-        # briefs; writing them as text would truncate the brief files to
-        # empty, and caching the object unloaded would hand the NEXT get_team
-        # a blank-briefed team this registry wrongly considers loaded.
-        # Ordering matters on the CREATE path specifically: mkdir first would
-        # put empty brief files on disk for hydration to then read back,
-        # clobbering the briefs the caller just supplied. This one call fixes
-        # all of it, and records the id as loaded so the caller's own save
-        # result reads back the real text.
-        self._hydrate_briefs_for_save(team)
+        # Loadedness authorizes only the canonical object this registry actually
+        # hydrated. Preserve that fact across the mandatory disk refresh; a
+        # transported copy with the same id remains untrusted by construction.
+        briefs_authoritative = team.id in self._briefs_loaded and team is self._teams.get(team.id)
+        with self._persistence_lock():
+            self._load()
+            return self._save_team_locked(team, briefs_authoritative=briefs_authoritative)
+
+    def _save_team_locked(self, team: Team, *, briefs_authoritative: bool) -> Team:
+        """Validate and publish ``team`` while ``_persistence_lock`` is held."""
+        name_key = team.name.casefold()
+        occupant = next(
+            (
+                stored
+                for stored in self._teams.values()
+                if stored.id != team.id and stored.name.casefold() == name_key
+            ),
+            None,
+        )
+        if occupant is not None:
+            raise ValueError(f"Team with name {team.name} already exists")
+
+        # Hydrate BEFORE creating the final directory. An untrusted transported
+        # row carries empty brief strings that mean "not loaded", while create
+        # and update explicitly mark their already-known values authoritative.
+        if briefs_authoritative:
+            self._briefs_loaded.add(team.id)
+        else:
+            self._hydrate_briefs_for_save(team)
+
         team_dir = self.teams_dir / team.id
-        team_dir.mkdir(parents=True, exist_ok=True)
         payload = team.model_dump(mode="json", exclude={"instructions", "project"})
+        metadata = yaml.safe_dump(payload, default_flow_style=False, sort_keys=False)
         try:
-            with (team_dir / "team.yml").open("w", encoding="utf-8") as handle:
-                yaml.safe_dump(payload, handle, default_flow_style=False, sort_keys=False)
-            (team_dir / "instructions.md").write_text(team.instructions, encoding="utf-8")
-            (team_dir / "project.md").write_text(team.project, encoding="utf-8")
+            self.teams_dir.mkdir(parents=True, exist_ok=True)
+            if team_dir.exists():
+                # Each replacement is atomic for unlocked readers; the writer
+                # lock keeps peer registries from interleaving the three-file set.
+                _atomic_write_text(team_dir / "team.yml", metadata)
+                _atomic_write_text(team_dir / "instructions.md", team.instructions)
+                _atomic_write_text(team_dir / "project.md", team.project)
+            else:
+                # Publish a new id as one directory rename so a failed create
+                # cannot leave a half-written team row visible on disk.
+                staging = Path(tempfile.mkdtemp(prefix=f".{team.id}.", dir=self.teams_dir))
+                try:
+                    (staging / "team.yml").write_text(metadata, encoding="utf-8")
+                    (staging / "instructions.md").write_text(team.instructions, encoding="utf-8")
+                    (staging / "project.md").write_text(team.project, encoding="utf-8")
+                    os.replace(staging, team_dir)
+                except BaseException:
+                    shutil.rmtree(staging, ignore_errors=True)
+                    raise
         except Exception as exc:
             raise Exception(f"Failed to save team metadata: {exc}") from exc
         self._teams[team.id] = team
-        # ``_hydrate_briefs_for_save`` already recorded the load; restated for
-        # the loaded-object path, where the caller supplied the briefs that
-        # were just persisted and rereading the same files on the next get
-        # would add I/O without recovering any state.
         self._briefs_loaded.add(team.id)
         return team
 
     def delete_team(self, team_id: str) -> None:
-        if team_id not in self._teams:
-            # Refresh once in case another process wrote it.
+        with self._persistence_lock():
+            # Delete participates in the same ordering as create/save so a
+            # delete-recreate-stale-save sequence has one unambiguous winner.
             self._load()
-        if team_id not in self._teams:
-            raise KeyError(f"Team with id {team_id} not found")
-        # Remove the on-disk copy FIRST: if the rmtree fails (permissions, an
-        # open handle) the cache must still agree with disk, so the row stays
-        # and the error propagates. Popping before the rmtree left a deleted
-        # row in the cache only when the filesystem said no.
-        team_dir = self.teams_dir / team_id
-        if team_dir.exists():
-            shutil.rmtree(team_dir)
-        self._teams.pop(team_id)
-        self._briefs_loaded.discard(team_id)
+            if team_id not in self._teams:
+                raise KeyError(f"Team with id {team_id} not found")
+            # Remove the on-disk copy FIRST: if rmtree fails, cache still agrees
+            # with disk and the row remains visible after the exception.
+            team_dir = self.teams_dir / team_id
+            if team_dir.exists():
+                shutil.rmtree(team_dir)
+            self._teams.pop(team_id)
+            self._briefs_loaded.discard(team_id)
 
 
 def parse_members(raw: Iterable[str] | None) -> list[TeamMember]:
