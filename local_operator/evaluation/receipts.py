@@ -46,6 +46,7 @@ MAX_REASON_LENGTH = 2_000
 MAX_CANARIES = 256
 ZERO_DIGEST = "0" * 64
 _BUDGET_COMMITMENT_FACTORY = object()
+_PREFLIGHT_SEAL_FACTORY = object()
 
 StrictIdentifier = Annotated[
     str,
@@ -205,9 +206,19 @@ class ModelCapabilityRequirement(_RequirementBase):
         return (self.kind, self.role)
 
 
+TimezoneName = Annotated[
+    str,
+    Field(
+        min_length=1,
+        max_length=255,
+        pattern=r"^[A-Za-z0-9_+-]+(?:/[A-Za-z0-9_+-]+)*$",
+    ),
+]
+
+
 class ClockRequirement(_RequirementBase):
     kind: Literal["clock"] = "clock"
-    timezone: StrictIdentifier
+    timezone: TimezoneName
     date: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
     fixed_clock: str | None = Field(
         default=None,
@@ -461,6 +472,11 @@ class RedactionSet:
 
 
 class SealedPreflight(ProtocolModel):
+    """Factory-only attestation over the exact validated preflight receipts."""
+
+    _authority: object = PrivateAttr()
+    _receipts: tuple[PreflightReceipt, ...] = PrivateAttr()
+
     plan_id: Digest
     required_requirement_ids: tuple[StrictIdentifier, ...]
     passed_requirement_ids: tuple[StrictIdentifier, ...]
@@ -483,7 +499,10 @@ class SealedPreflight(ProtocolModel):
         return tuple(value) if isinstance(value, list) else value
 
     @model_validator(mode="after")
-    def _validate_seal(self) -> "SealedPreflight":
+    def _validate_seal(self, info: ValidationInfo) -> "SealedPreflight":
+        context = info.context if isinstance(info.context, dict) else {}
+        if context.get("preflight_seal_factory") is not _PREFLIGHT_SEAL_FACTORY:
+            raise ValueError("preflight seals can only be minted from validated receipts")
         groups = (
             self.passed_requirement_ids,
             self.failed_requirement_ids,
@@ -512,7 +531,45 @@ class SealedPreflight(ProtocolModel):
         )
         if self.seal_id != expected:
             raise ValueError("preflight seal identity does not match its receipts")
+        receipts = context.get("preflight_receipts")
+        if not isinstance(receipts, tuple) or not all(
+            isinstance(receipt, PreflightReceipt) for receipt in receipts
+        ):
+            raise ValueError("preflight seal factory requires exact receipt evidence")
+        object.__setattr__(self, "_authority", _PREFLIGHT_SEAL_FACTORY)
+        object.__setattr__(self, "_receipts", receipts)
         return self
+
+    def __copy__(self) -> "SealedPreflight":
+        raise TypeError("preflight seal authority cannot be copied")
+
+    def __deepcopy__(self, memo: dict[int, Any] | None = None) -> "SealedPreflight":
+        raise TypeError("preflight seal authority cannot be copied")
+
+    def __reduce__(self) -> Any:
+        raise TypeError("preflight seal authority cannot be pickled")
+
+    def assert_authority(self) -> None:
+        if getattr(self, "_authority", None) is not _PREFLIGHT_SEAL_FACTORY:
+            raise ValueError("preflight seal lacks factory authority")
+        receipts = getattr(self, "_receipts", ())
+        actual_digests: list[str] = []
+        for receipt in receipts:
+            expected = _identity(
+                "preflight-receipt-v1",
+                receipt.model_dump(mode="json", exclude={"receipt_id"}),
+            )
+            if receipt.receipt_id != expected:
+                raise ValueError("preflight receipt authority was mutated")
+            actual_digests.append(receipt.receipt_id)
+        if tuple(sorted(actual_digests)) != self.receipt_digests:
+            raise ValueError("preflight seal receipt evidence does not match")
+        expected_seal = _identity(
+            "sealed-preflight-v1",
+            self.model_dump(mode="json", exclude={"seal_id"}),
+        )
+        if self.seal_id != expected_seal:
+            raise ValueError("preflight seal authority was mutated")
 
     @property
     def successful(self) -> bool:
@@ -570,9 +627,12 @@ def seal_preflight(
         "redaction_attested": True,
     }
     redactions.assert_clear(payload)
-    return SealedPreflight(
-        **payload,
-        seal_id=_identity("sealed-preflight-v1", payload),
+    return SealedPreflight.model_validate(
+        {**payload, "seal_id": _identity("sealed-preflight-v1", payload)},
+        context={
+            "preflight_seal_factory": _PREFLIGHT_SEAL_FACTORY,
+            "preflight_receipts": snapshot,
+        },
     )
 
 
@@ -782,6 +842,15 @@ class BudgetCommitment(ProtocolModel):
             raise ValueError("budget commitment identity does not match reservations")
         object.__setattr__(self, "_authority", _BUDGET_COMMITMENT_FACTORY)
         return self
+
+    def __copy__(self) -> "BudgetCommitment":
+        raise TypeError("budget commitment authority cannot be copied")
+
+    def __deepcopy__(self, memo: dict[int, Any] | None = None) -> "BudgetCommitment":
+        raise TypeError("budget commitment authority cannot be copied")
+
+    def __reduce__(self) -> Any:
+        raise TypeError("budget commitment authority cannot be pickled")
 
     def assert_authority(self, authorization: BudgetAuthorization) -> None:
         if getattr(self, "_authority", None) is not _BUDGET_COMMITMENT_FACTORY:

@@ -234,7 +234,8 @@ def test_cleanup_requires_exactly_one_receipt_and_attempted_is_not_clean() -> No
     attempted = _cleanup(plan, session="attempted")
     assert attempted.rescue_required
     assert attempted.incomplete_action_ids == ("session",)
-    assert CleanupResult.from_canonical_json(attempted.to_canonical_json()) == attempted
+    with pytest.raises(ValidationError, match="validated receipts"):
+        CleanupResult.from_canonical_json(attempted.to_canonical_json())
     clean = _cleanup(plan)
     assert not clean.rescue_required
 
@@ -419,7 +420,7 @@ def test_illegal_transition_table(state: str, operation: str) -> None:
         with pytest.raises(ValueError, match="illegal"):
             episode.preflight(_seal(plan))
     else:
-        with pytest.raises(ValueError, match="illegal"):
+        with pytest.raises(ValueError, match="illegal|lacks transition authority"):
             episode.begin_finalization()
 
 
@@ -556,7 +557,10 @@ def test_lifecycle_authority_rejects_every_public_construction_and_mutation_path
         forged.begin_finalization()
     with pytest.raises(TypeError, match="cannot be updated"):
         authorized.model_copy(update={"state": "completed"})
-    assert copy.deepcopy(authorized) is authorized
+    with pytest.raises(TypeError, match="cannot be copied"):
+        copy.copy(authorized)
+    with pytest.raises(TypeError, match="cannot be copied"):
+        copy.deepcopy(authorized)
     with pytest.raises(TypeError, match="cannot be pickled"):
         pickle.dumps(authorized)
     assert authorized.previous_state_id is not None
@@ -609,3 +613,110 @@ def test_lifecycle_rejects_reconciliation_from_mutated_authorization() -> None:
             }
         )
     assert plan.plan_id == finalizing.plan_id
+
+
+def test_forged_preflight_seal_cannot_preflight_or_authorize() -> None:
+    plan = _plan()
+    seal = _seal(plan)
+    budget = _budget()
+    cleanup = _cleanup_plan()
+    planned = EpisodeLifecycle.planned(
+        episode_id="episode-1",
+        plan_id=plan.plan_id,
+        budget_id=budget.budget_id,
+        cleanup_plan_id=cleanup.cleanup_plan_id,
+    )
+    forged = SealedPreflight.model_construct(**seal.model_dump())
+    with pytest.raises(ValueError, match="lacks factory authority"):
+        planned.preflight(forged)
+    preflighted = planned.preflight(seal)
+    with pytest.raises(ValueError, match="lacks factory authority"):
+        preflighted.authorize(forged, budget)
+
+
+def test_forged_cleanup_result_cannot_complete_episode() -> None:
+    plan, budget, cleanup, authorized, permit = _authorized()
+    reservation = _reservation(budget)
+    cleaning = (
+        authorized.start(permit, budget, _commitment(budget, reservation))
+        .begin_finalization()
+        .finish_finalization(_reconciliation(budget, reservation), _score(plan))
+    )
+    result = _cleanup(cleanup)
+    forged = CleanupResult.model_construct(**result.model_dump())
+    with pytest.raises(ValueError, match="lacks factory authority"):
+        cleaning.finish_cleanup(forged)
+
+
+def test_authorized_lifecycle_is_single_use_across_sibling_commitments() -> None:
+    import copy
+
+    _plan_value, budget, _cleanup_value, authorized, permit = _authorized()
+    first = reserve_budget(
+        budget,
+        "sibling-a",
+        (ResourceAmount(resource="guest_actions", value=10),),
+    )
+    second = reserve_budget(
+        budget,
+        "sibling-b",
+        (ResourceAmount(resource="guest_actions", value=10),),
+    )
+    copied = None
+    with pytest.raises(TypeError, match="cannot be copied"):
+        copied = copy.copy(authorized)
+    assert copied is None
+    first_running = authorized.start(permit, budget, commit_budget(budget, (first,)))
+    assert first_running.state == "running"
+    with pytest.raises(ValueError, match="lacks transition authority"):
+        authorized.start(permit, budget, commit_budget(budget, (second,)))
+
+
+def test_forged_side_effect_permit_cannot_start() -> None:
+    _plan_value, budget, _cleanup_value, authorized, permit = _authorized()
+    reservation = _reservation(budget)
+    forged = SideEffectPermit.model_construct(**permit.model_dump())
+    with pytest.raises(ValueError, match="lacks factory authority"):
+        authorized.start(forged, budget, _commitment(budget, reservation))
+
+
+def test_finalizing_crash_and_cancel_still_require_cleanup() -> None:
+    _plan_value, budget, cleanup, authorized, permit = _authorized()
+    reservation = _reservation(budget)
+    finalizing = authorized.start(
+        permit, budget, _commitment(budget, reservation)
+    ).begin_finalization()
+    crashed = finalizing.crash("judge process exited")
+    assert crashed.state == "cleaning"
+    assert crashed.finish_cleanup(_cleanup(cleanup)).state == "failed"
+
+    # Each state node is single use only at side-effect start; independent test
+    # setup provides a second finalizing authority for cancellation.
+    _plan_value, budget, cleanup, authorized, permit = _authorized()
+    reservation = _reservation(budget)
+    finalizing = authorized.start(
+        permit, budget, _commitment(budget, reservation)
+    ).begin_finalization()
+    cancelled = finalizing.cancel("operator cancelled during judging")
+    assert cancelled.state == "cleaning"
+    assert cancelled.finish_cleanup(_cleanup(cleanup)).state == "cancelled"
+
+
+def test_cleanup_cannot_succeed_after_timeout() -> None:
+    plan = _cleanup_plan()
+    late = record_cleanup(
+        plan,
+        "session",
+        status="succeeded",
+        evidence_code="late-confirmation",
+        duration_ms=plan.actions[0].timeout_ms + 1,
+    )
+    other = record_cleanup(
+        plan,
+        "volume",
+        status="not_needed",
+        evidence_code="not-allocated",
+        duration_ms=0,
+    )
+    with pytest.raises(ValueError, match="after its action timeout"):
+        aggregate_cleanup(plan, (late, other))

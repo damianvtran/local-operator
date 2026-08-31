@@ -38,6 +38,7 @@ MAX_CLEANUP_ATTEMPTS = 32
 MAX_CLEANUP_TIMEOUT_MS = 3_600_000
 MAX_FAILURE_LENGTH = 2_000
 _PERMIT_FACTORY = object()
+_CLEANUP_RESULT_FACTORY = object()
 _LIFECYCLE_FACTORY = object()
 
 
@@ -176,6 +177,11 @@ def record_cleanup(
 
 
 class CleanupResult(ProtocolModel):
+    """Factory-only aggregate over exact cleanup receipt evidence."""
+
+    _authority: object = PrivateAttr()
+    _receipts: tuple[CleanupReceipt, ...] = PrivateAttr()
+
     cleanup_plan_id: Digest
     succeeded_action_ids: tuple[StrictIdentifier, ...]
     not_needed_action_ids: tuple[StrictIdentifier, ...]
@@ -196,7 +202,10 @@ class CleanupResult(ProtocolModel):
         return tuple(value) if isinstance(value, list) else value
 
     @model_validator(mode="after")
-    def _validate_result(self) -> Self:
+    def _validate_result(self, info: ValidationInfo) -> Self:
+        context = info.context if isinstance(info.context, dict) else {}
+        if context.get("cleanup_result_factory") is not _CLEANUP_RESULT_FACTORY:
+            raise ValueError("cleanup results can only be minted from validated receipts")
         groups = (
             self.succeeded_action_ids,
             self.not_needed_action_ids,
@@ -217,7 +226,44 @@ class CleanupResult(ProtocolModel):
         )
         if self.cleanup_result_id != expected:
             raise ValueError("cleanup result identity does not match its receipts")
+        receipts = context.get("cleanup_receipts")
+        if not isinstance(receipts, tuple) or not all(
+            isinstance(receipt, CleanupReceipt) for receipt in receipts
+        ):
+            raise ValueError("cleanup result factory requires exact receipt evidence")
+        object.__setattr__(self, "_authority", _CLEANUP_RESULT_FACTORY)
+        object.__setattr__(self, "_receipts", receipts)
         return self
+
+    def __copy__(self) -> Self:
+        raise TypeError("cleanup result authority cannot be copied")
+
+    def __deepcopy__(self, memo: dict[int, Any] | None = None) -> Self:
+        raise TypeError("cleanup result authority cannot be copied")
+
+    def __reduce__(self) -> Any:
+        raise TypeError("cleanup result authority cannot be pickled")
+
+    def assert_authority(self) -> None:
+        if getattr(self, "_authority", None) is not _CLEANUP_RESULT_FACTORY:
+            raise ValueError("cleanup result lacks factory authority")
+        actual: list[str] = []
+        for receipt in getattr(self, "_receipts", ()):
+            expected = _identity(
+                "cleanup-receipt-v1",
+                receipt.model_dump(mode="json", exclude={"receipt_id"}),
+            )
+            if receipt.receipt_id != expected:
+                raise ValueError("cleanup receipt authority was mutated")
+            actual.append(receipt.receipt_id)
+        if tuple(sorted(actual)) != self.receipt_digests:
+            raise ValueError("cleanup result receipt evidence does not match")
+        expected_result = _identity(
+            "cleanup-result-v1",
+            self.model_dump(mode="json", exclude={"cleanup_result_id"}),
+        )
+        if self.cleanup_result_id != expected_result:
+            raise ValueError("cleanup result authority was mutated")
 
 
 def aggregate_cleanup(
@@ -237,10 +283,13 @@ def aggregate_cleanup(
         raise ValueError("cleanup requires exactly one receipt for every action")
     actions = {action.action_id: action for action in plan.actions}
     for action_id, receipt in by_id.items():
+        action = actions[action_id]
         if receipt.cleanup_plan_id != plan.cleanup_plan_id:
             raise ValueError("cleanup receipt belongs to another cleanup plan")
-        if receipt.action_digest != actions[action_id].action_digest:
+        if receipt.action_digest != action.action_digest:
             raise ValueError("cleanup receipt belongs to another action declaration")
+        if receipt.status == "succeeded" and receipt.duration_ms > action.timeout_ms:
+            raise ValueError("cleanup cannot succeed after its action timeout")
     succeeded = tuple(sorted(key for key, item in by_id.items() if item.status == "succeeded"))
     not_needed = tuple(sorted(key for key, item in by_id.items() if item.status == "not_needed"))
     incomplete = tuple(
@@ -254,14 +303,19 @@ def aggregate_cleanup(
         "receipt_digests": tuple(sorted(item.receipt_id for item in snapshot)),
         "rescue_required": bool(incomplete),
     }
-    return CleanupResult(
-        **payload,
-        cleanup_result_id=_identity("cleanup-result-v1", payload),
+    return CleanupResult.model_validate(
+        {**payload, "cleanup_result_id": _identity("cleanup-result-v1", payload)},
+        context={
+            "cleanup_result_factory": _CLEANUP_RESULT_FACTORY,
+            "cleanup_receipts": snapshot,
+        },
     )
 
 
 class SideEffectPermit(ProtocolModel):
-    """Unforgeable-by-validation authority bound to one sealed episode budget."""
+    """Factory-only authority bound to one sealed episode budget."""
+
+    _authority: object = PrivateAttr()
 
     episode_id: StrictIdentifier
     plan_id: Digest
@@ -280,7 +334,27 @@ class SideEffectPermit(ProtocolModel):
         )
         if self.permit_id != expected:
             raise ValueError("side-effect permit identity does not match its authorities")
+        object.__setattr__(self, "_authority", _PERMIT_FACTORY)
         return self
+
+    def __copy__(self) -> Self:
+        raise TypeError("side-effect permit authority cannot be copied")
+
+    def __deepcopy__(self, memo: dict[int, Any] | None = None) -> Self:
+        raise TypeError("side-effect permit authority cannot be copied")
+
+    def __reduce__(self) -> Any:
+        raise TypeError("side-effect permit authority cannot be pickled")
+
+    def assert_authority(self) -> None:
+        if getattr(self, "_authority", None) is not _PERMIT_FACTORY:
+            raise ValueError("side-effect permit lacks factory authority")
+        expected = _identity(
+            "side-effect-permit-v1",
+            self.model_dump(mode="json", exclude={"permit_id"}),
+        )
+        if self.permit_id != expected:
+            raise ValueError("side-effect permit authority was mutated")
 
 
 def mint_side_effect_permit(
@@ -292,6 +366,7 @@ def mint_side_effect_permit(
 ) -> SideEffectPermit:
     """Mint authority only after successful preflight and explicit budget authorization."""
 
+    preflight.assert_authority()
     if not preflight.successful:
         raise ValueError("failed preflight cannot authorize side effects")
     if preflight.plan_id != plan_id:
@@ -483,10 +558,11 @@ class EpisodeLifecycle(ProtocolModel):
     def __reduce__(self) -> Any:
         raise TypeError("episode lifecycle authority cannot be pickled")
 
+    def __copy__(self) -> Self:
+        raise TypeError("episode lifecycle authority cannot be copied")
+
     def __deepcopy__(self, memo: dict[int, Any] | None = None) -> Self:
-        if memo is not None:
-            memo[id(self)] = self
-        return self
+        raise TypeError("episode lifecycle authority cannot be copied")
 
     def model_copy(self, *, update: Any = None, deep: bool = False) -> Self:
         if update:
@@ -513,6 +589,7 @@ class EpisodeLifecycle(ProtocolModel):
         )
 
     def preflight(self, seal: SealedPreflight) -> Self:
+        seal.assert_authority()
         if not seal.successful:
             raise ValueError("failed preflight cannot enter preflighted state")
         if seal.plan_id != self.plan_id:
@@ -524,6 +601,7 @@ class EpisodeLifecycle(ProtocolModel):
     def authorize(
         self, seal: SealedPreflight, budget: BudgetAuthorization
     ) -> tuple[Self, SideEffectPermit]:
+        seal.assert_authority()
         if self.state != "preflighted" or self.preflight_seal_id != seal.seal_id:
             raise ValueError("illegal or mismatched episode authorization")
         if budget.budget_id != self.budget_id:
@@ -553,6 +631,7 @@ class EpisodeLifecycle(ProtocolModel):
         self._assert_authority()
         if self.state != "authorized":
             raise ValueError(f"illegal episode transition from {self.state}")
+        permit.assert_authority()
         commitment.assert_authority(authorization)
         if commitment.budget_id != self.budget_id:
             raise ValueError("budget commitment does not match this episode")
@@ -563,12 +642,16 @@ class EpisodeLifecycle(ProtocolModel):
             or permit.permit_id != self.permit_id
         ):
             raise ValueError("side-effect permit does not match this episode")
-        return self._transition(
+        running = self._transition(
             "authorized",
             "start-episode",
             state="running",
             reservation_ids=commitment.reservation_ids,
         )
+        # A state node is single-use authority. Consuming it prevents two
+        # independently valid commitments from creating sibling executions.
+        object.__setattr__(self, "_authority", None)
+        return running
 
     def begin_finalization(self) -> Self:
         return self._transition("running", "begin-finalization", state="finalizing")
@@ -609,8 +692,10 @@ class EpisodeLifecycle(ProtocolModel):
         )
 
     def crash(self, reason: str) -> Self:
+        if self.state not in ("running", "finalizing"):
+            raise ValueError(f"illegal episode transition from {self.state}")
         return self._transition(
-            "running",
+            self.state,
             "record-crash",
             state="cleaning",
             terminal_intent="fail",
@@ -619,8 +704,10 @@ class EpisodeLifecycle(ProtocolModel):
         )
 
     def cancel(self, reason: str) -> Self:
+        if self.state not in ("running", "finalizing"):
+            raise ValueError(f"illegal episode transition from {self.state}")
         return self._transition(
-            "running",
+            self.state,
             "record-cancellation",
             state="cleaning",
             terminal_intent="cancel",
@@ -644,6 +731,7 @@ class EpisodeLifecycle(ProtocolModel):
         )
 
     def finish_cleanup(self, result: CleanupResult) -> Self:
+        result.assert_authority()
         if result.cleanup_plan_id != self.cleanup_plan_id:
             raise ValueError("cleanup result belongs to another plan")
         updates: dict[str, Any] = {

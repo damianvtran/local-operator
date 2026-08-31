@@ -218,7 +218,8 @@ def test_preflight_requires_exactly_one_receipt_and_blocks_required_failure() ->
     redactions = RedactionSet.from_resolved_values(("definitely-not-present",))
     sealed = seal_preflight(plan, receipts, redactions)
     assert sealed.successful
-    assert SealedPreflight.from_canonical_json(sealed.to_canonical_json()) == sealed
+    with pytest.raises(ValidationError, match="validated receipts"):
+        SealedPreflight.from_canonical_json(sealed.to_canonical_json())
     with pytest.raises(ValueError, match="exactly one"):
         seal_preflight(plan, receipts[:-1], redactions)
     with pytest.raises(ValueError, match="duplicate"):
@@ -435,6 +436,8 @@ def test_reconciliation_rejects_allowance_overrun_and_commitment_mutation() -> N
 
 def test_clock_values_are_real_and_canonical() -> None:
     base = _requirements()[4].model_dump()
+    for zone in ("UTC", "America/New_York"):
+        assert ClockRequirement.model_validate({**base, "timezone": zone}).timezone == zone
     for field, value in (
         ("date", "2026-02-30"),
         ("fixed_clock", "2026-13-30T12:00:00Z"),
@@ -443,8 +446,10 @@ def test_clock_values_are_real_and_canonical() -> None:
         payload = {**base, "date": None, "fixed_clock": "2026-08-30T12:00:00Z", field: value}
         if field == "date":
             payload["fixed_clock"] = None
-        with pytest.raises(ValidationError):
+        with pytest.raises(ValidationError) as caught:
             ClockRequirement.model_validate(payload)
+        if field == "timezone":
+            assert "IANA zone" in str(caught.value)
 
 
 @pytest.mark.parametrize("encoded", ["base64", "urlsafe", "hex", "percent"])
