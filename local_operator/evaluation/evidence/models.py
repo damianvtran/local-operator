@@ -48,6 +48,27 @@ MediaType = Literal[
     "text/plain",
     "application/octet-stream",
 ]
+
+
+class EvidenceArtifactRef(ArtifactRef):
+    """Artifact reference restricted to evidence media the verifier understands."""
+
+    @field_validator("media_type")
+    @classmethod
+    def _closed_media(cls, value: str) -> str:
+        if value not in {
+            "image/png",
+            "image/jpeg",
+            "image/gif",
+            "image/webp",
+            "application/json",
+            "text/plain",
+            "application/octet-stream",
+        }:
+            raise ValueError("unsupported evidence artifact media type")
+        return value
+
+
 EventKind = Literal[
     "preflight",
     "lifecycle_transition",
@@ -97,7 +118,6 @@ ComparabilityLabel = Literal[
     "adapter_mismatch",
     "benchmark_mismatch",
 ]
-FinalizationIntent = Literal["score", "unscored"]
 
 
 def canonical_bytes(value: ProtocolModel | dict[str, Any] | list[Any]) -> bytes:
@@ -223,8 +243,10 @@ class LifecycleTransitionPayload(ProtocolModel):
     preflight_seal_id: Digest | None = None
     commitment_id: Digest | None = None
     reconciliation_id: Digest | None = None
+    reconciliation_reportable: bool | None = None
     score_id: Digest | None = None
     cleanup_result_id: Digest | None = None
+    rescue_required: bool | None = None
 
 
 class ModelRequestPayload(ProtocolModel):
@@ -234,7 +256,7 @@ class ModelRequestPayload(ProtocolModel):
     input_tokens: SafeCount
     message_count: SafeCount
     tool_count: SafeCount
-    redacted_prompt: ArtifactRef | None = None
+    redacted_prompt: EvidenceArtifactRef | None = None
 
 
 class ModelResponsePayload(ProtocolModel):
@@ -248,7 +270,7 @@ class ModelResponsePayload(ProtocolModel):
     cache_read_tokens: SafeCount = 0
     cache_write_tokens: SafeCount = 0
     tool_call_count: SafeCount
-    redacted_response: ArtifactRef | None = None
+    redacted_response: EvidenceArtifactRef | None = None
 
 
 class UsageCostPayload(ProtocolModel):
@@ -264,8 +286,8 @@ class UsageCostPayload(ProtocolModel):
 class ObservationPayload(ProtocolModel):
     observation_id: StrictIdentifier
     sequence: SafeCount
-    artifacts: tuple[ArtifactRef, ...] = ()
-    text_artifact: ArtifactRef | None = None
+    artifacts: tuple[EvidenceArtifactRef, ...] = ()
+    text_artifact: EvidenceArtifactRef | None = None
 
     @field_validator("artifacts", mode="before")
     @classmethod
@@ -277,7 +299,7 @@ class ActionBatchPayload(ProtocolModel):
     action_batch_id: StrictIdentifier
     observation_id: StrictIdentifier
     action_count: SafeCount
-    action_artifact: ArtifactRef
+    action_artifact: EvidenceArtifactRef
 
 
 class EnvironmentStepPayload(ProtocolModel):
@@ -291,9 +313,33 @@ class EnvironmentStepPayload(ProtocolModel):
 
 class UserSimulatorExchangePayload(ProtocolModel):
     exchange_id: StrictIdentifier
-    request_artifact: ArtifactRef
-    response_artifact: ArtifactRef
+    request_artifact: EvidenceArtifactRef
+    response_artifact: EvidenceArtifactRef
     receipt_id: Digest
+
+
+class FinalizationIntent(ProtocolModel):
+    kind: Literal["score", "unscored"]
+    scorer_id: StrictIdentifier | None = None
+    scorer_version: StrictIdentifier | None = None
+    intent_digest: Digest = ZERO_DIGEST
+
+    @model_validator(mode="after")
+    def _validate_and_identify(self) -> Self:
+        if self.kind == "score" and (self.scorer_id is None or self.scorer_version is None):
+            raise ValueError("scoring intent requires a pinned scorer identity")
+        if self.kind == "unscored" and (
+            self.scorer_id is not None or self.scorer_version is not None
+        ):
+            raise ValueError("unscored intent cannot name a scorer")
+        expected = canonical_digest(
+            "finalization-intent-v1",
+            self.model_dump(mode="json", exclude={"intent_digest"}),
+        )
+        if self.intent_digest not in (ZERO_DIGEST, expected):
+            raise ValueError("finalization intent identity does not match declaration")
+        object.__setattr__(self, "intent_digest", expected)
+        return self
 
 
 class ScoringStartPayload(ProtocolModel):
@@ -311,7 +357,7 @@ class ScoreArtifact(ProtocolModel):
     binary: Literal[0, 1] | None = None
     partial_ppm: int | None = Field(default=None, ge=0, le=1_000_000)
     reason: UnscoredReason | None = None
-    details: ArtifactRef | None = None
+    details: EvidenceArtifactRef | None = None
     score_id: Digest = ZERO_DIGEST
 
     @model_validator(mode="after")
@@ -351,7 +397,7 @@ class ErrorPayload(ProtocolModel):
     error_id: StrictIdentifier
     category: Literal["adapter", "environment", "provider", "infrastructure", "scorer", "internal"]
     diagnostic_code: StrictIdentifier
-    detail_artifact: ArtifactRef | None = None
+    detail_artifact: EvidenceArtifactRef | None = None
     retryable: bool
 
 
@@ -432,7 +478,7 @@ class EventRecord(ProtocolModel):
 
 
 class ArtifactInventoryEntry(ProtocolModel):
-    ref: ArtifactRef
+    ref: EvidenceArtifactRef
 
 
 class EvidenceCounters(ProtocolModel):
@@ -455,12 +501,12 @@ class OutcomeSeal(ProtocolModel):
     manifest_digest: Digest
     event_count: SafeCount
     final_event_sha256: Digest
-    artifacts: tuple[ArtifactRef, ...]
+    artifacts: tuple[EvidenceArtifactRef, ...]
     finalization_id: StrictIdentifier
     preflight_seal_id: Digest
     commitment_id: Digest
     reconciliation_id: Digest
-    score_id: Digest | None
+    score_id: Digest
     cleanup_result_id: Digest
     result: ScoreArtifact
     reportable: bool
@@ -518,8 +564,10 @@ class OutcomeDraft(ProtocolModel):
     commitment_id: Digest
     reconciliation_id: Digest
     cleanup_result_id: Digest
+    result: ScoreArtifact
     reportability_label: ReportabilityLabel
     comparability_label: ComparabilityLabel
+    ended_wall_time_ms: SafeCount
 
 
 class AbandonmentRecord(ProtocolModel):
@@ -552,7 +600,8 @@ class StateMarker(ProtocolModel):
     updated_wall_time_ms: SafeCount
     finalization_id: StrictIdentifier | None = None
     scoring_operation_id: StrictIdentifier | None = None
-    intent: FinalizationIntent | None = None
+    intent: Literal["score", "unscored"] | None = None
+    intent_digest: Digest | None = None
     terminal_id: Digest | None = None
 
     @model_validator(mode="after")
@@ -620,7 +669,7 @@ class VerificationReport(ProtocolModel):
     issues: tuple[VerificationIssue, ...]
     manifest: EvidenceManifest | None = None
     events: tuple[EventRecord, ...] = ()
-    artifacts: tuple[ArtifactRef, ...] = ()
+    artifacts: tuple[EvidenceArtifactRef, ...] = ()
     outcome: OutcomeSeal | None = None
     abandonment: AbandonmentRecord | None = None
     counters: EvidenceCounters | None = None
