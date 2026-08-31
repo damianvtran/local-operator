@@ -981,6 +981,7 @@ def test_every_builtin_tool_has_a_glyph_in_both_sets() -> None:
         "list_variables",
         "read_variable",
         "browser",
+        "send",
     }
     assert builtins <= set(NERD_TOOL_ICONS)
     assert builtins <= set(PLAIN_TOOL_ICONS)
@@ -1399,6 +1400,43 @@ def test_summary_falls_back_to_scalars_for_unrecognised_tools() -> None:
 def test_summary_falls_back_to_the_tool_name_when_no_scalars_exist() -> None:
     card = ToolCard("t", "todo", {"items": [{"text": "a"}]})
     assert "todo" in card._build_row(80).plain
+
+
+def test_send_summary_names_target_mode_and_message() -> None:
+    """The send row leads with WHO and HOW, then the body preview.
+
+    The delivery-mode marker is the audit point: a quiet mailbox drop and a
+    wake are otherwise identical lines, and the row builder sheds from the
+    right, so target + marker must survive any truncation."""
+    card = ToolCard(
+        "t",
+        "send",
+        {"target": "release cutter", "message": "gates are green, ready for review"},
+    )
+    row = card._build_row(100).plain
+    assert "release cutter" in row
+    assert "wake" in row  # the default delivery mode is visible
+    assert "gates are green" in row
+    # Order: target, then mode, then preview.
+    assert row.index("release cutter") < row.index("wake") < row.index("gates are green")
+
+
+def test_send_summary_marks_the_quiet_drop_and_now() -> None:
+    quiet = ToolCard("t", "send", {"target": "peer", "message": "later", "wake": False})
+    assert "quiet" in quiet._build_row(80).plain
+    now = ToolCard("t", "send", {"pid": 48213, "message": "stop", "now": True})
+    row = now._build_row(80).plain
+    assert "pid 48213" in row
+    assert "now" in row
+
+
+def test_send_summary_survives_a_long_message() -> None:
+    """A huge body must not push the target and mode off the row: the preview
+    is capped before the row's own truncation runs."""
+    card = ToolCard("t", "send", {"target": "peer", "message": "x" * 500})
+    row = card._build_row(60).plain
+    assert "peer" in row
+    assert "wake" in row
 
 
 def test_the_row_keeps_the_arguments_when_the_model_supplied_an_intent() -> None:

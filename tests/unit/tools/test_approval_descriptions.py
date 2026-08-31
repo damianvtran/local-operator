@@ -28,12 +28,14 @@ from local_operator.tools.builtin import (
     BashParams,
     BrowserParams,
     EditParams,
+    SendParams,
     WakeParams,
     WriteParams,
     _describe_browser_approval,
     _display_url,
     build_bash_tool,
     build_edit_tool,
+    build_send_tool,
     build_wake_tool,
     build_write_tool,
 )
@@ -71,6 +73,7 @@ def test_every_write_exec_tool_describes_its_own_approval() -> None:
         build_write_tool(),
         build_edit_tool(),
         build_wake_tool(ToolContext(wake_scheduler=_Scheduler())),
+        build_send_tool(ToolContext()),
     ]
     for tool in described:
         assert tool is not None
@@ -87,6 +90,9 @@ def test_every_write_exec_tool_describes_its_own_approval() -> None:
         (WakeParams, {"op": "list"}),
         (WakeParams, {"op": "cancel", "id": "w1"}),
         (BrowserParams, {"action": "goto", "url": "https://example.com"}),
+        (SendParams, {"target": "release cutter", "message": "gates are green"}),
+        (SendParams, {"pid": 48213, "message": "verify prod", "wake": False}),
+        (SendParams, {"session": "s1", "message": "hold off", "now": True}),
     ],
 )
 def test_every_described_shape_is_one_the_schema_accepts(params, arguments) -> None:
@@ -138,6 +144,29 @@ def test_wake_says_when_it_fires_and_what_it_will_say() -> None:
 
     assert _summary(tool, {"op": "list"}) == "wake: list"
     assert _summary(tool, {"op": "cancel", "id": "w1"}) == "cancel wake: w1"
+
+
+def test_send_names_the_peer_the_mode_and_the_body() -> None:
+    """The send prompt must say WHO gets it, HOW it lands, and WHAT it says.
+
+    Waking an idle peer and quietly dropping a note are different commitments,
+    so the mode word is load-bearing in the sentence a user approves.
+    """
+    tool = build_send_tool(ToolContext())
+    assert tool is not None
+    wake = _summary(tool, {"target": "release cutter", "message": "gates are green"})
+    assert wake == "send to release cutter (wake): gates are green"
+
+    quiet = _summary(tool, {"pid": 48213, "message": "fold in later", "wake": False})
+    assert quiet == "send to pid 48213 (quiet): fold in later"
+
+    now = _summary(tool, {"session": "s1", "message": "hold off", "now": True})
+    assert now == "send to session s1 (now): hold off"
+
+    # A long body is truncated for the at-a-glance approval row.
+    long_body = _summary(tool, {"target": "peer", "message": "x" * 200})
+    assert long_body.endswith("...")
+    assert len(long_body) < 120
 
 
 def test_browser_only_promises_navigation_when_it_navigates() -> None:
