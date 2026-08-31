@@ -12,7 +12,6 @@ import errno
 import fcntl
 import hashlib
 import os
-import re
 import secrets
 import stat
 import sys
@@ -61,7 +60,7 @@ MAX_ARTIFACT_BYTES = 256 * 1024 * 1024
 MAX_PARSED_MEDIA_BYTES = 32 * 1024 * 1024
 _REDACTION_SCAN_BLOCK = 64 * 1024
 _MAX_REDACTION_WINDOW = 1024 * 1024
-_FORK_REGISTRY_LOCK = threading.Lock()
+_FORK_REGISTRY_LOCK = threading.RLock()
 _FORK_WRITERS: weakref.WeakSet[EvidenceWriter] = weakref.WeakSet()
 _FORK_SNAPSHOT: tuple[EvidenceWriter, ...] = ()
 
@@ -84,7 +83,7 @@ def _after_fork_child() -> None:
     # child. Each writer validates descriptor identity before closing its copy.
     snapshot = _FORK_SNAPSHOT
     _FORK_SNAPSHOT = ()
-    _FORK_REGISTRY_LOCK = threading.Lock()
+    _FORK_REGISTRY_LOCK = threading.RLock()
     _FORK_WRITERS = weakref.WeakSet()
     for writer in snapshot:
         writer._invalidate_inherited_child()
@@ -199,41 +198,55 @@ def _write_all(fd: int, data: bytes, calls: Syscalls) -> None:
 
 
 class _RedactionScanner:
-    """Bounded rolling scanner for the raw and exposed encoded byte surface.
+    """Bounded byte-state scanner for raw and exposed encoded artifact bytes."""
 
-    Compressed pixels are intentionally opaque; adapters remain responsible for
-    redacting content before image encoding. The scanner covers raw UTF-8/ASCII,
-    percent escapes, hex, and base64 variants, including chunk boundaries and
-    whitespace separators within the bounded rolling window.
-    """
+    _WHITESPACE_DELETE = b" \t\r\n"
 
     def __init__(self, writer: EvidenceWriter) -> None:
         self._writer = writer
-        variants = (
-            writer._redactions._plaintext_canaries
-            + writer._redactions._exact_encoded_canaries
-            + writer._redactions._percent_canaries
-            + writer._redactions._hex_canaries
+        redactions = writer._redactions
+        self._plain = tuple(value.encode("utf-8") for value in redactions._plaintext_canaries)
+        self._encoded = tuple(value.encode("ascii") for value in redactions._exact_encoded_canaries)
+        self._percent = tuple(value.encode("ascii") for value in redactions._percent_canaries)
+        self._hex = tuple(value.encode("ascii") for value in redactions._hex_canaries)
+        longest = max(
+            (
+                len(value)
+                for group in (self._plain, self._encoded, self._percent, self._hex)
+                for value in group
+            ),
+            default=1,
         )
-        longest = max((len(value.encode("utf-8")) for value in variants), default=1)
-        self._window = min(
-            _MAX_REDACTION_WINDOW,
-            max(_REDACTION_SCAN_BLOCK, longest * 4 + 256),
-        )
-        self._tail = b""
+        self._raw_limit = min(_MAX_REDACTION_WINDOW, longest * 3 + 32)
+        self._normalized_limit = min(16 * 1024, longest + 8)
+        self._raw_tail = bytearray()
+        self._base64_tail = bytearray()
+        self._hex_tail = bytearray()
 
     @property
     def retained_bytes(self) -> int:
-        return len(self._tail)
+        return len(self._raw_tail) + len(self._base64_tail) + len(self._hex_tail)
 
     def feed(self, chunk: bytes) -> None:
         for offset in range(0, len(chunk), _REDACTION_SCAN_BLOCK):
             block = chunk[offset : offset + _REDACTION_SCAN_BLOCK]
-            window = self._tail + block
-            projections = _binary_projections(window)
-            projections.append(window.decode("utf-8", errors="ignore"))
-            self._writer._assert_redacted(projections)
-            self._tail = window[-self._window :]
+            self._raw_tail.extend(block)
+            del self._raw_tail[: max(0, len(self._raw_tail) - self._raw_limit)]
+            raw = bytes(self._raw_tail)
+            if any(value in raw for value in self._plain + self._percent):
+                raise EvidenceBundleInvalid("evidence redaction rejected content")
+
+            # Removing only ASCII whitespace preserves every non-encoding byte as
+            # a delimiter, so variants cannot be synthesized across binary data.
+            normalized = (bytes(self._base64_tail) + block).translate(None, self._WHITESPACE_DELETE)
+            if any(value in normalized for value in self._encoded):
+                raise EvidenceBundleInvalid("evidence redaction rejected content")
+            self._base64_tail[:] = normalized[-self._normalized_limit :]
+
+            folded = normalized.lower()
+            if any(value.lower() in folded for value in self._hex):
+                raise EvidenceBundleInvalid("evidence redaction rejected content")
+            self._hex_tail[:] = folded[-self._normalized_limit :]
 
 
 def _project_artifact(data: bytes, media_type: str) -> Any:
@@ -247,34 +260,9 @@ def _project_artifact(data: bytes, media_type: str) -> Any:
 
 
 def _binary_projections(data: bytes) -> list[str]:
-    """Expose bounded deterministic encodings without treating bytes as commands.
+    """Project only raw printable text; streaming scanner handles encodings."""
 
-    Runs shorter than eight bytes are ignored because they collide heavily with
-    normal binary headers. Whitespace is accepted only inside otherwise-valid
-    base64 or hex runs, then stripped before strict decoding.
-    """
-
-    printable = "".join(chr(byte) if 32 <= byte <= 126 else " " for byte in data)
-    projections = [printable]
-    text = data.decode("ascii", errors="ignore")
-    # Boundaries exclude adjacent printable binary text; only runs made entirely
-    # from the encoding alphabet plus whitespace are normalized and decoded.
-    candidates = re.findall(
-        r"(?<![A-Za-z0-9+/_-])(?:[A-Za-z0-9+/_-][ \t\r\n]*){8,}={0,2}",
-        text,
-    )
-    for candidate in candidates:
-        compact = "".join(character for character in candidate if not character.isspace())
-        if 8 <= len(compact) <= len(data) + 4:
-            # RedactionSet already carries exact standard and URL-safe base64
-            # variants. Comparing the normalized spelling avoids allocating a
-            # decoded copy of an attacker-controlled candidate.
-            projections.append(compact)
-    for candidate in re.findall(r"(?<![0-9A-Fa-f])(?:[0-9A-Fa-f]{2}[ \t\r\n]*){8,}", text):
-        hex_compact = "".join(character for character in candidate if not character.isspace())
-        if len(hex_compact) % 2 == 0:
-            projections.append(hex_compact)
-    return projections
+    return ["".join(chr(byte) if 32 <= byte <= 126 else " " for byte in data)]
 
 
 class EvidenceWriter:

@@ -520,6 +520,36 @@ def test_closed_writer_fork_does_not_close_reused_descriptors(tmp_path: Path) ->
             os.close(fd)
 
 
+def test_nested_at_fork_close_does_not_deadlock(tmp_path: Path) -> None:
+    script = r"""
+import os, sys, tempfile
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from local_operator.evaluation.evidence.store import EvidenceWriter
+from local_operator.evaluation.receipts import RedactionSet
+from tests.unit.evaluation.evidence.test_models import manifest
+root=Path(tempfile.mkdtemp())/'bundle'
+first=EvidenceWriter.create(root,manifest(),RedactionSet.from_resolved_values(()))
+def nested(): first.close()
+os.register_at_fork(before=nested)
+pid=os.fork()
+if pid == 0: os._exit(0)
+_, status=os.waitpid(pid,0)
+print(os.waitstatus_to_exitcode(status))
+"""
+    import subprocess
+    import sys
+
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(Path.cwd())],
+        text=True,
+        capture_output=True,
+        timeout=10,
+        check=True,
+    )
+    assert result.stdout.strip() == "0"
+
+
 def test_streaming_redaction_memory_is_bounded_for_64mib(tmp_path: Path) -> None:
     chunk = b"x" * (1024 * 1024)
     scanner_peak = 0
@@ -541,6 +571,37 @@ def test_streaming_redaction_memory_is_bounded_for_64mib(tmp_path: Path) -> None
         tracemalloc.stop()
     assert ref.byte_count == 64 * 1024 * 1024
     assert scanner_peak < 32 * 1024 * 1024
+
+
+def test_streaming_redaction_rss_delta_is_bounded_in_fresh_process() -> None:
+    script = r"""
+import resource, tempfile
+from pathlib import Path
+from local_operator.evaluation.evidence.store import EvidenceWriter
+from local_operator.evaluation.receipts import RedactionSet
+from tests.unit.evaluation.evidence.test_models import manifest
+before=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+root=Path(tempfile.mkdtemp())/'bundle'
+chunk=b'x'*(1024*1024)
+with EvidenceWriter.create(root,manifest(),RedactionSet.from_resolved_values(('very-secret-value',))) as writer:
+ writer.publish_artifact((chunk for _ in range(64)),media_type='application/octet-stream')
+after=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+print(after-before)
+"""
+    import subprocess
+    import sys
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        text=True,
+        capture_output=True,
+        timeout=120,
+        check=True,
+    )
+    # Darwin reports bytes; Linux reports KiB.
+    delta = int(result.stdout.strip())
+    delta_bytes = delta if sys.platform == "darwin" else delta * 1024
+    assert delta_bytes < 64 * 1024 * 1024
 
 
 def test_streaming_redaction_catches_chunk_boundary_canary(tmp_path: Path) -> None:
