@@ -307,7 +307,8 @@ class EnvironmentStepPayload(ProtocolModel):
     step_id: StrictIdentifier
     action_batch_id: StrictIdentifier
     receipt_id: Digest
-    observation_id: StrictIdentifier | None = None
+    input_observation_id: StrictIdentifier
+    output_observation_id: StrictIdentifier
     terminated: bool
     truncated: bool
 

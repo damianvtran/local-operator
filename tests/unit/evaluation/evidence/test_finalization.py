@@ -10,9 +10,12 @@ from typing import Any
 import pytest
 
 from local_operator.evaluation.evidence.models import (
+    ActionBatchPayload,
+    EnvironmentStepPayload,
     FinalizationIntent,
     LifecycleTransitionPayload,
     ModelRequestPayload,
+    ObservationPayload,
     OutcomeDraft,
     ScoreArtifact,
     ScoringResultPayload,
@@ -100,6 +103,88 @@ def test_seal_recomputes_all_assertions_and_verifies_terminal(tmp_path: Path) ->
     assert report.terminal_state == "sealed"
     assert report.outcome == outcome
     assert report.outcome is not None and report.outcome.result.binary == 0
+
+
+def test_three_observation_cycles_seal_as_complete_graph(tmp_path: Path) -> None:
+    root = tmp_path / "bundle"
+    writer = EvidenceWriter.create(root, manifest(), RedactionSet.from_resolved_values(()))
+    try:
+        action_artifact = writer.publish_artifact(b"safe", media_type="text/plain")
+        writer.append(
+            "observation",
+            ObservationPayload(observation_id="observation-0", sequence=0),
+            monotonic_ns=1,
+            wall_time_ms=1,
+        )
+        for index in range(2):
+            writer.append(
+                "action_batch",
+                ActionBatchPayload(
+                    action_batch_id=f"batch-{index}",
+                    observation_id=f"observation-{index}",
+                    action_count=1,
+                    action_artifact=action_artifact,
+                ),
+                monotonic_ns=2 + index * 3,
+                wall_time_ms=2 + index * 3,
+            )
+            writer.append(
+                "environment_step",
+                EnvironmentStepPayload(
+                    step_id=f"step-{index}",
+                    action_batch_id=f"batch-{index}",
+                    receipt_id=DIGEST,
+                    input_observation_id=f"observation-{index}",
+                    output_observation_id=f"observation-{index + 1}",
+                    terminated=index == 1,
+                    truncated=False,
+                ),
+                monotonic_ns=3 + index * 3,
+                wall_time_ms=3 + index * 3,
+            )
+            writer.append(
+                "observation",
+                ObservationPayload(observation_id=f"observation-{index + 1}", sequence=index + 1),
+                monotonic_ns=4 + index * 3,
+                wall_time_ms=4 + index * 3,
+            )
+        writer.begin_finalization(
+            "final",
+            "score-op",
+            FinalizationIntent(kind="score", scorer_id="scorer", scorer_version="1"),
+            monotonic_ns=8,
+            wall_time_ms=8,
+        )
+        score = ScoreArtifact(status="scored", binary=1)
+        writer.record_scoring_result(
+            ScoringResultPayload(
+                finalization_id="final", scoring_operation_id="score-op", score=score
+            ),
+            monotonic_ns=9,
+            wall_time_ms=9,
+        )
+        writer.record_final_lifecycle(
+            LifecycleTransitionPayload(
+                previous_state_id=None,
+                state_id=OTHER_DIGEST,
+                state="completed",
+                finalization_id="final",
+                preflight_seal_id=DIGEST,
+                commitment_id=OTHER_DIGEST,
+                reconciliation_id=DIGEST,
+                reconciliation_reportable=True,
+                score_id=score.score_id,
+                cleanup_result_id=OTHER_DIGEST,
+                rescue_required=False,
+            ),
+            monotonic_ns=10,
+            wall_time_ms=10,
+        )
+        outcome = writer.seal(_draft(score))
+    finally:
+        writer.close()
+    report = verify_bundle(root)
+    assert report.valid and outcome.counters.environment_step_count == 2
 
 
 def test_seal_rejects_orphan_model_request(tmp_path: Path) -> None:

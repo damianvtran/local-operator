@@ -145,6 +145,8 @@ def test_manifest_golden_bytes_are_deterministic() -> None:
                 step_id="step",
                 action_batch_id="batch",
                 receipt_id=DIGEST,
+                input_observation_id="observation",
+                output_observation_id="observation-2",
                 terminated=False,
                 truncated=False,
             ),

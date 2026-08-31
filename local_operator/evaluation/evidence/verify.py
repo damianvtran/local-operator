@@ -325,6 +325,7 @@ def _verify_semantics(
     observation_batches: dict[str, str] = {}
     steps: set[str] = set()
     batch_steps: dict[str, str] = {}
+    expected_output_observation: str | None = None
     next_observation_sequence = 0
     exchanges: set[str] = set()
     last_exchange: str | None = None
@@ -371,9 +372,14 @@ def _verify_semantics(
             if (
                 payload.observation_id in observations
                 or payload.sequence != next_observation_sequence
+                or (
+                    next_observation_sequence > 0
+                    and payload.observation_id != expected_output_observation
+                )
             ):
                 issues.error("receipt_binding_invalid", location)
             observations[payload.observation_id] = payload
+            expected_output_observation = None
             next_observation_sequence += 1
         elif isinstance(payload, ActionBatchPayload):
             if (
@@ -386,15 +392,22 @@ def _verify_semantics(
             observation_batches[payload.observation_id] = payload.action_batch_id
         elif isinstance(payload, EnvironmentStepPayload):
             batch = batches.get(payload.action_batch_id)
-            if payload.step_id in steps or batch is None or payload.action_batch_id in batch_steps:
+            if (
+                payload.step_id in steps
+                or batch is None
+                or payload.action_batch_id in batch_steps
+                or expected_output_observation is not None
+            ):
                 issues.error("receipt_binding_invalid", location)
             elif (
-                payload.observation_id is not None
-                and payload.observation_id != batch.observation_id
+                payload.input_observation_id != batch.observation_id
+                or payload.output_observation_id in observations
+                or payload.output_observation_id == payload.input_observation_id
             ):
                 issues.error("receipt_binding_invalid", location)
             steps.add(payload.step_id)
             batch_steps[payload.action_batch_id] = payload.step_id
+            expected_output_observation = payload.output_observation_id
         elif isinstance(payload, UserSimulatorExchangePayload):
             if payload.exchange_id in exchanges or payload.previous_exchange_id != last_exchange:
                 issues.error("receipt_binding_invalid", location)
@@ -455,7 +468,7 @@ def _verify_semantics(
         # operation must already have its exact completion receipt.
         if set(requests) != responses or set(requests) != usage:
             issues.error("receipt_binding_invalid", terminal_location)
-        if set(batches) != set(batch_steps):
+        if set(batches) != set(batch_steps) or expected_output_observation is not None:
             issues.error("receipt_binding_invalid", terminal_location)
         if observations and len(observation_batches) not in (
             len(observations),

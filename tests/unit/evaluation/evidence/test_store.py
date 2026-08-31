@@ -583,8 +583,11 @@ from tests.unit.evaluation.evidence.test_models import manifest
 before=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
 root=Path(tempfile.mkdtemp())/'bundle'
 chunk=b'x'*(1024*1024)
-with EvidenceWriter.create(root,manifest(),RedactionSet.from_resolved_values(('very-secret-value',))) as writer:
- writer.publish_artifact((chunk for _ in range(64)),media_type='application/octet-stream')
+redactions=RedactionSet.from_resolved_values(('very-secret-value',))
+with EvidenceWriter.create(root,manifest(),redactions) as writer:
+ writer.publish_artifact(
+  (chunk for _ in range(64)),media_type='application/octet-stream'
+ )
 after=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
 print(after-before)
 """
