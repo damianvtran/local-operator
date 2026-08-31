@@ -327,6 +327,65 @@ async def test_the_band_is_named_from_the_opener_before_any_provider_call() -> N
 
 
 @pytest.mark.asyncio
+async def test_frontend_updates_preserve_the_provisional_name() -> None:
+    """Canonical control snapshots must not repaint an unnamed tab as its cwd.
+
+    The persisted title remains empty while naming is in flight (and forever
+    when the isolated call returns no usable title). Todo and active-model
+    updates publish that truthful empty value during the first turn; it means
+    "not stored", not "discard the opener label the local host is wearing".
+    """
+    from local_operator.session.frontend_state import FrontendSessionState
+
+    app, session = await _boot(title="")
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _ready(pilot, app)
+        app._submit_prompt("fix the session naming fallback repaint")
+
+        assert app._status is not None
+        assert app._status._conversation_name == "Fix the session naming fallback repaint"
+        assert session.conversation_name == ""
+
+        app._apply_frontend_state(
+            FrontendSessionState(
+                session_id="session",
+                epoch="owner",
+                cwd="/private/tmp",
+                conversation_title="",
+            )
+        )
+
+        assert app._status._conversation_name == "Fix the session naming fallback repaint"
+        # The snapshot remains canonical: only the display overlay supplies the
+        # label, so a later generated/user title can still win normally.
+        assert session.conversation_name == ""
+        session.gate.set()
+
+
+@pytest.mark.asyncio
+async def test_a_canonical_title_supersedes_the_provisional_name() -> None:
+    """A persisted name remains authoritative over the local display overlay."""
+    from local_operator.session.frontend_state import FrontendSessionState
+
+    app, session = await _boot(title="")
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _ready(pilot, app)
+        app._show_provisional_name("fix the session naming fallback repaint")
+        assert app._status is not None
+
+        app._apply_frontend_state(
+            FrontendSessionState(
+                session_id="session",
+                epoch="owner",
+                conversation_title="Reliable session naming",
+            )
+        )
+
+        assert app._status._conversation_name == "Reliable session naming"
+        session.gate.set()
+
+
+@pytest.mark.asyncio
 async def test_a_dead_naming_call_leaves_the_opener_on_the_band() -> None:
     """A provider failure costs the better title, not the label.
 
