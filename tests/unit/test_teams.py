@@ -319,13 +319,14 @@ def test_intentional_empty_brief_update_still_clears_the_files(tmp_path: Path) -
     assert after.project == ""
 
 
-def test_unloaded_brief_sentinel_never_leaks_into_serialization() -> None:
-    """The private marker is a str subclass that serializes as ``''``.
+def test_a_metadata_only_team_serializes_as_plain_empty_briefs() -> None:
+    """No marker of any kind rides on the public brief fields.
 
-    ``Team.model_dump`` is what ``save_team`` writes into ``team.yml`` (and
-    what any tool or transport would carry), so the sentinel must survive a
-    round trip as plain text, not as a named marker a user could find in a
-    file or an API response.
+    R2-1 retired the str-subclass sentinel: loaded/unloaded is registry
+    state, so a ``Team`` — fresh, listed, or round-tripped — always carries
+    ordinary strings. This pins the serialization contract the review
+    exercised (``model_dump``/``model_dump_json``/``repr`` carry no marker)
+    without depending on a sentinel existing to leak.
     """
     team = Team(
         id="t",
@@ -337,7 +338,214 @@ def test_unloaded_brief_sentinel_never_leaks_into_serialization() -> None:
     assert dumped["project"] == ""
     assert "unloaded" not in team.model_dump_json().lower()
     assert "unloaded" not in repr(team).lower()
-    # A caller that DOES pass explicit empty strings keeps them (intentional
-    # empty briefs constructed directly must not become the sentinel).
-    explicit = team.model_copy(update={"instructions": "", "project": ""})
-    assert explicit.instructions == "" and explicit.project == ""
+    assert type(team.instructions) is str and type(team.project) is str
+
+
+def _seed_keep_team(tmp_path: Path) -> str:
+    """Create a team with both briefs set; returns its id."""
+    registry = TeamRegistry(tmp_path)
+    team = registry.create_team(
+        TeamEditFields(
+            name="ops",
+            manager="manager",
+            instructions="KEEP INSTRUCTIONS",
+            project="KEEP PROJECT",
+        )
+    )
+    return team.id
+
+
+def test_roundtripped_metadata_only_team_preserves_briefs_through_save(
+    tmp_path: Path,
+) -> None:
+    """R2-1 regression 1: the Pydantic Python round trip must not truncate.
+
+    The exact reviewed repro: a metadata-only ``list_teams`` row dumped with
+    ``model_dump`` and revalidated with ``model_validate`` loses any private
+    loaded/unloaded marker by construction — the registry owns that state —
+    so ``save_team`` must still preserve both on-disk briefs when the
+    round-tripped object carries only a METADATA edit.
+    """
+    team_id = _seed_keep_team(tmp_path)
+
+    second = TeamRegistry(tmp_path)
+    listed = second.list_teams()[0]
+    transported = Team.model_validate(listed.model_dump())
+    transported.description = "mutated, not the briefs"
+    second.save_team(transported)
+
+    third = TeamRegistry(tmp_path)
+    reloaded = third.get_team_by_name("ops")
+    assert reloaded is not None
+    assert reloaded.instructions == "KEEP INSTRUCTIONS"
+    assert reloaded.project == "KEEP PROJECT"
+    assert reloaded.description == "mutated, not the briefs"
+
+
+def test_roundtripped_metadata_only_team_preserves_briefs_through_json_save(
+    tmp_path: Path,
+) -> None:
+    """R2-1 regression 2: the JSON round trip must not truncate either.
+
+    ``model_dump_json``/``model_validate_json`` is the shape a tool or
+    transport actually carries a team across; the reviewed blocker truncated
+    both brief files through exactly this path.
+    """
+    team_id = _seed_keep_team(tmp_path)
+
+    second = TeamRegistry(tmp_path)
+    listed = second.list_teams()[0]
+    transported = Team.model_validate_json(listed.model_dump_json())
+    transported.manager = "lead"
+    second.save_team(transported)
+
+    third = TeamRegistry(tmp_path)
+    reloaded = third.get_team_by_name("ops")
+    assert reloaded is not None
+    assert reloaded.instructions == "KEEP INSTRUCTIONS"
+    assert reloaded.project == "KEEP PROJECT"
+    assert reloaded.manager == "lead"
+
+
+def test_directly_saved_metadata_list_object_preserves_briefs(tmp_path: Path) -> None:
+    """R2-1 regression 3: no transport at all — the listed row itself.
+
+    A caller can mutate the object ``list_teams`` handed it and pass it
+    straight back; the registry must not treat its unread briefs as clears.
+    """
+    _seed_keep_team(tmp_path)
+
+    second = TeamRegistry(tmp_path)
+    listed = second.list_teams()[0]
+    assert listed.instructions == "" and listed.project == ""
+    listed.description = "metadata only edit"
+    second.save_team(listed)
+
+    third = TeamRegistry(tmp_path)
+    reloaded = third.get_team_by_name("ops")
+    assert reloaded is not None
+    assert reloaded.instructions == "KEEP INSTRUCTIONS"
+    assert reloaded.project == "KEEP PROJECT"
+    # The saved object itself reads back the real text, not the "" it carried.
+    assert listed.instructions == "KEEP INSTRUCTIONS"
+    assert listed.project == "KEEP PROJECT"
+
+
+def test_hydrated_team_brief_edits_persist_through_save(tmp_path: Path) -> None:
+    """R2-1 regression 4: a LOADED team's deliberate brief edit survives.
+
+    ``get_team*`` marks the id loaded, so its strings are authoritative: a
+    caller that read the briefs, edited them, and saved must see its edit on
+    disk — preservation must never swallow an authored change.
+    """
+    _seed_keep_team(tmp_path)
+
+    second = TeamRegistry(tmp_path)
+    team = second.get_team_by_name("ops")
+    assert team is not None
+    assert team.instructions == "KEEP INSTRUCTIONS"
+    team.instructions = "REVISED COLLABORATION"
+    team.project = "REVISED PROJECT"
+    second.save_team(team)
+
+    third = TeamRegistry(tmp_path)
+    reloaded = third.get_team_by_name("ops")
+    assert reloaded is not None
+    assert reloaded.instructions == "REVISED COLLABORATION"
+    assert reloaded.project == "REVISED PROJECT"
+
+
+def test_update_team_explicit_empty_briefs_clear_the_files(tmp_path: Path) -> None:
+    """R2-1 regression 5: the authored clear path still clears.
+
+    ``update_team(..., TeamEditFields(instructions="", project=""))`` is the
+    supported way to retire both briefs; it hydrates first, so the empty
+    strings land on a loaded object and persist as empty files.
+    """
+    _seed_keep_team(tmp_path)
+
+    registry = TeamRegistry(tmp_path)
+    team = registry.get_team_by_name("ops")
+    assert team is not None
+    registry.update_team(team.id, TeamEditFields(instructions="", project=""))
+
+    after = TeamRegistry(tmp_path).get_team_by_name("ops")
+    assert after is not None
+    assert after.instructions == ""
+    assert after.project == ""
+
+
+def test_create_team_with_briefs_writes_them(tmp_path: Path) -> None:
+    """R2-1 regression 6: the create path is not collateral damage.
+
+    A brand-new id has no disk entry to preserve, so the caller-supplied
+    briefs are the briefs: the fresh empty directory must never be read back
+    over them.
+    """
+    registry = TeamRegistry(tmp_path)
+    created = registry.create_team(
+        TeamEditFields(
+            name="fresh",
+            manager="manager",
+            instructions="NEW COLLABORATION",
+            project="NEW PROJECT",
+        )
+    )
+    assert created.instructions == "NEW COLLABORATION"
+    assert created.project == "NEW PROJECT"
+
+    reloaded = TeamRegistry(tmp_path).get_team_by_name("fresh")
+    assert reloaded is not None
+    assert reloaded.instructions == "NEW COLLABORATION"
+    assert reloaded.project == "NEW PROJECT"
+
+
+def test_a_fresh_registry_save_of_a_transport_roundtripped_loaded_team_preserves_disk(
+    tmp_path: Path,
+) -> None:
+    """R2-1 edge: the transported object crosses registries.
+
+    A model dumped by one registry and saved by a SECOND registry that never
+    loaded the id still preserves the disk briefs: the destination registry
+    has not read them, so it cannot treat the carried "" as authored.
+    """
+    _seed_keep_team(tmp_path)
+
+    source = TeamRegistry(tmp_path)
+    loaded = source.get_team_by_name("ops")
+    assert loaded is not None
+    transported = Team.model_validate_json(loaded.model_dump_json())
+    # Simulate the transport dropping the loaded state: a second registry
+    # receives only the model.
+    destination = TeamRegistry(tmp_path)
+    destination.save_team(transported)
+
+    after = TeamRegistry(tmp_path).get_team_by_name("ops")
+    assert after is not None
+    assert after.instructions == "KEEP INSTRUCTIONS"
+    assert after.project == "KEEP PROJECT"
+
+
+def test_same_registry_does_not_trust_loadedness_for_a_transported_copy(tmp_path: Path) -> None:
+    """R2-1 edge: loadedness belongs to the canonical object, not only its id.
+
+    The registry may hydrate its canonical row, then receive a separately
+    transported metadata-only model with the same id. That copy never carried
+    loadedness, so its empty briefs must preserve disk rather than borrowing
+    authority from the registry's earlier lookup.
+    """
+    _seed_keep_team(tmp_path)
+
+    registry = TeamRegistry(tmp_path)
+    metadata = registry.list_teams()[0]
+    transported = Team.model_validate_json(metadata.model_dump_json())
+    canonical = registry.get_team(metadata.id)
+    assert canonical.instructions == "KEEP INSTRUCTIONS"
+    transported.description = "safe metadata edit"
+    registry.save_team(transported)
+
+    after = TeamRegistry(tmp_path).get_team_by_name("ops")
+    assert after is not None
+    assert after.instructions == "KEEP INSTRUCTIONS"
+    assert after.project == "KEEP PROJECT"
+    assert after.description == "safe metadata edit"

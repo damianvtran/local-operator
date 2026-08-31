@@ -2008,6 +2008,21 @@ class Editor(TextArea):
                     event.stop()
                     event.prevent_default()
                     return
+        if key in ("tab", "enter") and self._picker.is_loading():
+            # U2-2: the one dim row on screen is a TRANSIENT loading reserve,
+            # not an answer — real rows replace it the moment the session
+            # adopts a registry. Both keys act on a highlighted row, and with
+            # no rows yet Tab completed the empty query into trailing spaces
+            # (which then matched nothing once the roster landed) while Enter
+            # submitted and discarded the draft outright. Consumed as no-ops
+            # so the buffer and caret survive EXACTLY as typed; the catch-up
+            # the reserve exists to protect stays intact. Scoped to
+            # ``is_loading`` on purpose — ``is_pending`` also covers the
+            # one-tick fill window of ordinary argument lists, whose keys
+            # must keep passing through.
+            event.stop()
+            event.prevent_default()
+            return
         if key == "escape" and self._picker.is_pending():
             # The rows are one message-loop tick behind the keystroke that opened
             # the list — the app answers ArgumentQueryOpened — and for that tick
@@ -4864,7 +4879,14 @@ class Editor(TextArea):
             # empty-by-construction list, the entire content the user is reading.
             # Only `/team`·`/agent` reach this write, and for those the app
             # always sets the notice to "", so the hint owns the channel cleanly.
-            if self._is_name_argument_command(self._argument_command):
+            if (
+                self._is_name_argument_command(self._argument_command)
+                and not self._picker.is_loading()
+            ):
+                # The transient loading reserve owns the notice channel until
+                # the roster lands. Writing the normal parked-name hint here
+                # would clear that reserve on the key-routing pre-sync — before
+                # `_on_key` can consume pending Tab/Enter (U2-2).
                 self._picker.set_notice(self._name_switch_hint(list_argument) or "")
         # The ghost is re-derived from the freshly synced picker, on the one
         # path every keystroke already takes. Placed after both list branches so

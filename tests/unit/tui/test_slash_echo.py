@@ -583,6 +583,202 @@ async def test_session_adoption_catches_up_team_picker_and_name_highlight() -> N
         assert painted
 
 
+def _picker_geometry(app: OperatorApp, editor: Editor) -> dict[str, object]:
+    """The exact dock/screen coordinates a pending name row must preserve."""
+    return {
+        "composer": editor.region.y,
+        "picker": editor.picker.region.y,
+        "picker_height": editor.picker.region.height,
+        "status": app.query_one("#status-band").region.y,
+        "welcome": app.query_one(WelcomeView).region.y,
+        "screen": app.screen.size,
+        "virtual": app.screen.virtual_size,
+    }
+
+
+@pytest.mark.asyncio
+async def test_session_adoption_catches_up_agent_picker_without_geometry_change() -> None:
+    """U2-1: `/agent aud` reserves one row until the registry arrives."""
+    session = FakeSession()
+    session.agent_registry = _agent_registry(tempfile.mkdtemp())
+    release = asyncio.Event()
+
+    async def delayed_factory() -> FakeSession:
+        await release.wait()
+        return session
+
+    app = OperatorApp(delayed_factory)
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        for char in "/agent aud":
+            await pilot.press("slash" if char == "/" else ("space" if char == " " else char))
+        await pilot.pause()
+
+        pending = _picker_geometry(app, editor)
+        assert editor.picker.is_loading()
+        assert editor.picker.is_open() is False
+        assert editor.picker._notice == "loading agent roster…"
+        # FakeSession carries different welcome/status facts from the real
+        # Session used by committed evidence, so its absolute y coordinates
+        # are intentionally not hard-coded here. Pin the exact dock geometry
+        # and dimensions it must preserve across the three frames; the real
+        # Session capture below supplies the absolute 24/25/26/1 coordinates.
+        assert pending["picker_height"] == 1
+        assert pending["picker"] - pending["composer"] == 1
+        assert pending["status"] - pending["composer"] == 2
+        assert pending["screen"] == pending["virtual"]
+
+        release.set()
+        await _boot(pilot, app)
+        await pilot.pause()
+        first = _picker_geometry(app, editor)
+        await pilot.pause()
+        settled = _picker_geometry(app, editor)
+        # Session adoption replaces FakeSession's welcome/status facts and may
+        # recenter that content, so—as the team catch-up test above does—pin
+        # the DOCK invariant pre/post and exact first/settled equality. The
+        # real-Session capture has stable facts and asserts absolute equality.
+        assert first == settled
+        assert pending["picker_height"] == first["picker_height"] == 1
+        assert pending["picker"] - pending["composer"] == 1
+        assert first["picker"] - first["composer"] == 1
+        assert pending["status"] - pending["composer"] == 2
+        assert first["status"] - first["composer"] == 2
+        assert editor.text == "/agent aud"
+        assert editor.picker.is_loading() is False
+        assert editor.picker.is_open()
+        assert editor.picker.highlighted_name() == "auditor"
+        assert editor._name_choices == frozenset(
+            {
+                "architect",
+                "auditor",
+                "coder",
+                "dashboard-sme",
+                "designer",
+                "hollow-role",
+                "manager",
+                "reviewer",
+                "scout",
+            }
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("command", "query", "expected"),
+    [("team", "lop", "lopdev"), ("agent", "aud", "auditor")],
+)
+async def test_pending_name_tab_is_noop_then_completes_after_adoption(
+    command: str, query: str, expected: str
+) -> None:
+    """U2-2: pending Tab preserves exact text/caret; real rows restore Tab."""
+    from local_operator.teams import TeamEditFields, TeamRegistry
+
+    session = FakeSession()
+    teams = TeamRegistry(Path(tempfile.mkdtemp()))
+    teams.create_team(TeamEditFields(name="lopdev", manager="manager"))
+    session.team_registry = teams
+    session.agent_registry = _agent_registry(tempfile.mkdtemp())
+    release = asyncio.Event()
+
+    async def delayed_factory() -> FakeSession:
+        await release.wait()
+        return session
+
+    app = OperatorApp(delayed_factory)
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        original = f"/{command} {query}"
+        for char in original:
+            await pilot.press("slash" if char == "/" else ("space" if char == " " else char))
+        await pilot.pause()
+        caret = editor._caret_offset()
+        assert editor.picker.is_loading()
+        assert editor.picker.suggestions() == []
+
+        await pilot.press("tab")
+        await pilot.pause()
+        assert editor.text == original
+        assert editor._caret_offset() == caret
+        assert editor.picker.is_loading()
+
+        release.set()
+        await _boot(pilot, app)
+        await pilot.pause()
+        assert editor.picker.highlighted_name() == expected
+        await pilot.press("tab")
+        await pilot.pause()
+        assert editor.text == f"/{command} {expected} "
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("command", "query"), [("team", "lop"), ("agent", "aud")])
+async def test_pending_name_enter_is_noop_until_rows_arrive(command: str, query: str) -> None:
+    """U2-2: pending Enter never submits or clears the delayed query."""
+    from local_operator.teams import TeamEditFields, TeamRegistry
+
+    session = FakeSession()
+    teams = TeamRegistry(Path(tempfile.mkdtemp()))
+    teams.create_team(TeamEditFields(name="lopdev", manager="manager"))
+    session.team_registry = teams
+    session.agent_registry = _agent_registry(tempfile.mkdtemp())
+    release = asyncio.Event()
+
+    async def delayed_factory() -> FakeSession:
+        await release.wait()
+        return session
+
+    app = OperatorApp(delayed_factory)
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        original = f"/{command} {query}"
+        for char in original:
+            await pilot.press("slash" if char == "/" else ("space" if char == " " else char))
+        await pilot.pause()
+        caret = editor._caret_offset()
+        assert editor.picker.is_loading()
+
+        await pilot.press("enter")
+        await pilot.pause()
+        assert editor.text == original
+        assert editor._caret_offset() == caret
+        assert getattr(session, "attached_teams", []) == []
+        assert getattr(session, "active_agent", "") == ""
+
+        release.set()
+        await _boot(pilot, app)
+        await pilot.pause()
+        assert editor.text == original
+        assert editor.picker.is_open()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("command", "query"), [("team", "lop"), ("agent", "aud")])
+async def test_pending_name_placeholder_is_not_mouse_selectable(command: str, query: str) -> None:
+    """U2-2: the loading reserve has no keyboard or mouse selection target."""
+    app = OperatorApp(lambda: asyncio.Event().wait())
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        original = f"/{command} {query}"
+        for char in original:
+            await pilot.press("slash" if char == "/" else ("space" if char == " " else char))
+        await pilot.pause()
+        assert editor.picker.is_loading()
+        assert editor.picker.is_open() is False
+        assert editor.picker.highlighted_name() is None
+        assert editor.picker.suggestions() == []
+
+        await pilot.click(type(editor.picker), offset=(4, 0))
+        await pilot.pause()
+        assert editor.text == original
+        assert editor.picker.is_loading()
+        assert editor.picker.highlighted_name() is None
+
+
 @pytest.mark.asyncio
 async def test_pending_name_row_collapses_on_escape_and_stays_dismissed_after_adoption() -> None:
     """Esc releases D1's reserve; the late registry must not resurrect it."""

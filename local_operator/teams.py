@@ -130,36 +130,25 @@ class TeamEditFields(BaseModel):
     project: str | None = None
 
 
-class _UnloadedBrief(str):
-    """Module-private sentinel: a brief whose file has not been read yet.
-
-    A ``str`` SUBCLASS so it flows through pydantic validation and every
-    existing ``str`` consumer unchanged, and private (leading underscore,
-    no re-export) so it can never leak into a tool schema, ``model_dump``
-    output, or public API. Its single job is to make "the registry handed
-    out this team without reading its briefs" a distinguishable state from
-    "the brief is intentionally empty": both surface as ``''`` on the
-    public field, and only the first must be PRESERVED by ``save_team``
-    rather than written back as an empty file (review round 1, R1-1).
-    ``save_team`` and ``_load_briefs`` are the only readers; everyone else
-    sees an ordinary empty string via :attr:`Team.instructions`. It deliberately
-    inherits ``str.__repr__`` too: even debug/public model representations show
-    ``''``, never a sentinel label.
-    """
-
-
 class Team(BaseModel):
     """A durable team: manager + members + layered instruction briefs.
 
-    ``instructions`` and ``project`` read as plain strings everywhere, but
-    their DEFAULT is the :class:`_UnloadedBrief` sentinel rather than ``""``:
-    a team constructed from ``team.yml`` alone (``list_teams`` and every
-    picker refresh) has not paid the brief I/O yet, and a later
-    ``save_team`` of that object must re-read the files instead of
-    overwriting them with the empty strings it happens to carry. Constructing
-    a ``Team`` with explicit ``instructions=""`` — as ``create_team`` and a
-    deliberate ``update_team(..., TeamEditFields(instructions=""))`` do —
-    keeps the empty string and therefore still clears the file on purpose.
+    ``instructions`` and ``project`` are plain strings with NO marker for
+    whether they have been read: an unloaded brief and an intentionally
+    empty one are indistinguishable ON THE MODEL, by design. The loaded/
+    unloaded distinction is REGISTRY-owned (``TeamRegistry._briefs_loaded``),
+    because it is a fact about which files THIS registry has read — not a
+    property of the value, and not something that can survive a
+    ``model_dump``/``model_validate`` round trip through a tool or transport
+    (review round 2, R2-1: a str-subclass sentinel serialized as ``""`` and
+    revalidated as a plain ``""``, so a transported metadata-only team read
+    as a deliberate clear and ``save_team`` truncated the briefs). The
+    consequence is a documented constraint on ``save_team``: it cannot trust
+    a transported object's empty briefs and preserves the on-disk files for
+    any team id this registry has not loaded. Explicit brief writes go
+    through :meth:`TeamRegistry.update_team` (or ``create_team``), which
+    hydrate first and apply the caller's fields — including ``""`` clears —
+    onto a known-loaded object.
     """
 
     id: str
@@ -168,13 +157,12 @@ class Team(BaseModel):
     description: str = ""
     manager: str = "manager"
     members: list[TeamMember] = Field(default_factory=list)
-    # Sentinel default, not "": see the class docstring. ``exclude`` in
-    # ``save_team``'s dump already keeps both fields out of ``team.yml``;
-    # the sentinel itself is a private str subclass that serializes as ""
-    # should anyone ever dump these fields, so it cannot leak a marker into
-    # YAML, JSON, or tool output.
-    instructions: str = _UnloadedBrief()
-    project: str = _UnloadedBrief()
+    # Both briefs default to "" and never carry a marker: see the class
+    # docstring and ``save_team`` for why the loaded state lives in the
+    # registry instead of the value. ``save_team``'s dump excludes both
+    # fields from ``team.yml`` either way.
+    instructions: str = ""
+    project: str = ""
 
     @field_validator("name")
     @classmethod
@@ -354,24 +342,64 @@ class TeamRegistry:
         self._briefs_loaded.add(team.id)
         return team
 
-    def _persist_brief(self, team: Team, filename: str, value: str) -> str:
-        """The brief text to write for ``filename``, hydrating an unloaded one.
+    def _hydrate_briefs_for_save(self, team: Team) -> Team:
+        """Make ``team`` safe to persist: its briefs must be REAL values.
 
-        R1-1: ``list_teams`` hands out teams whose briefs were never read (they
-        are two 8k files on a five-second refresh path), and a caller that
-        mutates such an object's METADATA and saves it must not lose the briefs
-        it never touched. The sentinel default marks "not loaded"; here it is
-        the one place that turns it back into the on-disk text so the write
-        preserves the file verbatim. An explicit empty string — the only other
-        value ``Team`` construction can carry once ``create_team`` and
-        ``update_team`` normalize to ``""`` — is an INTENTIONAL clear and is
-        written as-is. Reads are best-effort like ``_load_briefs``: an
-        unreadable file logs and saves empty rather than failing the whole
-        metadata save, matching how ``_load`` treats bad YAML.
+        R2-1: the loaded/unloaded distinction is registry-owned
+        (``_briefs_loaded``), so a ``Team`` that reached this registry from
+        ANYWHERE but this registry's own ``get_team*`` — a ``list_teams``
+        metadata row, or a model dumped to JSON/Python and revalidated by a
+        tool or transport — carries ``""`` briefs that mean "never read",
+        not "deliberately emptied". Writing those verbatim truncated both
+        brief files. This method is the single choke point that resolves the
+        ambiguity the ONLY way that cannot lose data: it reads the brief
+        files this registry has on disk and merges them into the object,
+        then records the id as loaded so the write persists exactly what was
+        on disk.
+
+        A team whose briefs this registry HAS loaded (``get_team*`` result,
+        ``create_team``/``update_team`` output, or a previous save) keeps its
+        in-memory values untouched: the caller is editing briefs it actually
+        read, so its strings are authoritative and are written as-is. An
+        explicit clear is authored through :meth:`update_team`, which hydrates
+        first and then applies ``instructions=""`` onto the loaded object —
+        reaching this method already loaded, so the empty string persists.
+
+        Reads are best-effort like ``_load_briefs``: an unreadable file logs
+        and saves empty rather than failing the whole metadata save, matching
+        how ``_load`` treats bad YAML.
+
+        A team id this registry has NEVER SEEN (not in ``_teams``, no brief
+        files on disk) is a CREATE: the caller-supplied briefs are the only
+        briefs that will ever exist, so they are kept verbatim and the id is
+        simply marked loaded. Without this guard the fresh, empty directory
+        the save is about to make would be read back as two absent files and
+        the caller's briefs would be replaced with ``""`` on the very first
+        write — the exact truncation this method exists to prevent, reached
+        from the other side.
         """
-        if not isinstance(value, _UnloadedBrief):
-            return value
-        return _read_optional(self.teams_dir / team.id / filename)
+        canonical = self._teams.get(team.id)
+        if team.id in self._briefs_loaded and team is canonical:
+            # Loadedness authorizes only the exact canonical object this
+            # registry hydrated. A model-dumped/revalidated COPY with the same
+            # id is not evidence that its "" briefs are intentional; trusting
+            # the id alone would reintroduce R2-1 whenever a registry hydrated
+            # the original before receiving the transported copy.
+            return team
+        team_dir = self.teams_dir / team.id
+        on_disk_instructions = _read_optional(team_dir / "instructions.md")
+        on_disk_project = _read_optional(team_dir / "project.md")
+        if (
+            canonical is not None
+            or (team_dir / "instructions.md").is_file()
+            or (team_dir / "project.md").is_file()
+        ):
+            # An existing entry: the disk files are the authoritative briefs
+            # for an object that never read them.
+            team.instructions = on_disk_instructions
+            team.project = on_disk_project
+        self._briefs_loaded.add(team.id)
+        return team
 
     def get_team(self, team_id: str) -> Team:
         self._refresh_if_needed()
@@ -438,17 +466,37 @@ class TeamRegistry:
         return self.save_team(current)
 
     def save_team(self, team: Team) -> Team:
+        """Write ``team`` to disk and adopt it as this registry's current row.
+
+        CONSTRAINT (R2-1): the loaded/unloaded brief state is registry-owned,
+        so this method cannot tell from the OBJECT whether its ``""`` briefs
+        are "never read" or "deliberately emptied" — a model-dumped,
+        revalidated team has lost the distinction by construction. It
+        therefore resolves the ambiguity the safe way: for an id this
+        registry has not loaded, the on-disk brief files are merged into the
+        object before anything is written (``_hydrate_briefs_for_save``), so
+        a metadata-only ``list_teams`` row — or a round-tripped copy of one —
+        preserves both briefs while its metadata edits persist. A team this
+        registry HAS loaded (a ``get_team*`` result the caller edited, or the
+        output of ``create_team``/``update_team``) saves its briefs verbatim.
+        To CLEAR a brief, use :meth:`update_team` with an explicit empty
+        string: that path hydrates first, so the clear lands on a loaded
+        object and persists.
+        """
+        # Hydrate BEFORE the directory is created and BEFORE writing (R2-1,
+        # and R1-1 before it). An unloaded team reaches here carrying ""
+        # briefs; writing them as text would truncate the brief files to
+        # empty, and caching the object unloaded would hand the NEXT get_team
+        # a blank-briefed team this registry wrongly considers loaded.
+        # Ordering matters on the CREATE path specifically: mkdir first would
+        # put empty brief files on disk for hydration to then read back,
+        # clobbering the briefs the caller just supplied. This one call fixes
+        # all of it, and records the id as loaded so the caller's own save
+        # result reads back the real text.
+        self._hydrate_briefs_for_save(team)
         team_dir = self.teams_dir / team.id
         team_dir.mkdir(parents=True, exist_ok=True)
         payload = team.model_dump(mode="json", exclude={"instructions", "project"})
-        # R1-1: hydrate before writing AND before caching. A metadata-only team
-        # (straight from ``list_teams``) reaches here carrying sentinels; writing
-        # them as text would truncate the briefs to empty files, and caching the
-        # object with sentinels still set would hand the NEXT ``get_team`` an
-        # unloaded-looking team it considers loaded. Both fixes are this pair of
-        # assignments — the sentinel never survives a save.
-        team.instructions = self._persist_brief(team, "instructions.md", team.instructions)
-        team.project = self._persist_brief(team, "project.md", team.project)
         try:
             with (team_dir / "team.yml").open("w", encoding="utf-8") as handle:
                 yaml.safe_dump(payload, handle, default_flow_style=False, sort_keys=False)
@@ -457,8 +505,10 @@ class TeamRegistry:
         except Exception as exc:
             raise Exception(f"Failed to save team metadata: {exc}") from exc
         self._teams[team.id] = team
-        # The caller supplied the briefs that were just persisted; rereading the
-        # same files on the next get would add I/O without recovering any state.
+        # ``_hydrate_briefs_for_save`` already recorded the load; restated for
+        # the loaded-object path, where the caller supplied the briefs that
+        # were just persisted and rereading the same files on the next get
+        # would add I/O without recovering any state.
         self._briefs_loaded.add(team.id)
         return team
 
