@@ -366,6 +366,11 @@ def _reference_listing(resource: Skill, *, scheme: str) -> str:
     return "\n".join(lines)
 
 
+def resource_url(scheme: str, name: str) -> str:
+    """Build a resolver-compatible URL without letting names alter its structure."""
+    return f"{scheme}://{quote(name, safe='')}"
+
+
 def resolve_resource_url(
     url: str,
     resources: Mapping[str, Skill],

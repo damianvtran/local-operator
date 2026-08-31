@@ -158,6 +158,50 @@ class TestSelect:
         assert banana_skill not in matches
 
     @pytest.mark.asyncio
+    async def test_routes_slack_tenant_hotfix_to_both_workflows(self, tmp_path: Path) -> None:
+        # Synthetic metadata keeps this regression deterministic and proves the
+        # router contract without depending on one developer's installed catalog.
+        skills = [
+            _make_skill(
+                tmp_path,
+                "minerva-software-development",
+                "Use for Minerva software development changes, production hotfixes, "
+                "tenant configuration, testing, code review, GitLab merge requests, "
+                "and releases.",
+            ),
+            _make_skill(
+                tmp_path,
+                "minerva-support-workspace",
+                "Use for Minerva customer support requests involving Slack "
+                "conversations, tenant workspace configuration, customer incidents, "
+                "and drafting support replies.",
+            ),
+            _make_skill(
+                tmp_path,
+                "minerva-credentials",
+                "Use for securely loading API keys, OAuth tokens, passwords, and "
+                "environment credentials.",
+            ),
+            _make_skill(
+                tmp_path,
+                "calendar-planning",
+                "Use for calendar scheduling, meeting availability, invitations, and "
+                "timezone planning.",
+            ),
+        ]
+        index = SkillIndex(skills, LocalEmbedder(), cache_dir=tmp_path / "cache")
+
+        matches = await index.select(
+            "Please investigate the customer report in Slack, hotfix the tenant "
+            "configuration bug in Minerva, validate it, and draft the support reply."
+        )
+
+        assert [skill.name for skill in matches] == [
+            "minerva-software-development",
+            "minerva-support-workspace",
+        ]
+
+    @pytest.mark.asyncio
     async def test_threshold_respected(self, tmp_path: Path) -> None:
         skill = _make_skill(tmp_path, "pytest-helper", "pytest unit tests in python")
         index = SkillIndex([skill], LocalEmbedder(), cache_dir=tmp_path / "cache")
@@ -247,15 +291,28 @@ class TestRenderBlock:
             ),
         ]
         assert render_block(skills) == (
-            "Skills are specialized knowledge. If one matches your task, you MUST read "
-            "`skill://<name>` before proceeding. The skill body ends with its "
-            "reference files; read those with `skill://<name>/<path>`, never a "
-            "raw filesystem path.\n"
+            "Read these selected skills before proceeding: `skill://alpha`, "
+            "`skill://beta`. The skill body ends with its reference files; read those "
+            "with `skill://<name>/<path>`, never a raw filesystem path.\n"
             "<skills>\n"
             "- alpha: first skill\n"
             "- beta: second skill\n"
             "</skills>"
         )
+
+    def test_selected_url_encodes_frontmatter_name_for_resolver(self) -> None:
+        skill = Skill(
+            name="team/support",
+            description="support workflow",
+            file_path=Path("/x/support/SKILL.md"),
+            base_dir=Path("/x/support"),
+            source="test",
+        )
+
+        block = render_block([skill])
+
+        assert "`skill://team%2Fsupport`" in block
+        assert "`skill://team/support`" not in block
 
     def test_empty_list_returns_empty_string(self) -> None:
         assert render_block([]) == ""

@@ -3242,12 +3242,27 @@ async def execute_glob(
     if not pattern:
         return _error(tool_call_id, "glob", "pattern must be a non-empty string")
     if Path(pattern).is_absolute() or ".." in Path(pattern).parts:
-        return _error(
-            tool_call_id,
-            "glob",
+        message = (
             "pattern must be a relative glob within the working directory "
-            "(no absolute paths, no '..').",
+            "(no absolute paths, no '..')."
         )
+        # Skills are virtual resources, not files the model should discover.
+        # Correct only this observed misuse so every ordinary glob error keeps
+        # its concise, generic diagnostic.
+        if Path(pattern).is_absolute() and Path(pattern).name.casefold() == "skill.md":
+            # A conservative resource segment avoids reflecting path syntax or
+            # prose into a URL while still covering normal catalog names.
+            skill_name = Path(pattern).parent.name
+            resource = (
+                f"skill://{skill_name}"
+                if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", skill_name)
+                else "skill://<name>"
+            )
+            message += (
+                " Do not scan the filesystem for SKILL.md; read the selected skill "
+                f"directly with `{resource}`."
+            )
+        return _error(tool_call_id, "glob", message)
 
     root = Path(_safe_cwd(context))
     # An unbounded ``**`` walk is filesystem work that can freeze the session;

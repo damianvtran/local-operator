@@ -918,6 +918,51 @@ async def test_glob_rejects_absolute_and_parent_patterns(tools, context) -> None
         result = await _call(tools, "glob", {"pattern": pattern}, context)
         assert result.is_error is True
         assert "relative" in result.text.lower()
+        assert "skill://" not in result.text
+
+
+@pytest.mark.asyncio
+async def test_glob_redirects_absolute_skill_search_to_protocol(tools, context) -> None:
+    result = await _call(
+        tools,
+        "glob",
+        {"pattern": "/Users/example/**/minerva-support-workspace/SKILL.md"},
+        context,
+    )
+
+    assert result.is_error is True
+    assert "relative" in result.text.lower()
+    assert "Do not scan the filesystem for SKILL.md" in result.text
+    assert "`skill://minerva-support-workspace`" in result.text
+
+
+@pytest.mark.asyncio
+async def test_glob_does_not_redirect_skill_md_suffix(tools, context) -> None:
+    result = await _call(
+        tools,
+        "glob",
+        {"pattern": "/tmp/catalog/README-NOTSKILL.md"},
+        context,
+    )
+
+    assert result.is_error is True
+    assert "relative" in result.text.lower()
+    assert "skill://" not in result.text
+    assert "Do not scan" not in result.text
+
+
+@pytest.mark.asyncio
+async def test_glob_uses_placeholder_for_unsafe_skill_name(tools, context) -> None:
+    result = await _call(
+        tools,
+        "glob",
+        {"pattern": "/Users/example/**/unsafe name/SKILL.md"},
+        context,
+    )
+
+    assert result.is_error is True
+    assert "`skill://<name>`" in result.text
+    assert "unsafe name" not in result.text
 
 
 @pytest.mark.asyncio
