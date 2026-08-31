@@ -81,6 +81,7 @@ EventKind = Literal[
     "action_batch",
     "environment_step",
     "user_simulator_exchange",
+    "finalization_start",
     "scoring_start",
     "scoring_result",
     "cleanup",
@@ -250,6 +251,18 @@ class LifecycleTransitionPayload(ProtocolModel):
     score_id: Digest | None = None
     cleanup_result_id: Digest | None = None
     rescue_required: bool | None = None
+    failure_kind: (
+        Literal[
+            "preflight",
+            "infrastructure",
+            "crash",
+            "ambiguous_finalization",
+            "scorer",
+            "cleanup",
+            "cancelled",
+        ]
+        | None
+    ) = None
 
 
 class ModelRequestPayload(ProtocolModel):
@@ -387,6 +400,19 @@ class FinalizationIntent(ProtocolModel):
         return self
 
 
+class FinalizationStartPayload(ProtocolModel):
+    finalization_id: StrictIdentifier
+    intent: Literal["score", "unscored"]
+    scoring_operation_id: StrictIdentifier | None = None
+    intent_digest: Digest
+
+    @model_validator(mode="after")
+    def _bind_operation(self) -> Self:
+        if (self.intent == "score") != (self.scoring_operation_id is not None):
+            raise ValueError("finalization intent and scoring operation disagree")
+        return self
+
+
 class ScoringStartPayload(ProtocolModel):
     finalization_id: StrictIdentifier
     scoring_operation_id: StrictIdentifier
@@ -464,6 +490,7 @@ EventPayload: TypeAlias = (
     | ActionBatchPayload
     | EnvironmentStepPayload
     | UserSimulatorExchangePayload
+    | FinalizationStartPayload
     | ScoringStartPayload
     | ScoringResultPayload
     | CleanupPayload
@@ -482,6 +509,7 @@ _EVENT_PAYLOAD_TYPES: dict[str, type[ProtocolModel]] = {
     "action_batch": ActionBatchPayload,
     "environment_step": EnvironmentStepPayload,
     "user_simulator_exchange": UserSimulatorExchangePayload,
+    "finalization_start": FinalizationStartPayload,
     "scoring_start": ScoringStartPayload,
     "scoring_result": ScoringResultPayload,
     "cleanup": CleanupPayload,
@@ -683,6 +711,8 @@ VerificationIssueCode = Literal[
     "event_chain_mismatch",
     "event_hash_mismatch",
     "event_time_reversed",
+    "event_order_invalid",
+    "lifecycle_invalid",
     "artifact_name_invalid",
     "artifact_unsafe",
     "artifact_hash_mismatch",

@@ -13,7 +13,7 @@ import os
 import stat
 import sys
 from collections import Counter
-from typing import Any, Iterator
+from typing import Any, Iterator, cast
 
 from local_operator.evaluation.evidence.media import (
     MediaValidationError,
@@ -30,6 +30,7 @@ from local_operator.evaluation.evidence.models import (
     EvidenceArtifactRef,
     EvidenceCounters,
     EvidenceManifest,
+    FinalizationStartPayload,
     LifecycleTransitionPayload,
     ModelRequestPayload,
     ModelResponsePayload,
@@ -423,6 +424,10 @@ def _verify_semantics(
     seen_cleanup_receipts: set[str] = set()
     execution_closed = False
     execution_started = False
+    durable_finalizing = False
+    reconciled = False
+    cleaned = False
+    terminal_lifecycle_seen = False
     execution_payload_types = (
         ModelRequestPayload,
         ModelResponsePayload,
@@ -433,6 +438,7 @@ def _verify_semantics(
         UserSimulatorExchangePayload,
     )
     allowed_after_finalizing = {
+        "scoring_start",
         "scoring_result",
         "reconciliation",
         "lifecycle_transition",
@@ -446,8 +452,77 @@ def _verify_semantics(
         payload = event.payload
         if execution_closed and event.kind not in allowed_after_finalizing:
             issues.error("finalization_invalid", location)
-        if isinstance(payload, execution_payload_types):
+        terminal_lifecycle = isinstance(payload, LifecycleTransitionPayload) and payload.state in (
+            "completed",
+            "failed",
+            "cancelled",
+        )
+        running_lifecycle = (
+            isinstance(payload, LifecycleTransitionPayload) and payload.state == "running"
+        )
+        finalizing_lifecycle = (
+            isinstance(payload, LifecycleTransitionPayload) and payload.state == "finalizing"
+        )
+        execution_evidence = isinstance(payload, execution_payload_types) or running_lifecycle
+        if event.kind == "preflight" and (preflights or event.sequence != 0):
+            issues.error("event_order_invalid", location)
+        elif isinstance(payload, BudgetCommitmentPayload) and (
+            len(preflights) != 1
+            or not preflights[0].passed
+            or commitments
+            or execution_started
+            or durable_finalizing
+        ):
+            issues.error("event_order_invalid", location)
+        elif execution_evidence and (
+            len(commitments) != 1 or durable_finalizing or reconciled or cleaned
+        ):
+            issues.error("event_order_invalid", location)
+        elif event.kind == "finalization_start" and (
+            len(commitments) != 1 or durable_finalizing or reconciled or cleaned
+        ):
+            issues.error("event_order_invalid", location)
+        elif event.kind == "scoring_start" and (
+            len(commitments) != 1 or not durable_finalizing or starts or reconciled or cleaned
+        ):
+            issues.error("event_order_invalid", location)
+        elif event.kind == "scoring_result" and (
+            not durable_finalizing or len(starts) != 1 or results or reconciled or cleaned
+        ):
+            issues.error("event_order_invalid", location)
+        elif finalizing_lifecycle and (
+            len(commitments) != 1 or durable_finalizing or reconciled or cleaned
+        ):
+            issues.error("event_order_invalid", location)
+        elif event.kind == "reconciliation" and (
+            not durable_finalizing or reconciled or cleaned or (starts and not results)
+        ):
+            issues.error("event_order_invalid", location)
+        elif event.kind == "cleanup" and (not reconciled or cleaned):
+            issues.error("event_order_invalid", location)
+        elif terminal_lifecycle:
+            lifecycle_payload = cast(LifecycleTransitionPayload, payload)
+            early_failure = not execution_started and lifecycle_payload.failure_kind in (
+                "preflight",
+                "infrastructure",
+            )
+            if terminal_lifecycle_seen or (not early_failure and not cleaned):
+                issues.error("lifecycle_invalid", location)
+            if early_failure and (
+                lifecycle_payload.failure_kind == "preflight"
+                and (len(preflights) != 1 or preflights[0].passed)
+            ):
+                issues.error("lifecycle_invalid", location)
+        if execution_evidence:
             execution_started = True
+        if event.kind == "finalization_start" or finalizing_lifecycle:
+            durable_finalizing = True
+        elif event.kind == "reconciliation":
+            reconciled = True
+        elif event.kind == "cleanup":
+            cleaned = True
+        elif terminal_lifecycle:
+            terminal_lifecycle_seen = True
         if isinstance(payload, ModelRequestPayload):
             if payload.request_id in requests:
                 issues.error("receipt_binding_invalid", location)
@@ -576,6 +651,18 @@ def _verify_semantics(
                 issues.error("receipt_binding_invalid", location)
             cleanups.append(payload)
             seen_cleanup_receipts |= receipts
+        elif isinstance(payload, FinalizationStartPayload):
+            if (
+                marker is not None
+                and marker.state == "finalizing"
+                and (
+                    payload.finalization_id != marker.finalization_id
+                    or payload.intent != marker.intent
+                    or payload.scoring_operation_id != marker.scoring_operation_id
+                    or payload.intent_digest != marker.intent_digest
+                )
+            ):
+                issues.error("finalization_invalid", location)
         elif isinstance(payload, ScoringStartPayload):
             if starts or results:
                 issues.error("score_invalid", location)

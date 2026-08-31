@@ -29,21 +29,29 @@ from local_operator.evaluation.evidence.media import (
 from local_operator.evaluation.evidence.models import (
     AbandonmentReason,
     AbandonmentRecord,
+    ActionBatchPayload,
     BudgetCommitmentPayload,
     CleanupPayload,
+    EnvironmentStepPayload,
     EventKind,
     EventPayload,
     EventRecord,
     EvidenceArtifactRef,
     EvidenceManifest,
     FinalizationIntent,
+    FinalizationStartPayload,
+    LifecycleTransitionPayload,
+    ModelRequestPayload,
     ModelResponsePayload,
+    ObservationPayload,
     OutcomeDraft,
     OutcomeSeal,
     ReconciliationPayload,
     ScoringResultPayload,
     ScoringStartPayload,
     StateMarker,
+    UsageCostPayload,
+    UserSimulatorExchangePayload,
 )
 from local_operator.evaluation.evidence.verify import verify_bundle
 from local_operator.evaluation.receipts import RedactionSet
@@ -377,6 +385,17 @@ class EvidenceWriter:
         self._thread_lock = threading.RLock()
         self._closed = False
         self._poisoned = False
+        # These are assertions about the fsynced journal head, not lifecycle
+        # authority. They advance only after the corresponding event fsync.
+        self._phase_preflight: Any | None = None
+        self._phase_commitment: Any | None = None
+        self._phase_execution = False
+        self._phase_finalizing = False
+        self._phase_scoring_started = False
+        self._phase_scoring_result = False
+        self._phase_reconciled = False
+        self._phase_cleaned = False
+        self._phase_terminal = False
         self._creator_pid = os.getpid()
         self._fd_identities = {
             name: self._descriptor_identity(getattr(self, name))
@@ -720,6 +739,113 @@ class EvidenceWriter:
             # pydantic traceback, filesystem error, or caller log.
             raise EvidenceBundleInvalid("evidence redaction rejected content") from error
 
+    def _validate_event_phase(self, event: EventRecord) -> None:
+        """Reject impossible chronology before bytes enter the durable journal."""
+
+        payload = event.payload
+        execution_types = (
+            ModelRequestPayload,
+            ModelResponsePayload,
+            UsageCostPayload,
+            ObservationPayload,
+            ActionBatchPayload,
+            EnvironmentStepPayload,
+            UserSimulatorExchangePayload,
+        )
+        if event.kind == "preflight":
+            if self._phase_preflight is not None or self._sequence != 0:
+                raise EvidenceBundleInvalid("preflight must be the first evidence event")
+        elif isinstance(payload, BudgetCommitmentPayload):
+            if (
+                self._phase_preflight is None
+                or not self._phase_preflight.passed
+                or self._phase_commitment is not None
+                or self._phase_execution
+                or self._phase_finalizing
+            ):
+                raise EvidenceBundleInvalid("budget commitment is out of evidence phase")
+        elif isinstance(payload, execution_types) or (
+            isinstance(payload, LifecycleTransitionPayload) and payload.state == "running"
+        ):
+            if self._phase_commitment is None or self._phase_finalizing:
+                raise EvidenceBundleInvalid("execution evidence requires a prior commitment")
+        elif event.kind == "finalization_start":
+            if self._phase_finalizing or self._phase_commitment is None:
+                raise EvidenceBundleInvalid("finalization start is out of evidence phase")
+        elif event.kind == "scoring_start":
+            if (
+                not self._phase_finalizing
+                or self._phase_commitment is None
+                or self._phase_scoring_started
+            ):
+                raise EvidenceBundleInvalid("scoring start is out of evidence phase")
+        elif event.kind == "scoring_result":
+            if not self._phase_scoring_started or self._phase_scoring_result:
+                raise EvidenceBundleInvalid("scoring result is out of evidence phase")
+        elif event.kind == "reconciliation":
+            if (
+                not self._phase_finalizing
+                or self._phase_commitment is None
+                or self._phase_reconciled
+                or self._phase_cleaned
+                or (self._phase_scoring_started and not self._phase_scoring_result)
+            ):
+                raise EvidenceBundleInvalid("reconciliation is out of evidence phase")
+        elif event.kind == "cleanup":
+            if not self._phase_reconciled or self._phase_cleaned:
+                raise EvidenceBundleInvalid("cleanup is out of evidence phase")
+        elif isinstance(payload, LifecycleTransitionPayload) and payload.state in (
+            "completed",
+            "failed",
+            "cancelled",
+        ):
+            early_failure = not self._phase_execution and payload.failure_kind in (
+                "preflight",
+                "infrastructure",
+            )
+            if (
+                not self._phase_finalizing
+                or self._phase_terminal
+                or (not early_failure and not self._phase_cleaned)
+            ):
+                raise EvidenceBundleInvalid("terminal lifecycle is out of evidence phase")
+
+    def _advance_event_phase(self, event: EventRecord) -> None:
+        payload = event.payload
+        if event.kind == "preflight":
+            self._phase_preflight = payload
+        elif isinstance(payload, BudgetCommitmentPayload):
+            self._phase_commitment = payload
+        elif isinstance(
+            payload,
+            (
+                ModelRequestPayload,
+                ModelResponsePayload,
+                UsageCostPayload,
+                ObservationPayload,
+                ActionBatchPayload,
+                EnvironmentStepPayload,
+                UserSimulatorExchangePayload,
+            ),
+        ) or (isinstance(payload, LifecycleTransitionPayload) and payload.state == "running"):
+            self._phase_execution = True
+        elif event.kind == "finalization_start":
+            self._phase_finalizing = True
+        elif event.kind == "scoring_start":
+            self._phase_scoring_started = True
+        elif event.kind == "scoring_result":
+            self._phase_scoring_result = True
+        elif event.kind == "reconciliation":
+            self._phase_reconciled = True
+        elif event.kind == "cleanup":
+            self._phase_cleaned = True
+        elif isinstance(payload, LifecycleTransitionPayload) and payload.state in (
+            "completed",
+            "failed",
+            "cancelled",
+        ):
+            self._phase_terminal = True
+
     def append(
         self,
         kind: EventKind,
@@ -771,6 +897,7 @@ class EvidenceWriter:
             },
             strict=True,
         )
+        self._validate_event_phase(event)
         encoded = event.to_canonical_json() + b"\n"
         try:
             _write_all(self._events_fd, encoded, self._calls)
@@ -784,6 +911,7 @@ class EvidenceWriter:
         self._head = event.event_id
         self._last_monotonic_ns = now_monotonic
         self._last_wall_time_ms = now_wall
+        self._advance_event_phase(event)
         return event
 
     def _cleanup_artifact_temp(self, fd: int, temp: str) -> BaseException | None:
@@ -958,6 +1086,29 @@ class EvidenceWriter:
             except (OSError, EvidenceError):
                 self._poison()
                 raise
+            early_preflight_failure = (
+                self._phase_preflight is not None
+                and not self._phase_preflight.passed
+                and self._phase_commitment is None
+                and not self._phase_execution
+                and intent.kind == "unscored"
+            )
+            if early_preflight_failure:
+                # No budget or side-effect authority existed, so there is nothing
+                # to reconcile or clean and no scorer operation to make durable.
+                self._phase_finalizing = True
+                return None
+            self._append_locked(
+                "finalization_start",
+                FinalizationStartPayload(
+                    finalization_id=finalization_id,
+                    intent=intent.kind,
+                    scoring_operation_id=scoring_operation_id,
+                    intent_digest=intent.intent_digest,
+                ),
+                monotonic_ns=monotonic_ns,
+                wall_time_ms=wall_time_ms,
+            )
             if intent.kind == "unscored":
                 return None
             assert scoring_operation_id is not None
@@ -1035,8 +1186,6 @@ class EvidenceWriter:
         wall_time_ms: int | None = None,
     ) -> EventRecord:
         """Persist only the completed/failed/cancelled snapshot during finalization."""
-
-        from local_operator.evaluation.evidence.models import LifecycleTransitionPayload
 
         with self._thread_lock:
             self._ensure_open()

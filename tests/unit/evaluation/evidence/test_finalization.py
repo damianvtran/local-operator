@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import pytest
 
@@ -397,6 +397,7 @@ def test_seal_rejects_orphan_model_request(tmp_path: Path) -> None:
     root = tmp_path / "bundle"
     writer = EvidenceWriter.create(root, manifest(), RedactionSet.from_resolved_values(()))
     try:
+        _append_provenance(writer, monotonic_ns=0, wall_time_ms=0)
         writer.append(
             "model_request",
             ModelRequestPayload(
@@ -425,7 +426,8 @@ def test_seal_rejects_orphan_model_request(tmp_path: Path) -> None:
             monotonic_ns=3,
             wall_time_ms=3,
         )
-        _append_completed(writer, monotonic_ns=4, wall_time_ms=4)
+        _append_final_receipts(writer, monotonic_ns=4, wall_time_ms=4)
+        _append_completed(writer, monotonic_ns=6, wall_time_ms=6)
         with pytest.raises(EvidenceBundleInvalid, match="independent seal verification"):
             writer.seal(_draft(score))
     finally:
@@ -555,6 +557,110 @@ def test_outcome_publication_before_state_update_still_derives_sealed(tmp_path: 
     assert "state_stale" in {issue.code for issue in report.issues}
 
 
+@pytest.mark.parametrize(
+    ("state", "reason", "failure_kind"),
+    [
+        ("failed", "crash", "crash"),
+        ("cancelled", "cancelled", "cancelled"),
+    ],
+)
+def test_post_running_terminal_without_score_keeps_reconcile_cleanup_order(
+    tmp_path: Path,
+    state: Literal["failed", "cancelled"],
+    reason: Literal["crash", "cancelled"],
+    failure_kind: Literal["crash", "cancelled"],
+) -> None:
+    root = tmp_path / "bundle"
+    writer = EvidenceWriter.create(root, manifest(), RedactionSet.from_resolved_values(()))
+    try:
+        _append_provenance(writer, monotonic_ns=0, wall_time_ms=0)
+        writer.append(
+            "observation",
+            ObservationPayload(observation_id="observation-0", sequence=0),
+            monotonic_ns=1,
+            wall_time_ms=1,
+        )
+        writer.begin_finalization(
+            "final",
+            None,
+            FinalizationIntent(kind="unscored"),
+            monotonic_ns=2,
+            wall_time_ms=2,
+        )
+        score = ScoreArtifact(status="unscored", reason=reason)
+        _append_final_receipts(writer, monotonic_ns=3, wall_time_ms=3)
+        writer.record_final_lifecycle(
+            LifecycleTransitionPayload(
+                previous_state_id=None,
+                state_id=OTHER_DIGEST,
+                state=state,
+                finalization_id="final",
+                preflight_seal_id=DIGEST,
+                commitment_id=OTHER_DIGEST,
+                reconciliation_id=DIGEST,
+                reconciliation_reportable=True,
+                score_id=score.score_id,
+                cleanup_result_id=OTHER_DIGEST,
+                rescue_required=False,
+                failure_kind=failure_kind,
+            ),
+            monotonic_ns=5,
+            wall_time_ms=5,
+        )
+    finally:
+        writer.close()
+    report = verify_bundle(root)
+    assert report.valid
+    assert [event.kind for event in report.events][-4:] == [
+        "finalization_start",
+        "reconciliation",
+        "cleanup",
+        "lifecycle_transition",
+    ]
+
+
+def test_early_preflight_failure_has_no_unused_authorities(tmp_path: Path) -> None:
+    root = tmp_path / "bundle"
+    writer = EvidenceWriter.create(root, manifest(), RedactionSet.from_resolved_values(()))
+    try:
+        writer.append(
+            "preflight",
+            PreflightPayload(
+                sealed_preflight_id=DIGEST,
+                plan_id=DIGEST,
+                receipt_ids=(),
+                passed=False,
+            ),
+            monotonic_ns=0,
+            wall_time_ms=0,
+        )
+        # Early failure has no budget commitment, scorer, reconciliation, or cleanup.
+        writer.begin_finalization(
+            "final",
+            None,
+            FinalizationIntent(kind="unscored"),
+            monotonic_ns=2,
+            wall_time_ms=2,
+        )
+        writer.record_final_lifecycle(
+            LifecycleTransitionPayload(
+                previous_state_id=None,
+                state_id=OTHER_DIGEST,
+                state="failed",
+                finalization_id="final",
+                preflight_seal_id=DIGEST,
+                failure_kind="preflight",
+            ),
+            monotonic_ns=1,
+            wall_time_ms=1,
+        )
+    finally:
+        writer.close()
+    report = verify_bundle(root)
+    assert report.valid
+    assert [event.kind for event in report.events] == ["preflight", "lifecycle_transition"]
+
+
 def test_infrastructure_failure_seals_unscored_not_binary_zero(tmp_path: Path) -> None:
     root = tmp_path / "bundle"
     writer = EvidenceWriter.create(root, manifest(), RedactionSet.from_resolved_values(()))
@@ -564,6 +670,8 @@ def test_infrastructure_failure_seals_unscored_not_binary_zero(tmp_path: Path) -
             "final",
             None,
             FinalizationIntent(kind="unscored"),
+            monotonic_ns=1,
+            wall_time_ms=1,
         )
         score = ScoreArtifact(status="unscored", reason="infrastructure_failure")
         _append_final_receipts(writer, monotonic_ns=2, wall_time_ms=2)
@@ -580,6 +688,7 @@ def test_infrastructure_failure_seals_unscored_not_binary_zero(tmp_path: Path) -
                 score_id=score.score_id,
                 cleanup_result_id=OTHER_DIGEST,
                 rescue_required=False,
+                failure_kind="crash",
             )
         )
         draft = OutcomeDraft(

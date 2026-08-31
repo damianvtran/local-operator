@@ -16,9 +16,11 @@ from typing import Any
 import pytest
 
 from local_operator.evaluation.evidence.models import (
+    BudgetCommitmentPayload,
     CancelPayload,
     FinalizationIntent,
     ObservationPayload,
+    PreflightPayload,
     ScoreArtifact,
     ScoringResultPayload,
 )
@@ -37,6 +39,31 @@ from tests.unit.evaluation.evidence.test_models import DIGEST, manifest
 
 def redactions(*values: str) -> RedactionSet:
     return RedactionSet.from_resolved_values(values)
+
+
+def _append_authority(writer: EvidenceWriter, *, timestamp: int = 0) -> None:
+    writer.append(
+        "preflight",
+        PreflightPayload(
+            sealed_preflight_id=DIGEST,
+            plan_id=DIGEST,
+            receipt_ids=(),
+            passed=True,
+        ),
+        monotonic_ns=timestamp,
+        wall_time_ms=timestamp,
+    )
+    writer.append(
+        "budget_commitment",
+        BudgetCommitmentPayload(
+            commitment_id=DIGEST,
+            budget_id=manifest().budget_id,
+            reservation_ids=(),
+            reserved_summary_digest=DIGEST,
+        ),
+        monotonic_ns=timestamp,
+        wall_time_ms=timestamp,
+    )
 
 
 class _OSCallsForTest:
@@ -64,6 +91,7 @@ def _hold_writer(root: str, ready: ProcessEvent, release: ProcessEvent) -> None:
 
 def _hold_finalizing(root: str, ready: ProcessEvent, release: ProcessEvent) -> None:
     with EvidenceWriter.create(root, manifest(), redactions()) as writer:
+        _append_authority(writer)
         writer.begin_finalization(
             "final",
             "score-op",
@@ -143,16 +171,33 @@ def test_create_append_artifact_abandon_and_verify_real_files(tmp_path: Path) ->
     root = tmp_path / "bundle"
     with EvidenceWriter.create(root, manifest(), redactions()) as writer:
         ref = writer.publish_artifact(b"safe", media_type="text/plain")
-        event = writer.append(
-            "observation",
-            ObservationPayload(observation_id="observation", sequence=0, artifacts=(ref,)),
+        writer.append(
+            "preflight",
+            PreflightPayload(
+                sealed_preflight_id=DIGEST,
+                plan_id=DIGEST,
+                receipt_ids=(),
+                passed=False,
+            ),
             monotonic_ns=1,
             wall_time_ms=2,
         )
-        abandonment = writer.abandon("operator_abandoned", "test-complete")
+        event = writer.append(
+            "error",
+            {
+                "error_id": "preflight",
+                "category": "infrastructure",
+                "diagnostic_code": "failed",
+                "detail_artifact": ref.model_dump(mode="json"),
+                "retryable": False,
+            },
+            monotonic_ns=2,
+            wall_time_ms=3,
+        )
+        abandonment = writer.abandon("preflight_failure", "test-complete")
     assert (root / "manifest.json").stat().st_mode & 0o777 == 0o600
     assert (root / "artifacts" / ref.sha256).read_bytes() == b"safe"
-    assert (root / "events.jsonl").read_bytes() == event.to_canonical_json() + b"\n"
+    assert (root / "events.jsonl").read_bytes().endswith(event.to_canonical_json() + b"\n")
     report = verify_bundle(root)
     assert report.valid
     assert report.terminal_state == "abandoned"
@@ -228,6 +273,7 @@ def test_sigkill_owner_death_allows_only_verified_abandonment(tmp_path: Path) ->
 def test_append_and_finalize_share_one_lock_order_without_corruption(tmp_path: Path) -> None:
     root = tmp_path / "bundle"
     writer = EvidenceWriter.create(root, manifest(), redactions())
+    _append_authority(writer)
     barrier = threading.Barrier(3)
     results: list[str] = []
 
@@ -272,6 +318,7 @@ def test_append_and_finalize_share_one_lock_order_without_corruption(tmp_path: P
 def test_finalizing_marker_precedes_scoring_start_and_closes_execution(tmp_path: Path) -> None:
     root = tmp_path / "bundle"
     with EvidenceWriter.create(root, manifest(), redactions()) as writer:
+        _append_authority(writer)
         start = writer.begin_finalization(
             "final",
             "score-op",
@@ -527,6 +574,7 @@ def test_death_between_finalizing_marker_and_scoring_start_is_abandon_only(
 
     root = tmp_path / "bundle"
     writer = EvidenceWriter.create(root, manifest(), redactions(), syscalls=FailScoringStartWrite())
+    _append_authority(writer)
     with pytest.raises(OSError, match="journal-cutpoint"):
         writer.begin_finalization(
             "final",
@@ -970,6 +1018,7 @@ def test_close_attempts_all_fds_and_releases_lock_on_error(
 def test_hardlinked_artifact_is_rejected(tmp_path: Path) -> None:
     root = tmp_path / "bundle"
     with EvidenceWriter.create(root, manifest(), redactions()) as writer:
+        _append_authority(writer)
         ref = writer.publish_artifact(b"safe", media_type="text/plain")
         os.link(root / "artifacts" / ref.sha256, tmp_path / "second-link")
         writer.append(

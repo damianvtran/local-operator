@@ -17,6 +17,7 @@ from local_operator.evaluation.evidence.models import (
     EventRecord,
     EvidenceArtifactRef,
     EvidenceManifest,
+    FinalizationStartPayload,
     LifecycleTransitionPayload,
     ModelRequestPayload,
     ModelResponsePayload,
@@ -181,6 +182,15 @@ def test_manifest_golden_bytes_are_deterministic() -> None:
                 request_artifact=ARTIFACT,
                 response_artifact=ARTIFACT,
                 receipt_id=DIGEST,
+            ),
+        ),
+        (
+            "finalization_start",
+            FinalizationStartPayload(
+                finalization_id="final",
+                intent="score",
+                scoring_operation_id="score-op",
+                intent_digest=DIGEST,
             ),
         ),
         (

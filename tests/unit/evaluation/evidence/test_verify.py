@@ -10,11 +10,20 @@ import pytest
 
 from local_operator.evaluation.evidence.models import (
     ActionBatchPayload,
+    BudgetCommitmentPayload,
     CancelPayload,
+    CleanupPayload,
     EnvironmentStepPayload,
+    EventRecord,
+    FinalizationIntent,
+    LifecycleTransitionPayload,
     ModelRequestPayload,
     ModelResponsePayload,
     ObservationPayload,
+    PreflightPayload,
+    ReconciliationPayload,
+    ScoreArtifact,
+    ScoringResultPayload,
     UsageCostPayload,
 )
 from local_operator.evaluation.evidence.store import (
@@ -26,10 +35,31 @@ from local_operator.evaluation.receipts import RedactionSet
 from tests.unit.evaluation.evidence.test_models import ARTIFACT, DIGEST, ROUTE, manifest
 
 
+def _append_authority(writer: EvidenceWriter, *, timestamp: int = 0) -> None:
+    writer.append(
+        "preflight",
+        PreflightPayload(sealed_preflight_id=DIGEST, plan_id=DIGEST, receipt_ids=(), passed=True),
+        monotonic_ns=timestamp,
+        wall_time_ms=timestamp,
+    )
+    writer.append(
+        "budget_commitment",
+        BudgetCommitmentPayload(
+            commitment_id=DIGEST,
+            budget_id=manifest().budget_id,
+            reservation_ids=(),
+            reserved_summary_digest=DIGEST,
+        ),
+        monotonic_ns=timestamp,
+        wall_time_ms=timestamp,
+    )
+
+
 def _bundle(tmp_path: Path, *, events: int = 2, artifact: bool = False) -> Path:
     tmp_path.mkdir(parents=True, exist_ok=True)
     root = tmp_path / "bundle"
     with EvidenceWriter.create(root, manifest(), RedactionSet.from_resolved_values(())) as writer:
+        _append_authority(writer)
         ref = writer.publish_artifact(b"safe", media_type="text/plain") if artifact else None
         for index in range(events):
             if index == 0 and ref is not None:
@@ -61,9 +91,9 @@ def test_event_tamper_truncate_reorder_duplicate_and_chain_mismatch(tmp_path: Pa
     root = _bundle(tmp_path)
     original = (root / "events.jsonl").read_bytes().splitlines(keepends=True)
 
-    data = json.loads(original[0])
+    data = json.loads(original[2])
     data["payload"]["diagnostic_code"] = "tampered"
-    original[0] = json.dumps(data, separators=(",", ":"), sort_keys=True).encode() + b"\n"
+    original[2] = json.dumps(data, separators=(",", ":"), sort_keys=True).encode() + b"\n"
     (root / "events.jsonl").write_bytes(b"".join(original))
     assert "event_hash_mismatch" in codes(root)
 
@@ -87,8 +117,6 @@ def test_event_tamper_truncate_reorder_duplicate_and_chain_mismatch(tmp_path: Pa
     data = json.loads(lines[1])
     data["previous_event_sha256"] = "f" * 64
     # Recompute through model validation so only the chain binding is wrong.
-    from local_operator.evaluation.evidence.models import EventRecord
-
     lines[1] = (
         EventRecord.model_validate({**data, "event_id": "0" * 64}, strict=True).to_canonical_json()
         + b"\n"
@@ -97,11 +125,224 @@ def test_event_tamper_truncate_reorder_duplicate_and_chain_mismatch(tmp_path: Pa
     assert "event_chain_mismatch" in codes(root)
 
 
+def _rewrite_canonical_order(root: Path, ordered_kinds: list[str]) -> None:
+    source = {
+        json.loads(line)["kind"]: json.loads(line)
+        for line in (root / "events.jsonl").read_bytes().splitlines()
+    }
+    previous = manifest().manifest_digest
+    records = []
+    for sequence, kind in enumerate(ordered_kinds):
+        value = source[kind]
+        value.update(
+            {
+                "sequence": sequence,
+                "previous_event_sha256": previous,
+                "event_id": "0" * 64,
+                "monotonic_ns": sequence,
+                "wall_time_ms": sequence,
+            }
+        )
+        event = EventRecord.model_validate(value, strict=True)
+        records.append(event.to_canonical_json())
+        previous = event.event_id
+    (root / "events.jsonl").write_bytes(b"\n".join(records) + b"\n")
+
+
+def _phase_bundle(tmp_path: Path) -> Path:
+    root = tmp_path / "bundle"
+    with EvidenceWriter.create(root, manifest(), RedactionSet.from_resolved_values(())) as writer:
+        writer.append(
+            "preflight",
+            PreflightPayload(
+                sealed_preflight_id=DIGEST, plan_id=DIGEST, receipt_ids=(), passed=True
+            ),
+            monotonic_ns=0,
+            wall_time_ms=0,
+        )
+        writer.append(
+            "budget_commitment",
+            BudgetCommitmentPayload(
+                commitment_id=DIGEST,
+                budget_id=manifest().budget_id,
+                reservation_ids=(),
+                reserved_summary_digest=DIGEST,
+            ),
+            monotonic_ns=1,
+            wall_time_ms=1,
+        )
+        writer.begin_finalization(
+            "final",
+            "score-op",
+            FinalizationIntent(kind="score", scorer_id="scorer", scorer_version="1"),
+            monotonic_ns=2,
+            wall_time_ms=2,
+        )
+        score = ScoreArtifact(status="scored", binary=1)
+        writer.record_scoring_result(
+            ScoringResultPayload(
+                finalization_id="final", scoring_operation_id="score-op", score=score
+            ),
+            monotonic_ns=3,
+            wall_time_ms=3,
+        )
+        writer.record_reconciliation(
+            ReconciliationPayload(
+                reconciliation_id=DIGEST,
+                budget_id=manifest().budget_id,
+                commitment_id=DIGEST,
+                reportable=True,
+                provider_cost_microusd=0,
+                environment_cost_microusd=0,
+                total_cost_microusd=0,
+            ),
+            monotonic_ns=4,
+            wall_time_ms=4,
+        )
+        writer.record_cleanup(
+            CleanupPayload(
+                cleanup_result_id=DIGEST,
+                cleanup_plan_id=DIGEST,
+                receipt_ids=(),
+                rescue_required=False,
+            ),
+            monotonic_ns=5,
+            wall_time_ms=5,
+        )
+        writer.record_final_lifecycle(
+            LifecycleTransitionPayload(
+                previous_state_id=None,
+                state_id=DIGEST,
+                state="completed",
+                finalization_id="final",
+                preflight_seal_id=DIGEST,
+                commitment_id=DIGEST,
+                reconciliation_id=DIGEST,
+                reconciliation_reportable=True,
+                score_id=score.score_id,
+                cleanup_result_id=DIGEST,
+                rescue_required=False,
+            ),
+            monotonic_ns=6,
+            wall_time_ms=6,
+        )
+    return root
+
+
+@pytest.mark.parametrize(
+    "order",
+    [
+        [
+            "budget_commitment",
+            "preflight",
+            "finalization_start",
+            "scoring_start",
+            "scoring_result",
+            "reconciliation",
+            "cleanup",
+            "lifecycle_transition",
+        ],
+        [
+            "preflight",
+            "finalization_start",
+            "budget_commitment",
+            "scoring_start",
+            "scoring_result",
+            "reconciliation",
+            "cleanup",
+            "lifecycle_transition",
+        ],
+        [
+            "preflight",
+            "budget_commitment",
+            "finalization_start",
+            "scoring_start",
+            "reconciliation",
+            "scoring_result",
+            "cleanup",
+            "lifecycle_transition",
+        ],
+        [
+            "preflight",
+            "budget_commitment",
+            "finalization_start",
+            "scoring_start",
+            "scoring_result",
+            "cleanup",
+            "reconciliation",
+            "lifecycle_transition",
+        ],
+        [
+            "preflight",
+            "budget_commitment",
+            "finalization_start",
+            "scoring_start",
+            "scoring_result",
+            "reconciliation",
+            "lifecycle_transition",
+            "cleanup",
+        ],
+    ],
+)
+def test_verifier_rejects_canonically_rehashed_phase_reordering(
+    tmp_path: Path, order: list[str]
+) -> None:
+    root = _phase_bundle(tmp_path)
+    _rewrite_canonical_order(root, order)
+    report = verify_bundle(root)
+    assert not report.valid
+    assert {"event_order_invalid", "lifecycle_invalid"} & {issue.code for issue in report.issues}
+
+
+def test_generic_append_cannot_bypass_finalization_receipt_order(tmp_path: Path) -> None:
+    root = tmp_path / "bundle"
+    with EvidenceWriter.create(root, manifest(), RedactionSet.from_resolved_values(())) as writer:
+        writer.append(
+            "preflight",
+            PreflightPayload(
+                sealed_preflight_id=DIGEST, plan_id=DIGEST, receipt_ids=(), passed=True
+            ),
+        )
+        writer.append(
+            "budget_commitment",
+            BudgetCommitmentPayload(
+                commitment_id=DIGEST,
+                budget_id=manifest().budget_id,
+                reservation_ids=(),
+                reserved_summary_digest=DIGEST,
+            ),
+        )
+        with pytest.raises(EvidenceBundleInvalid, match="cleanup.*phase"):
+            writer.append(
+                "cleanup",
+                CleanupPayload(
+                    cleanup_result_id=DIGEST,
+                    cleanup_plan_id=DIGEST,
+                    receipt_ids=(),
+                    rescue_required=False,
+                ),
+            )
+        with pytest.raises(EvidenceBundleInvalid, match="reconciliation.*phase"):
+            writer.append(
+                "reconciliation",
+                ReconciliationPayload(
+                    reconciliation_id=DIGEST,
+                    budget_id=manifest().budget_id,
+                    commitment_id=DIGEST,
+                    reportable=True,
+                    provider_cost_microusd=0,
+                    environment_cost_microusd=0,
+                    total_cost_microusd=0,
+                ),
+            )
+
+
 def test_semantic_graph_rejects_duplicate_and_out_of_order_receipts(
     tmp_path: Path,
 ) -> None:
     root = tmp_path / "bundle"
     with EvidenceWriter.create(root, manifest(), RedactionSet.from_resolved_values(())) as writer:
+        _append_authority(writer)
         writer.append(
             "usage_cost",
             UsageCostPayload(
@@ -144,6 +385,7 @@ def test_semantic_graph_rejects_broken_observation_action_step_links(
 ) -> None:
     root = tmp_path / "bundle"
     with EvidenceWriter.create(root, manifest(), RedactionSet.from_resolved_values(())) as writer:
+        _append_authority(writer)
         writer.append(
             "action_batch",
             ActionBatchPayload(
@@ -178,6 +420,7 @@ def test_open_graph_rejects_sequence_gap_duplicate_batch_and_step(
 ) -> None:
     root = tmp_path / "bundle"
     with EvidenceWriter.create(root, manifest(), RedactionSet.from_resolved_values(())) as writer:
+        _append_authority(writer)
         writer.append(
             "observation",
             ObservationPayload(observation_id="observation", sequence=99),
@@ -218,6 +461,7 @@ def test_open_graph_rejects_sequence_gap_duplicate_batch_and_step(
 def test_terminal_step_requires_final_observation_and_lifecycle(tmp_path: Path) -> None:
     root = tmp_path / "bundle"
     with EvidenceWriter.create(root, manifest(), RedactionSet.from_resolved_values(())) as writer:
+        _append_authority(writer)
         writer.append(
             "observation",
             ObservationPayload(observation_id="observation-0", sequence=0),
@@ -261,6 +505,7 @@ def test_terminal_step_requires_final_observation_and_lifecycle(tmp_path: Path) 
 def test_action_after_terminal_step_is_invalid(tmp_path: Path) -> None:
     root = tmp_path / "bundle"
     with EvidenceWriter.create(root, manifest(), RedactionSet.from_resolved_values(())) as writer:
+        _append_authority(writer)
         writer.append(
             "observation",
             ObservationPayload(observation_id="observation-0", sequence=0),
@@ -339,15 +584,11 @@ def test_artifact_substitution_count_media_unknown_and_unreferenced(tmp_path: Pa
 
     root = _bundle(tmp_path / "count", artifact=True)
     raw = (root / "events.jsonl").read_bytes().splitlines()
-    data = json.loads(raw[0])
+    data = json.loads(raw[2])
     data["payload"]["artifacts"][0]["byte_count"] = 99
-    from local_operator.evaluation.evidence.models import EventRecord
-
+    tampered = EventRecord.model_validate({**data, "event_id": "0" * 64}, strict=True)
     (root / "events.jsonl").write_bytes(
-        EventRecord.model_validate({**data, "event_id": "0" * 64}, strict=True).to_canonical_json()
-        + b"\n"
-        + raw[1]
-        + b"\n"
+        raw[0] + b"\n" + raw[1] + b"\n" + tampered.to_canonical_json() + b"\n"
     )
     assert "artifact_count_mismatch" in codes(root)
 
