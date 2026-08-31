@@ -159,6 +159,30 @@ def isolate_environment(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def reset_store_maintenance() -> Iterator[None]:
+    """Give every test a process that has not yet swept the session store.
+
+    ``session_factory`` runs its four whole-store maintenance passes ONCE per
+    process (see ``_start_store_maintenance``): a store does not become dirty
+    again because the user pressed ``/resume``, and re-sweeping cost every
+    resume the full walk. That guard is module-global, so without this fixture
+    the FIRST test to call ``_prepare`` in an interpreter is the only one whose
+    sweeps run, and every later test silently gets a no-op — which is how
+    ``test_prepare_store_scans_do_not_stall_the_loop`` fails only when it runs
+    after ``test_prepare_claims_before_a_concurrent_sweep_can_reap_the_dir``
+    and passes alone. Same class of leaked global state as the root logger
+    below, answered the same way rather than per-test.
+    """
+    from local_operator.session_factory import reset_store_maintenance_for_tests
+
+    reset_store_maintenance_for_tests()
+    try:
+        yield
+    finally:
+        reset_store_maintenance_for_tests()
+
+
+@pytest.fixture(autouse=True)
 def restore_root_logger() -> Iterator[None]:
     """Give every test the process-global logging state back as it found it.
 

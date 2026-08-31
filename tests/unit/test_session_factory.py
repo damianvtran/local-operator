@@ -7,6 +7,7 @@ the real wiring (hosting ``test``) where the contract demands it.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import inspect
 import json
 import os
@@ -1229,7 +1230,10 @@ async def test_prepare_claims_before_a_concurrent_sweep_can_reap_the_dir(
     mirroring the real sweep's guard so a claimed dir is always left alone.
     """
     from local_operator.session.retention import _is_claimed, sweep_sessions
-    from local_operator.session_factory import _prepare
+    from local_operator.session_factory import (
+        _prepare,
+        await_store_maintenance_for_tests,
+    )
 
     config_manager = FakeConfigManager({"hosting": "test", "model_name": "test-model"})
     registry = FakeRegistry(tmp_config_dir)
@@ -1317,6 +1321,13 @@ async def test_prepare_claims_before_a_concurrent_sweep_can_reap_the_dir(
             cast("AgentRegistry", registry),
             has_ui=False,
         )
+        # The sweep is dispatched as a background task rather than awaited by
+        # ``_prepare``, so wait for it here: ``survived_the_sweep`` below is an
+        # observation made INSIDE ``reaping_sweep``, and without this the
+        # assertion races the sweep it is asserting about. The ordering under
+        # test is unaffected — the claim still happens before anything creates
+        # the directory, which is what ``reaped_at_mkdir`` pins independently.
+        await await_store_maintenance_for_tests()
     finally:
         retention_mod.sweep_from_config = original
 
@@ -2604,3 +2615,161 @@ def test_a_corrupt_payload_is_memoised_because_it_describes_the_file(tmp_path: P
     # Repaired by hand: the key moves, so the new verdict is derived, not served.
     resume_mod.mark_session_origin(sessions / "cut", resume_mod.ORIGIN_SUBAGENT)
     assert resume_mod.recent_sessions(tmp_path, limit=10**9) == []
+
+
+# --- whole-store maintenance is off the construction path --------------------
+
+
+@pytest.mark.asyncio
+async def test_store_maintenance_does_not_block_session_construction(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``_prepare`` returns without waiting for the store sweeps.
+
+    The four passes are whole-store disk walks that have nothing to do with the
+    session being built; awaiting them put their cost (measured 545 ms of a
+    708 ms ``create_session`` on a 3574-session store) on the critical path of
+    boot AND of every ``/resume``. They must be dispatched, not awaited.
+
+    Pinned by observing the task handle, not by parking a worker thread: under
+    xdist the default thread pool can starve, and a test that waits on a
+    ``to_thread``'d Event then flakes as "never started" rather than catching
+    the regression it was written for. The handle existing and not being done
+    at the moment ``_prepare`` returns is the same fact, without occupying a
+    worker.
+    """
+    from local_operator.session import retention as retention_mod
+    from local_operator.session_factory import (
+        _prepare,
+        await_store_maintenance_for_tests,
+    )
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def blocking_pass(*_a: Any, **_k: Any) -> Any:
+        started.set()
+        await release.wait()
+        return retention_mod.SweepResult()
+
+    # Patch the coroutine the dispatcher schedules, not the inner sweep: that
+    # is the thing ``_prepare`` used to await, so a regression that awaits it
+    # again hangs this test on ``wait_for`` rather than merely slowing it.
+    monkeypatch.setattr(session_factory, "_run_store_maintenance", blocking_pass)
+
+    config_manager = FakeConfigManager({"hosting": "test", "model_name": "test-model"})
+    registry = FakeRegistry(tmp_config_dir)
+    credential_manager = MagicMock()
+    credential_manager.get_credential.return_value = None
+
+    try:
+        await asyncio.wait_for(
+            _prepare(
+                _args(hosting="test", model="test-model"),
+                cast("ConfigManager", config_manager),
+                credential_manager,
+                cast("AgentRegistry", registry),
+                has_ui=False,
+            ),
+            timeout=5.0,
+        )
+        # Dispatched, not awaited: the task exists and has not finished.
+        from local_operator import session_factory as sf
+
+        task = sf._STORE_MAINTENANCE_TASK
+        assert task is not None, "store maintenance was never dispatched"
+        assert (
+            not task.done()
+        ), "store maintenance finished before _prepare returned — it was awaited"
+        await started.wait()
+    finally:
+        release.set()
+        await await_store_maintenance_for_tests()
+
+
+@pytest.mark.asyncio
+async def test_store_maintenance_runs_once_per_process(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A second session in the same process does not re-sweep the store.
+
+    ``/new`` and ``/resume`` re-enter ``create_session``, so before this change
+    every resume re-paid all four whole-store walks — on a store the same
+    process had swept seconds earlier. Maintenance answers a question about the
+    STORE, and the store does not become dirty because the user pressed
+    ``/resume``.
+    """
+    from local_operator.session import retention as retention_mod
+    from local_operator.session_factory import (
+        _prepare,
+        await_store_maintenance_for_tests,
+    )
+
+    calls: list[int] = []
+
+    def counting_sweep(*_a: Any, **_k: Any) -> Any:
+        calls.append(1)
+        return retention_mod.SweepResult()
+
+    monkeypatch.setattr(retention_mod, "sweep_from_config", counting_sweep)
+
+    config_manager = FakeConfigManager({"hosting": "test", "model_name": "test-model"})
+    registry = FakeRegistry(tmp_config_dir)
+    credential_manager = MagicMock()
+    credential_manager.get_credential.return_value = None
+
+    for _ in range(3):
+        await _prepare(
+            _args(hosting="test", model="test-model"),
+            cast("ConfigManager", config_manager),
+            credential_manager,
+            cast("AgentRegistry", registry),
+            has_ui=False,
+        )
+        await await_store_maintenance_for_tests()
+
+    assert calls == [1], f"the store was swept {len(calls)} times in one process"
+
+
+@pytest.mark.asyncio
+async def test_a_failing_maintenance_pass_never_reaches_the_session(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Best-effort, unchanged: a sweep that raises must not fail session start,
+    and the later passes still run. The contract these carried when they were
+    awaited inline survives the move to a background task."""
+    from local_operator import resume as resume_mod
+    from local_operator.session import retention as retention_mod
+    from local_operator.session_factory import (
+        _prepare,
+        await_store_maintenance_for_tests,
+    )
+
+    def exploding_sweep(*_a: Any, **_k: Any) -> Any:
+        raise RuntimeError("disk on fire")
+
+    ran: list[str] = []
+
+    def note_titles(*_a: Any, **_k: Any) -> int:
+        ran.append("titles")
+        return 0
+
+    monkeypatch.setattr(retention_mod, "sweep_from_config", exploding_sweep)
+    monkeypatch.setattr(resume_mod, "backfill_session_titles", note_titles)
+
+    config_manager = FakeConfigManager({"hosting": "test", "model_name": "test-model"})
+    registry = FakeRegistry(tmp_config_dir)
+    credential_manager = MagicMock()
+    credential_manager.get_credential.return_value = None
+
+    plan = await _prepare(
+        _args(hosting="test", model="test-model"),
+        cast("ConfigManager", config_manager),
+        credential_manager,
+        cast("AgentRegistry", registry),
+        has_ui=False,
+    )
+    await await_store_maintenance_for_tests()
+
+    assert plan is not None, "a failing sweep took the session down with it"
+    assert ran == ["titles"], "a failing pass stopped the passes after it"

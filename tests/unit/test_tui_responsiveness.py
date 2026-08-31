@@ -226,9 +226,17 @@ async def test_prepare_store_scans_do_not_stall_the_loop(
     probe over a store shaped like the operator's (many title-less sessions).
     The scans themselves still RUN (their effects are asserted); only their
     thread placement is under test.
+
+    They are also no longer AWAITED by ``_prepare`` — they are dispatched as a
+    background task so session construction does not pay for them — so the wait
+    below is what makes "did they run" answerable at all. Without it this test
+    races the task it is asserting about.
     """
     from local_operator import resume as resume_mod
-    from local_operator.session_factory import _prepare
+    from local_operator.session_factory import (
+        _prepare,
+        await_store_maintenance_for_tests,
+    )
     from tests.unit.test_session_factory import FakeConfigManager, FakeRegistry, _args
 
     config_dir = tmp_path / ".local-operator"
@@ -261,6 +269,7 @@ async def test_prepare_store_scans_do_not_stall_the_loop(
             has_ui=True,
             cwd=str(tmp_path),
         )
+        await await_store_maintenance_for_tests()
     finally:
         await recorder.stop()
     recorder.assert_no_stall_loaded()
