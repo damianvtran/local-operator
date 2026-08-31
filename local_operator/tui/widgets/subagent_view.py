@@ -2252,6 +2252,12 @@ class SubagentView(Vertical):
                 )
                 # Re-raised for the duration of the insert: see the comment
                 # above. Cleared again by `_finish_history_mount`.
+                # NOTE: this MUST NOT be visible to `_history_state_text`
+                # before the reconcile below has run — `show()` repaints the
+                # hint from `_history_loading` and a True here paints
+                # "loading earlier…" over the just-settled "transcript
+                # start". `_finish_history_mount` re-paints on clear, so the
+                # hint always ends at the settled text.
                 self._history_loading = True
                 self._blocks[prefix:prefix] = new_blocks
                 self._entries[prefix:prefix] = new_entries
@@ -2269,14 +2275,25 @@ class SubagentView(Vertical):
         """The prepend path's settle callback: the page is fully mounted.
 
         `_apply_history_page` clears `_history_loading` synchronously, which
-        is correct for every reader of the flag EXCEPT the page-back latch's
-        in-flight suppression — that one must span the insert's own settle
-        (gap settlement plus the anchor restore), or a wheel still in motion
-        re-arms mid-mount. This callback is the earliest moment that is true,
-        and it is the same moment the parent view's `_resume_paging` gate
-        opens.
+        is correct for every reader of the flag EXCEPT two: the page-back
+        latch's in-flight suppression — that one must span the insert's own
+        settle (gap settlement plus the anchor restore), or a wheel still in
+        motion re-arms mid-mount — and `_history_state_text`, which renders
+        "loading earlier…" for as long as the flag is set. The prepend path
+        therefore re-raises the flag after `_apply_history_page`'s clear, and
+        this callback is where it comes down for good, at the same moment the
+        parent view's `_resume_paging` gate opens.
+
+        The repaint matters as much as the clear: the reconcile that follows
+        a prepend drives `show()`, which repaints the hint from the flag and
+        painted "loading earlier…" OVER the settled "transcript start" text —
+        the state was correct while the visible chrome said a read was still
+        in flight, so a reader (and a test asserting the rendered page) saw a
+        walk that never finished. Painting here makes the settled text the
+        last word regardless of repaint order.
         """
         self._history_loading = False
+        self._paint_history_state()
 
     def _tail_entry(self, gone: bool, progress: str) -> SubagentEntry | None:
         """The row that TERMINATES the page, when the page needs one.
