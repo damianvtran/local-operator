@@ -374,10 +374,19 @@ class SessionTable:
         return out
 
     def notify_list_changed(self) -> None:
-        # Structural change: the cached durable rows and merged summaries may
-        # both be stale (a session registered, ended, or woke). Drop them so
-        # the repaint this notification triggers reads fresh state.
-        self.invalidate_summaries_cache()
+        """Wake the list SSE subscribers for a repaint.
+
+        Deliberately does NOT invalidate the summaries cache. Every projection
+        push from a live registrant calls this (~30x/s while streaming), and
+        invalidating here re-ran the full durable directory scan on each one —
+        which defeated the TTL cache in exactly the busy case it was built for
+        (measured: 30 repaints produced 30 scans at 42-92 ms each). A push
+        changes only LIVE fields, and ``_merge_summaries`` recomputes those
+        from ``self.entries`` on every build, so the cached durable rows stay
+        correct across it. Callers that genuinely change the DURABLE set
+        (registration, death, wake, seen) call
+        :meth:`invalidate_summaries_cache` themselves.
+        """
         for queue in self.list_subscribers:
             try:
                 queue.put_nowait(None)
@@ -648,7 +657,15 @@ async def _dial(daemon: "MobileDaemon", entry: SessionEntry) -> None:
                     # was evicted. Its identity remains fenced by the epoch ledger.
                     continue
                 entry.projection = captured
-                daemon.table.provisional_active.discard(entry.record.session_id)
+                # Only the FIRST push after a wake changes the durable picture:
+                # it retires the provisional-active marker, which moves the row
+                # between sections. Invalidating on EVERY push is what defeated
+                # the summaries cache — a streaming session pushes ~30x/s and
+                # each one re-ran the full directory scan.
+                session_id = entry.record.session_id
+                if session_id in daemon.table.provisional_active:
+                    daemon.table.provisional_active.discard(session_id)
+                    daemon.table.invalidate_summaries_cache()
                 daemon.table.notify_list_changed()
                 _fan_out(entry, daemon)
             # acks/errors are matched by req id in _request's future map.
@@ -1278,6 +1295,9 @@ class MobileDaemon:
                                     pass
                     self._prune_projection_generation(session_id)
         if changed:
+            # Structural: a session registered, was replaced, or died, so the
+            # durable listing itself may have moved.
+            self.table.invalidate_summaries_cache()
             self.table.notify_list_changed()
 
     def retain_provisional_active(self, session_id: str) -> None:
@@ -1300,6 +1320,9 @@ class MobileDaemon:
                                 queue.put_nowait(_projection_frame(projection))
                             except asyncio.QueueFull:
                                 pass
+                    # Structural: the wake settled into a durable (or dead)
+                    # session, which changes what the listing scan returns.
+                    self.table.invalidate_summaries_cache()
                     self.table.notify_list_changed()
             finally:
                 self._wake_settle_tasks.pop(session_id, None)
@@ -1863,6 +1886,8 @@ def build_app(daemon: MobileDaemon):
                 # remains authoritative until a live projection arrives or the
                 # attempt fails, so even a 50 ms worker is observable in list SSE.
                 daemon.table.provisional_active.add(session_id)
+                # Structural: the session moves to the active section.
+                daemon.table.invalidate_summaries_cache()
                 daemon.table.notify_list_changed()
                 projection = daemon.session_projections.get(session_id) or _durable_projection(
                     session_id
@@ -1884,6 +1909,8 @@ def build_app(daemon: MobileDaemon):
                     client, detail = await continue_command(config_dir(), command)
                 except BaseException:
                     daemon.table.provisional_active.discard(session_id)
+                    # Structural: the failed wake moves it back to previous.
+                    daemon.table.invalidate_summaries_cache()
                     daemon.table.notify_list_changed()
                     raise
                 client.close()

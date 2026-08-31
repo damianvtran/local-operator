@@ -247,7 +247,10 @@ async def test_summaries_caches_durable_rows_within_ttl(tmp_path, monkeypatch) -
 
 @pytest.mark.asyncio
 async def test_summaries_invalidation_forces_rescan(tmp_path, monkeypatch) -> None:
-    """notify_list_changed drops the cache so the next read rescans."""
+    """An explicit structural invalidation drops the cache so the next read
+    rescans. This is the seam the register/death/wake/seen sites call; a bare
+    ``notify_list_changed`` (a projection repaint) deliberately does NOT
+    invalidate — see test_projection_repaints_do_not_rescan_the_store."""
     cfg = tmp_path / "config"
     (cfg / "sessions").mkdir(parents=True)
     monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
@@ -265,9 +268,48 @@ async def test_summaries_invalidation_forces_rescan(tmp_path, monkeypatch) -> No
 
     table = SessionTable()
     await table.summaries()
-    table.notify_list_changed()
+    table.invalidate_summaries_cache()
     await table.summaries()
     assert calls["n"] == 2  # invalidation forced a second scan
+
+
+@pytest.mark.asyncio
+async def test_projection_repaints_do_not_rescan_the_store(tmp_path, monkeypatch) -> None:
+    """A streaming session's repaints must NOT re-run the durable scan (A3).
+
+    Every projection push calls ``notify_list_changed`` (~30x/s). While that
+    invalidated the cache, one streaming session re-imposed a 42-92 ms
+    blocking scan per repaint — restoring the starvation this work removed and
+    defeating the TTL in exactly the busy case it was built for.
+    """
+    cfg = tmp_path / "config"
+    (cfg / "sessions").mkdir(parents=True)
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+
+    calls = {"n": 0}
+    from local_operator import resume as resume_module
+
+    real_rows = resume_module.recent_session_rows
+
+    def counting_rows(config_dir, limit=None):
+        calls["n"] += 1
+        return real_rows(config_dir, limit)
+
+    monkeypatch.setattr(resume_module, "recent_session_rows", counting_rows)
+
+    table = SessionTable()
+    await table.summaries()
+    calls["n"] = 0
+    # One second of streaming: a repaint notification per push.
+    for _ in range(30):
+        table.notify_list_changed()
+        await table.summaries()
+    assert calls["n"] == 0, "projection repaints must not rescan the durable store"
+
+    # A structural change still refreshes, so correctness is preserved.
+    table.invalidate_summaries_cache()
+    await table.summaries()
+    assert calls["n"] == 1
 
 
 @pytest.mark.asyncio
