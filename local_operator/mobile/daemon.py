@@ -88,6 +88,39 @@ MAX_RETAINED_SESSION_PROJECTIONS = 64
 SUMMARIES_CACHE_TTL_S = 1.0
 
 
+def _durable_fold_cache():
+    """The daemon-wide cache of incremental durable folds (see
+    :mod:`.durable`). Created lazily so importing the daemon never pays for
+    the fold machinery, and so tests that patch ``config_dir`` before first
+    use get a cache keyed by THEIR directories."""
+    global _DURABLE_FOLD_CACHE
+    if _DURABLE_FOLD_CACHE is None:
+        from local_operator.mobile.durable import DurableFoldCache
+
+        _DURABLE_FOLD_CACHE = DurableFoldCache()
+    return _DURABLE_FOLD_CACHE
+
+
+_DURABLE_FOLD_CACHE: Any = None
+
+
+def _custom_snapshot_cache():
+    """The daemon-wide newest-wins custom-snapshot cache (see
+    :class:`.durable.CustomSnapshotCache`). Deliberately separate from the
+    fold cache: a deep roster asks every child transcript for its todo
+    snapshot, and routing those reads through the bounded fold cache would
+    evict the ROOT's fold — re-folding a 50 MB transcript on the next open."""
+    global _CUSTOM_SNAPSHOT_CACHE
+    if _CUSTOM_SNAPSHOT_CACHE is None:
+        from local_operator.mobile.durable import CustomSnapshotCache
+
+        _CUSTOM_SNAPSHOT_CACHE = CustomSnapshotCache()
+    return _CUSTOM_SNAPSHOT_CACHE
+
+
+_CUSTOM_SNAPSHOT_CACHE: Any = None
+
+
 class _StaleProjection(Exception):
     """A fenced owner frame with no retained payload to republish."""
 
@@ -364,7 +397,14 @@ def _durable_user_session_dir(session_id: str) -> Path | None:
 
 
 def _durable_projection(session_id: str) -> SessionProjection | None:
-    """Fold a user conversation and its routable child lineage from disk."""
+    """Fold a user conversation and its routable child lineage from disk.
+
+    Reads through the daemon's incremental fold cache (:mod:`.durable`): the
+    first open of a session pays one full fold, every later open reads only
+    the bytes appended since. The projection object itself is rebuilt on
+    every call (callers mutate and fence it), so what is cached is the fold,
+    not the projection.
+    """
     from local_operator.mobile.projection import (
         SUBAGENT_ERROR_CHARS,
         SUBAGENT_OUTCOME_CHARS,
@@ -374,12 +414,17 @@ def _durable_projection(session_id: str) -> SessionProjection | None:
         _compact_multiline,
     )
     from local_operator.resume import stored_session_title
-    from local_operator.session.session import SUBAGENT_ROSTER_CUSTOM_TYPE
-    from local_operator.session.transcript import Transcript
     from local_operator.tools.builtin import todo_snapshot
 
     directory = _durable_user_session_dir(session_id)
     if directory is None:
+        return None
+    try:
+        state = _durable_fold_cache().load(directory)
+    except FileNotFoundError:
+        return None
+    except Exception:  # noqa: BLE001 — an odd transcript yields no projection, not a 500
+        logger.exception("durable fold failed for session %s", session_id)
         return None
     projection = SessionProjection(
         session_id=session_id,
@@ -389,14 +434,15 @@ def _durable_projection(session_id: str) -> SessionProjection | None:
         cwd="",
         model_label="",
     )
-    transcript = Transcript(directory)
     fold = ProjectionFold(projection)
-    fold.fold_history(transcript.build_llm_history())
+    # fold_history reads messages without mutating them, so the cached list
+    # can be shared; the fold builds its own TranscriptEntry rows.
+    fold.fold_history(state.history)
 
     # The persisted roster is the restart-safe ownership record for child
     # routes. Rebuilding from it keeps old session projections useful without
     # retaining every child's unbounded transcript in daemon memory forever.
-    snapshot = transcript.latest_custom(SUBAGENT_ROSTER_CUSTOM_TYPE) or {}
+    snapshot = state.latest_customs.get("subagent_roster") or {}
     jobs = {str(row.get("id") or ""): row for row in snapshot.get("jobs") or []}
     records = [row for row in snapshot.get("records") or [] if row.get("job_id")]
     by_parent: dict[str | None, list[str]] = {}
@@ -408,7 +454,6 @@ def _durable_projection(session_id: str) -> SessionProjection | None:
         job = jobs.get(job_id, {})
         raw_dir = record.get("session_dir")
         child_dir = Path(str(raw_dir)) if raw_dir else None
-        child_transcript = Transcript(child_dir) if child_dir and child_dir.is_dir() else None
         status = str(record.get("outcome") or job.get("status") or "cancelled")
         if status in ("queued", "starting", "running"):
             status = "cancelled"
@@ -428,8 +473,14 @@ def _durable_projection(session_id: str) -> SessionProjection | None:
             ancestors.insert(0, str(ancestor.get("label") or cursor))
             cursor = str(ancestor["parent_job_id"]) if ancestor.get("parent_job_id") else None
         raw_todos = todo_snapshot(child_dir.name) if child_dir else []
-        if not raw_todos and child_transcript is not None:
-            raw_todos = (child_transcript.latest_custom("todo_snapshot") or {}).get("items") or []
+        if not raw_todos and child_dir is not None and child_dir.is_dir():
+            # The child's todo snapshot through the dedicated snapshot cache:
+            # a deep roster used to full-parse every child transcript on every
+            # durable projection, once per child. Routed around the fold cache
+            # so an 80-child roster cannot evict the root's fold.
+            raw_todos = (
+                _custom_snapshot_cache().load(child_dir, "todo_snapshot") or {}
+            ).get("items") or []
         row = SubagentRow(
             job_id=job_id,
             label=str(record.get("label") or job_id),
@@ -664,16 +715,15 @@ def _transcript_entry_json(entry: Any) -> dict[str, Any]:
 def _history_page(
     session_id: str, before: str | None, limit: int, *, durable_only: bool = True
 ) -> tuple[list[Any], bool]:
-    """Fold the session's full on-disk transcript and return the page of
-    entries immediately OLDER than ``before`` (chronological within the page)
-    plus whether more history exists beyond it.
+    """Return the page of folded entries immediately OLDER than ``before``
+    (chronological within the page) plus whether more history exists beyond it.
 
-    Runs off the event loop (``asyncio.to_thread`` at the call site): folding
-    a long transcript rehydrates every message and is not loop-safe work.
+    Reads through the daemon's incremental fold cache (:mod:`.durable`), so a
+    page costs one fold per session per daemon lifetime plus the appended
+    tail since — not the whole-file re-parse every page used to pay. Runs off
+    the event loop (``asyncio.to_thread`` at the call site): even the cached
+    path touches disk and the fold is not loop-safe work.
     """
-    from local_operator.mobile.projection import fold_messages_to_entries
-    from local_operator.session.transcript import Transcript
-
     if durable_only:
         directory = _durable_user_session_dir(session_id)
     else:
@@ -690,9 +740,10 @@ def _history_page(
     if directory is None or not (directory / "transcript.jsonl").is_file():
         return [], False
     try:
-        transcript = Transcript(directory)
-        history = transcript.build_llm_history()
-        entries = fold_messages_to_entries(history)
+        state = _durable_fold_cache().load(directory)
+        entries = state.render
+    except FileNotFoundError:
+        return [], False
     except Exception:  # noqa: BLE001 — an odd transcript yields no history, not a 500
         logger.exception("history fold failed for session %s", session_id)
         return [], False
