@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import gc
 import json
-import time
+import threading
 import weakref
 
 import pytest
@@ -2144,78 +2144,68 @@ async def test_the_loop_stays_responsive_while_several_subagents_run(tmp_path, m
     with 116 of 121 stall samples inside the tokenizer). The user-visible
     symptom was an agent reporting that its subagents "only run when I yield".
 
-    WHY THIS MEASURES LOOP-THREAD CPU AND NOT WALL-CLOCK LATENESS.
+    WHY THIS IS A STRUCTURAL SPY AND NOT A TIME BOUND.
 
-    The obvious probe — a watchdog that asks to be woken every 5 ms and
-    records how late it actually was — measures the wrong thing, and two
-    attempts to bound it failed in the same way (#418 raised a flat 1.0 s
-    bound to a calibrated one; #373 is that calibrated bound still going red
-    on unmodified ``main``). Wall lateness goes wide whenever the loop thread
-    is not SCHEDULED, which is a different property from the loop thread being
-    BUSY, and only the second one is a starved sibling.
+    Two attempts to bound a watchdog failed in the same way. #418 replaced a
+    flat 1.0 s wall-clock bound with a calibrated one; #373 is that calibrated
+    bound still going red on unmodified ``main`` (reproduced here: 3 of 12
+    under six CPU spinners, margins 1.07-1.22x). Converting the watchdog to
+    ``time.thread_time`` (the statistic ``test_loop_liveness.py`` adopted in
+    #136) removed the *load* sensitivity — wall lateness under 8 CPU hogs
+    exploded to 943-2034 ms while loop-thread CPU stayed at 393-492 ms — but
+    not the *core-speed* sensitivity. A slower CI core burns more CPU-seconds
+    on the same tokenizer pass: ubuntu-latest 3.13 reported 1056 ms and
+    1156 ms of loop-thread CPU against a 950 ms bound, on an unmodified
+    healthy tree, while the same SHA's parallel run passed. No portable
+    numeric bound can sit above CI's healthy 1156 ms and below this box's
+    1315 ms regression.
 
-    Measured on this exact workload, worst sample per run:
-
-    ======================  ==================  ==================
-    condition               wall lateness       loop-thread CPU
-    ======================  ==================  ==================
-    healthy, idle           440-684 ms          373-533 ms
-    healthy, 8 CPU hogs     943-2034 ms         393-492 ms
-    regressed (see below)   1376-1672 ms        1363-1444 ms
-    ======================  ==================  ==================
-
-    The wall column is why this test was flaky: under load a HEALTHY tree
-    produces 943-2034 ms, which overlaps the regressed range outright, so no
-    bound can separate them — the calibrated one failed 3 of 12 runs under six
-    spinners with margins of 1.07-1.22x, i.e. it was reporting scheduler noise.
-    The CPU column does not move with load (393-492 ms loaded vs 373-533 ms
-    idle) while still showing the regression at 2.6x clear of the healthy
-    ceiling. ``time.thread_time`` is per-thread and excludes time asleep or
-    waiting on the GIL, so a sample grows only when the loop thread genuinely
-    ran without yielding.
-
-    That is the same statistic, for the same reason, that
-    ``tests/unit/tools/test_loop_liveness.py`` adopted in #136 after its
-    wall-clock gap bound (``MAX_GAP_S = 0.12``) proved unfixable; see that
-    module's docstring for the fuller argument. This test now follows it
-    rather than keeping a second, load-sensitive convention beside it.
-
-    "REGRESSED" above is the seam from 70e66526 put back: forcing the
-    compaction rulers inline on the loop by lifting ``OFFLOAD_MIN_CHARS``
-    above any history this workload builds. That is the reproduction to use
-    when changing this test — a bound that does not fail against it is not
-    guarding anything.
-
-    WHY ``max()``. A synchronous stall blocks the watchdog itself, so the whole
-    stretch collapses into exactly ONE oversized sample rather than spreading
-    across the distribution. A percentile is blind here: measured against the
-    regressed tree, p99 is 114-189 ms against a healthy p99 of 108-273 ms,
-    because nearest-rank p99 discards the top 1% and the top 1% is the entire
-    evidence.
+    The contract this test can actually pin, load-immune and core-speed-
+    immune, is the one ``test_loop_liveness.py`` already pins for the image
+    path: the function that moved OFF the loop is observed running on a
+    thread that is not the loop's. ``Session._offloaded`` hops
+    ``estimate_messages_tokens`` / ``find_cut_point`` through
+    ``asyncio.to_thread`` once the history crosses ``OFFLOAD_MIN_CHARS``.
+    Spying those two names on ``local_operator.compaction.api`` (the module
+    ``_offloaded`` resolves by name) records the thread they ran on; the
+    assertion is that every call of a history large enough to offload ran
+    off-loop. Putting the rulers back inline (lifting ``OFFLOAD_MIN_CHARS``
+    above any history this workload builds — the 70e66526 seam reversed) is
+    the reproduction: the spy then sees the loop thread and the test dies.
 
     The workload is calibrated, not arbitrary. It has to build a history big
-    enough that the gate's tokenizer pass is expensive, because that is the
-    stretch under test; at a smaller size both variants pass and the test
-    proves nothing.
+    enough that the gate's tokenizer pass is expensive AND crosses the
+    offload threshold, because that is the stretch under test; at a smaller
+    size both variants pass and the test proves nothing.
     """
+    import local_operator.compaction.api as compaction_api
+
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
     parent = make_session(tmp_path, LongStream())
 
-    stop = asyncio.Event()
-    #: CPU time the loop thread accumulated between two watchdog wakes. A
-    #: synchronous stretch on the loop IS the loop thread running without
-    #: yielding, so it lands as one sample the size of the stretch.
-    loop_cpu: list[float] = []
+    loop_thread = threading.get_ident()
+    seen: dict[str, list[int]] = {
+        "estimate_messages_tokens": [],
+        "find_cut_point": [],
+    }
 
-    async def watchdog() -> None:
-        last = time.thread_time()
-        while not stop.is_set():
-            await asyncio.sleep(0.005)
-            now = time.thread_time()
-            loop_cpu.append(now - last)
-            last = now
+    def _wrap(name: str, real):
+        def spy(*args, **kwargs):
+            seen[name].append(threading.get_ident())
+            return real(*args, **kwargs)
 
-    watcher = asyncio.create_task(watchdog())
+        return spy
+
+    monkeypatch.setattr(
+        compaction_api,
+        "estimate_messages_tokens",
+        _wrap("estimate_messages_tokens", compaction_api.estimate_messages_tokens),
+    )
+    monkeypatch.setattr(
+        compaction_api,
+        "find_cut_point",
+        _wrap("find_cut_point", compaction_api.find_cut_point),
+    )
 
     job_ids = [parent._launch_subagent(label=f"c{i}", prompt="do the work") for i in range(6)]
 
@@ -2223,28 +2213,26 @@ async def test_the_loop_stays_responsive_while_several_subagents_run(tmp_path, m
         jobs = [parent.jobs.get(job_id) for job_id in job_ids]
         return all(job is not None and job.status != "running" for job in jobs)
 
-    try:
-        # Waits on the children settling, never on a frame or time budget: the
-        # timeout is a deadlock guard, and a run that reaches it has no result
-        # to assert on rather than a slow one.
-        await wait_for(all_settled, timeout=120.0)
-    finally:
-        stop.set()
-        await watcher
+    # Waits on the children settling, never on a frame or time budget: the
+    # timeout is a deadlock guard, and a run that reaches it has no result
+    # to assert on rather than a slow one.
+    await wait_for(all_settled, timeout=120.0)
 
-    assert loop_cpu, "the watchdog never ran — the measurement itself is broken"
-    worst = max(loop_cpu)
-    #: Halfway between the measured healthy ceiling (533 ms) and the cheapest
-    #: observed regression (1363 ms), in the gap the table above establishes.
-    #: A CONSTANT is correct here where it was not for wall lateness, because
-    #: this statistic does not scale with machine load; a slower machine
-    #: spends more wall time on the same work but not more un-yielded CPU.
-    MAX_LOOP_CPU_S = 0.95
-    assert worst < MAX_LOOP_CPU_S, (
-        f"the loop thread burned {worst * 1000:.0f} ms of CPU without yielding "
-        f"while subagents ran (bound {MAX_LOOP_CPU_S * 1000:.0f} ms, "
-        f"{len(loop_cpu)} samples); a synchronous stretch is starving "
-        "concurrent children"
+    # At least one ruler must have run — otherwise the workload no longer
+    # crosses the offload threshold and this test is watching nothing.
+    total = sum(len(idents) for idents in seen.values())
+    assert total, (
+        "neither compaction ruler ran — the history this workload builds is "
+        "no longer large enough to exercise the offload seam, so the "
+        "assertion below would pass vacuously"
+    )
+    on_loop = {
+        name: sum(1 for ident in idents if ident == loop_thread) for name, idents in seen.items()
+    }
+    assert all(n == 0 for n in on_loop.values()), (
+        f"a compaction ruler ran on the event-loop thread "
+        f"({on_loop}; {total} calls total) — the asyncio.to_thread hop is "
+        "gone and a child's tokenizer pass is starving its siblings"
     )
     await parent.dispose()
 
