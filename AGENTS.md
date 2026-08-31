@@ -110,6 +110,13 @@ stage because boot, the write-turn artifacts and the transcript replay are
 platform-neutral, but **do not drop the macOS leg** — without it this stage goes
 green against the exact commit it exists to catch.
 
+The `tui-e2e` job must not `need` the unit `test` job or `pip-audit`. It exists
+because a green unit suite did not catch #401; gating it on `test` skipped the
+freeze guard on every red unit run (observed on PR #426, which *fixed* a
+deadlock while `tui-e2e` reported `skipping`). It needs only `lint` and
+`type-check` — cheap syntax gates. A flake or a newly-published CVE must not
+disarm the macOS resume-liveness assertion.
+
 Gates, all of which must be clean before a PR. **Run them over the whole tree,
 exactly as CI does** — these are the commands from `.github/workflows/ci.yml`:
 
@@ -119,6 +126,16 @@ uvx --from black==26.1.0 black --check .
 uvx isort==5.13.2 --check .
 .venv/bin/python -m pyright --pythonpath .venv/bin/python .
 ```
+
+Do **not** invoke `.venv/bin/black`, `.venv/bin/flake8`, `.venv/bin/isort`, or
+`.venv/bin/pyright` directly. Those console scripts carry a shebang baked in
+at install time; after a parallel-agent worktree that owned the venv is
+deleted they fail with `bad interpreter` and exit **126**. `rc=126` is
+swallowed by a pipeline (`cmd | tail` reports `tail`'s 0), so a lint or
+format gate that never actually ran looks green. `python -m` and `uvx`
+cannot hit that path — that is why the commands above are spelled that way,
+and why `make lint` / `make format` / `make type-check` go through them
+rather than the console scripts.
 
 Narrowing the last two to `local_operator tests`, or passing `--profile black`
 instead of letting isort read the repo's own config, checks something CI does
