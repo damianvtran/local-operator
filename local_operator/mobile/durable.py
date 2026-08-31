@@ -172,7 +172,9 @@ class DurableFoldCache:
                 # is not read against a stale cursor.
                 self.invalidate(directory)
                 raise FileNotFoundError(path)
-            fingerprint = _FileFingerprint(inode=stat.st_ino, size=stat.st_size, mtime=stat.st_mtime)
+            fingerprint = _FileFingerprint(
+                inode=stat.st_ino, size=stat.st_size, mtime=stat.st_mtime
+            )
             previous = state.fingerprint
             if previous is not None and fingerprint.inode == previous.inode:
                 if fingerprint.size == previous.size:
@@ -191,7 +193,9 @@ class DurableFoldCache:
 
     # -- internals -----------------------------------------------------------
 
-    def _apply_tail(self, state: DurableFoldState, path: Path, fingerprint: _FileFingerprint) -> bool:
+    def _apply_tail(
+        self, state: DurableFoldState, path: Path, fingerprint: _FileFingerprint
+    ) -> bool:
         """Consume the bytes appended since the last load. False = rebuild.
 
         Returns False (rather than raising) whenever the tail cannot be folded
@@ -259,9 +263,7 @@ class DurableFoldCache:
                 # session never re-parses for them.
                 custom_type = entry.payload.get("custom_type")
                 if custom_type in _TRACKED_CUSTOM_TYPES:
-                    state.latest_customs[str(custom_type)] = dict(
-                        entry.payload.get("details", {})
-                    )
+                    state.latest_customs[str(custom_type)] = dict(entry.payload.get("details", {}))
         if rebuild_render:
             state.render = _fold(state.history)
         state.entry_count += len(new_entries)
@@ -269,9 +271,7 @@ class DurableFoldCache:
         state.fingerprint = fingerprint
         return True
 
-    def _rebuild(
-        self, state: DurableFoldState, path: Path, fingerprint: _FileFingerprint
-    ) -> None:
+    def _rebuild(self, state: DurableFoldState, path: Path, fingerprint: _FileFingerprint) -> None:
         """Full fold from the file: the pre-cache behaviour, run once per
         session per daemon lifetime (then maintained incrementally)."""
         entries: list[TranscriptEntry] = []

@@ -29,7 +29,6 @@ from local_operator.mobile.seen import MAX_SEEN_ENTRIES, SEEN_STORE_NAME, SeenSt
 from local_operator.mobile.types import SessionProjection, SubagentRow
 from local_operator.session.transcript import Transcript
 
-
 # ---------------------------------------------------------------------------
 # Incremental durable fold cache
 # ---------------------------------------------------------------------------
@@ -362,9 +361,7 @@ def test_frame_cap_delivers_oversized_subagent_result_under_cap() -> None:
     """Regression: a projection carrying a 5 MB subagent result still yields a
     frame under the soft cap — the exact payload that wedged the relay."""
     projection = SessionProjection(session_id="s1", pid=1, kind="tui")
-    projection.subagents.append(
-        SubagentRow(job_id="j1", label="big", result_text="R" * 5_000_000)
-    )
+    projection.subagents.append(SubagentRow(job_id="j1", label="big", result_text="R" * 5_000_000))
     frame, degraded = cap_projection_frame(projection)
     assert degraded is True
     size = len(json.dumps(frame).encode("utf-8"))
@@ -377,9 +374,7 @@ def test_frame_cap_does_not_mutate_the_projection() -> None:
     """Degradation happens on the serialized dict; the fold's projection is
     untouched (it is republished on the next repaint)."""
     projection = SessionProjection(session_id="s1", pid=1, kind="tui")
-    projection.subagents.append(
-        SubagentRow(job_id="j1", label="big", result_text="R" * 5_000_000)
-    )
+    projection.subagents.append(SubagentRow(job_id="j1", label="big", result_text="R" * 5_000_000))
     cap_projection_frame(projection)
     assert len(projection.subagents[0].result_text) == 5_000_000
 

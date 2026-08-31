@@ -516,9 +516,9 @@ def _durable_projection(session_id: str) -> SessionProjection | None:
             # a deep roster used to full-parse every child transcript on every
             # durable projection, once per child. Routed around the fold cache
             # so an 80-child roster cannot evict the root's fold.
-            raw_todos = (
-                _custom_snapshot_cache().load(child_dir, "todo_snapshot") or {}
-            ).get("items") or []
+            raw_todos = (_custom_snapshot_cache().load(child_dir, "todo_snapshot") or {}).get(
+                "items"
+            ) or []
         row = SubagentRow(
             job_id=job_id,
             label=str(record.get("label") or job_id),
