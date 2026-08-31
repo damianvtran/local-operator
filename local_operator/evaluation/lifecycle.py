@@ -10,18 +10,25 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Sequence
-from typing import Any, Literal, Self
+from typing import Any, Literal, Self, cast
 
-from pydantic import Field, ValidationInfo, field_validator, model_validator
+from pydantic import (
+    Field,
+    PrivateAttr,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 from local_operator.evaluation.protocol import ArtifactRef, ProtocolModel
 from local_operator.evaluation.receipts import (
     MAX_DECLARATIONS,
     ZERO_DIGEST,
     BudgetAuthorization,
+    BudgetCommitment,
     BudgetReconciliation,
-    BudgetReservation,
     Digest,
+    PositiveSafeCount,
     SafeCount,
     SealedPreflight,
     StrictIdentifier,
@@ -31,6 +38,7 @@ MAX_CLEANUP_ATTEMPTS = 32
 MAX_CLEANUP_TIMEOUT_MS = 3_600_000
 MAX_FAILURE_LENGTH = 2_000
 _PERMIT_FACTORY = object()
+_LIFECYCLE_FACTORY = object()
 
 
 def _identity(kind: str, payload: Any) -> str:
@@ -42,6 +50,24 @@ def _identity(kind: str, payload: Any) -> str:
         sort_keys=True,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _state_identity(payload: dict[str, Any]) -> str:
+    complete = dict(payload)
+    complete.setdefault("state", "planned")
+    complete.setdefault("preflight_seal_id", None)
+    complete.setdefault("permit_id", None)
+    complete.setdefault("reservation_ids", ())
+    complete.setdefault("reconciliation_id", None)
+    complete.setdefault("reconciliation_reportable", None)
+    complete.setdefault("score_id", None)
+    complete.setdefault("cleanup_result_id", None)
+    complete.setdefault("rescue_required", None)
+    complete.setdefault("terminal_intent", None)
+    complete.setdefault("failure_kind", None)
+    complete.setdefault("failure_reason", None)
+    complete.setdefault("previous_state_id", None)
+    return _identity("episode-lifecycle-state-v1", complete)
 
 
 CleanupActionKind = Literal[
@@ -60,8 +86,20 @@ class CleanupAction(ProtocolModel):
     action_id: StrictIdentifier
     kind: CleanupActionKind
     resource_ref: StrictIdentifier
-    timeout_ms: SafeCount = Field(le=MAX_CLEANUP_TIMEOUT_MS)
+    timeout_ms: PositiveSafeCount = Field(le=MAX_CLEANUP_TIMEOUT_MS)
     max_attempts: int = Field(ge=1, le=MAX_CLEANUP_ATTEMPTS)
+    action_digest: Digest = ZERO_DIGEST
+
+    @model_validator(mode="after")
+    def _identify(self) -> Self:
+        expected = _identity(
+            "cleanup-action-v1",
+            self.model_dump(mode="json", exclude={"action_digest"}),
+        )
+        if self.action_digest not in (ZERO_DIGEST, expected):
+            raise ValueError("cleanup action identity does not match its declaration")
+        object.__setattr__(self, "action_digest", expected)
+        return self
 
 
 class CleanupPlan(ProtocolModel):
@@ -96,7 +134,9 @@ class CleanupPlan(ProtocolModel):
 
 
 class CleanupReceipt(ProtocolModel):
+    cleanup_plan_id: Digest
     action_id: StrictIdentifier
+    action_digest: Digest
     status: Literal["not_needed", "attempted", "succeeded", "failed"]
     evidence_code: StrictIdentifier
     duration_ms: SafeCount
@@ -110,6 +150,29 @@ class CleanupReceipt(ProtocolModel):
             raise ValueError("cleanup receipt identity does not match its result")
         object.__setattr__(self, "receipt_id", expected)
         return self
+
+
+def record_cleanup(
+    plan: CleanupPlan,
+    action_id: StrictIdentifier,
+    *,
+    status: Literal["not_needed", "attempted", "succeeded", "failed"],
+    evidence_code: StrictIdentifier,
+    duration_ms: int,
+) -> CleanupReceipt:
+    """Bind cleanup evidence to one exact symbolic action and plan."""
+
+    action = next((item for item in plan.actions if item.action_id == action_id), None)
+    if action is None:
+        raise ValueError("cleanup action is not selected by the cleanup plan")
+    return CleanupReceipt(
+        cleanup_plan_id=plan.cleanup_plan_id,
+        action_id=action_id,
+        action_digest=action.action_digest,
+        status=status,
+        evidence_code=evidence_code,
+        duration_ms=duration_ms,
+    )
 
 
 class CleanupResult(ProtocolModel):
@@ -172,6 +235,12 @@ def aggregate_cleanup(
     expected_ids = {action.action_id for action in plan.actions}
     if set(by_id) != expected_ids:
         raise ValueError("cleanup requires exactly one receipt for every action")
+    actions = {action.action_id: action for action in plan.actions}
+    for action_id, receipt in by_id.items():
+        if receipt.cleanup_plan_id != plan.cleanup_plan_id:
+            raise ValueError("cleanup receipt belongs to another cleanup plan")
+        if receipt.action_digest != actions[action_id].action_digest:
+            raise ValueError("cleanup receipt belongs to another action declaration")
     succeeded = tuple(sorted(key for key, item in by_id.items() if item.status == "succeeded"))
     not_needed = tuple(sorted(key for key, item in by_id.items() if item.status == "not_needed"))
     incomplete = tuple(
@@ -275,7 +344,14 @@ TerminalIntent = Literal["complete", "fail", "cancel"]
 
 
 class EpisodeLifecycle(ProtocolModel):
-    """Immutable episode state whose methods enforce the only legal transition graph."""
+    """Factory-only state authority with a content-addressed transition chain.
+
+    Pydantic's ``model_construct`` can fabricate an object, but it lacks the
+    private marker checked by every transition. This constrains cooperative
+    adapters rather than hostile code which ignores the contract entirely.
+    """
+
+    _authority: object = PrivateAttr()
 
     episode_id: StrictIdentifier
     plan_id: Digest
@@ -303,6 +379,9 @@ class EpisodeLifecycle(ProtocolModel):
         | None
     ) = None
     failure_reason: str | None = Field(default=None, min_length=1, max_length=MAX_FAILURE_LENGTH)
+    previous_state_id: Digest | None = None
+    operation: StrictIdentifier
+    state_id: Digest
 
     @field_validator("reservation_ids", mode="before")
     @classmethod
@@ -310,7 +389,10 @@ class EpisodeLifecycle(ProtocolModel):
         return tuple(value) if isinstance(value, list) else value
 
     @model_validator(mode="after")
-    def _validate_state_evidence(self) -> Self:
+    def _validate_state_evidence(self, info: ValidationInfo) -> Self:
+        context = info.context if isinstance(info.context, dict) else {}
+        if context.get("lifecycle_factory") is not _LIFECYCLE_FACTORY:
+            raise ValueError("episode lifecycle authority can only be factory minted")
         if len(self.reservation_ids) != len(set(self.reservation_ids)):
             raise ValueError("episode contains duplicate reservations")
         if tuple(sorted(self.reservation_ids)) != self.reservation_ids:
@@ -368,6 +450,15 @@ class EpisodeLifecycle(ProtocolModel):
             raise ValueError("preflight and infrastructure failures cannot carry a score")
         if self.state == "cancelled" and self.terminal_intent != "cancel":
             raise ValueError("cancelled state requires cancellation intent")
+        if self.state == "planned":
+            if self.previous_state_id is not None or self.operation != "plan":
+                raise ValueError("planned lifecycle must be the transition-chain root")
+        elif self.previous_state_id is None:
+            raise ValueError("non-planned lifecycle requires a previous state identity")
+        expected = _state_identity(self.model_dump(mode="json", exclude={"state_id"}))
+        if self.state_id != expected:
+            raise ValueError("episode lifecycle state identity does not match its evidence")
+        object.__setattr__(self, "_authority", _LIFECYCLE_FACTORY)
         return self
 
     @classmethod
@@ -379,26 +470,56 @@ class EpisodeLifecycle(ProtocolModel):
         budget_id: Digest,
         cleanup_plan_id: Digest,
     ) -> Self:
-        return cls(
-            episode_id=episode_id,
-            plan_id=plan_id,
-            budget_id=budget_id,
-            cleanup_plan_id=cleanup_plan_id,
+        return cast(
+            Self,
+            plan_episode(
+                episode_id=episode_id,
+                plan_id=plan_id,
+                budget_id=budget_id,
+                cleanup_plan_id=cleanup_plan_id,
+            ),
         )
 
-    def _transition(self, expected: EpisodeState, **updates: Any) -> Self:
+    def __reduce__(self) -> Any:
+        raise TypeError("episode lifecycle authority cannot be pickled")
+
+    def __deepcopy__(self, memo: dict[int, Any] | None = None) -> Self:
+        if memo is not None:
+            memo[id(self)] = self
+        return self
+
+    def model_copy(self, *, update: Any = None, deep: bool = False) -> Self:
+        if update:
+            raise TypeError("episode lifecycle authority cannot be updated by copying")
+        return self
+
+    def _assert_authority(self) -> None:
+        if getattr(self, "_authority", None) is not _LIFECYCLE_FACTORY:
+            raise ValueError("episode lifecycle lacks transition authority")
+        expected = _state_identity(self.model_dump(mode="json", exclude={"state_id"}))
+        if self.state_id != expected:
+            raise ValueError("episode lifecycle authority was mutated")
+
+    def _transition(self, expected: EpisodeState, operation: str, **updates: Any) -> Self:
+        self._assert_authority()
         if self.state != expected:
             raise ValueError(f"illegal episode transition from {self.state}")
-        payload = self.model_dump(mode="python")
-        payload.update(updates)
-        return type(self).model_validate(payload)
+        payload = self.model_dump(mode="python", exclude={"state_id"})
+        payload.update(previous_state_id=self.state_id, operation=operation, **updates)
+        payload["state_id"] = _state_identity(payload)
+        return type(self).model_validate(
+            payload,
+            context={"lifecycle_factory": _LIFECYCLE_FACTORY},
+        )
 
     def preflight(self, seal: SealedPreflight) -> Self:
         if not seal.successful:
             raise ValueError("failed preflight cannot enter preflighted state")
         if seal.plan_id != self.plan_id:
             raise ValueError("preflight seal belongs to another dependency plan")
-        return self._transition("planned", state="preflighted", preflight_seal_id=seal.seal_id)
+        return self._transition(
+            "planned", "seal-preflight", state="preflighted", preflight_seal_id=seal.seal_id
+        )
 
     def authorize(
         self, seal: SealedPreflight, budget: BudgetAuthorization
@@ -414,20 +535,27 @@ class EpisodeLifecycle(ProtocolModel):
             budget=budget,
         )
         return (
-            self._transition("preflighted", state="authorized", permit_id=permit.permit_id),
+            self._transition(
+                "preflighted",
+                "authorize-side-effects",
+                state="authorized",
+                permit_id=permit.permit_id,
+            ),
             permit,
         )
 
     def start(
         self,
         permit: SideEffectPermit,
-        reservations: Sequence[BudgetReservation],
+        authorization: BudgetAuthorization,
+        commitment: BudgetCommitment,
     ) -> Self:
+        self._assert_authority()
         if self.state != "authorized":
             raise ValueError(f"illegal episode transition from {self.state}")
-        snapshot = tuple(reservations)
-        if not snapshot:
-            raise ValueError("episode start requires a prior budget reservation")
+        commitment.assert_authority(authorization)
+        if commitment.budget_id != self.budget_id:
+            raise ValueError("budget commitment does not match this episode")
         if (
             permit.episode_id != self.episode_id
             or permit.plan_id != self.plan_id
@@ -435,18 +563,15 @@ class EpisodeLifecycle(ProtocolModel):
             or permit.permit_id != self.permit_id
         ):
             raise ValueError("side-effect permit does not match this episode")
-        if any(
-            item.episode_id != self.episode_id or item.budget_id != self.budget_id
-            for item in snapshot
-        ):
-            raise ValueError("budget reservation does not match this episode")
-        ids = tuple(sorted(item.reservation_id for item in snapshot))
-        if len(ids) != len(set(ids)):
-            raise ValueError("episode start contains duplicate reservations")
-        return self._transition("authorized", state="running", reservation_ids=ids)
+        return self._transition(
+            "authorized",
+            "start-episode",
+            state="running",
+            reservation_ids=commitment.reservation_ids,
+        )
 
     def begin_finalization(self) -> Self:
-        return self._transition("running", state="finalizing")
+        return self._transition("running", "begin-finalization", state="finalizing")
 
     def finish_finalization(
         self,
@@ -458,6 +583,7 @@ class EpisodeLifecycle(ProtocolModel):
             raise ValueError("score receipt does not match this episode")
         return self._transition(
             "finalizing",
+            "finish-finalization",
             state="cleaning",
             terminal_intent="complete",
             reconciliation_id=reconciliation.reconciliation_id,
@@ -473,6 +599,7 @@ class EpisodeLifecycle(ProtocolModel):
         self._validate_reconciliation(reconciliation)
         return self._transition(
             "finalizing",
+            "finish-finalization",
             state="cleaning",
             terminal_intent="fail",
             reconciliation_id=reconciliation.reconciliation_id,
@@ -484,6 +611,7 @@ class EpisodeLifecycle(ProtocolModel):
     def crash(self, reason: str) -> Self:
         return self._transition(
             "running",
+            "record-crash",
             state="cleaning",
             terminal_intent="fail",
             failure_kind="crash",
@@ -493,6 +621,7 @@ class EpisodeLifecycle(ProtocolModel):
     def cancel(self, reason: str) -> Self:
         return self._transition(
             "running",
+            "record-cancellation",
             state="cleaning",
             terminal_intent="cancel",
             failure_reason=reason,
@@ -506,9 +635,13 @@ class EpisodeLifecycle(ProtocolModel):
     ) -> Self:
         if self.state not in ("planned", "preflighted", "authorized"):
             raise ValueError("post-start failure must enter cleaning first")
-        payload = self.model_dump(mode="python")
-        payload.update(state="failed", failure_kind=kind, failure_reason=reason)
-        return type(self).model_validate(payload)
+        return self._transition(
+            self.state,
+            "fail-before-running",
+            state="failed",
+            failure_kind=kind,
+            failure_reason=reason,
+        )
 
     def finish_cleanup(self, result: CleanupResult) -> Self:
         if result.cleanup_plan_id != self.cleanup_plan_id:
@@ -534,12 +667,41 @@ class EpisodeLifecycle(ProtocolModel):
             elif self.reconciliation_reportable is False and self.failure_kind is None:
                 updates["failure_kind"] = "unreportable"
                 updates["failure_reason"] = "required usage was unavailable"
-        return self._transition("cleaning", **updates)
+        return self._transition("cleaning", "finish-cleanup", **updates)
 
     def _validate_reconciliation(self, reconciliation: BudgetReconciliation) -> None:
         if (
             reconciliation.episode_id != self.episode_id
             or reconciliation.budget_id != self.budget_id
+            or reconciliation.authorization_digest != self.budget_id
+            or reconciliation.authorization.budget_id != self.budget_id
             or reconciliation.reservation_ids != self.reservation_ids
         ):
             raise ValueError("cost reconciliation does not match this episode")
+
+
+def plan_episode(
+    *,
+    episode_id: StrictIdentifier,
+    plan_id: Digest,
+    budget_id: Digest,
+    cleanup_plan_id: Digest,
+) -> EpisodeLifecycle:
+    """Mint the public plan as the root of a private transition authority chain."""
+
+    payload = {
+        "episode_id": episode_id,
+        "plan_id": plan_id,
+        "budget_id": budget_id,
+        "cleanup_plan_id": cleanup_plan_id,
+        "state": "planned",
+        "operation": "plan",
+        "state_id": ZERO_DIGEST,
+    }
+    payload["state_id"] = _state_identity(
+        {key: value for key, value in payload.items() if key != "state_id"}
+    )
+    return EpisodeLifecycle.model_validate(
+        payload,
+        context={"lifecycle_factory": _LIFECYCLE_FACTORY},
+    )

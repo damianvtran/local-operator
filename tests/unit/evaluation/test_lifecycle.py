@@ -7,7 +7,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import pytest
 from pydantic import ValidationError
@@ -15,27 +15,30 @@ from pydantic import ValidationError
 from local_operator.evaluation.lifecycle import (
     CleanupAction,
     CleanupPlan,
-    CleanupReceipt,
     CleanupResult,
     EpisodeLifecycle,
     ScoreReceipt,
     SideEffectPermit,
     aggregate_cleanup,
+    record_cleanup,
 )
 from local_operator.evaluation.protocol import ArtifactRef
 from local_operator.evaluation.receipts import (
     BUDGET_RESOURCES,
     AvailableUsage,
     BudgetAuthorization,
+    BudgetCommitment,
     BudgetReconciliation,
+    BudgetReservation,
     CappedAllowance,
     ComputeRequirement,
     DependencyPlan,
-    PreflightReceipt,
     RedactionSet,
     ResourceAmount,
     SealedPreflight,
+    commit_budget,
     reconcile_budget,
+    record_preflight,
     reserve_budget,
     seal_preflight,
 )
@@ -63,9 +66,9 @@ def _plan() -> DependencyPlan:
 
 
 def _seal(plan: DependencyPlan) -> SealedPreflight:
-    receipt = PreflightReceipt(
-        requirement_id="compute",
-        necessity="required",
+    receipt = record_preflight(
+        plan,
+        "compute",
         status="pass",
         evidence={"probe": "safe"},
         duration_ms=1,
@@ -108,25 +111,23 @@ def _cleanup_plan() -> CleanupPlan:
 def _cleanup(
     plan: CleanupPlan,
     *,
-    session: str = "succeeded",
-    volume: str = "not_needed",
+    session: Literal["not_needed", "attempted", "succeeded", "failed"] = "succeeded",
+    volume: Literal["not_needed", "attempted", "succeeded", "failed"] = "not_needed",
 ) -> CleanupResult:
     receipts = (
-        CleanupReceipt.model_validate(
-            {
-                "action_id": "session",
-                "status": session,
-                "evidence_code": "adapter-confirmed",
-                "duration_ms": 2,
-            }
+        record_cleanup(
+            plan,
+            "session",
+            status=session,
+            evidence_code="adapter-confirmed",
+            duration_ms=2,
         ),
-        CleanupReceipt.model_validate(
-            {
-                "action_id": "volume",
-                "status": volume,
-                "evidence_code": "adapter-confirmed",
-                "duration_ms": 1,
-            }
+        record_cleanup(
+            plan,
+            "volume",
+            status=volume,
+            evidence_code="adapter-confirmed",
+            duration_ms=1,
         ),
     )
     return aggregate_cleanup(plan, receipts)
@@ -135,8 +136,13 @@ def _cleanup(
 def _reservation(budget: BudgetAuthorization):  # type annotation inferred from factory
     return reserve_budget(
         budget,
+        "episode-reservation",
         tuple(ResourceAmount(resource=resource, value=10) for resource in BUDGET_RESOURCES),
     )
+
+
+def _commitment(budget: BudgetAuthorization, reservation: Any) -> BudgetCommitment:
+    return commit_budget(budget, (reservation,))
 
 
 def _reconciliation(
@@ -214,8 +220,9 @@ def test_cleanup_plan_is_symbolic_bounded_canonical_and_stable() -> None:
 
 def test_cleanup_requires_exactly_one_receipt_and_attempted_is_not_clean() -> None:
     plan = _cleanup_plan()
-    receipt = CleanupReceipt(
-        action_id="session",
+    receipt = record_cleanup(
+        plan,
+        "session",
         status="succeeded",
         evidence_code="confirmed",
         duration_ms=1,
@@ -262,13 +269,13 @@ def test_side_effect_start_is_impossible_before_seal_permit_and_reservation() ->
     _, _, _, authorized, permit = _authorized()
     reservation = _reservation(budget)
     with pytest.raises(ValueError, match="illegal episode transition"):
-        planned.start(permit, (reservation,))
-    with pytest.raises(ValueError, match="prior budget reservation"):
-        authorized.start(permit, ())
+        planned.start(permit, budget, _commitment(budget, reservation))
+    with pytest.raises(ValueError, match="factory authority"):
+        authorized.start(permit, budget, BudgetCommitment.model_construct())
     forged_payload = {**permit.model_dump(), "episode_id": "episode-other"}
     with pytest.raises(ValidationError):
         SideEffectPermit.model_validate(forged_payload)
-    running = authorized.start(permit, (reservation,))
+    running = authorized.start(permit, budget, _commitment(budget, reservation))
     assert running.state == "running"
     assert running.reservation_ids == (reservation.reservation_id,)
 
@@ -276,7 +283,7 @@ def test_side_effect_start_is_impossible_before_seal_permit_and_reservation() ->
 def test_legal_happy_path_requires_cost_score_and_clean_result() -> None:
     plan, budget, cleanup, authorized, permit = _authorized()
     reservation = _reservation(budget)
-    running = authorized.start(permit, (reservation,))
+    running = authorized.start(permit, budget, _commitment(budget, reservation))
     finalizing = running.begin_finalization()
     reconciliation = _reconciliation(budget, reservation)
     cleaning = finalizing.finish_finalization(reconciliation, _score(plan))
@@ -286,13 +293,16 @@ def test_legal_happy_path_requires_cost_score_and_clean_result() -> None:
     assert completed.reconciliation_id == reconciliation.reconciliation_id
     assert completed.score_id is not None
     assert completed.rescue_required is False
-    assert EpisodeLifecycle.from_canonical_json(completed.to_canonical_json()) == completed
+    with pytest.raises(ValidationError, match="factory minted"):
+        EpisodeLifecycle.from_canonical_json(completed.to_canonical_json())
 
 
 def test_unreportable_usage_or_incomplete_cleanup_cannot_complete() -> None:
     plan, budget, cleanup, authorized, permit = _authorized()
     reservation = _reservation(budget)
-    finalizing = authorized.start(permit, (reservation,)).begin_finalization()
+    finalizing = authorized.start(
+        permit, budget, _commitment(budget, reservation)
+    ).begin_finalization()
     unreportable = _reconciliation(budget, reservation, unavailable=True)
     cleaning = finalizing.finish_finalization(unreportable, _score(plan))
     failed = cleaning.finish_cleanup(_cleanup(cleanup))
@@ -309,7 +319,7 @@ def test_unreportable_usage_or_incomplete_cleanup_cannot_complete() -> None:
 def test_crash_and_cancel_after_running_must_flow_through_cleanup() -> None:
     _plan_value, budget, cleanup, authorized, permit = _authorized()
     reservation = _reservation(budget)
-    running = authorized.start(permit, (reservation,))
+    running = authorized.start(permit, budget, _commitment(budget, reservation))
     crashed = running.crash("adapter process exited")
     assert crashed.state == "cleaning"
     failed = crashed.finish_cleanup(_cleanup(cleanup))
@@ -347,7 +357,9 @@ def test_preflight_and_infrastructure_failures_are_unscored() -> None:
 def test_ambiguous_finalization_is_terminal_after_cleanup_and_cannot_rescore() -> None:
     plan, budget, cleanup, authorized, permit = _authorized()
     reservation = _reservation(budget)
-    finalizing = authorized.start(permit, (reservation,)).begin_finalization()
+    finalizing = authorized.start(
+        permit, budget, _commitment(budget, reservation)
+    ).begin_finalization()
     ambiguous = finalizing.mark_ambiguous_finalization(
         _reconciliation(budget, reservation),
         "judge response committed but acknowledgement was lost",
@@ -377,7 +389,7 @@ def test_ambiguous_finalization_is_terminal_after_cleanup_and_cannot_rescore() -
 def test_illegal_transition_table(state: str, operation: str) -> None:
     plan, budget, cleanup, authorized, permit = _authorized()
     reservation = _reservation(budget)
-    running = authorized.start(permit, (reservation,))
+    running = authorized.start(permit, budget, _commitment(budget, reservation))
     reconciliation = _reconciliation(budget, reservation)
     finalizing = running.begin_finalization()
     cleaning = finalizing.finish_finalization(reconciliation, _score(plan))
@@ -414,7 +426,7 @@ def test_illegal_transition_table(state: str, operation: str) -> None:
 def test_direct_snapshots_cannot_claim_completion_without_all_evidence() -> None:
     plan, budget, cleanup, authorized, permit = _authorized()
     reservation = _reservation(budget)
-    base = authorized.start(permit, (reservation,)).model_dump()
+    base = authorized.start(permit, budget, _commitment(budget, reservation)).model_dump()
     for missing in ("preflight_seal_id", "permit_id", "reconciliation_id", "score_id"):
         payload = {
             **base,
@@ -487,3 +499,113 @@ def test_evaluation_root_source_stays_inert() -> None:
     root = importlib.import_module("local_operator.evaluation")
     assert not hasattr(root, "EpisodeLifecycle")
     assert not hasattr(root, "DependencyPlan")
+
+
+def test_cleanup_receipt_replay_rejects_changed_plan_or_action() -> None:
+    plan = _cleanup_plan()
+    receipt = record_cleanup(
+        plan,
+        "session",
+        status="succeeded",
+        evidence_code="confirmed",
+        duration_ms=1,
+    )
+    changed_action = CleanupAction.model_validate(
+        {
+            **plan.actions[0].model_dump(exclude={"action_digest"}),
+            "resource_ref": "other-lease",
+        }
+    )
+    changed_plan = CleanupPlan(
+        episode_id=plan.episode_id,
+        actions=(changed_action, plan.actions[1]),
+    )
+    other = record_cleanup(
+        changed_plan,
+        "volume",
+        status="not_needed",
+        evidence_code="confirmed",
+        duration_ms=1,
+    )
+    with pytest.raises(ValueError, match="another cleanup plan|another action"):
+        aggregate_cleanup(changed_plan, (receipt, other))
+    with pytest.raises(ValidationError):
+        CleanupAction(
+            action_id="zero",
+            kind="close_session",
+            resource_ref="lease",
+            timeout_ms=0,
+            max_attempts=1,
+        )
+
+
+def test_lifecycle_authority_rejects_every_public_construction_and_mutation_path() -> None:
+    import copy
+    import pickle
+
+    plan, budget, cleanup, authorized, _permit = _authorized()
+    payload = authorized.model_dump()
+    with pytest.raises(ValidationError, match="factory minted"):
+        EpisodeLifecycle.model_validate(payload)
+    with pytest.raises(ValidationError, match="factory minted"):
+        EpisodeLifecycle.model_validate_json(authorized.to_canonical_json())
+    with pytest.raises(ValidationError, match="factory minted"):
+        EpisodeLifecycle.from_canonical_json(authorized.to_canonical_json())
+    forged = EpisodeLifecycle.model_construct(**payload)
+    with pytest.raises(ValueError, match="lacks transition authority"):
+        forged.begin_finalization()
+    with pytest.raises(TypeError, match="cannot be updated"):
+        authorized.model_copy(update={"state": "completed"})
+    assert copy.deepcopy(authorized) is authorized
+    with pytest.raises(TypeError, match="cannot be pickled"):
+        pickle.dumps(authorized)
+    assert authorized.previous_state_id is not None
+    assert authorized.state_id != authorized.previous_state_id
+    assert plan.plan_id == payload["plan_id"]
+    assert budget.budget_id == payload["budget_id"]
+    assert cleanup.cleanup_plan_id == payload["cleanup_plan_id"]
+
+
+def test_direct_overcap_reservation_and_forged_commitment_cannot_start() -> None:
+    _plan_value, budget, _cleanup_value, authorized, permit = _authorized()
+    overcap = BudgetReservation(
+        episode_id=budget.episode_id,
+        budget_id=budget.budget_id,
+        reservation_key="forged-overcap",
+        amounts=(ResourceAmount(resource="guest_actions", value=101),),
+    )
+    with pytest.raises(ValueError, match="exceeds"):
+        commit_budget(budget, (overcap,))
+    legitimate = _reservation(budget)
+    commitment = _commitment(budget, legitimate)
+    forged = BudgetCommitment.model_construct(**commitment.model_dump())
+    with pytest.raises(ValueError, match="factory authority"):
+        authorized.start(permit, budget, forged)
+
+
+def test_lifecycle_rejects_reconciliation_from_mutated_authorization() -> None:
+    plan, budget, _cleanup_value, authorized, permit = _authorized()
+    reservation = _reservation(budget)
+    finalizing = authorized.start(
+        permit, budget, _commitment(budget, reservation)
+    ).begin_finalization()
+    reconciliation = _reconciliation(budget, reservation)
+    changed_allowances = list(budget.allowances)
+    first = changed_allowances[0]
+    assert isinstance(first, CappedAllowance)
+    changed_allowances[0] = first.model_copy(update={"value": first.value + 1})
+    changed_budget = BudgetAuthorization(
+        episode_id=budget.episode_id,
+        allowances=tuple(changed_allowances),
+    )
+    payload = reconciliation.model_dump()
+    with pytest.raises(ValidationError):
+        BudgetReconciliation.model_validate(
+            {
+                **payload,
+                "budget_id": changed_budget.budget_id,
+                "authorization_digest": changed_budget.budget_id,
+                "authorization": changed_budget,
+            }
+        )
+    assert plan.plan_id == finalizing.plan_id
