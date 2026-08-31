@@ -86,9 +86,7 @@ def test_fold_cache_matches_full_reparse_on_append(tmp_path, monkeypatch) -> Non
     # entry_count is the cursor/file agreement invariant (A10): the tail read
     # must have consumed exactly the lines a full re-parse would see.
     file_lines = [
-        line
-        for line in (directory / "transcript.jsonl").read_text().splitlines()
-        if line.strip()
+        line for line in (directory / "transcript.jsonl").read_text().splitlines() if line.strip()
     ]
     assert state.entry_count == len(file_lines)
 
@@ -619,7 +617,12 @@ def test_frame_cheap_proxy_never_lets_an_oversized_frame_through() -> None:
         _FRAME_CHEAP_PROXY_DIVISOR,
         _frame_text_total,
     )
-    from local_operator.mobile.types import SubagentRow, TodoItem, TodoPhase, TranscriptEntry
+    from local_operator.mobile.types import (
+        SubagentRow,
+        TodoItem,
+        TodoPhase,
+        TranscriptEntry,
+    )
 
     random.seed(11)
     threshold = PROJECTION_FRAME_SOFT_CAP_BYTES // _FRAME_CHEAP_PROXY_DIVISOR
@@ -656,9 +659,9 @@ def test_frame_cheap_proxy_never_lets_an_oversized_frame_through() -> None:
         proxy = _frame_text_total(projection)
         real = len(json.dumps(projection.to_json()).encode("utf-8"))
         if proxy <= threshold:
-            assert real <= PROJECTION_FRAME_SOFT_CAP_BYTES, (
-                f"proxy {proxy} short-circuited a {real}-byte frame"
-            )
+            assert (
+                real <= PROJECTION_FRAME_SOFT_CAP_BYTES
+            ), f"proxy {proxy} short-circuited a {real}-byte frame"
 
 
 def test_frame_cap_tier2_drops_transcript_details() -> None:
