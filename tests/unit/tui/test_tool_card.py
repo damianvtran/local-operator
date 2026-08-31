@@ -1402,12 +1402,12 @@ def test_summary_falls_back_to_the_tool_name_when_no_scalars_exist() -> None:
     assert "todo" in card._build_row(80).plain
 
 
-def test_send_summary_names_target_mode_and_message() -> None:
-    """The send row leads with WHO and HOW, then the body preview.
+def test_send_summary_names_mode_target_and_message() -> None:
+    """The send row leads with HOW it lands, then WHO, then the body.
 
-    The delivery-mode marker is the audit point: a quiet mailbox drop and a
-    wake are otherwise identical lines, and the row builder sheds from the
-    right, so target + marker must survive any truncation."""
+    The mode marker is the discriminator and the row builder sheds from the
+    right, so the marker leads: behind the target it died first, and three
+    different delivery promises painted identical rows."""
     card = ToolCard(
         "t",
         "send",
@@ -1417,8 +1417,8 @@ def test_send_summary_names_target_mode_and_message() -> None:
     assert "release cutter" in row
     assert "wake" in row  # the default delivery mode is visible
     assert "gates are green" in row
-    # Order: target, then mode, then preview.
-    assert row.index("release cutter") < row.index("wake") < row.index("gates are green")
+    # Order: mode, then target, then the body.
+    assert row.index("wake") < row.index("release cutter") < row.index("gates are green")
 
 
 def test_send_summary_marks_the_quiet_drop_and_now() -> None:
@@ -1430,13 +1430,40 @@ def test_send_summary_marks_the_quiet_drop_and_now() -> None:
     assert "now" in row
 
 
-def test_send_summary_survives_a_long_message() -> None:
-    """A huge body must not push the target and mode off the row: the preview
-    is capped before the row's own truncation runs."""
+def test_send_modes_never_collide_at_narrow_widths() -> None:
+    """The defect the leading marker fixes: with the mode to the RIGHT of a long
+    target it was truncated away, so a wake, a quiet drop and a mid-turn steer
+    painted byte-identical rows at ordinary widths (measured: a 37-cell name
+    collided at 62 columns). One of those rows woke a peer and one did not."""
+    target = "minerva-user-dashboard-release-cutter"
+    message = "gates are green, ready for review"
+    for width in (40, 48, 52, 60, 62, 80):
+        rows = {
+            ToolCard("t", "send", {"target": target, "message": message, **extra})
+            ._build_row(width)
+            .plain
+            for extra in ({}, {"wake": False}, {"now": True})
+        }
+        assert len(rows) == 3, f"delivery modes collide at {width} columns: {rows}"
+
+
+def test_send_summary_uses_the_rows_own_budget_for_a_long_message() -> None:
+    """No private preview cap: the row's own truncation does the shedding, and
+    an extra bound only left a third of the line empty at normal widths. The
+    mode and target survive because the mode leads."""
     card = ToolCard("t", "send", {"target": "peer", "message": "x" * 500})
     row = card._build_row(60).plain
     assert "peer" in row
     assert "wake" in row
+    # The body fills the line rather than stopping early at a private cap.
+    assert row.count("x") > 20
+
+
+def test_send_summary_stands_in_for_a_missing_target() -> None:
+    """The card is painted before the call fails, and a blank slot made the row
+    read as though the peer were called "wake"."""
+    row = ToolCard("t", "send", {"message": "hello there"})._build_row(80).plain
+    assert "wake · ?" in row
 
 
 def test_the_row_keeps_the_arguments_when_the_model_supplied_an_intent() -> None:

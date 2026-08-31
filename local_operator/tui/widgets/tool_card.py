@@ -395,37 +395,44 @@ def _scalar_text(value: object) -> str:
     return ""
 
 
-#: Cell cap on the send row's message preview. The row builder truncates from
-#: the right anyway, but an unbounded preview would push the delivery-mode
-#: marker out of every realistic width before the ellipsis ever touched it —
-#: and the marker is the one word that tells a quiet mailbox drop from a wake.
-_SEND_PREVIEW_CELLS = 40
-
-
 def _send_summary(args: dict[str, object]) -> str:
-    """The send row: WHO gets it, HOW it lands, then a preview of the body.
+    """The send row: HOW it lands, WHO gets it, then a preview of the body.
 
-    Ordering is the audit argument: the row builder sheds from the right, so
-    the target and the delivery-mode marker survive any truncation and the
-    message preview is what gives way. The marker distinguishes the three
-    delivery promises — ``now`` steers mid-turn, ``quiet`` is the wake=False
-    mailbox drop, ``wake`` is the default that wakes an idle peer — which is
-    exactly the distinction this row exists to make visible, since a quiet
-    drop and a wake are otherwise identical lines.
+    The delivery-mode marker LEADS, and that ordering is the whole point. The
+    row builder truncates the composed summary from the right as one string, so
+    whatever sits rightmost dies first — with the marker after the target, three
+    cards with the same peer and three different delivery promises painted
+    byte-identical rows at ordinary widths (measured: a 37-cell conversation
+    name collides at 62 columns, a 26-cell ULID session id at 52). One of those
+    rows woke a peer and one did not, and the reader could not tell.
+
+    This is the same fix ``_describe_wake_approval`` already landed for the same
+    class of defect ("the BOUND leads the interval… a wake firing eight times
+    and one that never stops painted the same text at three widths"): put the
+    DISCRIMINATOR ahead of the free-text identity, so the field that separates
+    two rows is the one that survives.
+
+    The message preview carries no cap of its own. The row's own
+    ``truncate_cells`` already sheds it to the available budget; an extra
+    40-cell bound only left a third of the line empty at 100+ columns while
+    protecting nothing — the marker survives either way because it now leads.
     """
-    pid = args.get("pid")
-    session = _scalar_text(args.get("session"))
-    target = _scalar_text(args.get("target"))
-    if isinstance(pid, int) and not isinstance(pid, bool):
-        who = f"pid {pid}"
-    elif session:
-        who = f"session {session}"
-    else:
-        who = target
-    mode = "now" if args.get("now") else ("quiet" if args.get("wake") is False else "wake")
+    # Both labels come from the tool's own helpers so the card and the approval
+    # prompt can never disagree about WHICH peer or WHICH delivery mode a call
+    # names — two copies of that precedence would drift the first time a mode is
+    # added. Imported in-function: this widget module must not pull the tool
+    # module in at import time.
+    from local_operator.tools.builtin import (
+        peer_send_mode_label,
+        peer_send_target_label,
+    )
+
+    mode = peer_send_mode_label(args)
+    # `who` may be a raw conversation substring, i.e. model-controlled text; it
+    # goes through the same scalar flattening every other summary field does.
+    who = _scalar_text(peer_send_target_label(args)) or "?"
     message = _scalar_text(args.get("message"))
-    preview = truncate_cells(message, _SEND_PREVIEW_CELLS) if message else ""
-    parts = [part for part in (who, mode, preview) if part]
+    parts = [part for part in (mode, who, message) if part]
     return " · ".join(parts)
 
 

@@ -143,3 +143,28 @@ async def test_live_receipt_suppresses_its_replay() -> None:
         # mounted for it beyond the one from boot.
         bodies = [b.text() for b in _peer_blocks(app)]
         assert bodies.count("dup note") == 1
+
+
+def test_the_header_falls_back_to_cwd_then_session_id_not_a_bare_pid() -> None:
+    """A row reading `peer message from (pid 1)` names nothing a reader can act
+    on. The receive side resolves the name from the registry first; when even
+    that finds nothing, the cwd basename and then a short session id are still
+    better than a kernel-assigned number."""
+    by_cwd = PeerMessageBlock("body", {"pid": 1, "cwd": "/Users/x/minerva-core"})
+    assert "minerva-core" in by_cwd._header()
+
+    by_id = PeerMessageBlock("body", {"pid": 1, "session_id": "01JQ9ZK4W7X2M8N3PVQ6TYRB5H"})
+    header = by_id._header()
+    assert "01JQ9ZK4" in header
+    # Only a short prefix: a full ULID is 26 cells of entropy that would push
+    # the pid and model out of the header.
+    assert "01JQ9ZK4W7X2M8N3PVQ6TYRB5H" not in header
+
+    # A real name still wins over both fallbacks.
+    named = PeerMessageBlock(
+        "body", {"pid": 1, "cwd": "/Users/x/minerva-core", "conversation_name": "release cutter"}
+    )
+    assert "release cutter" in named._header()
+
+    # Nothing at all: the old bare-pid shape is still the last resort.
+    assert "pid 1" in PeerMessageBlock("body", {"pid": 1})._header()

@@ -28,6 +28,7 @@ reads from the SHAPE of each mark, a spanning bar against a single glyph.
 
 from __future__ import annotations
 
+import os
 import time
 from contextlib import contextmanager
 from typing import Callable, ClassVar, Iterator, Literal, Sequence
@@ -1607,10 +1608,28 @@ class PeerMessageBlock(TranscriptBlock):
         """The sender label: 'peer message from "<name>" (pid N, <model>)'.
 
         Every field is advisory — a leaner sender omits some — so the label is
-        assembled from whatever is present and never assumes a key exists."""
+        assembled from whatever is present and never assumes a key exists.
+
+        When the conversation name is genuinely absent even after the receive
+        side's registry enrichment, the label falls back to the sender's cwd
+        basename and then to a short session id rather than showing a bare pid.
+        A row reading `peer message from (pid 1)` names nothing a reader can act
+        on — the whole point of the indicator is to say WHICH session reached
+        in, and a working directory or an id prefix answers that where a pid
+        assigned by the kernel does not."""
         name = str(self._sender.get("conversation_name") or "").strip()
         pid = self._sender.get("pid")
         model = str(self._sender.get("model_label") or "").strip()
+        if not name:
+            cwd = str(self._sender.get("cwd") or "").strip().rstrip("/")
+            if cwd:
+                name = os.path.basename(cwd)
+        if not name:
+            session_id = str(self._sender.get("session_id") or "").strip()
+            if session_id:
+                # A short prefix: a full ULID is 26 cells of entropy that pushes
+                # the pid and model out of the header without helping the eye.
+                name = session_id[:8]
         bits: list[str] = []
         if pid is not None:
             bits.append(f"pid {pid}")
