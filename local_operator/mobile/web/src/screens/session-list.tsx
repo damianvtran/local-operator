@@ -8,7 +8,13 @@
  * danger dot and a word ("approval" / "question"), because that is the one
  * card that needs a decision (branding §7).
  */
-import { useEffect, useState } from "react";
+import {
+	useEffect,
+	useLayoutEffect,
+	useRef,
+	useState,
+	type Ref,
+} from "react";
 import { getDirectories } from "../api";
 import { Sheet } from "../components/ui/sheet";
 import { Spinner } from "../components/spinner";
@@ -20,26 +26,93 @@ import { MARK_DATA_URI } from "../lib/mark";
 import type { SessionSummary } from "../types";
 import { cn } from "../lib/cn";
 
-function SessionCard({ s, home }: { s: SessionSummary; home: string }) {
+/** The right-cluster word `new`. It lingers through a 120ms opacity fade when
+    the mark clears (session opened) instead of blinking out — but it MUST
+    unmount once the fade lands: an opacity-0 `shrink-0` span would keep
+    pushing the `N agents` / `N todo` chips rightward forever. The fade is a
+    transition, so the global prefers-reduced-motion block caps it to instant
+    for free; the unmount timer still runs its course. */
+function NewMark({ visible }: { visible: boolean }) {
+	const [mounted, setMounted] = useState(visible);
+	useEffect(() => {
+		if (visible) {
+			setMounted(true);
+			return;
+		}
+		if (!mounted) return;
+		/* Matches --transition-duration-fast (120ms): the timeout only removes
+		   the node after the CSS fade has landed. */
+		const timer = setTimeout(() => setMounted(false), 120);
+		return () => clearTimeout(timer);
+	}, [visible, mounted]);
+	if (!mounted) return null;
+	return (
+		<span
+			/* Sighting users see `new`; assistive tech hears the unambiguous
+			   phrase. While fading out the word is already meaningless, so it
+			   leaves the accessibility tree at once. */
+			aria-label={visible ? "new activity" : undefined}
+			aria-hidden={visible ? undefined : true}
+			className="shrink-0 text-meta text-accent"
+			style={{
+				opacity: visible ? 1 : 0,
+				transition:
+					"opacity var(--transition-duration-fast, 120ms) ease-out",
+			}}
+		>
+			new
+		</span>
+	);
+}
+
+function SessionCard({
+	s,
+	home,
+	ref,
+}: {
+	s: SessionSummary;
+	home: string;
+	/* FLIP anchor: the list measures every card before/after a reorder so it
+	   can settle it into its new slot instead of teleporting it. */
+	ref?: Ref<HTMLButtonElement>;
+}) {
 	const pendingLabel =
 		s.pending_kind === "approval"
 			? "approval"
 			: s.pending_kind === "ask"
 				? "question"
 				: null;
+	/* Render ladder: NEEDS DECISION > WORKING > NEW/UNREAD > IDLE — the same
+	   order as the daemon's sort, so what is loudest is also what is
+	   highest. Flags coexist in data; exactly one state renders. A session
+	   blocked on a decision must be opened anyway, so the unread mark would
+	   add noise; a streaming session is drawing the eye already, and "new"
+	   marks COMPLETED unviewed activity, never in-flight work. */
+	const decision = Boolean(s.needs_attention && pendingLabel);
+	const unread = Boolean(s.unseen) && !decision && !s.streaming;
 	return (
 		<button
+			ref={ref}
 			type="button"
 			onClick={() => navigate(`/s/${encodeURIComponent(s.session_id)}`)}
 			className="flex w-full flex-col gap-0.5 rounded-md px-2 py-1.5 text-left select-none active:bg-elevated"
 		>
 			<div className="flex items-center gap-2">
-				{s.needs_attention && pendingLabel ? (
-					<span
-						className="lo-pulse inline-block size-1.5 shrink-0 rounded-full bg-danger"
-						aria-hidden
-					/>
-				) : null}
+				{/* Reserved dot slot, always rendered: every title starts at the
+				    same x in every state, forever — indicators change colour,
+				    never geometry. The old conditional dot shifted titles 14px
+				    sideways when it appeared/disappeared. */}
+				<span
+					className={cn(
+						"inline-block size-1.5 shrink-0 rounded-full",
+						decision
+							? "lo-pulse bg-danger"
+							: unread
+								? "bg-accent"
+								: "bg-transparent",
+					)}
+					aria-hidden
+				/>
 				{s.streaming ? (
 					/* The obvious in-progress mark beside the title: a small loading
 					   wheel, not just the text sweep — the sweep alone was too
@@ -54,11 +127,15 @@ function SessionCard({ s, home }: { s: SessionSummary; home: string }) {
 				>
 					{s.conversation_name || "untitled"}
 				</span>
-				{s.needs_attention && pendingLabel ? (
+				{decision && pendingLabel ? (
 					<span className="shrink-0 text-meta text-danger">
 						{pendingLabel}
 					</span>
 				) : null}
+				{/* State word rides BEFORE the count chips in the right cluster
+				    (spec §1): `new` truncates the title only, row height never
+				    changes. */}
+				<NewMark visible={unread} />
 				{s.subagents_running > 0 ? (
 					/* ⟳ and ☐ render as tofu boxes on phones whose system font lacks
 					   those codepoints. Text marks survive every font. */
@@ -134,6 +211,11 @@ export function SessionListScreen() {
 	const [home, setHome] = useState("");
 	const [themeOpen, setThemeOpen] = useState(false);
 	const [query, setQuery] = useState("");
+	/* FLIP settle state: card DOM by session id, plus each card's content
+	   coordinate from the previous commit. */
+	const mainRef = useRef<HTMLElement>(null);
+	const cardRefs = useRef(new Map<string, HTMLButtonElement>());
+	const prevTops = useRef(new Map<string, number>());
 	const visible = sessions.filter((session) =>
 		`${session.conversation_name} ${session.session_id} ${session.cwd}`
 			.toLowerCase()
@@ -143,6 +225,55 @@ export function SessionListScreen() {
 	const previous = visible.filter((session) => session.section === "previous");
 
 	useEffect(() => retainSessionListStream(), []);
+
+	/* FLIP settle for reorders (spec §3): a card never teleports under a
+	   thumb mid-scroll. After each commit, measure every card's position in
+	   the scroll content (`rect.top - main.rect.top + scrollTop`, so a user
+	   scroll between commits never reads as movement), and where a card moved,
+	   apply the inverse translateY with no transition, force a style flush,
+	   then play it back to zero with a transform transition. Scroll offset is
+	   untouched — only transforms animate. Implemented with `transition`,
+	   never `animation`, so the global prefers-reduced-motion block caps the
+	   settle to instant for free. Runs synchronously before paint
+	   (useLayoutEffect) so the inverted frame is what the user would have
+	   seen anyway — the pre-reorder layout. */
+	useLayoutEffect(() => {
+		const main = mainRef.current;
+		const origin = main
+			? main.getBoundingClientRect().top - main.scrollTop
+			: 0;
+		const nextTops = new Map<string, number>();
+		for (const [id, el] of cardRefs.current) {
+			nextTops.set(id, el.getBoundingClientRect().top - origin);
+		}
+		for (const [id, el] of cardRefs.current) {
+			const prev = prevTops.current.get(id);
+			const next = nextTops.get(id);
+			/* New cards have no old position and simply appear in place. */
+			if (prev === undefined || next === undefined) continue;
+			const dy = prev - next;
+			if (dy === 0) continue;
+			el.style.transition = "none";
+			el.style.transform = `translateY(${dy}px)`;
+			/* Force the inverted position to commit as a style before the
+			   transition property returns, or the browser collapses both
+			   writes and the card jumps straight to its new slot. */
+			void el.offsetHeight;
+			el.style.transition =
+				"transform var(--transition-duration-base, 180ms) var(--ease-out-quart, ease-out)";
+			el.style.transform = "";
+			const done = (event: TransitionEvent) => {
+				/* transitionend BUBBLES: the `new` word's opacity fade inside the
+				   card also ends, and acting on that event would strip the
+				   transform transition mid-settle. */
+				if (event.target !== el) return;
+				el.style.transition = "";
+				el.removeEventListener("transitionend", done);
+			};
+			el.addEventListener("transitionend", done);
+		}
+		prevTops.current = nextTops;
+	});
 	useEffect(() => {
 		getDirectories()
 			.then((d) => setHome(d.home))
@@ -164,7 +295,10 @@ export function SessionListScreen() {
 					local operator
 				</h1>
 			</header>
-			<main className="flex flex-1 flex-col overflow-y-auto px-1 pb-2">
+			<main
+				ref={mainRef}
+				className="flex flex-1 flex-col overflow-y-auto px-1 pb-2"
+			>
 				<input
 					value={query}
 					onChange={(event) => setQuery(event.target.value)}
@@ -186,11 +320,31 @@ export function SessionListScreen() {
 					<div className="flex flex-col gap-3">
 						<section>
 							<h2 className="px-2 py-1 text-meta font-medium text-ink-muted">Active Sessions</h2>
-							{active.map((s) => <SessionCard key={s.session_id} s={s} home={home} />)}
+							{active.map((s) => (
+								<SessionCard
+									key={s.session_id}
+									s={s}
+									home={home}
+									ref={(el) => {
+										if (el) cardRefs.current.set(s.session_id, el);
+										else cardRefs.current.delete(s.session_id);
+									}}
+								/>
+							))}
 						</section>
 						<section>
 							<h2 className="px-2 py-1 text-meta font-medium text-ink-muted">Previous Sessions</h2>
-							{previous.map((s) => <SessionCard key={s.session_id} s={s} home={home} />)}
+							{previous.map((s) => (
+								<SessionCard
+									key={s.session_id}
+									s={s}
+									home={home}
+									ref={(el) => {
+										if (el) cardRefs.current.set(s.session_id, el);
+										else cardRefs.current.delete(s.session_id);
+									}}
+								/>
+							))}
 						</section>
 					</div>
 				)}
