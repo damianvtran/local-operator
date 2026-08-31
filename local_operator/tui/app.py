@@ -2851,7 +2851,17 @@ class OperatorApp(App[None]):
             cost=(
                 self._spend_text(cost) if cost is not None else ("$—" if billed_unknown else None)
             ),
-            conversation_name=str(getattr(state, "conversation_title", "") or ""),
+            # A local opener label is DISPLAY state until a generated title is
+            # accepted. Canonical snapshots correctly keep their persisted title
+            # empty during that interval, but must not turn "empty in storage"
+            # into "erase the better label already painted": todo/model-route
+            # updates arrive throughout the first turn, and one otherwise sends
+            # the terminal tab back to its cwd (often the unhelpful `tmp`). A
+            # real canonical title still wins immediately; reload/session swaps
+            # clear `_provisional_name` before adopting their replacement.
+            conversation_name=(
+                str(getattr(state, "conversation_title", "") or "") or self._provisional_name
+            ),
             # The fork tag follows the name, not the band's memory: a snapshot
             # arrives with EVERY name change, and `StatusLine.update` treats a
             # missing `forked=` as leave-alone — so a rename that cleared the
