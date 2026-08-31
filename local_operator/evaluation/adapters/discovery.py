@@ -6,6 +6,8 @@ import base64
 import csv
 import hashlib
 import importlib.metadata
+import inspect
+import json
 import os
 import stat
 from collections.abc import Callable
@@ -20,6 +22,10 @@ from local_operator.evaluation.adapters.api import (
 )
 from local_operator.evaluation.evidence.models import canonical_digest
 
+MAX_WORKSPACE_FILES = 100_000
+MAX_WORKSPACE_BYTES = 4 * 1024 * 1024 * 1024
+RELEASE_MANIFEST = "adapter-release.json"
+
 
 class AdapterDiscoveryError(RuntimeError):
     """A closed discovery failure safe to report across the RPC boundary."""
@@ -31,6 +37,9 @@ class ResolvedLaunch:
     executable_device: int
     executable_inode: int
     executable_mode: int
+    executable_size: int
+    executable_sha256: str
+    executable_nlink: int
     workspace: str
     workspace_device: int
     workspace_inode: int
@@ -63,8 +72,16 @@ def resolve_launch(selector: AdapterSelector) -> ResolvedLaunch:
     workspace = Path(selector.workspace)
     executable_info = _symlink_free(executable)
     workspace_info = _symlink_free(workspace)
-    if not stat.S_ISREG(executable_info.st_mode) or not os.access(executable, os.X_OK):
-        raise AdapterDiscoveryError("adapter Python is not an executable regular file")
+    if (
+        not stat.S_ISREG(executable_info.st_mode)
+        or executable_info.st_nlink != 1
+        or not os.access(executable, os.X_OK)
+    ):
+        raise AdapterDiscoveryError("adapter Python must be one executable non-hardlinked file")
+    executable_digest = hashlib.sha256()
+    with executable.open("rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            executable_digest.update(chunk)
     if not stat.S_ISDIR(workspace_info.st_mode):
         raise AdapterDiscoveryError("adapter workspace is not a directory")
     return ResolvedLaunch(
@@ -72,6 +89,9 @@ def resolve_launch(selector: AdapterSelector) -> ResolvedLaunch:
         executable_device=executable_info.st_dev,
         executable_inode=executable_info.st_ino,
         executable_mode=executable_info.st_mode,
+        executable_size=executable_info.st_size,
+        executable_sha256=executable_digest.hexdigest(),
+        executable_nlink=executable_info.st_nlink,
         workspace=str(workspace),
         workspace_device=workspace_info.st_dev,
         workspace_inode=workspace_info.st_ino,
@@ -82,10 +102,19 @@ def resolve_launch(selector: AdapterSelector) -> ResolvedLaunch:
 def validate_resolved_launch(launch: ResolvedLaunch) -> None:
     executable_info = _symlink_free(Path(launch.executable))
     workspace_info = _symlink_free(Path(launch.workspace))
+    if not stat.S_ISREG(executable_info.st_mode) or executable_info.st_nlink != 1:
+        raise AdapterDiscoveryError("adapter Python identity is unsafe")
+    executable_digest = hashlib.sha256()
+    with Path(launch.executable).open("rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            executable_digest.update(chunk)
     current = (
         executable_info.st_dev,
         executable_info.st_ino,
         executable_info.st_mode,
+        executable_info.st_size,
+        executable_digest.hexdigest(),
+        executable_info.st_nlink,
         workspace_info.st_dev,
         workspace_info.st_ino,
         workspace_info.st_mode,
@@ -94,6 +123,9 @@ def validate_resolved_launch(launch: ResolvedLaunch) -> None:
         launch.executable_device,
         launch.executable_inode,
         launch.executable_mode,
+        launch.executable_size,
+        launch.executable_sha256,
+        launch.executable_nlink,
         launch.workspace_device,
         launch.workspace_inode,
         launch.workspace_mode,
@@ -102,12 +134,76 @@ def validate_resolved_launch(launch: ResolvedLaunch) -> None:
         raise AdapterDiscoveryError("adapter launch path identity changed before spawn")
 
 
+def workspace_digest(path: str) -> str:
+    """Hash every immutable workspace file without following special entries."""
+
+    root = Path(path)
+    root_info = _symlink_free(root)
+    if not stat.S_ISDIR(root_info.st_mode):
+        raise AdapterDiscoveryError("adapter workspace is not a directory")
+    entries: list[dict[str, Any]] = []
+    total_bytes = 0
+    for directory, directory_names, file_names in os.walk(root, followlinks=False):
+        directory_names.sort()
+        file_names.sort()
+        current = Path(directory)
+        for name in (*directory_names, *file_names):
+            candidate = current / name
+            info = os.lstat(candidate)
+            if stat.S_ISLNK(info.st_mode):
+                raise AdapterDiscoveryError("adapter workspace contains a symlink")
+            if stat.S_ISDIR(info.st_mode):
+                continue
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                raise AdapterDiscoveryError("adapter workspace contains an unsafe file")
+            if len(entries) >= MAX_WORKSPACE_FILES:
+                raise AdapterDiscoveryError("adapter workspace file count exceeds limit")
+            total_bytes += info.st_size
+            if total_bytes > MAX_WORKSPACE_BYTES:
+                raise AdapterDiscoveryError("adapter workspace bytes exceed limit")
+            digest = hashlib.sha256()
+            with candidate.open("rb") as stream:
+                while chunk := stream.read(1024 * 1024):
+                    digest.update(chunk)
+            entries.append(
+                {
+                    "path": candidate.relative_to(root).as_posix(),
+                    "mode": stat.S_IMODE(info.st_mode),
+                    "size": info.st_size,
+                    "sha256": digest.hexdigest(),
+                }
+            )
+    entries.sort(key=lambda entry: entry["path"])
+    return canonical_digest("adapter-workspace-manifest-v1", entries)
+
+
+def verify_release_manifest(selector: AdapterSelector) -> None:
+    manifest = Path(selector.workspace) / RELEASE_MANIFEST
+    try:
+        info = os.lstat(manifest)
+        raw = manifest.read_bytes()
+    except OSError as error:
+        raise AdapterDiscoveryError("adapter release manifest is unavailable") from error
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or len(raw) > 4096:
+        raise AdapterDiscoveryError("adapter release manifest is unsafe")
+    try:
+        value = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise AdapterDiscoveryError("adapter release manifest is malformed") from error
+    canonical = json.dumps(value, separators=(",", ":"), sort_keys=True).encode()
+    if raw != canonical or value != {"release_digest": selector.release_digest}:
+        raise AdapterDiscoveryError("adapter release manifest digest differs")
+
+
 def validate_launch_paths(selector: AdapterSelector) -> None:
     resolve_launch(selector)
 
 
 def worker_argv(selector: AdapterSelector) -> tuple[str, ...]:
     resolve_launch(selector)
+    verify_release_manifest(selector)
+    if workspace_digest(selector.workspace) != selector.workspace_digest:
+        raise AdapterDiscoveryError("adapter workspace content digest differs")
     # Isolation flags prevent user site, PYTHON* variables, and current-directory
     # imports from changing which exact wheel the worker verifies.
     return (
@@ -177,8 +273,30 @@ def verify_distribution(selector: AdapterSelector) -> importlib.metadata.Distrib
     return distribution
 
 
+def _verified_entry_module(
+    distribution: importlib.metadata.Distribution, selector: AdapterSelector
+) -> tuple[str, Path]:
+    module, separator, attribute = selector.entry_point.partition(":")
+    if separator != ":" or not module or not attribute or ":" in attribute:
+        raise AdapterDiscoveryError("adapter entry point must be module:attribute")
+    candidates = {f"{module.replace('.', '/')}.py", f"{module.replace('.', '/')}/__init__.py"}
+    rows = {row[0]: row for row in _record_rows(distribution)}
+    matches = sorted(candidates & rows.keys())
+    if len(matches) != 1:
+        raise AdapterDiscoveryError("adapter entry module is not uniquely RECORD-covered")
+    module_path = Path(str(distribution.locate_file(matches[0])))
+    _symlink_free(module_path)
+    encoded_hash = rows[matches[0]][1].split("=", 1)[1]
+    actual = base64.urlsafe_b64encode(hashlib.sha256(module_path.read_bytes()).digest()).rstrip(
+        b"="
+    )
+    if actual.decode() != encoded_hash:
+        raise AdapterDiscoveryError("adapter entry module RECORD hash differs")
+    return module, module_path
+
+
 def load_selected_adapter(selector: AdapterSelector) -> EvaluationAdapter:
-    """Load exactly one entry point from only the already selected distribution."""
+    """Load exactly one preverified module from the selected distribution."""
 
     distribution = verify_distribution(selector)
     matches = [
@@ -192,8 +310,15 @@ def load_selected_adapter(selector: AdapterSelector) -> EvaluationAdapter:
         raise AdapterDiscoveryError(
             "selected distribution must expose exactly one exact entry point"
         )
+    module, module_path = _verified_entry_module(distribution, selector)
     try:
         factory = cast(Callable[[], Any], matches[0].load())
+        factory_module = getattr(factory, "__module__", "")
+        source = inspect.getsourcefile(factory)
+        if factory_module != module and not factory_module.startswith(f"{module}."):
+            raise AdapterDiscoveryError("adapter factory comes from another module")
+        if source is None or Path(source).resolve(strict=True) != module_path.resolve(strict=True):
+            raise AdapterDiscoveryError("adapter factory source differs from verified module")
         adapter = factory()
     except Exception as error:
         raise AdapterDiscoveryError("selected adapter entry point failed to load") from error

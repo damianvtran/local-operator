@@ -36,6 +36,7 @@ def selector(tmp_path: Path) -> AdapterSelector:
         release_digest="b" * 64,
         python_executable=str(Path(sys.executable).resolve()),
         workspace=str(workspace),
+        workspace_digest="c" * 64,
         route_capability="computer",
     )
 

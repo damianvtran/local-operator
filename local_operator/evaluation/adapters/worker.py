@@ -30,6 +30,8 @@ from local_operator.evaluation.adapters.api import (
 from local_operator.evaluation.adapters.discovery import (
     AdapterDiscoveryError,
     load_selected_adapter,
+    verify_release_manifest,
+    workspace_digest,
 )
 from local_operator.evaluation.adapters.rpc import (
     AsyncIncrementalReader,
@@ -63,11 +65,11 @@ class _OperationRecord:
 
 
 def _workspace_digest(selector: AdapterSelector) -> str:
-    info = os.stat(selector.workspace, follow_symlinks=False)
-    return canonical_digest(
-        "adapter-workspace-v1",
-        {"device": info.st_dev, "inode": info.st_ino, "mode": info.st_mode},
-    )
+    verify_release_manifest(selector)
+    digest = workspace_digest(selector.workspace)
+    if digest != selector.workspace_digest:
+        raise AdapterDiscoveryError("adapter workspace content digest differs")
+    return digest
 
 
 class Worker:

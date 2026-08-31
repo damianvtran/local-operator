@@ -4,6 +4,8 @@ import base64
 import csv
 import hashlib
 import importlib.metadata
+import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -18,6 +20,7 @@ from local_operator.evaluation.adapters.discovery import (
     validate_resolved_launch,
     verify_distribution,
     worker_argv,
+    workspace_digest,
 )
 
 
@@ -77,6 +80,12 @@ def fake_distribution(tmp_path: Path, entries: list[FakeEntryPoint]) -> FakeDist
 def selected(tmp_path: Path, digest: str) -> AdapterSelector:
     workspace = tmp_path / "workspace"
     workspace.mkdir(exist_ok=True)
+    release_digest = "b" * 64
+    (workspace / "adapter-release.json").write_text(f'{{"release_digest":"{release_digest}"}}')
+    executable = tmp_path / "python"
+    if not executable.exists():
+        shutil.copy2(Path(sys.executable).resolve(), executable)
+        executable.chmod(0o755)
     return AdapterSelector(
         schema_version="1.0",
         adapter_id="tiny",
@@ -84,9 +93,10 @@ def selected(tmp_path: Path, digest: str) -> AdapterSelector:
         version="1.0",
         entry_point="tiny_adapter:create",
         package_digest=digest,
-        release_digest="b" * 64,
-        python_executable=str(Path(sys.executable).resolve()),
+        release_digest=release_digest,
+        python_executable=str(executable),
         workspace=str(workspace),
+        workspace_digest=workspace_digest(str(workspace)),
         route_capability="computer",
     )
 
@@ -113,10 +123,37 @@ def test_launch_identity_detects_swap(tmp_path: Path) -> None:
     base = selected(tmp_path, "a" * 64)
     resolved = resolve_launch(base)
     workspace = Path(base.workspace)
-    workspace.rmdir()
+    shutil.rmtree(workspace)
     workspace.mkdir()
     with pytest.raises(AdapterDiscoveryError, match="identity changed"):
         validate_resolved_launch(resolved)
+
+
+def test_launch_rejects_hardlink_and_content_mutation(tmp_path: Path) -> None:
+    base = selected(tmp_path, "a" * 64)
+    executable = Path(base.python_executable)
+    hardlink = tmp_path / "python-hardlink"
+    os.link(executable, hardlink)
+    with pytest.raises(AdapterDiscoveryError, match="non-hardlinked"):
+        resolve_launch(base)
+    hardlink.unlink()
+    resolved = resolve_launch(base)
+    with executable.open("r+b") as stream:
+        first = stream.read(1)
+        stream.seek(0)
+        stream.write(bytes([first[0] ^ 1]))
+    with pytest.raises(AdapterDiscoveryError, match="identity changed"):
+        validate_resolved_launch(resolved)
+
+
+def test_workspace_content_mutation_changes_digest(tmp_path: Path) -> None:
+    base = selected(tmp_path, "a" * 64)
+    workspace = Path(base.workspace)
+    before = workspace_digest(str(workspace))
+    manifest = workspace / "adapter-release.json"
+    original = manifest.read_text()
+    manifest.write_text(original.replace("b", "a", 1))
+    assert workspace_digest(str(workspace)) != before
 
 
 def test_exact_record_digest_and_worker_flags(tmp_path: Path) -> None:
