@@ -97,7 +97,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install flake8==7.1.0 black==26.1.0 isort==5.13.2 pyright==1.1.408
+          pip install flake8==7.1.0 black==26.1.0 isort==5.13.2
 
       - name: Run flake8
         run: flake8 .
@@ -111,8 +111,12 @@ jobs:
   type-check:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    env:
-      PYRIGHT_PYTHON_FORCE_VERSION: latest
+    # pyright's version is the pin in pyproject.toml's dev extra. Do NOT
+    # set PYRIGHT_PYTHON_FORCE_VERSION: that env var makes the wrapper
+    # ignore the bundled analyzer and download whatever npm currently
+    # calls latest, which is how this job drifted onto 1.1.413 while the
+    # package (and every local run) stayed on 1.1.411. Bump the pin, not
+    # an env override.
     steps:
       - uses: actions/checkout@v4
 
@@ -427,11 +431,25 @@ jobs:
     # compositor, so there is no window, no display server and no TTY beyond
     # what the harness makes itself. It needs no `xvfb` and must never grow a
     # real browser or terminal dependency.
+    #
+    # lint + type-check only. This job is the freeze regression guard (#401);
+    # it exists BECAUSE a green unit suite did not catch a total event-loop
+    # deadlock. Gating it on `test` (or `pip-audit`) disarms the guard
+    # whenever that cheaper stage is red — which is exactly when you most
+    # want the freeze signal. Observed on PR #426: both CI runs skipped
+    # tui-e2e because `test` was flaky, so a deadlock fix landed with the
+    # deadlock guard never executed. PR #461 reduced that flake; it does
+    # not make the structural dependency right.
+    #
+    # lint/type-check stay: they are cheap syntax gates and a broken
+    # install is not a freeze. `test` and `pip-audit` do not: a flake or a
+    # newly-published CVE must not skip the macOS resume-liveness
+    # assertion. The job installs the package itself, so it does not need
+    # those stages to have built anything. cli-sanity/server-sanity keep
+    # the full `needs` list — they are live-LLM cost, not freeze guards.
     needs:
       - lint
       - type-check
-      - test
-      - pip-audit
     # Generous relative to the ~11 s the stage takes when healthy (~14 s on a
     # macOS runner, which is slower and queues longer). The failure mode under
     # test is a hang, and each test carries its own tighter `faulthandler`

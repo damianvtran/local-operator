@@ -130,7 +130,17 @@ dev = [
     # accepts, or accept code CI flags, and either way the local gate stops
     # predicting the remote one. Bump this and the ci.yml pin together.
     "flake8==7.1.0",
-    "pyright",
+    # Same discipline as flake8: one version across the type-check job,
+    # the local gate, and this extra. Unpinned, the wrapper
+    # (PYRIGHT_PYTHON_FORCE_VERSION=latest used to live on the type-check
+    # job) downloaded whatever npm called latest (1.1.413) while pip
+    # resolved 1.1.411 and the lint job — which never even ran pyright —
+    # pinned 1.1.408. The restated `[tool.pyright] exclude` defaults are
+    # version-specific; three versions means the restatement is a guess.
+    # Bump this pin, not an env override, and keep the exclude-superset
+    # guard in tests/unit/test_ci_hygiene.py green against the new
+    # analyzer.
+    "pyright==1.1.411",
     "pytest",
     "pytest-asyncio",
     "pytest-cov",
