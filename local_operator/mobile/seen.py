@@ -71,8 +71,9 @@ class SeenStore:
         self._lock = threading.Lock()
         self._last_seen: dict[str, float] = {}
         self._baselines: dict[str, float] = {}
-        # Wall-clock of the last watch-driven write (see touch_watched).
-        self._last_watch_persist_at = 0.0
+        # Wall-clock of the last watch-driven write, PER SESSION (see
+        # touch_watched). Bounded alongside the stamps it shadows.
+        self._watch_persisted_at: dict[str, float] = {}
         self._load()
 
     # -- verdicts -------------------------------------------------------------
@@ -118,8 +119,14 @@ class SeenStore:
         with self._lock:
             self._last_seen[session_id] = stamp
             self._baselines.setdefault(session_id, stamp)
-            if stamp - self._last_watch_persist_at >= WATCH_PERSIST_INTERVAL_S:
-                self._last_watch_persist_at = stamp
+            # PER-SESSION, not one clock for the store: a single instance-wide
+            # timestamp meant the first watched session to write suppressed the
+            # disk write for every OTHER session for the whole interval, so a
+            # second session watched in that window kept its stamp only in
+            # memory and lost it on a crash. Two phones on two sessions is the
+            # ordinary case, not an exotic one.
+            if stamp - self._watch_persisted_at.get(session_id, 0.0) >= WATCH_PERSIST_INTERVAL_S:
+                self._watch_persisted_at[session_id] = stamp
                 self._bound_locked()
                 self._persist_locked()
 
@@ -184,3 +191,6 @@ class SeenStore:
         ranked = sorted(self._last_seen, key=self._last_seen.get)  # type: ignore[arg-type]
         for session_id in ranked[:excess]:
             self._last_seen.pop(session_id, None)
+            # The debounce clock is shadow state for a stamp; dropping the
+            # stamp without it would leak one float per evicted session.
+            self._watch_persisted_at.pop(session_id, None)

@@ -570,6 +570,31 @@ def test_seen_store_mark_seen_clears_then_relights(tmp_path) -> None:
     assert store.is_unseen("s1", 250.0) is True  # newer than last_seen
 
 
+def test_watch_debounce_is_per_session(tmp_path) -> None:
+    """Each watched session gets its own persist clock (A15).
+
+    A single instance-wide timestamp meant the first watched session to write
+    suppressed the disk write for every other session for the whole interval,
+    so a second session watched in that window kept its stamp only in memory
+    and lost it on a crash. Two phones on two sessions is the ordinary case.
+    """
+    import json
+
+    path = tmp_path / SEEN_STORE_NAME
+    store = SeenStore(path)
+    for index, session_id in enumerate(("a", "b", "c")):
+        store.touch_watched(session_id, now=1000.0 + index)
+    persisted = json.loads(path.read_text())["sessions"]
+    assert sorted(persisted) == ["a", "b", "c"]
+
+    # The debounce still does its job WITHIN one session: repeat touches
+    # inside the interval must not rewrite the file.
+    before = path.stat().st_mtime_ns
+    for _ in range(300):
+        store.touch_watched("a", now=1003.0)
+    assert path.stat().st_mtime_ns == before
+
+
 def test_seen_store_persists_last_seen_across_restart(tmp_path) -> None:
     """last_seen survives a store reload; baselines re-derive safely."""
     path = tmp_path / SEEN_STORE_NAME
