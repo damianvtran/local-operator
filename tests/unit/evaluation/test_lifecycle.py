@@ -720,3 +720,125 @@ def test_cleanup_cannot_succeed_after_timeout() -> None:
     )
     with pytest.raises(ValueError, match="after its action timeout"):
         aggregate_cleanup(plan, (late, other))
+
+
+def test_start_is_atomic_across_threads_and_rolls_back_construction_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    for iteration in range(12):
+        _plan_value, budget, _cleanup_value, authorized, permit = _authorized()
+        reservations = tuple(
+            reserve_budget(
+                budget,
+                f"race-{iteration}-{suffix}",
+                (ResourceAmount(resource="guest_actions", value=10),),
+            )
+            for suffix in ("a", "b")
+        )
+        commitments = tuple(commit_budget(budget, (item,)) for item in reservations)
+        barrier = Barrier(2)
+
+        def attempt(index: int) -> object:
+            barrier.wait()
+            try:
+                return authorized.start(permit, budget, commitments[index])
+            except ValueError as error:
+                return error
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            outcomes = tuple(executor.map(attempt, (0, 1)))
+        running = [item for item in outcomes if isinstance(item, EpisodeLifecycle)]
+        rejected = [item for item in outcomes if isinstance(item, ValueError)]
+        assert len(running) == 1
+        assert len(rejected) == 1
+        assert running[0].state == "running"
+        assert "authority" in str(rejected[0])
+
+    _plan_value, budget, _cleanup_value, authorized, permit = _authorized()
+    reservation = _reservation(budget)
+    commitment = _commitment(budget, reservation)
+    original = EpisodeLifecycle._transition
+    calls = 0
+
+    def fail_once(self, expected, operation, **updates):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise ValueError("injected child construction failure")
+        return original(self, expected, operation, **updates)
+
+    monkeypatch.setattr(EpisodeLifecycle, "_transition", fail_once)
+    with pytest.raises(ValueError, match="injected child construction failure"):
+        authorized.start(permit, budget, commitment)
+    assert authorized.start(permit, budget, commitment).state == "running"
+
+
+def test_finish_cleanup_is_atomic_and_rolls_back_construction_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    plan, budget, cleanup, authorized, permit = _authorized()
+    reservation = _reservation(budget)
+    cleaning = (
+        authorized.start(permit, budget, _commitment(budget, reservation))
+        .begin_finalization()
+        .finish_finalization(_reconciliation(budget, reservation), _score(plan))
+    )
+    result = _cleanup(cleanup)
+    barrier = Barrier(2)
+
+    def attempt() -> object:
+        barrier.wait()
+        try:
+            return cleaning.finish_cleanup(result)
+        except ValueError as error:
+            return error
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = tuple(executor.map(lambda _index: attempt(), (0, 1)))
+    terminal = [item for item in outcomes if isinstance(item, EpisodeLifecycle)]
+    rejected = [item for item in outcomes if isinstance(item, ValueError)]
+    assert len(terminal) == 1
+    assert len(rejected) == 1
+    assert terminal[0].state == "completed"
+
+    # A cleanup result is single-use even against a separately minted but
+    # content-identical cleaning authority.
+    plan2, budget2, cleanup2, authorized2, permit2 = _authorized()
+    reservation2 = _reservation(budget2)
+    cleaning2 = (
+        authorized2.start(permit2, budget2, _commitment(budget2, reservation2))
+        .begin_finalization()
+        .finish_finalization(_reconciliation(budget2, reservation2), _score(plan2))
+    )
+    with pytest.raises(ValueError, match="lacks factory authority"):
+        cleaning2.finish_cleanup(result)
+    assert cleanup2.cleanup_plan_id == cleanup.cleanup_plan_id
+
+    plan3, budget3, cleanup3, authorized3, permit3 = _authorized()
+    reservation3 = _reservation(budget3)
+    cleaning3 = (
+        authorized3.start(permit3, budget3, _commitment(budget3, reservation3))
+        .begin_finalization()
+        .finish_finalization(_reconciliation(budget3, reservation3), _score(plan3))
+    )
+    retryable_result = _cleanup(cleanup3)
+    original = EpisodeLifecycle._transition
+    calls = 0
+
+    def fail_once(self, expected, operation, **updates):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise ValueError("injected terminal construction failure")
+        return original(self, expected, operation, **updates)
+
+    monkeypatch.setattr(EpisodeLifecycle, "_transition", fail_once)
+    with pytest.raises(ValueError, match="injected terminal construction failure"):
+        cleaning3.finish_cleanup(retryable_result)
+    assert cleaning3.finish_cleanup(retryable_result).state == "completed"

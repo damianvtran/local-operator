@@ -475,3 +475,38 @@ def test_redaction_rejects_common_encoded_canary_variants(encoded: str) -> None:
     with pytest.raises(ValueError) as caught:
         seal_preflight(plan, (receipt,), RedactionSet.from_resolved_values((secret,)))
     assert secret not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "transform",
+    [
+        lambda value: value.lower(),
+        lambda value: value.upper(),
+        lambda value: "".join(
+            character.upper() if index % 2 else character.lower()
+            for index, character in enumerate(value)
+        ),
+    ],
+    ids=("lower", "upper", "mixed"),
+)
+@pytest.mark.parametrize("encoding", ["percent", "hex"])
+def test_redaction_matches_percent_and_hex_case_insensitively(
+    encoding: str,
+    transform: object,
+) -> None:
+    from urllib.parse import quote
+
+    secret = "Secret/Value+42"
+    encoded = quote(secret, safe="") if encoding == "percent" else secret.encode().hex()
+    candidate = transform(encoded)  # type: ignore[operator]
+    plan = _plan((_requirements()[0],))
+    receipt = record_preflight(
+        plan,
+        "compute",
+        status="pass",
+        evidence={"nested": ["safe", {"encoded": candidate}]},
+        duration_ms=1,
+    )
+    with pytest.raises(ValueError) as caught:
+        seal_preflight(plan, (receipt,), RedactionSet.from_resolved_values((secret,)))
+    assert secret not in str(caught.value)

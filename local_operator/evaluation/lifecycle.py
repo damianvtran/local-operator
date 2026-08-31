@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
+from threading import RLock
 from typing import Any, Literal, Self, cast
 
 from pydantic import (
@@ -51,6 +53,20 @@ def _identity(kind: str, payload: Any) -> str:
         sort_keys=True,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+@contextmanager
+def _authority_locks(*locks: RLock) -> Iterator[None]:
+    """Acquire process-local authority locks in one deadlock-safe order."""
+
+    ordered = sorted({id(lock): lock for lock in locks}.values(), key=id)
+    for lock in ordered:
+        lock.acquire()
+    try:
+        yield
+    finally:
+        for lock in reversed(ordered):
+            lock.release()
 
 
 def _state_identity(payload: dict[str, Any]) -> str:
@@ -181,6 +197,8 @@ class CleanupResult(ProtocolModel):
 
     _authority: object = PrivateAttr()
     _receipts: tuple[CleanupReceipt, ...] = PrivateAttr()
+    _lock: RLock = PrivateAttr(default_factory=RLock)
+    _consumed: bool = PrivateAttr(default=False)
 
     cleanup_plan_id: Digest
     succeeded_action_ids: tuple[StrictIdentifier, ...]
@@ -244,8 +262,11 @@ class CleanupResult(ProtocolModel):
     def __reduce__(self) -> Any:
         raise TypeError("cleanup result authority cannot be pickled")
 
+    def authority_lock(self) -> RLock:
+        return self._lock
+
     def assert_authority(self) -> None:
-        if getattr(self, "_authority", None) is not _CLEANUP_RESULT_FACTORY:
+        if self._consumed or getattr(self, "_authority", None) is not _CLEANUP_RESULT_FACTORY:
             raise ValueError("cleanup result lacks factory authority")
         actual: list[str] = []
         for receipt in getattr(self, "_receipts", ()):
@@ -264,6 +285,10 @@ class CleanupResult(ProtocolModel):
         )
         if self.cleanup_result_id != expected_result:
             raise ValueError("cleanup result authority was mutated")
+
+    def consume_authority(self) -> None:
+        self._consumed = True
+        object.__setattr__(self, "_authority", None)
 
 
 def aggregate_cleanup(
@@ -313,9 +338,11 @@ def aggregate_cleanup(
 
 
 class SideEffectPermit(ProtocolModel):
-    """Factory-only authority bound to one sealed episode budget."""
+    """Single-use in-process authority bound to one sealed episode budget."""
 
     _authority: object = PrivateAttr()
+    _lock: RLock = PrivateAttr(default_factory=RLock)
+    _consumed: bool = PrivateAttr(default=False)
 
     episode_id: StrictIdentifier
     plan_id: Digest
@@ -346,8 +373,11 @@ class SideEffectPermit(ProtocolModel):
     def __reduce__(self) -> Any:
         raise TypeError("side-effect permit authority cannot be pickled")
 
+    def authority_lock(self) -> RLock:
+        return self._lock
+
     def assert_authority(self) -> None:
-        if getattr(self, "_authority", None) is not _PERMIT_FACTORY:
+        if self._consumed or getattr(self, "_authority", None) is not _PERMIT_FACTORY:
             raise ValueError("side-effect permit lacks factory authority")
         expected = _identity(
             "side-effect-permit-v1",
@@ -355,6 +385,10 @@ class SideEffectPermit(ProtocolModel):
         )
         if self.permit_id != expected:
             raise ValueError("side-effect permit authority was mutated")
+
+    def consume_authority(self) -> None:
+        self._consumed = True
+        object.__setattr__(self, "_authority", None)
 
 
 def mint_side_effect_permit(
@@ -427,6 +461,8 @@ class EpisodeLifecycle(ProtocolModel):
     """
 
     _authority: object = PrivateAttr()
+    _lock: RLock = PrivateAttr(default_factory=RLock)
+    _consumed: bool = PrivateAttr(default=False)
 
     episode_id: StrictIdentifier
     plan_id: Digest
@@ -570,7 +606,7 @@ class EpisodeLifecycle(ProtocolModel):
         return self
 
     def _assert_authority(self) -> None:
-        if getattr(self, "_authority", None) is not _LIFECYCLE_FACTORY:
+        if self._consumed or getattr(self, "_authority", None) is not _LIFECYCLE_FACTORY:
             raise ValueError("episode lifecycle lacks transition authority")
         expected = _state_identity(self.model_dump(mode="json", exclude={"state_id"}))
         if self.state_id != expected:
@@ -628,30 +664,37 @@ class EpisodeLifecycle(ProtocolModel):
         authorization: BudgetAuthorization,
         commitment: BudgetCommitment,
     ) -> Self:
-        self._assert_authority()
-        if self.state != "authorized":
-            raise ValueError(f"illegal episode transition from {self.state}")
-        permit.assert_authority()
-        commitment.assert_authority(authorization)
-        if commitment.budget_id != self.budget_id:
-            raise ValueError("budget commitment does not match this episode")
-        if (
-            permit.episode_id != self.episode_id
-            or permit.plan_id != self.plan_id
-            or permit.budget_id != self.budget_id
-            or permit.permit_id != self.permit_id
-        ):
-            raise ValueError("side-effect permit does not match this episode")
-        running = self._transition(
-            "authorized",
-            "start-episode",
-            state="running",
-            reservation_ids=commitment.reservation_ids,
-        )
-        # A state node is single-use authority. Consuming it prevents two
-        # independently valid commitments from creating sibling executions.
-        object.__setattr__(self, "_authority", None)
-        return running
+        # These guards are deliberately process-local. Cooperative adapters get
+        # exactly-once authority within this runtime; serialized evidence alone
+        # never recreates authority in another process.
+        with _authority_locks(self._lock, permit.authority_lock(), commitment.authority_lock()):
+            self._assert_authority()
+            if self.state != "authorized":
+                raise ValueError(f"illegal episode transition from {self.state}")
+            permit.assert_authority()
+            commitment.assert_authority(authorization)
+            if commitment.budget_id != self.budget_id:
+                raise ValueError("budget commitment does not match this episode")
+            if (
+                permit.episode_id != self.episode_id
+                or permit.plan_id != self.plan_id
+                or permit.budget_id != self.budget_id
+                or permit.permit_id != self.permit_id
+            ):
+                raise ValueError("side-effect permit does not match this episode")
+            # Child construction is the last fallible step. Only after it works
+            # are all three authorities consumed, so validation errors can retry.
+            running = self._transition(
+                "authorized",
+                "start-episode",
+                state="running",
+                reservation_ids=commitment.reservation_ids,
+            )
+            self._consumed = True
+            object.__setattr__(self, "_authority", None)
+            permit.consume_authority()
+            commitment.consume_authority()
+            return running
 
     def begin_finalization(self) -> Self:
         return self._transition("running", "begin-finalization", state="finalizing")
@@ -731,31 +774,39 @@ class EpisodeLifecycle(ProtocolModel):
         )
 
     def finish_cleanup(self, result: CleanupResult) -> Self:
-        result.assert_authority()
-        if result.cleanup_plan_id != self.cleanup_plan_id:
-            raise ValueError("cleanup result belongs to another plan")
-        updates: dict[str, Any] = {
-            "cleanup_result_id": result.cleanup_result_id,
-            "rescue_required": result.rescue_required,
-        }
-        if self.terminal_intent == "cancel":
-            updates["state"] = "cancelled"
-        elif (
-            self.terminal_intent == "complete"
-            and not result.rescue_required
-            and self.reconciliation_reportable is True
-            and self.score_id is not None
-        ):
-            updates["state"] = "completed"
-        else:
-            updates["state"] = "failed"
-            if result.rescue_required:
-                updates["failure_kind"] = "cleanup"
-                updates["failure_reason"] = "cleanup requires operator rescue"
-            elif self.reconciliation_reportable is False and self.failure_kind is None:
-                updates["failure_kind"] = "unreportable"
-                updates["failure_reason"] = "required usage was unavailable"
-        return self._transition("cleaning", "finish-cleanup", **updates)
+        with _authority_locks(self._lock, result.authority_lock()):
+            self._assert_authority()
+            result.assert_authority()
+            if result.cleanup_plan_id != self.cleanup_plan_id:
+                raise ValueError("cleanup result belongs to another plan")
+            updates: dict[str, Any] = {
+                "cleanup_result_id": result.cleanup_result_id,
+                "rescue_required": result.rescue_required,
+            }
+            if self.terminal_intent == "cancel":
+                updates["state"] = "cancelled"
+            elif (
+                self.terminal_intent == "complete"
+                and not result.rescue_required
+                and self.reconciliation_reportable is True
+                and self.score_id is not None
+            ):
+                updates["state"] = "completed"
+            else:
+                updates["state"] = "failed"
+                if result.rescue_required:
+                    updates["failure_kind"] = "cleanup"
+                    updates["failure_reason"] = "cleanup requires operator rescue"
+                elif self.reconciliation_reportable is False and self.failure_kind is None:
+                    updates["failure_kind"] = "unreportable"
+                    updates["failure_reason"] = "required usage was unavailable"
+            # Terminal construction precedes both consumes: a construction or
+            # validation error leaves lifecycle and result retryable together.
+            terminal = self._transition("cleaning", "finish-cleanup", **updates)
+            self._consumed = True
+            object.__setattr__(self, "_authority", None)
+            result.consume_authority()
+            return terminal
 
     def _validate_reconciliation(self, reconciliation: BudgetReconciliation) -> None:
         if (

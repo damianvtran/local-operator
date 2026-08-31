@@ -14,6 +14,7 @@ import json
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import date as Date
 from datetime import datetime, timezone
+from threading import RLock
 from typing import Annotated, Any, Literal, TypeAlias
 from urllib.parse import quote
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -416,10 +417,17 @@ class RedactionSet:
     an adapter responsibility.
     """
 
-    __slots__ = ("_canaries",)
+    __slots__ = ("_exact_encoded_canaries", "_folded_encoded_canaries", "_plaintext_canaries")
 
-    def __init__(self, canaries: tuple[str, ...]) -> None:
-        self._canaries = canaries
+    def __init__(
+        self,
+        plaintext_canaries: tuple[str, ...],
+        exact_encoded_canaries: tuple[str, ...],
+        folded_encoded_canaries: tuple[str, ...],
+    ) -> None:
+        self._plaintext_canaries = plaintext_canaries
+        self._exact_encoded_canaries = exact_encoded_canaries
+        self._folded_encoded_canaries = folded_encoded_canaries
 
     @classmethod
     def from_resolved_values(cls, values: Iterable[str]) -> "RedactionSet":
@@ -428,7 +436,8 @@ class RedactionSet:
             raise ValueError("too many redaction canaries")
         if any(not isinstance(value, str) or not value for value in snapshot):
             raise ValueError("redaction canaries must be non-empty strings")
-        variants: set[str] = set(snapshot)
+        exact_encoded_variants: set[str] = set()
+        folded_encoded_variants: set[str] = set()
         for value in snapshot:
             raw = value.encode("utf-8")
             # Short encoded fragments collide too readily with ordinary evidence;
@@ -437,20 +446,20 @@ class RedactionSet:
                 continue
             standard = base64.b64encode(raw).decode("ascii")
             urlsafe = base64.urlsafe_b64encode(raw).decode("ascii")
-            variants.update(
-                {
-                    standard,
-                    standard.rstrip("="),
-                    urlsafe,
-                    urlsafe.rstrip("="),
-                    quote(value, safe=""),
-                    raw.hex(),
-                }
+            exact_encoded_variants.update(
+                {standard, standard.rstrip("="), urlsafe, urlsafe.rstrip("=")}
             )
-        return cls(tuple(sorted(variants, key=lambda value: (-len(value), value))))
+            # Percent escapes and hexadecimal digits are semantically
+            # case-insensitive, unlike base64 and the original secret text.
+            folded_encoded_variants.update({quote(value, safe="").casefold(), raw.hex().casefold()})
+        return cls(
+            tuple(sorted(set(snapshot), key=lambda value: (-len(value), value))),
+            tuple(sorted(exact_encoded_variants, key=lambda value: (-len(value), value))),
+            tuple(sorted(folded_encoded_variants, key=lambda value: (-len(value), value))),
+        )
 
     def __repr__(self) -> str:
-        return f"RedactionSet(count={len(self._canaries)})"
+        return f"RedactionSet(count={len(self._plaintext_canaries)})"
 
     def assert_clear(self, value: Any) -> None:
         def strings(item: Any) -> Iterable[str]:
@@ -465,7 +474,11 @@ class RedactionSet:
                     yield from strings(nested)
 
         for candidate in strings(value):
-            if any(canary in candidate for canary in self._canaries):
+            if (
+                any(canary in candidate for canary in self._plaintext_canaries)
+                or any(canary in candidate for canary in self._exact_encoded_canaries)
+                or any(canary in candidate.casefold() for canary in self._folded_encoded_canaries)
+            ):
                 # Never include the candidate or canary: validation errors often
                 # cross process boundaries and become durable logs.
                 raise ValueError("secret canary survived evidence redaction")
@@ -811,6 +824,8 @@ class BudgetCommitment(ProtocolModel):
     """Factory-only authority over the complete validated reservation set."""
 
     _authority: object = PrivateAttr()
+    _lock: RLock = PrivateAttr(default_factory=RLock)
+    _consumed: bool = PrivateAttr(default=False)
 
     episode_id: StrictIdentifier
     budget_id: Digest
@@ -852,8 +867,11 @@ class BudgetCommitment(ProtocolModel):
     def __reduce__(self) -> Any:
         raise TypeError("budget commitment authority cannot be pickled")
 
+    def authority_lock(self) -> RLock:
+        return self._lock
+
     def assert_authority(self, authorization: BudgetAuthorization) -> None:
-        if getattr(self, "_authority", None) is not _BUDGET_COMMITMENT_FACTORY:
+        if self._consumed or getattr(self, "_authority", None) is not _BUDGET_COMMITMENT_FACTORY:
             raise ValueError("budget commitment lacks factory authority")
         if (
             self.episode_id != authorization.episode_id
@@ -867,6 +885,10 @@ class BudgetCommitment(ProtocolModel):
         )
         if self.commitment_id != expected:
             raise ValueError("budget commitment authority was mutated")
+
+    def consume_authority(self) -> None:
+        self._consumed = True
+        object.__setattr__(self, "_authority", None)
 
 
 def commit_budget(
