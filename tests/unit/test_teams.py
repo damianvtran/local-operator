@@ -366,7 +366,7 @@ def test_roundtripped_metadata_only_team_preserves_briefs_through_save(
     so ``save_team`` must still preserve both on-disk briefs when the
     round-tripped object carries only a METADATA edit.
     """
-    team_id = _seed_keep_team(tmp_path)
+    _seed_keep_team(tmp_path)
 
     second = TeamRegistry(tmp_path)
     listed = second.list_teams()[0]
@@ -391,7 +391,7 @@ def test_roundtripped_metadata_only_team_preserves_briefs_through_json_save(
     transport actually carries a team across; the reviewed blocker truncated
     both brief files through exactly this path.
     """
-    team_id = _seed_keep_team(tmp_path)
+    _seed_keep_team(tmp_path)
 
     second = TeamRegistry(tmp_path)
     listed = second.list_teams()[0]
