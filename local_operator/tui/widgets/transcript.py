@@ -2090,6 +2090,13 @@ class TranscriptView(ScrollableContainer):
         super().__init__(id=id, classes=classes)
         self._blocks: list[TranscriptBlock] = []
         self._on_clear: Callable[[], None] | None = None
+        #: Fired from :meth:`note_user_scroll` after the tail-anchor release.
+        #: A bounded resume pages older rows when the reader reaches the top,
+        #: and Home at offset 0 does not change ``scroll_y`` — so a reactive
+        #: watch on the offset would miss the one gesture that most clearly
+        #: means "show me the start". The hook is the same shape as
+        #: ``on_clear``: optional, app-owned, never required for the widget.
+        self._on_user_scroll: Callable[[], None] | None = None
         # The ledger's shared name column, recomputed lazily. Cached because it
         # is read once per card per repaint and only changes when the set of tool
         # names on screen does.
@@ -2142,6 +2149,17 @@ class TranscriptView(ScrollableContainer):
     def set_on_clear(self, hook: Callable[[], None] | None) -> None:
         """Install the hook fired after every :meth:`clear_blocks`."""
         self._on_clear = hook
+
+    def set_on_user_scroll(self, hook: Callable[[], None] | None) -> None:
+        """Install the hook fired from every user-initiated scroll.
+
+        Distinct from watching ``scroll_y``: a Home press while already at the
+        top does not change the offset, so a reactive watch never fires, and
+        that is exactly the gesture that should load the next older page of a
+        bounded resume. The hook runs after the tail-anchor release so a page
+        mount cannot re-acquire following for a reader who just left the tail.
+        """
+        self._on_user_scroll = hook
 
     def pin_tail(self, block: TranscriptBlock) -> None:
         """Append ``block`` and hold it last as the transcript grows.
@@ -2651,6 +2669,8 @@ class TranscriptView(ScrollableContainer):
         # a wheel notch DOWN while already at the tail, which must hand the
         # anchor straight back rather than leaving it released forever.
         self.call_after_refresh(self._resync_tail_anchor)
+        if self._on_user_scroll is not None:
+            self._on_user_scroll()
 
     def watch_scroll_y(self, old_value: float, new_value: float) -> None:
         """Re-decide following from every offset the viewport actually rests at.
