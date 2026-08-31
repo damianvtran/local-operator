@@ -21,6 +21,11 @@ Two entry points, one wire:
 They share the same target resolution and delivery semantics; the only
 difference is the default and who runs them.
 
+**Trust boundary is the account.** The discovery record is mode `0600` under a
+`0700` directory, so anything that can read a session's control key is already
+the owning user. Delivery is loopback only. There is no cross-account path; the
+same-account boundary is the whole authorization story.
+
 ## The `send` tool — agent-facing, in-session
 
 An agent messages a peer with the `send` tool, not by shelling out to `lop
@@ -37,7 +42,7 @@ Parameters:
   cross-session card.
 - `wake` (default **true**) — mailbox mode: wake an idle peer so it responds
   right away. `wake=False` is the quiet drop: the peer reads it on its next
-  turn and stays idle.
+  turn and stays idle (the TUI card shows this mode as `quiet`).
 - `now` — steer the peer mid-turn instead of using the mailbox; opens a turn
   if the peer is idle.
 
@@ -57,13 +62,6 @@ exactly how the peer took it:
 
 A session cannot send to itself (the tool refuses), and an ambiguous `target`
 returns the candidate list asking for a `pid`.
-
-## `lop sessions` — what is running and what it costs
-
-**Trust boundary is the account.** The discovery record is mode `0600` under a
-`0700` directory, so anything that can read a session's control key is already
-the owning user. Delivery is loopback only. There is no cross-account path; the
-same-account boundary is the whole authorization story.
 
 ## `lop sessions` — what is running and what it costs
 
