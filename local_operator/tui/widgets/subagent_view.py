@@ -1921,7 +1921,7 @@ class SubagentView(Vertical):
         if self.is_mounted:
             self._paint_chrome()
 
-    def _note_history_gesture(self, *_args: Any) -> None:
+    def _note_history_gesture(self, *_args: Any, continuous: bool = False) -> None:
         """A reader moved the body: re-arm the page-back latch.
 
         The re-arm half of the edge trigger (``_history_at_top`` is the
@@ -1930,15 +1930,32 @@ class SubagentView(Vertical):
         from the insert's own restore scroll, so a page mounting cannot
         re-arm the latch its own displacement would immediately consume.
 
-        Suppressed while a page this gesture already requested is in flight:
-        the notches still arriving from the same wheel land inside the top
-        rows before the first page has settled, and re-arming on them made
-        one drag issue a second (deduped, but real) request. One gesture
-        episode is one page; the NEXT page waits for a gesture that arrives
-        after this one's page has landed.
+        Suppressed in two cases, both of which are a gesture that cannot
+        have moved the reader OFF the top rows:
+
+        * while a page this same gesture requested is in flight — the
+          notches still arriving from that wheel land inside the top rows
+          before the first page has settled, and re-arming on them made one
+          drag issue a second (deduped, but real) request;
+        * a CONTINUOUS gesture (wheel/scrollbar) arriving while the body is
+          already clamped at the top. Such a notch moves NOTHING — the
+          offset is pinned at 0 — so it is not evidence the reader left and
+          came back, and re-arming on it let a held wheel load a page per
+          notch while the reader sat still. A discrete act (key, affordance
+          click, or a caller announcing a gesture by hand) at the top IS the
+          deliberate "next page please", so it re-arms.
+
+        A sustained drag CAN load several pages, and that is correct: each
+        prepend displaces the reader a page-height down, so a wheel that
+        keeps running travels that distance back up and genuinely re-arrives
+        at the top — one page per real arrival. What the two suppressions
+        remove is the page that no travel paid for.
         """
-        if not self._history_loading:
-            self._history_at_top = True
+        if self._history_loading:
+            return
+        if continuous and self._body.scroll_y <= 1:
+            return
+        self._history_at_top = True
 
     def _scroll_changed(self, *_args: Any) -> None:
         self._arm_arrows()
@@ -2090,6 +2107,10 @@ class SubagentView(Vertical):
     ) -> None:
         if generation != self._history_generation:
             return
+        # Cleared here for every reader EXCEPT the latch's in-flight
+        # suppression: the PREPEND path below re-raises it until the insert's
+        # own settle (`_finish_history_mount`), because that suppression must
+        # span the mount, not just the disk read.
         self._history_loading = False
         self._history_error = False
         rows = list(page.entries)
@@ -2212,7 +2233,26 @@ class SubagentView(Vertical):
                 # because the note used to occupy body index 0 while being
                 # excluded from `_entries` (review round 1, N1 / round 2, M3);
                 # pinning it out of the column removes that skew entirely.
-                self._body.insert_blocks(prefix, new_blocks, anchor_offset=anchor)
+                #
+                # `on_settled` re-opens the page-back latch's in-flight
+                # suppression (``_note_history_gesture``): until the gaps
+                # settle AND the anchor restore's own scroll has landed, the
+                # notches still arriving from the wheel that requested this
+                # page are part of the same gesture, and re-arming on them
+                # bought a second page. Holding `_history_loading` to HERE
+                # (rather than clearing it in `_apply_history_page`, before
+                # the insert even mounted) makes the window match
+                # `_resume_paging`'s on the parent view, which is held by the
+                # same callback.
+                self._body.insert_blocks(
+                    prefix,
+                    new_blocks,
+                    anchor_offset=anchor,
+                    on_settled=self._finish_history_mount,
+                )
+                # Re-raised for the duration of the insert: see the comment
+                # above. Cleared again by `_finish_history_mount`.
+                self._history_loading = True
                 self._blocks[prefix:prefix] = new_blocks
                 self._entries[prefix:prefix] = new_entries
                 self._pending = entries
@@ -2224,6 +2264,19 @@ class SubagentView(Vertical):
                 return
         self._pending = entries
         self._sync_body(entries, self._pending_head)
+
+    def _finish_history_mount(self) -> None:
+        """The prepend path's settle callback: the page is fully mounted.
+
+        `_apply_history_page` clears `_history_loading` synchronously, which
+        is correct for every reader of the flag EXCEPT the page-back latch's
+        in-flight suppression — that one must span the insert's own settle
+        (gap settlement plus the anchor restore), or a wheel still in motion
+        re-arms mid-mount. This callback is the earliest moment that is true,
+        and it is the same moment the parent view's `_resume_paging` gate
+        opens.
+        """
+        self._history_loading = False
 
     def _tail_entry(self, gone: bool, progress: str) -> SubagentEntry | None:
         """The row that TERMINATES the page, when the page needs one.

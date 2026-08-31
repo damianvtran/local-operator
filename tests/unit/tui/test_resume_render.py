@@ -334,20 +334,29 @@ async def test_scrolling_up_a_long_resume_reveals_older_rows_in_order() -> None:
 @pytest.mark.asyncio
 async def test_arriving_at_the_top_mounts_one_page_then_stops() -> None:
     """Arriving at the top loads ONE page — and nothing more until the reader
-    LEAVES the top zone and comes back.
+    actually travels away from the top rows and comes back.
 
-    The pre-fix trigger was LEVEL-triggered: after a page prepended and the
-    anchor restore parked the viewport back inside the trigger rows, the
-    gate released while the reader was still at the top, and the next watch
-    firing — the settle frames of the mount itself — mounted another page,
-    and another, until the deferred head was gone. To the reader that is "I
+    The pre-fix trigger was LEVEL-triggered: after a page prepended, the
+    anchor restore parked the viewport back inside the trigger rows, the gate
+    released while the reader was still at the top, and the next watch firing
+    — the settle frames of the mount itself, or a wheel notch clamped against
+    the top — mounted another page, and another. To the reader that is "I
     scroll to the top and it loads chunks one after another without me
-    scrolling up again". The trigger must be an EDGE: armed by a gesture
-    that starts outside the zone, consumed by exactly one page.
+    scrolling up again". The trigger must be an EDGE, and the property that
+    makes it one is that NO page mounts without the reader having travelled
+    out of the trigger zone since the previous one.
 
-    Driven with real wheel events, and the drag carries a momentum tail —
-    the notches a real hand still delivers after the first page begins to
-    mount. Pre-fix that tail mounted a second page from the one gesture.
+    Driven with real wheel events as a CONTINUED drag that does not stop at
+    the first mount (review round 1, M1: stopping there ends the gesture
+    exactly where a cascade would begin, so that shape passed pre-fix). The
+    drag runs in the rhythm a trackpad delivers — several notches per frame —
+    and then holds the wheel against the clamped top, where the offset cannot
+    move at all. On this view the violation is deterministic: a 40-row
+    viewport against a ~120-row page means the reader reaches the clamped top
+    long before the head is anywhere near exhausted, so pre-fix every mount
+    after the first happened with no travel at all (8 of 9 on a 600-message
+    session, 3/3 runs). Every mount is audited against the offset's peak
+    since the previous one.
     """
     session = FakeSession()
     session._history = _history(200)  # 600 messages; many pages available
@@ -356,11 +365,23 @@ async def test_arriving_at_the_top_mounts_one_page_then_stops() -> None:
         await _wait_for_resume(pilot, app)
         view = app.query_one(TranscriptView)
         assert len(app._resume_pending_head) > 2 * RESUME_PAGE_MESSAGES
-        # Scroll up with the wheel until the first page mounts, then deliver
-        # the momentum tail — the notches a real hand still sends — and stop
-        # entirely. Pre-fix the tail notches mounted a SECOND page from the
-        # one gesture (and a longer drag walked the whole head).
-        for _ in range(80):
+        # Travel audit: the highest offset seen since the previous mount is
+        # how far the reader actually went. A mount with no intervening travel
+        # is the level-trigger cascade, whatever gesture was in flight.
+        mounts = {"n": 0, "no_travel": 0, "first": True, "peak": 0.0}
+        real_mount = OperatorApp._mount_older_resume_page
+
+        def auditing_mount(self: OperatorApp) -> None:
+            if not mounts["first"] and mounts["peak"] <= RESUME_PAGE_TRIGGER_ROWS:
+                mounts["no_travel"] += 1
+            mounts["first"] = False
+            mounts["n"] += 1
+            mounts["peak"] = 0.0
+            real_mount(self)
+
+        OperatorApp._mount_older_resume_page = auditing_mount  # type: ignore[method-assign]
+
+        def notch() -> None:
             view.post_message(
                 MouseScrollUp(
                     widget=view,
@@ -374,50 +395,54 @@ async def test_arriving_at_the_top_mounts_one_page_then_stops() -> None:
                     delta_y=-2,
                 )
             )
+
+        # A continued drag: bursts per frame, straight through every mount it
+        # causes. No early stop — stopping at the first mount ends the
+        # gesture exactly where the cascade would begin.
+        for _ in range(25):
+            for _ in range(5):
+                notch()
+            mounts["peak"] = max(mounts["peak"], view.scroll_offset.y)
             await pilot.pause()
-            if len(app._resume_pending_head) < 522:
-                break
-        for _ in range(3):
-            view.post_message(
-                MouseScrollUp(
-                    widget=view,
-                    button=0,
-                    shift=False,
-                    meta=False,
-                    ctrl=False,
-                    x=10,
-                    y=10,
-                    delta_x=0,
-                    delta_y=-2,
-                )
-            )
+        # ...then HOLD the wheel against the clamped top: notches keep
+        # arriving while the offset is pinned and cannot move. A clamped
+        # notch is not travel and must not earn a page.
+        for _ in range(30):
+            for _ in range(5):
+                notch()
             await pilot.pause()
-        after_first = len(app._resume_pending_head)
-        blocks_after_first = len(view.blocks())
-        assert after_first == 522 - RESUME_PAGE_MESSAGES, "exactly one page mounted"
-        # Now WAIT. Nothing is animating, nothing is pending — the reader is
-        # parked below the top on the new height (the anchor restore put them
-        # back where they were). A generous pause is the whole test: the
-        # pre-fix cascade needed no further input, so no further input is
-        # given. Any additional mount here is the bug.
-        for _ in range(120):
-            await pilot.pause()
-        assert len(app._resume_pending_head) == after_first
-        assert len(view.blocks()) == blocks_after_first
-        # A DELIBERATE second trip — scroll down out of the zone, then back to
-        # the top — mounts exactly one more page, and stops again.
-        view.scroll_to(y=RESUME_PAGE_TRIGGER_ROWS + 40, animate=False)
-        await pilot.pause()
-        for _ in range(8):
-            await pilot.pause()
-        assert len(app._resume_pending_head) == after_first, "scrolling away mounts nothing"
-        view.focus()
-        await _press_and_settle(pilot, view, "home")
-        assert len(app._resume_pending_head) == after_first - RESUME_PAGE_MESSAGES
-        assert view.scroll_offset.y <= RESUME_PAGE_TRIGGER_ROWS
         for _ in range(60):
             await pilot.pause()
-        assert len(app._resume_pending_head) == after_first - RESUME_PAGE_MESSAGES
+        OperatorApp._mount_older_resume_page = real_mount  # type: ignore[method-assign]
+
+        # The contract: a long drag may mount several pages (each genuine
+        # re-arrival at the top earns one), but NEVER without travel away
+        # from the zone since the previous page.
+        assert mounts["no_travel"] == 0, (
+            f"{mounts['no_travel']} of {mounts['n']} pages mounted with no "
+            "travel away from the trigger zone — the level-trigger cascade"
+        )
+        assert mounts["n"] >= 1, "the drag reached the top and mounted a page"
+        # And once the gesture is over, parked wherever it left them, no
+        # further page mounts however long the view idles.
+        settled_pending = len(app._resume_pending_head)
+        settled_blocks = len(view.blocks())
+        for _ in range(120):
+            await pilot.pause()
+        assert len(app._resume_pending_head) == settled_pending
+        assert len(view.blocks()) == settled_blocks
+        # A deliberate discrete act at the top — the Home key — still mounts
+        # exactly one more page (the pinned per-press contract).
+        if app._resume_pending_head:
+            view.focus()
+            await pilot.pause()
+            before = len(app._resume_pending_head)
+            await _press_and_settle(pilot, view, "home")
+            assert len(app._resume_pending_head) < before
+            assert view.scroll_offset.y <= RESUME_PAGE_TRIGGER_ROWS
+            for _ in range(60):
+                await pilot.pause()
+            assert len(app._resume_pending_head) == before - RESUME_PAGE_MESSAGES
 
 
 @pytest.mark.asyncio

@@ -3743,7 +3743,7 @@ class OperatorApp(App[None]):
             transcript.follow_tail()
         return appended
 
-    def _transcript_scrolled(self, *_args: Any) -> None:
+    def _transcript_scrolled(self, *_args: Any, continuous: bool = False) -> None:
         """Mount the next older page when the reader reaches the top.
 
         Fired from the transcript's ``scroll_y`` WATCH (every offset the
@@ -3754,16 +3754,30 @@ class OperatorApp(App[None]):
         enough; the guards inside :meth:`_check_resume_page` are what keep
         the many firings of one animated gesture to ONE page.
 
-        This hook is also the latch's only re-arm (see `_resume_in_zone`).
-        Every INPUT path — wheel, key, scrollbar drag, arrow affordance —
-        announces itself here through ``note_user_scroll`` before it moves
-        anything, and the mount's own displacement never passes through it,
-        which is exactly the discrimination an offset-based re-arm cannot
-        make: the prepend pushes the reader out of the zone with no gesture
-        involved, and re-arming on THAT let a wheel still in motion walk the
-        whole head. A gesture pressed while already parked at the top
-        re-arms too — that is the deliberate "next page please" press, and
-        one press is one page because the check consumes the latch again.
+        This hook is also the latch's only re-arm (see `_resume_in_zone`),
+        and the RULE is deliberate: a gesture re-arms only when it can
+        actually have moved the reader OUT of the trigger zone, or when it
+        is a discrete act. Every input path announces itself here before it
+        moves anything, and the mount's own displacement never passes
+        through it — but a wheel notch arriving while the viewport is
+        already clamped at the top moves NOTHING, and re-arming on it let a
+        held wheel mount a page per notch while the reader sat at y=0 (the
+        "held scroll-up at the top" half of the reported loop). A discrete
+        act at the top is different: a keypress, an affordance click, or a
+        caller announcing a gesture by hand is the deliberate "next page
+        please", and one act is one page because the check consumes the
+        latch again.
+
+        Consequence for a SUSTAINED drag, stated plainly because it is the
+        behaviour and not an accident: a long wheel drag CAN mount several
+        pages. Each mount displaces the reader a page-height down (the
+        insert goes above them), so a wheel that keeps running travels that
+        distance back up and genuinely re-arrives at the top — one page per
+        real arrival, which is the contract. What this rule removes is the
+        page that no travel paid for: notches clamped at the top, settle
+        frames, and the mount's own restore. That is the half of the
+        reported loop the operator actually saw — chunks loading "without
+        requiring me to scroll up to the top again on the new height".
         """
         if not self._resume_pending_head:
             return
@@ -3771,13 +3785,12 @@ class OperatorApp(App[None]):
             # A page this same gesture requested is still mounting. The
             # notches still arriving from that wheel land inside the trigger
             # rows before the first page settles, and re-arming on them made
-            # one drag mount a second page the moment the gate re-opened.
-            # One gesture episode is one page; the next waits for a gesture
+            # one drag mount a second page the moment the gate re-opened —
+            # a page no travel paid for. The next page waits for a gesture
             # that arrives after this one's page has landed.
             return
-        # Re-arm unconditionally: a gesture is a gesture wherever it starts,
-        # and the settle/mount machinery can never fire this hook.
-        self._resume_in_zone = True
+        if not continuous or self._transcript_view().scroll_offset.y > RESUME_PAGE_TRIGGER_ROWS:
+            self._resume_in_zone = True
         # SINGLE-FLIGHT: exactly one deferred check may be pending at a time.
         # The watch fires once per animation frame and each firing used to
         # schedule its own check, so one animated gesture queued hundreds;

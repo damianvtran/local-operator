@@ -2206,7 +2206,10 @@ class TranscriptView(ScrollableContainer):
         #: watch on the offset would miss the one gesture that most clearly
         #: means "show me the start". The hook is the same shape as
         #: ``on_clear``: optional, app-owned, never required for the widget.
-        self._on_user_scroll: Callable[[], None] | None = None
+        #: It receives ``discrete`` — True for a keystroke, False for a
+        #: continuous gesture — because the page-back latch re-arms on a
+        #: deliberate keypress at the top but not on a clamped wheel notch.
+        self._on_user_scroll: Callable[..., None] | None = None
         # The ledger's shared name column, recomputed lazily. Cached because it
         # is read once per card per repaint and only changes when the set of tool
         # names on screen does.
@@ -2260,7 +2263,7 @@ class TranscriptView(ScrollableContainer):
         """Install the hook fired after every :meth:`clear_blocks`."""
         self._on_clear = hook
 
-    def set_on_user_scroll(self, hook: Callable[[], None] | None) -> None:
+    def set_on_user_scroll(self, hook: Callable[..., None] | None) -> None:
         """Install the hook fired from every user-initiated scroll.
 
         Distinct from watching ``scroll_y``: a Home press while already at the
@@ -2796,13 +2799,22 @@ class TranscriptView(ScrollableContainer):
         self._tail_anchor.acquire()
         self.call_after_refresh(self._scroll_to_tail)
 
-    def note_user_scroll(self) -> None:
+    def note_user_scroll(self, *, continuous: bool = False) -> None:
         """A person moved the viewport: release, then re-decide where they land.
 
         Public because a scroll gesture does not always arrive as an event on
         this widget — the subagent page's ↑↓ hint buttons page the body from
         outside it, and a click on an affordance is as much a user scroll as
         the wheel is.
+
+        ``continuous`` marks a free-running gesture (wheel, scrollbar drag)
+        rather than a discrete act (keystroke, click on an affordance, or a
+        caller announcing a gesture by hand). The distinction matters to the
+        page-back latch: a wheel notch arriving while the viewport is already
+        clamped at the top moves NOTHING, so it is not evidence the reader
+        left and came back — re-arming on it let a held wheel mount a page per
+        notch while the reader sat at y=0. A discrete act at the top IS an
+        ask ("show me the next older page"), so it re-arms.
         """
         self._tail_anchor.note_user_scroll()
         # After the refresh, not now: the scroll this call is reporting has not
@@ -2812,7 +2824,7 @@ class TranscriptView(ScrollableContainer):
         # anchor straight back rather than leaving it released forever.
         self.call_after_refresh(self._resync_tail_anchor)
         if self._on_user_scroll is not None:
-            self._on_user_scroll()
+            self._on_user_scroll(continuous=continuous)
 
     def watch_scroll_y(self, old_value: float, new_value: float) -> None:
         """Re-decide following from every offset the viewport actually rests at.
@@ -2892,23 +2904,23 @@ class TranscriptView(ScrollableContainer):
     # messages — and a scroll arriving through one of them came from a person.
 
     def _on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
-        self.note_user_scroll()
+        self.note_user_scroll(continuous=True)
         super()._on_mouse_scroll_down(event)
 
     def _on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
-        self.note_user_scroll()
+        self.note_user_scroll(continuous=True)
         super()._on_mouse_scroll_up(event)
 
     def _on_scroll_to(self, message: ScrollTo) -> None:
-        self.note_user_scroll()
+        self.note_user_scroll(continuous=True)
         super()._on_scroll_to(message)
 
     def _on_scroll_up(self, event: ScrollUp) -> None:
-        self.note_user_scroll()
+        self.note_user_scroll(continuous=True)
         super()._on_scroll_up(event)
 
     def _on_scroll_down(self, event: ScrollDown) -> None:
-        self.note_user_scroll()
+        self.note_user_scroll(continuous=True)
         super()._on_scroll_down(event)
 
     def action_scroll_up(self) -> None:
