@@ -260,6 +260,7 @@ def _gif_lzw(payload: bytes, minimum_code_size: int) -> None:
     next_code = end + 1
     bit_offset = 0
     saw_clear = False
+    have_previous = False
     while bit_offset + code_size <= len(payload) * 8:
         byte_offset = bit_offset // 8
         shift = bit_offset % 8
@@ -268,6 +269,7 @@ def _gif_lzw(payload: bytes, minimum_code_size: int) -> None:
         bit_offset += code_size
         if code == clear:
             saw_clear = True
+            have_previous = False
             code_size = minimum_code_size + 1
             next_code = end + 1
             continue
@@ -277,9 +279,19 @@ def _gif_lzw(payload: bytes, minimum_code_size: int) -> None:
             return
         if not saw_clear or code > next_code:
             raise MediaValidationError("invalid GIF LZW code")
-        next_code += 1
-        if next_code == (1 << code_size) and code_size < 12:
-            code_size += 1
+        if not have_previous:
+            # The first data code after clear establishes the previous sequence;
+            # no dictionary entry exists until a second sequence is observed.
+            if code >= clear:
+                raise MediaValidationError("invalid first GIF LZW code")
+            have_previous = True
+            continue
+        # code == next_code is the valid KwKwK case. Every subsequent code adds
+        # exactly one dictionary entry and may grow width for the next read.
+        if next_code < 4096:
+            next_code += 1
+            if next_code == (1 << code_size) and code_size < 12:
+                code_size += 1
     raise MediaValidationError("missing GIF LZW end code")
 
 

@@ -115,6 +115,37 @@ def test_png_rejects_crc_dimension_truncation_and_trailing_bytes() -> None:
             validate_media(payload, "image/png")
 
 
+def _pack_gif_codes(codes: list[tuple[int, int]]) -> bytes:
+    value = 0
+    bits = 0
+    output = bytearray()
+    for code, width in codes:
+        value |= code << bits
+        bits += width
+        while bits >= 8:
+            output.append(value & 0xFF)
+            value >>= 8
+            bits -= 8
+    if bits:
+        output.append(value & 0xFF)
+    return bytes(output)
+
+
+def test_gif_lzw_accepts_growth_kwkwk_and_clear_reset() -> None:
+    # min=2: clear(4), first literal, second literal adds code 6 and grows to
+    # width 4; code 7 is KwKwK, clear resets width to 3, then literal and EOI.
+    compressed = _pack_gif_codes([(4, 3), (0, 3), (1, 3), (7, 4), (4, 4), (0, 3), (5, 3)])
+    payload = (
+        b"GIF89a\x01\x00\x01\x00\x00\x00\x00"
+        b"\x2c\x00\x00\x00\x00\x01\x00\x01\x00\x00"
+        + b"\x02"
+        + bytes([len(compressed)])
+        + compressed
+        + b"\x00\x3b"
+    )
+    validate_media(payload, "image/gif")
+
+
 def test_reviewer_header_only_fixtures_are_rejected() -> None:
     empty_scan = jpeg()[:-3] + b"\xff\xd9"
     invalid_gif = gif().replace(b"\x02\x02\x4c\x01", b"\x00\x00")
