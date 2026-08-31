@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import signal
@@ -686,6 +687,9 @@ class VerifiedAdapterSession:
         return result
 
     def begin_ask(self, params: AskUserExchangeParams) -> None:
+        # Every application entry point passes the same poison gate, so a
+        # poisoned session cannot accumulate new episode state locally either.
+        self._ensure_usable()
         self.verifier.begin_ask(params)
 
     async def finish_ask(
@@ -801,8 +805,6 @@ def verify_artifact(root: Path, reference: ArtifactRef) -> bytes:
     finally:
         os.close(root_fd)
     raw = bytes(data)
-    import hashlib
-
     if hashlib.sha256(raw).hexdigest() != name:
         raise SupervisionError("artifact digest differs")
     try:
