@@ -75,6 +75,8 @@ EventKind = Literal[
     "model_request",
     "model_response",
     "usage_cost",
+    "budget_commitment",
+    "reconciliation",
     "observation",
     "action_batch",
     "environment_step",
@@ -284,6 +286,45 @@ class UsageCostPayload(ProtocolModel):
     cost_microusd: SafeCount
 
 
+class BudgetCommitmentPayload(ProtocolModel):
+    """Durable binding between the manifest budget and reserved execution authority."""
+
+    commitment_id: Digest
+    budget_id: Digest
+    reservation_ids: tuple[Digest, ...]
+    reserved_summary_digest: Digest
+
+    @field_validator("reservation_ids", mode="before")
+    @classmethod
+    def _tuple_reservations(cls, value: Any) -> Any:
+        return tuple(value) if isinstance(value, list) else value
+
+    @model_validator(mode="after")
+    def _unique_reservations(self) -> Self:
+        if len(set(self.reservation_ids)) != len(self.reservation_ids):
+            raise ValueError("budget commitment contains duplicate reservations")
+        return self
+
+
+class ReconciliationPayload(ProtocolModel):
+    """Durable usage receipt which closes one committed budget exactly once."""
+
+    reconciliation_id: Digest
+    budget_id: Digest
+    commitment_id: Digest
+    reportable: bool
+    provider_cost_microusd: SafeCount
+    environment_cost_microusd: SafeCount
+    total_cost_microusd: SafeCount
+    receipt_artifact: EvidenceArtifactRef | None = None
+
+    @model_validator(mode="after")
+    def _sum_costs(self) -> Self:
+        if self.provider_cost_microusd + self.environment_cost_microusd != self.total_cost_microusd:
+            raise ValueError("reconciliation total does not match component costs")
+        return self
+
+
 class ObservationPayload(ProtocolModel):
     observation_id: StrictIdentifier
     sequence: SafeCount
@@ -417,6 +458,8 @@ EventPayload: TypeAlias = (
     | ModelRequestPayload
     | ModelResponsePayload
     | UsageCostPayload
+    | BudgetCommitmentPayload
+    | ReconciliationPayload
     | ObservationPayload
     | ActionBatchPayload
     | EnvironmentStepPayload
@@ -433,6 +476,8 @@ _EVENT_PAYLOAD_TYPES: dict[str, type[ProtocolModel]] = {
     "model_request": ModelRequestPayload,
     "model_response": ModelResponsePayload,
     "usage_cost": UsageCostPayload,
+    "budget_commitment": BudgetCommitmentPayload,
+    "reconciliation": ReconciliationPayload,
     "observation": ObservationPayload,
     "action_batch": ActionBatchPayload,
     "environment_step": EnvironmentStepPayload,
@@ -508,10 +553,10 @@ class OutcomeSeal(ProtocolModel):
     artifacts: tuple[EvidenceArtifactRef, ...]
     finalization_id: StrictIdentifier
     preflight_seal_id: Digest
-    commitment_id: Digest
-    reconciliation_id: Digest
+    commitment_id: Digest | None
+    reconciliation_id: Digest | None
     score_id: Digest
-    cleanup_result_id: Digest
+    cleanup_result_id: Digest | None
     result: ScoreArtifact
     reportable: bool
     reportability_label: ReportabilityLabel
@@ -565,9 +610,9 @@ class OutcomeDraft(ProtocolModel):
 
     finalization_id: StrictIdentifier
     preflight_seal_id: Digest
-    commitment_id: Digest
-    reconciliation_id: Digest
-    cleanup_result_id: Digest
+    commitment_id: Digest | None
+    reconciliation_id: Digest | None
+    cleanup_result_id: Digest | None
     result: ScoreArtifact
     reportability_label: ReportabilityLabel
     comparability_label: ComparabilityLabel
@@ -625,6 +670,7 @@ VerificationIssueCode = Literal[
     "unsafe_path",
     "unsafe_owner",
     "unsafe_permissions",
+    "resource_limit_exceeded",
     "manifest_missing",
     "manifest_noncanonical",
     "manifest_invalid",

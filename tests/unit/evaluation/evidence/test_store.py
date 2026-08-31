@@ -6,6 +6,7 @@ import base64
 import multiprocessing
 import os
 import signal
+import stat
 import threading
 import tracemalloc
 from multiprocessing.synchronize import Event as ProcessEvent
@@ -72,6 +73,70 @@ def _hold_finalizing(root: str, ready: ProcessEvent, release: ProcessEvent) -> N
         )
         ready.set()
         assert release.wait(30)
+
+
+def test_immutable_publication_fsyncs_target_and_temp_removal(tmp_path: Path) -> None:
+    class RecordingCalls(_OSCallsForTest):
+        def __init__(self) -> None:
+            self.order: list[str] = []
+
+        def write(self, fd: int, data: bytes) -> int:
+            self.order.append("write")
+            return super().write(fd, data)
+
+        def fsync(self, fd: int) -> None:
+            self.order.append("fsync")
+            super().fsync(fd)
+
+        def link(self, src: str, dst: str, *, src_dir_fd: int, dst_dir_fd: int) -> None:
+            self.order.append("link")
+            super().link(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+
+        def unlink(self, path: str, *, dir_fd: int) -> None:
+            self.order.append("unlink")
+            super().unlink(path, dir_fd=dir_fd)
+
+    root = tmp_path / "root"
+    root.mkdir(mode=0o700)
+    fd = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    calls = RecordingCalls()
+    try:
+        EvidenceWriter._create_immutable(fd, "manifest.json", b"{}", calls)
+    finally:
+        os.close(fd)
+    assert calls.order == ["write", "fsync", "link", "fsync", "unlink", "fsync"]
+    assert sorted(path.name for path in root.iterdir()) == ["manifest.json"]
+
+
+@pytest.mark.parametrize("failure_index", [1, 2])
+def test_immutable_cleanup_cutpoints_never_claim_success(
+    tmp_path: Path, failure_index: int
+) -> None:
+    class CleanupCutpoint(_OSCallsForTest):
+        def __init__(self) -> None:
+            self.directory_fsyncs = 0
+
+        def fsync(self, fd: int) -> None:
+            if stat.S_ISDIR(os.fstat(fd).st_mode):
+                self.directory_fsyncs += 1
+                if failure_index == 2 and self.directory_fsyncs == 2:
+                    raise OSError("directory-cutpoint")
+            super().fsync(fd)
+
+        def unlink(self, path: str, *, dir_fd: int) -> None:
+            if failure_index == 1 and self.directory_fsyncs == 1:
+                raise OSError("unlink-cutpoint")
+            super().unlink(path, dir_fd=dir_fd)
+
+    root = tmp_path / "root"
+    root.mkdir(mode=0o700)
+    fd = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        with pytest.raises(EvidenceBundleInvalid):
+            EvidenceWriter._create_immutable(fd, "outcome.json", b"{}", CleanupCutpoint())
+    finally:
+        os.close(fd)
+    assert (root / "outcome.json").exists()
 
 
 def test_create_append_artifact_abandon_and_verify_real_files(tmp_path: Path) -> None:

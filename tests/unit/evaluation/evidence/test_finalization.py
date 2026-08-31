@@ -11,12 +11,16 @@ import pytest
 
 from local_operator.evaluation.evidence.models import (
     ActionBatchPayload,
+    BudgetCommitmentPayload,
+    CleanupPayload,
     EnvironmentStepPayload,
     FinalizationIntent,
     LifecycleTransitionPayload,
     ModelRequestPayload,
     ObservationPayload,
     OutcomeDraft,
+    PreflightPayload,
+    ReconciliationPayload,
     ScoreArtifact,
     ScoringResultPayload,
 )
@@ -33,6 +37,63 @@ from tests.unit.evaluation.evidence.test_models import (
     ROUTE,
     manifest,
 )
+
+
+def _append_provenance(
+    writer: EvidenceWriter, *, monotonic_ns: int = 1, wall_time_ms: int = 1
+) -> tuple[int, int]:
+    writer.append(
+        "preflight",
+        PreflightPayload(
+            sealed_preflight_id=DIGEST,
+            plan_id=DIGEST,
+            receipt_ids=(OTHER_DIGEST,),
+            passed=True,
+        ),
+        monotonic_ns=monotonic_ns,
+        wall_time_ms=wall_time_ms,
+    )
+    writer.append(
+        "budget_commitment",
+        BudgetCommitmentPayload(
+            commitment_id=OTHER_DIGEST,
+            budget_id=OTHER_DIGEST,
+            reservation_ids=(DIGEST,),
+            reserved_summary_digest=DIGEST,
+        ),
+        monotonic_ns=monotonic_ns + 1,
+        wall_time_ms=wall_time_ms + 1,
+    )
+    return monotonic_ns + 2, wall_time_ms + 2
+
+
+def _append_final_receipts(
+    writer: EvidenceWriter, *, monotonic_ns: int, wall_time_ms: int
+) -> tuple[int, int]:
+    writer.record_reconciliation(
+        ReconciliationPayload(
+            reconciliation_id=DIGEST,
+            budget_id=OTHER_DIGEST,
+            commitment_id=OTHER_DIGEST,
+            reportable=True,
+            provider_cost_microusd=0,
+            environment_cost_microusd=0,
+            total_cost_microusd=0,
+        ),
+        monotonic_ns=monotonic_ns,
+        wall_time_ms=wall_time_ms,
+    )
+    writer.record_cleanup(
+        CleanupPayload(
+            cleanup_result_id=OTHER_DIGEST,
+            cleanup_plan_id=DIGEST,
+            receipt_ids=(DIGEST,),
+            rescue_required=False,
+        ),
+        monotonic_ns=monotonic_ns + 1,
+        wall_time_ms=wall_time_ms + 1,
+    )
+    return monotonic_ns + 2, wall_time_ms + 2
 
 
 def _append_completed(writer: EvidenceWriter, *, monotonic_ns: int, wall_time_ms: int) -> None:
@@ -57,20 +118,24 @@ def _append_completed(writer: EvidenceWriter, *, monotonic_ns: int, wall_time_ms
 
 def _finalized(root: Path) -> tuple[EvidenceWriter, ScoreArtifact]:
     writer = EvidenceWriter.create(root, manifest(), RedactionSet.from_resolved_values(()))
+    monotonic_ns, wall_time_ms = _append_provenance(writer)
     writer.begin_finalization(
         "final",
         "score-op",
         FinalizationIntent(kind="score", scorer_id="scorer", scorer_version="1"),
-        monotonic_ns=1,
-        wall_time_ms=2,
+        monotonic_ns=monotonic_ns,
+        wall_time_ms=wall_time_ms,
     )
     score = ScoreArtifact(status="scored", binary=0)
     writer.record_scoring_result(
         ScoringResultPayload(finalization_id="final", scoring_operation_id="score-op", score=score),
-        monotonic_ns=2,
-        wall_time_ms=3,
+        monotonic_ns=monotonic_ns + 1,
+        wall_time_ms=wall_time_ms + 1,
     )
-    _append_completed(writer, monotonic_ns=3, wall_time_ms=4)
+    monotonic_ns, wall_time_ms = _append_final_receipts(
+        writer, monotonic_ns=monotonic_ns + 2, wall_time_ms=wall_time_ms + 2
+    )
+    _append_completed(writer, monotonic_ns=monotonic_ns, wall_time_ms=wall_time_ms)
     return writer, score
 
 
@@ -109,6 +174,7 @@ def test_three_observation_cycles_seal_as_complete_graph(tmp_path: Path) -> None
     root = tmp_path / "bundle"
     writer = EvidenceWriter.create(root, manifest(), RedactionSet.from_resolved_values(()))
     try:
+        _append_provenance(writer, monotonic_ns=0, wall_time_ms=0)
         action_artifact = writer.publish_artifact(b"safe", media_type="text/plain")
         writer.append(
             "observation",
@@ -163,6 +229,7 @@ def test_three_observation_cycles_seal_as_complete_graph(tmp_path: Path) -> None
             monotonic_ns=9,
             wall_time_ms=9,
         )
+        _append_final_receipts(writer, monotonic_ns=10, wall_time_ms=10)
         writer.record_final_lifecycle(
             LifecycleTransitionPayload(
                 previous_state_id=None,
@@ -177,8 +244,8 @@ def test_three_observation_cycles_seal_as_complete_graph(tmp_path: Path) -> None
                 cleanup_result_id=OTHER_DIGEST,
                 rescue_required=False,
             ),
-            monotonic_ns=10,
-            wall_time_ms=10,
+            monotonic_ns=12,
+            wall_time_ms=12,
         )
         outcome = writer.seal(_draft(score))
     finally:
@@ -191,6 +258,7 @@ def test_finish_action_allows_terminal_after_nonterminal_step(tmp_path: Path) ->
     root = tmp_path / "bundle"
     writer = EvidenceWriter.create(root, manifest(), RedactionSet.from_resolved_values(()))
     try:
+        _append_provenance(writer, monotonic_ns=0, wall_time_ms=0)
         action_artifact = writer.publish_artifact(b"safe", media_type="text/plain")
         writer.append(
             "observation",
@@ -256,6 +324,7 @@ def test_finish_action_allows_terminal_after_nonterminal_step(tmp_path: Path) ->
             monotonic_ns=7,
             wall_time_ms=7,
         )
+        _append_final_receipts(writer, monotonic_ns=8, wall_time_ms=8)
         writer.record_final_lifecycle(
             LifecycleTransitionPayload(
                 previous_state_id=None,
@@ -270,13 +339,58 @@ def test_finish_action_allows_terminal_after_nonterminal_step(tmp_path: Path) ->
                 cleanup_result_id=OTHER_DIGEST,
                 rescue_required=False,
             ),
-            monotonic_ns=8,
-            wall_time_ms=8,
+            monotonic_ns=10,
+            wall_time_ms=10,
         )
         outcome = writer.seal(_draft(score))
     finally:
         writer.close()
     assert outcome.result.binary == 1 and verify_bundle(root).valid
+
+
+@pytest.mark.parametrize(
+    ("missing", "replacement"),
+    [
+        ("preflight", None),
+        ("budget_commitment", None),
+        ("reconciliation", None),
+        ("cleanup", None),
+        ("preflight", "wrong_plan"),
+        ("cleanup", "wrong_plan"),
+    ],
+)
+def test_seal_rejects_missing_or_mismatched_provenance(
+    tmp_path: Path, missing: str, replacement: str | None
+) -> None:
+    root = tmp_path / "bundle"
+    writer, score = _finalized(root)
+    writer.close()
+    lines = (root / "events.jsonl").read_bytes().splitlines()
+    selected = []
+    for line in lines:
+        decoded = json.loads(line)
+        if decoded["kind"] == missing:
+            if replacement == "wrong_plan":
+                key = "plan_id" if missing == "preflight" else "cleanup_plan_id"
+                decoded["payload"][key] = "f" * 64
+                decoded["event_id"] = "0" * 64
+                from local_operator.evaluation.evidence.models import EventRecord
+
+                selected.append(
+                    EventRecord.model_validate(decoded, strict=True).to_canonical_json()
+                )
+            continue
+        selected.append(line)
+    (root / "events.jsonl").write_bytes(b"\n".join(selected) + b"\n")
+    report = verify_bundle(root)
+    assert not report.valid
+    issue_codes = {issue.code for issue in report.issues}
+    if replacement == "wrong_plan" or missing in {"preflight", "budget_commitment"}:
+        assert "receipt_binding_invalid" in issue_codes
+    else:
+        assert {"event_sequence_mismatch", "event_chain_mismatch"} & issue_codes
+    with pytest.raises(EvidenceBundleInvalid):
+        EvidenceWriter.open_for_abandon(root, RedactionSet.from_resolved_values(()))
 
 
 def test_seal_rejects_orphan_model_request(tmp_path: Path) -> None:
@@ -332,11 +446,12 @@ def test_seal_rejects_forged_finalization_and_lifecycle_score(tmp_path: Path) ->
     root = tmp_path / "lifecycle-score"
     writer = EvidenceWriter.create(root, manifest(), RedactionSet.from_resolved_values(()))
     try:
+        _append_provenance(writer, monotonic_ns=0, wall_time_ms=0)
         writer.begin_finalization(
             "final",
             "score-op",
             FinalizationIntent(kind="score", scorer_id="scorer", scorer_version="1"),
-            monotonic_ns=1,
+            monotonic_ns=2,
             wall_time_ms=2,
         )
         score = ScoreArtifact(status="scored", binary=0)
@@ -347,6 +462,7 @@ def test_seal_rejects_forged_finalization_and_lifecycle_score(tmp_path: Path) ->
             monotonic_ns=2,
             wall_time_ms=3,
         )
+        _append_final_receipts(writer, monotonic_ns=3, wall_time_ms=4)
         writer.record_final_lifecycle(
             LifecycleTransitionPayload(
                 previous_state_id=None,
@@ -361,8 +477,8 @@ def test_seal_rejects_forged_finalization_and_lifecycle_score(tmp_path: Path) ->
                 cleanup_result_id=OTHER_DIGEST,
                 rescue_required=False,
             ),
-            monotonic_ns=3,
-            wall_time_ms=4,
+            monotonic_ns=5,
+            wall_time_ms=6,
         )
         with pytest.raises(EvidenceBundleInvalid, match="lifecycle receipts"):
             writer.seal(_draft(score))
@@ -411,11 +527,12 @@ def test_outcome_publication_before_state_update_still_derives_sealed(tmp_path: 
         RedactionSet.from_resolved_values(()),
         syscalls=calls,
     )
+    _append_provenance(writer, monotonic_ns=0, wall_time_ms=0)
     writer.begin_finalization(
         "final",
         "score-op",
         FinalizationIntent(kind="score", scorer_id="scorer", scorer_version="1"),
-        monotonic_ns=1,
+        monotonic_ns=2,
         wall_time_ms=2,
     )
     score = ScoreArtifact(status="scored", binary=0)
@@ -424,7 +541,8 @@ def test_outcome_publication_before_state_update_still_derives_sealed(tmp_path: 
         monotonic_ns=2,
         wall_time_ms=3,
     )
-    _append_completed(writer, monotonic_ns=3, wall_time_ms=4)
+    _append_final_receipts(writer, monotonic_ns=4, wall_time_ms=4)
+    _append_completed(writer, monotonic_ns=6, wall_time_ms=6)
     calls.fail = True
     try:
         with pytest.raises(OSError, match="state-cutpoint"):
@@ -441,12 +559,14 @@ def test_infrastructure_failure_seals_unscored_not_binary_zero(tmp_path: Path) -
     root = tmp_path / "bundle"
     writer = EvidenceWriter.create(root, manifest(), RedactionSet.from_resolved_values(()))
     try:
+        _append_provenance(writer, monotonic_ns=0, wall_time_ms=0)
         writer.begin_finalization(
             "final",
             None,
             FinalizationIntent(kind="unscored"),
         )
         score = ScoreArtifact(status="unscored", reason="infrastructure_failure")
+        _append_final_receipts(writer, monotonic_ns=2, wall_time_ms=2)
         writer.record_final_lifecycle(
             LifecycleTransitionPayload(
                 previous_state_id=None,

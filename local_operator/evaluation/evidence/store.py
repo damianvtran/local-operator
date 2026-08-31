@@ -29,6 +29,8 @@ from local_operator.evaluation.evidence.media import (
 from local_operator.evaluation.evidence.models import (
     AbandonmentReason,
     AbandonmentRecord,
+    BudgetCommitmentPayload,
+    CleanupPayload,
     EventKind,
     EventPayload,
     EventRecord,
@@ -38,6 +40,7 @@ from local_operator.evaluation.evidence.models import (
     ModelResponsePayload,
     OutcomeDraft,
     OutcomeSeal,
+    ReconciliationPayload,
     ScoringResultPayload,
     ScoringStartPayload,
     StateMarker,
@@ -587,32 +590,52 @@ class EvidenceWriter:
 
     @staticmethod
     def _create_immutable(dir_fd: int, name: str, data: bytes, calls: Syscalls) -> None:
-        """Publish by hard link so an existing terminal can never be replaced."""
+        """Publish and durably remove the sibling name before claiming success.
+
+        The first directory fsync commits the create-if-absent target. The second
+        commits removal of the temporary hard link; omitting it can resurrect an
+        unknown root entry after a crash even though the terminal target survived.
+        """
 
         temp = f".{name}.{secrets.token_hex(16)}.tmp"
         fd = os.open(temp, _WRITE_FLAGS | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=dir_fd)
+        primary: BaseException | None = None
         try:
             _write_all(fd, data, calls)
             calls.fsync(fd)
-        except BaseException:
-            os.close(fd)
-            try:
-                calls.unlink(temp, dir_fd=dir_fd)
-            except FileNotFoundError:
-                pass
-            raise
-        else:
-            os.close(fd)
-        try:
-            calls.link(temp, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
-            calls.fsync(dir_fd)
-        except FileExistsError:
-            raise EvidenceTerminal("immutable evidence file already exists")
+        except BaseException as error:
+            primary = error
         finally:
+            os.close(fd)
+        if primary is None:
             try:
-                calls.unlink(temp, dir_fd=dir_fd)
-            except FileNotFoundError:
-                pass
+                calls.link(temp, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+                calls.fsync(dir_fd)
+            except FileExistsError as error:
+                primary = EvidenceTerminal("immutable evidence file already exists")
+                primary.__cause__ = error
+            except BaseException as error:
+                primary = error
+
+        cleanup_error: BaseException | None = None
+        try:
+            calls.unlink(temp, dir_fd=dir_fd)
+        except BaseException as error:
+            cleanup_error = error
+        try:
+            # This is required even after an earlier publication error: callers
+            # must never assume a temporary namespace mutation was persisted.
+            calls.fsync(dir_fd)
+        except BaseException as error:
+            if cleanup_error is None:
+                cleanup_error = error
+        if cleanup_error is not None:
+            ambiguous = EvidenceBundleInvalid("immutable evidence cleanup failed")
+            if primary is not None:
+                raise primary from cleanup_error
+            raise ambiguous from cleanup_error
+        if primary is not None:
+            raise primary
 
     @staticmethod
     def _write_state(root_fd: int, marker: StateMarker, calls: Syscalls) -> None:
@@ -952,6 +975,58 @@ class EvidenceWriter:
                 wall_time_ms=wall_time_ms,
             )
 
+    def _record_finalization_receipt(
+        self,
+        kind: EventKind,
+        payload: EventPayload,
+        *,
+        monotonic_ns: int | None = None,
+        wall_time_ms: int | None = None,
+    ) -> EventRecord:
+        """Append a closed finalization receipt after ordinary execution is sealed."""
+
+        with self._thread_lock:
+            self._ensure_open()
+            if self._recovery_only:
+                raise EvidenceRecoveryOnly("recovered bundle may only be abandoned")
+            marker = StateMarker.from_canonical_json(self._read_regular(self._root_fd, _STATE))
+            if marker.state != "finalizing":
+                raise EvidenceTerminal("bundle is not finalizing")
+            return self._append_locked(
+                kind,
+                payload,
+                monotonic_ns=monotonic_ns,
+                wall_time_ms=wall_time_ms,
+            )
+
+    def record_reconciliation(
+        self,
+        payload: ReconciliationPayload,
+        *,
+        monotonic_ns: int | None = None,
+        wall_time_ms: int | None = None,
+    ) -> EventRecord:
+        return self._record_finalization_receipt(
+            "reconciliation",
+            payload,
+            monotonic_ns=monotonic_ns,
+            wall_time_ms=wall_time_ms,
+        )
+
+    def record_cleanup(
+        self,
+        payload: CleanupPayload,
+        *,
+        monotonic_ns: int | None = None,
+        wall_time_ms: int | None = None,
+    ) -> EventRecord:
+        return self._record_finalization_receipt(
+            "cleanup",
+            payload,
+            monotonic_ns=monotonic_ns,
+            wall_time_ms=wall_time_ms,
+        )
+
     def record_final_lifecycle(
         self,
         payload: Any,
@@ -1058,6 +1133,20 @@ class EvidenceWriter:
                     raise EvidenceBundleInvalid("seal draft disagrees with durable score")
             elif starts or results or marker.intent != "unscored":
                 raise EvidenceBundleInvalid("unscored seal disagrees with finalization intent")
+            preflights = [event.payload for event in events if event.kind == "preflight"]
+            commitments = [
+                event.payload
+                for event in events
+                if isinstance(event.payload, BudgetCommitmentPayload)
+            ]
+            reconciliations = [
+                event.payload
+                for event in events
+                if isinstance(event.payload, ReconciliationPayload)
+            ]
+            cleanups = [
+                event.payload for event in events if isinstance(event.payload, CleanupPayload)
+            ]
             completed = [
                 event.payload
                 for event in events
@@ -1067,13 +1156,36 @@ class EvidenceWriter:
             if not completed:
                 raise EvidenceBundleInvalid("seal requires a completed lifecycle snapshot")
             state = cast(Any, completed[-1])
+            post_running = draft.result.reason != "preflight_failure"
+            if post_running and not (
+                len(preflights) == len(commitments) == len(reconciliations) == len(cleanups) == 1
+            ):
+                raise EvidenceBundleInvalid("seal lacks complete durable provenance")
+            if draft.result.reason == "preflight_failure" and not (
+                len(preflights) == 1
+                and getattr(preflights[0], "passed", None) is False
+                and not commitments
+                and not reconciliations
+                and not cleanups
+            ):
+                raise EvidenceBundleInvalid("preflight failure provenance is inconsistent")
+            durable_preflight = getattr(preflights[0], "sealed_preflight_id", None)
+            durable_commitment = commitments[0].commitment_id if commitments else None
+            durable_reconciliation = (
+                reconciliations[0].reconciliation_id if reconciliations else None
+            )
+            durable_cleanup = cleanups[0].cleanup_result_id if cleanups else None
             assertions = (
                 (state.finalization_id, marker.finalization_id),
                 (state.score_id, draft.result.score_id),
                 (state.preflight_seal_id, draft.preflight_seal_id),
+                (state.preflight_seal_id, durable_preflight),
                 (state.commitment_id, draft.commitment_id),
+                (state.commitment_id, durable_commitment),
                 (state.reconciliation_id, draft.reconciliation_id),
+                (state.reconciliation_id, durable_reconciliation),
                 (state.cleanup_result_id, draft.cleanup_result_id),
+                (state.cleanup_result_id, durable_cleanup),
             )
             if any(actual != expected for actual, expected in assertions):
                 raise EvidenceBundleInvalid("seal draft disagrees with lifecycle receipts")
@@ -1081,6 +1193,10 @@ class EvidenceWriter:
             if reportable and (
                 state.reconciliation_reportable is not True
                 or state.rescue_required is not False
+                or not reconciliations
+                or reconciliations[0].reportable is not True
+                or not cleanups
+                or cleanups[0].rescue_required is not False
                 or draft.result.status != "scored"
             ):
                 raise EvidenceBundleInvalid("reportable seal lacks reportable durable receipts")

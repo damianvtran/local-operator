@@ -9,6 +9,7 @@ from pydantic import ValidationError
 
 from local_operator.evaluation.evidence.models import (
     ActionBatchPayload,
+    BudgetCommitmentPayload,
     CancelPayload,
     CleanupPayload,
     EnvironmentStepPayload,
@@ -21,6 +22,7 @@ from local_operator.evaluation.evidence.models import (
     ModelResponsePayload,
     ObservationPayload,
     PreflightPayload,
+    ReconciliationPayload,
     RouteIdentity,
     ScoreArtifact,
     ScoringResultPayload,
@@ -124,6 +126,27 @@ def test_manifest_golden_bytes_are_deterministic() -> None:
             "usage_cost",
             UsageCostPayload(
                 request_id="request", input_tokens=3, output_tokens=2, cost_microusd=9
+            ),
+        ),
+        (
+            "budget_commitment",
+            BudgetCommitmentPayload(
+                commitment_id=OTHER_DIGEST,
+                budget_id=OTHER_DIGEST,
+                reservation_ids=(DIGEST,),
+                reserved_summary_digest=DIGEST,
+            ),
+        ),
+        (
+            "reconciliation",
+            ReconciliationPayload(
+                reconciliation_id=DIGEST,
+                budget_id=OTHER_DIGEST,
+                commitment_id=OTHER_DIGEST,
+                reportable=True,
+                provider_cost_microusd=9,
+                environment_cost_microusd=0,
+                total_cost_microusd=9,
             ),
         ),
         (
