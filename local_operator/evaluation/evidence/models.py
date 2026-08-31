@@ -689,14 +689,34 @@ class StateMarker(ProtocolModel):
     scoring_operation_id: StrictIdentifier | None = None
     intent: Literal["score", "unscored"] | None = None
     intent_digest: Digest | None = None
+    journal_event_count: SafeCount | None = None
+    journal_head_sha256: Digest | None = None
     terminal_id: Digest | None = None
 
     @model_validator(mode="after")
     def _state_fields(self) -> Self:
-        if self.state == "finalizing" and self.finalization_id is None:
-            raise ValueError("finalizing marker requires a finalization ID")
-        if self.state in ("open", "sealed", "abandoned") and self.intent is not None:
-            raise ValueError("only finalizing marker carries finalization intent")
+        authority = (
+            self.finalization_id,
+            self.intent,
+            self.intent_digest,
+            self.journal_event_count,
+            self.journal_head_sha256,
+        )
+        carries_authority = any(value is not None for value in authority)
+        if self.state == "finalizing" and not all(value is not None for value in authority):
+            raise ValueError("finalizing marker requires complete journal-bound authority")
+        if (
+            self.state == "abandoned"
+            and carries_authority
+            and not all(value is not None for value in authority)
+        ):
+            raise ValueError("abandoned marker authority must remain complete")
+        if self.state in ("open", "sealed") and carries_authority:
+            raise ValueError("open and sealed markers cannot carry finalization authority")
+        if self.intent == "score" and self.scoring_operation_id is None:
+            raise ValueError("scored marker authority requires an operation ID")
+        if self.intent == "unscored" and self.scoring_operation_id is not None:
+            raise ValueError("unscored marker authority cannot carry an operation ID")
         return self
 
 

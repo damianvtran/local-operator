@@ -1167,6 +1167,8 @@ class EvidenceWriter:
                         scoring_operation_id=scoring_operation_id,
                         intent=intent.kind,
                         intent_digest=start.intent_digest,
+                        journal_event_count=self._sequence,
+                        journal_head_sha256=self._head,
                     ),
                     self._calls,
                 )
@@ -1477,12 +1479,30 @@ class EvidenceWriter:
                 for event in events
                 if isinstance(event.payload, FinalizationStartPayload)
             ]
+            marker = StateMarker.from_canonical_json(self._read_regular(self._root_fd, _STATE))
+            finalization_id = starts[0].finalization_id if len(starts) == 1 else None
+            if finalization_id is None and reason == "ambiguous_finalization":
+                expected_head = events[-1].event_id if events else self.manifest.manifest_digest
+                marker_matches_head = (
+                    marker.state == "finalizing"
+                    and marker.bundle_id == self.manifest.bundle_id
+                    and marker.journal_event_count == len(events)
+                    and marker.journal_head_sha256 == expected_head
+                    and marker.finalization_id is not None
+                    and marker.intent is not None
+                    and marker.intent_digest is not None
+                )
+                if not marker_matches_head:
+                    raise EvidenceBundleInvalid(
+                        "ambiguous finalization marker does not bind the durable journal"
+                    )
+                finalization_id = marker.finalization_id
             record = AbandonmentRecord(
                 bundle_id=self.manifest.bundle_id,
                 manifest_digest=self.manifest.manifest_digest,
                 reason=reason,
                 diagnostic_code=diagnostic_code,
-                finalization_id=starts[0].finalization_id if len(starts) == 1 else None,
+                finalization_id=finalization_id,
                 last_event_sequence=len(events) - 1 if events else None,
                 last_event_sha256=events[-1].event_id if events else self.manifest.manifest_digest,
                 event_count=len(events),
@@ -1495,6 +1515,18 @@ class EvidenceWriter:
                     record.to_canonical_json(),
                     self._calls,
                 )
+                marker_authority = (
+                    {
+                        "finalization_id": marker.finalization_id,
+                        "scoring_operation_id": marker.scoring_operation_id,
+                        "intent": marker.intent,
+                        "intent_digest": marker.intent_digest,
+                        "journal_event_count": marker.journal_event_count,
+                        "journal_head_sha256": marker.journal_head_sha256,
+                    }
+                    if marker.state == "finalizing"
+                    else {}
+                )
                 self._write_state(
                     self._root_fd,
                     StateMarker(
@@ -1502,6 +1534,7 @@ class EvidenceWriter:
                         bundle_id=self.manifest.bundle_id,
                         updated_wall_time_ms=int(time.time_ns() // 1_000_000),
                         terminal_id=record.abandonment_id,
+                        **marker_authority,
                     ),
                     self._calls,
                 )

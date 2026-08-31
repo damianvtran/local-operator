@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import multiprocessing
 import os
 import signal
@@ -604,6 +605,79 @@ def test_journal_fsync_failure_does_not_advance_memory_head(tmp_path: Path) -> N
                 wall_time_ms=2,
             )
         assert (writer._sequence, writer._head) == initial
+
+
+def test_marker_before_finalization_start_recovers_to_bound_abandonment(
+    tmp_path: Path,
+) -> None:
+    class FailFinalizationStartWrite(_OSCallsForTest):
+        def write(self, fd: int, data: bytes) -> int:
+            if b'"kind":"finalization_start"' in data:
+                raise OSError("finalization-start-cutpoint")
+            return super().write(fd, data)
+
+    root = tmp_path / "bundle"
+    writer = EvidenceWriter.create(
+        root, manifest(), redactions(), syscalls=FailFinalizationStartWrite()
+    )
+    _append_authority(writer)
+    with pytest.raises(OSError, match="finalization-start-cutpoint"):
+        writer.begin_finalization(
+            "final",
+            "score-op",
+            FinalizationIntent(kind="score", scorer_id="scorer", scorer_version="1"),
+        )
+    writer.close()
+    cutpoint = verify_bundle(root)
+    assert {(issue.code, issue.location) for issue in cutpoint.issues} == {
+        ("finalization_invalid", "events.jsonl"),
+        ("score_invalid", "state.json"),
+    }
+    with EvidenceWriter.open_for_abandon(root, redactions()) as recovered:
+        record = recovered.abandon("ambiguous_finalization", "start-not-durable")
+    assert record.finalization_id == "final"
+    report = verify_bundle(root)
+    assert report.valid and report.terminal_state == "abandoned"
+    assert report.issues == ()
+
+
+@pytest.mark.parametrize("field", ["finalization_id", "intent_digest", "journal_head_sha256"])
+def test_tampered_marker_only_authority_cannot_abandon(tmp_path: Path, field: str) -> None:
+    class FailFinalizationStartWrite(_OSCallsForTest):
+        def write(self, fd: int, data: bytes) -> int:
+            if b'"kind":"finalization_start"' in data:
+                raise OSError("cutpoint")
+            return super().write(fd, data)
+
+    root = tmp_path / "bundle"
+    writer = EvidenceWriter.create(
+        root, manifest(), redactions(), syscalls=FailFinalizationStartWrite()
+    )
+    _append_authority(writer)
+    with pytest.raises(OSError):
+        writer.begin_finalization(
+            "final",
+            "score-op",
+            FinalizationIntent(kind="score", scorer_id="scorer", scorer_version="1"),
+        )
+    writer.close()
+    marker = json.loads((root / "state.json").read_bytes())
+    marker[field] = "f" * 64 if field != "finalization_id" else "forged"
+    (root / "state.json").write_text(
+        json.dumps(marker, separators=(",", ":"), sort_keys=True), encoding="utf-8"
+    )
+    with pytest.raises((EvidenceBundleInvalid, EvidenceTerminal)):
+        EvidenceWriter.open_for_abandon(root, redactions())
+
+
+def test_missing_marker_and_start_cannot_claim_ambiguous_finalization(tmp_path: Path) -> None:
+    root = tmp_path / "bundle"
+    writer = EvidenceWriter.create(root, manifest(), redactions())
+    _append_authority(writer)
+    writer.close()
+    with EvidenceWriter.open_for_abandon(root, redactions()) as recovered:
+        with pytest.raises(EvidenceBundleInvalid, match="marker"):
+            recovered.abandon("ambiguous_finalization", "not-finalizing")
 
 
 def test_death_between_finalizing_marker_and_scoring_start_is_abandon_only(

@@ -700,7 +700,17 @@ def _verify_semantics(
     finalization_required = (
         (marker is not None and marker.state == "finalizing")
         or outcome is not None
-        or (abandonment is not None and abandonment.finalization_id is not None)
+        or (
+            abandonment is not None
+            and abandonment.finalization_id is not None
+            and not (
+                marker is not None
+                and marker.state == "abandoned"
+                and marker.journal_event_count == len(events)
+                and marker.journal_head_sha256
+                == (events[-1].event_id if events else abandonment.manifest_digest)
+            )
+        )
         or bool(terminal_states)
         or bool(starts)
         or bool(results)
@@ -951,16 +961,6 @@ def verify_bundle(root: os.PathLike[str] | str) -> VerificationReport:
                 issues.error("outcome_mismatch", "outcome.json")
             if outcome.artifacts != artifacts:
                 issues.error("outcome_mismatch", "outcome.json")
-        if abandonment is not None and manifest is not None:
-            if (
-                abandonment.bundle_id != manifest.bundle_id
-                or abandonment.manifest_digest != manifest.manifest_digest
-                or abandonment.event_count != len(events)
-                or abandonment.last_event_sha256 != final_hash
-                or abandonment.last_event_sequence != (len(events) - 1 if events else None)
-            ):
-                issues.error("abandonment_mismatch", "abandonment.json")
-
         marker_raw = _read_file(root_fd, "state.json", issues, "unsafe_path")
         marker = _canonical_model(
             marker_raw,
@@ -971,6 +971,43 @@ def verify_bundle(root: os.PathLike[str] | str) -> VerificationReport:
             location="state.json",
             issues=issues,
         )
+        if marker is not None and marker.state in ("finalizing", "abandoned") and marker.intent:
+            marker_count = marker.journal_event_count
+            marker_head = marker.journal_head_sha256
+            prefix_head = (
+                events[marker_count - 1].event_id
+                if marker_count is not None and 0 < marker_count <= len(events)
+                else (manifest.manifest_digest if marker_count == 0 and manifest else None)
+            )
+            start_after_marker = (
+                marker_count is not None
+                and marker_count < len(events)
+                and isinstance(events[marker_count].payload, FinalizationStartPayload)
+                and events[marker_count].previous_event_sha256 == marker_head
+            )
+            marker_matches_journal = (
+                marker.bundle_id == (manifest.bundle_id if manifest is not None else None)
+                and prefix_head == marker_head
+                and marker.finalization_id is not None
+                and marker.intent_digest is not None
+            )
+            try:
+                marker_authority = FinalizationStartPayload(
+                    finalization_id=marker.finalization_id or "invalid",
+                    intent=marker.intent,
+                    scoring_operation_id=marker.scoring_operation_id,
+                    intent_digest=marker.intent_digest or "0" * 64,
+                )
+                if (
+                    start_after_marker
+                    and marker_count is not None
+                    and events[marker_count].payload != marker_authority
+                ):
+                    marker_matches_journal = False
+            except ValueError:
+                marker_matches_journal = False
+            if not marker_matches_journal:
+                issues.error("state_invalid", "state.json")
         if outcome is not None and abandonment is not None:
             terminal = "invalid"
         elif outcome is not None:
@@ -981,6 +1018,32 @@ def verify_bundle(root: os.PathLike[str] | str) -> VerificationReport:
             terminal = "finalizing"
         else:
             terminal = "open"
+        if abandonment is not None and manifest is not None:
+            starts = [
+                event.payload
+                for event in events
+                if isinstance(event.payload, FinalizationStartPayload)
+            ]
+            expected_finalization_id = starts[0].finalization_id if len(starts) == 1 else None
+            if (
+                expected_finalization_id is None
+                and abandonment.reason == "ambiguous_finalization"
+                and marker is not None
+                and marker.state == "abandoned"
+                and marker.bundle_id == manifest.bundle_id
+                and marker.journal_event_count == len(events)
+                and marker.journal_head_sha256 == final_hash
+            ):
+                expected_finalization_id = marker.finalization_id
+            if (
+                abandonment.bundle_id != manifest.bundle_id
+                or abandonment.manifest_digest != manifest.manifest_digest
+                or abandonment.event_count != len(events)
+                or abandonment.last_event_sha256 != final_hash
+                or abandonment.last_event_sequence != (len(events) - 1 if events else None)
+                or abandonment.finalization_id != expected_finalization_id
+            ):
+                issues.error("abandonment_mismatch", "abandonment.json")
         if marker is not None and marker.state != terminal:
             issues.warning("state_stale", "state.json")
         _verify_semantics(events, manifest, marker, outcome, abandonment, issues)
