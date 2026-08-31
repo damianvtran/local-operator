@@ -670,14 +670,22 @@ class UsagePanel(Static):
         self._repaint()
 
     def show_reports(self, reports, *, now_ms: float | None = None) -> None:  # noqa: ANN001
-        """Install a finished fetch and paint it."""
+        """Install a finished fetch and paint it, keeping the reader's place.
+
+        A refresh replaces numbers the user is already reading; snapping them
+        to the top is jostling, not a new open. A brand-new open is already at
+        0 (`start_fetch` clamps against the one-row loading body; `show_cached`
+        without ``keep_offset`` still zeros). `_compose_rows` clamps if the new
+        body is shorter.
+        """
         self._reports = list(reports)
         self._loading = False
         self._refreshing = False
         self._refresh_failed = False
         self._error = ""
         self._fetched_ms = self._now() if now_ms is None else now_ms
-        self._offset = 0
+        # Keep `_offset`. The finished-fetch path lands over an already-open
+        # panel the user may have scrolled while the worker was in flight.
         self.display = True
         self._repaint()
 
@@ -758,8 +766,9 @@ class UsagePanel(Static):
         """Restore a scroll position (clamped by the next repaint).
 
         Exists for the ``r`` path, which re-shows the standing reports after
-        ``start_fetch`` reset the offset: the reader's place in a long report
-        survives the refresh instead of snapping to the top.
+        ``start_fetch`` clamped the offset against the one-row loading body.
+        The finished fetch then keeps that restored place rather than snapping
+        to the top.
         """
         self._offset = max(0, int(offset))
         self._repaint()

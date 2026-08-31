@@ -4571,6 +4571,67 @@ async def test_r_refetches_without_closing_the_panel() -> None:
 
 
 @pytest.mark.asyncio
+async def test_scrolling_during_an_in_flight_usage_fetch_keeps_place_when_it_lands() -> None:
+    """Open `/usage` from cache, scroll while the confirming fetch is in flight:
+    when it lands the view must not jump to the top."""
+    from local_operator.tui.widgets.usage_panel import UsagePanel
+    from tests.unit.tui.test_usage_panel import _many_reports
+
+    class _HeldMany(FakeProviderController):
+        def __init__(self) -> None:
+            super().__init__()
+            self.release = asyncio.Event()
+            self.started = asyncio.Event()
+            self.cached_reports = _many_reports()
+
+        async def fetch_usage(self, provider_ids=None, *, force_refresh: bool = False):
+            self.usage_calls.append(provider_ids)
+            self.started.set()
+            await self.release.wait()
+            return _many_reports()
+
+    ctrl = _HeldMany()
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=ctrl)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        await _run_usage_command(pilot, app)
+        panel = app.query_one(UsagePanel)
+        await ctrl.started.wait()
+        panel.action_scroll_page(1)
+        offset = panel.view_offset
+        assert offset > 0
+        ctrl.release.set()
+        for _ in range(6):
+            await pilot.pause()
+        assert panel.view_offset == offset
+        assert "refreshing…" not in "\n".join(panel.render_lines_for_test())
+
+
+@pytest.mark.asyncio
+async def test_r_on_a_scrolled_usage_panel_does_not_jump_to_the_top() -> None:
+    """`keep_offset` holds during ``refreshing…``; the finished fetch must too."""
+    from local_operator.tui.widgets.usage_panel import UsagePanel
+    from tests.unit.tui.test_usage_panel import _many_reports
+
+    ctrl = FakeProviderController()
+    ctrl.usage_reports = _many_reports()
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=ctrl)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        await _run_usage_command(pilot, app)
+        panel = app.query_one(UsagePanel)
+        panel.action_scroll_page(1)
+        offset = panel.view_offset
+        assert offset > 0
+        await pilot.press("r")
+        for _ in range(6):
+            await pilot.pause()
+        assert panel.view_offset == offset
+        assert panel.is_open
+        assert "refreshing…" not in "\n".join(panel.render_lines_for_test())
+
+
+@pytest.mark.asyncio
 async def test_a_failed_fetch_is_reported_inside_the_panel() -> None:
     """The panel is what has focus and what carries the key that retries, so an
     error anywhere else asks the user to look away from the fix."""
