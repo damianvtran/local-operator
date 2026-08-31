@@ -80,8 +80,9 @@ from textual.geometry import Size
 from textual.message import Message
 from textual.widgets import Static
 
+from local_operator import terminals
 from local_operator.tui import theme as theme_mod
-from local_operator.tui.animation import motion_enabled
+from local_operator.tui.animation import animation_focused, motion_enabled
 from local_operator.tui.widgets.status_line import format_model_label
 from local_operator.tui.widgets.transcript import NOTICE_GLYPHS
 
@@ -340,13 +341,19 @@ HINT_KEY_WIDTH_TIGHT = max(cell_len(key) for key, _ in HINTS) + 1
 #: EVERY LAUNCH OPENS ON — the rotation is pinned to it and only then resumes at
 #: a random point in the ring (see :meth:`WelcomeView._sync_tip_timer`) — which
 #: is why it is resumption, the single question a returning user arrives with.
+
+#: The ``ctrl+v`` paste sentence. Defined before :data:`TIPS` so the pool can
+#: reuse it rather than carrying a second copy that would drift. See the pin
+#: comment on :data:`TIP_SETUP` for why a Terminal.app launch opens on this.
+TIP_PASTE = "ctrl+v attaches an image from the system clipboard"
+
 TIPS: tuple[str, ...] = (
     "/resume picks up a recent session where you left off",
     "/team <name> <message> sends work to the manager",
     "Ask to create an agent with its own instruction set",
     "/model <provider>/<id> switches this session only",
     "/usage shows how much provider quota is left",
-    "ctrl+v attaches an image from the system clipboard",
+    TIP_PASTE,
     "/approvals <ask|auto> sets whether tools ask first",
     "ctrl+c copies what you highlight in the composer",
     "esc stops the agent without ending the session",
@@ -363,6 +370,25 @@ TIPS: tuple[str, ...] = (
 #: does nothing for them (D4). Once a session exists the rotation resumes into
 #: the normal ring, so this only replaces the opening frame.
 TIP_SETUP = "/login <provider> sets up a provider (e.g. /login openai)"
+
+#: The tip a Terminal.app launch opens on, in place of the pinned ``TIPS[0]``.
+#:
+#: ``ctrl+v`` is the ONLY way to attach an image in a terminal that does not
+#: implement the kitty keyboard protocol: ``Cmd+V`` delivers zero bytes, so
+#: the app never runs a line of code and cannot teach the key at the moment
+#: it fails. After the composer placeholder was retired (#427) that population
+#: had no ambient discovery path at all — ``/help`` documents the chord, but
+#: a user whose ``Cmd+V`` silently did nothing has no reason to look it up
+#: (#430). Pinning the existing ``ctrl+v`` pool entry as the OPENING tip
+#: (the same mechanism :data:`TIP_SETUP` already uses for first-run) reaches
+#: ~100% of stranded users on their first frame and 0% of everyone else.
+#:
+#: Detection is from ``TERM_PROGRAM``, never from a capability query: stdin
+#: belongs to Textual's input loop while the app is running, and the markers
+#: are injected by the emulator at spawn. See :func:`terminals.is_apple_terminal`.
+#: Setup still wins when both apply: a first-run Terminal.app user needs
+#: ``/login`` more than they need paste. The sentence itself lives above as
+#: :data:`TIP_PASTE` so the pool and the pin cannot drift.
 
 #: The tip's prefix: the app's own `info` glyph, the mark every quiet one-line
 #: receipt in the transcript already carries (D14). A word — `tip:` — would cost
@@ -398,7 +424,7 @@ TIP_ROTATE_INTERVAL_S = 12.0
 #: exists to refuse, and a number that silently went stale the first time a tip
 #: was reworded. Measured against the LONGEST entry, so the widest tip in the
 #: pool is the one that decides, and the invariant holds by construction.
-TIP_MIN_WIDTH = max(cell_len(f"{TIP_GLYPH} {tip}") for tip in (*TIPS, TIP_SETUP))
+TIP_MIN_WIDTH = max(cell_len(f"{TIP_GLYPH} {tip}") for tip in (*TIPS, TIP_SETUP, TIP_PASTE))
 
 #: Warning body without its remedy, for widths that cannot hold the full
 #: `— /login <provider>` tail. A half-printed command is worse than none: the
@@ -774,7 +800,9 @@ def _hint_lines(width: int, *, setup: bool = False) -> list[Text]:
     return lines
 
 
-def _tip_lines(width: int, index: int, *, setup: bool = False) -> list[Text]:
+def _tip_lines(
+    width: int, index: int, *, setup: bool = False, pin_paste: bool = False
+) -> list[Text]:
     """The tip at ``index``, as ONE row — or no row at all when ``width`` is tight.
 
     The row count is a function of ``width`` alone. That is the contract the
@@ -788,8 +816,12 @@ def _tip_lines(width: int, index: int, *, setup: bool = False) -> list[Text]:
     ``index`` is taken modulo the pool so callers can keep a monotonic counter.
     ``setup`` swaps the OPENING tip (the pinned ``index == 0`` frame every launch
     lands on) for :data:`TIP_SETUP`, so a first-run user is not pitched
-    ``/resume`` with nothing to resume (D4). Later rotation frames keep the
-    normal ring — by the time the row has turned over there is a session.
+    ``/resume`` with nothing to resume (D4). ``pin_paste`` does the same for
+    :data:`TIP_PASTE` on a Terminal.app launch (#430): that population has no
+    other ambient discovery path for ``ctrl+v``. Setup wins when both apply —
+    a first-run user needs ``/login`` more than they need paste. Later rotation
+    frames keep the normal ring — by the time the row has turned over there is
+    a session, and the paste entry is still in the pool.
     """
     if width < TIP_MIN_WIDTH:
         return []
@@ -801,7 +833,13 @@ def _tip_lines(width: int, index: int, *, setup: bool = False) -> list[Text]:
     # at, which is the one failure mode that would make a rotating row annoying.
     glyph_style = Style(color=theme_mod.semantic_color("faint"))
     body_style = Style(color=theme_mod.semantic_color("dim"))
-    body = TIP_SETUP if (setup and index % len(TIPS) == 0) else TIPS[index % len(TIPS)]
+    opening = index % len(TIPS) == 0
+    if opening and setup:
+        body = TIP_SETUP
+    elif opening and pin_paste:
+        body = TIP_PASTE
+    else:
+        body = TIPS[index % len(TIPS)]
     line = Text(no_wrap=True)
     line.append(f"{TIP_GLYPH} ", style=glyph_style)
     line.append(body, style=body_style)
@@ -815,6 +853,7 @@ def build_welcome_lines(
     *,
     mark_color: str | None = None,
     tip_index: int = 0,
+    pin_paste: bool = False,
 ) -> list[Text]:
     """Render the welcome block as exactly the lines it occupies.
 
@@ -846,6 +885,10 @@ def build_welcome_lines(
     the tip is one row at every width that draws it at all, so a rotation is a
     repaint and never a re-measure — see :func:`_tip_lines` and
     :meth:`WelcomeView._tip_tick`.
+
+    ``pin_paste`` swaps the opening tip for :data:`TIP_PASTE` on a Terminal.app
+    launch (#430). Same shape contract as ``tip_index``: the paste sentence is
+    already in the pool, so pinning it cannot change the row count.
     """
     if width <= 0 or height <= 0:
         return []
@@ -876,7 +919,7 @@ def build_welcome_lines(
     status_without_version = [row for row in status_full if row[0] != _PRIORITY_VERSION]
     status = list(status_without_version)
     hints = _hint_lines(width, setup=info.setup)
-    tip = _tip_lines(width, tip_index, setup=info.setup)
+    tip = _tip_lines(width, tip_index, setup=info.setup, pin_paste=pin_paste)
     show_hints = False
     show_tip = False
     show_wordmark = False
@@ -1032,16 +1075,21 @@ class WelcomeView(Static):
         # decide whether it has anything to repaint.
         self._mark_color: str | None = None
         self._tip_timer: Any | None = None
-        # Which tip is on screen. Zero is not a placeholder: it is what a still
-        # frame shows (the rotation is gated on the animation switch, see
-        # `_sync_tip_timer`), so it is the entry every reproducible frame in the
-        # suite and every snapshot carries — and, since the rotation is pinned to
-        # it, the entry a LIVE launch opens on too.
+        # Which tip is on screen. Zero is not a placeholder: it is the pinned
+        # opening entry every launch lands on (and every still frame in the
+        # suite, because the first tick has not fired yet). The rotation is
+        # independent of the animation switch — see `_sync_tip_timer`.
         self._tip_index = 0
         # Where the ring picks up after the pinned first tip, consumed by the
         # first tick. See `_sync_tip_timer` for why the resume point is drawn and
         # the start is not.
         self._tip_resume: int | None = None
+        # Pin :data:`TIP_PASTE` as the opening tip on Terminal.app. Captured
+        # once at construction: the markers cannot change under a running
+        # process, and reading them per frame would make a still frame depend
+        # on the host's TERM_PROGRAM (the suite's autouse fixture seeds
+        # GHOSTTY_BIN, so a per-frame read would never pin in tests either).
+        self._pin_paste_tip = terminals.is_apple_terminal()
 
     def on_mount(self) -> None:
         self._poll()
@@ -1108,6 +1156,7 @@ class WelcomeView(Static):
             width,
             max(0, region_height - taken),
             tip_index=self._tip_index,
+            pin_paste=self._pin_paste_tip,
         )
         return len(lines), taken
 
@@ -1152,6 +1201,7 @@ class WelcomeView(Static):
             self.size.height,
             mark_color=self._mark_color,
             tip_index=self._tip_index,
+            pin_paste=self._pin_paste_tip,
         )
         # A Group of one Text per row: the lines are already padded and
         # truncated to the widget, so nothing here may re-wrap them.
@@ -1303,27 +1353,34 @@ class WelcomeView(Static):
         self.refresh()
 
     def _sync_tip_timer(self) -> None:
-        """Rotate only while the splash is on screen and animation is allowed.
+        """Rotate while the splash is on screen, independent of the glow.
 
-        The SAME gate as the pulse, for the same reason and then one more: a row
-        of text that changes on a clock makes every still frame a sample of an
-        animation, so a snapshot would capture whichever tip the wall clock
-        happened to be holding. With the gate closed no timer exists — the
-        rotation is not merely paused — and the row holds at ``TIPS[0]``.
+        The pulse is gated on ``motion_enabled`` (shimmer setting AND focus)
+        because a colour that changes on a clock makes every still frame a
+        sample of an animation. The tip is not a colour: it is a
+        discoverability surface, and gating it on shimmer too meant a user
+        who turned animation off never saw past ``TIPS[0]`` — every other
+        tip in the ring, including the ``ctrl+v`` paste chord, was
+        unreachable on every launch (#424 D9). Snapshots stay deterministic
+        because they capture the OPENING frame, before the first 12 s tick;
+        they do not need the timer to be absent, they need it not to have
+        fired yet.
 
-        It follows the pulse onto the focus gate too. A tip nobody is reading is
-        not a tip, and at 12 s per rotation a blurred splash rotating for an
-        hour is 300 repaints of a row that was never seen; the row a returning
-        user finds is ``TIPS[0]``, which is the defined still frame rather than
-        an arbitrary sample of the ring.
+        Focus still pauses it. A tip nobody is reading is not a tip, and at
+        12 s per rotation a blurred splash rotating for an hour is 300
+        repaints of a row that was never seen; the row a returning user
+        finds is ``TIPS[0]``, which is the defined still frame rather than
+        an arbitrary sample of the ring. The env kill switch still
+        suppresses the *pulse*. It does not freeze the tip.
         """
-        wanted = bool(self.display) and motion_enabled()
+        wanted = bool(self.display) and animation_focused()
         if wanted and self._tip_timer is None:
-            # The row OPENS on `TIPS[0]` and never on a lottery. The pool is
-            # ordered, and the first thing a first-run user reads was whichever
-            # entry `randrange` landed on — "compaction runs itself when the
-            # context window fills" is meaningless to someone who does not yet
-            # have a context, while resumption is the question they arrive with.
+            # The row OPENS on `TIPS[0]` (or TIP_SETUP / TIP_PASTE) and never
+            # on a lottery. The pool is ordered, and the first thing a
+            # first-run user reads was whichever entry `randrange` landed on —
+            # "compaction runs itself when the context window fills" is
+            # meaningless to someone who does not yet have a context, while
+            # resumption is the question they arrive with.
             #
             # The ring still has to be REACHABLE, though, and that is what the
             # draw is for: a user who types their first prompt straight away sees

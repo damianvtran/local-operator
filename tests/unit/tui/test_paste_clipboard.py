@@ -1204,6 +1204,35 @@ async def test_ctrl_v_replaces_a_live_selection_with_an_image_marker(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_a_path_paste_replaces_a_live_selection_like_ctrl_v(tmp_path) -> None:
+    """#424 U7: the cmux/path route inserted at the caret without consuming
+    the selection, so selecting `WORD` and pasting a file path gave
+    `keep WORD[Image #1]  keep` against `keep [Image #1]  keep` on ``ctrl+v``.
+
+    Posted to the APP, not the widget: ``App.on_event`` forwards a
+    non-forwarded ``Paste`` to the focused widget, so posting to the widget
+    delivers it twice (see this module's docstring).
+    """
+    path = tmp_path / "shot.png"
+    path.write_bytes(_png_bytes())
+    app = Host()
+    async with app.run_test() as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        editor.insert("keep WORD keep")
+        editor.selection = Selection((0, 5), (0, 9))
+        await pilot.pause()
+        await _paste(app, pilot, str(path))
+
+        assert editor.text == "keep [Image #1, 1568x200]  keep"
+        assert len(editor.referenced_images()) == 1
+        # The caret lands AFTER the marker, so the next keystroke continues
+        # past it rather than typing in front of it — same as ctrl+v.
+        editor.insert("!")
+        assert editor.text == "keep [Image #1, 1568x200] ! keep"
+
+
+@pytest.mark.asyncio
 async def test_a_timeout_is_reported_as_a_timeout_not_an_empty_clipboard(monkeypatch) -> None:
     """A read that never finished cannot report what was on the clipboard.
 

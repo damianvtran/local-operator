@@ -47,6 +47,7 @@ from local_operator.tui.widgets.welcome import (
     MODEL_PENDING,
     TIP_GLYPH,
     TIP_MIN_WIDTH,
+    TIP_PASTE,
     TIP_ROTATE_INTERVAL_S,
     TIP_SETUP,
     TIPS,
@@ -1225,28 +1226,31 @@ def test_the_pool_stays_a_readable_size_and_fits_a_60_column_terminal() -> None:
 
 
 @pytest.mark.asyncio
-async def test_the_rotation_is_a_no_op_when_animation_is_disabled() -> None:
-    """``LOCAL_OPERATOR_NO_SHIMMER`` (this suite's autouse fixture) holds the row
-    at the FIRST tip with no timer scheduled at all.
+async def test_the_rotation_runs_when_animation_is_disabled() -> None:
+    """``LOCAL_OPERATOR_NO_SHIMMER`` (this suite's autouse fixture) still
+    schedules the tip timer. The pulse stays still; the tip does not.
 
-    Same gate as the pulse, and for a sharper reason: a row of text on a clock
-    would make every still frame a sample of whichever tip the wall clock
-    happened to be holding, so the SVG goldens could never be regenerated twice.
+    #424 D9: gating the tip on the same switch as the glow froze the row at
+    ``TIPS[0]`` for every shimmer-off user, so every other tip in the ring —
+    including the ``ctrl+v`` paste chord — was unreachable on every launch.
+    Snapshots stay deterministic because they capture the OPENING frame,
+    before the first 12 s tick; they do not need the timer to be absent.
     """
     app = _make_app(FakeSession())
     async with app.run_test(size=(100, 30)) as pilot:
         welcome = await _settled_welcome(pilot)
-        assert welcome._tip_timer is None
+        assert welcome._tip_timer is not None, "D9: shimmer-off froze the tip ring"
         assert welcome._tip_index == 0
+        assert welcome._pulse_timer is None, "the glow still stays still"
 
         before = _frame(app)
         shown = [row.strip() for row in _tip_rows([text for text, _ in before])]
         assert shown == [f"{TIP_GLYPH} {TIPS[0]}"]
-        await asyncio.sleep(1.0)
+        welcome._tip_tick()
         await pilot.pause()
-        assert _frame(app) == before
-        assert welcome._tip_timer is None
-        assert welcome._tip_index == 0
+        after = [row.strip() for row in _tip_rows([text for text, _ in _frame(app)])]
+        assert after != shown, "a tick with shimmer off did not turn the tip over"
+        assert welcome._tip_index != 0
 
 
 @pytest.mark.asyncio
@@ -1358,6 +1362,121 @@ async def test_the_tip_timer_stops_when_the_view_is_unmounted(animation_on: None
         assert rotation._task is None
 
 
+@pytest.mark.asyncio
+async def test_the_tip_timer_is_created_even_when_shimmer_is_off() -> None:
+    """Mutation guard for #424 D9.
+
+    The production gate is ``wanted = bool(self.display)``. Restoring the old
+    ``and shimmer_enabled()`` conjunct (the defect) must make this test die:
+    with the suite's autouse ``LOCAL_OPERATOR_NO_SHIMMER=1``, that conjunct is
+    False, no timer is created, and the ring never turns. Driven through the
+    real widget rather than the builder so a future gate change cannot hide
+    behind a pure-function test that never reached ``_sync_tip_timer``.
+    """
+    app = _make_app(FakeSession())
+    async with app.run_test(size=(100, 30)) as pilot:
+        welcome = await _settled_welcome(pilot)
+        assert welcome.display is True
+        assert welcome._tip_timer is not None
+        # The pulse still honours the shimmer gate — D9 is specifically about
+        # the TIP, not about turning animation back on.
+        assert welcome._pulse_timer is None
+
+
+@pytest.mark.asyncio
+async def test_toggling_shimmer_does_not_leak_or_double_the_tip_timer(
+    animation_on: None,
+) -> None:
+    """The tip timer is independent of the glow, so flipping shimmer at
+    runtime must neither stop the rotation nor stack a second interval on
+    top of the first. Driven by calling the two sync methods the settings
+    path would, because there is no live settings→welcome hook to press.
+    """
+    from local_operator.tui.widgets import welcome as welcome_mod
+
+    app = _make_app(FakeSession())
+    async with app.run_test(size=(100, 30)) as pilot:
+        welcome = await _settled_welcome(pilot)
+        first = welcome._tip_timer
+        assert first is not None
+        # Glow off → on → off, the way a user toggling display.shimmer would.
+        welcome._sync_pulse_timer()
+        welcome._sync_tip_timer()
+        assert welcome._tip_timer is first, "a second sync stacked a new tip timer"
+        # Force the glow on, then off again; the tip timer must be untouched.
+        # Patch where welcome.py bound the name, not the shimmer module —
+        # `_sync_pulse_timer` reads the imported symbol.
+        original = welcome_mod.shimmer_enabled
+        try:
+            welcome_mod.shimmer_enabled = lambda: True
+            welcome._sync_pulse_timer()
+            welcome._sync_tip_timer()
+            assert welcome._pulse_timer is not None
+            assert welcome._tip_timer is first
+            welcome_mod.shimmer_enabled = lambda: False
+            welcome._sync_pulse_timer()
+            welcome._sync_tip_timer()
+            assert welcome._pulse_timer is None
+            assert welcome._tip_timer is first
+            assert first._task is not None, "the original tip timer was stopped"
+        finally:
+            welcome_mod.shimmer_enabled = original
+
+
+def test_a_terminal_app_launch_opens_on_the_paste_tip() -> None:
+    """#430: Terminal.app has no other ambient discovery path for ``ctrl+v``.
+
+    Pinning the existing pool entry as the OPENING tip (the same mechanism
+    ``TIP_SETUP`` already uses) reaches that population on their first frame
+    and nobody else. Setup still wins when both apply: a first-run user needs
+    ``/login`` more than they need paste. Later rotation frames keep the
+    normal ring — the paste sentence is already in the pool.
+    """
+    from local_operator.tui.widgets.welcome import _tip_lines
+
+    opening = _tip_lines(ROOMY_W, 0, pin_paste=True)
+    assert len(opening) == 1
+    assert opening[0].plain.strip() == f"{TIP_GLYPH} {TIP_PASTE}"
+    # A later frame is the ordinary ring, not a stuck paste tip.
+    later = _tip_lines(ROOMY_W, 1, pin_paste=True)
+    assert later[0].plain.strip() == f"{TIP_GLYPH} {TIPS[1]}"
+    # Setup outranks paste: a first-run Terminal.app user needs /login.
+    setup = _tip_lines(ROOMY_W, 0, setup=True, pin_paste=True)
+    assert setup[0].plain.strip() == f"{TIP_GLYPH} {TIP_SETUP}"
+    # And a non-Terminal.app launch is unchanged.
+    ordinary = _tip_lines(ROOMY_W, 0)
+    assert ordinary[0].plain.strip() == f"{TIP_GLYPH} {TIPS[0]}"
+
+
+@pytest.mark.asyncio
+async def test_the_composed_splash_pins_paste_on_apple_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The pin is not just the builder: the REAL splash, with Apple_Terminal
+    in the environment, opens on the paste tip. Captured at construction so a
+    host that is not Terminal.app (this suite seeds GHOSTTY_BIN) does not
+    pin, and a host that is does."""
+    monkeypatch.setenv("TERM_PROGRAM", "Apple_Terminal")
+    # Drop the suite's ghostty marker so is_apple_terminal is the only hit.
+    monkeypatch.delenv("GHOSTTY_BIN", raising=False)
+    monkeypatch.delenv("GHOSTTY_RESOURCES_DIR", raising=False)
+    app = _make_app(FakeSession())
+    async with app.run_test(size=(100, 30)) as pilot:
+        welcome = await _settled_welcome(pilot)
+        assert welcome._pin_paste_tip is True
+        shown = [row.strip() for row in _tip_rows([text for text, _ in _frame(app)])]
+        assert shown == [f"{TIP_GLYPH} {TIP_PASTE}"]
+        # A tick still walks the ordinary ring, so the pin is the OPENING
+        # frame only — the same contract TIP_SETUP already has.
+        # Force the first tick onto a known non-paste entry so the assertion
+        # cannot lose to the random resume landing on TIPS[5] (TIP_PASTE).
+        welcome._tip_resume = 1
+        welcome._tip_tick()
+        await pilot.pause()
+        after = [row.strip() for row in _tip_rows([text for text, _ in _frame(app)])]
+        assert after == [f"{TIP_GLYPH} {TIPS[1]}"]
+
+
 # --- the defects the design round found in the tip ------------------------------
 
 
@@ -1387,7 +1506,9 @@ def test_the_threshold_is_the_width_the_pool_actually_needs() -> None:
     # The setup-state opening tip (TIP_SETUP) is drawn at the same row, so the
     # threshold must clear the WIDEST of the pool AND that tip, or the setup
     # notice would truncate at a width the constant swore was safe.
-    assert TIP_MIN_WIDTH == max(cell_len(f"{TIP_GLYPH} {tip}") for tip in (*TIPS, TIP_SETUP))
+    assert TIP_MIN_WIDTH == max(
+        cell_len(f"{TIP_GLYPH} {tip}") for tip in (*TIPS, TIP_SETUP, TIP_PASTE)
+    )
     # One cell under it there is no row at all, rather than a fragment of one.
     assert not _tip_rows(_lines(_info(), TIP_MIN_WIDTH - 1, 99))
 

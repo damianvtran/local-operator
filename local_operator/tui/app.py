@@ -14886,6 +14886,18 @@ class OperatorApp(App[None]):
             # Same staleness guard as on_argument_query_opened: the buffer may
             # have moved on in the tick the message spent queued.
             return
+        if editor._caret_offset() != message.caret:
+            # The caret moved while this message sat queued, so the builder's
+            # own parse — which anchors on the caret — would answer for a
+            # position the user has already left. This is the #393 seam: `home`
+            # on ``/mcp `` parks the caret on the ``/`` where ``slash_argument``
+            # reports no argument at all, the verb list closes, and the refresh
+            # queued by that same key then runs the builder at column 0, gets
+            # the empty verb list back, and re-closes the list the editor's
+            # `end` had just re-opened. A caret-only move never changes the
+            # buffer, so the rows this message was posted to fetch are the ones
+            # the list already holds — dropping it is correct, not a loss.
+            return
         if message.command == "mcp":
             picker = editor.picker
             # Same self-clearing rule as every sibling fill, applied BEFORE
