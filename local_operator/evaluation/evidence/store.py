@@ -153,6 +153,9 @@ class _OSCalls:
     def unlink(self, path: str, *, dir_fd: int) -> None:
         os.unlink(path, dir_fd=dir_fd)
 
+    def close(self, fd: int) -> None:
+        os.close(fd)
+
 
 _OS_CALLS = _OSCalls()
 
@@ -760,6 +763,30 @@ class EvidenceWriter:
         self._last_wall_time_ms = now_wall
         return event
 
+    def _cleanup_artifact_temp(self, fd: int, temp: str) -> BaseException | None:
+        """Attempt every temp cleanup step and return only the first failure.
+
+        Close precedes unlink so even an unlink failure cannot strand an open
+        descriptor. FileNotFound is benign because link publication never moves
+        the temp name and another completed cleanup may already have removed it.
+        """
+
+        first_error: BaseException | None = None
+        if fd >= 0:
+            try:
+                close = getattr(self._calls, "close", os.close)
+                close(fd)
+            except BaseException as error:
+                first_error = error
+        try:
+            self._calls.unlink(temp, dir_fd=self._artifacts_fd)
+        except FileNotFoundError:
+            pass
+        except BaseException as error:
+            if first_error is None:
+                first_error = error
+        return first_error
+
     def publish_artifact(
         self,
         source: bytes | bytearray | memoryview | BinaryIO | Iterable[bytes],
@@ -789,13 +816,20 @@ class EvidenceWriter:
             else:
                 stream = source
             temp = f".artifact.{secrets.token_hex(16)}.tmp"
-            fd = os.open(
-                temp, _WRITE_FLAGS | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=self._artifacts_fd
-            )
-            digest = hashlib.sha256()
-            count = 0
-            scanner = _RedactionScanner(self)
+            fd = -1
+            primary: BaseException | None = None
+            ref: EvidenceArtifactRef | None = None
+            link_attempted = False
             try:
+                fd = os.open(
+                    temp,
+                    _WRITE_FLAGS | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                    dir_fd=self._artifacts_fd,
+                )
+                digest = hashlib.sha256()
+                count = 0
+                scanner = _RedactionScanner(self)
                 for chunk in stream:
                     if not isinstance(chunk, bytes):
                         raise EvidenceBundleInvalid("artifact stream must yield bytes")
@@ -815,52 +849,48 @@ class EvidenceWriter:
                     raise EvidenceBundleInvalid("artifact byte count assertion failed")
                 ref = EvidenceArtifactRef(sha256=actual, media_type=media_type, byte_count=count)
                 self._calls.fsync(fd)
-            except BaseException as error:
-                os.close(fd)
-                try:
-                    self._calls.unlink(temp, dir_fd=self._artifacts_fd)
-                except FileNotFoundError:
-                    pass
-                if isinstance(error, (OSError, EvidenceError)) and not isinstance(
-                    error, EvidenceBundleInvalid
-                ):
-                    self._poison()
-                raise
-            os.close(fd)
-            link_attempted = False
-            try:
                 if media_type != "application/octet-stream":
                     data = self._read_regular(self._artifacts_fd, temp)
                     projection = _project_artifact(data, media_type)
                     if media_type in ("application/json", "text/plain"):
                         self._assert_redacted(projection)
                 link_attempted = True
-                self._calls.link(
-                    temp,
-                    ref.sha256,
-                    src_dir_fd=self._artifacts_fd,
-                    dst_dir_fd=self._artifacts_fd,
-                )
-            except FileExistsError:
-                existing = self._read_regular(self._artifacts_fd, ref.sha256)
-                if (
-                    hashlib.sha256(existing).hexdigest() != ref.sha256
-                    or len(existing) != ref.byte_count
-                ):
-                    raise EvidenceBundleInvalid("existing artifact conflicts with digest")
-                if media_type != "application/octet-stream":
-                    _project_artifact(existing, media_type)
-            except BaseException:
-                if link_attempted:
-                    # link may have created the target before surfacing an error.
-                    # No caller may continue under ambiguous publication state.
-                    self._poison()
-                raise
-            finally:
                 try:
-                    self._calls.unlink(temp, dir_fd=self._artifacts_fd)
-                except FileNotFoundError:
-                    pass
+                    self._calls.link(
+                        temp,
+                        ref.sha256,
+                        src_dir_fd=self._artifacts_fd,
+                        dst_dir_fd=self._artifacts_fd,
+                    )
+                except FileExistsError:
+                    existing = self._read_regular(self._artifacts_fd, ref.sha256)
+                    if (
+                        hashlib.sha256(existing).hexdigest() != ref.sha256
+                        or len(existing) != ref.byte_count
+                    ):
+                        raise EvidenceBundleInvalid("existing artifact conflicts with digest")
+                    if media_type != "application/octet-stream":
+                        _project_artifact(existing, media_type)
+            except BaseException as error:
+                primary = error
+                if link_attempted or (
+                    isinstance(error, (OSError, EvidenceError))
+                    and not isinstance(error, EvidenceBundleInvalid)
+                ):
+                    self._poison()
+            cleanup_error = self._cleanup_artifact_temp(fd, temp)
+            fd = -1
+            if cleanup_error is not None:
+                # Ambiguous temp ownership is itself a durable-boundary failure,
+                # even when the primary content rejection was deterministic.
+                self._poison()
+            if primary is not None:
+                if cleanup_error is not None:
+                    raise primary from cleanup_error
+                raise primary
+            if cleanup_error is not None:
+                raise EvidenceRecoveryOnly("artifact cleanup failed") from cleanup_error
+            assert ref is not None
             try:
                 self._calls.fsync(self._artifacts_fd)
             except OSError:

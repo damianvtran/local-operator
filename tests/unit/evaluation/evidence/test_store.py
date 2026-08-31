@@ -38,6 +38,23 @@ def redactions(*values: str) -> RedactionSet:
     return RedactionSet.from_resolved_values(values)
 
 
+class _OSCallsForTest:
+    def write(self, fd: int, data: bytes) -> int:
+        return os.write(fd, data)
+
+    def fsync(self, fd: int) -> None:
+        os.fsync(fd)
+
+    def link(self, src: str, dst: str, *, src_dir_fd: int, dst_dir_fd: int) -> None:
+        os.link(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+
+    def unlink(self, path: str, *, dir_fd: int) -> None:
+        os.unlink(path, dir_fd=dir_fd)
+
+    def close(self, fd: int) -> None:
+        os.close(fd)
+
+
 def _hold_writer(root: str, ready: ProcessEvent, release: ProcessEvent) -> None:
     with EvidenceWriter.create(root, manifest(), redactions()):
         ready.set()
@@ -725,6 +742,107 @@ def test_artifact_limit_rejects_before_unbounded_write(tmp_path: Path) -> None:
                 (b"x" * (1024 * 1024) for _ in range(MAX_ARTIFACT_BYTES // (1024 * 1024) + 1)),
                 media_type="application/octet-stream",
             )
+
+
+def test_redaction_unlink_failure_preserves_generic_error_and_poisons(
+    tmp_path: Path,
+) -> None:
+    class UnlinkFails:
+        def write(self, fd: int, data: bytes) -> int:
+            return os.write(fd, data)
+
+        def fsync(self, fd: int) -> None:
+            os.fsync(fd)
+
+        def link(self, src: str, dst: str, *, src_dir_fd: int, dst_dir_fd: int) -> None:
+            os.link(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+
+        def unlink(self, path: str, *, dir_fd: int) -> None:
+            raise OSError("unlink-failure")
+
+    secret = "very-secret-value"
+    root = tmp_path / "bundle"
+    writer = EvidenceWriter.create(root, manifest(), redactions(secret), syscalls=UnlinkFails())
+    with pytest.raises(EvidenceBundleInvalid) as error:
+        writer.publish_artifact(secret.encode(), media_type="text/plain")
+    assert secret not in str(error.value)
+    with pytest.raises(EvidenceRecoveryOnly):
+        writer.append(
+            "cancel",
+            CancelPayload(cancellation_id="later", source="operator", diagnostic_code="x"),
+        )
+    assert any(path.name.startswith(".artifact.") for path in (root / "artifacts").iterdir())
+    writer.close()
+    assert not verify_bundle(root).valid
+
+
+def test_temp_close_failure_still_unlinks_and_poisons(tmp_path: Path) -> None:
+    class CloseFails(_OSCallsForTest):
+        def close(self, fd: int) -> None:
+            os.close(fd)
+            raise OSError("temp-close-failure")
+
+    root = tmp_path / "bundle"
+    writer = EvidenceWriter.create(root, manifest(), redactions(), syscalls=CloseFails())
+    with pytest.raises(EvidenceBundleInvalid):
+        writer.publish_artifact(b"safe", media_type="text/plain", expected_sha256=DIGEST)
+    assert list((root / "artifacts").iterdir()) == []
+    with pytest.raises(EvidenceRecoveryOnly):
+        writer.begin_finalization("final", None, FinalizationIntent(kind="unscored"))
+    writer.close()
+
+
+def test_temp_close_and_unlink_failures_both_attempted_and_poison(
+    tmp_path: Path,
+) -> None:
+    calls = {"close": 0, "unlink": 0}
+
+    class UnlinkFails:
+        def write(self, fd: int, data: bytes) -> int:
+            return os.write(fd, data)
+
+        def fsync(self, fd: int) -> None:
+            os.fsync(fd)
+
+        def link(self, src: str, dst: str, *, src_dir_fd: int, dst_dir_fd: int) -> None:
+            os.link(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+
+        def unlink(self, path: str, *, dir_fd: int) -> None:
+            calls["unlink"] += 1
+            raise OSError("unlink-failure")
+
+        def close(self, fd: int) -> None:
+            calls["close"] += 1
+            os.close(fd)
+            raise OSError("close-failure")
+
+    writer = EvidenceWriter.create(
+        tmp_path / "bundle", manifest(), redactions(), syscalls=UnlinkFails()
+    )
+    with pytest.raises(EvidenceRecoveryOnly):
+        writer.publish_artifact(b"safe", media_type="text/plain")
+    assert calls == {"close": 1, "unlink": 1}
+    with pytest.raises(EvidenceRecoveryOnly):
+        writer.append(
+            "cancel",
+            CancelPayload(cancellation_id="later", source="operator", diagnostic_code="x"),
+        )
+    writer.close()
+
+
+def test_content_rejection_cleanup_keeps_writer_reusable(tmp_path: Path) -> None:
+    root = tmp_path / "bundle"
+    with EvidenceWriter.create(root, manifest(), redactions("very-secret-value")) as writer:
+        with pytest.raises(EvidenceBundleInvalid):
+            writer.publish_artifact(b"very-secret-value", media_type="application/octet-stream")
+        writer.append(
+            "cancel",
+            CancelPayload(cancellation_id="later", source="operator", diagnostic_code="x"),
+            monotonic_ns=1,
+            wall_time_ms=2,
+        )
+    assert list((root / "artifacts").iterdir()) == []
+    assert verify_bundle(root).valid
 
 
 def test_ambiguous_artifact_link_poisons_writer(tmp_path: Path) -> None:
