@@ -15,6 +15,10 @@ import sys
 from collections import Counter
 from typing import Any, Iterator
 
+from local_operator.evaluation.evidence.media import (
+    MediaValidationError,
+    validate_media,
+)
 from local_operator.evaluation.evidence.models import (
     AbandonmentRecord,
     ActionBatchPayload,
@@ -154,34 +158,10 @@ def _artifact_refs(value: Any) -> Iterator[ArtifactRef]:
 
 
 def _media_matches(data: bytes, media_type: str) -> bool:
-    if media_type == "image/png":
-        return data.startswith(b"\x89PNG\r\n\x1a\n")
-    if media_type == "image/jpeg":
-        return data.startswith(b"\xff\xd8\xff") and data.endswith(b"\xff\xd9")
-    if media_type == "image/gif":
-        return data.startswith((b"GIF87a", b"GIF89a"))
-    if media_type == "image/webp":
-        return len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP"
-    if media_type == "application/json":
-        try:
-            decoded = json.loads(data.decode("utf-8"))
-        except (UnicodeDecodeError, ValueError):
-            return False
-        return (
-            json.dumps(
-                decoded,
-                allow_nan=False,
-                ensure_ascii=False,
-                separators=(",", ":"),
-                sort_keys=True,
-            ).encode("utf-8")
-            == data
-        )
-    if media_type == "text/plain":
-        try:
-            data.decode("utf-8")
-        except UnicodeDecodeError:
-            return False
+    try:
+        validate_media(data, media_type)
+    except MediaValidationError:
+        return False
     return True
 
 

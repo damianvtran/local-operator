@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import multiprocessing
 import os
 import signal
@@ -246,6 +247,27 @@ def test_redaction_rejects_all_encoded_canaries_without_echo(tmp_path: Path) -> 
                 writer.publish_artifact(variant.encode(), media_type="text/plain")
             assert secret not in str(error.value)
     assert (tmp_path / "bundle" / "events.jsonl").read_bytes() == b""
+    assert list((tmp_path / "bundle" / "artifacts").iterdir()) == []
+
+
+def test_binary_artifacts_reject_whitespace_encoded_canaries(tmp_path: Path) -> None:
+    secret = "very-secret-value"
+    standard = base64.b64encode(secret.encode()).decode()
+    urlsafe = base64.urlsafe_b64encode(secret.encode()).decode()
+    hexed = secret.encode().hex()
+    variants = (
+        "\n".join(standard[index : index + 4] for index in range(0, len(standard), 4)),
+        "\t".join(urlsafe[index : index + 3] for index in range(0, len(urlsafe), 3)),
+        " ".join(hexed[index : index + 2] for index in range(0, len(hexed), 2)),
+    )
+    with EvidenceWriter.create(tmp_path / "bundle", manifest(), redactions(secret)) as writer:
+        for variant in variants:
+            with pytest.raises(EvidenceBundleInvalid) as error:
+                writer.publish_artifact(
+                    b"\x00header\x00" + variant.encode() + b"\x00tail",
+                    media_type="application/octet-stream",
+                )
+            assert secret not in str(error.value)
     assert list((tmp_path / "bundle" / "artifacts").iterdir()) == []
 
 

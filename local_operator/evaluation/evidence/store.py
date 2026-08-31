@@ -8,12 +8,14 @@ side-effect authority cannot be reconstructed from bytes after a crash.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import errno
 import fcntl
 import hashlib
 import io
-import json
 import os
+import re
 import secrets
 import stat
 import sys
@@ -24,6 +26,10 @@ from collections.abc import Iterable, Mapping
 from typing import Any, BinaryIO, Protocol, cast
 from urllib.parse import unquote
 
+from local_operator.evaluation.evidence.media import (
+    MediaValidationError,
+    validate_media,
+)
 from local_operator.evaluation.evidence.models import (
     AbandonmentReason,
     AbandonmentRecord,
@@ -39,7 +45,6 @@ from local_operator.evaluation.evidence.models import (
     ScoringResultPayload,
     ScoringStartPayload,
     StateMarker,
-    canonical_bytes,
 )
 from local_operator.evaluation.evidence.verify import verify_bundle
 from local_operator.evaluation.receipts import RedactionSet
@@ -52,6 +57,9 @@ _STATE = "state.json"
 _OUTCOME = "outcome.json"
 _ABANDONMENT = "abandonment.json"
 _DIGEST_CHARS = frozenset("0123456789abcdef")
+# Only this exact semantic issue is expected when the finalizing marker reaches
+# disk before scoring_start. Integrity and confinement findings always block.
+_AMBIGUOUS_FINALIZATION_ISSUES = frozenset({("score_invalid", "state.json")})
 _WRITE_FLAGS = os.O_WRONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
 _READ_FLAGS = (
     os.O_RDONLY
@@ -156,34 +164,52 @@ def _write_all(fd: int, data: bytes, calls: Syscalls) -> None:
 
 
 def _project_artifact(data: bytes, media_type: str) -> Any:
-    if media_type == "application/json":
-        try:
-            decoded = json.loads(data.decode("utf-8"))
-        except (UnicodeDecodeError, ValueError) as error:
-            raise EvidenceBundleInvalid("artifact media validation failed") from error
-        if canonical_bytes(decoded) != data:
-            raise EvidenceBundleInvalid("artifact media validation failed")
-        return decoded
-    if media_type == "text/plain":
-        try:
-            return data.decode("utf-8")
-        except UnicodeDecodeError as error:
-            raise EvidenceBundleInvalid("artifact media validation failed") from error
-    if media_type == "image/png" and not data.startswith(b"\x89PNG\r\n\x1a\n"):
-        raise EvidenceBundleInvalid("artifact media validation failed")
-    if media_type == "image/jpeg" and not (
-        data.startswith(b"\xff\xd8\xff") and data.endswith(b"\xff\xd9")
-    ):
-        raise EvidenceBundleInvalid("artifact media validation failed")
-    if media_type == "image/gif" and not data.startswith((b"GIF87a", b"GIF89a")):
-        raise EvidenceBundleInvalid("artifact media validation failed")
-    if media_type == "image/webp" and not (
-        len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP"
-    ):
-        raise EvidenceBundleInvalid("artifact media validation failed")
-    # Binary formats are scanned only through their safe ASCII projection; this
-    # catches encoded canaries without interpreting arbitrary provider bytes.
-    return "".join(chr(byte) if 32 <= byte <= 126 else " " for byte in data)
+    try:
+        projection = validate_media(data, media_type)
+    except MediaValidationError as error:
+        raise EvidenceBundleInvalid("artifact media validation failed") from error
+    if media_type in ("application/json", "text/plain"):
+        return projection
+    return _binary_projections(data)
+
+
+def _binary_projections(data: bytes) -> list[str]:
+    """Expose bounded deterministic encodings without treating bytes as commands.
+
+    Runs shorter than eight bytes are ignored because they collide heavily with
+    normal binary headers. Whitespace is accepted only inside otherwise-valid
+    base64 or hex runs, then stripped before strict decoding.
+    """
+
+    printable = "".join(chr(byte) if 32 <= byte <= 126 else " " for byte in data)
+    projections = [printable]
+    text = data.decode("ascii", errors="ignore")
+    # Boundaries exclude adjacent printable binary text; only runs made entirely
+    # from the encoding alphabet plus whitespace are normalized and decoded.
+    candidates = re.findall(
+        r"(?<![A-Za-z0-9+/_-])(?:[A-Za-z0-9+/_-][ \t\r\n]*){8,}={0,2}",
+        text,
+    )
+    for candidate in candidates:
+        compact = "".join(character for character in candidate if not character.isspace())
+        if 8 <= len(compact) <= len(data) + 4:
+            padded = compact + "=" * (-len(compact) % 4)
+            for altchars in (None, b"-_"):
+                try:
+                    decoded = base64.b64decode(
+                        padded.encode("ascii"), altchars=altchars, validate=True
+                    )
+                except (ValueError, binascii.Error):
+                    continue
+                projections.append(decoded.decode("utf-8", errors="ignore"))
+    for candidate in re.findall(r"(?<![0-9A-Fa-f])(?:[0-9A-Fa-f]{2}[ \t\r\n]*){8,}", text):
+        hex_compact = "".join(character for character in candidate if not character.isspace())
+        if len(hex_compact) % 2 == 0:
+            try:
+                projections.append(bytes.fromhex(hex_compact).decode("utf-8", errors="ignore"))
+            except ValueError:
+                pass
+    return projections
 
 
 class EvidenceWriter:
@@ -338,9 +364,12 @@ class EvidenceWriter:
             lock_fd = cls._lock(root_fd)
             try:
                 report = verify_bundle(path)
-                allowed = {"state_stale"}
+                # A finalizing marker with no scoring_start is the expected
+                # crash cutpoint: it is invalid for execution but safe to lock,
+                # independently inspect, and abandon without rescoring.
                 if any(
-                    issue.severity == "error" and issue.code not in allowed
+                    issue.severity == "error"
+                    and (issue.code, issue.location) not in _AMBIGUOUS_FINALIZATION_ISSUES
                     for issue in report.issues
                 ):
                     raise EvidenceBundleInvalid("bundle failed recovery verification")
@@ -939,7 +968,15 @@ class EvidenceWriter:
             report = verify_bundle(self.root)
             if report.outcome is not None or report.abandonment is not None:
                 raise EvidenceTerminal("bundle already has an immutable terminal")
-            if report.manifest is None or any(issue.severity == "error" for issue in report.issues):
+            allowed_errors = (
+                _AMBIGUOUS_FINALIZATION_ISSUES
+                if self._recovery_only and reason == "ambiguous_finalization"
+                else frozenset()
+            )
+            if report.manifest is None or any(
+                issue.severity == "error" and (issue.code, issue.location) not in allowed_errors
+                for issue in report.issues
+            ):
                 raise EvidenceBundleInvalid("bundle failed independent abandonment verification")
             events = report.events
             record = AbandonmentRecord(
