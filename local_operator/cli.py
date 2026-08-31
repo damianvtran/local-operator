@@ -1163,14 +1163,22 @@ def send_command(args: argparse.Namespace) -> int:
         _peer_red(error or "no target resolved")
         return 1
 
-    # Self-send guard (U2): `lop send` is a child of the launching TUI, so
-    # os.getppid() IS the sending session's pid. A target resolving to that pid
-    # means the session is messaging itself, which would paint a
-    # "peer message from <own name>" card as though a DIFFERENT session sent it
-    # (and, in --wake/--now mode, self-trigger a turn). Refuse rather than
-    # deliver a mislabeled self-note; the composer is the way to talk to
-    # yourself.
-    if record.pid == os.getppid():
+    # Self-send guard (U2): a target resolving to the SENDING session means the
+    # session is messaging itself, which would paint a "peer message from <own
+    # name>" card as though a DIFFERENT session sent it (and, in --wake/--now
+    # mode, self-trigger a turn). Refuse rather than deliver a mislabeled
+    # self-note; the composer is the way to talk to yourself.
+    #
+    # The comparison uses the pid the IDENTITY walk resolved, not a bare
+    # os.getppid(). `lop send` is only sometimes a direct child of the TUI: run
+    # from an agent's bash tool or through a shell wrapper it is a grandchild,
+    # and then the two disagree — the guard compared the intermediate shell's
+    # pid, missed, and delivered a self-message that the ancestry-resolved
+    # identity then labelled confidently with the session's OWN name. Resolving
+    # once and using it for both is what keeps them from drifting apart again.
+    sender = _peer_sender_identity()
+    sender_pid = sender.get("pid")
+    if record.pid == sender_pid:
         _peer_red("that target is this session; use the composer to message yourself")
         return 1
 
@@ -1189,7 +1197,6 @@ def send_command(args: argparse.Namespace) -> int:
         return 1
 
     mode = "steer" if args.steer else "mailbox"
-    sender = _peer_sender_identity()
     try:
         detail = asyncio.run(
             send_peer_message(

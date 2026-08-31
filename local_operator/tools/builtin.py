@@ -4786,13 +4786,19 @@ async def execute_send(
 
     from local_operator.mobile.peer_send import (
         candidate_lines,
-        peer_sender_identity,
+        peer_sender_identity_async,
         resolve_peer_target,
         validate_peer_body,
     )
 
-    record, candidates, error = resolve_peer_target(
-        target=params.target, pid=params.pid, session=params.session
+    # Off the loop: the resolver reads and parses every registry record, and
+    # this tool runs inside the session's own event loop, where a blocking
+    # filesystem walk stalls the UI along with every other task.
+    record, candidates, error = await asyncio.to_thread(
+        resolve_peer_target,
+        target=params.target,
+        pid=params.pid,
+        session=params.session,
     )
     if candidates:
         # ``pid=<n>`` rather than ``pid <n>``: the reader is a model that has to
@@ -4823,7 +4829,10 @@ async def execute_send(
         return _error(tool_call_id, "send", body_error)
 
     mode = "steer" if params.now else "mailbox"
-    sender = peer_sender_identity(os.getpid())
+    # Also off the loop: the ancestry walk runs a registry scan and a ``ps`` per
+    # hop. It matches on the first hop here (the tool IS the session process),
+    # but the cost is not structurally bounded and must not sit on the loop.
+    sender = await peer_sender_identity_async(os.getpid())
     if "session_id" not in sender and context is not None:
         # No registry record named this process (a reduced host that never
         # published one): fall back to the ToolContext identity so the peer's

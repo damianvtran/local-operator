@@ -19,6 +19,7 @@ on purpose: it pulls the registry and config path only, never the heavyweight
 
 from __future__ import annotations
 
+import asyncio
 import os
 import subprocess
 from typing import Any
@@ -210,14 +211,31 @@ def _parent_pid(pid: int) -> "int | None":
 
 
 def _record_for_pid(pid: int) -> "Any | None":
-    """The live registry record published by ``pid``, or ``None``."""
+    """The LIVE registry record published by ``pid``, or ``None``.
+
+    Only ``live`` records count. ``scan`` also returns ``wedged`` (pid alive but
+    the heartbeat has aged out) and ``stale`` (pid gone) entries, and labelling
+    a message from one of those is worse than leaving it unlabelled: a pid the
+    OS has since reused would attribute the message to whatever session happens
+    to hold that number now, and that attribution reaches the model-visible
+    provenance envelope, not just the card. ``resolve_peer_target`` filters to
+    live for the same reason twenty lines up; enrichment must not be laxer than
+    the resolver.
+
+    Never raises — see :func:`resolve_sender_identity` for why every failure
+    here has to degrade to "less labelled" rather than propagate.
+    """
     try:
-        for record, _state in registry.scan(config_dir()):
-            if record.pid == pid:
+        for record, state in registry.scan(config_dir()):
+            if record.pid == pid and state == "live":
                 return record
-    except OSError:
-        # A scan failure never blocks a send: the message still delivers, it is
-        # just less labelled.
+    except Exception:
+        # Deliberately broad: a scan reads and parses files written by other
+        # processes, so it can fail in ways beyond OSError (a torn record
+        # surfacing as ValueError, a config-path lookup failing). This runs
+        # AHEAD of the transcript write on the receive path, so an escaping
+        # exception would drop a message that was already accepted on the wire.
+        # Identity is a nicety; delivery is not.
         return None
     return None
 
@@ -233,6 +251,18 @@ def _identity_from_record(pid: int, record: "Any") -> "dict[str, Any]":
     }
 
 
+async def peer_sender_identity_async(lookup_pid: int) -> "dict[str, Any]":
+    """``peer_sender_identity`` off the event loop.
+
+    The walk is blocking work — a registry scan per hop plus a ``ps`` per hop,
+    typically ~15 ms but bounded only by the subprocess timeout — and callers
+    inside a running loop must not stall it. Matches the ``asyncio.to_thread``
+    discipline the rest of this package already uses for registry and
+    subprocess work.
+    """
+    return await asyncio.to_thread(peer_sender_identity, lookup_pid)
+
+
 def peer_sender_identity(lookup_pid: int) -> "dict[str, Any]":
     """Best-effort identity of the sending session for the peer indicator.
 
@@ -246,10 +276,20 @@ def peer_sender_identity(lookup_pid: int) -> "dict[str, Any]":
 
     Why the walk: testing only the immediate parent made identity fragile in
     exactly the cases that matter. ``lop send`` invoked from a subagent's bash
-    tool, through a shell wrapper, under ``nohup``, or after a reparent has a
-    ppid that is not the session — frequently pid 1 — so the lookup missed and
-    the card rendered ``peer message from (pid 1)``: no name, no model, nothing
-    to follow in a busy transcript.
+    tool, through a shell wrapper, or under ``nohup`` is a grandchild or lower,
+    so the lookup missed and the card rendered ``peer message from (pid 1)``:
+    no name, no model, nothing to follow in a busy transcript.
+
+    What it does NOT fix: a genuinely REPARENTED sender. Once init has adopted
+    the process its chain to the session is gone from the process table, so
+    there is nothing left to walk and no amount of hops recovers it — that case
+    still arrives pid-only. It is covered on the other side instead:
+    :func:`resolve_sender_identity` resolves the sender against the receiver's
+    own registry, and the card falls back to the cwd basename. This walk claims
+    only the intact-chain cases.
+
+    Blocking (a registry scan and a ``ps`` per hop). Callers on an event loop
+    must use :func:`peer_sender_identity_async`.
 
     When nothing is found we still carry the original pid; the identity is
     advisory, never load-bearing for delivery.
@@ -288,17 +328,29 @@ def resolve_sender_identity(sender: "dict[str, Any] | None") -> "dict[str, Any]"
 
     Only ABSENT or blank fields are filled: a sender that named itself keeps its
     own labels (a session that renamed its conversation mid-flight is right
-    about itself), and a sender with no record keeps whatever it supplied. Never
-    raises — enrichment is a nicety and delivery must not depend on it.
+    about itself), and a sender with no record keeps whatever it supplied.
+
+    Genuinely never raises, and that is load-bearing rather than defensive: this
+    runs on the receive path AHEAD of the transcript write, on a message the
+    wire has already accepted, so an exception escaping here would DROP a
+    delivered message. Every failure degrades to the unenriched dict.
+
+    Cheap enough to call inline (one registry scan, no subprocess) — unlike the
+    send-side ancestry walk, which needs a thread.
     """
-    resolved: dict[str, Any] = dict(sender or {})
-    pid = resolved.get("pid")
-    if not isinstance(pid, int) or isinstance(pid, bool):
+    try:
+        resolved: dict[str, Any] = dict(sender or {})
+        pid = resolved.get("pid")
+        if not isinstance(pid, int) or isinstance(pid, bool):
+            return resolved
+        record = _record_for_pid(pid)
+        if record is None:
+            return resolved
+        for key, value in _identity_from_record(pid, record).items():
+            if not str(resolved.get(key) or "").strip():
+                resolved[key] = value
         return resolved
-    record = _record_for_pid(pid)
-    if record is None:
-        return resolved
-    for key, value in _identity_from_record(pid, record).items():
-        if not str(resolved.get(key) or "").strip():
-            resolved[key] = value
-    return resolved
+    except Exception:
+        # Broad on purpose (see above): a malformed record, an unexpected
+        # attribute, or a scan fault must cost the label, never the message.
+        return dict(sender or {})

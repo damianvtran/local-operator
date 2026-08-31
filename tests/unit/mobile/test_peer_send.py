@@ -250,3 +250,71 @@ def test_registry_scan_sees_a_published_record(tmp_path) -> None:
     registry.publish(rec, root=tmp_path)
     found = registry.scan(root=tmp_path)
     assert any(r.pid == os.getpid() and state == "live" for r, state in found)
+
+
+def test_enrichment_ignores_wedged_and_stale_records(monkeypatch) -> None:
+    """Only LIVE records may name a sender (round 2, MINOR-4).
+
+    ``scan`` also returns ``wedged`` (pid alive, heartbeat aged out) and
+    ``stale`` (pid gone) entries. Enriching from those attributes a message to
+    whichever session happens to hold a reused pid, and that attribution reaches
+    the model-visible provenance envelope — so enrichment must be no laxer than
+    ``resolve_peer_target``, which filters to live twenty lines up.
+    """
+    for state in ("wedged", "stale"):
+        rec = _Record(4242, conversation_name="not really here")
+        monkeypatch.setattr(peer_send.registry, "scan", _scan([(rec, state)]))
+        resolved = peer_send.resolve_sender_identity({"pid": 4242})
+        assert resolved == {"pid": 4242}, f"{state} record was used to label a sender"
+        # The send-side walk must not accept it either.
+        monkeypatch.setattr(peer_send, "_parent_pid", lambda pid: None)
+        assert peer_send.peer_sender_identity(4242) == {"pid": 4242}
+
+    live = _Record(4242, conversation_name="genuinely live")
+    monkeypatch.setattr(peer_send.registry, "scan", _scan([(live, "live")]))
+    assert peer_send.resolve_sender_identity({"pid": 4242})["conversation_name"] == (
+        "genuinely live"
+    )
+
+
+def test_enrichment_never_raises_whatever_the_registry_does(monkeypatch) -> None:
+    """The docstring's "never raises" has to be true, not aspirational.
+
+    This runs on the receive path AHEAD of the transcript write, on a message
+    the wire has already accepted, so an escaping exception DROPS a delivered
+    message. Previously only OSError was caught and ValueError/RuntimeError
+    propagated (round 2, MINOR-5).
+    """
+    for boom in (ValueError("torn record"), RuntimeError("wedged"), OSError("gone")):
+
+        def scan(root=None, _exc=boom):
+            raise _exc
+
+        monkeypatch.setattr(peer_send.registry, "scan", scan)
+        # Degrades to the unenriched dict rather than propagating.
+        assert peer_send.resolve_sender_identity({"pid": 5}) == {"pid": 5}
+        monkeypatch.setattr(peer_send, "_parent_pid", lambda pid: None)
+        assert peer_send.peer_sender_identity(5) == {"pid": 5}
+
+    # A record whose attributes explode is survivable too.
+    class _Hostile:
+        pid = 5
+
+        def __getattr__(self, name):
+            raise RuntimeError("hostile record")
+
+    monkeypatch.setattr(peer_send.registry, "scan", _scan([(_Hostile(), "live")]))
+    assert peer_send.resolve_sender_identity({"pid": 5}) == {"pid": 5}
+
+
+@pytest.mark.asyncio
+async def test_the_ancestry_walk_has_an_off_loop_entry_point(monkeypatch) -> None:
+    """The walk runs a registry scan and a ``ps`` per hop, so callers inside a
+    running loop must not do it inline (round 2, MINOR-7)."""
+    rec = _Record(900, conversation_name="owning session")
+    monkeypatch.setattr(peer_send.registry, "scan", _scan([(rec, "live")]))
+    monkeypatch.setattr(peer_send, "_parent_pid", lambda pid: 900 if pid != 900 else 1)
+
+    resolved = await peer_send.peer_sender_identity_async(100)
+    assert resolved["conversation_name"] == "owning session"
+    assert resolved["pid"] == 900
