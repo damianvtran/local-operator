@@ -840,3 +840,60 @@ async def test_a_failed_in_flight_pass_does_not_skip_the_ceiling_pass(tmp_path, 
     ends = [event for event in events if isinstance(event, CompactionEndEvent) and event.success]
     assert ends, "the ceiling pass never committed after the background failure"
     await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_background_failure_during_cancel_does_not_skip_the_ceiling(tmp_path, monkeypatch):
+    """The overlapping failure #413 names, not the sequential one.
+
+    ``test_a_failed_in_flight_pass_does_not_skip_the_ceiling_pass`` settles
+    the failed pass BEFORE the ceiling fires, so it only pins "a finished
+    failure leaves the latch clear." The sharp case is the in-flight pass
+    failing (or being cancelled into failure) WHILE the ceiling is inside
+    ``_cancel_background_compaction`` — if that wait re-raises, the ceiling
+    never starts (review round 1, F2).
+
+    ``fail`` is captured at the background call, then ``fail_summary`` is
+    flipped off so only that call is bound to fail. The gate opens after
+    cancel has started (handle dropped, latch not yet cleared). Counted
+    on the stream: the ceiling call has to actually happen, concurrency
+    stays at 1, one successful commit.
+    """
+    stream = SlowSummaryStream()
+    stream.fail_summary = True
+    session = make_session(tmp_path, stream=stream)
+    await talk(session)
+    events: list[Any] = []
+    session.subscribe(events.append)
+    pin_measured_context(monkeypatch, 400_000)
+    seed_hint(session)
+
+    stream.gate = asyncio.Event()
+    await asyncio.wait_for(drive_boundary(session, 400_000), timeout=5.0)
+    await _until(lambda: stream.summary_calls == 1, "the background summarization never started")
+    assert session._compaction_pass_in_flight
+    # Captured on the background call already. The ceiling's own call must
+    # succeed, or a missed compaction and a failed summarization look the
+    # same in the commit count.
+    stream.fail_summary = False
+
+    pin_measured_context(monkeypatch, 700_000)
+    ceiling = asyncio.ensure_future(drive_boundary(session, 700_000))
+    await _until(
+        lambda: session._compaction_pass_task is None,
+        "the ceiling pass never entered cancel",
+    )
+    stream.gate.set()
+    await asyncio.wait_for(ceiling, timeout=10.0)
+
+    assert stream.peak_concurrent_summaries == 1, (
+        f"{stream.peak_concurrent_summaries} summarization calls ran at once — "
+        "a background failure during cancel let the ceiling overlap it"
+    )
+    assert stream.summary_calls == 2, (
+        f"{stream.summary_calls} summarization calls — the ceiling pass did not "
+        "run while the in-flight pass was failing, which is a missed compaction"
+    )
+    ends = [event for event in events if isinstance(event, CompactionEndEvent) and event.success]
+    assert ends, "the ceiling pass never committed after a background failure during cancel"
+    await session.dispose()

@@ -6392,44 +6392,57 @@ class Session:
         cleared the latch in its ``finally``, so this is a no-op and the
         ceiling path continues as it always did.
 
-        Does not await the cancelled task past one event-loop tick: that
-        tick is what delivers ``CancelledError`` to the pass so the new
-        summarization does not overlap it; waiting for the provider to
+        Bounded wait (0.1 s), not one event-loop tick: that bound is what
+        delivers ``CancelledError`` to the pass so the new summarization
+        does not overlap it, then proceeds. Waiting for the provider to
         acknowledge the cancel would reintroduce the unbounded wait.
         """
         task = self._compaction_pass_task
         self._compaction_pass_task = None
-        if task is not None and not task.done():
-            task.cancel()
-            # Bounded wait so the cancelled pass can unwind its in-flight
-            # summarization before we start another. Shielded: awaiting a
-            # cancelled task without a shield would CancelledError THIS
-            # (ceiling) pass, which is the one that must complete. Timed:
-            # if cancellation were swallowed, an unbounded await would be
-            # the wait this method exists to avoid.
-            try:
-                await asyncio.wait_for(asyncio.shield(task), timeout=0.1)
-            except asyncio.TimeoutError:
-                pass
-            except asyncio.CancelledError:
-                # Awaiting a cancelled task raises CancelledError even
-                # through ``shield``. That is the inner pass unwinding,
-                # which is success — unless WE were cancelled (dispose
-                # mid-ceiling), in which case the ceiling pass must not
-                # swallow it. ``Task.cancelling()`` is 3.11+; this
-                # project requires 3.12.
-                me = asyncio.current_task()
-                if me is not None and me.cancelling():
-                    raise
-        # Whatever the background pass produced is about to be stale: we are
-        # committing a different pass against the live history. Drop it so a
-        # later boundary cannot apply a summary of a prefix we are about to
-        # replace. Also covers the race where cancel was requested after the
-        # summary returned and the write of ``_pending_compaction`` ran
-        # anyway (no await between those two, so CancelledError is not
-        # delivered until the next yield).
-        self._pending_compaction = None
-        self._compaction_pass_in_flight = False
+        try:
+            if task is not None and not task.done():
+                task.cancel()
+                # Bounded wait so the cancelled pass can unwind its in-flight
+                # summarization before we start another. Shielded: awaiting a
+                # cancelled task without a shield would CancelledError THIS
+                # (ceiling) pass, which is the one that must complete. Timed:
+                # if cancellation were swallowed, an unbounded await would be
+                # the wait this method exists to avoid.
+                try:
+                    await asyncio.wait_for(asyncio.shield(task), timeout=0.1)
+                except asyncio.TimeoutError:
+                    pass
+                except asyncio.CancelledError:
+                    # Awaiting a cancelled task raises CancelledError even
+                    # through ``shield``. That is the inner pass unwinding,
+                    # which is success — unless WE were cancelled (dispose
+                    # mid-ceiling), in which case the ceiling pass must not
+                    # swallow it. ``Task.cancelling()`` is 3.11+; this
+                    # project requires 3.12.
+                    me = asyncio.current_task()
+                    if me is not None and me.cancelling():
+                        raise
+                except Exception:
+                    # The inner pass's swallows currently keep this path
+                    # dead. If they ever stop, ``wait_for`` would raise
+                    # into ``_run_compaction`` BEFORE the ceiling starts —
+                    # the missed-compaction trap #413 named as worse than
+                    # a double-bill (review round 1, F1). Cancel still
+                    # happened; the ceiling must proceed.
+                    pass
+        finally:
+            # Whatever the background pass produced is about to be stale:
+            # we are committing a different pass against the live history.
+            # Drop it so a later boundary cannot apply a summary of a
+            # prefix we are about to replace. Also covers the race where
+            # cancel was requested after the summary returned and the
+            # write of ``_pending_compaction`` ran anyway (no await
+            # between those two, so CancelledError is not delivered until
+            # the next yield). In ``finally`` so a surprise from
+            # ``wait_for`` cannot skip the latch-clear and then skip the
+            # ceiling pass (F1).
+            self._pending_compaction = None
+            self._compaction_pass_in_flight = False
 
     async def _summarize_for_compaction(
         self, plan: _CompactionPlan
