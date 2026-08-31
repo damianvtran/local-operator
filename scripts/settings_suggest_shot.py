@@ -25,6 +25,10 @@ STATE selects what the page is showing:
                know (a custom endpoint id), proving suggestions assist but do
                not hard-constrain — the frame shows no ghost and the buffer is
                committable as typed
+    provider-windowed  the Default provider editor open against a catalogue
+               LARGER than the visible window, highlight moved into the middle,
+               so the frame shows the `pos/total` count cue on the highlighted
+               row and the windowed 8-of-N list (review round 1, U3)
 
 The provider and model catalogues are INJECTED (same shape the app resolves for
 the real page) so the frame is identical on every machine.
@@ -169,6 +173,24 @@ async def main() -> None:
             view._buffer = ""
             view._caret = 0
             _type("my-endpoint/custom-model-v2")
+        elif state == "provider-windowed":
+            # A catalogue larger than the 8-row window, with the highlight moved
+            # into the middle, so the frame proves the `pos/total` cue and the
+            # windowing behaviour a short list never exercises. Re-load with the
+            # bigger catalogue rather than the module default.
+            view.load(
+                teams=TEAMS,
+                agents=AGENTS,
+                providers=PROVIDERS,
+                provider_catalogue=[(f"prov{n:02d}", f"Provider {n:02d}") for n in range(12)],
+                model_catalogue=MODEL_CATALOGUE,
+            )
+            _select(view, "hosting")
+            view.action_activate()
+            view._buffer = ""
+            view._caret = 0
+            view._suggest_index = 3
+            view._repaint()
         else:
             raise SystemExit(f"unknown state {state}")
 
