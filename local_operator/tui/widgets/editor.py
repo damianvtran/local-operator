@@ -875,10 +875,12 @@ ASIDE_PLACEHOLDER = "Ask the aside…"
 
 #: What the composer says in bang-mode. The first clause is opencode's
 #: sentence — what typing here WILL DO — and the second names the way out,
-#: because entry is taught three ways (tip, placeholder, green chevron) while
-#: exit was taught by nothing on screen (design round 1, D2): the placeholder
-#: is the one surface guaranteed visible the moment the mode opens on an
-#: empty buffer, which is exactly when a first-timer looks for the door.
+#: because entry is taught three ways (tip, placeholder, and the ``$``
+#: marker — a shape change, not a hue, so it survives ``NO_COLOR``; #385)
+#: while exit was taught by nothing on screen (design round 1, D2): the
+#: placeholder is the one surface guaranteed visible the moment the mode
+#: opens on an empty buffer, which is exactly when a first-timer looks
+#: for the door.
 SHELL_PLACEHOLDER = "Run a command… — esc to leave"
 
 

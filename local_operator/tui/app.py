@@ -1098,13 +1098,31 @@ ASIDE_LAYOUT_CLASS = "aside"
 #: ``OperatorApp._sync_composer_focus``.
 COMPOSER_FOCUSED_CLASS = "-composer-focused"
 
-#: Class the input dock carries while bang-mode is on. The chevron stays the
-#: same glyph — ``composer_cells`` finds the row by it — and the class is
-#: what the stylesheet reads to paint it ``string`` rather than the focus
+#: Class the input dock carries while bang-mode is on. The class is what the
+#: stylesheet reads to paint the marker ``string`` rather than the focus
 #: brightness. ``string`` is the ramp's command/success green, a step off
 #: the accent, so a shell-mode composer does not spend the "turn is live"
 #: ink (D5) and still reads as a different MODE from the resting field.
+#:
+#: The GLYPH also changes (``PROMPT_CHEVRON`` → ``SHELL_CHEVRON``). Hue
+#: alone is invisible to a colourblind reader, under ``NO_COLOR``, and on a
+#: monochrome terminal — and bang-mode changes what Enter does, so that
+#: silence is a safety gap, not polish (#385). Shape carries the mode;
+#: colour remains a redundant cue for readers who can see it.
 COMPOSER_SHELL_CLASS = "-composer-shell"
+
+#: The composer's resting prompt marker. One cell, and the glyph
+#: ``composer_cells`` (and the command picker, deliberately) locate the
+#: row by. Bang-mode swaps it for :data:`SHELL_CHEVRON` rather than
+#: recoloring this one: a hue-only swap is invisible without colour.
+PROMPT_CHEVRON = "❯"
+
+#: Bang-mode's prompt marker. The POSIX shell prompt, one cell, so it
+#: fits the same 2-cell ``#prompt-chevron`` box and does not shift the
+#: editor. Chosen over ``!`` because ``!`` is the KEY that enters the
+#: mode; using it as the marker would make the frame look like the bang
+#: was inserted into the buffer (it is consumed, not typed).
+SHELL_CHEVRON = "$"
 
 #: How long after a terminal resize the floating overlay cards re-measure
 #: themselves. They are hosted in `width: auto` containers, so Textual sends
@@ -2298,7 +2316,7 @@ class OperatorApp(App[None]):
                 yield Band(id="status-band")
                 editor = Editor(commands=SLASH_COMMANDS)
                 with Horizontal(id="input-row"):
-                    yield Chrome("❯", id="prompt-chevron")
+                    yield Chrome(PROMPT_CHEVRON, id="prompt-chevron")
                     yield editor
                 # The picker is the editor's, but it cannot be the editor's
                 # CHILD: it has to draw across the full panel width, outside the
@@ -6833,12 +6851,20 @@ class OperatorApp(App[None]):
         dock.set_class(focused, COMPOSER_FOCUSED_CLASS)
 
     def on_shell_mode_changed(self, message: ShellModeChanged) -> None:
-        """Follow the composer's bang-mode onto the dock class the sheet reads."""
+        """Follow the composer's bang-mode onto the dock class AND the glyph.
+
+        The class is the colour cue (``string`` green). The glyph is the
+        colour-independent one: ``$`` instead of ``❯``, so a reader who
+        cannot see the hue still knows Enter will run a command (#385).
+        Both flip on the same message so they cannot drift apart.
+        """
         try:
             dock = self.query_one("#input-dock")
+            chevron = self.query_one("#prompt-chevron", Chrome)
         except NoMatches:
             return
         dock.set_class(message.active, COMPOSER_SHELL_CLASS)
+        chevron.update(SHELL_CHEVRON if message.active else PROMPT_CHEVRON)
 
     def on_interrupt_requested(self, message: InterruptRequested) -> None:
         """Ctrl+C from the composer — the NORMAL path, since it holds focus.
@@ -15601,6 +15627,49 @@ class OperatorApp(App[None]):
             style=dim,
         )
         lines.append(cmd_paste_note)
+
+        # The rest of the key reference. Same surface, same two-column
+        # gutter, same 74-cell ceiling at 80 columns as the copy/paste
+        # rows above — `/help` is the in-app place a user already opens
+        # when lost, and until these rows existed the README was the only
+        # channel documenting the chords (#385). Tightly scoped additions
+        # rather than a second surface: another agent is concurrently
+        # working #430 against the same block, so a wholesale rewrite of
+        # this method would collide.
+        #
+        # Descriptions are budgeted against `name_width` (currently 20,
+        # derived from `/settings, /config`) so `name_width + description`
+        # stays <= 74. Continuation lines use the same empty-gutter
+        # indent the `ctrl+c` row already established.
+
+        def _key_row(key: str, description: str) -> Text:
+            row = Text()
+            row.append(key.ljust(name_width), style=muted)
+            row.append(description, style=dim)
+            return row
+
+        def _key_more(description: str) -> Text:
+            row = Text()
+            row.append("".ljust(name_width), style=muted)
+            row.append(description, style=dim)
+            return row
+
+        # Bang-mode's marker is named here because the glyph is the
+        # colour-independent signal (#385) and a user who cannot see the
+        # hue still needs to know what `$` on the composer means. The
+        # description is 47 cells (67 composed) so it has headroom.
+        lines.append(_key_row("!", "run the buffer as a local shell command"))
+        lines.append(_key_more("the composer shows $ instead of ❯; esc leaves"))
+        lines.append(_key_row("option+left/right", "move by word; +shift selects"))
+        lines.append(_key_more("ctrl+left/right is the same on Linux/Windows"))
+        lines.append(_key_row("option+up/down", "same as up/down (history, lists)"))
+        lines.append(_key_row("shift+tab", "cycle reasoning effort"))
+        lines.append(_key_row("ctrl+l", "clear the transcript (history stays)"))
+        lines.append(_key_row("ctrl+t", "expand or collapse the todo panel"))
+        lines.append(_key_row("ctrl+g", "expand or collapse the subagent panel"))
+        lines.append(_key_row("ctrl+b", "open an aside; ctrl+f forks it in"))
+        lines.append(_key_row("esc", "stop the agent; leave a mode"))
+        lines.append(_key_row("ctrl+d", "quit, on an empty composer"))
         # Where the logs went. Console logging is off while the TUI owns the
         # terminal (see `local_operator.logger.file_logging`), so without this
         # line the file is unfindable without reading the source. `/help` and
