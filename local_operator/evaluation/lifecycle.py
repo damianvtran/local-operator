@@ -27,6 +27,7 @@ from local_operator.evaluation.protocol import ArtifactRef, ProtocolModel
 from local_operator.evaluation.receipts import (
     MAX_DECLARATIONS,
     ZERO_DIGEST,
+    AuthorityModel,
     BudgetAuthorization,
     BudgetCommitment,
     BudgetReconciliation,
@@ -212,7 +213,7 @@ def record_cleanup(
     )
 
 
-class CleanupResult(ProtocolModel):
+class CleanupResult(AuthorityModel):
     """Factory-only aggregate over exact cleanup receipt evidence."""
 
     _authority: object = PrivateAttr()
@@ -357,7 +358,7 @@ def aggregate_cleanup(
     )
 
 
-class SideEffectPermit(ProtocolModel):
+class SideEffectPermit(AuthorityModel):
     """Single-use in-process authority bound to one sealed episode budget."""
 
     _authority: object = PrivateAttr()
@@ -472,7 +473,7 @@ EpisodeState = Literal[
 TerminalIntent = Literal["complete", "fail", "cancel"]
 
 
-class EpisodeLifecycle(ProtocolModel):
+class EpisodeLifecycle(AuthorityModel):
     """Factory-only state authority with a content-addressed transition chain.
 
     Pydantic's ``model_construct`` can fabricate an object, but it lacks the
@@ -624,11 +625,6 @@ class EpisodeLifecycle(ProtocolModel):
 
     def __deepcopy__(self, memo: dict[int, Any] | None = None) -> Self:
         raise TypeError("episode lifecycle authority cannot be copied")
-
-    def model_copy(self, *, update: Any = None, deep: bool = False) -> Self:
-        if update:
-            raise TypeError("episode lifecycle authority cannot be updated by copying")
-        return self
 
     def _assert_authority(self) -> None:
         if self._consumed or getattr(self, "_authority", None) is not _LIFECYCLE_FACTORY:

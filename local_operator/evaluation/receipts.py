@@ -16,7 +16,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from datetime import date as Date
 from datetime import datetime, timezone
 from threading import RLock
-from typing import Annotated, Any, Literal, TypeAlias
+from typing import Annotated, Any, Literal, Self, TypeAlias
 from urllib.parse import quote
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -69,6 +69,50 @@ def _thaw(value: Any) -> JsonValue:
     if isinstance(value, (list, tuple)):
         return [_thaw(item) for item in value]
     return value
+
+
+class AuthorityModel(ProtocolModel):
+    """Guard normal Python/Pydantic APIs from recreating private authority.
+
+    These controls constrain cooperative in-process callers. Python code that
+    deliberately mutates ``PrivateAttr`` storage through low-level object APIs is
+    hostile and outside this contract; serialized fields never contain a token.
+    """
+
+    def copy(
+        self,
+        *,
+        include: Any = None,
+        exclude: Any = None,
+        update: dict[str, Any] | None = None,
+        deep: bool = False,
+    ) -> Self:
+        raise ValueError("authority models cannot be copied")
+
+    def model_copy(
+        self,
+        *,
+        update: Mapping[str, Any] | None = None,
+        deep: bool = False,
+    ) -> Self:
+        raise ValueError("authority models cannot be copied")
+
+    @classmethod
+    def model_construct(cls, _fields_set: set[str] | None = None, **values: Any) -> Self:
+        # model_construct intentionally skips validation. Permit pure evidence
+        # construction, but discard every attempted private marker so the result
+        # can never pass assert_authority or transition methods.
+        public_values = {key: value for key, value in values.items() if not key.startswith("_")}
+        return super().model_construct(_fields_set=_fields_set, **public_values)
+
+    def __copy__(self) -> Self:
+        raise TypeError("authority models cannot be copied")
+
+    def __deepcopy__(self, memo: dict[int, Any] | None = None) -> Self:
+        raise TypeError("authority models cannot be copied")
+
+    def __reduce__(self) -> Any:
+        raise TypeError("authority models cannot be pickled")
 
 
 class _MetadataModel(ProtocolModel):
@@ -508,7 +552,7 @@ class RedactionSet:
                 raise ValueError("secret canary survived evidence redaction")
 
 
-class SealedPreflight(ProtocolModel):
+class SealedPreflight(AuthorityModel):
     """Factory-only attestation over the exact validated preflight receipts."""
 
     _authority: object = PrivateAttr()
@@ -844,7 +888,7 @@ def reserve_budget(
     return reservation
 
 
-class BudgetCommitment(ProtocolModel):
+class BudgetCommitment(AuthorityModel):
     """Factory-only authority over the complete validated reservation set."""
 
     _authority: object = PrivateAttr()

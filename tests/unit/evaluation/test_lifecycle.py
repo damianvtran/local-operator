@@ -23,7 +23,7 @@ from local_operator.evaluation.lifecycle import (
     aggregate_cleanup,
     record_cleanup,
 )
-from local_operator.evaluation.protocol import ArtifactRef
+from local_operator.evaluation.protocol import ArtifactRef, ProtocolModel
 from local_operator.evaluation.receipts import (
     BUDGET_RESOURCES,
     AvailableUsage,
@@ -570,7 +570,7 @@ def test_lifecycle_authority_rejects_every_public_construction_and_mutation_path
     forged = EpisodeLifecycle.model_construct(**payload)
     with pytest.raises(ValueError, match="lacks transition authority"):
         forged.begin_finalization()
-    with pytest.raises(TypeError, match="cannot be updated"):
+    with pytest.raises(ValueError, match="cannot be copied"):
         authorized.model_copy(update={"state": "completed"})
     with pytest.raises(TypeError, match="cannot be copied"):
         copy.copy(authorized)
@@ -1129,3 +1129,101 @@ def test_lineage_is_private_unforgeable_and_shared_by_children() -> None:
     forged = EpisodeLifecycle.model_construct(**payload)
     with pytest.raises(ValueError, match="lacks transition authority"):
         forged.authorize(_seal(plan), budget)
+
+
+def test_every_authority_model_blocks_copy_and_constructed_private_injection() -> None:
+    import inspect
+
+    from local_operator.evaluation import lifecycle as lifecycle_module
+    from local_operator.evaluation import receipts as receipts_module
+    from local_operator.evaluation.receipts import AuthorityModel
+
+    plan, budget, cleanup, authorized, permit = _authorized()
+    reservation = _reservation(budget)
+    commitment = _commitment(budget, reservation)
+    seal = _seal(plan)
+    cleanup_result = _cleanup(cleanup)
+    live_models = (authorized, permit, commitment, seal, cleanup_result)
+    for live in live_models:
+        with pytest.raises(ValueError, match="cannot be copied"):
+            live.copy()
+        with pytest.raises(ValueError, match="cannot be copied"):
+            live.model_copy()
+        private_values = {
+            name: getattr(live, name, object())
+            for name in ("_authority", "_lineage", "_lock", "_consumed", "_receipts")
+        }
+        construct: Any = type(live).model_construct
+        constructed = construct(**live.model_dump(), **private_values)
+        assert getattr(constructed, "_authority", None) is not getattr(live, "_authority", None)
+        if isinstance(live, EpisodeLifecycle):
+            assert getattr(constructed, "_lineage", None) is not live._lineage
+        if isinstance(constructed, EpisodeLifecycle):
+            with pytest.raises(ValueError, match="lacks transition authority"):
+                constructed.begin_finalization()
+        elif hasattr(constructed, "assert_authority"):
+            with pytest.raises((ValueError, AttributeError)):
+                if isinstance(constructed, BudgetCommitment):
+                    constructed.assert_authority(budget)
+                else:
+                    constructed.assert_authority()
+
+    authority_classes = {
+        value
+        for module in (receipts_module, lifecycle_module)
+        for value in vars(module).values()
+        if inspect.isclass(value)
+        and issubclass(value, ProtocolModel)
+        and "_authority" in value.__private_attributes__
+    }
+    assert authority_classes == {
+        SealedPreflight,
+        BudgetCommitment,
+        CleanupResult,
+        SideEffectPermit,
+        EpisodeLifecycle,
+    }
+    assert all(issubclass(value, AuthorityModel) for value in authority_classes)
+    assert all(value.copy is AuthorityModel.copy for value in authority_classes)
+    assert all(
+        value.model_construct.__func__ is AuthorityModel.model_construct.__func__
+        for value in authority_classes
+    )
+
+
+def test_constructed_authority_clones_cannot_consume_originals() -> None:
+    plan, budget, cleanup, authorized, permit = _authorized()
+    reservation = _reservation(budget)
+    commitment = _commitment(budget, reservation)
+    cloned_lifecycle = EpisodeLifecycle.model_construct(
+        **authorized.model_dump(),
+        _authority=authorized._authority,
+        _lineage=authorized._lineage,
+        _lock=authorized._lock,
+        _consumed=False,
+    )
+    cloned_permit = SideEffectPermit.model_construct(
+        **permit.model_dump(), _authority=permit._authority, _lock=permit._lock, _consumed=False
+    )
+    cloned_commitment = BudgetCommitment.model_construct(
+        **commitment.model_dump(),
+        _authority=commitment._authority,
+        _lock=commitment._lock,
+        _consumed=False,
+    )
+    with pytest.raises(ValueError, match="lacks transition authority"):
+        cloned_lifecycle.start(cloned_permit, budget, cloned_commitment)
+    running = authorized.start(permit, budget, commitment)
+    finalizing = running.begin_finalization()
+    cleaning = finalizing.finish_finalization(_reconciliation(budget, reservation), _score(plan))
+    result = _cleanup(cleanup)
+    cloned_result = CleanupResult.model_construct(
+        **result.model_dump(),
+        _authority=result._authority,
+        _lock=result._lock,
+        _consumed=False,
+        _receipts=result._receipts,
+    )
+    with pytest.raises(ValueError, match="lacks factory authority"):
+        cleaning.finish_cleanup(cloned_result)
+    assert cleaning.finish_cleanup(result).state == "completed"
