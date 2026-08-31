@@ -1145,6 +1145,29 @@ def test_the_tip_is_quieter_than_the_hints_it_sits_under() -> None:
     assert _contrast(glyph, ground) < _contrast(body, ground)
 
 
+def test_fork_tips_cover_commands_settings_and_backend_detection() -> None:
+    """Discovery names the real entry points without promising one backend's UI.
+
+    The cmux-only placement is qualified explicitly; terminal detection stays
+    capability-shaped because not every supported backend has workspaces.
+    """
+    fork_tips = [
+        tip
+        for tip in TIPS
+        if any(token in tip.lower() for token in ("fork", "cmux", "multiplexer"))
+    ]
+    joined = "\n".join(fork_tips)
+
+    assert "/fork branches" in joined
+    assert "/fork <message> starts divergent work" in joined
+    assert "/settings → Fork → Where a fork opens" in joined
+    assert "Under cmux, Where it opens" in joined
+    assert "workspace or surface" in joined
+    assert "detects terminal or multiplexer" in joined
+    assert "then picks placement" in joined
+    assert all(word not in joined.lower() for word in ("always", "unsupported"))
+
+
 def test_advancing_the_rotation_changes_the_tip_and_never_the_row_count() -> None:
     """THE constraint. Every tip, at every size, draws the same number of rows.
 
@@ -1184,7 +1207,7 @@ def test_a_narrow_terminal_omits_the_tip_rather_than_wrapping_it() -> None:
     one, truncated into the box.
 
     Omitted on WIDTH and never on the current tip's own length — that is what
-    keeps the row count the same answer for all twelve, which the rotation
+    keeps the row count the same answer for every entry, which the rotation
     depends on.
     """
     for width in range(1, TIP_MIN_WIDTH):

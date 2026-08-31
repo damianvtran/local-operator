@@ -483,10 +483,11 @@ def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
     ``compaction_summary`` markers become a user message carrying the summary;
     a snapcompact archive in ``preserve_data`` is rendered back into
     text_head → imaged middle → text_tail blocks (base64 ``ImageContent``
-    between ``TextContent`` edges). ``wake_prompt`` deliveries become user
-    messages of their formatted text, and the newest ``todo_reminder`` (only
-    the newest) becomes one too; other custom entries are dropped (bookkeeping
-    never enters LLM context). ``provider_payload`` rides along untouched.
+    between ``TextContent`` edges). ``fork_boundary`` and ``wake_prompt``
+    deliveries become user messages of their formatted text, and the newest
+    ``todo_reminder`` (only the newest) becomes one too; other custom entries
+    are dropped (bookkeeping never enters LLM context). ``provider_payload``
+    rides along untouched.
     """
     out: list[Message] = []
     # Only the NEWEST todo reminder survives the render. An earlier one asserts
@@ -534,6 +535,7 @@ def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
                 )
             )
         elif message.custom_type in (
+            "fork_boundary",
             WAKE_PROMPT_MESSAGE_TYPE,
             HUB_MESSAGE_TYPE,
             JOB_RESULT_MESSAGE_TYPE,
@@ -1594,9 +1596,24 @@ class Session:
         self._ask_user: AskUserFn | None = None
 
         self._loop = AgentLoop()
+        replayed_messages = list(transcript.build_llm_history())
+        # A fork's inherited bytes stay untouched for prompt-cache continuity;
+        # its lineage warning exists only at the live context tail and is
+        # consumed once, so resume never accumulates synthetic transcript rows.
+        from local_operator.fork import consume_fork_boundary
+
+        fork_boundary = consume_fork_boundary(transcript.directory)
+        if fork_boundary:
+            replayed_messages.append(
+                CustomMessage(
+                    custom_type="fork_boundary",
+                    attribution="system",
+                    details={"text": fork_boundary},
+                )
+            )
         self._context = LoopContext(
             system_blocks=[],
-            messages=list(transcript.build_llm_history()),
+            messages=replayed_messages,
             tools=self._tools,
         )
         self._handlers: list[EventHandler] = []
@@ -7831,7 +7848,18 @@ class Session:
     # -- wakes -------------------------------------------------------------------
 
     def _load_wake_schedules(self) -> None:
-        details = self._transcript.latest_custom(WAKE_SCHEDULES_CUSTOM_TYPE)
+        # A wake is active ownership, not conversation history. A fork declines
+        # only snapshots copied at its creation boundary; snapshots appended
+        # afterwards belong to the fork and must survive its next resume.
+        from local_operator.fork import fork_instant
+
+        entry = self._transcript.latest_custom_entry(WAKE_SCHEDULES_CUSTOM_TYPE)
+        if entry is None:
+            return
+        forked_at = fork_instant(self._transcript.directory)
+        if forked_at is not None and not entry.ts > forked_at:
+            return
+        details = dict(entry.payload.get("details", {}))
         if not details:
             return
         schedules: list[WakeSchedule] = []
@@ -8131,10 +8159,21 @@ class Session:
         in the CHILD's own transcript and is recovered by resuming or
         ``hub op='peek'``-ing it, never by re-reading it here.
         """
+        # Forks inherit historical transcript content, not process ownership.
+        # The modern sidecar is excluded from the clone, so one present here was
+        # written by this fork. For the legacy transcript fallback, compare its
+        # append time with the fork boundary so a descendant declines its
+        # parent's roster while still restoring one it later writes itself.
+        from local_operator.fork import fork_instant
+
         details = _read_roster_sidecar(self._transcript.directory / SUBAGENT_ROSTER_SIDECAR)
         loaded_sidecar = details is not None
         if details is None:
-            details = self._transcript.latest_custom(SUBAGENT_ROSTER_CUSTOM_TYPE)
+            entry = self._transcript.latest_custom_entry(SUBAGENT_ROSTER_CUSTOM_TYPE)
+            forked_at = fork_instant(self._transcript.directory)
+            if entry is None or (forked_at is not None and not entry.ts > forked_at):
+                return
+            details = dict(entry.payload.get("details", {}))
         if not details:
             return
         self._subagent_roster_generation = int(details.get("generation") or 0)
