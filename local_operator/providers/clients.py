@@ -267,6 +267,110 @@ def _openrouter_upstream_text(error: Mapping[str, Any]) -> str:
     return raw.strip()[:500]
 
 
+#: Aggregators answer an UPSTREAM provider failure with an HTTP 400 whose body
+#: names nothing: the outer message is exactly "Provider returned error" and
+#: ``metadata.raw`` holds a bare sentinel instead of the origin provider's
+#: diagnostics. Session e13d092c093c recorded this shape intermittently on a
+#: request that live probes at ~750k tokens answered 200 seconds later — an
+#: upstream blip wearing a 400. Compared case-insensitively because the casing
+#: on the wire ("Provider returned error", raw "ERROR") is the aggregator's,
+#: not part of the signal.
+_OPAQUE_AGGREGATOR_MESSAGE = "provider returned error"
+
+#: Raw bodies short enough to prove nobody tried to say anything. A real
+#: upstream body — "context length exceeded", a JSON error object — is
+#: actionable and must keep its ``request`` classification.
+_OPAQUE_RAW_SENTINELS = frozenset({"error"})
+
+#: How many matched quote pairs :func:`_strip_quote_pair` will peel. Real
+#: bodies use at most one or two layers; the cap exists so a body made of
+#: nothing but quotes cannot spend quadratic CPU (each peel copies the string)
+#: on a request that is already failing.
+_MAX_QUOTE_PEELS = 4
+
+
+def _strip_quote_pair(text: str) -> str:
+    """Peel MATCHED surrounding quote pairs off ``text``.
+
+    ``str.strip('"\'')`` would take any leading/trailing run of either
+    character, so unbalanced junk like ``\'\'\'ERROR""`` would reduce to the
+    sentinel and be treated as no-information. That only ever widens the match,
+    but the widening should be a decision rather than an accident of the API —
+    so pairs are peeled one at a time and an unbalanced body keeps its quotes
+    and stays ``request``.
+
+    The peel LOOPS rather than running once to cover a value that arrives
+    already wrapped more than once — e.g. ``'"ERROR"'`` — which costs nothing
+    to absorb and keeps the predicate insensitive to how many layers of
+    quoting an aggregator applied.
+
+    A JSON-encoded ``raw`` whose inner value is itself a string (the
+    double-encoding case) DOES reach this function. :func:`_openrouter_upstream_text`
+    ``json.loads`` it, then — because the inner is a ``str``, not a
+    ``Mapping`` — returns the original unparsed ``raw`` rather than the
+    decoded inner. The peel then takes matched quote pairs off that original.
+    (A ``Mapping`` inner is unwrapped to its ``message`` instead, and never
+    gets here.) The earlier claim that double-encoding is "parsed away before
+    this sees it" was wrong; the behaviour was always this, only the stated
+    reason was not.
+
+    ``_MAX_QUOTE_PEELS`` bounds the loop because slicing copies the string on
+    every pass: an adversarial body of a few MB of quotes would otherwise cost
+    quadratic time on a request that is already failing. Nothing legitimate
+    nests quotes more than a couple of layers deep, so a low cap costs real
+    traffic nothing and denies a hostile aggregator the CPU.
+    """
+    for _ in range(_MAX_QUOTE_PEELS):
+        if not (len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'"):
+            break
+        text = text[1:-1].strip()
+    return text
+
+
+def _is_opaque_aggregator_400(error: Mapping[str, Any]) -> bool:
+    """An aggregator 400 carrying NO actionable upstream diagnostics.
+
+    OpenRouter forwards an upstream failure as ``{"message": "Provider
+    returned error", "metadata": {"raw": ...}}``. When ``raw`` holds real
+    diagnostics the composed message names the actual problem and the 400 is
+    an answer — kind ``request``, no retry. When ``raw`` is a bare sentinel
+    (observed: ``"ERROR"``, from a provider named "Stealth"), the body says
+    nothing a caller could fix, and the status line is the aggregator's relay
+    choice rather than evidence the request was wrong. Those are classified
+    transient so the failover cascade runs.
+
+    Two deliberate widenings, both toward "treat no-information as transient":
+
+    - The outer message is matched after trimming and case-folding, so
+      ``"Provider returned error "`` matches too. The casing and padding on the
+      wire are the aggregator's formatting, not part of the signal.
+    - :func:`_openrouter_upstream_text` unwraps a nested ``error`` object, so
+      ``{"error": {"message": "ERROR"}}`` resolves to the same bare sentinel and
+      also matches. A body that structurally tried to say something but whose
+      content is still the word "error" carries no more actionable information
+      than the flat sentinel. This is the case most likely to shadow a real
+      upstream error whose message happens to be that single word; the cost of
+      that collision is bounded retries, and the cost of the opposite mistake
+      is a dead turn.
+
+    The price is latency, not correctness, and it is not small: a genuinely
+    broken request now saturates the driver's server-fault budget (12 requests
+    per target) before surfacing. Measured against the default 500ms base delay
+    and the 8s backoff cap, that is 64-76s of sleep on a single target and
+    roughly 4-5 minutes across a 3-target fallback chain. A user hitting a
+    PERSISTENT aggregator 400 therefore waits minutes for a failure that
+    previously surfaced immediately. That is the accepted trade: this shape is
+    by construction unattributable, so the alternative is killing a turn that
+    rotation or a fallback could have served — but it is a real cost, not the
+    rounding error an earlier draft of this docstring implied.
+    """
+    message = _first_text(error.get("message"))
+    if message.lower() != _OPAQUE_AGGREGATOR_MESSAGE:
+        return False
+    upstream = _openrouter_upstream_text(error)
+    return _strip_quote_pair(upstream.strip()).lower() in _OPAQUE_RAW_SENTINELS
+
+
 def _compat_stream_error(chunk: Mapping[str, Any]) -> ProviderError:
     """An in-band mid-stream failure on an OpenAI-compatible stream.
 
@@ -293,6 +397,7 @@ def _compat_stream_error(chunk: Mapping[str, Any]) -> ProviderError:
     error = chunk.get("error")
     status: int | None = None
     error_type = ""
+    opaque_aggregator_400 = False
     if isinstance(error, Mapping):
         message = _first_text(error.get("message"), error.get("detail"), error.get("msg"))
         upstream = _openrouter_upstream_text(error)
@@ -308,6 +413,13 @@ def _compat_stream_error(chunk: Mapping[str, Any]) -> ProviderError:
         metadata = error.get("metadata")
         if isinstance(metadata, Mapping):
             error_type = str(metadata.get("error_type") or "")
+        # The SAME opaque relay body arrives on this channel whenever the
+        # gateway had already committed HTTP 200 before the upstream failed, so
+        # it has to classify the same way here as in `raise_for_status` -- a
+        # turn must not die on the relay channel the aggregator happened to
+        # pick. Judged on the chunk's `code` rather than a status line, because
+        # in-band that is where the 400 lives.
+        opaque_aggregator_400 = status == 400 and _is_opaque_aggregator_400(error)
     else:
         message = _first_text(error)
     if not message:
@@ -317,7 +429,7 @@ def _compat_stream_error(chunk: Mapping[str, Any]) -> ProviderError:
     return ProviderError(
         status,
         _capped(message),
-        retryable=status is None or status == 429 or status >= 500,
+        retryable=(opaque_aggregator_400 or status is None or status == 429 or status >= 500),
         auth_error=status in (401, 403),
     )
 
@@ -430,6 +542,13 @@ def raise_for_status(response: httpx.Response) -> None:
     # 408/504 are the two "ran out of time" statuses; 429 and 5xx are the
     # classic retryables. Everything else in 4xx is an answer, not a blip.
     retryable = status == 429 or status >= 500 or status in (408, 504)
+    # ...except an aggregator 400 whose body carries no usable diagnostics:
+    # that is an upstream failure relayed under a 400, not a request the
+    # provider read and refused, so it must reach the failover cascade. See
+    # :func:`_is_opaque_aggregator_400` for the shape and the evidence.
+    error = payload.get("error") if isinstance(payload, Mapping) else None
+    if status == 400 and isinstance(error, Mapping) and _is_opaque_aggregator_400(error):
+        retryable = True
     raise ProviderError(
         status,
         _extract_error_message(response, payload),

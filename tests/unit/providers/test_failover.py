@@ -1009,6 +1009,128 @@ async def test_primary_unknown_400_style_not_aborted_if_not_request_kind() -> No
     assert served.calls == 1
 
 
+async def test_opaque_aggregator_400_fails_over_instead_of_aborting() -> None:
+    """The session e13d092c093c failure, end to end: an aggregator answers the
+    PRIMARY with HTTP 400 / "Provider returned error" / ``metadata.raw``
+    "ERROR" — no actionable diagnostics. Classified ``request`` it aborted the
+    turn before rotation or fallback could serve; classified transient it must
+    consume a same-credential attempt, rotate to the sibling key, and only then
+    walk the chain — all under the driver's existing server-fault budget."""
+    from local_operator.providers.clients import raise_for_status
+
+    def _opaque_400() -> ProviderError:
+        # Built through the real wire mapper so the test exercises the exact
+        # body OpenRouter sent, not a hand-stamped classification.
+        try:
+            raise_for_status(
+                httpx.Response(
+                    400,
+                    json={
+                        "error": {
+                            "message": "Provider returned error",
+                            "code": 400,
+                            "metadata": {"raw": "ERROR", "provider_name": "Stealth"},
+                        }
+                    },
+                )
+            )
+        except ProviderError as exc:
+            return exc
+        raise AssertionError("raise_for_status must raise")
+
+    attempts: list[str | None] = []
+    served = ScriptedClient([StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")])
+
+    def fail_like_the_session(
+        request: ChatRequest, api_key: str | None, oauth_access: Any = None
+    ) -> AsyncIterator[Any]:
+        attempts.append(api_key)
+        raise _opaque_400()
+
+    async def client_for(spec: ModelSpec) -> Any:
+        if spec.provider == "anthropic":
+            return served
+        return _FnClient(fail_like_the_session)
+
+    settings = {
+        "retry": {
+            "baseDelayMs": 1,
+            "maxRetries": 2,
+            "fallbackChains": {"default": ["anthropic/claude-x"]},
+        }
+    }
+    auth = FakeAuth({"openai": ["k1", "k2"], "anthropic": ["k3"]})
+    got = [event async for event in stream_with_failover(_request(), auth, settings, client_for)]
+    assert any(isinstance(e, StreamTextDelta) and e.delta == "ok" for e in got)
+    assert served.calls == 1
+    # The opaque 400 was retried on the SAME credential first (transient
+    # semantics), then rotated to the sibling before the chain took over.
+    assert len(attempts) >= 2
+    assert attempts[0] == "k1"
+    assert any(k == "k2" for k in attempts[1:])
+    assert auth.rotations, "the sibling rotation must actually have run"
+
+
+async def test_opaque_aggregator_400_in_band_fails_over_instead_of_aborting() -> None:
+    """The same failure on the aggregator's OTHER relay channel.
+
+    When the gateway has already committed HTTP 200 it relays the identical
+    opaque body as an in-band error chunk instead of a status line. That path is
+    mapped by ``_compat_stream_error``, which classified from ``code`` alone and
+    so still aborted the turn with zero fallback calls after the pre-stream path
+    was fixed. Driven end to end through a REAL ``OpenAICompatClient`` over a
+    mock transport, so the chunk travels the actual SSE parser rather than a
+    hand-stamped ProviderError: the cascade must rotate the sibling key and let
+    the chain serve the turn."""
+    body = json.dumps(
+        {
+            "id": "gen-1",
+            "error": {
+                "code": 400,
+                "message": "Provider returned error",
+                "metadata": {"raw": "ERROR", "provider_name": "Stealth"},
+            },
+            "choices": [{"index": 0, "delta": {"content": ""}, "finish_reason": "error"}],
+        }
+    )
+    primary_requests: list[Any] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        primary_requests.append(request)
+        # The error is the FIRST chunk, so nothing has been forwarded yet and
+        # failover is genuinely still possible at that point.
+        return httpx.Response(
+            200,
+            content=f"data: {body}\n\ndata: [DONE]\n\n".encode(),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    primary = OpenAICompatClient(
+        "https://api.test.example/v1",
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    served = ScriptedClient([StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")])
+
+    async def client_for(spec: ModelSpec) -> Any:
+        return served if spec.provider == "anthropic" else primary
+
+    settings = {
+        "retry": {
+            "baseDelayMs": 1,
+            "maxRetries": 2,
+            "fallbackChains": {"default": ["anthropic/claude-x"]},
+        }
+    }
+    auth = FakeAuth({"openai": ["k1", "k2"], "anthropic": ["k3"]})
+    got = [event async for event in stream_with_failover(_request(), auth, settings, client_for)]
+    assert any(isinstance(e, StreamTextDelta) and e.delta == "ok" for e in got)
+    assert served.calls == 1, "the fallback chain must have served the turn"
+    assert auth.rotations, "the sibling rotation must actually have run"
+    # Bounded, not unbounded: the driver's server-fault budget still caps the
+    # in-band path, so the primary is not retried forever before the chain runs.
+    assert len(primary_requests) <= 12
+
+
 async def test_transport_retries_honor_budget_same_key_first() -> None:
     """PR-06: retryable 5xx consumes retry.maxRetries on the SAME key with
     backoff BEFORE any credential rotation."""
