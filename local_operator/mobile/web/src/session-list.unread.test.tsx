@@ -45,10 +45,17 @@ function cardByName(name: string): HTMLButtonElement {
 	return screen.getByRole("button", { name: new RegExp(name) });
 }
 
-/* The reserved dot slot is the first child of the card's title row. */
-function dot(card: HTMLButtonElement): HTMLElement {
+/* The ONE reserved indicator slot: first child of the card's title row. It is
+   sized to the largest occupant (the spinner) and holds either the spinner or
+   the centred dot, so every title starts at the same x in all four states. */
+function slot(card: HTMLButtonElement): HTMLElement {
 	const row = card.querySelector("div")!;
 	return row.firstElementChild as HTMLElement;
+}
+
+/* The dot inside the slot. Streaming rows have a spinner there instead. */
+function dot(card: HTMLButtonElement): HTMLElement {
+	return slot(card).firstElementChild as HTMLElement;
 }
 
 afterEach(() => {
@@ -112,7 +119,39 @@ describe("SessionCard attention ladder", () => {
 		expect(card.textContent).not.toContain("new");
 		/* In-flight work keeps the spinner and shimmer, not the accent mark. */
 		expect(card.querySelector(".lo-spinner")).toBeTruthy();
-		expect(dot(card).className).toContain("bg-transparent");
+		/* D2/U1: the spinner renders INSIDE the reserved slot, not beside it.
+		   Rendered alongside, a streaming row paid slot + gap + spinner and its
+		   title sat ~19.5px right of every other row's. */
+		expect(slot(card).querySelector(".lo-spinner")).toBeTruthy();
+		expect(slot(card).className).toContain("size-3");
+	});
+
+	it("gives every state the SAME indicator slot, so titles never shift", () => {
+		/* D2/U1: the reserved-slot promise held for three states and broke on
+		   streaming, which rendered the spinner IN ADDITION to the slot. One
+		   slot, one size, all four states. */
+		sessionList = [
+			summary({ session_id: "a", conversation_name: "Decide", needs_attention: true, pending_kind: "approval" }),
+			summary({ session_id: "b", conversation_name: "Working", streaming: true }),
+			summary({ session_id: "c", conversation_name: "Unread", unseen: true }),
+			summary({ session_id: "d", conversation_name: "Idle" }),
+		];
+		render(<SessionListScreen />);
+		const slots = ["Decide", "Working", "Unread", "Idle"].map((name) =>
+			slot(cardByName(name)),
+		);
+		/* Identical slot geometry across all four; only the contents differ. */
+		for (const s of slots) {
+			expect(s.className).toContain("size-3");
+			expect(s.className).toContain("shrink-0");
+		}
+		/* And the title is the slot's next sibling in every state — nothing is
+		   inserted between the slot and the name. */
+		for (const name of ["Decide", "Working", "Unread", "Idle"]) {
+			const card = cardByName(name);
+			const title = slot(card).nextElementSibling as HTMLElement;
+			expect(title.textContent).toBe(name);
+		}
 	});
 
 	it("keeps the reserved dot slot on an idle card", () => {
@@ -129,6 +168,6 @@ describe("SessionCard attention ladder", () => {
 		expect(marker).toBeTruthy();
 		expect(marker.className).toContain("size-1.5");
 		expect(marker.className).toContain("bg-transparent");
-		expect(marker.getAttribute("aria-hidden")).toBe("true");
+		expect(slot(card).getAttribute("aria-hidden")).toBe("true");
 	});
 });

@@ -34,17 +34,25 @@ import { cn } from "../lib/cn";
     for free; the unmount timer still runs its course. */
 function NewMark({ visible }: { visible: boolean }) {
 	const [mounted, setMounted] = useState(visible);
+	/* The unmount timer is driven by the visible -> hidden TRANSITION, so the
+	   effect tracks the previous `visible` in a ref rather than depending on
+	   `mounted` — the state it sets itself. Depending on your own output is
+	   the shape that becomes a re-entrant timer the moment someone adds a
+	   branch: correct here only because of a guard, and a trap next edit. */
+	const wasVisible = useRef(visible);
 	useEffect(() => {
+		const had = wasVisible.current;
+		wasVisible.current = visible;
 		if (visible) {
 			setMounted(true);
 			return;
 		}
-		if (!mounted) return;
+		if (!had) return;
 		/* Matches --transition-duration-fast (120ms): the timeout only removes
 		   the node after the CSS fade has landed. */
 		const timer = setTimeout(() => setMounted(false), 120);
 		return () => clearTimeout(timer);
-	}, [visible, mounted]);
+	}, [visible]);
 	if (!mounted) return null;
 	return (
 		<span
@@ -98,27 +106,40 @@ function SessionCard({
 			className="flex w-full flex-col gap-0.5 rounded-md px-2 py-1.5 text-left select-none active:bg-elevated"
 		>
 			<div className="flex items-center gap-2">
-				{/* Reserved dot slot, always rendered: every title starts at the
-				    same x in every state, forever — indicators change colour,
-				    never geometry. The old conditional dot shifted titles 14px
-				    sideways when it appeared/disappeared. */}
+				{/* ONE reserved indicator slot serving all four states, so every
+				    title starts at the same x forever — indicators change colour,
+				    never geometry.
+
+				    The slot is sized to the LARGEST occupant (the 12px spinner)
+				    and the 6px dot is centred inside it. Rendering the spinner
+				    BESIDE the slot, as this did before, defeated the whole point:
+				    a streaming row paid slot + gap + spinner and its title sat
+				    ~19.5px right of every other row's, so the reserved-slot
+				    promise held for three states and broke on the fourth — the
+				    one that changes most often. Spinner itself is untouched; it
+				    is a shared component and its own size is correct. */}
 				<span
-					className={cn(
-						"inline-block size-1.5 shrink-0 rounded-full",
-						decision
-							? "lo-pulse bg-danger"
-							: unread
-								? "bg-accent"
-								: "bg-transparent",
+					className="flex size-3 shrink-0 items-center justify-center"
+					aria-hidden={s.streaming ? undefined : true}
+				>
+					{s.streaming ? (
+						/* The obvious in-progress mark beside the title: a small
+						   loading wheel, not just the text sweep — the sweep alone
+						   was too subtle to catch at a glance. */
+						<Spinner />
+					) : (
+						<span
+							className={cn(
+								"inline-block size-1.5 rounded-full",
+								decision
+									? "lo-pulse bg-danger"
+									: unread
+										? "bg-accent"
+										: "bg-transparent",
+							)}
+						/>
 					)}
-					aria-hidden
-				/>
-				{s.streaming ? (
-					/* The obvious in-progress mark beside the title: a small loading
-					   wheel, not just the text sweep — the sweep alone was too
-					   subtle to catch at a glance. */
-					<Spinner />
-				) : null}
+				</span>
 				<span
 					className={cn(
 						"min-w-0 flex-1 truncate text-body-sm font-medium",
