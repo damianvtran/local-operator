@@ -58,7 +58,7 @@ _DIGEST_CHARS = frozenset("0123456789abcdef")
 _AMBIGUOUS_FINALIZATION_ISSUES = frozenset({("score_invalid", "state.json")})
 MAX_ARTIFACT_BYTES = 256 * 1024 * 1024
 MAX_PARSED_MEDIA_BYTES = 32 * 1024 * 1024
-_REDACTION_SCAN_BLOCK = 64 * 1024
+_REDACTION_SCAN_BLOCK = 4 * 1024
 _MAX_REDACTION_WINDOW = 1024 * 1024
 _FORK_REGISTRY_LOCK = threading.RLock()
 _FORK_WRITERS: weakref.WeakSet[EvidenceWriter] = weakref.WeakSet()
@@ -222,19 +222,35 @@ class _RedactionScanner:
         self._raw_tail = bytearray()
         self._base64_tail = bytearray()
         self._hex_tail = bytearray()
+        self._percent_tail = bytearray()
+        self._percent_pending = bytearray()
 
     @property
     def retained_bytes(self) -> int:
-        return len(self._raw_tail) + len(self._base64_tail) + len(self._hex_tail)
+        return (
+            len(self._raw_tail)
+            + len(self._base64_tail)
+            + len(self._hex_tail)
+            + len(self._percent_tail)
+            + len(self._percent_pending)
+        )
 
     def feed(self, chunk: bytes) -> None:
         for offset in range(0, len(chunk), _REDACTION_SCAN_BLOCK):
             block = chunk[offset : offset + _REDACTION_SCAN_BLOCK]
-            self._raw_tail.extend(block)
-            del self._raw_tail[: max(0, len(self._raw_tail) - self._raw_limit)]
-            raw = bytes(self._raw_tail)
+            # Scan prior overlap plus every incoming byte before retaining only
+            # the suffix. Truncating first would let early bytes in a large feed
+            # cross the persistence boundary without redaction.
+            window = bytes(self._raw_tail) + block
+            raw = window
             if any(value in raw for value in self._plain + self._percent):
                 raise EvidenceBundleInvalid("evidence redaction rejected content")
+            self._raw_tail[:] = window[-self._raw_limit :]
+            decoded = self._decode_percent(block)
+            percent_window = bytes(self._percent_tail) + decoded
+            if any(value in percent_window for value in self._plain):
+                raise EvidenceBundleInvalid("evidence redaction rejected content")
+            self._percent_tail[:] = percent_window[-self._raw_limit :]
 
             # Removing only ASCII whitespace preserves every non-encoding byte as
             # a delimiter, so variants cannot be synthesized across binary data.
@@ -247,6 +263,39 @@ class _RedactionScanner:
             if any(value.lower() in folded for value in self._hex):
                 raise EvidenceBundleInvalid("evidence redaction rejected content")
             self._hex_tail[:] = folded[-self._normalized_limit :]
+
+    @staticmethod
+    def _hex_value(byte: int) -> int | None:
+        if 48 <= byte <= 57:
+            return byte - 48
+        if 65 <= byte <= 70:
+            return byte - 55
+        if 97 <= byte <= 102:
+            return byte - 87
+        return None
+
+    def _decode_percent(self, block: bytes) -> bytes:
+        output = bytearray()
+        data = bytes(self._percent_pending) + block
+        self._percent_pending.clear()
+        index = 0
+        while index < len(data):
+            if data[index] != 37:  # %
+                output.append(data[index])
+                index += 1
+                continue
+            if index + 2 >= len(data):
+                self._percent_pending.extend(data[index:])
+                break
+            high = self._hex_value(data[index + 1])
+            low = self._hex_value(data[index + 2])
+            if high is None or low is None:
+                output.append(data[index])
+                index += 1
+                continue
+            output.append((high << 4) | low)
+            index += 3
+        return bytes(output)
 
 
 def _project_artifact(data: bytes, media_type: str) -> Any:

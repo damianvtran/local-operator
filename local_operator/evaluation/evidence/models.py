@@ -301,6 +301,7 @@ class ActionBatchPayload(ProtocolModel):
     observation_id: StrictIdentifier
     action_count: SafeCount
     action_artifact: EvidenceArtifactRef
+    terminal: Literal["finish", "ask_user"] | None = None
 
 
 class EnvironmentStepPayload(ProtocolModel):

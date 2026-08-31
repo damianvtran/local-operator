@@ -187,6 +187,98 @@ def test_three_observation_cycles_seal_as_complete_graph(tmp_path: Path) -> None
     assert report.valid and outcome.counters.environment_step_count == 2
 
 
+def test_finish_action_allows_terminal_after_nonterminal_step(tmp_path: Path) -> None:
+    root = tmp_path / "bundle"
+    writer = EvidenceWriter.create(root, manifest(), RedactionSet.from_resolved_values(()))
+    try:
+        action_artifact = writer.publish_artifact(b"safe", media_type="text/plain")
+        writer.append(
+            "observation",
+            ObservationPayload(observation_id="observation-0", sequence=0),
+            monotonic_ns=1,
+            wall_time_ms=1,
+        )
+        writer.append(
+            "action_batch",
+            ActionBatchPayload(
+                action_batch_id="batch-0",
+                observation_id="observation-0",
+                action_count=1,
+                action_artifact=action_artifact,
+            ),
+            monotonic_ns=2,
+            wall_time_ms=2,
+        )
+        writer.append(
+            "environment_step",
+            EnvironmentStepPayload(
+                step_id="step-0",
+                action_batch_id="batch-0",
+                receipt_id=DIGEST,
+                input_observation_id="observation-0",
+                output_observation_id="observation-1",
+                terminated=False,
+                truncated=False,
+            ),
+            monotonic_ns=3,
+            wall_time_ms=3,
+        )
+        writer.append(
+            "observation",
+            ObservationPayload(observation_id="observation-1", sequence=1),
+            monotonic_ns=4,
+            wall_time_ms=4,
+        )
+        writer.append(
+            "action_batch",
+            ActionBatchPayload(
+                action_batch_id="finish",
+                observation_id="observation-1",
+                action_count=1,
+                action_artifact=action_artifact,
+                terminal="finish",
+            ),
+            monotonic_ns=5,
+            wall_time_ms=5,
+        )
+        writer.begin_finalization(
+            "final",
+            "score-op",
+            FinalizationIntent(kind="score", scorer_id="scorer", scorer_version="1"),
+            monotonic_ns=6,
+            wall_time_ms=6,
+        )
+        score = ScoreArtifact(status="scored", binary=1)
+        writer.record_scoring_result(
+            ScoringResultPayload(
+                finalization_id="final", scoring_operation_id="score-op", score=score
+            ),
+            monotonic_ns=7,
+            wall_time_ms=7,
+        )
+        writer.record_final_lifecycle(
+            LifecycleTransitionPayload(
+                previous_state_id=None,
+                state_id=OTHER_DIGEST,
+                state="completed",
+                finalization_id="final",
+                preflight_seal_id=DIGEST,
+                commitment_id=OTHER_DIGEST,
+                reconciliation_id=DIGEST,
+                reconciliation_reportable=True,
+                score_id=score.score_id,
+                cleanup_result_id=OTHER_DIGEST,
+                rescue_required=False,
+            ),
+            monotonic_ns=8,
+            wall_time_ms=8,
+        )
+        outcome = writer.seal(_draft(score))
+    finally:
+        writer.close()
+    assert outcome.result.binary == 1 and verify_bundle(root).valid
+
+
 def test_seal_rejects_orphan_model_request(tmp_path: Path) -> None:
     root = tmp_path / "bundle"
     writer = EvidenceWriter.create(root, manifest(), RedactionSet.from_resolved_values(()))

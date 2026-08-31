@@ -215,6 +215,103 @@ def test_open_graph_rejects_sequence_gap_duplicate_batch_and_step(
     assert "receipt_binding_invalid" in {issue.code for issue in report.issues}
 
 
+def test_terminal_step_requires_final_observation_and_lifecycle(tmp_path: Path) -> None:
+    root = tmp_path / "bundle"
+    with EvidenceWriter.create(root, manifest(), RedactionSet.from_resolved_values(())) as writer:
+        writer.append(
+            "observation",
+            ObservationPayload(observation_id="observation-0", sequence=0),
+            monotonic_ns=1,
+            wall_time_ms=1,
+        )
+        writer.append(
+            "action_batch",
+            ActionBatchPayload(
+                action_batch_id="batch",
+                observation_id="observation-0",
+                action_count=1,
+                action_artifact=ARTIFACT,
+            ),
+            monotonic_ns=2,
+            wall_time_ms=2,
+        )
+        writer.append(
+            "environment_step",
+            EnvironmentStepPayload(
+                step_id="step",
+                action_batch_id="batch",
+                receipt_id=DIGEST,
+                input_observation_id="observation-0",
+                output_observation_id="observation-1",
+                terminated=True,
+                truncated=False,
+            ),
+            monotonic_ns=3,
+            wall_time_ms=3,
+        )
+        writer.append(
+            "observation",
+            ObservationPayload(observation_id="observation-1", sequence=1),
+            monotonic_ns=4,
+            wall_time_ms=4,
+        )
+    assert "finalization_invalid" in {issue.code for issue in verify_bundle(root).issues}
+
+
+def test_action_after_terminal_step_is_invalid(tmp_path: Path) -> None:
+    root = tmp_path / "bundle"
+    with EvidenceWriter.create(root, manifest(), RedactionSet.from_resolved_values(())) as writer:
+        writer.append(
+            "observation",
+            ObservationPayload(observation_id="observation-0", sequence=0),
+            monotonic_ns=1,
+            wall_time_ms=1,
+        )
+        writer.append(
+            "action_batch",
+            ActionBatchPayload(
+                action_batch_id="batch-0",
+                observation_id="observation-0",
+                action_count=1,
+                action_artifact=ARTIFACT,
+            ),
+            monotonic_ns=2,
+            wall_time_ms=2,
+        )
+        writer.append(
+            "environment_step",
+            EnvironmentStepPayload(
+                step_id="step-0",
+                action_batch_id="batch-0",
+                receipt_id=DIGEST,
+                input_observation_id="observation-0",
+                output_observation_id="observation-1",
+                terminated=False,
+                truncated=True,
+            ),
+            monotonic_ns=3,
+            wall_time_ms=3,
+        )
+        writer.append(
+            "observation",
+            ObservationPayload(observation_id="observation-1", sequence=1),
+            monotonic_ns=4,
+            wall_time_ms=4,
+        )
+        writer.append(
+            "action_batch",
+            ActionBatchPayload(
+                action_batch_id="batch-1",
+                observation_id="observation-1",
+                action_count=1,
+                action_artifact=ARTIFACT,
+            ),
+            monotonic_ns=5,
+            wall_time_ms=5,
+        )
+    assert "finalization_invalid" in {issue.code for issue in verify_bundle(root).issues}
+
+
 def test_partial_tail_refuses_append_without_repair(tmp_path: Path) -> None:
     root = _bundle(tmp_path, events=1)
     with (root / "events.jsonl").open("ab") as handle:

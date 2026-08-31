@@ -273,6 +273,48 @@ def test_binary_artifacts_reject_whitespace_encoded_canaries(tmp_path: Path) -> 
     assert list((tmp_path / "bundle" / "artifacts").iterdir()) == []
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b"x" * 70_000 + b"very-secret-value" + b"tail",
+        b"prefix-very%2dsecret-value-tail",
+        b"prefix-%76%65%72%79%2D%73%65%63%72%65%74%2D%76%61%6C%75%65-tail",
+    ],
+)
+def test_scanner_rejects_reviewer_payloads_in_one_large_feed(
+    tmp_path: Path, payload: bytes
+) -> None:
+    with EvidenceWriter.create(
+        tmp_path / "bundle", manifest(), redactions("very-secret-value")
+    ) as writer:
+        with pytest.raises(EvidenceBundleInvalid):
+            writer.publish_artifact(payload, media_type="application/octet-stream")
+
+
+def test_percent_scanner_preserves_state_across_every_split(tmp_path: Path) -> None:
+    payload = b"prefix-%76%65%72%79%2Dsecret-value-tail"
+    for split in range(1, len(payload)):
+        root = tmp_path / f"bundle-{split}"
+        with EvidenceWriter.create(root, manifest(), redactions("very-secret-value")) as writer:
+            with pytest.raises(EvidenceBundleInvalid):
+                writer.publish_artifact(
+                    (payload[:split], payload[split:]),
+                    media_type="application/octet-stream",
+                )
+
+
+def test_percent_scanner_incomplete_escape_is_literal_and_case_sensitive(
+    tmp_path: Path,
+) -> None:
+    with EvidenceWriter.create(
+        tmp_path / "bundle", manifest(), redactions("Very-Secret-Value")
+    ) as writer:
+        writer.publish_artifact(
+            (b"lowercase-very-secret-value-%", b"2"),
+            media_type="application/octet-stream",
+        )
+
+
 def test_invalid_artifact_expectations_and_media_leave_no_target(tmp_path: Path) -> None:
     root = tmp_path / "bundle"
     with EvidenceWriter.create(root, manifest(), redactions()) as writer:
