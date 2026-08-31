@@ -1,5 +1,7 @@
 """Cache-aware pruning: superseded reads, useless blanking, and every guard."""
 
+from typing import Any
+
 from local_operator.compaction.pruning import (
     MIN_PRUNE_TOKENS,
     SUPERSEDED_NOTICE,
@@ -8,7 +10,7 @@ from local_operator.compaction.pruning import (
     prune_tool_outputs,
 )
 from local_operator.compaction.tokens import estimate_tokens
-from local_operator.harness.types import Message
+from local_operator.harness.types import Message, TextContent
 
 NOW = 10_000_000
 ACTIVE = NOW  # not idle
@@ -34,6 +36,7 @@ def test_superseded_read_blanked_with_pairing_intact():
     out, changed = prune_tool_outputs(messages, NOW, ACTIVE)
     assert changed is True
     assert len(out) == 4  # never deleted
+    assert old_read.text == "[Superseded by a newer result for the same resource]"
     assert old_read.text == SUPERSEDED_NOTICE
     assert old_read.provider_payload is not None
     assert old_read.provider_payload["pruned"] is True
@@ -257,3 +260,105 @@ def test_identical_ranged_read_is_superseded_like_identical_full():
     out, changed = prune_tool_outputs(messages, NOW, ACTIVE)
     assert changed is True
     assert first.text == SUPERSEDED_NOTICE
+
+
+def _observer(call_id: str, name: str, details: dict[str, Any], body: str = "x" * 1200) -> Message:
+    return Message(
+        role="tool",
+        tool_call_id=call_id,
+        tool_name=name,
+        content=[TextContent(text=f"{call_id} {body}")],
+        provider_payload={"details": details},
+    )
+
+
+def _text_len(messages: list[Message]) -> int:
+    """Total characters of TEXT content, ignoring non-text blocks."""
+    return sum(
+        len(block.text)
+        for message in messages
+        for block in (message.content if isinstance(message.content, list) else [])
+        if isinstance(block, TextContent)
+    )
+
+
+def _first_text(message: Message) -> str:
+    blocks = message.content if isinstance(message.content, list) else []
+    return next((b.text for b in blocks if isinstance(b, TextContent)), "")
+
+
+def test_a_declared_key_supersedes_re_reads_of_one_resource() -> None:
+    """A tool may declare that its result is a re-read of one thing.
+
+    ``details['supersede_key']`` names the CONTENT, so a later result carrying
+    the same key describes the same resource in a newer state and the older one
+    is dead weight. Polling one endpoint is the common case.
+    """
+    key = "https://api/status\x00rendered"
+    messages = [Message.user("poll")] + [
+        _observer(f"c{i}", "web_fetch", {"url": "https://api/status", "supersede_key": key})
+        for i in range(6)
+    ]
+    before = _text_len(messages)
+
+    pruned, changed = prune_tool_outputs(messages, now_ms=0, last_activity_ms=0)
+
+    assert changed
+    assert _text_len(pruned) < before * 0.35
+    # The newest result must survive intact: it alone describes reality.
+    assert "x" * 1200 in _first_text(pruned[-1])
+
+
+def test_path_and_declared_key_namespaces_cannot_collide() -> None:
+    """A path that resembles a declaration must remain a different resource."""
+    path = _observer("path", "read", {"path": "declared:/etc/passwd"})
+    declared = _observer("declared", "read", {"supersede_key": "/etc/passwd:full"})
+
+    before = _text_len([path, declared])
+    pruned, changed = prune_tool_outputs([path, declared], now_ms=0, last_activity_ms=0)
+
+    assert changed is False
+    assert _text_len(pruned) == before
+
+
+def test_a_declared_key_never_blanks_a_different_result() -> None:
+    """The saving must come from redundancy only, never from real content.
+
+    This is the axis that makes inference unsafe and the opt-in necessary. A
+    browser stamps ONE surface handle on every action it performs, so a key
+    inferred from that handle collapses an accessibility snapshot, the console
+    log, a scroll and a click into a single group -- and a 40-character click
+    result then blanks the snapshot and the errors the agent gathered to decide
+    what to click. Only results the tool DECLARES to be the same content may be
+    grouped, and a differing declaration must keep them apart.
+    """
+    surface = {"surface_id": "s:1", "url": "https://app/form", "title": "Form"}
+    flow = [
+        Message.user("fill the form"),
+        _observer("snapshot", "browser", dict(surface)),
+        _observer("console", "browser", dict(surface)),
+        _observer("scrolled", "browser", dict(surface)),
+        _observer("clicked", "browser", dict(surface), body="y" * 40),
+    ]
+    before = _text_len(flow)
+    pruned, _changed = prune_tool_outputs(flow, now_ms=0, last_activity_ms=0)
+    assert _text_len(pruned) == before, (
+        "a browser surface handle is stamped on every action, so it must not "
+        "group them; blanking here loses the snapshot the click depended on"
+    )
+
+    # Renditions of one URL are different answers and must not blank each other.
+    raw = _observer("raw", "web_fetch", {"url": "https://a", "supersede_key": "https://a\x00raw"})
+    rendered = _observer(
+        "rendered", "web_fetch", {"url": "https://a", "supersede_key": "https://a\x00rendered"}
+    )
+    mixed = [Message.user("go"), raw, rendered]
+    before_mixed = _text_len(mixed)
+    pruned_mixed, _ = prune_tool_outputs(mixed, now_ms=0, last_activity_ms=0)
+    assert _text_len(pruned_mixed) == before_mixed
+
+    # And results with no declaration at all stay exempt, as before.
+    bare = [Message.user("go")] + [_observer(f"b{i}", "bash", {}) for i in range(8)]
+    before_bare = _text_len(bare)
+    pruned_bare, _ = prune_tool_outputs(bare, now_ms=0, last_activity_ms=0)
+    assert _text_len(pruned_bare) == before_bare

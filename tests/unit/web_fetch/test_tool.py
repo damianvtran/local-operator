@@ -98,6 +98,8 @@ async def test_cache_hit_makes_no_network_call(context: ToolContext) -> None:
         "https://example.com/x", tool_name="web_fetch", context=context, transport=transport
     )
     assert d1["cache"] == "miss"
+    fresh_key = "https://example.com/x\x00raw=0|max_bytes=default"
+    assert d1["supersede_key"] == fresh_key
     first_calls = transport.calls
     assert first_calls >= 1
 
@@ -105,6 +107,10 @@ async def test_cache_hit_makes_no_network_call(context: ToolContext) -> None:
         "https://example.com/x", tool_name="web_fetch", context=context, transport=transport
     )
     assert d2["cache"] == "hit"
+    # A hit is still a re-read of the same rendition. Pinning equality here
+    # catches either call site dropping the variant as the result is shaped.
+    assert d2["supersede_key"] == fresh_key
+    assert d2["supersede_key"] == d1["supersede_key"]
     # Zero additional HTTP calls on the cache hit.
     assert transport.calls == first_calls
 
@@ -173,6 +179,7 @@ async def test_raw_and_rendered_do_not_share_cache_entry(context: ToolContext) -
     )
     assert "<html>" in p_raw  # verbatim source
     assert d_raw["render_method"] == "text"
+    assert d_raw["supersede_key"] == "https://example.com/p\x00raw=1|max_bytes=default"
 
     # raw=False for the same URL must NOT hit the raw entry: it renders markdown.
     p_rendered, d_rendered, _e = await run_fetch(
@@ -183,6 +190,8 @@ async def test_raw_and_rendered_do_not_share_cache_entry(context: ToolContext) -
     )
     assert d_rendered["cache"] == "miss"  # different variant → no collision
     assert d_rendered["render_method"] == "markdownify"
+    assert d_rendered["supersede_key"] == "https://example.com/p\x00raw=0|max_bytes=default"
+    assert d_rendered["supersede_key"] != d_raw["supersede_key"]
     assert "# Heading" in p_rendered
     assert "<html>" not in p_rendered
 
@@ -194,6 +203,34 @@ async def test_raw_and_rendered_do_not_share_cache_entry(context: ToolContext) -
         transport=transport,
     )
     assert d3["cache"] == "hit"
+
+
+@pytest.mark.asyncio
+async def test_max_bytes_variants_emit_distinct_supersede_keys(context: ToolContext) -> None:
+    """Byte caps change the returned content, so they name distinct resources."""
+    page = _html_page(100)
+    transport = _CountingTransport(
+        lambda req: httpx.Response(200, text=page, headers={"content-type": "text/html"})
+    )
+
+    _small_preview, small, _small_error = await run_fetch(
+        "https://example.com/capped",
+        tool_name="web_fetch",
+        context=context,
+        transport=transport,
+        max_bytes=2048,
+    )
+    _large_preview, large, _large_error = await run_fetch(
+        "https://example.com/capped",
+        tool_name="web_fetch",
+        context=context,
+        transport=transport,
+        max_bytes=4096,
+    )
+
+    assert small["supersede_key"] == "https://example.com/capped\x00raw=0|max_bytes=2048"
+    assert large["supersede_key"] == "https://example.com/capped\x00raw=0|max_bytes=4096"
+    assert small["supersede_key"] != large["supersede_key"]
 
 
 @pytest.mark.asyncio

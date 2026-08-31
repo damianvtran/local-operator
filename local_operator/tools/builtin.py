@@ -2300,6 +2300,12 @@ async def execute_read(
                 "read",
                 f"Cannot resolve '{target}': the resolver does not handle this URL.",
             )
+        # Deliberately NO supersede_key here. This path serves internal URLs
+        # (skill://, guide://, mcp://), and skill reads are exempt from pruning
+        # anyway -- ``_is_prunable`` protects them because a pruned skill just
+        # gets re-read in a loop. Declaring a key would be inert for those and
+        # would add avoidable risk for the rest, since a resolver result is not
+        # always the same content under the same URL.
         return _text(tool_call_id, "read", content, details={"url": target})
 
     cwd = _safe_cwd(context)
