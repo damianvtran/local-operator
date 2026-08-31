@@ -1181,11 +1181,15 @@ def _read_row_through_fd(directory_fd: int) -> tuple[str | None, str, str]:
             return None, "", ""
         fds.append(metadata_fd)
         instructions_fd = _open_optional_at(directory_fd, "instructions.md")
-        if instructions_fd is not None:
-            fds.append(instructions_fd)
         project_fd = _open_optional_at(directory_fd, "project.md")
-        if project_fd is not None:
-            fds.append(project_fd)
+        # Every row this registry publishes contains all three files, including
+        # explicit-empty briefs. A missing child on a pinned old directory is
+        # therefore the signature of concurrent backup cleanup, not a valid
+        # revision. Legacy rows missing optional briefs fall through after the
+        # bounded retries to the stable path snapshot, where absence means "".
+        if instructions_fd is None or project_fd is None:
+            return None, "", ""
+        fds.extend((instructions_fd, project_fd))
         verification_fd = _open_optional_at(directory_fd, "team.yml")
         if verification_fd is None:
             return None, "", ""
@@ -1196,8 +1200,8 @@ def _read_row_through_fd(directory_fd: int) -> tuple[str | None, str, str]:
             return None, "", ""
         return (
             metadata_text,
-            _read_text_fd(instructions_fd) if instructions_fd is not None else "",
-            _read_text_fd(project_fd) if project_fd is not None else "",
+            _read_text_fd(instructions_fd),
+            _read_text_fd(project_fd),
         )
     finally:
         for fd in fds:
