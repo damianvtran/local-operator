@@ -1608,6 +1608,27 @@ class SessionStreamFn:
     USAGE_CHECK_TTL_S = 60.0
     DEFAULT_USAGE_BLOCK_MS = 5 * 60 * 1000
 
+    #: How many blocked accounts the recovery walk may probe at once.
+    #:
+    #: The walk used to be strictly serial, which on a pool with several
+    #: blocked rows is a multi-second network train on the time-to-usable
+    #: path (an ``ensure_oauth_fresh`` plus a usage GET per row, one after
+    #: another). Probing them concurrently removes the train.
+    #:
+    #: The bound is what keeps the cure from being worse than the disease,
+    #: and it is NOT a tuning knob to be raised casually. Anthropic and
+    #: OpenAI rate-limit their usage endpoints **per source IP regardless of
+    #: account** (see the module docstring of
+    #: :mod:`local_operator.providers.usage_cache`), so an unbounded gather
+    #: over N blocked rows is a synchronized burst against one IP — exactly
+    #: how this walk used to earn its own 429s, whose backoff then poisoned
+    #: the NEXT boot. Three is deliberately small: it collapses the common
+    #: 3-5 row pool to one or two waves while keeping the instantaneous
+    #: request rate close to what a single interactive ``/usage`` already
+    #: costs. Raising it trades a few hundred milliseconds for the 429 storm
+    #: this constant exists to prevent.
+    USAGE_RECOVERY_PROBE_CONCURRENCY = 3
+
     def __init__(
         self,
         auth_store: AuthStore,
@@ -2013,6 +2034,7 @@ class SessionStreamFn:
         *,
         reserve_percent: float,
         cache: dict[str, str],
+        usage_memo: "dict[str, UsageReport | None] | None" = None,
     ) -> str:
         """Whether ``provider`` still has spendable quota for ``model_id``.
 
@@ -2026,6 +2048,14 @@ class SessionStreamFn:
         lists several models on the same host does not re-hit the usage
         endpoint, while still letting a Fable hop and an Opus hop on the
         same Anthropic pool disagree (their binding windows differ).
+
+        ``usage_memo`` carries the walk's per-account reports, which is a
+        LEVEL BELOW that verdict memo: two model-scoped verdicts on one pool
+        may differ, but they read the same accounts, and this method
+        enumerates every OAuth account of the provider. Without the report
+        memo, a chain that lists the walk's own provider re-fetched usage for
+        an account the primary probe had just read (measured: two GETs for
+        one account in one boundary).
         """
         cache_key = f"{provider}/{model_id}"
         cached = cache.get(cache_key)
@@ -2073,6 +2103,7 @@ class SessionStreamFn:
                         account_id=a.account_id,
                         oauth_creds=a.raw,
                     ),
+                    usage_memo,
                 )
             except Exception:
                 saw_unknown = True
@@ -2106,6 +2137,7 @@ class SessionStreamFn:
                     provider,
                     fingerprint_secret(selected.access_token),
                     lambda: fetch_usage(self._http, provider, api_key=selected.access_token),
+                    usage_memo,
                 )
             except Exception:
                 report = None
@@ -2145,6 +2177,7 @@ class SessionStreamFn:
         different_provider: bool = False,
         reserve_percent: float = 10.0,
         quota_cache: dict[str, str] | None = None,
+        usage_memo: "dict[str, UsageReport | None] | None" = None,
     ) -> Any | None:
         """The first configured fallback with working auth, bench- and quota-aware.
 
@@ -2205,6 +2238,7 @@ class SessionStreamFn:
                 target_model,
                 reserve_percent=reserve_percent,
                 cache=quota_cache,
+                usage_memo=usage_memo,
             )
             if availability == "depleted":
                 if first_depleted is None:
@@ -2236,6 +2270,7 @@ class SessionStreamFn:
         provider: str,
         account_identity: str,
         fetch: "Callable[[], Awaitable[UsageReport | None]]",
+        usage_memo: "dict[str, UsageReport | None] | None" = None,
     ) -> "UsageReport | None":
         """Route one preflight usage probe through the shared cross-process cache.
 
@@ -2244,6 +2279,36 @@ class SessionStreamFn:
         ``leased_account_usage`` never serves a fresh row on the fast path. Fails open
         to a live fetch when the cache is unavailable, so routing can never be made
         WORSE than the pre-cache behaviour. See docs/specs/preflight-usage-cache.md.
+
+        ``usage_memo`` is the boundary walk's per-ACCOUNT report memo, and it is the
+        layer that stops one boundary asking the same account's usage endpoint twice.
+        It is needed IN ADDITION to the two memos the walk already carries, because
+        neither covers this:
+
+        * ``attempted_ids`` dedupes credential rows the walk has JUDGED, but the
+          rows enumerated by ``_provider_quota_availability`` (a fallback-chain
+          question) are not judgements and are deliberately not recorded there.
+        * ``quota_cache`` dedupes provider+model VERDICTS, and cannot be widened:
+          a Fable hop and an Opus hop on one Anthropic pool legitimately disagree
+          because their binding windows differ.
+
+        The underlying per-account REPORT is identical for both, though — it is one
+        GET against one account — so memoizing the report is sound where sharing the
+        verdict is not. Measured: a reserve-state account on a chain that lists its
+        own provider was fetched twice per boundary (once by the primary probe, once
+        by ``_provider_quota_availability`` via ``_first_available_fallback``).
+
+        The cross-process cache cannot collapse this. ``leased_account_usage``
+        deliberately never serves a fresh row on its fast path so a routing probe can
+        notice recovery on its own next boundary; that contract is right ACROSS
+        boundaries and is exactly what leaves the duplication WITHIN one.
+
+        A ``None`` result is memoized like any other: every caller treats it as
+        fail-open (unknown usage, keep the existing verdict), so replaying it inside
+        one boundary reaches the same conservative outcome the re-probe would — while
+        a re-probe of an endpoint that failed milliseconds ago is precisely the burst
+        that earns a 429. Freshness is unaffected: the memo lives only for this
+        boundary walk and is discarded with it.
         """
         from local_operator.providers.usage_cache import (
             account_preflight_key,
@@ -2253,7 +2318,15 @@ class SessionStreamFn:
         storage = self._storage_provider(provider)
         store = self._usage_cache_store()
         key = account_preflight_key(storage, account_identity)
-        return await leased_account_usage(store, key, storage, fetch)
+        # Keyed by the same string the shared cache keys on, so the memo can never
+        # conflate two accounts that the cache would keep apart (storage aliasing
+        # included: ``openai-device`` and ``openai`` are one pool).
+        if usage_memo is not None and key in usage_memo:
+            return usage_memo[key]
+        report = await leased_account_usage(store, key, storage, fetch)
+        if usage_memo is not None:
+            usage_memo[key] = report
+        return report
 
     async def _primary_has_auth(self, model: ModelSpec) -> bool:
         from local_operator.providers.failover import FallbackTarget
@@ -2378,6 +2451,16 @@ class SessionStreamFn:
         # F7). See ``_first_available_fallback`` for why a verdict is stable
         # across one walk.
         quota_cache: dict[str, str] = {}
+        # The per-ACCOUNT report memo for this same walk, one level below the
+        # verdict memo above. Two model-scoped verdicts on one pool may
+        # legitimately disagree, but they read the SAME accounts, and the
+        # rotation/fallback steps each enumerate them again — so the reports
+        # are what duplicates. See ``_cached_account_usage`` for why neither
+        # ``attempted_ids`` nor ``quota_cache`` can cover this, and why the
+        # cross-process cache deliberately does not either. Scoped to the
+        # walk and discarded with it, so the next boundary still re-probes
+        # live and can notice recovery.
+        usage_memo: dict[str, UsageReport | None] = {}
         while True:
             try:
                 access = await self._auth_store.get_oauth_access(
@@ -2399,7 +2482,7 @@ class SessionStreamFn:
                     # to another provider only after re-checking the blocks
                     # themselves: exhaust every login first.
                     recovered = await self._recover_blocked_accounts(
-                        model, storage, rows, retry, attempted_ids
+                        model, storage, rows, retry, attempted_ids, usage_memo
                     )
                     if recovered is not None:
                         health, shared_remaining, tier_binding, access = recovered
@@ -2413,6 +2496,7 @@ class SessionStreamFn:
                             retry,
                             attempted_ids,
                             quota_cache,
+                            usage_memo,
                         ):
                             continue
                         return
@@ -2421,6 +2505,7 @@ class SessionStreamFn:
                         different_provider=True,
                         reserve_percent=retry.usage_reserve_percent,
                         quota_cache=quota_cache,
+                        usage_memo=usage_memo,
                     )
                     if fallback is not None:
                         await self._route_state.activate(
@@ -2448,6 +2533,7 @@ class SessionStreamFn:
                     access_token=a.access_token,
                     account_id=a.account_id,
                 ),
+                usage_memo,
             )
             if report is None:
                 return
@@ -2524,7 +2610,7 @@ class SessionStreamFn:
                         )
                     ]
                     recovered = await self._recover_blocked_accounts(
-                        model, storage, blocked_rows, retry, attempted_ids
+                        model, storage, blocked_rows, retry, attempted_ids, usage_memo
                     )
                     if recovered is not None:
                         rec_health = recovered[0]
@@ -2562,6 +2648,7 @@ class SessionStreamFn:
                             retry,
                             attempted_ids,
                             quota_cache,
+                            usage_memo,
                         ):
                             continue
                         return
@@ -2607,6 +2694,7 @@ class SessionStreamFn:
                     model,
                     reserve_percent=retry.usage_reserve_percent,
                     quota_cache=quota_cache,
+                    usage_memo=usage_memo,
                 )
                 if fallback is None:
                     # Deduped per condition: the quota is spent and nothing can
@@ -2638,6 +2726,7 @@ class SessionStreamFn:
                 retry,
                 attempted_ids,
                 quota_cache,
+                usage_memo,
             ):
                 continue
             return
@@ -2653,6 +2742,7 @@ class SessionStreamFn:
         retry: Any,
         attempted_ids: set[int],
         quota_cache: dict[str, str] | None = None,
+        usage_memo: "dict[str, UsageReport | None] | None" = None,
     ) -> bool:
         """Act on a low/depleted account-scope verdict.
 
@@ -2662,6 +2752,9 @@ class SessionStreamFn:
         ``quota_cache`` is the caller's boundary-walk memo of fallback
         availability, threaded through so the chain is probed once per
         boundary rather than once per account rotation (review F7).
+        ``usage_memo`` is the same walk's per-account report memo, threaded
+        for the same reason one level down: the fallback chain may list this
+        walk's own provider, whose accounts have already been read.
 
         The binding windows that produced ``health`` can be scoped to a model
         tier while the shared windows still hold quota (Anthropic's
@@ -2711,6 +2804,7 @@ class SessionStreamFn:
             different_provider=health.state == "depleted",
             reserve_percent=retry.usage_reserve_percent,
             quota_cache=quota_cache,
+            usage_memo=usage_memo,
         )
         if not siblings and health.state == "reserve":
             # Last account on this provider, still holding spendable quota.
@@ -2773,7 +2867,7 @@ class SessionStreamFn:
                 and self._auth_store.is_blocked_for_model(candidate.id, storage, model.model_id)
             ]
             recovered = await self._recover_blocked_accounts(
-                model, storage, blocked_rows, retry, attempted_ids
+                model, storage, blocked_rows, retry, attempted_ids, usage_memo
             )
             if recovered is not None:
                 rec_health = recovered[0]
@@ -2803,6 +2897,7 @@ class SessionStreamFn:
                     retry,
                     attempted_ids,
                     quota_cache,
+                    usage_memo,
                 )
 
         if not siblings and fallback is None:
@@ -2911,6 +3006,7 @@ class SessionStreamFn:
         rows: list[Any],
         retry: Any,
         attempted_ids: set[int],
+        usage_memo: "dict[str, UsageReport | None] | None" = None,
     ) -> tuple[Any, float | None, bool, Any] | None:
         """Re-check blocked accounts before a provider failover.
 
@@ -2922,13 +3018,15 @@ class SessionStreamFn:
         outranks the row, and with a healthy unblocked sibling in the pool
         every probe answered for that sibling — re-blocking rows that held
         the only spendable quota). Refresh failures and unknown/unreachable
-        reports leave the row's existing block standing and move on. The
-        first definite verdict wins: the row's block is lifted, the session
-        is pinned to it, and the (health, shared, tier, access) tuple goes
-        back to the caller's shared policy — which is what re-blocks a row
-        whose re-probe says depleted. ``None`` means every blocked account
-        was re-checked and none gave a verdict — only then is a provider
-        fallback honest.
+        reports leave the row's existing block standing and move on. A
+        usable verdict (healthy or reserve) in the wave wins over a depleted
+        one: the row's block is lifted, the session is pinned to it, and the
+        (health, shared, tier, access) tuple goes back to the caller's
+        shared policy. A depleted verdict is returned only when the whole
+        wave is genuinely out — which is what re-blocks that row and, if
+        nothing later recovers, lets the caller hop. ``None`` means every
+        blocked account was re-checked and none gave a verdict — only then
+        is a provider fallback honest.
 
         ``attempted_ids`` is the preflight's record of which credentials this
         message boundary has already judged, and it is BOTH read and written
@@ -2943,103 +3041,233 @@ class SessionStreamFn:
         for this boundary, and re-probing it costs a network round trip to
         reach the same answer. Rows are finite and the set only grows, so
         each recursive step strictly shrinks the candidate pool.
-        """
-        from local_operator.providers.auth_store import OAuthAccess
-        from local_operator.providers.registry import get_provider_definition
-        from local_operator.providers.usage import (
-            fetch_usage,
-            shared_tier_saturation,
-            usage_health,
-        )
 
-        for row in rows:
-            if row.id in attempted_ids:
-                continue  # already judged at this message boundary
-            # Recorded BEFORE the probe, so every exit below — refresh
-            # failure, missing token, unreachable endpoint, unreadable
-            # report, or a definite verdict — leaves this row out of the
-            # next enumeration. See the docstring: this is the walk's
-            # termination guarantee, not an optimisation.
-            attempted_ids.add(row.id)
-            # Probe the row's OWN refreshed token. Clearing the block and
-            # re-asking the cascade (the first shape of this walk) attributed
-            # the verdict to whatever the cascade returned — with a healthy
-            # unblocked sibling in the pool, EVERY probe resolved to that
-            # sibling, re-blocked the row just lifted, and the walk ended
-            # "nothing recovered" while blocked accounts held spendable
-            # quota. Reading the row directly makes the verdict about the
-            # row, and leaves the pool's blocks and stickiness untouched
-            # until a verdict says otherwise.
+        **Probes run concurrently, in bounded waves, but the VERDICT is still
+        decided in row order.** The walk used to be strictly serial, which on
+        a pool with several blocked rows is a network train (a refresh plus a
+        usage GET per row, one after another) on the time-to-usable path, and
+        it is what generated the self-inflicted 429 burst whose backoff then
+        poisoned the next boot. Three properties keep the concurrent form
+        equivalent to the serial one, and each is load-bearing:
+
+        * **Ordering.** ``asyncio.gather`` preserves result order regardless
+          of completion order, and the verdict is selected by scanning that
+          ordered list. A usable recovery is preferred over a depleted one
+          in the same wave (see the scan below); among equals, the first in
+          ROW order wins, not whichever probe happened to answer first —
+          which is what makes the choice deterministic and reproducible
+          rather than a race between siblings.
+        * **Attribution.** Each probe reads its own row's refreshed token and
+          builds its own ``OAuthAccess``; nothing is shared between probes, so
+          running them together cannot cross a verdict onto another row. This
+          is the invariant the serial form protected by construction and the
+          one whose breakage would take a healthy credential out of rotation.
+        * **Termination.** Every row in a launched wave is recorded in
+          ``attempted_ids`` BEFORE that wave starts, so the walk's shrinking
+          candidate pool is unchanged. Rows in LATER waves are not reserved:
+          once a verdict is found, the remaining waves are never launched, and
+          reserving them would mark accounts as judged that were never probed
+          — retiring, for this whole boundary, credentials nobody ever looked
+          at. The serial walk left them untouched for exactly that reason.
+
+        The wave size is capped by
+        :data:`SessionStreamFn.USAGE_RECOVERY_PROBE_CONCURRENCY`; see that
+        constant for why an unbounded gather is the wrong shape here.
+        """
+        import asyncio
+
+        from local_operator.providers.registry import get_provider_definition
+        from local_operator.providers.usage import fetch_usage, usage_health
+
+        async def probe(row: Any) -> tuple[Any, dict[str, Any], str] | None:
+            """Read one row's own usage, or None when it yields no verdict.
+
+            Every failure mode the serial walk handled with ``continue`` is a
+            ``None`` here — refresh failure, missing token, unreachable
+            endpoint — so an exception can never escape one probe and cancel
+            its siblings' gather. Returns the row alongside its credentials
+            and token because the caller needs all three to build the access,
+            and re-reading them after the gather would refresh twice.
+            """
             try:
+                # Probe the row's OWN refreshed token. Clearing the block and
+                # re-asking the cascade (the first shape of this walk)
+                # attributed the verdict to whatever the cascade returned —
+                # with a healthy unblocked sibling in the pool, EVERY probe
+                # resolved to that sibling, re-blocked the row just lifted,
+                # and the walk ended "nothing recovered" while blocked
+                # accounts held spendable quota. Reading the row directly
+                # makes the verdict about the row, and leaves the pool's
+                # blocks and stickiness untouched until a verdict says
+                # otherwise. Concurrent refreshes of DISTINCT rows are safe:
+                # ``AuthStore`` holds a per-row refresh lock.
                 creds = await self._auth_store.ensure_oauth_fresh(row.id)
             except Exception:
                 creds = None
             if creds is None:
-                continue  # refresh failed: the block stands, try the next row
+                return None  # refresh failed: the block stands
             definition = get_provider_definition(model.provider)
             key_fn = definition.get_api_key if definition is not None else None
             token = key_fn(creds) if key_fn else creds.get("access")
             if not token:
-                continue
-            report = await self._cached_account_usage(
-                model.provider,
-                creds.get("email") or creds.get("account_id") or f"cred:{row.id}",
-                lambda t=token, c=creds: fetch_usage(
-                    self._http,
+                return None
+            try:
+                report = await self._cached_account_usage(
                     model.provider,
-                    access_token=t,
-                    account_id=c.get("account_id"),
-                ),
-            )
-            if report is None:
-                continue  # unreachable quota endpoint: keep the block, move on
-            health = usage_health(
-                report,
-                model.model_id,
-                reserve_percent=retry.usage_reserve_percent,
-            )
-            if health.state == "unknown":
-                continue  # unreadable: the block stands, try the next row
-            # A definite verdict about the row just probed. The block is a
-            # stale claim this probe has now superseded: lift it and pin the
-            # session to the exact credential the usage was read for, then
-            # hand the verdict to the caller's shared policy (settle, rotate,
-            # or block-again-and-fall-back). A depleted verdict is returned,
-            # not swallowed — the policy decides its fate, and the caller's
-            # fallback notice must name the quota, not the credential pool.
-            # A definite verdict supersedes exactly the blocks that could
-            # hide this model: the account-wide backoff and every scoped
-            # block whose family gates it. Blocks for OTHER families stay
-            # standing — a probe that proves opus serviceable says nothing
-            # about a fable weekly that is still spent.
-            self._auth_store.clear_blocks_for_model(row.id, storage, model.model_id)
-            self._auth_store.pin_session_credential(model.provider, self._session_id, row.id)
-            shared_remaining, tier_binding = shared_tier_saturation(
-                report,
-                reserve_percent=retry.usage_reserve_percent,
-            )
-            if health.state == "healthy":
-                # A recovered account is a healthy edge like the boundary
-                # probe's: drop the quota latch so a later re-entry into
-                # low/exhausted announces afresh rather than being deduped
-                # against the pre-recovery verdict.
-                self._clear_quota_latch(f"{model.provider}/{model.model_id}")
-                await self._notice(
-                    f"{model.provider} account quota recovered — resuming {model.provider}",
-                    "info",
+                    creds.get("email") or creds.get("account_id") or f"cred:{row.id}",
+                    lambda t=token, c=creds: fetch_usage(
+                        self._http,
+                        model.provider,
+                        access_token=t,
+                        account_id=c.get("account_id"),
+                    ),
+                    usage_memo,
                 )
-                self._route_state.clear()
-            access = OAuthAccess(
-                access_token=token,
-                credential_id=row.id,
-                account_id=creds.get("account_id"),
-                email=creds.get("email"),
-                org_id=creds.get("org_id"),
-                kind="oauth",
-                raw=creds,
-            )
-            return health, shared_remaining, tier_binding, access
+            except Exception:
+                # The serial form let an exception here propagate to
+                # preflight's own guard. Inside a gather it would cancel the
+                # siblings, so it is contained and read as "no verdict" —
+                # the same outcome an unreachable endpoint already produces,
+                # and one that leaves the row's block standing.
+                return None
+            if report is None:
+                return None  # unreachable quota endpoint: keep the block
+            return report, creds, token
+
+        # Reserve and probe one bounded wave at a time. Slicing (rather than a
+        # semaphore over all rows) is what keeps the unprobed tail out of
+        # ``attempted_ids``: a semaphore would still have to launch — and so
+        # reserve — every row up front.
+        pending = [row for row in rows if row.id not in attempted_ids]
+        for start in range(0, len(pending), self.USAGE_RECOVERY_PROBE_CONCURRENCY):
+            wave = pending[start : start + self.USAGE_RECOVERY_PROBE_CONCURRENCY]
+            # Recorded BEFORE the wave's probes run, so every outcome —
+            # refresh failure, missing token, unreachable endpoint, unreadable
+            # report, or a definite verdict — leaves these rows out of the
+            # next enumeration. See the docstring: this is the walk's
+            # termination guarantee, not an optimisation.
+            for row in wave:
+                attempted_ids.add(row.id)
+            results = await asyncio.gather(*(probe(row) for row in wave))
+            # Row order, not completion order: see the docstring's ordering
+            # property. A later row's verdict must never pre-empt an earlier
+            # row's just because its request finished first.
+            #
+            # Prefer a USABLE verdict (healthy/reserve) over a depleted one
+            # in the same wave. The serial walk returned the first definite
+            # verdict of any kind, then the caller re-entered
+            # ``_apply_account_health`` which walked the remaining blocked
+            # rows — so a depleted first row never hid a later sibling that
+            # still held quota (review F2/F5). Reserving the whole wave in
+            # ``attempted_ids`` (required for termination of THIS gather)
+            # would make that re-entry skip the rest of the wave, so a
+            # depleted-then-healthy pair in one wave would hop providers
+            # while the healthy row sat reserved and unconsulted. Scanning
+            # the already-paid reports for a usable recovery first produces
+            # the same observable (depleted rows stay blocked, the healthy
+            # sibling serves) without the ping-pong, and only returns a
+            # depleted verdict when the whole wave is genuinely out — which
+            # is when the caller is honest to hop.
+            first_depleted: tuple[Any, Any, Any, dict[str, Any], str] | None = None
+            for row, result in zip(wave, results):
+                if result is None:
+                    continue
+                report, creds, token = result
+                health = usage_health(
+                    report,
+                    model.model_id,
+                    reserve_percent=retry.usage_reserve_percent,
+                )
+                if health.state == "unknown":
+                    continue  # unreadable: the block stands, try the next row
+                if health.state in ("healthy", "reserve"):
+                    return await self._settle_recovered_account(
+                        model,
+                        storage,
+                        row,
+                        report,
+                        health,
+                        creds,
+                        token,
+                        retry,
+                    )
+                if first_depleted is None:
+                    first_depleted = (row, report, health, creds, token)
+            if first_depleted is not None:
+                row, report, health, creds, token = first_depleted
+                return await self._settle_recovered_account(
+                    model,
+                    storage,
+                    row,
+                    report,
+                    health,
+                    creds,
+                    token,
+                    retry,
+                )
         return None
+
+    async def _settle_recovered_account(
+        self,
+        model: ModelSpec,
+        storage: str,
+        row: Any,
+        report: "UsageReport",
+        health: Any,
+        creds: dict[str, Any],
+        token: str,
+        retry: Any,
+    ) -> tuple[Any, float | None, bool, Any]:
+        """Apply a definite recovery verdict to the row it was read for.
+
+        Split out of the walk so the concurrent form has exactly ONE place
+        that mutates blocks and stickiness, reached only after the verdict has
+        been selected in row order. Probes must not write here: two siblings
+        settling at once is how a pinned session ends up on the account that
+        merely answered first.
+        """
+        from local_operator.providers.auth_store import OAuthAccess
+        from local_operator.providers.usage import shared_tier_saturation
+
+        # A definite verdict about the row just probed. The block is a
+        # stale claim this probe has now superseded: lift it and pin the
+        # session to the exact credential the usage was read for, then
+        # hand the verdict to the caller's shared policy (settle, rotate,
+        # or block-again-and-fall-back). A depleted verdict is returned,
+        # not swallowed — the policy decides its fate, and the caller's
+        # fallback notice must name the quota, not the credential pool.
+        # A definite verdict supersedes exactly the blocks that could
+        # hide this model: the account-wide backoff and every scoped
+        # block whose family gates it. Blocks for OTHER families stay
+        # standing — a probe that proves opus serviceable says nothing
+        # about a fable weekly that is still spent.
+        self._auth_store.clear_blocks_for_model(row.id, storage, model.model_id)
+        self._auth_store.pin_session_credential(model.provider, self._session_id, row.id)
+        shared_remaining, tier_binding = shared_tier_saturation(
+            report,
+            reserve_percent=retry.usage_reserve_percent,
+        )
+        if health.state == "healthy":
+            # A recovered account is a healthy edge like the boundary
+            # probe's: drop the quota latch so a later re-entry into
+            # low/exhausted announces afresh rather than being deduped
+            # against the pre-recovery verdict.
+            self._clear_quota_latch(f"{model.provider}/{model.model_id}")
+            await self._notice(
+                f"{model.provider} account quota recovered — resuming {model.provider}",
+                "info",
+            )
+            self._route_state.clear()
+        access = OAuthAccess(
+            access_token=token,
+            credential_id=row.id,
+            account_id=creds.get("account_id"),
+            email=creds.get("email"),
+            org_id=creds.get("org_id"),
+            kind="oauth",
+            raw=creds,
+        )
+        return health, shared_remaining, tier_binding, access
 
     async def __call__(
         self, request: ChatRequest, signal: AbortSignal | None

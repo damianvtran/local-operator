@@ -6,6 +6,7 @@ the harness ``ModelSpec`` consumed by wire clients, and ``validate_model``
 hits the same endpoints as before through a descriptor table.
 """
 
+import asyncio
 import json
 import time
 import zlib
@@ -30,7 +31,7 @@ from local_operator.model.configure import (
 )
 from local_operator.model.registry import ModelInfo
 from local_operator.providers.auth_store import AuthStore
-from local_operator.providers.failover import FallbackTarget
+from local_operator.providers.failover import FallbackTarget, RetrySettings
 from local_operator.providers.usage import UsageAmount, UsageLimit, UsageReport
 
 
@@ -1836,6 +1837,283 @@ async def test_startup_preflight_fails_over_only_when_every_account_is_exhausted
         assert notices == [
             "anthropic quota exhausted (0% remaining) — falling back to openai/gpt-5.3-codex"
         ]
+    finally:
+        await stream.close()
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_blocked_recovery_probes_run_bounded_and_concurrently(tmp_path) -> None:
+    """The recovery walk probes blocked rows in bounded waves, not serially.
+
+    The serial walk was a network train on the time-to-usable path (a refresh
+    plus a usage GET per row, one after another), and it is what generated the
+    self-inflicted 429 burst whose backoff then poisoned the next boot. The
+    bound matters as much as the concurrency: Anthropic/OpenAI rate-limit the
+    usage endpoint per source IP regardless of account, so an unbounded gather
+    would just make the burst faster. Asserting the PEAK is the regression
+    guard against someone later "optimizing" the cap away."""
+    store = AuthStore(tmp_path / "auth.db")
+    rows = [
+        store.upsert_credential("anthropic", _oauth(f"oauth-{i}", f"acct-{i}")) for i in range(6)
+    ]
+    for row in rows:
+        store.block_credential(row.id, "anthropic", block_ms=60_000)
+    store.upsert_credential("openai", {"key": "sk-openai", "source": "login"})
+    stream = create_stream_fn(
+        store,
+        {
+            "retry": {
+                "usageAwareFallback": True,
+                "fallbackChains": {"default": ["openai/gpt-5.3-codex"]},
+            }
+        },
+        session_id="session-a",
+    )
+
+    inflight = 0
+    peak = 0
+
+    async def fetch(*_args: Any, **kwargs: Any) -> Any:
+        nonlocal inflight, peak
+        token = str(kwargs.get("access_token") or kwargs.get("api_key"))
+        if not token.startswith("oauth-"):
+            return _anthropic_usage(100.0)
+        inflight += 1
+        peak = max(peak, inflight)
+        await asyncio.sleep(0)  # yield so siblings can overlap
+        inflight -= 1
+        return _anthropic_usage(100.0)
+
+    try:
+        with patch("local_operator.providers.usage.fetch_usage", side_effect=fetch):
+            await stream.preflight_usage(ModelSpec(provider="anthropic", model_id="claude-opus-5"))
+        assert peak > 1, "probes ran serially — the walk is still a network train"
+        assert peak <= stream.USAGE_RECOVERY_PROBE_CONCURRENCY
+    finally:
+        await stream.close()
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_blocked_recovery_verdict_follows_row_order_not_completion_order(
+    tmp_path,
+) -> None:
+    """Concurrency must not turn "first definite verdict" into a race.
+
+    ``asyncio.gather`` preserves result order, and the walk scans that ordered
+    list — so the winner is the first row, not the fastest responder. Here the
+    LAST row answers first; picking it would mis-attribute the recovery and
+    pin the session to an account chosen by network timing."""
+    store = AuthStore(tmp_path / "auth.db")
+    rows = [
+        store.upsert_credential("anthropic", _oauth(f"oauth-{i}", f"acct-{i}")) for i in range(3)
+    ]
+    for row in rows:
+        store.block_credential(row.id, "anthropic", block_ms=60_000)
+    store.upsert_credential("openai", {"key": "sk-openai", "source": "login"})
+    stream = create_stream_fn(
+        store,
+        {
+            "retry": {
+                "usageAwareFallback": True,
+                "fallbackChains": {"default": ["openai/gpt-5.3-codex"]},
+            }
+        },
+        session_id="session-a",
+    )
+
+    async def fetch(*_args: Any, **kwargs: Any) -> Any:
+        token = str(kwargs.get("access_token") or kwargs.get("api_key"))
+        if not token.startswith("oauth-"):
+            return _anthropic_usage(100.0)
+        # Earlier rows are SLOWER, so completion order is the reverse of row
+        # order and a completion-order bug would settle on oauth-2.
+        index = int(token.rsplit("-", 1)[1])
+        for _ in range((3 - index) * 4):
+            await asyncio.sleep(0)
+        return _anthropic_usage(25.0)  # every row is healthy
+
+    try:
+        with patch("local_operator.providers.usage.fetch_usage", side_effect=fetch):
+            await stream.preflight_usage(ModelSpec(provider="anthropic", model_id="claude-opus-5"))
+        # The FIRST row recovered; its siblings keep their blocks.
+        assert not store.is_blocked(rows[0].id, "anthropic")
+        assert store.is_blocked(rows[1].id, "anthropic")
+        assert store.is_blocked(rows[2].id, "anthropic")
+    finally:
+        await stream.close()
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_blocked_recovery_does_not_reserve_rows_it_never_probed(tmp_path) -> None:
+    """Only rows in a LAUNCHED wave are recorded as judged.
+
+    ``attempted_ids`` is the walk's termination guarantee, but reserving the
+    unprobed tail up front would retire — for the whole boundary — credentials
+    nobody ever looked at. With a verdict found in the first wave, the later
+    rows must remain un-probed AND un-reserved."""
+    store = AuthStore(tmp_path / "auth.db")
+    rows = [
+        store.upsert_credential("anthropic", _oauth(f"oauth-{i}", f"acct-{i}")) for i in range(6)
+    ]
+    for row in rows:
+        store.block_credential(row.id, "anthropic", block_ms=60_000)
+    stream = create_stream_fn(
+        store, {"retry": {"usageAwareFallback": True}}, session_id="session-a"
+    )
+
+    probed: list[str] = []
+
+    def fetch(*_args: Any, **kwargs: Any) -> Any:
+        token = str(kwargs.get("access_token") or kwargs.get("api_key"))
+        probed.append(token)
+        return _anthropic_usage(25.0)  # healthy: the first wave settles it
+
+    attempted: set[int] = set()
+    try:
+        with patch("local_operator.providers.usage.fetch_usage", side_effect=fetch):
+            recovered = await stream._recover_blocked_accounts(
+                ModelSpec(provider="anthropic", model_id="claude-opus-5"),
+                "anthropic",
+                rows,
+                RetrySettings.from_settings({"retry": {"usageAwareFallback": True}}),
+                attempted,
+            )
+        assert recovered is not None
+        bound = stream.USAGE_RECOVERY_PROBE_CONCURRENCY
+        assert len(probed) <= bound, "probed beyond the first wave"
+        # The tail was never probed, so it must still be a candidate later.
+        assert attempted == {row.id for row in rows[:bound]}
+        for row in rows[bound:]:
+            assert row.id not in attempted
+    finally:
+        await stream.close()
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_preflight_reads_each_account_usage_once_per_boundary(tmp_path) -> None:
+    """One boundary asks one account's usage endpoint exactly once.
+
+    Eight requests to one provider's usage endpoint in a single boot is the
+    defect behind the self-inflicted 429s. The walk carries two memos already
+    — ``attempted_ids`` (rows judged) and ``quota_cache`` (provider+model
+    verdicts) — and NEITHER dedupes the underlying per-account report: a
+    fallback chain that lists the walk's own provider re-enumerates accounts
+    the primary probe already read. This is that regression guard."""
+    store = AuthStore(tmp_path / "auth.db")
+    account = store.upsert_credential("anthropic", _oauth("oauth-a", "acct-a"))
+    store.block_credential(account.id, "anthropic", block_ms=0)  # unblocked
+    stream = create_stream_fn(
+        store,
+        {
+            "retry": {
+                "usageAwareFallback": True,
+                # Lists anthropic itself, so the fallback scan re-enumerates
+                # the very account the primary probe just read.
+                "fallbackChains": {"default": ["anthropic/claude-fable-5"]},
+            }
+        },
+        session_id="session-a",
+    )
+
+    calls: list[str] = []
+
+    def fetch(*_args: Any, **kwargs: Any) -> Any:
+        calls.append(str(kwargs.get("access_token") or kwargs.get("api_key")))
+        return _anthropic_usage(92.0)  # reserve: drives the fallback scan
+
+    try:
+        with patch("local_operator.providers.usage.fetch_usage", side_effect=fetch):
+            await stream.preflight_usage(ModelSpec(provider="anthropic", model_id="claude-opus-5"))
+        assert calls.count("oauth-a") == 1, f"account probed {calls.count('oauth-a')}x: {calls}"
+    finally:
+        await stream.close()
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_recovery_wave_prefers_a_usable_sibling_over_an_earlier_depleted_one(
+    tmp_path,
+) -> None:
+    """A depleted first row in a wave must not hide a later sibling with quota.
+
+    The serial walk returned the first definite verdict of any kind, then the
+    caller re-entered and walked the remaining blocked rows — so depleted
+    never hid a later healthy sibling (review F2). The concurrent form
+    reserves the whole wave in ``attempted_ids`` before the gather, which
+    would make that re-entry skip the rest of the wave. Preferring a usable
+    verdict already in hand is what keeps the observable identical: the
+    depleted row stays blocked, the healthy sibling serves, no provider hop.
+    """
+    store = AuthStore(tmp_path / "auth.db")
+    depleted = store.upsert_credential("anthropic", _oauth("oauth-a", "acct-a"))
+    healthy = store.upsert_credential("anthropic", _oauth("oauth-b", "acct-b"))
+    for row in (depleted, healthy):
+        store.block_credential(row.id, "anthropic", block_ms=60_000)
+    store.upsert_credential("openai", {"key": "sk-openai", "source": "login"})
+    stream = create_stream_fn(
+        store,
+        {
+            "retry": {
+                "usageAwareFallback": True,
+                "fallbackChains": {"default": ["openai/gpt-5.3-codex"]},
+            }
+        },
+        session_id="session-a",
+    )
+
+    def fetch(*_args: Any, **kwargs: Any) -> Any:
+        token = str(kwargs.get("access_token") or kwargs.get("api_key"))
+        if token == "oauth-a":
+            return _anthropic_usage(100.0)
+        if token == "oauth-b":
+            return _anthropic_usage(25.0)
+        return _anthropic_usage(100.0)
+
+    try:
+        with patch("local_operator.providers.usage.fetch_usage", side_effect=fetch):
+            await stream.preflight_usage(ModelSpec(provider="anthropic", model_id="claude-opus-5"))
+        assert stream._route_state.active is None
+        assert store.is_blocked(depleted.id, "anthropic")
+        assert not store.is_blocked(healthy.id, "anthropic")
+    finally:
+        await stream.close()
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_recovery_probe_failure_leaves_the_block_standing(tmp_path) -> None:
+    """A transient failure keeps the existing verdict; it never invents one.
+
+    The concurrent form contains exceptions inside each probe rather than
+    letting one escape into the gather, where it would cancel its siblings.
+    A raising probe must read exactly as the serial walk's "unreachable
+    endpoint" did: no verdict, block stands, siblings still evaluated."""
+    store = AuthStore(tmp_path / "auth.db")
+    first = store.upsert_credential("anthropic", _oauth("oauth-a", "acct-a"))
+    second = store.upsert_credential("anthropic", _oauth("oauth-b", "acct-b"))
+    for row in (first, second):
+        store.block_credential(row.id, "anthropic", block_ms=60_000)
+    stream = create_stream_fn(
+        store, {"retry": {"usageAwareFallback": True}}, session_id="session-a"
+    )
+
+    def fetch(*_args: Any, **kwargs: Any) -> Any:
+        token = str(kwargs.get("access_token") or kwargs.get("api_key"))
+        if token == "oauth-a":
+            raise RuntimeError("transient transport failure")
+        return _anthropic_usage(25.0)
+
+    try:
+        with patch("local_operator.providers.usage.fetch_usage", side_effect=fetch):
+            await stream.preflight_usage(ModelSpec(provider="anthropic", model_id="claude-opus-5"))
+        # The failed probe's block stands; the healthy sibling still recovered,
+        # so one bad account never suppresses the rest of the pool.
+        assert store.is_blocked(first.id, "anthropic")
+        assert not store.is_blocked(second.id, "anthropic")
     finally:
         await stream.close()
         store.close()
