@@ -1557,7 +1557,11 @@ async def test_failed_boot_retires_the_team_reserve_and_restores_enter() -> None
         rendered = " ".join(
             str(getattr(block, "_text", "") or "") for block in app._transcript_view().children
         )
-        assert "session is still starting" in rendered
+        # U8-2: that report names the FAILURE. It used to say "still starting"
+        # one row under "✗ session failed to start", which contradicted it; the
+        # property this test guards is that Enter is answered at all, and the
+        # wording assertion moved with the fix rather than pinning the old lie.
+        assert "session failed to start — /login" in rendered
 
 
 @pytest.mark.asyncio
@@ -1587,4 +1591,114 @@ async def test_boot_failure_flag_clears_when_a_new_session_transition_starts() -
         assert app._boot_failed is False
         assert app._name_list_pending_notice("team") == "loading teams…"
         settled.set()
+        await pilot.pause()
+
+
+@pytest.mark.asyncio
+async def test_pending_notice_reads_the_same_for_canonical_and_alias_spellings() -> None:
+    """U8-1: `/agents` must not render "loading agents roster…".
+
+    The notice interpolated the typed command word, so the plural alias leaked
+    into copy the product would never write, in the one row whose job is to say
+    the roster is coming. Both spellings of each family open the SAME list, so
+    they must read identically — one constant per family, the way the team
+    branch already did it. No test asserted either ALIAS, which is how this
+    survived seven rounds.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        # Hold the window the notice describes open, so the branch is reached.
+        app._session_transition_pending = True
+        assert app._name_list_pending_notice("team") == "loading teams…"
+        assert app._name_list_pending_notice("teams") == "loading teams…"
+        assert app._name_list_pending_notice("agent") == "loading agent roster…"
+        assert app._name_list_pending_notice("agents") == "loading agent roster…"
+        app._session_transition_pending = False
+
+
+@pytest.mark.asyncio
+async def test_alias_spellings_paint_the_same_pending_row_in_the_picker() -> None:
+    """U8-1 through the real surface: type the alias and read the rendered row."""
+    for typed, expected in (("/teams x", "loading teams…"), ("/agents a", "loading agent roster…")):
+        release = asyncio.Event()
+
+        async def delayed_factory() -> FakeSession:
+            await release.wait()
+            return FakeSession()
+
+        app = OperatorApp(delayed_factory)
+        async with app.run_test(size=(100, 30)) as pilot:
+            editor = app.query_one(Editor)
+            editor.focus()
+            for char in typed:
+                await pilot.press("slash" if char == "/" else ("space" if char == " " else char))
+            await pilot.pause()
+            assert editor.picker._notice == expected, typed
+            release.set()
+            await pilot.pause()
+
+
+@pytest.mark.asyncio
+async def test_failed_boot_enter_reports_the_failure_not_a_pending_start() -> None:
+    """U8-2: Enter after a DEFINITIVE boot failure must not say "still starting".
+
+    U7-1 routes `/team` back into the ordinary submit path, whose no-session
+    guard answered "session is still starting…" — directly beneath the app's own
+    `✗ session failed to start: …`. The two cannot both be true, and the second
+    is the one that tells the user what to do next, so it sent them off to wait
+    for something that was never arriving.
+    """
+
+    async def failing_factory() -> FakeSession:
+        raise RuntimeError("registry exploded")
+
+    app = OperatorApp(failing_factory)
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        for _ in range(40):
+            await pilot.pause()
+            if app._boot_failed:
+                break
+        assert app._boot_failed is True
+
+        for probe in ("/team lop", "/agent aud"):
+            for char in probe:
+                await pilot.press("slash" if char == "/" else ("space" if char == " " else char))
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause()
+            await pilot.pause()
+
+        rendered = " ".join(
+            str(getattr(block, "_text", "") or "") for block in app._transcript_view().children
+        )
+        # The draft is still consumed by the ordinary path (U7-1 holds)...
+        assert editor.text == ""
+        # ...but nothing tells the user to wait for a session that failed.
+        assert "still starting" not in rendered, rendered
+        assert rendered.count("session failed to start — /login") == 2, rendered
+
+
+@pytest.mark.asyncio
+async def test_genuine_still_starting_keeps_its_wording() -> None:
+    """U8-2 must not regress the case the string was written for.
+
+    While the boot worker is genuinely running, "still starting" is true and
+    telling the user to wait is the right advice; only the FAILED state gets the
+    other answer.
+    """
+    release = asyncio.Event()
+
+    async def delayed_factory() -> FakeSession:
+        await release.wait()
+        return FakeSession()
+
+    app = OperatorApp(delayed_factory)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        assert app._boot_failed is False
+        assert app._no_session_notice() == ("session is still starting…", "warning")
+        release.set()
         await pilot.pause()

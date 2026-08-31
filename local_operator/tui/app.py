@@ -5487,10 +5487,41 @@ class OperatorApp(App[None]):
         if not self._session_transition_pending and self._session is not None:
             return ""
         # Same voice as every other picker notice (the `/effort` and `/logout`
-        # rows): lowercase, no period, says why the list is empty. Command word
-        # in the text because `/team` and `/agent` share this row and the user
-        # should not have to guess which registry is still loading.
-        return f"loading {command} roster…" if command in ("agent", "agents") else "loading teams…"
+        # rows): lowercase, no period, says why the list is empty. The registry
+        # is named in the text because `/team` and `/agent` share this row and
+        # the user should not have to guess which one is still loading.
+        #
+        # ONE CONSTANT PER FAMILY, never the typed word (U8-1). Interpolating
+        # `command` here rendered the plural alias as "loading agents roster…",
+        # copy the product would never write, in the row whose whole job is to
+        # reassure the user the roster is coming. Both spellings of each family
+        # are the same list and must read identically.
+        return "loading agent roster…" if command in ("agent", "agents") else "loading teams…"
+
+    def _no_session_notice(self) -> tuple[str, NoticeKind]:
+        """The (text, style) a command answers with when there is no session yet.
+
+        Two DIFFERENT states share ``self._session is None`` and must not share
+        one answer (U8-2). While the boot worker is running, "still starting" is
+        true and telling the user to wait is the right advice. After
+        ``_on_boot_failed``, the app has just printed ``✗ session failed to
+        start: <error>`` one row above, and answering "still starting" beneath
+        it contradicts that line and sends the user off to wait for something
+        that is never arriving — so the failed state names itself and points at
+        the lever that re-opens a session.
+
+        Scoped to the two commands this PR routes into the guard (``/team``,
+        ``/agent``), not applied to the ~15 other sites that share the string:
+        the wording there is pre-existing and app-wide, and rewording all of it
+        is a change to many unrelated commands rather than to this flow. The
+        helper exists so those sites can adopt it later without re-deriving the
+        distinction.
+        """
+        failed: NoticeKind = "error"
+        starting: NoticeKind = "warning"
+        if self._boot_failed:
+            return ("session failed to start — /login to reconfigure or restart lop", failed)
+        return ("session is still starting…", starting)
 
     def _retire_name_list_reserve(self) -> None:
         """Re-derive an open `/team`/`/agent` list after the window it waited on closed.
@@ -5707,7 +5738,8 @@ class OperatorApp(App[None]):
         """
         session = self._session
         if session is None:
-            self._system_notice("session is still starting…", "warning")
+            # U8-2: a DEFINITIVE boot failure must not be reported as "starting".
+            self._system_notice(*self._no_session_notice())
             return
         registry = self._team_registry()
         if registry is None or not hasattr(registry, "list_teams"):
@@ -6011,7 +6043,8 @@ class OperatorApp(App[None]):
         """
         session = self._session
         if session is None:
-            self._system_notice("session is still starting…", "warning")
+            # U8-2: a DEFINITIVE boot failure must not be reported as "starting".
+            self._system_notice(*self._no_session_notice())
             return
         if not arg:
             rows = self._agent_profile_rows()
