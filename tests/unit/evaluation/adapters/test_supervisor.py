@@ -17,6 +17,8 @@ from local_operator.evaluation.adapters.api import (
     AdapterCapabilities,
     AdapterMetadata,
     AdapterSelector,
+    AskUserExchangeParams,
+    AskUserExchangeResult,
     CleanupResult,
     Handshake,
     PythonRuntime,
@@ -111,13 +113,15 @@ def descriptor(tmp_path: Path) -> RescueDescriptor:
     )
 
 
-def observation(task_id: str, episode_id: str, sequence: int) -> Observation:
+def observation(
+    task_id: str, episode_id: str, sequence: int, *, text: str = "state"
+) -> Observation:
     provisional = Observation(
         task_id=task_id,
         episode_id=episode_id,
         sequence=sequence,
         observation_id="provisional",
-        text="state",
+        text=text,
     )
     return provisional.model_copy(update={"observation_id": observation_content_id(provisional)})
 
@@ -125,13 +129,66 @@ def observation(task_id: str, episode_id: str, sequence: int) -> Observation:
 def test_host_verifier_rejects_cross_episode_without_mutating_current(tmp_path: Path) -> None:
     verifier = HostVerifier("task", "episode", tmp_path)
     initial = observation("task", "episode", 0)
-    verifier.accept_observation(initial)
+    verifier.accept_initial(initial)
     with pytest.raises(SupervisionError, match="another task or episode"):
-        verifier.accept_observation(observation("other", "episode", 1))
+        verifier.accept_output(observation("other", "episode", 1))
     assert verifier.current_observation == initial
     with pytest.raises(SupervisionError, match="another task or episode"):
-        verifier.accept_observation(observation("task", "other", 1))
+        verifier.accept_output(observation("task", "other", 1))
     assert verifier.current_observation == initial
+
+
+def test_host_verifier_enforces_initial_next_and_snapshot_modes(tmp_path: Path) -> None:
+    verifier = HostVerifier("task", "episode", tmp_path)
+    with pytest.raises(SupervisionError, match="sequence zero"):
+        verifier.accept_initial(observation("task", "episode", 99))
+    assert verifier.current_observation is None
+    initial = observation("task", "episode", 0)
+    verifier.accept_initial(initial)
+    for sequence in (0, 2, 99):
+        with pytest.raises(SupervisionError, match="exact next"):
+            verifier.accept_output(observation("task", "episode", sequence))
+        assert verifier.current_observation == initial
+    verifier.verify_current_snapshot(initial)
+    with pytest.raises(SupervisionError, match="snapshot differs"):
+        verifier.verify_current_snapshot(observation("task", "episode", 0, text="changed content"))
+    assert verifier.current_observation == initial
+    next_observation = observation("task", "episode", 1)
+    verifier.accept_output(next_observation)
+    assert verifier.current_observation == next_observation
+
+
+def test_ask_exchange_requires_expected_episode_and_preserves_pending_on_error(
+    tmp_path: Path,
+) -> None:
+    verifier = HostVerifier("task", "episode", tmp_path)
+    wrong_begin = AskUserExchangeParams(
+        operation_id="ask-wrong", episode_id="other", ask_id="ask", prompt="Question?"
+    )
+    with pytest.raises(SupervisionError, match="another episode"):
+        verifier.begin_ask(wrong_begin)
+    begin = AskUserExchangeParams(
+        operation_id="ask-begin", episode_id="episode", ask_id="ask", prompt="Question?"
+    )
+    verifier.begin_ask(begin)
+    wrong_finish = AskUserExchangeParams(
+        operation_id="ask-finish-wrong",
+        episode_id="other",
+        ask_id="ask",
+        prompt="Question?",
+        answer="Answer",
+    )
+    result = AskUserExchangeResult(ask_id="ask", accepted=True)
+    with pytest.raises(SupervisionError, match="stale, unsolicited, or mismatched"):
+        verifier.finish_ask(wrong_finish, result)
+    # The failed finish must leave the original exchange outstanding.
+    with pytest.raises(SupervisionError, match="begin once"):
+        verifier.begin_ask(begin.model_copy(update={"operation_id": "again"}))
+    correct_finish = wrong_finish.model_copy(
+        update={"operation_id": "ask-finish", "episode_id": "episode"}
+    )
+    verifier.finish_ask(correct_finish, result)
+    verifier.begin_ask(begin.model_copy(update={"operation_id": "next", "ask_id": "next"}))
 
 
 def test_environment_is_constructed_without_parent_secrets() -> None:

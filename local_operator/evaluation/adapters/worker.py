@@ -19,10 +19,12 @@ from local_operator.evaluation.adapters.api import (
     AdapterSelector,
     AdapterState,
     BeginRescueParams,
+    CleanupParams,
     EvaluationAdapter,
     Handshake,
     HelloParams,
     PythonRuntime,
+    RescueDescriptor,
     canonical_params_digest,
 )
 from local_operator.evaluation.adapters.discovery import (
@@ -82,6 +84,8 @@ class Worker:
         self._adapter: EvaluationAdapter | None = None
         self._selector: AdapterSelector | None = None
         self._handshake: Handshake | None = None
+        self._rescue_descriptor: RescueDescriptor | None = None
+        self._rescue_actions: dict[str, _OperationRecord] = {}
         self._last_id = 0
         self._replay: OrderedDict[int, tuple[AdapterMethod, str, bytes]] = OrderedDict()
         self._operations: dict[str, _OperationRecord] = {}
@@ -192,32 +196,46 @@ class Worker:
                 digest=digest,
             )
             return
+        rescue_action_id: str | None = None
+        if request.method == "cleanup" and self._rescue_descriptor is not None:
+            assert isinstance(params, CleanupParams)
+            rescue_action_id = self._validate_rescue_cleanup(params)
+            previous_action = self._rescue_actions.get(rescue_action_id)
+            if previous_action is not None:
+                if previous_action.params_digest != self._rescue_action_digest(params):
+                    raise RpcProtocolError("rescue action was reused with changed content")
+                self._replay_operation(request, digest, previous_action)
+                return
         try:
             result = await self._dispatch(request.method, params)
             result_type = RESULT_MODELS[request.method]
             if not isinstance(result, result_type):
                 raise TypeError("adapter returned the wrong closed result")
         except asyncio.CancelledError:
-            self._write_error(
+            response = self._write_error(
                 request,
                 "cancelled",
                 "adapter call was cancelled",
                 digest=digest,
                 operation_id=operation_id,
             )
+            if rescue_action_id is not None:
+                self._record_rescue_action(rescue_action_id, params, request.method, response)
             return
         except RpcProtocolError:
             raise
         except (AdapterDiscoveryError, Exception):
             # Adapter exceptions may contain reprs, paths, environment values, or
             # tracebacks.  The wire exposes only a closed code and fixed text.
-            self._write_error(
+            response = self._write_error(
                 request,
                 "adapter_error",
                 "adapter operation failed",
                 digest=digest,
                 operation_id=operation_id,
             )
+            if rescue_action_id is not None:
+                self._record_rescue_action(rescue_action_id, params, request.method, response)
             return
         self._state = METHOD_NEXT_STATE[request.method]
         response = RpcResponse(
@@ -227,6 +245,55 @@ class Worker:
             result=result.model_dump(mode="json"),
         )
         self._send_response(request, digest, response, operation_id=operation_id)
+        if rescue_action_id is not None:
+            self._record_rescue_action(rescue_action_id, params, request.method, response)
+
+    def _record_rescue_action(
+        self,
+        action_id: str,
+        params: ProtocolModel,
+        method: AdapterMethod,
+        response: RpcResponse,
+    ) -> None:
+        assert isinstance(params, CleanupParams)
+        self._rescue_actions[action_id] = _OperationRecord(
+            method=method,
+            params_digest=self._rescue_action_digest(params),
+            result=response.result,
+            error=response.error,
+        )
+
+    def _validate_rescue_cleanup(self, params: CleanupParams) -> str:
+        descriptor = self._rescue_descriptor
+        assert descriptor is not None
+        if (
+            params.cleanup_plan.episode_id != descriptor.episode_id
+            or params.cleanup_plan != descriptor.cleanup_plan
+            or params.cleanup_plan.cleanup_plan_id != descriptor.cleanup_plan.cleanup_plan_id
+            or len(params.action_ids) != 1
+        ):
+            raise RpcProtocolError("cleanup differs from the pinned rescue plan")
+        action_id = params.action_ids[0]
+        expected = next(
+            (action for action in descriptor.cleanup_plan.actions if action.action_id == action_id),
+            None,
+        )
+        actual = next(
+            (action for action in params.cleanup_plan.actions if action.action_id == action_id),
+            None,
+        )
+        if expected is None or actual != expected:
+            raise RpcProtocolError("cleanup action differs from the pinned rescue action")
+        return action_id
+
+    @staticmethod
+    def _rescue_action_digest(params: CleanupParams) -> str:
+        # Operation IDs are transport idempotency keys; rescue action identity is
+        # independently pinned so a new key cannot repeat the same effect.
+        return canonical_digest(
+            "adapter-rescue-action-call-v1",
+            params.model_dump(mode="json", exclude={"operation_id"}),
+        )
 
     async def _dispatch(self, method: AdapterMethod, params: ProtocolModel) -> ProtocolModel:
         if method == "hello":
@@ -255,6 +322,8 @@ class Worker:
                 raise RpcProtocolError("rescue pins differ from the exact handshake")
             # This transition grants cleanup routing only. Adapter code is not
             # invoked, so it cannot create resources or resolve persisted refs.
+            self._rescue_descriptor = params.descriptor
+            self._rescue_actions.clear()
             return AckResult()
         assert self._adapter is not None
         handler = getattr(self._adapter, method)
@@ -269,10 +338,11 @@ class Worker:
         *,
         digest: str,
         operation_id: str | None = None,
-    ) -> None:
+    ) -> RpcResponse:
         error = RpcError.model_validate({"code": code, "message": message}, strict=True)
         response = RpcResponse(jsonrpc="2.0", id=request.id, method=request.method, error=error)
         self._send_response(request, digest, response, operation_id=operation_id)
+        return response
 
     def _send_response(
         self,

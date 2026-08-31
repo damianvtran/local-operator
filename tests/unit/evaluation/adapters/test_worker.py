@@ -21,11 +21,13 @@ from local_operator.evaluation.adapters.api import (
     HelloParams,
     PrepareParams,
     PrepareResult,
+    PythonRuntime,
     RescueDescriptor,
 )
 from local_operator.evaluation.adapters.rpc import (
     IncrementalReader,
     IncrementalWriter,
+    RpcProtocolError,
     RpcRequest,
     RpcResponse,
     canonical_line,
@@ -366,12 +368,14 @@ async def test_real_worker_rescue_invokes_each_cleanup_once_and_blocks_normal_fl
             ),
         )
         assert response.result == AckResult().model_dump(mode="json")
+        first_cleanup: CleanupParams | None = None
         for request_id, action in enumerate(cleanup_plan.actions, start=3):
             params = CleanupParams(
                 operation_id=f"cleanup-{action.action_id}",
                 cleanup_plan=cleanup_plan,
                 action_ids=(action.action_id,),
             )
+            first_cleanup = first_cleanup or params
             response = await exchange(
                 writer,
                 reader,
@@ -383,6 +387,20 @@ async def test_real_worker_rescue_invokes_each_cleanup_once_and_blocks_normal_fl
                 ),
             )
             assert response.error is None
+        assert first_cleanup is not None
+        duplicate = first_cleanup.model_copy(update={"operation_id": "second-key-same-action"})
+        response = await exchange(
+            writer,
+            reader,
+            RpcRequest(
+                jsonrpc="2.0",
+                id=5,
+                method="cleanup",
+                params=duplicate.model_dump(mode="json"),
+            ),
+        )
+        assert response.error is None
+        assert adapter.cleanup_calls == ["one", "two"]
         forbidden = PrepareParams(
             operation_id="forbidden", episode_id="episode", secret_refs=(), infra_values=()
         )
@@ -391,7 +409,7 @@ async def test_real_worker_rescue_invokes_each_cleanup_once_and_blocks_normal_fl
             reader,
             RpcRequest(
                 jsonrpc="2.0",
-                id=5,
+                id=6,
                 method="prepare",
                 params=forbidden.model_dump(mode="json"),
             ),
@@ -402,6 +420,79 @@ async def test_real_worker_rescue_invokes_each_cleanup_once_and_blocks_normal_fl
         os.close(request_write)
         assert await asyncio.wait_for(task, 1) == 0
         for fd in (request_read, response_read, response_write):
+            os.close(fd)
+
+
+def test_rescue_cleanup_rejects_forged_episode_and_action_without_losing_pin(
+    tmp_path: Path,
+) -> None:
+    selected = rescue_selector(tmp_path)
+    cleanup_plan = CleanupPlan(
+        episode_id="episode",
+        actions=(
+            CleanupAction(
+                action_id="one",
+                kind="release_instance",
+                resource_ref="resource-one",
+                timeout_ms=100,
+                max_attempts=1,
+            ),
+        ),
+    )
+    pinned_handshake = Handshake(
+        selector=selected,
+        metadata=rescue_metadata(),
+        python=PythonRuntime.current(),
+        workspace_digest="c" * 64,
+        selected_route="computer",
+    )
+    descriptor = RescueDescriptor(
+        schema_version="1.0",
+        selector=selected,
+        handshake=pinned_handshake,
+        episode_id="episode",
+        cleanup_plan=cleanup_plan,
+        secret_refs=(),
+        infra_values=(),
+        artifact_root=str(tmp_path),
+    )
+    request_read, request_write = os.pipe()
+    response_read, response_write = os.pipe()
+    worker = Worker(request_read, response_write)
+    worker._rescue_descriptor = descriptor
+    try:
+        forged_episode = CleanupPlan(episode_id="episode-b", actions=cleanup_plan.actions)
+        with pytest.raises(RpcProtocolError, match="pinned rescue plan"):
+            worker._validate_rescue_cleanup(
+                CleanupParams(
+                    operation_id="forged-episode",
+                    cleanup_plan=forged_episode,
+                    action_ids=("one",),
+                )
+            )
+        modified_action = CleanupPlan(
+            episode_id="episode",
+            actions=(
+                CleanupAction(
+                    action_id="one",
+                    kind="release_instance",
+                    resource_ref="other-resource",
+                    timeout_ms=100,
+                    max_attempts=1,
+                ),
+            ),
+        )
+        with pytest.raises(RpcProtocolError, match="pinned rescue plan"):
+            worker._validate_rescue_cleanup(
+                CleanupParams(
+                    operation_id="forged-action",
+                    cleanup_plan=modified_action,
+                    action_ids=("one",),
+                )
+            )
+        assert worker._rescue_descriptor == descriptor
+    finally:
+        for fd in (request_read, request_write, response_read, response_write):
             os.close(fd)
 
 

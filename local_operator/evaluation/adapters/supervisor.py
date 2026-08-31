@@ -411,7 +411,28 @@ class HostVerifier:
         self._outstanding_ask: str | None = None
         self._score_ids: set[str] = set()
 
-    def accept_observation(self, observation: Any) -> None:
+    def accept_initial(self, observation: Any) -> None:
+        if self.current_observation is not None or observation.sequence != 0:
+            raise SupervisionError("initial adapter observation must be sequence zero")
+        self._validate_observation_content(observation)
+        self._sequences.add(observation.sequence)
+        self.current_observation = observation
+
+    def accept_output(self, observation: Any) -> None:
+        current = self.current_observation
+        if current is None or observation.sequence != current.sequence + 1:
+            raise SupervisionError("adapter output must be the exact next sequence")
+        self._validate_observation_content(observation)
+        self._sequences.add(observation.sequence)
+        self.current_observation = observation
+
+    def verify_current_snapshot(self, observation: Any) -> None:
+        current = self.current_observation
+        if current is None or observation != current:
+            raise SupervisionError("adapter snapshot differs from the current observation")
+        self._validate_observation_content(observation)
+
+    def _validate_observation_content(self, observation: Any) -> None:
         if (observation.task_id, observation.episode_id) != (
             self.task_id,
             self.episode_id,
@@ -420,10 +441,6 @@ class HostVerifier:
         validate_observation(observation)
         for frame in observation.frames:
             verify_artifact(self.artifact_root, frame.artifact)
-        if observation.sequence in self._sequences:
-            raise SupervisionError("adapter observation sequence is duplicated")
-        self._sequences.add(observation.sequence)
-        self.current_observation = observation
 
     def accept_execution(self, params: ExecuteParams, result: ExecuteResult) -> None:
         if self.current_observation is None:
@@ -434,16 +451,19 @@ class HostVerifier:
             self.current_observation,
             seen_sequences=self._sequences,
         )
-        self.accept_observation(result.observation)
+        self.accept_output(result.observation)
 
     def begin_ask(self, params: AskUserExchangeParams) -> None:
+        if params.episode_id != self.episode_id:
+            raise SupervisionError("ask-user exchange belongs to another episode")
         if self._outstanding_ask is not None or params.answer is not None:
             raise SupervisionError("ask-user exchange must begin once without an answer")
         self._outstanding_ask = params.ask_id
 
     def finish_ask(self, params: AskUserExchangeParams, result: AskUserExchangeResult) -> None:
         if (
-            self._outstanding_ask != params.ask_id
+            params.episode_id != self.episode_id
+            or self._outstanding_ask != params.ask_id
             or result.ask_id != params.ask_id
             or params.answer is None
         ):
