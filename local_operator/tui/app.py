@@ -2674,6 +2674,15 @@ class OperatorApp(App[None]):
                 self._spend_text(cost) if cost is not None else ("$—" if billed_unknown else None)
             ),
             conversation_name=str(getattr(state, "conversation_title", "") or ""),
+            # The fork tag follows the name, not the band's memory: a snapshot
+            # arrives with EVERY name change, and `StatusLine.update` treats a
+            # missing `forked=` as leave-alone — so a rename that cleared the
+            # session flag could not heal the tab here without this push, and
+            # the live window would keep saying `[fork]` after `/resume`'s
+            # picker had already stopped (review round 1, R1). Read defensively:
+            # an older owner's snapshot may predate the field, and "not a fork"
+            # is the answer that leaves such a host exactly as it was.
+            forked=bool(getattr(state, "conversation_title_forked", False)),
             streaming=bool(getattr(state, "streaming", False)),
             subagents=sum(1 for j in task_jobs if j.status == "running" and not j.queued),
             jobs=sum(1 for j in bash_jobs if j.status == "running" and not j.queued),
@@ -10083,7 +10092,19 @@ class OperatorApp(App[None]):
             # One call paints the band AND pushes the terminal title (see
             # `StatusLine._sync_terminal_title`), so neither surface can lag the
             # other by a frame.
-            self._status.update(conversation_name=stored)
+            #
+            # The fork tag is re-read from the session in the SAME call, for the
+            # reason `_store_title` does: `set_conversation_name` above has just
+            # cleared it, and `StatusLine.update` treats a missing `forked=` as
+            # leave-alone — so without this push the tab would keep prefixing
+            # `[fork]` onto the name the user just typed, and the live window and
+            # the `/resume` picker (which clears from disk) would disagree about
+            # the same session (review round 1, R1). `getattr` because a reduced
+            # facade need not expose the property, same as `_adopt_session`.
+            self._status.update(
+                conversation_name=stored,
+                forked=bool(getattr(session, "wears_inherited_title", False)),
+            )
         self._notify_mobile_title(stored)
         # `stored`, not `arg`: the store collapses whitespace and caps the length
         # (`MAX_TITLE_CHARS`), and the receipt's whole job is to show the title

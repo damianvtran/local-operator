@@ -22,8 +22,10 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from typing import cast
 
 import pytest
+from textual.widgets import Static
 
 from local_operator.fork import (
     BOOT_PROMPT_NAME,
@@ -788,10 +790,15 @@ class TestTheForkInheritsItsParentsCacheKey:
     Nothing in the suite covered this before, and its failure is entirely
     silent: a fork that loses the key still works, still answers, and merely
     pays full price for a prefix that was already warm. Measured live on
-    ``openai/gpt-5.4`` over a real Responses endpoint, the inherited key read
-    the parent's prefix in 16/16 trials while a non-matching key read in 3/8 —
-    so losing it is a real regression, not a theoretical one. The evidence is
-    in ``docs/evidence/fork-cache/``.
+    ``openai/gpt-5.4`` over a real Responses endpoint: the inherited key read
+    the parent's prefix in every trial of every run (10/10 in the canonical
+    N=10, and never a miss across four runs and a dozen probes), so losing it
+    is a real exposure. What that endpoint could NOT establish is that the key
+    is NECESSARY — the control arms are unstable there (a wrong-key repeat
+    ranged 3/8 to 10/10 across runs), because the underlying cache is
+    content-addressed and the key is a routing hint, not a lock. The honest
+    claim is sufficiency-with-never-a-cost, which is what shipping the
+    inheritance needs; the evidence is in ``docs/evidence/fork-cache/``.
 
     Two distinct failure modes are pinned:
 
@@ -1128,6 +1135,50 @@ class TestTheWindowTitleNamesTheFork:
             "lo \u203a Refactor the loader"
         )
 
+    def test_a_live_rename_clears_the_tab_mark(self, tmp_path: Path) -> None:
+        """R1. `set_conversation_name` clears the session flag, but the TAB is
+        painted by `StatusLine`, whose `update` treats a missing `forked=` as
+        leave-alone — so a `_cmd_rename` that pushed only the name left the
+        band's stale `True` in force and the tab kept prefixing `[fork]` onto
+        the name the user just typed. The disk picker clears from
+        `title.json`'s mtime, so the live window and `/resume` disagreed about
+        the same session.
+
+        Driven through the REAL `_cmd_rename` — not through
+        `set_conversation_name` alone, which is the gap the prior test left —
+        with a REAL `Session` over a REAL fork directory and a REAL
+        `TerminalTitle` writer, so the assertion is the rendered OSC string.
+        """
+        from local_operator.tui.app import OperatorApp
+
+        _seed_named_parent(tmp_path, "Refactor the loader")
+        fork_id = fork_session(tmp_path, PARENT_ID)
+        fork = _build_session(tmp_path / "sessions" / fork_id)
+        assert fork.wears_inherited_title is True
+
+        app = OperatorApp.__new__(OperatorApp)
+        app._session = fork
+        app._provisional_name = ""
+        app._status = _titled_band(forked=True)
+        # `_cmd_rename` ends with a best-effort phone push; a `None` handle is
+        # the no-phone state, which is what this double wants.
+        app._mobile_handle = None
+        notices: list[str] = []
+
+        def _notice(body: str, kind: str = "info") -> None:
+            # Matches the ``NoticeFn`` protocol (``kind`` is part of its shape);
+            # only the body is asserted here.
+            notices.append(body)
+
+        OperatorApp._cmd_rename(app, "Streaming parser attempt", _notice)
+
+        written = _title_written(app._status)
+        assert fork.wears_inherited_title is False
+        assert (
+            "[fork]" not in written
+        ), f"the tab still announces a borrowed title after /rename: {written!r}"
+        assert written == "lo \u203a Streaming parser attempt"
+
 
 class TestAPendingForkIsVisibleAndRevocable:
     """U6. The deferred acknowledgement scrolls away behind a long tool run,
@@ -1218,11 +1269,18 @@ def _titled_band(*, forked: bool = False, name: str = ""):
     """A ``StatusLine`` wired to a REAL ``TerminalTitle`` over a capture sink."""
     from local_operator.tui.terminal_title import TerminalTitle
     from local_operator.tui.widgets.status_line import StatusLine
+    from tests.unit.tui.test_status_line import FakeDock
 
     band = _band()
     band._conversation_name = name
     band._cwd = "/tmp/lop-forkux"
     band._forked = forked
+    # `update()` repaints through the dock (``FakeDock`` mirrors the three
+    # things StatusLine asks of its widget; `cast` because the double stands
+    # in for a `Static` exactly as test_status_line's own `_dock` does), so a
+    # caller driving the REAL command path — not just `_sync_terminal_title`
+    # by hand — works too.
+    band._dock = cast(Static, FakeDock())
     # A real writer over a sink that goes nowhere: what is asserted is the
     # rendered title (``TerminalTitle.current``), and the sink only keeps the
     # OSC escape out of the test's stdout.

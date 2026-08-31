@@ -584,6 +584,14 @@ class FrontendSessionState(BaseModel):
     cwd: str = ""
     conversation_title: str = ""
     conversation_title_user_set: bool = False
+    #: True while the session is a FORK still wearing its parent's title. The
+    #: band/tab tag rides on the SAME refresh as the name so a rename that
+    #: clears the session flag reaches every frontend in the same frame —
+    #: without it a follower's snapshot could not heal a stale `[fork]` tab
+    #: (review round 1, R1). `extra="allow"` keeps older readers tolerant of
+    #: the new field, and `getattr` at the source keeps a reduced facade
+    #: (embedded SDK, test double) from failing the whole refresh.
+    conversation_title_forked: bool = False
     goal: str = ""
     active_agent: str = ""
     active_team: str = ""
@@ -1144,6 +1152,7 @@ class FrontendStateStore:
             cwd=str(getattr(session, "cwd", "") or getattr(session, "_cwd", "") or os.getcwd()),
             conversation_title=title,
             conversation_title_user_set=bool(getattr(title_state, "user_set", False)),
+            conversation_title_forked=bool(getattr(session, "wears_inherited_title", False)),
             goal=str(getattr(session, "goal", "") or ""),
             active_agent=str(getattr(session, "active_agent", "") or ""),
             active_team=str(getattr(session, "active_team_name", "") or ""),

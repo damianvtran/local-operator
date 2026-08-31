@@ -156,7 +156,16 @@ ICON_FORK_PENDING = "⎇"
 #: glyph: unlike the one-cell approval alarm this state is temporary and
 #: unfamiliar, and a lone unexplained mark appearing mid-turn is a question
 #: rather than an answer. "forking" is the same verb the receipt used.
-FORK_PENDING_TEXT = "forking"
+#:
+#: The `· esc` suffix is the receipt's affordance made durable (UX round 1,
+#: U10): the dim acknowledgement scrolls away behind a long tool run, and
+#: after it goes the band was the ONLY thing still saying a fork is armed —
+#: naming the state without naming the way out. A user who armed this ten
+#: minutes ago should not have to remember a parenthetical that is no longer
+#: on screen, or discover Ctrl+C by reflex and abort the turn they still
+#: want. Four cells, spent on a rung the ladder sheds late (the segment
+#: survives at 60 cols), same vocabulary as the receipt.
+FORK_PENDING_TEXT = "forking \u00b7 esc"
 
 #: The name's cell BUDGET: the most the trailing segment may take, and the
 #: narrowest it is worth showing at when the row is too tight for all of it.
