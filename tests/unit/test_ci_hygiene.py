@@ -187,14 +187,20 @@ def test_pipeline_does_not_swallow_a_126_from_a_broken_console_script() -> None:
     opposite of a guard. It builds a 126-exiting fake and shows that
     (a) a pipeline swallows it and (b) `python -m` does not consult
     that shebang at all.
+
+    The fake is invoked by absolute path, not via PATH lookup. Linux
+    bash/dash continue searching PATH after a bad shebang, so a fake
+    named `flake8` on PATH is skipped and the real flake8 in the venv
+    runs (rc=0) — which is how this assertion passed locally on macOS
+    (no PATH continuation) and then failed on CI 3.12 by detecting it
+    was not exercising the defect. An absolute path cannot be skipped.
     """
     with tempfile.TemporaryDirectory() as tmp:
-        # flake8, not black: black is deliberately absent from the dev
-        # extra (the documented gate is `uvx`), so `python -m black`
-        # would fail on CI for a reason that has nothing to do with
-        # shebangs. flake8 is in the extra and is one of the three
-        # console scripts the issue named.
-        fake = Path(tmp) / "flake8"
+        # Unique name, not `flake8`: even with an absolute-path
+        # invocation we must not share a name with a real console
+        # script, because a future edit that switches back to PATH
+        # lookup would silently start testing the real flake8 again.
+        fake = Path(tmp) / "lop-stale-script"
         # A shebang pointing at a path that does not exist is how the
         # real console scripts fail after a worktree is deleted. The
         # kernel returns 126 ("bad interpreter") before the script body
@@ -202,9 +208,24 @@ def test_pipeline_does_not_swallow_a_126_from_a_broken_console_script() -> None:
         fake.write_text("#!/this/interpreter/does/not/exist\n")
         fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
 
+        # Direct execve of a missing-interpreter shebang raises
+        # FileNotFoundError; a gate script sees the *shell*
+        # translation, which is 126. Drive bash explicitly so we are
+        # not at the mercy of `/bin/sh` being dash vs bash.
+        bash = ["/bin/bash", "-c"]
+        direct = subprocess.run(
+            [*bash, f"{fake} --version"],
+            capture_output=True,
+            text=True,
+        )
+        assert direct.returncode == 126, (
+            "the fake did not fail with 126 at its own boundary "
+            f"(rc={direct.returncode}, stderr={direct.stderr!r}); "
+            "the rest of this test is not exercising the defect"
+        )
+
         piped = subprocess.run(
-            f"{fake} --version | tail -1",
-            shell=True,
+            [*bash, f"{fake} --version | tail -1"],
             capture_output=True,
             text=True,
         )
@@ -215,27 +236,10 @@ def test_pipeline_does_not_swallow_a_126_from_a_broken_console_script() -> None:
             "rewriting, but the Makefile still must not pipe."
         )
 
-        # 126 is a *shell* translation of ENOENT on the shebang
-        # interpreter. Direct execve raises FileNotFoundError, which
-        # is not the rc a gate script sees. Invoke through a shell
-        # the same way `make` / a copied command line would.
+        # `python -m` looks up the module on sys.path; it never execs
+        # a console-script shebang. Pointing PATH at the fake must
+        # therefore not change the module invocation's rc.
         env = {**os.environ, "PATH": tmp + os.pathsep + os.environ.get("PATH", "")}
-        via_path = subprocess.run(
-            "flake8 --version",
-            shell=True,
-            env=env,
-            capture_output=True,
-            text=True,
-        )
-        # 126 is bash-on-macOS for a bad shebang; Linux bash has been
-        # seen to report 127 (command not found) for the same ENOENT.
-        # Either is a failed gate. The defect is that the pipeline
-        # above reported 0 regardless.
-        assert via_path.returncode != 0, (
-            "the fake console script succeeded when found on PATH "
-            f"(rc={via_path.returncode}); the rest of this test is "
-            "not exercising the defect"
-        )
         via_module = subprocess.run(
             [sys.executable, "-m", "flake8", "--version"],
             env=env,
