@@ -1247,6 +1247,10 @@ def _band():
     band._context_window = 0
     band._subagents = 0
     band._jobs = 0
+    # `_render` reads this even when the deferred-history segment is empty
+    # (0 = absent). The helper predates that rung, so it has to seed the
+    # field the same way it seeds `_jobs` — `__new__` skips `__init__`.
+    band._deferred = 0
     band._streaming = False
     band._cost = ""
     band._conversation_name = ""
