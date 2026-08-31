@@ -3423,7 +3423,6 @@ class OperatorApp(App[None]):
         # into a short session would otherwise page the OLD conversation onto
         # the new transcript the first time the reader scrolled up.
         self._resume_pending_head = []
-        self._sync_deferred_segment()
         self._resume_results = {}
         self._resume_head_notice = None
         self._resume_mounted_ids.clear()
@@ -3514,10 +3513,6 @@ class OperatorApp(App[None]):
                 # result that renders (or already rendered) in the tail.
                 self._resume_results = results
                 self._resume_pending_head = deferred
-        # The band's deferred count is the at-rest signal that the transcript
-        # is bounded (UX1, U3) — pushed here so it is correct from the FIRST
-        # frame, not from the next band tick.
-        self._sync_deferred_segment()
         transcript = self._transcript_view()
 
         appended = bool(settled_results)
@@ -3798,9 +3793,6 @@ class OperatorApp(App[None]):
         # history.
         start = _resume_tail_start(head, RESUME_PAGE_MESSAGES)
         page, self._resume_pending_head = head[start:], head[:start]
-        # The count the band shows shrinks with every page mounted; pushed
-        # synchronously so the figure cannot lag the gesture that changed it.
-        self._sync_deferred_segment()
         # Dedupe by stable ID, never by position: the tail was sliced off
         # the same list, so an overlap should be impossible — but a message
         # painted twice is a corrupted transcript the user cannot correct,
@@ -4535,10 +4527,6 @@ class OperatorApp(App[None]):
             # dead conversation's figure would stay on screen until the new one's
             # first turn ended.
             cost="",
-            # Same contract for the deferred count: it described the replaced
-            # conversation's bounded head, which is gone with the transcript.
-            # The new session's resume replay re-pushes it if it has one.
-            deferred=0,
         )
         return (*carried_spend, was_floor)
 
@@ -9059,10 +9047,6 @@ class OperatorApp(App[None]):
         # longer holds. The model's context is untouched by any of this, which
         # is what /clear already promises.
         self._resume_pending_head = []
-        # The band must not keep advertising older messages that no longer
-        # exist — `/clear` empties the screen, and a stale count beside an
-        # empty transcript would claim history the user just erased.
-        self._sync_deferred_segment()
         self._resume_results = {}
         self._resume_head_notice = None
         self._resume_mounted_ids.clear()
@@ -13155,22 +13139,6 @@ class OperatorApp(App[None]):
     def action_scroll_todos_up(self) -> None:
         """``ctrl+up`` — page the expanded todo overflow toward the start (U2)."""
         self._scroll_todos(down=False)
-
-    def _sync_deferred_segment(self) -> None:
-        """Mirror the deferred-head size into the status band (UX1, U3).
-
-        The band is the only chrome visible at REST — the head notice lives
-        four screens above the viewport, so without this nothing at first
-        paint says the transcript is bounded and the failure mode the notice
-        exists for ("a user believing history was LOST") is answered only
-        after scrolling. Called at every point the pending head changes size
-        or empties: the initial split, each page mount, `/clear`, and a fresh
-        resume resetting an old head. Tolerates a not-yet-constructed band,
-        which is the state during early boot when a resume replays first.
-        """
-        if self._status is None:
-            return
-        self._status.update(deferred=len(self._resume_pending_head))
 
     def action_transcript_home(self) -> None:
         """``ctrl+home`` — take the transcript to its oldest row (UX1, U2).
