@@ -280,9 +280,7 @@ async def test_summaries_invalidation_forces_rescan(tmp_path, monkeypatch) -> No
 
 
 @pytest.mark.asyncio
-async def test_streaming_outranks_unseen_matching_the_render_ladder(
-    tmp_path, monkeypatch
-) -> None:
+async def test_streaming_outranks_unseen_matching_the_render_ladder(tmp_path, monkeypatch) -> None:
     """The sort ladder must match the render ladder (A14, and D5's substance).
 
     The client renders NEEDS DECISION > WORKING > UNREAD > IDLE and suppresses
@@ -351,9 +349,9 @@ async def test_streaming_outranks_unseen_matching_the_render_ladder(
     # Same section, so the ladder — not the section term — decides.
     assert by_id["unread-live"]["section"] == by_id["streaming-live"]["section"]
     ordered = [row["session_id"] for row in rows]
-    assert ordered.index("streaming-live") < ordered.index("unread-live"), (
-        "a streaming row must outrank an unread one, matching the render ladder"
-    )
+    assert ordered.index("streaming-live") < ordered.index(
+        "unread-live"
+    ), "a streaming row must outrank an unread one, matching the render ladder"
 
 
 @pytest.mark.asyncio
@@ -792,9 +790,9 @@ def test_frame_measurement_gate_never_lets_an_oversized_frame_through() -> None:
         if not degraded:
             # The gate vouched for this frame without measuring it, so the
             # claim it made must be true.
-            assert real <= PROJECTION_FRAME_SOFT_CAP_BYTES, (
-                f"measurement gate passed a {real}-byte frame as undegraded"
-            )
+            assert (
+                real <= PROJECTION_FRAME_SOFT_CAP_BYTES
+            ), f"measurement gate passed a {real}-byte frame as undegraded"
 
 
 def test_frame_cap_bounds_a_deep_roster_carrying_todos() -> None:

@@ -430,9 +430,7 @@ def cap_projection_frame(
         for phase in row.get("todos") or []:
             for item in phase.get("items") or []:
                 item["text"] = _compact(str(item.get("text") or ""), FRAME_CAP_TODO_TEXT_CHARS)
-                item["reason"] = _compact(
-                    str(item.get("reason") or ""), FRAME_CAP_TODO_TEXT_CHARS
-                )
+                item["reason"] = _compact(str(item.get("reason") or ""), FRAME_CAP_TODO_TEXT_CHARS)
     if _frame_bytes(data) <= cap_bytes:
         return data, True
     for row in data.get("subagents") or []:
