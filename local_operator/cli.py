@@ -1130,7 +1130,15 @@ def _resolve_peer_target(
     ``send`` tool resolves targets identically."""
     from local_operator.mobile.peer_send import resolve_peer_target
 
-    return resolve_peer_target(target=args.target, pid=args.pid, session=args.session)
+    # The flag grammar is passed in so the CLI's user-visible error keeps saying
+    # `--pid` / `--session`, exactly as it did before the extraction.
+    return resolve_peer_target(
+        target=args.target,
+        pid=args.pid,
+        session=args.session,
+        pid_hint="--pid",
+        session_hint="--session",
+    )
 
 
 def send_command(args: argparse.Namespace) -> int:

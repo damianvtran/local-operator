@@ -20,6 +20,7 @@ on purpose: it pulls the registry and config path only, never the heavyweight
 from __future__ import annotations
 
 import os
+import subprocess
 from typing import Any
 
 from local_operator.mobile import registry
@@ -37,6 +38,8 @@ def resolve_peer_target(
     target: str | None = None,
     pid: int | None = None,
     session: str | None = None,
+    pid_hint: str = "an exact pid",
+    session_hint: str = "a session id",
 ) -> "tuple[Any | None, list[Any], str]":
     """Resolve a peer-send target to one live :class:`SessionRecord`.
 
@@ -78,10 +81,16 @@ def resolve_peer_target(
 
     needle_source = (target or "").strip()
     if not needle_source:
-        # Worded for BOTH callers: the CLI passes a pid via ``--pid`` and the
-        # tool via its ``pid`` parameter, so the hint names the concepts, not
-        # either caller's flag grammar.
-        return None, [], "no target given (pass a name/substring, an exact pid, or a session id)"
+        # The hints are the CALLER's own grammar: `lop send` passes `--pid` /
+        # `--session` and prints the string a user can retype, while the tool
+        # passes its parameter names. Parameterised rather than fixed because
+        # the CLI's wording is user-visible and must not drift as a side effect
+        # of sharing this code (review round 1, MINOR-2).
+        return (
+            None,
+            [],
+            f"no target given (pass a name/substring, {pid_hint}, or {session_hint})",
+        )
 
     needle = needle_source.lower()
     matches: list[Any] = []
@@ -127,14 +136,20 @@ def candidate_lines(
 ) -> "list[str]":
     """One disambiguation line per ambiguous candidate.
 
-    ``prefix`` names the addressing knob in the caller's own grammar: the CLI
-    surfaces it as the ``--pid`` flag, the tool as the ``pid`` parameter. The row
-    content (pid, name, model) is identical so both read the same registry truth.
+    ``prefix`` names the addressing knob in the caller's own grammar, and it
+    carries its own separator: the CLI wants the flag form ``--pid 48213`` (a
+    space, so it can be retyped at a shell) and the tool wants the parameter
+    form ``pid=48213`` (no space, so a model can copy it into an argument). The
+    row content (pid, name, model) is identical so both read the same registry
+    truth.
     """
     lines: list[str] = []
+    # A prefix that already ends in its own separator (``pid=``) is joined
+    # tight; a bare flag name takes the space a shell command needs.
+    gap = "" if prefix.endswith("=") else " "
     for rec in candidates:
         name = rec.conversation_name or rec.session_id
-        lines.append(f"{indent}{prefix} {rec.pid}  {name}  ({rec.model_label})")
+        lines.append(f"{indent}{prefix}{gap}{rec.pid}  {name}  ({rec.model_label})")
     return lines
 
 
@@ -153,35 +168,137 @@ def validate_peer_body(text: str) -> "str | None":
     return None
 
 
+#: How far up the process tree to look for the owning session. `lop send` is
+#: USUALLY a direct child of the TUI, but not always: run from a subagent's
+#: bash tool, through a shell wrapper, under nohup, or after a reparent, the
+#: session is a grandparent or higher (and a reparented process's ppid is 1).
+#: Bounded so a pathological tree cannot turn identity lookup into a walk, and
+#: because a session more than a few hops up is not plausibly the sender.
+_ANCESTRY_MAX_HOPS = 8
+
+
+def _parent_pid(pid: int) -> "int | None":
+    """The parent of ``pid``, or ``None`` when it cannot be determined.
+
+    Uses ``ps`` because it is the one answer available on both macOS and Linux
+    without a dependency; ``/proc`` does not exist on macOS and ``psutil`` is not
+    a hard requirement of this package. Every failure mode (no such process, a
+    ``ps`` that is missing or slow, unparseable output) degrades to ``None``,
+    which simply ends the walk — identity is advisory and must never block a
+    send.
+    """
+    if pid <= 1:
+        return None
+    try:
+        out = subprocess.run(
+            ["ps", "-o", "ppid=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    text = out.stdout.strip()
+    if not text:
+        return None
+    try:
+        parent = int(text.split()[0])
+    except (ValueError, IndexError):
+        return None
+    return parent if parent > 0 else None
+
+
+def _record_for_pid(pid: int) -> "Any | None":
+    """The live registry record published by ``pid``, or ``None``."""
+    try:
+        for record, _state in registry.scan(config_dir()):
+            if record.pid == pid:
+                return record
+    except OSError:
+        # A scan failure never blocks a send: the message still delivers, it is
+        # just less labelled.
+        return None
+    return None
+
+
+def _identity_from_record(pid: int, record: "Any") -> "dict[str, Any]":
+    """The advisory sender dict for one registry record."""
+    return {
+        "pid": pid,
+        "session_id": record.session_id,
+        "conversation_name": record.conversation_name,
+        "model_label": record.model_label,
+        "cwd": record.cwd,
+    }
+
+
 def peer_sender_identity(lookup_pid: int) -> "dict[str, Any]":
     """Best-effort identity of the sending session for the peer indicator.
 
     Looks ``lookup_pid`` up in the registry and copies its conversation/model/
-    session id so the target's indicator can name the sender honestly. When the
-    record cannot be found we still carry the pid — the identity is advisory,
-    never load-bearing for delivery.
+    session id so the target's indicator can name the sender honestly. When no
+    record is found the process ANCESTRY is walked upward (bounded by
+    :data:`_ANCESTRY_MAX_HOPS`, stopping at pid 1) and the first ancestor that
+    published a record wins — the sender pid reported is then that ancestor's,
+    because the pid on the card must name the session the reader can go and
+    talk to, not the transient shell in between.
 
-    The pid to look up is the CALLER's decision because the two entry points run
-    in different processes relative to the session: ``lop send`` is a short-lived
-    CHILD of the TUI that spawned it, so the session is ``os.getppid()`` there,
-    while the in-session ``send`` tool runs INSIDE the session process, so the
-    session is ``os.getpid()``. This function is pid-agnostic so both stay honest.
+    Why the walk: testing only the immediate parent made identity fragile in
+    exactly the cases that matter. ``lop send`` invoked from a subagent's bash
+    tool, through a shell wrapper, under ``nohup``, or after a reparent has a
+    ppid that is not the session — frequently pid 1 — so the lookup missed and
+    the card rendered ``peer message from (pid 1)``: no name, no model, nothing
+    to follow in a busy transcript.
+
+    When nothing is found we still carry the original pid; the identity is
+    advisory, never load-bearing for delivery.
+
+    The pid to start from is the CALLER's decision because the two entry points
+    run in different processes relative to the session: ``lop send`` is a
+    short-lived CHILD of the TUI, so the CLI starts at ``os.getppid()``, while
+    the in-session ``send`` tool runs INSIDE the session, so it starts at
+    ``os.getpid()`` and matches on the first hop.
     """
-    sender: dict[str, Any] = {"pid": lookup_pid}
-    try:
-        for record, _state in registry.scan(config_dir()):
-            if record.pid == lookup_pid:
-                sender.update(
-                    {
-                        "session_id": record.session_id,
-                        "conversation_name": record.conversation_name,
-                        "model_label": record.model_label,
-                        "cwd": record.cwd,
-                    }
-                )
-                break
-    except OSError:
-        # A scan failure never blocks a send: the message still delivers, it is
-        # just less labelled.
-        pass
-    return sender
+    record = _record_for_pid(lookup_pid)
+    if record is not None:
+        return _identity_from_record(lookup_pid, record)
+
+    pid = lookup_pid
+    for _hop in range(_ANCESTRY_MAX_HOPS):
+        parent = _parent_pid(pid)
+        if parent is None or parent <= 1:
+            break
+        record = _record_for_pid(parent)
+        if record is not None:
+            return _identity_from_record(parent, record)
+        pid = parent
+    return {"pid": lookup_pid}
+
+
+def resolve_sender_identity(sender: "dict[str, Any] | None") -> "dict[str, Any]":
+    """Fill a RECEIVED sender identity in from the local registry.
+
+    The receive side must not have to trust the sender's self-report: the dict
+    arrives over the wire and can be empty or partial (the pid-only case a
+    failed ancestry lookup produces). The registry is same-account, local, and
+    written by the owning process itself, so for a sender running on this
+    machine it is the authoritative answer to "who is pid N" — strictly better
+    than whatever the sender chose to claim.
+
+    Only ABSENT or blank fields are filled: a sender that named itself keeps its
+    own labels (a session that renamed its conversation mid-flight is right
+    about itself), and a sender with no record keeps whatever it supplied. Never
+    raises — enrichment is a nicety and delivery must not depend on it.
+    """
+    resolved: dict[str, Any] = dict(sender or {})
+    pid = resolved.get("pid")
+    if not isinstance(pid, int) or isinstance(pid, bool):
+        return resolved
+    record = _record_for_pid(pid)
+    if record is None:
+        return resolved
+    for key, value in _identity_from_record(pid, record).items():
+        if not str(resolved.get(key) or "").strip():
+            resolved[key] = value
+    return resolved

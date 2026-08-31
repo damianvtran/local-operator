@@ -69,6 +69,7 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+from rich.cells import cell_len
 
 from local_operator.harness.approval import ask_approval
 from local_operator.harness.types import (
@@ -551,6 +552,43 @@ def _approval_description(path: Path, inside: bool, action: str, resolvable: boo
     else:
         marker = f"{UNRESOLVABLE_MARKER} "
     return f"{marker}{action}: {_display_target(str(path))}"
+
+
+#: Cell budget for the free-text body an approval sentence quotes. The prompt is
+#: read at a glance and shares its row with the host's ``Allow <tool>?`` prefix,
+#: so the body is bounded rather than wrapped.
+APPROVAL_BODY_CELLS = 60
+
+
+def _truncate_approval_body(text: str, width: int = APPROVAL_BODY_CELLS) -> str:
+    """Bound ``text`` to ``width`` CELLS, ending in the app's ellipsis.
+
+    Measured in cells, not characters: a CJK body clipped by ``len()`` rendered
+    138 cells against an intended 60 and wrapped the approval prompt onto a
+    second line, because every character in it is two cells wide. The ellipsis
+    is ``…`` for the same reason the rest of the TUI uses it — an ASCII ``...``
+    in one truncation and ``…`` in another renders two styles in one frame.
+
+    Deliberately a local reimplementation rather than an import of
+    ``tui.widgets.tool_card.truncate_cells``: this module runs headless (the
+    stdin approval gate has no TUI at all) and must not pull a Textual widget
+    module in for a string bound.
+    """
+    if width <= 0 or not text:
+        return ""
+    if cell_len(text) <= width:
+        return text
+    ellipsis = "…"
+    target = width - cell_len(ellipsis)
+    out: list[str] = []
+    used = 0
+    for char in text:
+        size = cell_len(char)
+        if used + size > target:
+            break
+        out.append(char)
+        used += size
+    return "".join(out).rstrip() + ellipsis
 
 
 def _describe_shell_approval(args: dict[str, Any], cwd: str) -> str:
@@ -4624,31 +4662,60 @@ class SendParams(BaseModel):
     )
 
 
-def _describe_send_approval(args: dict[str, Any], cwd: str) -> str:
-    """``send to <target> (<mode>): <body>`` — who gets it, how it lands, what
-    it says.
+#: How a peer send is addressed and how it will land, as the two words both the
+#: approval prompt and the TUI card need. ONE definition on purpose: the two
+#: surfaces format differently but must never disagree about WHICH peer or WHICH
+#: delivery mode a call names, and two copies of that precedence would drift the
+#: first time a mode is added (review round 1, NIT-2).
+def peer_send_target_label(args: dict[str, Any]) -> str:
+    """The addressed peer: ``pid <n>`` / ``session <id>`` / the raw substring.
 
-    All three are the decision: waking an idle session and quietly dropping a
-    note are different commitments, and ``pid 48213`` versus a substring is the
-    difference between one peer and whichever matches. The body is truncated
-    because an approval row is read at a glance (same bound as ``hub``).
+    Mirrors the resolver's own precedence (pid, then session id, then
+    substring). ``?`` when nothing addresses a peer — the call will fail, but the
+    row and the prompt are painted before that, and a blank slot reads as though
+    the next field were the target.
     """
     pid = args.get("pid")
     session = str(args.get("session") or "").strip()
     target = " ".join(str(args.get("target") or "").split())
     if isinstance(pid, int) and not isinstance(pid, bool):
-        who = f"pid {pid}"
-    elif session:
-        who = f"session {session}"
-    elif target:
-        who = target
-    else:
-        who = "?"
-    mode = "now" if args.get("now") else ("quiet" if args.get("wake") is False else "wake")
-    body = " ".join(str(args.get("message") or "").split())
-    if len(body) > 60:
-        body = body[:57] + "..."
-    return f"send to {who} ({mode}): {body}" if body else f"send to {who} ({mode})"
+        return f"pid {pid}"
+    if session:
+        return f"session {session}"
+    return target or "?"
+
+
+def peer_send_mode_label(args: dict[str, Any]) -> str:
+    """The delivery promise in one word: ``now`` / ``quiet`` / ``wake``.
+
+    ``now`` steers the peer mid-turn, ``wake`` (the default) drives an idle
+    peer's turn, ``quiet`` (``wake=False``) waits for the peer's next turn.
+    """
+    if args.get("now"):
+        return "now"
+    return "quiet" if args.get("wake") is False else "wake"
+
+
+def _describe_send_approval(args: dict[str, Any], cwd: str) -> str:
+    """``to <target> (<mode>): <body>`` — who gets it, how it lands, what it says.
+
+    All three are the decision: waking an idle session and quietly dropping a
+    note are different commitments, and ``pid 48213`` versus a substring is the
+    difference between one peer and whichever matches.
+
+    The clause does NOT repeat the tool name. The host already prefixes
+    ``Allow send?``, which is why every sibling describer supplies its own verb
+    (``run:``, ``subagent:``, ``schedule:``, ``browse:``); ``send to …`` under
+    that prefix read "Allow send? send to …" (design round 1, D5).
+
+    The body is bounded in CELLS with the app's ellipsis, not in characters with
+    ASCII dots: a CJK body clipped by character count measured 138 cells against
+    an intended 60 and wrapped the prompt onto a second line (design round 1, D4).
+    """
+    who = peer_send_target_label(args)
+    mode = peer_send_mode_label(args)
+    body = _truncate_approval_body(" ".join(str(args.get("message") or "").split()))
+    return f"to {who} ({mode}): {body}" if body else f"to {who} ({mode})"
 
 
 def build_send_tool(context: ToolContext) -> AgentTool | None:
@@ -4679,11 +4746,21 @@ def build_send_tool(context: ToolContext) -> AgentTool | None:
         # (wake drives an idle peer's turn; now steers or opens one) — the same
         # commitment wake's write tier names, so it prompts like a mutation.
         approval_tier="write",
-        # shared, not exclusive: each call is a one-shot dial to the target's
-        # own socket and no state is shared between calls (contrast wake, whose
-        # create/cancel rewrite one schedule list), so concurrent sends to
-        # different peers are independent.
-        concurrency="shared",
+        # EXCLUSIVE because of the wire, not because of tool state. The shared
+        # resource is the PEER's control socket: `send_peer_message` dials
+        # daemon-class, and a registrant admits at most one daemon connection —
+        # a new daemon dial EVICTS the existing one (`registrant.py`). Two
+        # concurrent sends therefore tear down the first sender's socket while
+        # it still awaits its ack, so it raises ConnectionError and reports
+        # "could not deliver" for a message the peer already received and
+        # processed (measured: 3 concurrent sends -> 2 ConnectionErrors, 3/3
+        # delivered). A false negative on a delivery receipt is worse than an
+        # error, because the model's natural response is to retry and duplicate
+        # the message. Serialising within the batch matches the wire's real
+        # one-daemon-at-a-time contract; `hub`, the closest sibling, is
+        # exclusive for its own reasons. (A non-evicting client class for peer
+        # sends would lift this, and is out of scope here.)
+        concurrency="exclusive",
         # interruptible: the only wait is the peer's ack under a bounded
         # deadline; cancelling on Esc/steer is free (the frame either acked or
         # it did not) and keeps the turn responsive like the other network tools.
@@ -4718,8 +4795,11 @@ async def execute_send(
         target=params.target, pid=params.pid, session=params.session
     )
     if candidates:
-        lines = [f"{len(candidates)} sessions match; disambiguate with pid:"]
-        lines.extend(candidate_lines(candidates, indent="  ", prefix="pid"))
+        # ``pid=<n>`` rather than ``pid <n>``: the reader is a model that has to
+        # turn this line into an argument, so the line is written in the
+        # parameter syntax it will copy (review round 1, MINOR-1).
+        lines = [f"{len(candidates)} sessions match; retry with pid=<n>:"]
+        lines.extend(candidate_lines(candidates, indent="  ", prefix="pid="))
         return _error(tool_call_id, "send", "\n".join(lines))
     if error or record is None:
         return _error(tool_call_id, "send", error or "no target resolved")
@@ -4766,11 +4846,26 @@ async def execute_send(
             wake=bool(params.wake),
             sender=sender,
         )
-    except (RuntimeError, ConnectionError, OSError, ValueError) as exc:
-        # ValueError covers a read fault the frame reader can still surface
-        # (e.g. an oversized non-welcome line): it must become the same soft
-        # "could not deliver" result the CLI prints, never a traceback.
+    except RuntimeError as exc:
+        # A protocol-level refusal (an older registrant that does not know the
+        # op, a handle that cannot receive): the peer answered, and its answer
+        # was no. Nothing was delivered, so the model may safely retry elsewhere.
         return _error(tool_call_id, "send", f"could not deliver: {exc}")
+    except (ConnectionError, OSError, ValueError) as exc:
+        # The connection or the ack failed — which is NOT the same as the
+        # message not arriving. The receive side commits the message before it
+        # acks, so a dropped socket or an ack timeout (asyncio.TimeoutError is
+        # an OSError subclass) can mean "delivered, receipt lost". Saying
+        # "could not deliver" here would assert a non-delivery this side cannot
+        # know, and a model that believes it retries and duplicates the message
+        # (review round 1, MINOR-3).
+        return _error(
+            tool_call_id,
+            "send",
+            f"no delivery confirmation from {record.conversation_name or record.session_id} "
+            f"(pid {record.pid}): {exc}. The message may or may not have arrived — "
+            "check with the peer before resending, or it may be delivered twice.",
+        )
     name = record.conversation_name or record.session_id
     return _text(
         tool_call_id,
@@ -7893,9 +7988,10 @@ def _describe_hub_approval(args: dict[str, Any], cwd: str) -> str:
     if isinstance(target, list):
         target = ", ".join(str(item) for item in target)
     target = " ".join(str(target or "").split())
-    body = " ".join(str(args.get("message") or "").split())
-    if len(body) > 60:
-        body = body[:57] + "..."
+    # Cell-bounded with the app's ellipsis (same reasoning as the send
+    # describer): the character-count bound this used to carry rendered a CJK
+    # body at more than twice its intended width and wrapped the prompt.
+    body = _truncate_approval_body(" ".join(str(args.get("message") or "").split()))
     head = f"{op} {target}".strip()
     return f"{head}: {body}" if body else head
 

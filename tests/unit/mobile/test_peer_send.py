@@ -134,6 +134,107 @@ def test_sender_identity_falls_back_to_pid_alone(fake_scan) -> None:
     assert sender == {"pid": 999}
 
 
+def test_identity_walks_up_to_a_grandparent_that_owns_the_record(monkeypatch) -> None:
+    """`lop send` is not always a direct child of the TUI.
+
+    Run from a subagent's bash tool, through a shell wrapper, or under nohup,
+    the session is a grandparent or higher — testing only the immediate parent
+    missed it and the card rendered `peer message from (pid 1)`.
+    """
+    session_rec = _Record(500, conversation_name="owning session", session_id="own-id")
+    monkeypatch.setattr(peer_send.registry, "scan", _scan([(session_rec, "live")]))
+    # 100 (lop send) -> 200 (shell wrapper) -> 500 (the session that owns a record)
+    tree = {100: 200, 200: 500, 500: 1}
+    monkeypatch.setattr(peer_send, "_parent_pid", lambda pid: tree.get(pid))
+
+    sender = peer_send.peer_sender_identity(100)
+    # The pid reported is the SESSION's, not the transient shell's: the card has
+    # to name a session the reader can go and talk to.
+    assert sender["pid"] == 500
+    assert sender["conversation_name"] == "owning session"
+    assert sender["session_id"] == "own-id"
+
+
+def test_identity_degrades_gracefully_when_no_ancestor_owns_a_record(monkeypatch) -> None:
+    """The reparented case (ppid 1, nothing published): still deliverable, just
+    less labelled — identity is advisory and must never block a send."""
+    monkeypatch.setattr(peer_send.registry, "scan", _scan([]))
+    monkeypatch.setattr(peer_send, "_parent_pid", lambda pid: 1 if pid != 1 else None)
+    assert peer_send.peer_sender_identity(4242) == {"pid": 4242}
+
+
+def test_the_ancestry_walk_is_bounded(monkeypatch) -> None:
+    """A pathological tree must not turn identity lookup into a long walk."""
+    monkeypatch.setattr(peer_send.registry, "scan", _scan([]))
+    seen: list[int] = []
+
+    def parent(pid: int) -> int:
+        seen.append(pid)
+        return pid + 1  # an infinite chain that never reaches a record
+
+    monkeypatch.setattr(peer_send, "_parent_pid", parent)
+    assert peer_send.peer_sender_identity(10) == {"pid": 10}
+    assert len(seen) <= peer_send._ANCESTRY_MAX_HOPS
+
+
+def test_a_parent_lookup_failure_ends_the_walk_without_raising(monkeypatch) -> None:
+    monkeypatch.setattr(peer_send.registry, "scan", _scan([]))
+    monkeypatch.setattr(peer_send, "_parent_pid", lambda pid: None)
+    assert peer_send.peer_sender_identity(77) == {"pid": 77}
+
+
+def test_receiver_resolves_a_pid_only_sender_from_the_registry(monkeypatch) -> None:
+    """OP2: the receive side must not depend on the sender's self-report.
+
+    A sender whose ancestry walk found nothing arrives as ``{"pid": N}``; the
+    local registry is the authoritative answer to "who is pid N"."""
+    rec = _Record(321, conversation_name="release cutter", session_id="rc-id")
+    monkeypatch.setattr(peer_send.registry, "scan", _scan([(rec, "live")]))
+    resolved = peer_send.resolve_sender_identity({"pid": 321})
+    assert resolved["conversation_name"] == "release cutter"
+    assert resolved["model_label"] == "test/model"
+    assert resolved["session_id"] == "rc-id"
+
+
+def test_receiver_keeps_what_the_sender_actually_supplied(monkeypatch) -> None:
+    """A session that renamed itself mid-flight is right about its own name, so
+    only ABSENT or blank fields are filled in."""
+    rec = _Record(321, conversation_name="stale name")
+    monkeypatch.setattr(peer_send.registry, "scan", _scan([(rec, "live")]))
+    resolved = peer_send.resolve_sender_identity(
+        {"pid": 321, "conversation_name": "fresh name", "model_label": ""}
+    )
+    assert resolved["conversation_name"] == "fresh name"
+    # The blank one is still filled from the record.
+    assert resolved["model_label"] == "test/model"
+
+
+def test_receiver_enrichment_never_raises_on_a_junk_sender(monkeypatch) -> None:
+    monkeypatch.setattr(peer_send.registry, "scan", _scan([]))
+    assert peer_send.resolve_sender_identity(None) == {}
+    assert peer_send.resolve_sender_identity({}) == {}
+    # A non-int pid cannot be looked up and must pass through untouched.
+    assert peer_send.resolve_sender_identity({"pid": "nope"}) == {"pid": "nope"}
+
+
+def test_the_core_stays_import_light() -> None:
+    """NIT-1: the module docstring promises it never pulls the heavyweight
+    Session graph, and that promise is what keeps it importable from a tool.
+    A comment cannot enforce it; this does."""
+    import ast
+    from pathlib import Path
+
+    source = Path(peer_send.__file__).read_text()
+    imported: set[str] = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            imported.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported.add(node.module)
+    assert not any(name.startswith("local_operator.session") for name in imported), imported
+    assert not any(name.startswith("local_operator.tui") for name in imported), imported
+
+
 def test_registry_scan_sees_a_published_record(tmp_path) -> None:
     # Round-trip through the REAL registry so the core's scan contract holds.
     rec = registry.SessionRecord(

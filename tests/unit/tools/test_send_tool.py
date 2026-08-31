@@ -256,7 +256,7 @@ async def test_ambiguous_target_returns_candidates_and_asks_for_a_pid() -> None:
     )
     assert result.is_error is True
     assert "2 sessions match" in result.text
-    assert "disambiguate with pid" in result.text
+    assert "retry with pid=<n>" in result.text
     assert "multi session 0" in result.text
     assert "multi session 1" in result.text
 
@@ -290,6 +290,139 @@ async def test_empty_message_is_refused() -> None:
         assert not any(name == "receive_peer_message" for name, _a, _k in handle.calls)
     finally:
         registrant.close()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_sends_to_one_peer_all_report_delivery() -> None:
+    """Regression for the delivery-receipt false negative (review round 1).
+
+    ``send_peer_message`` dials DAEMON-class, and a registrant admits at most one
+    daemon connection — a new daemon dial evicts the existing one. Under
+    ``concurrency="shared"`` two sends in one batch therefore raced: the earlier
+    sender's socket was torn down while it awaited its ack, so it raised
+    ConnectionError and reported "could not deliver" for a message the peer had
+    already received and processed. Measured before the fix: 3 concurrent sends
+    -> 2 ConnectionErrors, 3/3 actually delivered.
+
+    The tool is declared ``exclusive``, which is what serialises a batch. This
+    test pins BOTH halves: the declaration (a future edit back to "shared"
+    fails here) and the delivered-and-acked behaviour when the calls are run in
+    the serial order the loop guarantees.
+    """
+    from local_operator.harness.types import ToolContext as _Ctx
+    from local_operator.tools.builtin import build_send_tool
+
+    tool = build_send_tool(_Ctx())
+    assert tool is not None
+    # The declaration IS the fix: the loop serialises exclusive tools, so the
+    # eviction race cannot be entered in the first place.
+    assert tool.concurrency == "exclusive"
+
+    registrant, _alias, handle = await _start_peer()
+    try:
+        results = []
+        for index in range(3):
+            results.append(
+                await execute_send(
+                    f"c{index}",
+                    {"target": "peer-target", "message": f"batch {index}"},
+                    None,
+                    None,
+                    _context(),
+                )
+            )
+        # Every call reports success, and every message reached the peer: no
+        # sender is told a delivered message failed.
+        assert [r.is_error for r in results] == [False, False, False]
+        delivered = [args[0] for name, args, _k in handle.calls if name == "receive_peer_message"]
+        assert delivered == ["batch 0", "batch 1", "batch 2"]
+    finally:
+        registrant.close()
+
+
+@pytest.mark.asyncio
+async def test_a_lost_ack_is_not_reported_as_a_failed_delivery(monkeypatch) -> None:
+    """The receive side commits BEFORE it acks, so a dropped socket or an ack
+    timeout can mean "delivered, receipt lost". Claiming "could not deliver"
+    there asserts a non-delivery this side cannot know, and a model that
+    believes it retries and duplicates the message (review round 1, MINOR-3)."""
+    registrant, _alias, _handle = await _start_peer()
+    try:
+        import local_operator.mobile.peer_client as peer_client_mod
+
+        async def _boom(*args, **kwargs):
+            raise ConnectionError("session closed the connection before acking")
+
+        monkeypatch.setattr(peer_client_mod, "send_peer_message", _boom)
+        result = await execute_send(
+            "lost",
+            {"target": "peer-target", "message": "did this land?"},
+            None,
+            None,
+            _context(),
+        )
+        assert result.is_error is True
+        assert "no delivery confirmation" in result.text
+        assert "may or may not have arrived" in result.text
+        # The confident claim must NOT appear on this arm.
+        assert "could not deliver" not in result.text
+    finally:
+        registrant.close()
+
+
+@pytest.mark.asyncio
+async def test_a_protocol_refusal_still_says_it_did_not_deliver(monkeypatch) -> None:
+    """A RuntimeError is the peer ANSWERING no (an older registrant, a handle
+    that cannot receive): nothing was delivered, so the confident wording is
+    correct and the model may safely retry elsewhere."""
+    registrant, _alias, _handle = await _start_peer()
+    try:
+        import local_operator.mobile.peer_client as peer_client_mod
+
+        async def _refuse(*args, **kwargs):
+            raise RuntimeError("this session cannot receive peer messages")
+
+        monkeypatch.setattr(peer_client_mod, "send_peer_message", _refuse)
+        result = await execute_send(
+            "refused",
+            {"target": "peer-target", "message": "hello"},
+            None,
+            None,
+            _context(),
+        )
+        assert result.is_error is True
+        assert "could not deliver" in result.text
+    finally:
+        registrant.close()
+
+
+@pytest.mark.asyncio
+async def test_disambiguation_prints_the_parameter_syntax() -> None:
+    """The reader is a model that must turn the line into an argument, so the
+    candidates are written as ``pid=<n>`` (review round 1, MINOR-1)."""
+    for index, pid in enumerate((os.getppid(), 1)):
+        registry.publish(
+            registry.SessionRecord(
+                pid=pid,
+                kind="tui",
+                session_id=f"syntax-{index}",
+                conversation_name=f"syntax session {index}",
+                cwd="/tmp",
+                model_label="test/model",
+                control_port=9,
+                control_key="k",
+            )
+        )
+    result = await execute_send(
+        "syntax",
+        {"target": "syntax session", "message": "which?"},
+        None,
+        None,
+        _context(),
+    )
+    assert result.is_error is True
+    assert "pid=<n>" in result.text
+    assert f"pid={os.getppid()}" in result.text
 
 
 @pytest.mark.asyncio

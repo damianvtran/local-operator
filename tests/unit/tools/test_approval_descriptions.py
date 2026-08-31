@@ -151,22 +151,47 @@ def test_send_names_the_peer_the_mode_and_the_body() -> None:
 
     Waking an idle peer and quietly dropping a note are different commitments,
     so the mode word is load-bearing in the sentence a user approves.
+
+    The clause does not repeat the tool name: the host already prefixes
+    ``Allow send?``, so ``send to …`` rendered "Allow send? send to …". Every
+    sibling supplies its own verb (``run:``, ``schedule:``, ``browse:``).
     """
+    from rich.cells import cell_len
+
     tool = build_send_tool(ToolContext())
     assert tool is not None
     wake = _summary(tool, {"target": "release cutter", "message": "gates are green"})
-    assert wake == "send to release cutter (wake): gates are green"
+    assert wake == "to release cutter (wake): gates are green"
 
     quiet = _summary(tool, {"pid": 48213, "message": "fold in later", "wake": False})
-    assert quiet == "send to pid 48213 (quiet): fold in later"
+    assert quiet == "to pid 48213 (quiet): fold in later"
 
     now = _summary(tool, {"session": "s1", "message": "hold off", "now": True})
-    assert now == "send to session s1 (now): hold off"
+    assert now == "to session s1 (now): hold off"
 
-    # A long body is truncated for the at-a-glance approval row.
+    # A long body is bounded for the at-a-glance approval row, with the app's
+    # ellipsis rather than ASCII dots.
     long_body = _summary(tool, {"target": "peer", "message": "x" * 200})
-    assert long_body.endswith("...")
-    assert len(long_body) < 120
+    assert long_body.endswith("…")
+
+    # Bounded in CELLS, not characters: a CJK body clipped by character count
+    # measured 138 cells against an intended 60 and wrapped the prompt.
+    cjk = _summary(tool, {"target": "p", "message": "工" * 200})
+    quoted = cjk.split("): ", 1)[1]
+    assert cell_len(quoted) <= builtin.APPROVAL_BODY_CELLS
+
+
+def test_hub_bounds_its_body_in_cells_too() -> None:
+    """`hub` carried the same character-count bound this one copied; fixed at
+    both call sites rather than propagated (design round 1, D4)."""
+    from rich.cells import cell_len
+
+    described = builtin._describe_hub_approval(
+        {"op": "send", "to": "coder", "message": "工" * 200}, "."
+    )
+    quoted = described.split(": ", 1)[1]
+    assert cell_len(quoted) <= builtin.APPROVAL_BODY_CELLS
+    assert quoted.endswith("…")
 
 
 def test_browser_only_promises_navigation_when_it_navigates() -> None:
