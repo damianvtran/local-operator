@@ -21,9 +21,11 @@ from local_operator.evaluation.adapters.api import (
     Handshake,
     PythonRuntime,
     RescueDescriptor,
+    observation_content_id,
 )
 from local_operator.evaluation.adapters.supervisor import (
     MAX_DIAGNOSTIC_TAIL,
+    HostVerifier,
     SupervisionError,
     _Tail,
     _terminate_process_group,
@@ -38,7 +40,7 @@ from local_operator.evaluation.lifecycle import (
     CleanupPlan,
     record_cleanup,
 )
-from local_operator.evaluation.protocol import ArtifactRef
+from local_operator.evaluation.protocol import ArtifactRef, Observation
 
 
 def selector(tmp_path: Path) -> AdapterSelector:
@@ -107,6 +109,29 @@ def descriptor(tmp_path: Path) -> RescueDescriptor:
         infra_values=(),
         artifact_root=str(tmp_path),
     )
+
+
+def observation(task_id: str, episode_id: str, sequence: int) -> Observation:
+    provisional = Observation(
+        task_id=task_id,
+        episode_id=episode_id,
+        sequence=sequence,
+        observation_id="provisional",
+        text="state",
+    )
+    return provisional.model_copy(update={"observation_id": observation_content_id(provisional)})
+
+
+def test_host_verifier_rejects_cross_episode_without_mutating_current(tmp_path: Path) -> None:
+    verifier = HostVerifier("task", "episode", tmp_path)
+    initial = observation("task", "episode", 0)
+    verifier.accept_observation(initial)
+    with pytest.raises(SupervisionError, match="another task or episode"):
+        verifier.accept_observation(observation("other", "episode", 1))
+    assert verifier.current_observation == initial
+    with pytest.raises(SupervisionError, match="another task or episode"):
+        verifier.accept_observation(observation("task", "other", 1))
+    assert verifier.current_observation == initial
 
 
 def test_environment_is_constructed_without_parent_secrets() -> None:
@@ -220,6 +245,7 @@ class FakeSupervisor:
         self.expected = expected
         self.duplicate = duplicate
         self.terminated = False
+        self.methods: list[str] = []
 
     async def handshake(self) -> Handshake:
         return self.expected.handshake
@@ -233,6 +259,9 @@ class FakeSupervisor:
         timeout: float,
     ) -> CleanupResult | AckResult:
         del result_type, timeout
+        self.methods.append(method)
+        if method in ("begin_rescue", "close"):
+            return AckResult()
         assert method == "cleanup"
         action = self.expected.cleanup_plan.actions[0]
         receipt = record_cleanup(
@@ -256,6 +285,7 @@ async def test_rescue_reconciles_every_action_and_records_aggregate(tmp_path: Pa
     aggregate = await run_rescue(rescue, launch=lambda _: fake)  # type: ignore[arg-type]
     assert aggregate.complete
     assert len(aggregate.receipts) == 1
+    assert fake.methods == ["begin_rescue", "cleanup", "close"]
     assert fake.terminated
 
 

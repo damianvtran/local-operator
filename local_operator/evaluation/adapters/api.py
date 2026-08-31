@@ -35,6 +35,7 @@ MAX_RECEIPTS = 256
 AdapterMethod: TypeAlias = Literal[
     "hello",
     "inspect_requirements",
+    "begin_rescue",
     "prepare",
     "reset_start",
     "observe",
@@ -62,6 +63,7 @@ RouteCapability: TypeAlias = Literal["computer", "browser", "terminal"]
 METHOD_STATES: Mapping[AdapterMethod, frozenset[AdapterState]] = {
     "hello": frozenset({"NEW"}),
     "inspect_requirements": frozenset({"HANDSHAKEN"}),
+    "begin_rescue": frozenset({"HANDSHAKEN"}),
     "prepare": frozenset({"INSPECTED"}),
     "reset_start": frozenset({"PREPARED"}),
     "observe": frozenset({"RUNNING"}),
@@ -76,6 +78,7 @@ METHOD_STATES: Mapping[AdapterMethod, frozenset[AdapterState]] = {
 METHOD_NEXT_STATE: Mapping[AdapterMethod, AdapterState] = {
     "hello": "HANDSHAKEN",
     "inspect_requirements": "INSPECTED",
+    "begin_rescue": "CLEANING",
     "prepare": "PREPARED",
     "reset_start": "RUNNING",
     "observe": "RUNNING",
@@ -86,7 +89,16 @@ METHOD_NEXT_STATE: Mapping[AdapterMethod, AdapterState] = {
     "close": "CLOSED",
 }
 KEYED_METHODS = frozenset(
-    {"prepare", "reset_start", "execute", "ask_user_exchange", "score", "cleanup", "close"}
+    {
+        "begin_rescue",
+        "prepare",
+        "reset_start",
+        "execute",
+        "ask_user_exchange",
+        "score",
+        "cleanup",
+        "close",
+    }
 )
 READ_ONLY_METHODS = frozenset({"hello", "inspect_requirements", "observe"})
 
@@ -308,6 +320,31 @@ class OperationParams(ProtocolModel):
     operation_id: StrictIdentifier
 
 
+class BeginRescueParams(OperationParams):
+    """Content pins only; the worker receives no resolved secret material."""
+
+    descriptor: RescueDescriptor
+    descriptor_id: Digest
+    episode_id: StrictIdentifier
+    cleanup_plan_id: Digest
+    selector_digest: Digest
+    handshake_digest: Digest
+
+    @model_validator(mode="after")
+    def _bind_descriptor(self) -> "BeginRescueParams":
+        if (
+            self.descriptor_id != self.descriptor.descriptor_id
+            or self.episode_id != self.descriptor.episode_id
+            or self.cleanup_plan_id != self.descriptor.cleanup_plan.cleanup_plan_id
+            or self.selector_digest
+            != canonical_digest("adapter-rescue-selector-v1", self.descriptor.selector)
+            or self.handshake_digest
+            != canonical_digest("adapter-rescue-handshake-v1", self.descriptor.handshake)
+        ):
+            raise ValueError("rescue initialization pins differ from descriptor")
+        return self
+
+
 class PrepareParams(OperationParams):
     episode_id: StrictIdentifier
     secret_refs: tuple[SecretRef, ...] = Field(max_length=MAX_RESCUE_REFS)
@@ -324,6 +361,7 @@ class PrepareResult(ProtocolModel):
 
 
 class ResetStartParams(OperationParams):
+    task_id: StrictIdentifier
     episode_id: StrictIdentifier
 
 
@@ -433,6 +471,7 @@ class AckResult(ProtocolModel):
 AdapterParams: TypeAlias = (
     HelloParams
     | InspectRequirementsParams
+    | BeginRescueParams
     | PrepareParams
     | ResetStartParams
     | ObserveParams
@@ -456,6 +495,7 @@ AdapterResult: TypeAlias = (
 PARAM_MODELS: Mapping[AdapterMethod, type[ProtocolModel]] = {
     "hello": HelloParams,
     "inspect_requirements": InspectRequirementsParams,
+    "begin_rescue": BeginRescueParams,
     "prepare": PrepareParams,
     "reset_start": ResetStartParams,
     "observe": ObserveParams,
@@ -468,6 +508,7 @@ PARAM_MODELS: Mapping[AdapterMethod, type[ProtocolModel]] = {
 RESULT_MODELS: Mapping[AdapterMethod, type[ProtocolModel]] = {
     "hello": Handshake,
     "inspect_requirements": RequirementsResult,
+    "begin_rescue": AckResult,
     "prepare": PrepareResult,
     "reset_start": AckResult,
     "observe": ObservationResult,

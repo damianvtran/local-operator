@@ -19,12 +19,15 @@ from typing import Any
 from pydantic import field_validator, model_validator
 
 from local_operator.evaluation.adapters.api import (
+    AckResult,
     AdapterResult,
     AdapterSelector,
     AskUserExchangeParams,
     AskUserExchangeResult,
+    BeginRescueParams,
     CleanupParams,
     CleanupResult,
+    CloseParams,
     ExecuteParams,
     ExecuteResult,
     Handshake,
@@ -399,7 +402,9 @@ def _terminate_process_group(process: subprocess.Popen[bytes], pgid: int) -> Non
 class HostVerifier:
     """Parent-owned episode truth; adapters never grant lifecycle authority."""
 
-    def __init__(self, artifact_root: Path) -> None:
+    def __init__(self, task_id: str, episode_id: str, artifact_root: Path) -> None:
+        self.task_id = task_id
+        self.episode_id = episode_id
         self.artifact_root = artifact_root
         self.current_observation: Any | None = None
         self._sequences: set[int] = set()
@@ -407,6 +412,11 @@ class HostVerifier:
         self._score_ids: set[str] = set()
 
     def accept_observation(self, observation: Any) -> None:
+        if (observation.task_id, observation.episode_id) != (
+            self.task_id,
+            self.episode_id,
+        ):
+            raise SupervisionError("adapter observation belongs to another task or episode")
         validate_observation(observation)
         for frame in observation.frames:
             verify_artifact(self.artifact_root, frame.artifact)
@@ -580,6 +590,23 @@ async def run_rescue(
         handshake = await supervisor.handshake()
         if handshake != descriptor.handshake:
             raise SupervisionError("rescue worker handshake differs from persisted pins")
+        begin = await supervisor.call(
+            "begin_rescue",
+            BeginRescueParams(
+                operation_id=f"rescue-begin-{descriptor.descriptor_id[:32]}",
+                descriptor=descriptor,
+                descriptor_id=descriptor.descriptor_id,
+                episode_id=descriptor.episode_id,
+                cleanup_plan_id=descriptor.cleanup_plan.cleanup_plan_id,
+                selector_digest=canonical_digest("adapter-rescue-selector-v1", descriptor.selector),
+                handshake_digest=canonical_digest(
+                    "adapter-rescue-handshake-v1", descriptor.handshake
+                ),
+            ),
+            AckResult,
+            timeout=10.0,
+        )
+        assert isinstance(begin, AckResult)
         for action in descriptor.cleanup_plan.actions:
             # One action per call preserves each action's own timeout/attempt cap
             # and makes missing or duplicate receipts independently detectable.
@@ -605,6 +632,16 @@ async def run_rescue(
                 raise SupervisionError("rescue receipt differs from persisted cleanup action")
             receipts.append(receipt)
         cleanup = aggregate_cleanup(descriptor.cleanup_plan, receipts)
+        closed = await supervisor.call(
+            "close",
+            CloseParams(
+                operation_id=f"rescue-close-{descriptor.descriptor_id[:32]}",
+                episode_id=descriptor.episode_id,
+            ),
+            AckResult,
+            timeout=10.0,
+        )
+        assert isinstance(closed, AckResult)
         return RescueAggregate(
             descriptor_id=descriptor.descriptor_id,
             receipts=tuple(receipts),

@@ -14,9 +14,11 @@ from local_operator.evaluation.adapters.api import (
     METHOD_STATES,
     PARAM_MODELS,
     RESULT_MODELS,
+    AckResult,
     AdapterMethod,
     AdapterSelector,
     AdapterState,
+    BeginRescueParams,
     EvaluationAdapter,
     Handshake,
     HelloParams,
@@ -79,6 +81,7 @@ class Worker:
         self._state: AdapterState = "NEW"
         self._adapter: EvaluationAdapter | None = None
         self._selector: AdapterSelector | None = None
+        self._handshake: Handshake | None = None
         self._last_id = 0
         self._replay: OrderedDict[int, tuple[AdapterMethod, str, bytes]] = OrderedDict()
         self._operations: dict[str, _OperationRecord] = {}
@@ -203,6 +206,8 @@ class Worker:
                 operation_id=operation_id,
             )
             return
+        except RpcProtocolError:
+            raise
         except (AdapterDiscoveryError, Exception):
             # Adapter exceptions may contain reprs, paths, environment values, or
             # tracebacks.  The wire exposes only a closed code and fixed text.
@@ -228,13 +233,29 @@ class Worker:
             assert isinstance(params, HelloParams)
             self._selector = params.selector
             self._adapter = load_selected_adapter(params.selector)
-            return Handshake(
+            self._handshake = Handshake(
                 selector=params.selector,
                 metadata=self._adapter.metadata,
                 python=PythonRuntime.current(),
                 workspace_digest=_workspace_digest(params.selector),
                 selected_route=params.selector.route_capability,
             )
+            return self._handshake
+        if method == "begin_rescue":
+            assert isinstance(params, BeginRescueParams)
+            assert self._selector is not None and self._handshake is not None
+            if (
+                params.descriptor.selector != self._selector
+                or params.descriptor.handshake != self._handshake
+                or params.selector_digest
+                != canonical_digest("adapter-rescue-selector-v1", self._selector)
+                or params.handshake_digest
+                != canonical_digest("adapter-rescue-handshake-v1", self._handshake)
+            ):
+                raise RpcProtocolError("rescue pins differ from the exact handshake")
+            # This transition grants cleanup routing only. Adapter code is not
+            # invoked, so it cannot create resources or resolve persisted refs.
+            return AckResult()
         assert self._adapter is not None
         handler = getattr(self._adapter, method)
         result = await handler(params)

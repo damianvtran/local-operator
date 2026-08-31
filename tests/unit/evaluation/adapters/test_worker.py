@@ -2,14 +2,26 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 from local_operator.evaluation.adapters.api import (
+    AckResult,
+    AdapterCapabilities,
+    AdapterMetadata,
+    AdapterSelector,
     AdapterState,
+    BeginRescueParams,
+    CleanupParams,
+    CleanupResult,
+    Handshake,
+    HelloParams,
     PrepareParams,
     PrepareResult,
+    RescueDescriptor,
 )
 from local_operator.evaluation.adapters.rpc import (
     IncrementalReader,
@@ -20,7 +32,12 @@ from local_operator.evaluation.adapters.rpc import (
     parse_canonical_line,
 )
 from local_operator.evaluation.adapters.worker import Worker
-from local_operator.evaluation.lifecycle import CleanupAction, CleanupPlan
+from local_operator.evaluation.evidence.models import canonical_digest
+from local_operator.evaluation.lifecycle import (
+    CleanupAction,
+    CleanupPlan,
+    record_cleanup,
+)
 
 
 class CountingWorker(Worker):
@@ -225,6 +242,167 @@ async def test_operation_capacity_poison_precedes_dispatch() -> None:
         for fd in (request_read, request_write, response_read, response_write):
             if fd >= 0:
                 os.close(fd)
+
+
+class RescueAdapter:
+    def __init__(self, metadata: AdapterMetadata) -> None:
+        self.metadata = metadata
+        self.cleanup_calls: list[str] = []
+
+    async def cleanup(self, params: CleanupParams) -> CleanupResult:
+        action_id = params.action_ids[0]
+        self.cleanup_calls.append(action_id)
+        return CleanupResult(
+            receipts=(
+                record_cleanup(
+                    params.cleanup_plan,
+                    action_id,
+                    status="succeeded",
+                    evidence_code="released",
+                    duration_ms=1,
+                ),
+            )
+        )
+
+
+def rescue_selector(tmp_path: Path) -> AdapterSelector:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    return AdapterSelector(
+        schema_version="1.0",
+        adapter_id="rescue",
+        distribution="rescue-adapter",
+        version="1.0",
+        entry_point="rescue_adapter:create",
+        package_digest="a" * 64,
+        release_digest="b" * 64,
+        python_executable=str(Path(sys.executable).resolve()),
+        workspace=str(workspace),
+        route_capability="computer",
+    )
+
+
+def rescue_metadata() -> AdapterMetadata:
+    return AdapterMetadata(
+        adapter_id="rescue",
+        distribution="rescue-adapter",
+        version="1.0",
+        entry_point="rescue_adapter:create",
+        package_digest="a" * 64,
+        release_digest="b" * 64,
+        schema_version="1.0",
+        capabilities=AdapterCapabilities(routes=("computer",), ask_user=False, scoring=False),
+    )
+
+
+@pytest.mark.asyncio
+async def test_real_worker_rescue_invokes_each_cleanup_once_and_blocks_normal_flow(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    selected = rescue_selector(tmp_path)
+    adapter = RescueAdapter(rescue_metadata())
+    monkeypatch.setattr(
+        "local_operator.evaluation.adapters.worker.load_selected_adapter", lambda _: adapter
+    )
+    request_read, request_write = os.pipe()
+    response_read, response_write = os.pipe()
+    worker = Worker(request_read, response_write)
+    task = asyncio.create_task(worker.run())
+    writer = IncrementalWriter(request_write)
+    reader = IncrementalReader(response_read)
+    try:
+        hello = await exchange(
+            writer,
+            reader,
+            RpcRequest(
+                jsonrpc="2.0",
+                id=1,
+                method="hello",
+                params=HelloParams(selector=selected).model_dump(mode="json"),
+            ),
+        )
+        assert hello.result is not None
+        handshake = Handshake.model_validate(hello.result, strict=True)
+        cleanup_plan = CleanupPlan(
+            episode_id="episode",
+            actions=tuple(
+                CleanupAction(
+                    action_id=action_id,
+                    kind="release_instance",
+                    resource_ref=f"resource-{action_id}",
+                    timeout_ms=100,
+                    max_attempts=1,
+                )
+                for action_id in ("one", "two")
+            ),
+        )
+        descriptor = RescueDescriptor(
+            schema_version="1.0",
+            selector=selected,
+            handshake=handshake,
+            episode_id="episode",
+            cleanup_plan=cleanup_plan,
+            secret_refs=(),
+            infra_values=(),
+            artifact_root=str(tmp_path),
+        )
+        begin = BeginRescueParams(
+            operation_id="begin",
+            descriptor=descriptor,
+            descriptor_id=descriptor.descriptor_id,
+            episode_id=descriptor.episode_id,
+            cleanup_plan_id=cleanup_plan.cleanup_plan_id,
+            selector_digest=canonical_digest("adapter-rescue-selector-v1", selected),
+            handshake_digest=canonical_digest("adapter-rescue-handshake-v1", handshake),
+        )
+        response = await exchange(
+            writer,
+            reader,
+            RpcRequest(
+                jsonrpc="2.0",
+                id=2,
+                method="begin_rescue",
+                params=begin.model_dump(mode="json"),
+            ),
+        )
+        assert response.result == AckResult().model_dump(mode="json")
+        for request_id, action in enumerate(cleanup_plan.actions, start=3):
+            params = CleanupParams(
+                operation_id=f"cleanup-{action.action_id}",
+                cleanup_plan=cleanup_plan,
+                action_ids=(action.action_id,),
+            )
+            response = await exchange(
+                writer,
+                reader,
+                RpcRequest(
+                    jsonrpc="2.0",
+                    id=request_id,
+                    method="cleanup",
+                    params=params.model_dump(mode="json"),
+                ),
+            )
+            assert response.error is None
+        forbidden = PrepareParams(
+            operation_id="forbidden", episode_id="episode", secret_refs=(), infra_values=()
+        )
+        response = await exchange(
+            writer,
+            reader,
+            RpcRequest(
+                jsonrpc="2.0",
+                id=5,
+                method="prepare",
+                params=forbidden.model_dump(mode="json"),
+            ),
+        )
+        assert response.error is not None and response.error.code == "invalid_state"
+        assert adapter.cleanup_calls == ["one", "two"]
+    finally:
+        os.close(request_write)
+        assert await asyncio.wait_for(task, 1) == 0
+        for fd in (request_read, response_read, response_write):
+            os.close(fd)
 
 
 @pytest.mark.asyncio
