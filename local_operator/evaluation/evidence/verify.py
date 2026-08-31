@@ -17,7 +17,10 @@ from typing import Any, Iterator
 
 from local_operator.evaluation.evidence.models import (
     AbandonmentRecord,
+    ActionBatchPayload,
     ArtifactRef,
+    CleanupPayload,
+    EnvironmentStepPayload,
     EventRecord,
     EvidenceArtifactRef,
     EvidenceCounters,
@@ -25,11 +28,14 @@ from local_operator.evaluation.evidence.models import (
     LifecycleTransitionPayload,
     ModelRequestPayload,
     ModelResponsePayload,
+    ObservationPayload,
     OutcomeSeal,
+    PreflightPayload,
     ScoringResultPayload,
     ScoringStartPayload,
     StateMarker,
     UsageCostPayload,
+    UserSimulatorExchangePayload,
     VerificationIssue,
     VerificationIssueCode,
     VerificationReport,
@@ -326,40 +332,126 @@ def _counters(events: tuple[EventRecord, ...]) -> EvidenceCounters:
 
 
 def _verify_semantics(
-    events: tuple[EventRecord, ...], outcome: OutcomeSeal | None, issues: _Issues
+    events: tuple[EventRecord, ...],
+    marker: StateMarker | None,
+    outcome: OutcomeSeal | None,
+    issues: _Issues,
 ) -> None:
-    starts = [event.payload for event in events if isinstance(event.payload, ScoringStartPayload)]
-    results = [event.payload for event in events if isinstance(event.payload, ScoringResultPayload)]
-    if len(starts) > 1 or len(results) > 1 or (results and not starts):
-        issues.error("score_invalid", "events.jsonl")
-    if (
-        starts
-        and results
-        and (
-            starts[0].finalization_id != results[0].finalization_id
-            or starts[0].scoring_operation_id != results[0].scoring_operation_id
-        )
-    ):
-        issues.error("score_invalid", "events.jsonl")
-    if starts:
-        start_index = next(
-            index
-            for index, event in enumerate(events)
-            if isinstance(event.payload, ScoringStartPayload)
-        )
-        if any(isinstance(event.payload, ScoringStartPayload) for event in events[:start_index]):
-            issues.error("finalization_invalid", "events.jsonl")
-    requests = {
-        event.payload.request_id
-        for event in events
-        if isinstance(event.payload, ModelRequestPayload)
+    requests: dict[str, ModelRequestPayload] = {}
+    responses: set[str] = set()
+    usage: set[str] = set()
+    observations: dict[str, ObservationPayload] = {}
+    batches: dict[str, ActionBatchPayload] = {}
+    steps: set[str] = set()
+    exchanges: set[str] = set()
+    last_exchange: str | None = None
+    lifecycle: dict[str, LifecycleTransitionPayload] = {}
+    last_state_id: str | None = None
+    starts: list[ScoringStartPayload] = []
+    results: list[ScoringResultPayload] = []
+    seen_preflight_receipts: set[str] = set()
+    seen_cleanup_receipts: set[str] = set()
+    execution_closed = False
+    allowed_after_finalizing = {
+        "scoring_result",
+        "lifecycle_transition",
+        "cleanup",
+        "error",
+        "cancel",
     }
+
     for event in events:
-        if (
-            isinstance(event.payload, (ModelResponsePayload, UsageCostPayload))
-            and event.payload.request_id not in requests
-        ):
-            issues.error("receipt_binding_invalid", f"events.jsonl:{event.sequence + 1}")
+        location = f"events.jsonl:{event.sequence + 1}"
+        payload = event.payload
+        if execution_closed and event.kind not in allowed_after_finalizing:
+            issues.error("finalization_invalid", location)
+        if isinstance(payload, ModelRequestPayload):
+            if payload.request_id in requests:
+                issues.error("receipt_binding_invalid", location)
+            requests[payload.request_id] = payload
+        elif isinstance(payload, ModelResponsePayload):
+            request = requests.get(payload.request_id)
+            if request is None or payload.request_id in responses:
+                issues.error("receipt_binding_invalid", location)
+            elif payload.requested_route != request.requested_route:
+                issues.error("route_mismatch", location)
+            responses.add(payload.request_id)
+        elif isinstance(payload, UsageCostPayload):
+            if (
+                payload.request_id not in responses
+                or payload.request_id in usage
+                or payload.request_id not in requests
+            ):
+                issues.error("receipt_binding_invalid", location)
+            usage.add(payload.request_id)
+        elif isinstance(payload, ObservationPayload):
+            if payload.observation_id in observations:
+                issues.error("receipt_binding_invalid", location)
+            observations[payload.observation_id] = payload
+        elif isinstance(payload, ActionBatchPayload):
+            if payload.action_batch_id in batches or payload.observation_id not in observations:
+                issues.error("receipt_binding_invalid", location)
+            batches[payload.action_batch_id] = payload
+        elif isinstance(payload, EnvironmentStepPayload):
+            batch = batches.get(payload.action_batch_id)
+            if payload.step_id in steps or batch is None:
+                issues.error("receipt_binding_invalid", location)
+            elif (
+                payload.observation_id is not None
+                and payload.observation_id != batch.observation_id
+            ):
+                issues.error("receipt_binding_invalid", location)
+            steps.add(payload.step_id)
+        elif isinstance(payload, UserSimulatorExchangePayload):
+            if payload.exchange_id in exchanges or payload.previous_exchange_id != last_exchange:
+                issues.error("receipt_binding_invalid", location)
+            exchanges.add(payload.exchange_id)
+            last_exchange = payload.exchange_id
+        elif isinstance(payload, LifecycleTransitionPayload):
+            if payload.state_id in lifecycle or payload.previous_state_id != last_state_id:
+                issues.error("receipt_binding_invalid", location)
+            lifecycle[payload.state_id] = payload
+            last_state_id = payload.state_id
+            if payload.state == "finalizing":
+                execution_closed = True
+        elif isinstance(payload, PreflightPayload):
+            receipts = set(payload.receipt_ids)
+            if len(receipts) != len(payload.receipt_ids) or receipts & seen_preflight_receipts:
+                issues.error("receipt_binding_invalid", location)
+            seen_preflight_receipts |= receipts
+        elif isinstance(payload, CleanupPayload):
+            receipts = set(payload.receipt_ids)
+            if len(receipts) != len(payload.receipt_ids) or receipts & seen_cleanup_receipts:
+                issues.error("receipt_binding_invalid", location)
+            seen_cleanup_receipts |= receipts
+        elif isinstance(payload, ScoringStartPayload):
+            if starts or results:
+                issues.error("score_invalid", location)
+            starts.append(payload)
+            execution_closed = True
+        elif isinstance(payload, ScoringResultPayload):
+            if (
+                len(starts) != 1
+                or results
+                or payload.finalization_id != starts[0].finalization_id
+                or payload.scoring_operation_id != starts[0].scoring_operation_id
+            ):
+                issues.error("score_invalid", location)
+            results.append(payload)
+
+    completed = [payload for payload in lifecycle.values() if payload.state == "completed"]
+    if marker is not None and marker.state == "finalizing":
+        if marker.intent == "score":
+            if len(starts) != 1:
+                issues.error("score_invalid", "state.json")
+            elif (
+                starts[0].finalization_id != marker.finalization_id
+                or starts[0].scoring_operation_id != marker.scoring_operation_id
+                or starts[0].intent_digest != marker.intent_digest
+            ):
+                issues.error("score_invalid", "state.json")
+        elif starts or results:
+            issues.error("score_invalid", "state.json")
     if outcome is not None:
         if outcome.event_count != len(events):
             issues.error("counter_mismatch", "outcome.json")
@@ -370,32 +462,37 @@ def _verify_semantics(
             issues.error("counter_mismatch", "outcome.json")
         routes_by_key = {
             (
-                event.payload.served_route.provider_id,
-                event.payload.served_route.route_id,
-                event.payload.served_route.model_id,
-            ): event.payload.served_route
-            for event in events
-            if isinstance(event.payload, ModelResponsePayload)
+                payload.served_route.provider_id,
+                payload.served_route.route_id,
+                payload.served_route.model_id,
+            ): payload.served_route
+            for payload in (event.payload for event in events)
+            if isinstance(payload, ModelResponsePayload)
         }
         served = tuple(routes_by_key[key] for key in sorted(routes_by_key))
         if outcome.served_routes != served:
             issues.error("route_mismatch", "outcome.json")
-        completed = [
-            event.payload
-            for event in events
-            if isinstance(event.payload, LifecycleTransitionPayload)
-            and event.payload.state == "completed"
-        ]
-        if not completed:
-            issues.error("finalization_invalid", "outcome.json")
-        elif outcome.reportable and (
-            completed[-1].preflight_seal_id != outcome.preflight_seal_id
-            or completed[-1].commitment_id != outcome.commitment_id
-            or completed[-1].reconciliation_id != outcome.reconciliation_id
-            or completed[-1].cleanup_result_id != outcome.cleanup_result_id
-            or completed[-1].reconciliation_reportable is not True
-            or completed[-1].rescue_required is not False
-            or outcome.result.status != "scored"
+        score = results[0].score if len(results) == 1 else outcome.result
+        if (
+            len(completed) != 1
+            or completed[0].finalization_id != outcome.finalization_id
+            or completed[0].score_id != score.score_id
+            or outcome.score_id != score.score_id
+            or outcome.result != score
+            or (starts and starts[0].finalization_id != outcome.finalization_id)
+            or completed[0].preflight_seal_id != outcome.preflight_seal_id
+            or completed[0].commitment_id != outcome.commitment_id
+            or completed[0].reconciliation_id != outcome.reconciliation_id
+            or completed[0].cleanup_result_id != outcome.cleanup_result_id
+        ):
+            issues.error("outcome_mismatch", "outcome.json")
+        if outcome.reportable and (
+            completed
+            and (
+                completed[0].reconciliation_reportable is not True
+                or completed[0].rescue_required is not False
+                or outcome.result.status != "scored"
+            )
         ):
             issues.error("outcome_mismatch", "outcome.json")
 
@@ -469,7 +566,10 @@ def verify_bundle(root: os.PathLike[str] | str) -> VerificationReport:
             )
 
         references: dict[str, ArtifactRef] = {}
-        for record in (*events, *((outcome,) if outcome is not None else ())):
+        # The immutable manifest and journal are the only authorities for which
+        # artifact bytes belong to a bundle. outcome.json merely asserts that
+        # exact derived inventory and can never bless an added file.
+        for record in ((manifest,) if manifest is not None else ()) + events:
             for ref in _artifact_refs(record):
                 previous = references.get(ref.sha256)
                 if previous is not None and previous != ref:
@@ -477,7 +577,6 @@ def verify_bundle(root: os.PathLike[str] | str) -> VerificationReport:
                 references[ref.sha256] = ref
         artifacts = _read_artifacts(root_fd, references, issues)
         counters = _counters(events)
-        _verify_semantics(events, outcome, issues)
 
         final_hash = (
             events[-1].event_id if events else (manifest.manifest_digest if manifest else "0" * 64)
@@ -488,9 +587,7 @@ def verify_bundle(root: os.PathLike[str] | str) -> VerificationReport:
                 or outcome.manifest_digest != manifest.manifest_digest
             ):
                 issues.error("outcome_mismatch", "outcome.json")
-            if tuple(ref.sha256 for ref in outcome.artifacts) != tuple(
-                ref.sha256 for ref in artifacts
-            ):
+            if outcome.artifacts != artifacts:
                 issues.error("outcome_mismatch", "outcome.json")
         if abandonment is not None and manifest is not None:
             if (
@@ -524,6 +621,7 @@ def verify_bundle(root: os.PathLike[str] | str) -> VerificationReport:
             terminal = "open"
         if marker is not None and marker.state != terminal:
             issues.warning("state_stale", "state.json")
+        _verify_semantics(events, marker, outcome, issues)
         return VerificationReport(
             valid=not any(issue.severity == "error" for issue in issues.values),
             terminal_state=terminal,

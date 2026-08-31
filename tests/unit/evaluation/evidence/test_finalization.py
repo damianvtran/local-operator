@@ -29,14 +29,15 @@ from tests.unit.evaluation.evidence.test_models import DIGEST, OTHER_DIGEST, man
 def _append_completed(writer: EvidenceWriter, *, monotonic_ns: int, wall_time_ms: int) -> None:
     writer.record_final_lifecycle(
         LifecycleTransitionPayload(
-            previous_state_id=DIGEST,
+            previous_state_id=None,
             state_id=OTHER_DIGEST,
             state="completed",
+            finalization_id="final",
             preflight_seal_id=DIGEST,
             commitment_id=OTHER_DIGEST,
             reconciliation_id=DIGEST,
             reconciliation_reportable=True,
-            score_id=None,
+            score_id=ScoreArtifact(status="scored", binary=0).score_id,
             cleanup_result_id=OTHER_DIGEST,
             rescue_required=False,
         ),
@@ -93,6 +94,57 @@ def test_seal_recomputes_all_assertions_and_verifies_terminal(tmp_path: Path) ->
     assert report.terminal_state == "sealed"
     assert report.outcome == outcome
     assert report.outcome is not None and report.outcome.result.binary == 0
+
+
+def test_seal_rejects_forged_finalization_and_lifecycle_score(tmp_path: Path) -> None:
+    writer, score = _finalized(tmp_path / "finalization")
+    try:
+        bad = _draft(score).model_dump(mode="json")
+        bad["finalization_id"] = "forged"
+        with pytest.raises(EvidenceBundleInvalid, match="durable finalization"):
+            writer.seal(OutcomeDraft.model_validate(bad, strict=True))
+    finally:
+        writer.close()
+
+    root = tmp_path / "lifecycle-score"
+    writer = EvidenceWriter.create(root, manifest(), RedactionSet.from_resolved_values(()))
+    try:
+        writer.begin_finalization(
+            "final",
+            "score-op",
+            FinalizationIntent(kind="score", scorer_id="scorer", scorer_version="1"),
+            monotonic_ns=1,
+            wall_time_ms=2,
+        )
+        score = ScoreArtifact(status="scored", binary=0)
+        writer.record_scoring_result(
+            ScoringResultPayload(
+                finalization_id="final", scoring_operation_id="score-op", score=score
+            ),
+            monotonic_ns=2,
+            wall_time_ms=3,
+        )
+        writer.record_final_lifecycle(
+            LifecycleTransitionPayload(
+                previous_state_id=None,
+                state_id=OTHER_DIGEST,
+                state="completed",
+                finalization_id="final",
+                preflight_seal_id=DIGEST,
+                commitment_id=OTHER_DIGEST,
+                reconciliation_id=DIGEST,
+                reconciliation_reportable=True,
+                score_id=ScoreArtifact(status="scored", binary=1).score_id,
+                cleanup_result_id=OTHER_DIGEST,
+                rescue_required=False,
+            ),
+            monotonic_ns=3,
+            wall_time_ms=4,
+        )
+        with pytest.raises(EvidenceBundleInvalid, match="lifecycle receipts"):
+            writer.seal(_draft(score))
+    finally:
+        writer.close()
 
 
 def test_seal_rejects_draft_receipt_or_score_disagreement(tmp_path: Path) -> None:
@@ -174,9 +226,10 @@ def test_infrastructure_failure_seals_unscored_not_binary_zero(tmp_path: Path) -
         score = ScoreArtifact(status="unscored", reason="infrastructure_failure")
         writer.record_final_lifecycle(
             LifecycleTransitionPayload(
-                previous_state_id=DIGEST,
+                previous_state_id=None,
                 state_id=OTHER_DIGEST,
                 state="completed",
+                finalization_id="final",
                 preflight_seal_id=DIGEST,
                 commitment_id=OTHER_DIGEST,
                 reconciliation_id=DIGEST,
@@ -203,6 +256,28 @@ def test_infrastructure_failure_seals_unscored_not_binary_zero(tmp_path: Path) -
     assert outcome.result.status == "unscored"
     assert outcome.result.binary is None
     assert verify_bundle(root).valid
+
+
+def test_forged_outcome_artifact_cannot_bless_unreferenced_file(tmp_path: Path) -> None:
+    writer, score = _finalized(tmp_path / "bundle")
+    try:
+        outcome = writer.seal(_draft(score))
+    finally:
+        writer.close()
+    root = tmp_path / "bundle"
+    extra = b"unreferenced"
+    digest = __import__("hashlib").sha256(extra).hexdigest()
+    (root / "artifacts" / digest).write_bytes(extra)
+    data = outcome.model_dump(mode="json")
+    data["artifacts"].append(
+        {"sha256": digest, "media_type": "text/plain", "byte_count": len(extra)}
+    )
+    data["evidence_root"] = "0" * 64
+    forged = type(outcome).model_validate(data, strict=True)
+    (root / "outcome.json").write_bytes(forged.to_canonical_json())
+    report = verify_bundle(root)
+    assert "artifact_unreferenced" in {issue.code for issue in report.issues}
+    assert "outcome_mismatch" in {issue.code for issue in report.issues}
 
 
 def test_terminal_conflict_and_outcome_tamper_are_detected(tmp_path: Path) -> None:

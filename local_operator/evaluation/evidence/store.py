@@ -773,6 +773,10 @@ class EvidenceWriter:
             marker = StateMarker.from_canonical_json(self._read_regular(self._root_fd, _STATE))
             if marker.state != "finalizing":
                 raise EvidenceTerminal("bundle is not finalizing")
+            if payload.finalization_id != marker.finalization_id:
+                raise EvidenceBundleInvalid(
+                    "terminal lifecycle snapshot disagrees with finalization marker"
+                )
             return self._append_locked(
                 "lifecycle_transition",
                 payload,
@@ -834,8 +838,18 @@ class EvidenceWriter:
                 event.payload for event in events if isinstance(event.payload, ScoringResultPayload)
             ]
             marker = StateMarker.from_canonical_json(self._read_regular(self._root_fd, _STATE))
+            if marker.finalization_id is None or draft.finalization_id != marker.finalization_id:
+                raise EvidenceBundleInvalid("seal draft disagrees with durable finalization")
             if draft.result.status == "scored":
-                if len(starts) != 1 or len(results) != 1 or results[0].score != draft.result:
+                if (
+                    len(starts) != 1
+                    or len(results) != 1
+                    or results[0].score != draft.result
+                    or starts[0].finalization_id != marker.finalization_id
+                    or results[0].finalization_id != marker.finalization_id
+                    or starts[0].scoring_operation_id != marker.scoring_operation_id
+                    or results[0].scoring_operation_id != marker.scoring_operation_id
+                ):
                     raise EvidenceBundleInvalid("seal draft disagrees with durable score")
             elif starts or results or marker.intent != "unscored":
                 raise EvidenceBundleInvalid("unscored seal disagrees with finalization intent")
@@ -849,6 +863,8 @@ class EvidenceWriter:
                 raise EvidenceBundleInvalid("seal requires a completed lifecycle snapshot")
             state = cast(Any, completed[-1])
             assertions = (
+                (state.finalization_id, marker.finalization_id),
+                (state.score_id, draft.result.score_id),
                 (state.preflight_seal_id, draft.preflight_seal_id),
                 (state.commitment_id, draft.commitment_id),
                 (state.reconciliation_id, draft.reconciliation_id),
@@ -879,7 +895,7 @@ class EvidenceWriter:
                 event_count=len(events),
                 final_event_sha256=events[-1].event_id if events else self.manifest.manifest_digest,
                 artifacts=report.artifacts,
-                finalization_id=draft.finalization_id,
+                finalization_id=marker.finalization_id,
                 preflight_seal_id=draft.preflight_seal_id,
                 commitment_id=draft.commitment_id,
                 reconciliation_id=draft.reconciliation_id,

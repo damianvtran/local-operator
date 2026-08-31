@@ -8,14 +8,22 @@ from pathlib import Path
 
 import pytest
 
-from local_operator.evaluation.evidence.models import CancelPayload, ObservationPayload
+from local_operator.evaluation.evidence.models import (
+    ActionBatchPayload,
+    CancelPayload,
+    EnvironmentStepPayload,
+    ModelRequestPayload,
+    ModelResponsePayload,
+    ObservationPayload,
+    UsageCostPayload,
+)
 from local_operator.evaluation.evidence.store import (
     EvidenceBundleInvalid,
     EvidenceWriter,
 )
 from local_operator.evaluation.evidence.verify import verify_bundle
 from local_operator.evaluation.receipts import RedactionSet
-from tests.unit.evaluation.evidence.test_models import manifest
+from tests.unit.evaluation.evidence.test_models import ARTIFACT, DIGEST, ROUTE, manifest
 
 
 def _bundle(tmp_path: Path, *, events: int = 2, artifact: bool = False) -> Path:
@@ -87,6 +95,81 @@ def test_event_tamper_truncate_reorder_duplicate_and_chain_mismatch(tmp_path: Pa
     )
     (root / "events.jsonl").write_bytes(b"".join(lines))
     assert "event_chain_mismatch" in codes(root)
+
+
+def test_semantic_graph_rejects_duplicate_and_out_of_order_receipts(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "bundle"
+    with EvidenceWriter.create(root, manifest(), RedactionSet.from_resolved_values(())) as writer:
+        writer.append(
+            "usage_cost",
+            UsageCostPayload(
+                request_id="request",
+                input_tokens=1,
+                output_tokens=1,
+                cost_microusd=1,
+            ),
+            monotonic_ns=1,
+            wall_time_ms=1,
+        )
+        request = ModelRequestPayload(
+            request_id="request",
+            requested_route=ROUTE,
+            tool_schema_digest=DIGEST,
+            input_tokens=1,
+            message_count=1,
+            tool_count=0,
+        )
+        writer.append("model_request", request, monotonic_ns=2, wall_time_ms=2)
+        writer.append("model_request", request, monotonic_ns=3, wall_time_ms=3)
+        response = ModelResponsePayload(
+            request_id="request",
+            provider_request_id="provider-request",
+            requested_route=ROUTE,
+            served_route=ROUTE,
+            stop_reason="end",
+            output_tokens=1,
+            reasoning_tokens=0,
+            tool_call_count=0,
+        )
+        writer.append("model_response", response, monotonic_ns=4, wall_time_ms=4)
+        writer.append("model_response", response, monotonic_ns=5, wall_time_ms=5)
+    report = verify_bundle(root)
+    assert "receipt_binding_invalid" in {issue.code for issue in report.issues}
+
+
+def test_semantic_graph_rejects_broken_observation_action_step_links(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "bundle"
+    with EvidenceWriter.create(root, manifest(), RedactionSet.from_resolved_values(())) as writer:
+        writer.append(
+            "action_batch",
+            ActionBatchPayload(
+                action_batch_id="batch",
+                observation_id="missing",
+                action_count=1,
+                action_artifact=ARTIFACT,
+            ),
+            monotonic_ns=1,
+            wall_time_ms=1,
+        )
+        writer.append(
+            "environment_step",
+            EnvironmentStepPayload(
+                step_id="step",
+                action_batch_id="batch",
+                receipt_id=DIGEST,
+                observation_id="different",
+                terminated=False,
+                truncated=False,
+            ),
+            monotonic_ns=2,
+            wall_time_ms=2,
+        )
+    report = verify_bundle(root)
+    assert "receipt_binding_invalid" in {issue.code for issue in report.issues}
 
 
 def test_partial_tail_refuses_append_without_repair(tmp_path: Path) -> None:

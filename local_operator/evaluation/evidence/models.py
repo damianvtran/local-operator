@@ -240,6 +240,7 @@ class LifecycleTransitionPayload(ProtocolModel):
     state: Literal[
         "planned", "preflighted", "running", "finalizing", "completed", "failed", "cancelled"
     ]
+    finalization_id: StrictIdentifier | None = None
     preflight_seal_id: Digest | None = None
     commitment_id: Digest | None = None
     reconciliation_id: Digest | None = None
@@ -313,6 +314,7 @@ class EnvironmentStepPayload(ProtocolModel):
 
 class UserSimulatorExchangePayload(ProtocolModel):
     exchange_id: StrictIdentifier
+    previous_exchange_id: StrictIdentifier | None = None
     request_artifact: EvidenceArtifactRef
     response_artifact: EvidenceArtifactRef
     receipt_id: Digest
