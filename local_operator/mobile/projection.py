@@ -299,7 +299,9 @@ _WIRE_ESCAPE_SIX_BYTE_CEILING = 6
 #: 1,840 us across an 80-row frame against 152 us to serialize the whole thing,
 #: i.e. it made the "cheap" estimate 12x more expensive than the work it
 #: exists to avoid.
-_WIRE_ESCAPED_ASCII = {ord(char): None for char in ('"', "\\", *(chr(i) for i in range(0x20)), "\x7f")}
+_WIRE_ESCAPED_ASCII = {
+    ord(char): None for char in ('"', "\\", *(chr(i) for i in range(0x20)), "\x7f")
+}
 
 
 def _wire_charge(text: str) -> int:

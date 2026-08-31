@@ -737,7 +737,6 @@ def test_frame_measurement_gate_never_lets_an_oversized_frame_through() -> None:
     vacuously without them, which is how the defect shipped.
     """
     import random
-    import string
 
     from local_operator.mobile.types import (
         AskOptionWire,
