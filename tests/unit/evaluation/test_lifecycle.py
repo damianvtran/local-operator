@@ -858,16 +858,8 @@ def test_finish_cleanup_is_atomic_and_rolls_back_construction_failure(
 
 
 def test_every_lifecycle_parent_is_sequentially_single_use() -> None:
-    plan = _plan()
+    plan, budget, cleanup, planned = _planned()
     seal = _seal(plan)
-    budget = _budget()
-    cleanup = _cleanup_plan()
-    planned = EpisodeLifecycle.planned(
-        episode_id=budget.episode_id,
-        plan_id=plan.plan_id,
-        budget_id=budget.budget_id,
-        cleanup_plan_id=cleanup.cleanup_plan_id,
-    )
     preflighted = planned.preflight(seal)
     with pytest.raises(ValueError, match="lacks transition authority"):
         planned.preflight(seal)
