@@ -1182,12 +1182,14 @@ _STORE_MAINTENANCE_TASK: "asyncio.Task[None] | None" = None
 
 
 def reset_store_maintenance_for_tests() -> None:
-    """Forget that maintenance ran, so a test can drive it again.
+    """Forget that maintenance ran, so every test starts un-swept.
 
-    The once-per-process guard is deliberate production behaviour and a test
-    that needs the sweeps to run twice would otherwise be asserting against
-    state left by an earlier test in the same interpreter. Applied by an
-    autouse fixture in ``tests/conftest.py``, not per test.
+    The once-per-process guard is deliberate production behaviour, but in a
+    test interpreter it means the first test to call ``_prepare`` consumes the
+    process's single pass and every later one silently exercises a no-op.
+    Resetting around EACH test — the autouse fixture in ``tests/conftest.py``
+    calls this before and after — is what lets any test assert on the sweeps'
+    effects regardless of the order it happens to run in.
     """
     global _STORE_MAINTENANCE_TASK
     _STORE_MAINTENANCE_TASK = None
@@ -1306,6 +1308,20 @@ def _start_store_maintenance(
     which is the belt that protects concurrent sessions in OTHER processes too.
     The ``live_dir`` skip is a redundant second belt for the local case, not the
     load-bearing one.
+
+    One window this opens, named rather than inherited by accident: the origin
+    backfill used to COMPLETE before ``_prepare`` returned, so the in-TUI
+    ``/resume`` picker could never offer a delegated run. It now races first
+    paint, and on the FIRST launch after the upgrade that introduced origin
+    markers the picker can briefly list subagent/reviewer sessions until the
+    background pass stamps them — 67 ms for the origin pass on a 3574-session
+    store, so the window is tens of milliseconds, once per upgrade, and it
+    self-heals within the same launch. Resuming such a run appends to its
+    transcript; nothing is destroyed. The CLI ``--resume`` path is unaffected:
+    ``cli.py`` still runs both backfills eagerly and synchronously before
+    resolving ``--resume``. If the picker ever grows a correctness dependency
+    on origin — filtering delegated runs out by default, say — stamp origins
+    eagerly here (it is the cheap pass) and background only the other three.
 
     A crash before first paint means the sweeps do not run this launch. That is
     acceptable by design: the cost is an unreaped empty directory, which is

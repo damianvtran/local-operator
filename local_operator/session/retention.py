@@ -165,11 +165,9 @@ class SweepResult:
     ``evicted`` counts only empty directories — a non-zero value never means
     a transcript was removed, because transcripts are never removed.
 
-    There is no ``bytes_remaining``. It was accumulated by summing every byte
-    in the store on every sweep and read by NOTHING — not the factory caller,
-    not a script, not a test — so the field existed only to justify the walk
-    that produced it. Reporting store size is a question for a tool the user
-    runs, not a tax on every boot and every ``/resume``."""
+    Store size is not reported: computing it meant summing every byte in the
+    store on every sweep, and nothing read the number.
+    """
 
     scanned: int = 0
     evicted: int = 0
