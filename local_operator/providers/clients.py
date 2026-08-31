@@ -302,11 +302,17 @@ def _strip_quote_pair(text: str) -> str:
     The peel LOOPS rather than running once to cover a value that arrives
     already wrapped more than once — e.g. ``'"ERROR"'`` — which costs nothing
     to absorb and keeps the predicate insensitive to how many layers of
-    quoting an aggregator applied. Note this is NOT the JSON double-encoding
-    case: a truly double-encoded ``raw`` arrives backslash-escaped
-    (``"\\"ERROR\\""``), which :func:`_openrouter_upstream_text` has already
-    parsed away by the time this sees it, so that input never reaches the
-    loop.
+    quoting an aggregator applied.
+
+    A JSON-encoded ``raw`` whose inner value is itself a string (the
+    double-encoding case) DOES reach this function. :func:`_openrouter_upstream_text`
+    ``json.loads`` it, then — because the inner is a ``str``, not a
+    ``Mapping`` — returns the original unparsed ``raw`` rather than the
+    decoded inner. The peel then takes matched quote pairs off that original.
+    (A ``Mapping`` inner is unwrapped to its ``message`` instead, and never
+    gets here.) The earlier claim that double-encoding is "parsed away before
+    this sees it" was wrong; the behaviour was always this, only the stated
+    reason was not.
 
     ``_MAX_QUOTE_PEELS`` bounds the loop because slicing copies the string on
     every pass: an adversarial body of a few MB of quotes would otherwise cost
