@@ -2625,6 +2625,60 @@ async def test_a_brief_that_already_fits_is_offered_no_affordance() -> None:
 
 
 @pytest.mark.asyncio
+async def test_the_title_tracks_failed_attempts_without_mislabeling_in_flight_calls() -> None:
+    """Attempts stay counted while outcomes settle from the folded tool row.
+
+    A start is not a failure, an error adds the compact warning immediately,
+    and a later success remains an attempt without inflating that warning.
+    """
+    job = _Job("sub-1", "RetryBudgetScout", status="running")
+    job.trajectory = [_call("c1", "edit", path="one.py")]
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        view = await _open(pilot, app, job)
+        title = view.rendered_rows()[0]
+        assert "1 tool" in title
+        assert "failed" not in title
+
+        job.trajectory.append(_result("c1", "edit", "invalid patch", is_error=True))
+        app._refresh_band()
+        await pilot.pause()
+        title = view.rendered_rows()[0]
+        assert "1 tool · 1 failed" in title
+
+        job.trajectory.extend(
+            [_call("c2", "read", path="two.py"), _result("c2", "read", "contents")]
+        )
+        app._refresh_band()
+        await pilot.pause()
+        title = view.rendered_rows()[0]
+        assert "2 tools · 1 failed" in title
+
+
+@pytest.mark.asyncio
+async def test_failed_tool_summary_has_a_truthful_compact_truncation_rung() -> None:
+    """The full count compacts to a ratio before leaving as one whole field."""
+    job = _Job("sub-1", "RetryBudgetScout", status="running")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        view = await _open(pilot, app, job)
+        rows = {
+            width: view._title_row(width, "⣾", tools=2, failed_tools=2).plain
+            for width in range(20, 121)
+        }
+        assert any("2 tools · 2 failed" in row for row in rows.values())
+        assert any("2/2 failed" in row for row in rows.values())
+        for width, row in rows.items():
+            assert cell_len(row) <= width, (width, row)
+            if "failed" in row:
+                assert "2 tools · 2 failed" in row or "2/2 failed" in row, (width, row)
+
+
+@pytest.mark.asyncio
 async def test_the_title_drops_whole_fields_rather_than_cutting_a_value() -> None:
     """`⣿ running · 23…` cannot be told from 23s or 23m, and `⣷ runn…` spends
     four cells to say less than the glyph already said. A field that will not

@@ -2385,11 +2385,17 @@ class SubagentView(Vertical):
         # for the life of the page.
         self._arm_arrows()
         spinner = SPINNER_FRAMES[self._spinner_index] if self._running else ""
-        # The tool COUNT, not the entry count: the memo has to key on what the
-        # title renders, or a row replaced by one of a different kind at equal
-        # length paints a stale header. Sound on its own, rather than by way
-        # of the spinner happening to repaint eight times a second.
-        tools = sum(1 for entry in self._entries if entry.kind == "tool")
+        # Counts come from the FOLDED rows the body already trusts, rather than
+        # re-interpreting raw events in the chrome. Attempts remain visible while
+        # settled errors add the outcome signal; an in-flight row has no outcome
+        # yet and therefore must not be presented as a failure.
+        tool_entries = [entry for entry in self._entries if entry.kind == "tool"]
+        tools = len(tool_entries)
+        failed_tools = sum(1 for entry in tool_entries if entry.outcome == "error")
+        # The tool COUNTS, not the entry count: the memo has to key on what the
+        # title renders, or a row settling from running to failed at equal length
+        # paints a stale header. Sound on its own, rather than by way of the
+        # spinner happening to repaint eight times a second.
         # Role and effort are part of what the title paints, so they belong in
         # the memo key: without them a page retargeted from a task to a scout
         # (same label width, different role) would keep the stale header.
@@ -2399,6 +2405,7 @@ class SubagentView(Vertical):
             self._queued,
             self._elapsed,
             tools,
+            failed_tools,
             width,
             spinner,
             self._agent_role,
@@ -2422,7 +2429,7 @@ class SubagentView(Vertical):
         # that (see `assistant.py`'s frozen-epoch check); it is a module global
         # read, so carrying it costs nothing per tick.
         epoch = theme_mod.get_theme_epoch()
-        self._title_text = self._title_row(width, spinner, tools)
+        self._title_text = self._title_row(width, spinner, tools, failed_tools)
         # Keyed on WIDTH alone: the row is a pure function of it, while the
         # memo above also carries the spinner and therefore fires eight times
         # a second — re-measuring five candidate rungs and layout-refreshing
@@ -2483,8 +2490,8 @@ class SubagentView(Vertical):
             )
             self._rule.update(self._rule_text, layout=False)
 
-    def _title_row(self, width: int, spinner: str, tools: int) -> Text:
-        """``Subagent · <role> · <label>  <glyph> <status> · <effort> · <elapsed> · <n> tools``.
+    def _title_row(self, width: int, spinner: str, tools: int, failed_tools: int = 0) -> Text:
+        """Build the adaptive title, including attempted and failed tool counts.
 
         The breadcrumb is dim and the LABEL carries the base ink, which
         inverts the usage card's ``Usage  <target>`` weighting on purpose:
@@ -2579,8 +2586,18 @@ class SubagentView(Vertical):
         for keep_word in (True, False):
             for word_choice in word_choices if keep_word else [word_choices[-1]]:
                 tail: list[tuple[str, Style]] = []
+                tool_summaries: list[str] = []
                 if tools:
-                    tail.append((f" · {tools} tool{'' if tools == 1 else 's'}", dim))
+                    attempts = f"{tools} tool{'' if tools == 1 else 's'}"
+                    if failed_tools:
+                        failures = f"{failed_tools} failed"
+                        tool_summaries = [
+                            f" · {attempts} · {failures}",
+                            f" · {failed_tools}/{tools} failed",
+                        ]
+                    else:
+                        tool_summaries = [f" · {attempts}"]
+                    tail.append((tool_summaries[0], dim))
                 tail.append((f" · {self._elapsed}", dim))
                 # Effort sits AFTER elapsed in the list, so it is dropped LATER
                 # (the ladder peels ``tail`` from the front): the tier is part
@@ -2594,48 +2611,53 @@ class SubagentView(Vertical):
                 rungs = len(tail) if keep_word else len(tail) + 1
                 for dropped in range(rungs):
                     fields = tail[dropped:]
-                    # The role is the MOST disposable field on the row, so it is
-                    # offered ONLY at the least-reduced rung: the full state word
-                    # still present (``keep_word``) and no tail field yet dropped
-                    # (``dropped == 0``). Every tighter rung tries the row
-                    # WITHOUT the role, so the role leaves before a shortened
-                    # state word, any dropped tail field, or the clock — the
-                    # invariant it is documented to hold. Merely trying it
-                    # innermost broke that for a long state word (see the
-                    # ``role_seg`` comment above). Only offered when there is a
-                    # non-default role to show.
-                    role_allowed = bool(role_seg) and keep_word and dropped == 0
-                    for keep_role in (True, False) if role_allowed else (False,):
-                        role_chrome = cell_len(f"{role_seg} · ") if keep_role else 0
-                        # The label gets whatever the fields do not want,
-                        # floored at eight cells so it never vanishes entirely —
-                        # it is the page's subject. The fixed chrome is the
-                        # breadcrumb AND the glyph (and the role, when shown):
-                        # counting only the 13 breadcrumb cells left the budget
-                        # one short, so a rung whose label consumed it exactly
-                        # was rejected and the ladder fell through — non-monotone
-                        # in width, with the state word visible at 35 cells and
-                        # gone again at 36-40 where it still fit.
-                        spend = (
-                            sum(cell_len(text) for text, _ in fields)
-                            + 13
-                            + cell_len(glyph)
-                            + role_chrome
+                    # A failed summary gets one compact truthful rung before the
+                    # whole field leaves: ``2/2 failed`` still preserves attempts
+                    # and outcomes, while truncating either number would lie. It
+                    # is tried only after the optional role yields, because role
+                    # identity is less useful than knowing the calls failed.
+                    summaries = tool_summaries if tools and dropped == 0 else [""]
+                    for summary_index, summary in enumerate(summaries):
+                        candidate_fields = list(fields)
+                        if summary:
+                            candidate_fields[0] = (summary, dim)
+                        # The role is the MOST disposable field on the row, so it is
+                        # offered ONLY at the least-reduced rung with the FULL tool
+                        # summary. Every tighter rung tries the row WITHOUT it.
+                        role_allowed = (
+                            bool(role_seg) and keep_word and dropped == 0 and summary_index == 0
                         )
-                        label = truncate_cells(self._label, max(8, width - spend))
-                        row = Text(no_wrap=True, overflow="ellipsis")
-                        row.append("Subagent", style=dim)
-                        row.append(" · ", style=faint)
-                        if keep_role:
-                            row.append(role_seg, style=dim)
+                        for keep_role in (True, False) if role_allowed else (False,):
+                            role_chrome = cell_len(f"{role_seg} · ") if keep_role else 0
+                            # The label gets whatever the fields do not want,
+                            # floored at eight cells so it never vanishes entirely —
+                            # it is the page's subject. The fixed chrome is the
+                            # breadcrumb AND the glyph (and the role, when shown):
+                            # counting only the 13 breadcrumb cells left the budget
+                            # one short, so a rung whose label consumed it exactly
+                            # was rejected and the ladder fell through — non-monotone
+                            # in width, with the state word visible at 35 cells and
+                            # gone again at 36-40 where it still fit.
+                            spend = (
+                                sum(cell_len(text) for text, _ in candidate_fields)
+                                + 13
+                                + cell_len(glyph)
+                                + role_chrome
+                            )
+                            label = truncate_cells(self._label, max(8, width - spend))
+                            row = Text(no_wrap=True, overflow="ellipsis")
+                            row.append("Subagent", style=dim)
                             row.append(" · ", style=faint)
-                        row.append(label, style=fg)
-                        row.append("  ", style=dim)
-                        row.append(glyph, style=glyph_style)
-                        for text, style in reversed(fields):
-                            row.append(text, style=style)
-                        if cell_len(row.plain) <= width:
-                            return row
+                            if keep_role:
+                                row.append(role_seg, style=dim)
+                                row.append(" · ", style=faint)
+                            row.append(label, style=fg)
+                            row.append("  ", style=dim)
+                            row.append(glyph, style=glyph_style)
+                            for text, style in reversed(candidate_fields):
+                                row.append(text, style=style)
+                            if cell_len(row.plain) <= width:
+                                return row
         # Narrower than the breadcrumb itself: keep the two things that
         # identify the page, and let the label take the ellipsis.
         row = Text(no_wrap=True, overflow="ellipsis")

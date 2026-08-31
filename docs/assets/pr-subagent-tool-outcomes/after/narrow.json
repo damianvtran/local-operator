@@ -1,0 +1,51 @@
+{
+  "scenario": "failed",
+  "size": [
+    62,
+    24
+  ],
+  "title": "Subagent \u00b7 child  \u28fe running \u00b7 1m17s \u00b7 2 tools \u00b7 2 failed",
+  "error_rows": [],
+  "geometry": {
+    "scroll_y": 0,
+    "max_scroll_y": 0,
+    "viewport_h": 9,
+    "virtual_h": 9,
+    "first_visible_is_row_head": false,
+    "owner_block_start": null,
+    "owner_block": null,
+    "rows_into_owner": null,
+    "block_starts": [
+      [
+        1,
+        "InstructionBlock"
+      ],
+      [
+        3,
+        "AssistantBlock"
+      ],
+      [
+        5,
+        "ToolCard"
+      ],
+      [
+        7,
+        "ToolCard"
+      ],
+      [
+        9,
+        "WorkingBlock"
+      ]
+    ]
+  },
+  "visible_rows": [
+    "Subagent \u00b7 child  \u28fe running \u00b7 1m17s \u00b7 2 tools \u00b7 2 failed",
+    "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
+    "Fix the duplicate notice rows in the subagent view.",
+    "Applying the review fixes to the widget.",
+    "\uf044 edit     local_operator/tui/widg\u2026  Invalid a\u2026 \u2717  0.0s",
+    "\uf044 edit     tests/unit/tui/test_sub\u2026  Invalid a\u2026 \u2717  0.0s",
+    "  \u28fe Applying the review fixes  1s",
+    "\u2191\u2193 scroll \u00b7 esc back to conversation"
+  ]
+}
