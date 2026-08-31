@@ -50,6 +50,7 @@ import logging
 import os
 import re
 import shutil
+import stat
 import tempfile
 import time
 import uuid
@@ -64,7 +65,7 @@ from pydantic import BaseModel, Field, field_validator
 # Shared identity with ``local_operator.types`` (see its docstring): the CLI
 # catches this at zero startup cost while ``teams`` raises it where the lock
 # times out. Importing the name (not redefining it) keeps the two identical.
-from local_operator.types import TeamRegistryLockTimeout
+from local_operator.types import TeamRegistryLockTimeout, TeamRegistryRecoveryError
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +77,16 @@ MAX_TEAM_INSTRUCTIONS_CHARS = 8_000
 #: A team name is also a slash-command argument, so it cannot contain spaces
 #: or slashes — ``/team feature-release ship it`` has to parse unambiguously.
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+#: IDs are filesystem row addresses, including on transported ``Team`` models.
+#: Keep the historical safe-segment shape (fixtures use short IDs) while
+#: excluding every separator, absolute path, and dot segment.
+_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+#: Windows has no descriptor-pinned row reads. Immediate bounded retries cover
+#: the directory-swap gap without combining files from different revisions.
+_ROW_SNAPSHOT_ATTEMPTS = 3
+_ROW_SNAPSHOT_RETRY_S = 0.005
 
 #: Persistence is normally a few local-file writes. A bounded retry keeps a
 #: wedged peer from parking a synchronous tool call forever while still making
@@ -180,6 +191,11 @@ class Team(BaseModel):
     instructions: str = ""
     project: str = ""
 
+    @field_validator("id")
+    @classmethod
+    def _id(cls, value: str) -> str:
+        return validate_team_id(value)
+
     @field_validator("name")
     @classmethod
     def _name(cls, value: str) -> str:
@@ -279,6 +295,17 @@ class Team(BaseModel):
         return "\n\n".join(parts) + "\n\n"
 
 
+def validate_team_id(team_id: str) -> str:
+    """Return an ID that is exactly one safe filesystem path segment."""
+    candidate = team_id or ""
+    if not _ID_RE.fullmatch(candidate) or candidate in {".", ".."}:
+        raise ValueError(
+            "team id must be 1-128 characters of letters, digits, dot, "
+            "underscore or hyphen, start with a letter or digit, and contain no path separators"
+        )
+    return candidate
+
+
 def validate_team_name(name: str) -> str:
     """Return a stripped, legal team name or raise ``ValueError``."""
     return Team.model_validate(
@@ -348,23 +375,27 @@ def _atomic_write_text(path: Path, text: str) -> None:
 
 
 def _fsync_dir(path: Path) -> None:
-    """Flush a directory entry to durable storage, best-effort.
+    """Flush a directory entry, suppressing only unsupported implementations.
 
-    WHY: a rename is ordered against later renames on the same directory but
-    the directory ENTRY itself reaches disk only on the next fsync of the
-    directory. After a crash, a published team row could otherwise vanish
-    while its staging predecessor's name still resolves. Not available on
-    some platforms/filesystems (and not permitted on directories on Windows),
-    where the registry falls back to rename ordering alone.
+    Directory fsync is unavailable on Windows and a few filesystems reject it
+    with a documented unsupported-operation errno. Real durability failures —
+    including EIO, ENOSPC, EDQUOT, and permission errors — must reach the caller.
     """
-    try:
-        fd = os.open(path, os.O_RDONLY)
-    except OSError:
+    if os.name == "nt":  # pragma: no cover - exercised by Windows CI
         return
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    fd = os.open(path, flags)
     try:
         os.fsync(fd)
-    except OSError:
-        pass  # pragma: no cover - platform/filesystem dependent
+    except OSError as exc:
+        unsupported = {
+            errno.EINVAL,
+            errno.EBADF,
+            getattr(errno, "ENOTSUP", errno.EINVAL),
+            getattr(errno, "EOPNOTSUPP", errno.EINVAL),
+        }
+        if exc.errno not in unsupported:
+            raise
     finally:
         os.close(fd)
 
@@ -429,6 +460,10 @@ class TeamRegistry:
         self._briefs_loaded: set[str] = set()
         self._last_refresh_time = 0.0
         self._refresh_interval = refresh_interval
+        # Recovery is the sole startup read that may create a lock sidecar, and
+        # only when a crash artifact proves work is required. Unused registries
+        # remain side-effect free.
+        self._recover_for_read_if_needed()
         self._load()
 
     def _load(self) -> None:
@@ -441,6 +476,10 @@ class TeamRegistry:
             self._last_refresh_time = time.time()
             return
         for child in children:
+            # Crafted symlink rows must never turn metadata reads or deletion
+            # into operations outside the registry root.
+            if child.is_symlink():
+                continue
             # R5-1: dot-prefixed entries are NEVER team rows. Create staging
             # directories (``.<id>.<rand>``), update staging/backup swap
             # directories, per-file ``.team.yml.*`` temporaries and any crash
@@ -453,6 +492,10 @@ class TeamRegistry:
             # start with a dot.
             if child.name.startswith("."):
                 continue
+            try:
+                validate_team_id(child.name)
+            except ValueError:
+                continue
             if not child.is_dir():
                 continue
             # R5-1: the directory name IS the row's address — briefs are read
@@ -462,7 +505,7 @@ class TeamRegistry:
             # where the files actually live, so it is skipped as invalid
             # rather than trusted.
             path = child / "team.yml"
-            if not path.is_file():
+            if path.is_symlink() or not path.is_file():
                 continue
             try:
                 with path.open("r", encoding="utf-8") as handle:
@@ -492,7 +535,27 @@ class TeamRegistry:
         self._last_refresh_time = time.time()
 
     def _refresh_if_needed(self) -> None:
+        self._recover_for_read_if_needed()
         if time.time() - self._last_refresh_time > self._refresh_interval:
+            self._load()
+
+    def _recover_for_read_if_needed(self) -> None:
+        """Recover hidden backups before a read can report a row as missing."""
+        try:
+            needs_recovery = any(
+                _backup_row_id(child) is not None for child in self.teams_dir.iterdir()
+            )
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise TeamRegistryRecoveryError(
+                "Could not inspect interrupted team saves; fix registry access and retry"
+            ) from exc
+        if not needs_recovery:
+            return
+        with self._persistence_lock():
+            # The lock performs recovery before yielding. Reload while still
+            # serialized so the read adopts exactly the healed tree.
             self._load()
 
     def list_teams(self) -> list[Team]:
@@ -515,7 +578,8 @@ class TeamRegistry:
         """
         if team.id in self._briefs_loaded:
             return team
-        team_dir = self.teams_dir / team.id
+        team_id = validate_team_id(team.id)
+        team_dir = self.teams_dir / team_id
         if _DIR_FD_READS:
             # A revision publish has a tiny window where the target name does
             # not exist (between ``target -> backup`` and ``staged -> target``).
@@ -525,7 +589,7 @@ class TeamRegistry:
             # published revision.
             for attempt in range(3):
                 try:
-                    directory_fd = os.open(team_dir, os.O_RDONLY)
+                    directory_fd = _open_row_directory(team_dir)
                 except FileNotFoundError:
                     if attempt < 2:
                         time.sleep(0.005)
@@ -534,33 +598,30 @@ class TeamRegistry:
                 except OSError:
                     break
                 try:
-                    error, instructions, project = _read_row_through_fd(directory_fd)
-                    if error is None:
-                        pinned = _parse_pinned_metadata(directory_fd)
-                        if pinned is not None and pinned.id == team.id:
-                            if pinned.name == team.name and pinned.description == team.description:
-                                team.instructions = instructions
-                                team.project = project
-                                self._briefs_loaded.add(team.id)
-                                return team
-                            # The directory was replaced under us: adopt the
-                            # pinned revision wholesale so metadata and briefs
-                            # stay one revision.
-                            pinned.instructions = instructions
-                            pinned.project = project
-                            self._teams[team.id] = pinned
-                            self._briefs_loaded.add(team.id)
-                            return pinned
+                    metadata_text, instructions, project = _read_row_through_fd(directory_fd)
+                    pinned = _parse_metadata_text(metadata_text)
+                    if pinned is not None and pinned.id == team_id:
+                        # Adopt the complete pinned model. Selected-field
+                        # comparisons let manager/member/created changes mix
+                        # with briefs from another revision.
+                        pinned.instructions = instructions
+                        pinned.project = project
+                        self._teams[team_id] = pinned
+                        self._briefs_loaded.add(team_id)
+                        return pinned
                 finally:
                     os.close(directory_fd)
                 break
-        # POSIX fd reads unavailable (or the pinned row was unreadable): fall
-        # back to path reads. This can only observe a COMPLETE directory —
-        # publication is a single rename — so the worst case is a brief pair
-        # from the revision the path resolves to now.
-        team.instructions = _read_optional(team_dir / "instructions.md")
-        team.project = _read_optional(team_dir / "project.md")
-        self._briefs_loaded.add(team.id)
+        # Windows lacks openat pinning. Verify metadata bytes and directory
+        # identity before/after all reads; any swap seam invalidates the sample.
+        for attempt in range(_ROW_SNAPSHOT_ATTEMPTS):
+            snapshot = _read_row_snapshot(team_dir, team_id)
+            if snapshot is not None:
+                self._teams[team_id] = snapshot
+                self._briefs_loaded.add(team_id)
+                return snapshot
+            if attempt + 1 < _ROW_SNAPSHOT_ATTEMPTS:
+                time.sleep(_ROW_SNAPSHOT_RETRY_S)
         return team
 
     def _hydrate_briefs_for_save(self, team: Team) -> Team:
@@ -607,7 +668,8 @@ class TeamRegistry:
             # the id alone would reintroduce R2-1 whenever a registry hydrated
             # the original before receiving the transported copy.
             return team
-        team_dir = self.teams_dir / team.id
+        team_id = validate_team_id(team.id)
+        team_dir = self.teams_dir / team_id
         # R5-2: this runs UNDER the persistence lock, so no compliant writer can
         # swap the row mid-read; the pinned-fd read is still used because it
         # costs nothing here and keeps the read consistent even if a peer from
@@ -622,14 +684,16 @@ class TeamRegistry:
             # for an object that never read them.
             team.instructions = on_disk_instructions
             team.project = on_disk_project
-        self._briefs_loaded.add(team.id)
+        # Loadedness is adopted only after publication succeeds. Marking the
+        # canonical ID here would poison a failed save: the cache still carries
+        # metadata-only blank briefs but future reads would trust them as loaded.
         return team
 
     def _read_briefs_pinned(self, team_dir: Path) -> tuple[str, str]:
         """Read both briefs through one pinned row-directory descriptor."""
         if _DIR_FD_READS:
             try:
-                directory_fd = os.open(team_dir, os.O_RDONLY)
+                directory_fd = _open_row_directory(team_dir)
             except OSError:
                 return _read_optional(team_dir / "instructions.md"), _read_optional(
                     team_dir / "project.md"
@@ -644,6 +708,7 @@ class TeamRegistry:
         return _read_optional(team_dir / "instructions.md"), _read_optional(team_dir / "project.md")
 
     def get_team(self, team_id: str) -> Team:
+        team_id = validate_team_id(team_id)
         self._refresh_if_needed()
         team = self._teams.get(team_id)
         if team is None:
@@ -731,6 +796,7 @@ class TeamRegistry:
             return self._save_team_locked(team, briefs_authoritative=True)
 
     def update_team(self, team_id: str, fields: TeamEditFields) -> Team:
+        team_id = validate_team_id(team_id)
         with self._persistence_lock():
             # Refresh exactly once under the writer lock, then mutate and save
             # that canonical object without re-locking or replacing the cache.
@@ -738,7 +804,11 @@ class TeamRegistry:
             current = self._teams.get(team_id)
             if current is None:
                 raise KeyError(f"Team with id {team_id} not found")
-            self._load_briefs(current)
+            current = self._load_briefs(current)
+            # Keep the canonical cache on the last acknowledged durable row.
+            # Stage all edits on a detached candidate and adopt only after the
+            # directory transaction completes successfully.
+            candidate = current.model_copy(deep=True)
 
             updates = fields.model_dump(exclude_unset=True)
             if "name" in updates and updates["name"] is not None:
@@ -746,27 +816,27 @@ class TeamRegistry:
                 occupant = self._find_cached_team_by_name(new_name)
                 if occupant is not None and occupant.id != team_id:
                     raise ValueError(f"Team with name {new_name} already exists")
-                current.name = new_name
+                candidate.name = new_name
             if "description" in updates and updates["description"] is not None:
-                current.description = updates["description"].strip()
+                candidate.description = updates["description"].strip()
             if "manager" in updates and updates["manager"] is not None:
                 manager = updates["manager"].strip()
                 if not manager:
                     raise ValueError("manager is required")
-                current.manager = manager
+                candidate.manager = manager
             if "members" in fields.model_fields_set and fields.members is not None:
                 # ``model_dump`` recursively turns Pydantic children into dicts.
                 # Keep the validated TeamMember objects: roster rendering and
                 # orchestration call ``member.role`` / ``member.count`` immediately
                 # after an update, before a reload can rehydrate them from YAML.
-                current.members = list(fields.members)
+                candidate.members = list(fields.members)
             if "instructions" in updates and updates["instructions"] is not None:
                 # An explicit "" is a DELIBERATE clear. This path hydrated first,
                 # so the empty string is authoritative rather than transported.
-                current.instructions = _bounded(updates["instructions"])
+                candidate.instructions = _bounded(updates["instructions"])
             if "project" in updates and updates["project"] is not None:
-                current.project = _bounded(updates["project"])
-            return self._save_team_locked(current, briefs_authoritative=True)
+                candidate.project = _bounded(updates["project"])
+            return self._save_team_locked(candidate, briefs_authoritative=True)
 
     def save_team(self, team: Team) -> Team:
         """Write ``team`` to disk and adopt it as this registry's current row.
@@ -789,13 +859,35 @@ class TeamRegistry:
         # Loadedness authorizes only the canonical object this registry actually
         # hydrated. Preserve that fact across the mandatory disk refresh; a
         # transported copy with the same id remains untrusted by construction.
-        briefs_authoritative = team.id in self._briefs_loaded and team is self._teams.get(team.id)
+        try:
+            # Assignment validation is intentionally not enabled on this shared
+            # model, so validate a detached transport copy before any filesystem
+            # operation. On failure, restore this registry's canonical snapshot
+            # from disk because the caller may have mutated that exact object.
+            candidate = Team.model_validate(team.model_dump())
+            team_id = validate_team_id(candidate.id)
+        except ValueError:
+            self._load()
+            raise
+        briefs_authoritative = team_id in self._briefs_loaded and team is self._teams.get(team_id)
+        # Direct callers may edit the canonical result before save. Reloading
+        # restores the cache from disk, while this detached candidate prevents a
+        # failed publication from re-adopting the rejected in-memory revision.
         with self._persistence_lock():
             self._load()
-            return self._save_team_locked(team, briefs_authoritative=briefs_authoritative)
+            saved = self._save_team_locked(candidate, briefs_authoritative=briefs_authoritative)
+        # Existing callers reasonably keep the object they passed. Reflect the
+        # now-durable hydrated briefs only after publication succeeds; failure
+        # still leaves both the canonical cache and caller object untouched.
+        team.instructions = saved.instructions
+        team.project = saved.project
+        return saved
 
     def _save_team_locked(self, team: Team, *, briefs_authoritative: bool) -> Team:
         """Validate and publish ``team`` while ``_persistence_lock`` is held."""
+        # Defense in depth for ``model_construct`` and validation-bypassing
+        # transports: reject before mkdir, temp creation, rename, or cleanup.
+        team_id = validate_team_id(team.id)
         name_key = team.name.casefold()
         occupant = next(
             (
@@ -811,12 +903,11 @@ class TeamRegistry:
         # Hydrate BEFORE creating the final directory. An untrusted transported
         # row carries empty brief strings that mean "not loaded", while create
         # and update explicitly mark their already-known values authoritative.
-        if briefs_authoritative:
-            self._briefs_loaded.add(team.id)
-        else:
+        team_dir = self.teams_dir / team_id
+        if team_dir.is_symlink():
+            raise ValueError("refusing to save through a symlinked team row")
+        if not briefs_authoritative:
             self._hydrate_briefs_for_save(team)
-
-        team_dir = self.teams_dir / team.id
         payload = team.model_dump(mode="json", exclude={"instructions", "project"})
         metadata = yaml.safe_dump(payload, default_flow_style=False, sort_keys=False)
         try:
@@ -829,7 +920,7 @@ class TeamRegistry:
             # directory first and swapping it in with a recoverable backup
             # means an unlocked reader sees the old complete row or the new
             # complete row, never a mixture.
-            staging = Path(tempfile.mkdtemp(prefix=f".{team.id}.", dir=self.teams_dir))
+            staging = Path(tempfile.mkdtemp(prefix=f".{team_id}.", dir=self.teams_dir))
             try:
                 _write_row_files(staging, metadata, team)
                 if team_dir.exists():
@@ -840,14 +931,22 @@ class TeamRegistry:
                     # disk (and, since R5-1, staging is invisible to readers
                     # even before the rename).
                     os.replace(staging, team_dir)
-                    _fsync_dir(self.teams_dir)
+                    try:
+                        _fsync_dir(self.teams_dir)
+                    except BaseException:
+                        # A create is not acknowledged unless its directory entry
+                        # is durable. Remove the unacknowledged row so a retry can
+                        # use the same name without discovering phantom success.
+                        shutil.rmtree(team_dir)
+                        _fsync_dir(self.teams_dir)
+                        raise
             except BaseException:
                 shutil.rmtree(staging, ignore_errors=True)
                 raise
         except Exception as exc:
             raise Exception(f"Failed to save team metadata: {exc}") from exc
-        self._teams[team.id] = team
-        self._briefs_loaded.add(team.id)
+        self._teams[team_id] = team
+        self._briefs_loaded.add(team_id)
         return team
 
     def _swap_row_directory_locked(self, staging: Path, target: Path) -> None:
@@ -890,11 +989,15 @@ class TeamRegistry:
             os.replace(staging, target)
             _fsync_dir(target.parent)
         except BaseException:
-            if renamed_aside and not target.exists():
-                # Roll the old complete row back into place: publication
-                # failed, so the durable state must be the pre-save row.
-                os.replace(backup, target)
-                _fsync_dir(target.parent)
+            if renamed_aside:
+                # A post-publish fsync failure is still a failed save. Remove
+                # only our staged revision and restore the authoritative backup
+                # so disk and cache both remain on the old row.
+                if target.exists():
+                    shutil.rmtree(target)
+                if backup.exists():
+                    os.replace(backup, target)
+                    _fsync_dir(target.parent)
             raise
         shutil.rmtree(backup, ignore_errors=True)
 
@@ -913,32 +1016,47 @@ class TeamRegistry:
         """
         try:
             children = list(self.teams_dir.iterdir())
-        except OSError:
+        except FileNotFoundError:
             return  # no teams tree yet: nothing to recover
+        except OSError as exc:
+            raise TeamRegistryRecoveryError(
+                "Could not inspect interrupted team saves; fix access to "
+                f"{self.teams_dir} and retry"
+            ) from exc
         for child in children:
-            if not child.name.startswith(".") or ".backup." not in child.name:
-                continue
-            row_id = child.name.split(".backup.", 1)[0].lstrip(".")
-            if not row_id:
+            row_id = _backup_row_id(child)
+            if row_id is None:
                 continue
             target = self.teams_dir / row_id
             try:
+                if target.is_symlink():
+                    raise OSError(errno.ELOOP, "published team row is a symlink")
                 if target.exists():
-                    # Target is the newer complete revision; the backup is a
-                    # leftover from an interrupted cleanup. Remove it only
-                    # under this lock, never speculatively.
-                    shutil.rmtree(child, ignore_errors=True)
+                    # A target is authoritative only when it is a complete real
+                    # row for this ID. A file/corrupt directory beside a backup
+                    # cannot justify deleting the only known durable revision.
+                    if not _published_row_matches(target, row_id):
+                        raise OSError(errno.EINVAL, "published team row is incomplete or invalid")
+                    # The valid target is the newer complete revision; the
+                    # backup is an interrupted-cleanup leftover.
+                    shutil.rmtree(child)
+                    _fsync_dir(self.teams_dir)
                 else:
+                    if not _published_row_matches(child, row_id):
+                        raise OSError(errno.EINVAL, "backup team row is incomplete or invalid")
                     logger.warning("recovering team row %s from interrupted save", row_id)
                     os.replace(child, target)
                     _fsync_dir(self.teams_dir)
             except OSError as exc:
-                # Recovery is best-effort: a failed restore must not break the
-                # mutation that triggered it, and the hidden backup remains
-                # available for a later attempt.
-                logger.warning("could not recover team row %s: %s", row_id, exc)
+                # A hidden authoritative row invalidates absence and uniqueness
+                # answers. Abort every reader/writer until recovery succeeds.
+                raise TeamRegistryRecoveryError(
+                    f"Could not recover team {row_id!r} from an interrupted save; "
+                    "fix registry permissions and retry"
+                ) from exc
 
     def delete_team(self, team_id: str) -> None:
+        team_id = validate_team_id(team_id)
         with self._persistence_lock():
             # Delete participates in the same ordering as create/save so a
             # delete-recreate-stale-save sequence has one unambiguous winner.
@@ -948,6 +1066,8 @@ class TeamRegistry:
             # Remove the on-disk copy FIRST: if rmtree fails, cache still agrees
             # with disk and the row remains visible after the exception.
             team_dir = self.teams_dir / team_id
+            if team_dir.is_symlink():
+                raise ValueError("refusing to delete a symlinked team row")
             if team_dir.exists():
                 shutil.rmtree(team_dir)
             self._teams.pop(team_id)
@@ -1015,6 +1135,9 @@ def _bounded(text: str) -> str:
 
 def _read_optional(path: Path) -> str:
     try:
+        if path.is_symlink():
+            logger.warning("refusing to follow symlinked team file %s", path)
+            return ""
         if path.is_file():
             return path.read_text(encoding="utf-8-sig", errors="replace")
     except OSError:
@@ -1022,9 +1145,8 @@ def _read_optional(path: Path) -> str:
     return ""
 
 
-def _parse_pinned_metadata(directory_fd: int) -> Team | None:
-    """Re-read ``team.yml`` through the pinned descriptor, or None if invalid."""
-    text = _read_optional_at(directory_fd, "team.yml")
+def _parse_metadata_text(text: str | None) -> Team | None:
+    """Parse one captured metadata revision, returning None when invalid."""
     if not text:
         return None
     try:
@@ -1035,24 +1157,21 @@ def _parse_pinned_metadata(directory_fd: int) -> Team | None:
         return None
     try:
         return Team.model_validate(data)
-    except Exception:  # noqa: BLE001 - invalid pinned metadata falls back
+    except Exception:  # noqa: BLE001 - invalid metadata is an unavailable snapshot
         return None
 
 
 def _read_row_through_fd(directory_fd: int) -> tuple[str | None, str, str]:
     """Read metadata and both briefs through ONE pinned directory descriptor.
 
-    Returns ``(metadata_error, instructions, project)`` where a non-None
-    ``metadata_error`` means the directory holds no readable ``team.yml``.
-    Everything comes through the same fd, so all three files are guaranteed
+    Returns captured metadata text plus both briefs. Everything comes through
+    the same fd, so all three files are guaranteed
     to be the same directory revision even if that directory is renamed
     mid-read — the kernel keeps the descriptor addressing the original inode.
     """
     metadata_text = _read_optional_at(directory_fd, "team.yml")
-    if not metadata_text:
-        return "no team.yml", "", ""
     return (
-        None,
+        metadata_text or None,
         _read_optional_at(directory_fd, "instructions.md"),
         _read_optional_at(directory_fd, "project.md"),
     )
@@ -1061,6 +1180,79 @@ def _read_row_through_fd(directory_fd: int) -> tuple[str | None, str, str]:
 #: ``dir_fd`` reads need POSIX ``openat`` semantics. Windows lacks them, so
 #: readers there use path reads (see ``_read_optional_at``).
 _DIR_FD_READS = hasattr(os, "open") and os.name == "posix"
+
+
+def _open_row_directory(team_dir: Path) -> int:
+    """Open one real row directory without following a crafted symlink."""
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    return os.open(team_dir, flags)
+
+
+def _backup_row_id(path: Path) -> str | None:
+    """Return the safe row ID encoded by a real hidden backup directory."""
+    match = re.fullmatch(r"\.([A-Za-z0-9][A-Za-z0-9._-]{0,127})\.backup\..+", path.name)
+    if match is None:
+        return None
+    mode = path.lstat().st_mode
+    if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
+        return None
+    try:
+        return validate_team_id(match.group(1))
+    except ValueError:
+        return None
+
+
+def _published_row_matches(team_dir: Path, expected_id: str) -> bool:
+    """Return whether a recovery target is a real complete row for its ID."""
+    if team_dir.is_symlink() or not team_dir.is_dir():
+        return False
+    metadata = team_dir / "team.yml"
+    if metadata.is_symlink():
+        return False
+    try:
+        team = _parse_metadata_text(metadata.read_text(encoding="utf-8-sig", errors="replace"))
+    except OSError:
+        return False
+    return team is not None and team.id == expected_id
+
+
+def _read_row_snapshot(team_dir: Path, expected_id: str) -> Team | None:
+    """Read one complete path-based row revision or reject a racing sample."""
+    try:
+        before_stat = team_dir.stat(follow_symlinks=False)
+        if not stat.S_ISDIR(before_stat.st_mode):
+            return None
+        metadata_path = team_dir / "team.yml"
+        if metadata_path.is_symlink():
+            return None
+        metadata_before = metadata_path.read_bytes()
+        instructions = _read_optional_strict(team_dir / "instructions.md")
+        project = _read_optional_strict(team_dir / "project.md")
+        metadata_after = metadata_path.read_bytes()
+        after_stat = team_dir.stat(follow_symlinks=False)
+    except OSError:
+        return None
+    identity_before = (before_stat.st_dev, before_stat.st_ino, before_stat.st_mtime_ns)
+    identity_after = (after_stat.st_dev, after_stat.st_ino, after_stat.st_mtime_ns)
+    if metadata_before != metadata_after or identity_before != identity_after:
+        return None
+    metadata_text = metadata_before.decode("utf-8-sig", errors="replace")
+    team = _parse_metadata_text(metadata_text)
+    if team is None or team.id != expected_id:
+        return None
+    team.instructions = instructions
+    team.project = project
+    return team
+
+
+def _read_optional_strict(path: Path) -> str:
+    """Read an optional brief while preserving non-absence failures for retry."""
+    try:
+        if path.is_symlink():
+            raise OSError(errno.ELOOP, "team brief is a symlink")
+        return path.read_text(encoding="utf-8-sig", errors="replace")
+    except FileNotFoundError:
+        return ""
 
 
 def _read_optional_at(directory_fd: int, filename: str) -> str:
@@ -1075,7 +1267,8 @@ def _read_optional_at(directory_fd: int, filename: str) -> str:
     the metadata came from, so the three files are one consistent revision.
     """
     try:
-        fd = os.open(filename, os.O_RDONLY, dir_fd=directory_fd)
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(filename, flags, dir_fd=directory_fd)
     except OSError:
         return ""
     try:

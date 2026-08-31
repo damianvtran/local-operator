@@ -2754,7 +2754,11 @@ def main() -> int:
             # same reason the teams module is: ``local_operator.types`` builds
             # pydantic models at import time and must stay off the startup path
             # (pinned by test_import_graph).
-            from local_operator.teams import TeamRegistry, TeamRegistryLockTimeout
+            from local_operator.teams import (
+                TeamRegistry,
+                TeamRegistryLockTimeout,
+                TeamRegistryRecoveryError,
+            )
 
             try:
                 team_registry = TeamRegistry(base_dir)
@@ -2768,7 +2772,7 @@ def main() -> int:
                     return teams_delete_command(args.name, team_registry)
                 else:
                     parser.error(f"Invalid teams command: {args.teams_command}")
-            except TeamRegistryLockTimeout as e:
+            except (TeamRegistryLockTimeout, TeamRegistryRecoveryError) as e:
                 print(f"\n\033[1;31mError: {str(e)}\033[0m", file=sys.stderr)
                 return 1
         elif args.subcommand == "serve":
@@ -3154,7 +3158,10 @@ def main() -> int:
         # needed (``local_operator.types`` must stay off the startup path,
         # pinned by test_import_graph); every other exception falls through
         # to the full presenter unchanged.
-        if type(e).__name__ == "TeamRegistryLockTimeout" and isinstance(e, TimeoutError):
+        if type(e).__name__ in {
+            "TeamRegistryLockTimeout",
+            "TeamRegistryRecoveryError",
+        } and isinstance(e, (TimeoutError, RuntimeError)):
             print(f"\n\033[1;31mError: {str(e)}\033[0m", file=sys.stderr)
             return 1
         # STDERR, always. main() wraps the `exec` dispatch too, so this is the

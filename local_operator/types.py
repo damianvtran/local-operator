@@ -451,6 +451,16 @@ class Schedule(BaseModel):
         return v
 
 
+class TeamRegistryRecoveryError(RuntimeError):
+    """An interrupted team-row transaction could not be recovered safely.
+
+    Readers and writers must stop rather than report a hidden durable row as
+    absent or publish a duplicate name. The CLI/tool boundaries present this as
+    concise corrective guidance, while the chained storage error remains
+    available to diagnostics.
+    """
+
+
 class TeamRegistryLockTimeout(TimeoutError):
     """The bounded wait for the cross-process teams registry lock expired.
 

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import errno
 import os
+import subprocess
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,6 +21,7 @@ from local_operator.teams import (
     TeamMember,
     TeamRegistry,
     TeamRegistryLockTimeout,
+    TeamRegistryRecoveryError,
     parse_members,
 )
 
@@ -33,6 +36,72 @@ def test_constructing_unused_registry_does_not_create_config_tree(tmp_path: Path
     TeamRegistry(config_dir)
 
     assert not config_dir.exists()
+
+
+@pytest.mark.parametrize(
+    "hostile_id",
+    [
+        "./../../victim",
+        "../escaped",
+        "folder/child",
+        r"folder\\child",
+        "/tmp/absolute",
+        ".",
+        "..",
+    ],
+)
+def test_team_model_rejects_path_ids(hostile_id: str) -> None:
+    with pytest.raises(ValueError, match="team id"):
+        Team(
+            id=hostile_id,
+            name="hostile",
+            created_date=datetime.now(timezone.utc),
+        )
+
+
+def test_save_defensively_rejects_bypassed_path_id_without_touching_disk(tmp_path: Path) -> None:
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    sentinel = victim / "user-data"
+    sentinel.write_text("keep", encoding="utf-8")
+    registry = TeamRegistry(tmp_path / "config")
+    hostile = Team.model_construct(
+        id=str(victim),
+        name="hostile",
+        created_date=datetime.now(timezone.utc),
+        description="",
+        manager="manager",
+        members=[],
+        instructions="",
+        project="",
+    )
+
+    with pytest.raises(ValueError, match="team id"):
+        registry.save_team(hostile)
+
+    assert sentinel.read_text(encoding="utf-8") == "keep"
+    assert not registry.config_dir.exists()
+
+
+def test_load_skips_symlinked_rows_and_metadata(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    row_id = "11111111-2222-3333-4444-555555555555"
+    (outside / "team.yml").write_text(
+        yaml.safe_dump(
+            {
+                "id": row_id,
+                "name": "outside",
+                "created_date": "2026-01-01T00:00:00Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+    teams = tmp_path / "config" / "teams"
+    teams.mkdir(parents=True)
+    (teams / row_id).symlink_to(outside, target_is_directory=True)
+
+    assert TeamRegistry(tmp_path / "config").list_teams() == []
 
 
 def test_lock_sidecar_is_not_a_team_row(tmp_path: Path) -> None:
@@ -283,10 +352,10 @@ def test_list_is_metadata_only_and_get_loads_briefs_once(tmp_path: Path, monkeyp
     assert loaded is not None
     assert loaded.instructions == "Review before merging."
     assert loaded.project == "on-call"
-    assert sorted(fd_reads) == ["instructions.md", "project.md", "team.yml", "team.yml"]
+    assert sorted(fd_reads) == ["instructions.md", "project.md", "team.yml"]
 
     assert second.get_team(team.id) is loaded
-    assert len(fd_reads) == 4
+    assert len(fd_reads) == 3
 
 
 def test_saving_a_metadata_only_list_result_preserves_both_briefs(tmp_path: Path) -> None:
@@ -931,6 +1000,102 @@ def test_published_directory_name_must_match_metadata_id(tmp_path: Path) -> None
 # --- R5-2: directory-level transaction for existing rows ---------------------
 
 
+def test_hydration_adopts_complete_metadata_and_briefs_revision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    writer = TeamRegistry(tmp_path)
+    team = writer.create_team(
+        TeamEditFields(
+            name="ops",
+            manager="old-manager",
+            members=[TeamMember(role="old-role")],
+            instructions="old-I",
+            project="old-P",
+        )
+    )
+    reader = TeamRegistry(tmp_path)
+    writer.update_team(
+        team.id,
+        TeamEditFields(
+            manager="new-manager",
+            members=[TeamMember(role="new-role", count=2)],
+            instructions="new-I",
+            project="new-P",
+        ),
+    )
+
+    full = reader.get_team(team.id)
+    assert (
+        full.manager,
+        [(member.role, member.count) for member in full.members],
+        full.instructions,
+        full.project,
+    ) == ("new-manager", [("new-role", 2)], "new-I", "new-P")
+
+    # Force the non-dirfd branch against another stale cache. Its bounded
+    # metadata-before/briefs/metadata-after snapshot must adopt one whole row.
+    fallback = TeamRegistry(tmp_path)
+    writer.update_team(
+        team.id,
+        TeamEditFields(
+            manager="final-manager",
+            members=[TeamMember(role="final-role")],
+            instructions="final-I",
+            project="final-P",
+        ),
+    )
+    monkeypatch.setattr(teams_module, "_DIR_FD_READS", False)
+    full = fallback.get_team(team.id)
+    assert (
+        full.manager,
+        [member.role for member in full.members],
+        full.instructions,
+        full.project,
+    ) == ("final-manager", ["final-role"], "final-I", "final-P")
+
+
+def test_fallback_hydration_retries_swap_during_brief_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = TeamRegistry(tmp_path)
+    team = registry.create_team(
+        TeamEditFields(name="ops", manager="old", instructions="old-I", project="old-P")
+    )
+    reader = TeamRegistry(tmp_path)
+    replacement = Team(
+        id=team.id,
+        name="ops",
+        created_date=team.created_date,
+        manager="new",
+        instructions="new-I",
+        project="new-P",
+    )
+    target = tmp_path / "teams" / team.id
+    staging = tmp_path / "teams" / ".replacement"
+    staging.mkdir()
+    payload = replacement.model_dump(mode="json", exclude={"instructions", "project"})
+    teams_module._write_row_files(staging, yaml.safe_dump(payload, sort_keys=False), replacement)
+
+    real_read = teams_module._read_optional_strict
+    swapped = False
+
+    def swap_after_instructions(path: Path) -> str:
+        nonlocal swapped
+        value = real_read(path)
+        if path.name == "instructions.md" and not swapped:
+            swapped = True
+            old = tmp_path / "teams" / ".old"
+            os.replace(target, old)
+            os.replace(staging, target)
+        return value
+
+    monkeypatch.setattr(teams_module, "_DIR_FD_READS", False)
+    monkeypatch.setattr(teams_module, "_read_optional_strict", swap_after_instructions)
+    full = reader.get_team(team.id)
+    assert swapped
+    assert (full.manager, full.instructions, full.project) == ("new", "new-I", "new-P")
+
+
 @pytest.mark.parametrize(
     "failure_at",
     [
@@ -977,11 +1142,15 @@ def test_injected_update_failure_preserves_old_complete_row(
         if directory.parent != registry.teams_dir or not directory.name.startswith("."):
             real_write(directory, metadata, team)
             return
-        target_index = {
+        stage_failures = {
             "staged_metadata": 0,
             "staged_instructions": 1,
             "staged_project": 2,
-        }[failure_at]
+        }
+        if failure_at not in stage_failures:
+            real_write(directory, metadata, team)
+            return
+        target_index = stage_failures[failure_at]
         staged_writes.append(row_files[target_index])
         # Fail DURING the staged row: the named file and everything before it
         # are on disk, everything after is not — the exact mid-row crash.
@@ -998,8 +1167,9 @@ def test_injected_update_failure_preserves_old_complete_row(
         src_path, dst_path = Path(str(src)), Path(str(dst))
         in_teams = src_path.parent == registry.teams_dir
         staging_source = in_teams and src_path.name.startswith(".")
+        live_source = in_teams and src_path.name == team.id
         backup_destination = dst_path.parent == registry.teams_dir and dst_path.name.startswith(".")
-        if staging_source and backup_destination and failure_at == "target_aside":
+        if live_source and backup_destination and failure_at == "target_aside":
             swap_renames.append("aside")
             raise OSError("injected failure at target->backup")
         if (
@@ -1027,6 +1197,16 @@ def test_injected_update_failure_preserves_old_complete_row(
         )
 
     monkeypatch.undo()
+    # The long-lived registry must remain on the acknowledged old row too.
+    same = registry.get_team_by_name("old")
+    assert same is not None
+    assert (same.name, same.description, same.instructions, same.project) == (
+        "old",
+        "old-desc",
+        "old-inst",
+        "old-proj",
+    )
+
     fresh = TeamRegistry(tmp_path)
     seen = fresh.get_team_by_name("old")
     assert seen is not None, "old row vanished entirely"
@@ -1038,6 +1218,53 @@ def test_injected_update_failure_preserves_old_complete_row(
     )
     leftovers = [p.name for p in (tmp_path / "teams").iterdir() if p.name.startswith(".")]
     assert leftovers == []
+
+    retried = registry.update_team(
+        team.id,
+        TeamEditFields(name="new", instructions="new-inst", project="new-proj"),
+    )
+    assert (retried.name, retried.instructions, retried.project) == (
+        "new",
+        "new-inst",
+        "new-proj",
+    )
+
+
+@pytest.mark.parametrize("fail_call", [1, 2])
+def test_update_directory_fsync_failure_rolls_back_cache_and_disk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fail_call: int
+) -> None:
+    registry = TeamRegistry(tmp_path)
+    team = registry.create_team(
+        TeamEditFields(name="old", manager="old-lead", instructions="old-I", project="old-P")
+    )
+    real_fsync_dir = teams_module._fsync_dir
+    calls = 0
+
+    def fail_selected(path: Path) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == fail_call:
+            raise OSError(errno.EIO, "durability failure")
+        real_fsync_dir(path)
+
+    monkeypatch.setattr(teams_module, "_fsync_dir", fail_selected)
+    with pytest.raises(Exception, match="Failed to save team metadata"):
+        registry.update_team(
+            team.id,
+            TeamEditFields(name="new", manager="new-lead", instructions="new-I", project="new-P"),
+        )
+    monkeypatch.undo()
+
+    same = registry.get_team(team.id)
+    fresh = TeamRegistry(tmp_path).get_team(team.id)
+    for seen in (same, fresh):
+        assert (seen.name, seen.manager, seen.instructions, seen.project) == (
+            "old",
+            "old-lead",
+            "old-I",
+            "old-P",
+        )
 
 
 def test_crash_between_swap_renames_recovers_on_next_locked_mutation(
@@ -1087,12 +1314,13 @@ def test_crash_between_swap_renames_recovers_on_next_locked_mutation(
     assert (seen.name, seen.instructions, seen.project) == ("old", "old-inst", "old-proj")
     assert [p.name for p in (tmp_path / "teams").iterdir() if p.name.startswith(".")] == []
 
-    # True crash state: target gone, row only in the hidden backup. No reader
-    # can see it, and the next locked mutation must restore it whole.
+    # True crash state: target gone, row only in the hidden backup. The first
+    # fresh read now recovers it under lock instead of reporting a false absence.
     row_dir = tmp_path / "teams" / team.id
     backup_dir = tmp_path / "teams" / f".{team.id}.backup.stranded"
     row_dir.rename(backup_dir)
-    assert TeamRegistry(tmp_path).list_teams() == []
+    recovered = TeamRegistry(tmp_path).list_teams()
+    assert [row.name for row in recovered] == ["old"]
 
     healed = TeamRegistry(tmp_path)
     healed.create_team(TeamEditFields(name="other"))
@@ -1175,6 +1403,215 @@ def test_new_row_create_is_published_atomically(tmp_path: Path) -> None:
 
 
 # --- U5-1: lock timeout surface ---------------------------------------------
+
+
+@pytest.mark.parametrize("failure_errno", [errno.EIO, errno.ENOSPC])
+def test_directory_fsync_propagates_real_storage_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure_errno: int
+) -> None:
+    directory = tmp_path / "directory"
+    directory.mkdir()
+    monkeypatch.setattr(
+        os, "fsync", lambda _fd: (_ for _ in ()).throw(OSError(failure_errno, "fail"))
+    )
+    with pytest.raises(OSError) as excinfo:
+        teams_module._fsync_dir(directory)
+    assert excinfo.value.errno == failure_errno
+
+
+def test_directory_fsync_suppresses_unsupported_einval(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    directory = tmp_path / "directory"
+    directory.mkdir()
+    monkeypatch.setattr(
+        os, "fsync", lambda _fd: (_ for _ in ()).throw(OSError(errno.EINVAL, "unsupported"))
+    )
+    teams_module._fsync_dir(directory)
+
+
+def test_create_fsync_failure_is_not_adopted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = TeamRegistry(tmp_path)
+    real_fsync_dir = teams_module._fsync_dir
+    calls = 0
+
+    def fail_first_fsync(path: Path) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OSError(errno.ENOSPC, "full")
+        real_fsync_dir(path)
+
+    monkeypatch.setattr(teams_module, "_fsync_dir", fail_first_fsync)
+    with pytest.raises(Exception, match="Failed to save team metadata"):
+        registry.create_team(TeamEditFields(name="not-published"))
+    assert registry.list_teams() == []
+    assert TeamRegistry(tmp_path).list_teams() == []
+
+
+def _strand_backup(registry: TeamRegistry, team_id: str) -> Path:
+    target = registry.teams_dir / team_id
+    backup = registry.teams_dir / f".{team_id}.backup.interrupted"
+    target.rename(backup)
+    return backup
+
+
+def _run_teams_cli(config_dir: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    env["LOCAL_OPERATOR_CONFIG_DIR"] = str(config_dir)
+    return subprocess.run(
+        [
+            str(Path(__file__).parents[2] / ".venv" / "bin" / "python"),
+            "-c",
+            "import sys; from local_operator.cli import main; sys.exit(main())",
+            "teams",
+            *args,
+        ],
+        cwd=Path(__file__).parents[2],
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=15,
+        check=False,
+    )
+
+
+def test_fresh_read_recovers_stranded_backup_complete_row(tmp_path: Path) -> None:
+    registry = TeamRegistry(tmp_path)
+    team = registry.create_team(
+        TeamEditFields(
+            name="survivor",
+            description="durable",
+            manager="lead",
+            members=[TeamMember(role="coder", count=2)],
+            instructions="collaborate",
+            project="ship",
+        )
+    )
+    _strand_backup(registry, team.id)
+
+    fresh = TeamRegistry(tmp_path)
+    listed = fresh.list_teams()
+    shown = fresh.get_team_by_name("survivor")
+    assert [row.name for row in listed] == ["survivor"]
+    assert shown is not None
+    assert (
+        shown.description,
+        shown.manager,
+        [(member.role, member.count) for member in shown.members],
+        shown.instructions,
+        shown.project,
+    ) == ("durable", "lead", [("coder", 2)], "collaborate", "ship")
+    assert not any(".backup." in path.name for path in registry.teams_dir.iterdir())
+
+
+@pytest.mark.parametrize("command", [("list",), ("show", "survivor")])
+def test_real_cli_read_recovers_stranded_backup(tmp_path: Path, command: tuple[str, ...]) -> None:
+    config_dir = tmp_path / "config"
+    registry = TeamRegistry(config_dir)
+    team = registry.create_team(
+        TeamEditFields(
+            name="survivor",
+            manager="lead",
+            members=[TeamMember(role="coder")],
+            instructions="collaborate",
+            project="ship",
+        )
+    )
+    _strand_backup(registry, team.id)
+
+    result = _run_teams_cli(config_dir, *command)
+
+    assert result.returncode == 0, result.stderr
+    assert "survivor" in result.stdout
+    assert "No teams found" not in result.stdout
+    assert "No team found" not in result.stdout
+    if command[0] == "show":
+        assert "lead" in result.stdout
+        assert "collaborate" in result.stdout
+        assert "ship" in result.stdout
+
+
+@pytest.mark.parametrize("operation", ["create", "update", "delete", "list", "show"])
+def test_failed_recovery_aborts_every_registry_operation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    registry = TeamRegistry(tmp_path)
+    team = registry.create_team(TeamEditFields(name="ops", instructions="old"))
+    backup = _strand_backup(registry, team.id)
+    real_replace = teams_module.os.replace
+
+    def deny_restore(src, dst, **kwargs):
+        if Path(src) == backup:
+            raise PermissionError("denied")
+        return real_replace(src, dst, **kwargs)
+
+    monkeypatch.setattr(teams_module.os, "replace", deny_restore)
+    with pytest.raises(TeamRegistryRecoveryError, match="fix registry permissions and retry"):
+        if operation == "create":
+            registry.create_team(TeamEditFields(name="ops"))
+        elif operation == "update":
+            registry.update_team(team.id, TeamEditFields(description="new"))
+        elif operation == "delete":
+            registry.delete_team(team.id)
+        elif operation == "list":
+            registry.list_teams()
+        else:
+            registry.get_team_by_name("ops")
+
+    assert backup.is_dir()
+    assert not (registry.teams_dir / team.id).exists()
+    monkeypatch.undo()
+    recovered = TeamRegistry(tmp_path).get_team_by_name("ops")
+    assert recovered is not None
+    assert (recovered.instructions, recovered.description) == ("old", "")
+
+
+def test_recovery_fsync_failure_reports_then_row_remains_recoverable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = TeamRegistry(tmp_path)
+    team = registry.create_team(TeamEditFields(name="survivor", instructions="old"))
+    _strand_backup(registry, team.id)
+    real_fsync_dir = teams_module._fsync_dir
+    calls = 0
+
+    def fail_once(path: Path) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OSError(errno.EIO, "durability failure")
+        real_fsync_dir(path)
+
+    monkeypatch.setattr(teams_module, "_fsync_dir", fail_once)
+    with pytest.raises(TeamRegistryRecoveryError):
+        registry.list_teams()
+    monkeypatch.undo()
+
+    recovered = TeamRegistry(tmp_path).get_team_by_name("survivor")
+    assert recovered is not None
+    assert recovered.instructions == "old"
+
+
+def test_real_cli_failed_recovery_prints_guidance_not_not_found(tmp_path: Path) -> None:
+    config_dir = tmp_path / "config"
+    registry = TeamRegistry(config_dir)
+    team = registry.create_team(TeamEditFields(name="survivor"))
+    backup = _strand_backup(registry, team.id)
+    # The subprocess runs as the same user, so use a non-directory target that
+    # makes backup->target fail deterministically rather than relying on chmod.
+    (registry.teams_dir / team.id).write_text("blocks restore", encoding="utf-8")
+
+    result = _run_teams_cli(config_dir, "show", "survivor")
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert "Could not recover team" in result.stderr
+    assert "fix registry permissions and retry" in result.stderr
+    assert "No team found" not in result.stderr
+    assert backup.is_dir()
 
 
 def test_lock_timeout_is_a_domain_exception_with_guidance(tmp_path: Path) -> None:
