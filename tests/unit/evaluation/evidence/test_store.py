@@ -20,6 +20,7 @@ from local_operator.evaluation.evidence.models import (
     BudgetCommitmentPayload,
     CancelPayload,
     FinalizationIntent,
+    FinalizationStartPayload,
     ObservationPayload,
     PreflightPayload,
     ScoreArtifact,
@@ -635,7 +636,24 @@ def test_marker_before_finalization_start_recovers_to_bound_abandonment(
     }
     with EvidenceWriter.open_for_abandon(root, redactions()) as recovered:
         record = recovered.abandon("ambiguous_finalization", "start-not-durable")
-    assert record.finalization_id == "final"
+    start = FinalizationStartPayload(
+        finalization_id="final", intent="score", scoring_operation_id="score-op"
+    )
+    assert (
+        record.finalization_id,
+        record.finalization_intent,
+        record.scoring_operation_id,
+        record.finalization_intent_digest,
+        record.pre_finalization_event_count,
+        record.pre_finalization_event_sha256,
+    ) == (
+        "final",
+        "score",
+        "score-op",
+        start.intent_digest,
+        2,
+        cutpoint.events[-1].event_id,
+    )
     report = verify_bundle(root)
     assert report.valid and report.terminal_state == "abandoned"
     assert report.issues == ()
@@ -668,6 +686,114 @@ def test_tampered_marker_only_authority_cannot_abandon(tmp_path: Path, field: st
     )
     with pytest.raises((EvidenceBundleInvalid, EvidenceTerminal)):
         EvidenceWriter.open_for_abandon(root, redactions())
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "finalization_id",
+        "finalization_intent",
+        "scoring_operation_id",
+        "finalization_intent_digest",
+        "pre_finalization_event_count",
+        "pre_finalization_event_sha256",
+    ],
+)
+def test_terminal_abandonment_authority_tamper_is_detected(tmp_path: Path, field: str) -> None:
+    class FailFinalizationStartWrite(_OSCallsForTest):
+        def write(self, fd: int, data: bytes) -> int:
+            if b'"kind":"finalization_start"' in data:
+                raise OSError("cutpoint")
+            return super().write(fd, data)
+
+    root = tmp_path / "bundle"
+    writer = EvidenceWriter.create(
+        root, manifest(), redactions(), syscalls=FailFinalizationStartWrite()
+    )
+    _append_authority(writer)
+    with pytest.raises(OSError):
+        writer.begin_finalization(
+            "final",
+            "score-op",
+            FinalizationIntent(kind="score", scorer_id="scorer", scorer_version="1"),
+        )
+    writer.close()
+    with EvidenceWriter.open_for_abandon(root, redactions()) as recovered:
+        recovered.abandon("ambiguous_finalization", "cutpoint")
+    data = json.loads((root / "abandonment.json").read_bytes())
+    if field == "finalization_intent":
+        data[field] = "unscored"
+        data["scoring_operation_id"] = None
+        data["finalization_intent_digest"] = FinalizationStartPayload(
+            finalization_id=data["finalization_id"], intent="unscored"
+        ).intent_digest
+    elif field in {"finalization_id", "scoring_operation_id"}:
+        data[field] = "forged" if field == "finalization_id" else "forged-op"
+        data["finalization_intent_digest"] = FinalizationStartPayload(
+            finalization_id=data["finalization_id"],
+            intent=data["finalization_intent"],
+            scoring_operation_id=data["scoring_operation_id"],
+        ).intent_digest
+    elif field == "finalization_intent_digest":
+        data["finalization_id"] = "forged"
+        data[field] = FinalizationStartPayload(
+            finalization_id="forged",
+            intent=data["finalization_intent"],
+            scoring_operation_id=data["scoring_operation_id"],
+        ).intent_digest
+    elif field == "pre_finalization_event_count":
+        data[field] += 1
+    else:
+        data[field] = "f" * 64
+    data["abandonment_id"] = "0" * 64
+    from local_operator.evaluation.evidence.models import AbandonmentRecord
+
+    (root / "abandonment.json").write_bytes(
+        AbandonmentRecord.model_validate(data, strict=True).to_canonical_json()
+    )
+    report = verify_bundle(root)
+    assert not report.valid
+    assert "abandonment_mismatch" in {issue.code for issue in report.issues}
+
+
+def test_coherent_abandoned_marker_rewrite_cannot_change_immutable_intent(
+    tmp_path: Path,
+) -> None:
+    class FailFinalizationStartWrite(_OSCallsForTest):
+        def write(self, fd: int, data: bytes) -> int:
+            if b'"kind":"finalization_start"' in data:
+                raise OSError("cutpoint")
+            return super().write(fd, data)
+
+    root = tmp_path / "bundle"
+    writer = EvidenceWriter.create(
+        root, manifest(), redactions(), syscalls=FailFinalizationStartWrite()
+    )
+    _append_authority(writer)
+    with pytest.raises(OSError):
+        writer.begin_finalization(
+            "final",
+            "score-op",
+            FinalizationIntent(kind="score", scorer_id="scorer", scorer_version="1"),
+        )
+    writer.close()
+    with EvidenceWriter.open_for_abandon(root, redactions()) as recovered:
+        recovered.abandon("ambiguous_finalization", "cutpoint")
+    marker = json.loads((root / "state.json").read_bytes())
+    replacement = FinalizationStartPayload(finalization_id="final", intent="unscored")
+    marker.update(
+        {
+            "intent": "unscored",
+            "scoring_operation_id": None,
+            "intent_digest": replacement.intent_digest,
+        }
+    )
+    (root / "state.json").write_text(
+        json.dumps(marker, separators=(",", ":"), sort_keys=True), encoding="utf-8"
+    )
+    report = verify_bundle(root)
+    assert not report.valid
+    assert "abandonment_mismatch" in {issue.code for issue in report.issues}
 
 
 def test_missing_marker_and_start_cannot_claim_ambiguous_finalization(tmp_path: Path) -> None:

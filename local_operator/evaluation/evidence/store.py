@@ -1480,8 +1480,33 @@ class EvidenceWriter:
                 if isinstance(event.payload, FinalizationStartPayload)
             ]
             marker = StateMarker.from_canonical_json(self._read_regular(self._root_fd, _STATE))
-            finalization_id = starts[0].finalization_id if len(starts) == 1 else None
-            if finalization_id is None and reason == "ambiguous_finalization":
+            authority: FinalizationStartPayload | None = starts[0] if len(starts) == 1 else None
+            pre_count: int | None = None
+            pre_head: str | None = None
+            if authority is not None:
+                start_index = next(
+                    event.sequence
+                    for event in events
+                    if isinstance(event.payload, FinalizationStartPayload)
+                )
+                pre_count = start_index
+                pre_head = (
+                    events[start_index - 1].event_id
+                    if start_index > 0
+                    else self.manifest.manifest_digest
+                )
+                if marker.state == "finalizing" and (
+                    marker.finalization_id != authority.finalization_id
+                    or marker.intent != authority.intent
+                    or marker.scoring_operation_id != authority.scoring_operation_id
+                    or marker.intent_digest != authority.intent_digest
+                    or marker.journal_event_count != pre_count
+                    or marker.journal_head_sha256 != pre_head
+                ):
+                    raise EvidenceBundleInvalid(
+                        "finalizing marker disagrees with durable finalization start"
+                    )
+            if authority is None and reason == "ambiguous_finalization":
                 expected_head = events[-1].event_id if events else self.manifest.manifest_digest
                 marker_matches_head = (
                     marker.state == "finalizing"
@@ -1496,13 +1521,28 @@ class EvidenceWriter:
                     raise EvidenceBundleInvalid(
                         "ambiguous finalization marker does not bind the durable journal"
                     )
-                finalization_id = marker.finalization_id
+                assert marker.finalization_id is not None
+                assert marker.intent is not None
+                assert marker.intent_digest is not None
+                authority = FinalizationStartPayload(
+                    finalization_id=marker.finalization_id,
+                    intent=marker.intent,
+                    scoring_operation_id=marker.scoring_operation_id,
+                    intent_digest=marker.intent_digest,
+                )
+                pre_count = marker.journal_event_count
+                pre_head = marker.journal_head_sha256
             record = AbandonmentRecord(
                 bundle_id=self.manifest.bundle_id,
                 manifest_digest=self.manifest.manifest_digest,
                 reason=reason,
                 diagnostic_code=diagnostic_code,
-                finalization_id=finalization_id,
+                finalization_id=authority.finalization_id if authority else None,
+                finalization_intent=authority.intent if authority else None,
+                scoring_operation_id=authority.scoring_operation_id if authority else None,
+                finalization_intent_digest=authority.intent_digest if authority else None,
+                pre_finalization_event_count=pre_count,
+                pre_finalization_event_sha256=pre_head,
                 last_event_sequence=len(events) - 1 if events else None,
                 last_event_sha256=events[-1].event_id if events else self.manifest.manifest_digest,
                 event_count=len(events),

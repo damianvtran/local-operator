@@ -661,6 +661,11 @@ class AbandonmentRecord(ProtocolModel):
     reason: AbandonmentReason
     diagnostic_code: StrictIdentifier
     finalization_id: StrictIdentifier | None = None
+    finalization_intent: Literal["score", "unscored"] | None = None
+    scoring_operation_id: StrictIdentifier | None = None
+    finalization_intent_digest: Digest | None = None
+    pre_finalization_event_count: SafeCount | None = None
+    pre_finalization_event_sha256: Digest | None = None
     last_event_sequence: int | None = Field(default=None, ge=0, le=MAX_SAFE_JSON_INTEGER)
     last_event_sha256: Digest
     event_count: SafeCount
@@ -669,8 +674,33 @@ class AbandonmentRecord(ProtocolModel):
 
     @model_validator(mode="after")
     def _identify(self) -> Self:
-        if self.reason == "ambiguous_finalization" and self.finalization_id is None:
-            raise ValueError("ambiguous finalization abandonment requires finalization authority")
+        authority = (
+            self.finalization_id,
+            self.finalization_intent,
+            self.finalization_intent_digest,
+            self.pre_finalization_event_count,
+            self.pre_finalization_event_sha256,
+        )
+        has_authority = all(value is not None for value in authority)
+        if self.reason == "ambiguous_finalization" and not has_authority:
+            raise ValueError("ambiguous finalization abandonment requires complete authority")
+        if self.reason != "ambiguous_finalization" and any(
+            value is not None for value in authority
+        ):
+            raise ValueError("non-ambiguous abandonment cannot carry finalization authority")
+        if not has_authority and self.scoring_operation_id is not None:
+            raise ValueError("scoring operation requires finalization authority")
+        if self.finalization_intent == "score" and self.scoring_operation_id is None:
+            raise ValueError("scored abandonment authority requires an operation ID")
+        if self.finalization_intent == "unscored" and self.scoring_operation_id is not None:
+            raise ValueError("unscored abandonment authority cannot carry an operation ID")
+        if has_authority:
+            FinalizationStartPayload(
+                finalization_id=self.finalization_id or "invalid",
+                intent=self.finalization_intent or "unscored",
+                scoring_operation_id=self.scoring_operation_id,
+                intent_digest=self.finalization_intent_digest or ZERO_DIGEST,
+            )
         expected = canonical_digest(
             "evidence-abandonment-v1",
             self.model_dump(mode="json", exclude={"abandonment_id"}),

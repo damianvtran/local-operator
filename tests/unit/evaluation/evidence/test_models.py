@@ -8,6 +8,7 @@ import pytest
 from pydantic import ValidationError
 
 from local_operator.evaluation.evidence.models import (
+    AbandonmentRecord,
     ActionBatchPayload,
     BudgetCommitmentPayload,
     CancelPayload,
@@ -288,6 +289,59 @@ def test_score_zero_is_distinct_from_unscored() -> None:
     ):
         with pytest.raises(ValidationError):
             ScoreArtifact.model_validate(invalid)
+
+
+def test_abandonment_recovery_authority_is_complete_and_canonical() -> None:
+    start = FinalizationStartPayload(
+        finalization_id="final", intent="score", scoring_operation_id="score-op"
+    )
+    record = AbandonmentRecord(
+        bundle_id=DIGEST,
+        manifest_digest=OTHER_DIGEST,
+        reason="ambiguous_finalization",
+        diagnostic_code="cutpoint",
+        finalization_id=start.finalization_id,
+        finalization_intent=start.intent,
+        scoring_operation_id=start.scoring_operation_id,
+        finalization_intent_digest=start.intent_digest,
+        pre_finalization_event_count=2,
+        pre_finalization_event_sha256=DIGEST,
+        last_event_sequence=1,
+        last_event_sha256=OTHER_DIGEST,
+        event_count=2,
+        abandoned_wall_time_ms=3,
+    )
+    assert AbandonmentRecord.from_canonical_json(record.to_canonical_json()) == record
+    for field in (
+        "finalization_id",
+        "finalization_intent",
+        "finalization_intent_digest",
+        "pre_finalization_event_count",
+        "pre_finalization_event_sha256",
+    ):
+        invalid = record.model_dump(mode="json")
+        invalid[field] = None
+        invalid["abandonment_id"] = "0" * 64
+        with pytest.raises(ValidationError):
+            AbandonmentRecord.model_validate(invalid, strict=True)
+    with pytest.raises(ValidationError):
+        AbandonmentRecord(
+            bundle_id=DIGEST,
+            manifest_digest=OTHER_DIGEST,
+            reason="operator_abandoned",
+            diagnostic_code="open",
+            finalization_id="final",
+            finalization_intent="unscored",
+            finalization_intent_digest=FinalizationStartPayload(
+                finalization_id="final", intent="unscored"
+            ).intent_digest,
+            pre_finalization_event_count=0,
+            pre_finalization_event_sha256=DIGEST,
+            last_event_sequence=None,
+            last_event_sha256=DIGEST,
+            event_count=0,
+            abandoned_wall_time_ms=1,
+        )
 
 
 def test_models_are_deeply_immutable() -> None:

@@ -1024,9 +1024,23 @@ def verify_bundle(root: os.PathLike[str] | str) -> VerificationReport:
                 for event in events
                 if isinstance(event.payload, FinalizationStartPayload)
             ]
-            expected_finalization_id = starts[0].finalization_id if len(starts) == 1 else None
+            authority: FinalizationStartPayload | None = starts[0] if len(starts) == 1 else None
+            pre_count: int | None = None
+            pre_head: str | None = None
+            if authority is not None:
+                start_index = next(
+                    event.sequence
+                    for event in events
+                    if isinstance(event.payload, FinalizationStartPayload)
+                )
+                pre_count = start_index
+                pre_head = (
+                    events[start_index - 1].event_id
+                    if start_index > 0
+                    else manifest.manifest_digest
+                )
             if (
-                expected_finalization_id is None
+                authority is None
                 and abandonment.reason == "ambiguous_finalization"
                 and marker is not None
                 and marker.state == "abandoned"
@@ -1034,14 +1048,40 @@ def verify_bundle(root: os.PathLike[str] | str) -> VerificationReport:
                 and marker.journal_event_count == len(events)
                 and marker.journal_head_sha256 == final_hash
             ):
-                expected_finalization_id = marker.finalization_id
+                try:
+                    authority = FinalizationStartPayload(
+                        finalization_id=marker.finalization_id or "invalid",
+                        intent=marker.intent or "unscored",
+                        scoring_operation_id=marker.scoring_operation_id,
+                        intent_digest=marker.intent_digest or "0" * 64,
+                    )
+                    pre_count = marker.journal_event_count
+                    pre_head = marker.journal_head_sha256
+                except ValueError:
+                    authority = None
+            expected_authority = (
+                authority.finalization_id if authority else None,
+                authority.intent if authority else None,
+                authority.scoring_operation_id if authority else None,
+                authority.intent_digest if authority else None,
+                pre_count,
+                pre_head,
+            )
+            actual_authority = (
+                abandonment.finalization_id,
+                abandonment.finalization_intent,
+                abandonment.scoring_operation_id,
+                abandonment.finalization_intent_digest,
+                abandonment.pre_finalization_event_count,
+                abandonment.pre_finalization_event_sha256,
+            )
             if (
                 abandonment.bundle_id != manifest.bundle_id
                 or abandonment.manifest_digest != manifest.manifest_digest
                 or abandonment.event_count != len(events)
                 or abandonment.last_event_sha256 != final_hash
                 or abandonment.last_event_sequence != (len(events) - 1 if events else None)
-                or abandonment.finalization_id != expected_finalization_id
+                or actual_authority != expected_authority
             ):
                 issues.error("abandonment_mismatch", "abandonment.json")
         if marker is not None and marker.state != terminal:
