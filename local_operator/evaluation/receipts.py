@@ -370,6 +370,7 @@ class RedactionSet:
 
 class SealedPreflight(ProtocolModel):
     plan_id: Digest
+    required_requirement_ids: tuple[StrictIdentifier, ...]
     passed_requirement_ids: tuple[StrictIdentifier, ...]
     failed_requirement_ids: tuple[StrictIdentifier, ...]
     skipped_requirement_ids: tuple[StrictIdentifier, ...]
@@ -378,6 +379,7 @@ class SealedPreflight(ProtocolModel):
     seal_id: Digest
 
     @field_validator(
+        "required_requirement_ids",
         "passed_requirement_ids",
         "failed_requirement_ids",
         "skipped_requirement_ids",
@@ -400,6 +402,16 @@ class SealedPreflight(ProtocolModel):
             raise ValueError("sealed requirement outcome IDs must be unique")
         if any(tuple(sorted(group)) != group for group in groups):
             raise ValueError("sealed requirement outcome IDs must be canonical")
+        if tuple(sorted(self.required_requirement_ids)) != self.required_requirement_ids:
+            raise ValueError("sealed required requirement IDs must be canonical")
+        if len(self.required_requirement_ids) != len(set(self.required_requirement_ids)):
+            raise ValueError("sealed required requirement IDs must be unique")
+        if not set(self.required_requirement_ids).issubset(flattened):
+            raise ValueError("sealed required requirement IDs must have outcomes")
+        if set(self.required_requirement_ids).intersection(self.failed_requirement_ids):
+            raise ValueError("sealed preflight cannot contain required failures")
+        if set(self.required_requirement_ids).intersection(self.skipped_requirement_ids):
+            raise ValueError("sealed preflight cannot contain required skips")
         if tuple(sorted(self.receipt_digests)) != self.receipt_digests:
             raise ValueError("sealed receipt digests must be canonical")
         expected = _identity(
@@ -412,7 +424,9 @@ class SealedPreflight(ProtocolModel):
 
     @property
     def successful(self) -> bool:
-        return not self.failed_requirement_ids
+        # Required failures and skips are structurally forbidden. Optional
+        # failures remain visible without blocking cooperative adapters.
+        return True
 
 
 def seal_preflight(
@@ -448,6 +462,11 @@ def seal_preflight(
         raise ValueError("required dependency failure prevents preflight sealing")
     payload = {
         "plan_id": plan.plan_id,
+        "required_requirement_ids": tuple(
+            sorted(
+                item.requirement_id for item in plan.requirements if item.necessity == "required"
+            )
+        ),
         "passed_requirement_ids": passed,
         "failed_requirement_ids": failed,
         "skipped_requirement_ids": skipped,

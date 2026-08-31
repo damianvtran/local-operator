@@ -236,7 +236,8 @@ def test_optional_failure_or_skip_seals_but_is_not_successful() -> None:
             duration_ms=0,
         )
         sealed = seal_preflight(plan, (receipt,), RedactionSet.from_resolved_values(()))
-        assert sealed.successful is (status == "skip")
+        assert sealed.successful
+        assert (optional.requirement_id in sealed.failed_requirement_ids) is (status == "fail")
 
 
 @pytest.mark.parametrize(
