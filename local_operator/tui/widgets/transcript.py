@@ -2230,6 +2230,7 @@ class TranscriptView(ScrollableContainer):
         blocks: Sequence[TranscriptBlock],
         *,
         anchor_offset: float | None = None,
+        on_settled: Callable[[], None] | None = None,
     ) -> None:
         """Insert history above visible content while preserving its anchor.
 
@@ -2238,6 +2239,13 @@ class TranscriptView(ScrollableContainer):
         block containing the viewport top plus its intra-block offset, never a
         virtual-height proxy: adaptive gap settlement can legitimately change
         heights above it on a later layout pass.
+
+        ``on_settled`` runs after the insert is fully answered — gaps settled
+        AND the anchor restore's own non-animated scroll has landed — which is
+        the earliest moment a caller that gates work on "the reader is back
+        where they were" can safely re-open that gate. Running it from the
+        anchor restore rather than the settle itself is load-bearing: between
+        the two, the offset still sits where the inserted rows pushed it.
         """
         additions = list(blocks)
         if not additions:
@@ -2263,11 +2271,23 @@ class TranscriptView(ScrollableContainer):
 
             def restore_anchor() -> None:
                 if anchor_block is None or anchor_block.parent is not self:
+                    if on_settled is not None:
+                        on_settled()
                     return
-                self.scroll_to(
-                    y=max(0, anchor_block.virtual_region.y - anchor_gap),
-                    animate=False,
-                )
+                # Inside the programmatic guard: this scroll is the insert's
+                # own, not a reader's, so it must not release the tail anchor
+                # (`watch_scroll_y` skips the resync) — and, for the resume
+                # page-back path, must not be read as a reader arriving at the
+                # top. The restored offset can be inside the page trigger
+                # zone by construction: the rows above were just inserted, so
+                # the anchor lands where it was, which was the top.
+                with self._tail_anchor.programmatic_scroll():
+                    self.scroll_to(
+                        y=max(0, anchor_block.virtual_region.y - anchor_gap),
+                        animate=False,
+                    )
+                if on_settled is not None:
+                    on_settled()
 
             self.call_after_refresh(restore_anchor)
 
@@ -2689,6 +2709,17 @@ class TranscriptView(ScrollableContainer):
         super().watch_scroll_y(old_value, new_value)
         if not self._tail_anchor.programmatic:
             self._tail_anchor.resync(at_end=self.is_near_bottom())
+            # The page-back trigger rides the same watch, scheduled for after
+            # the refresh rather than answered here. `note_user_scroll` fires
+            # at gesture START, before an animated scroll has moved anything,
+            # so a check scheduled only from there can never see the landing;
+            # the watch supplies it. This fires once per animation frame, and
+            # that is fine BY DESIGN: the deferred check reads the viewport
+            # only when it is at rest (animation finished, no pending target,
+            # gate open — see `OperatorApp._check_resume_page`), so the many
+            # firings of one animated gesture collapse into ONE page (M1/U1).
+            if self._on_user_scroll is not None:
+                self._on_user_scroll()
 
     def _resync_tail_anchor(self) -> None:
         # Not while the viewport is still travelling: an animated page-up is

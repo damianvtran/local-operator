@@ -12,10 +12,12 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from textual.events import Key
 
 from local_operator.tui.app import (
     RESUME_OLDER_NOTICE,
     RESUME_PAGE_MESSAGES,
+    RESUME_PAGE_TRIGGER_ROWS,
     RESUME_RENDER_MESSAGES,
     RESUME_START_NOTICE,
     OperatorApp,
@@ -81,6 +83,27 @@ def _user_texts(app: OperatorApp) -> list[str]:
     ]
 
 
+async def _press_and_settle(pilot, view: TranscriptView, key: str) -> None:
+    """Press a real key and let its scroll animation fully settle.
+
+    ``pilot.press`` waits for the animator between keys, which hides exactly
+    the mid-animation behaviour these tests exist to pin; posting the event
+    directly and draining frames keeps the gesture's own timeline visible.
+    The pause loop must outlive the animation (Textual animates a Home over
+    ~1 s at speed 50) AND the settle callback a page mount schedules.
+    """
+    event = Key(key, None)
+    event.set_sender(pilot.app)
+    pilot.app.post_message(event)
+    for _ in range(160):
+        await pilot.pause()
+        if not pilot.app.animator.is_being_animated(view, "scroll_y"):
+            # One extra beat for the settle/anchor callbacks the mount queued.
+            for _ in range(4):
+                await pilot.pause()
+            return
+
+
 async def _wait_for_resume(pilot, app: OperatorApp, *, min_blocks: int = 1) -> None:
     """Boot paints, then a worker adopts the session and replays history.
 
@@ -107,6 +130,112 @@ def test_resume_tail_start_snaps_to_the_nearest_user_row() -> None:
     assert _resume_tail_start(history, 4) == 12
     assert _resume_tail_start(history, 80) == 0
     assert _resume_tail_start(history, 15) == 0
+
+
+@pytest.mark.asyncio
+async def test_an_animated_page_up_mounts_exactly_one_page() -> None:
+    """One animated PageUp mounts ONE page — the page-per-gesture contract.
+
+    Textual ANIMATES pageup/home, so the offset crosses the trigger row many
+    times inside one gesture. The re-entry guard must hold for the whole
+    gesture, not one synchronous callback: the version this test was written
+    against let each animation frame mount another page (three pages for one
+    PageUp, and the ENTIRE deferred head for one Home on a 600-message
+    session), which is the unbounded render cost the display bound exists to
+    remove, paid mid-interaction. Drives the REAL key path — focus the
+    transcript, post the key, let the animation run — never
+    ``scroll_home(animate=False)``.
+    """
+    session = FakeSession()
+    session._history = _history(200)  # 600 messages; ~120 turns deferred
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _wait_for_resume(pilot, app)
+        view = app.query_one(TranscriptView)
+        before_pending = len(app._resume_pending_head)
+        before_blocks = len(view.blocks())
+        # Place the viewport ABOVE the trigger row but off the top, the
+        # position a reader is in when they page up toward the history.
+        view.scroll_to(y=RESUME_PAGE_TRIGGER_ROWS + 8, animate=False)
+        await pilot.pause()
+        view.focus()
+        await pilot.pause()
+        await _press_and_settle(pilot, view, "pageup")
+        assert len(app._resume_pending_head) == before_pending - RESUME_PAGE_MESSAGES
+        assert len(view.blocks()) > before_blocks
+        assert view.scroll_offset.y <= RESUME_PAGE_TRIGGER_ROWS
+
+
+@pytest.mark.asyncio
+async def test_an_animated_home_mounts_one_page_and_lands_at_the_top() -> None:
+    """One animated Home mounts ONE page and lands at the TOP of it.
+
+    The cascade this guards against was worst for Home: the whole remaining
+    conversation mounted in one keypress and the viewport landed
+    mid-conversation (y=146 of 270 on a 150-message session), because the Home
+    animation and the mount's anchor restore fought for the offset. The
+    gesture must be fast, mount one page, and leave the reader at the start
+    of what is rendered — not in the middle, and not needing a second press.
+    """
+    session = FakeSession()
+    session._history = _history(50)  # 150 messages; ~70 deferred
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _wait_for_resume(pilot, app)
+        view = app.query_one(TranscriptView)
+        before_pending = len(app._resume_pending_head)
+        assert before_pending
+        view.focus()
+        await pilot.pause()
+        await _press_and_settle(pilot, view, "home")
+        # Exactly one page: the head shrank by one page, not to zero.
+        assert len(app._resume_pending_head) == before_pending - RESUME_PAGE_MESSAGES
+        # The reader landed AT THE TOP of what is rendered, not mid-page.
+        assert view.scroll_offset.y <= RESUME_PAGE_TRIGGER_ROWS
+        first_users = [t for t in _user_texts(app)][:1]
+        assert first_users, "a page mounted"
+        # A second Home mounts the NEXT page (the gesture re-arms), and still
+        # lands at the top — the reader walks back in pages, never a cascade.
+        # The SECOND press may exhaust the head (a 150-message session holds
+        # only ~72 deferred, so two 60-message pages reach the start); what
+        # is pinned is that the walk is bounded — never more than one page
+        # per press — and never a cascade to zero from a single gesture.
+        await _press_and_settle(pilot, view, "home")
+        assert (
+            before_pending - 2 * RESUME_PAGE_MESSAGES
+            <= len(app._resume_pending_head)
+            < (before_pending - RESUME_PAGE_MESSAGES)
+        )
+        assert view.scroll_offset.y <= RESUME_PAGE_TRIGGER_ROWS
+
+
+@pytest.mark.asyncio
+async def test_the_composer_pages_the_transcript_by_keyboard() -> None:
+    """``ctrl+home`` from the composer reaches the transcript (UX1, U2).
+
+    Default focus is the composer and every plain scroll key is spoken for by
+    the Editor, so without a chord the "scroll up to load" affordance was
+    mouse-only. ``ctrl+home`` must mount one page without moving focus, and
+    ``ctrl+end`` must return the reader to the tail.
+    """
+    session = FakeSession()
+    session._history = _history(50)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _wait_for_resume(pilot, app)
+        view = app.query_one(TranscriptView)
+        before_pending = len(app._resume_pending_head)
+        assert before_pending
+        # The composer holds focus, as it does at rest after a resume.
+        composer_focused = app.focused
+        assert composer_focused is not view
+        await _press_and_settle(pilot, view, "ctrl+home")
+        assert len(app._resume_pending_head) == before_pending - RESUME_PAGE_MESSAGES
+        assert view.scroll_offset.y <= RESUME_PAGE_TRIGGER_ROWS
+        # Focus never left the composer — the reader can type immediately.
+        assert app.focused is composer_focused
+        await _press_and_settle(pilot, view, "ctrl+end")
+        assert view.scroll_offset.y >= view.max_scroll_y - 1
 
 
 @pytest.mark.asyncio
@@ -246,22 +375,41 @@ async def test_clear_drops_the_deferred_head() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_cross_cut_tool_result_still_settles_its_card() -> None:
-    """A call in the deferred head is answered by a result that may already
-    live in the rendered tail. Pairing from the whole-conversation index is
-    what stops that call replaying as ``interrupted``."""
-    # Force the cut to fall between a call and its result: 27 messages, bound
-    # would be 80 so this is short… use enough turns that the snap still
-    # leaves a tool result in the tail whose call is in the head? With turn
-    # snapping the cut is always on a user row, so a call and its result
-    # stay together. Pin the pairing by paging a page that includes a call
-    # whose result was already indexed from the whole history.
+async def test_a_page_splitting_a_turn_still_pairs_call_with_result() -> None:
+    """A page can split a turn whose body exceeds one page: the call and its
+    result may land in different pages, and the whole-conversation results
+    index is what pairs them — a page-local index would replay the call as
+    ``interrupted`` (its result is not in the page) and drop the orphaned
+    result's card.
+
+    Constructs the real hazard rather than asserting around it: one turn of
+    100 messages (a user row, then a batched run of assistant+call / result
+    pairs) is larger than ``RESUME_PAGE_MESSAGES``, so the page cut falls
+    INSIDE the turn and the first page mounts a call whose result is still
+    deferred.
+    """
+    # One oversized turn: user row + 99 assistant-with-call / result pairs.
+    big_turn: list[Any] = [
+        SimpleNamespace(
+            role="user",
+            text="turn 0000: run the whole batch",
+            tool_calls=None,
+            content=[],
+            custom_type=None,
+            id="u-0",
+        )
+    ]
+    for i in range(99):
+        big_turn.extend(_turn(i, with_id=False)[1:])  # the assistant+call and result rows only
     session = FakeSession()
-    session._history = _history(40)
+    session._history = big_turn + _history(30)[3:]  # the oversized turn first
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 40)) as pilot:
         await _wait_for_resume(pilot, app)
         view = app.query_one(TranscriptView)
+        # The oversized turn's head is deferred by the initial bound…
+        assert app._resume_pending_head
+        # …and paging once splits it: the cut lands inside the turn.
         view.scroll_home(animate=False)
         view.note_user_scroll()
         for _ in range(8):
@@ -270,10 +418,10 @@ async def test_a_cross_cut_tool_result_still_settles_its_card() -> None:
         assert cards
         assert all(c._state == "success" for c in cards)
         assert not any(c._state == "interrupted" for c in cards)
+        assert app._resume_pending_head  # the turn still spans the cut
 
 
-@pytest.mark.asyncio
-async def test_resume_page_size_is_smaller_than_the_initial_bound() -> None:
+def test_resume_page_size_is_smaller_than_the_initial_bound() -> None:
     """A page is paid during an interaction, so it is smaller than the
     first-frame budget. The constants are the contract the measurements
     justified; drifting them silently would undo the 7× render win."""

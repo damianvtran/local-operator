@@ -1694,6 +1694,26 @@ class OperatorApp(App[None]):
         # the common path.
         Binding("ctrl+down", "scroll_todos_down", "Scroll todos down", show=False),
         Binding("ctrl+up", "scroll_todos_up", "Scroll todos up", show=False),
+        # Page the TRANSCRIPT from the composer (UX round 1, U2). A bounded
+        # resume is the first time scrolling the transcript is REQUIRED to see
+        # one's own history, and every plain scroll key is spoken for: `up`,
+        # `down`, `pageup`, `pagedown` and `home`/`end` are TextArea cursor
+        # bindings, `tab` never leaves the composer, `shift+tab` is effort
+        # cycling (priority), and `ctrl+up`/`ctrl+down` page the todo overflow.
+        # So without a chord of its own, "scroll up to load" was mouse-only.
+        #
+        # `ctrl+home`/`ctrl+end` because TextArea binds NEITHER (audited
+        # against textual 8.2.8: it binds `home,ctrl+a` and `end,ctrl+e` for
+        # LINE-relative cursor moves, never the ctrl chord for the buffer
+        # extremes), and nothing else in this app binds them — the same
+        # free-key discipline `ctrl+t`, `ctrl+g` and `ctrl+up`/`ctrl+down`
+        # above were chosen by. They bubble rather than sit at `priority`, so
+        # an open picker keeps first refusal on the key, exactly like the
+        # other composer-adjacent chords. `home` jumps to the oldest row
+        # (mounting one page, then further pages per press once the head is
+        # still deferred); `end` returns to the live tail.
+        Binding("ctrl+home", "transcript_home", "Transcript top", show=False),
+        Binding("ctrl+end", "transcript_end", "Transcript end", show=False),
     ]
 
     def __init__(
@@ -2077,12 +2097,19 @@ class OperatorApp(App[None]):
         #: `_collect_resume_page_blocks`, which is synchronous — no await
         #: crosses it, so no live event can be diverted into a history page.
         self._block_sink: list[Any] | None = None
-        #: Guards re-entry into the backward page mount. The scroll watcher
-        #: fires for every intermediate offset of an animated page-up, and each
-        #: mount moves the offset again — without this one keypress mounts the
-        #: rest of the conversation in a cascade, which is the cost this whole
-        #: bound exists to avoid.
+        #: One page per USER GESTURE, not per scroll callback. Held from the
+        #: first trigger until the mount's settle pass has restored the scroll
+        #: anchor: Textual ANIMATES pageup/home, so the scroll watcher fires
+        #: for every intermediate offset of one gesture, and each mount moves
+        #: the offset again — a per-callback guard let one animated Home mount
+        #: the entire deferred head (522 messages on a 600-message probe), the
+        #: unbounded render cost this bound exists to remove. Cleared by the
+        #: settle callback `insert_blocks` schedules, never synchronously.
         self._resume_paging = False
+        #: SINGLE-FLIGHT guard for the deferred page check: while set, a check
+        #: is already scheduled and `_transcript_scrolled` must not queue a
+        #: second. See that method for why unbounded requeues were a cascade.
+        self._resume_check_pending = False
         #: What the CURRENT turn has already been billed for, per model call, by
         #: `on_context_usage_reported`. `on_turn_ended` prices the same turn as a
         #: whole and is the authoritative figure, so it adds only the difference
@@ -2489,14 +2516,14 @@ class OperatorApp(App[None]):
         transcript = self._transcript_view()
         transcript.set_on_clear(self._on_transcript_cleared)  # TUI-009 hook
         # A bounded resume mounts its older pages when the reader reaches the
-        # top. Two signals, because neither is complete: watching ``scroll_y``
-        # catches a wheel or page-up that actually moves the offset, and the
-        # user-scroll hook catches Home while already at the top — which does
-        # not change the offset, so the reactive never fires. SubagentView
-        # pages on the reactive alone because its Home handler calls the loader
-        # directly; the main transcript's Home is Textual's, so the hook is
-        # what makes that key do the same work.
-        self.watch(transcript, "scroll_y", self._transcript_scrolled, init=False)
+        # top. The hook alone catches every GESTURE (wheel, key, drag, click —
+        # `note_user_scroll` fires for each) but fires at gesture START, before
+        # an animated scroll has moved anything; the transcript's own
+        # ``scroll_y`` watch (see ``TranscriptView.watch_scroll_y``) re-fires
+        # the same callback for every offset the viewport passes through. The
+        # two together cover a gesture from start to landing, and the
+        # rest-guard in `_check_resume_page` is what collapses the many
+        # firings of one animated gesture into ONE page (M1/U1).
         transcript.set_on_user_scroll(self._transcript_scrolled)
         # Cached: every appended block asks the splash to hide, and that path
         # should not pay for a DOM query per block.
@@ -3396,10 +3423,14 @@ class OperatorApp(App[None]):
         # into a short session would otherwise page the OLD conversation onto
         # the new transcript the first time the reader scrolled up.
         self._resume_pending_head = []
+        self._sync_deferred_segment()
         self._resume_results = {}
         self._resume_head_notice = None
         self._resume_mounted_ids.clear()
         self._resume_paging = False
+        # A check queued for the OLD conversation must not fire against the
+        # new one; a fresh head has no gesture in flight worth answering.
+        self._resume_check_pending = False
         self._project_settled_rows(history, bound=RESUME_RENDER_MESSAGES)
 
     def _project_settled_rows(self, history: list[Any], *, bound: int | None = None) -> bool:
@@ -3483,6 +3514,10 @@ class OperatorApp(App[None]):
                 # result that renders (or already rendered) in the tail.
                 self._resume_results = results
                 self._resume_pending_head = deferred
+        # The band's deferred count is the at-rest signal that the transcript
+        # is bounded (UX1, U3) — pushed here so it is correct from the FIRST
+        # frame, not from the next band tick.
+        self._sync_deferred_segment()
         transcript = self._transcript_view()
 
         appended = bool(settled_results)
@@ -3662,16 +3697,71 @@ class OperatorApp(App[None]):
     def _transcript_scrolled(self, *_args: Any) -> None:
         """Mount the next older page when the reader reaches the top.
 
-        Deliberately edge-triggered on the OFFSET rather than on a key press:
-        the top can be reached by wheel, keyboard, scrollbar drag or Home, and
-        a per-gesture hook would have to enumerate them all and would still
-        miss the drag. :data:`RESUME_PAGE_TRIGGER_ROWS` fires it slightly
-        before the hard top so the rows are already there when the reader
-        arrives, rather than appearing under a viewport that had stopped.
+        Fired from the transcript's ``scroll_y`` WATCH (every offset the
+        viewport actually passes through) and from ``note_user_scroll`` (the
+        gesture that moves NOTHING — Home while already at the top changes no
+        offset, so the watch alone would miss the one key that most clearly
+        means "show me the start"). Both are needed, and neither alone is
+        enough; the guard inside :meth:`_check_resume_page` is what keeps the
+        many firings of one animated gesture to ONE page.
+
+        The offset is never read here — this fires mid-animation and at
+        gesture start, where the offset is pre-gesture or mid-flight. The
+        question is handed to :meth:`_check_resume_page` after the refresh,
+        which waits for the viewport to be at rest before answering.
         """
         if not self._resume_pending_head:
             return
-        if self._transcript_view().scroll_offset.y <= RESUME_PAGE_TRIGGER_ROWS:
+        # SINGLE-FLIGHT: exactly one deferred check may be pending at a time.
+        # The watch fires once per animation frame and each firing used to
+        # schedule its own check, so one animated gesture queued hundreds;
+        # they all drained the moment the gate re-opened and each one mounted
+        # another page — the same cascade the gate exists to prevent, arriving
+        # one settle-pass later (M1/U1). A flag is enough because the pending
+        # check always runs before the next frame's watch can fire again.
+        if self._resume_check_pending:
+            return
+        self._resume_check_pending = True
+
+        def run_check() -> None:
+            self._resume_check_pending = False
+            self._check_resume_page()
+
+        self._transcript_view().call_after_refresh(run_check)
+
+    def _check_resume_page(self) -> None:
+        """Answer "is the reader at the top" from a viewport at rest.
+
+        Re-asks frame-by-frame while the viewport is still travelling — an
+        animated page-up is mid-flight for its whole duration, and every
+        intermediate offset is nearer the top than where the reader will land
+        — and again while a page this gesture already mounted is still
+        settling, so a second gesture arriving inside that window is answered
+        the moment the gate re-opens rather than silently dropped. Both waits
+        end: the animation finishes, and the settle callback releases the
+        gate (:meth:`_mount_older_resume_page`). The requeue is single-flight
+        (see `_transcript_scrolled`), so waiting never accumulates.
+
+        :data:`RESUME_PAGE_TRIGGER_ROWS` fires slightly before the hard top so
+        the rows are already there when the reader arrives, rather than
+        appearing under a viewport that had stopped.
+        """
+        if not self._resume_pending_head:
+            return
+        transcript = self._transcript_view()
+        if (
+            transcript.app.animator.is_being_animated(transcript, "scroll_y")
+            # A scroll that has been REQUESTED but not started yet — the
+            # callback can land between the key binding and the animation it
+            # schedules, where `is_being_animated` is still False and the
+            # offset still pre-gesture. `scroll_target_y` is where the
+            # viewport is committed to go; differing means travel is coming.
+            or transcript.scroll_target_y != transcript.scroll_offset.y
+            or self._resume_paging
+        ):
+            self._transcript_scrolled()
+            return
+        if transcript.scroll_offset.y <= RESUME_PAGE_TRIGGER_ROWS:
             self._mount_older_resume_page()
 
     def _mount_older_resume_page(self) -> None:
@@ -3687,49 +3777,71 @@ class OperatorApp(App[None]):
         `read_transcript_page` carries: a `compact_file` replacing the JSONL
         underneath a cursor. There is no cursor to go stale, so the
         ``reconciled`` case cannot arise here — and the id dedupe below is the
-        belt to that braces, catching any message that reaches the transcript
+        belt to those braces, catching any message that reaches the transcript
         twice however it got there.
+
+        ONE page per gesture, held across frames: the gate is cleared by the
+        settle callback `insert_blocks` schedules, never synchronously. A
+        synchronous clear left the gate open again while an animated page-up
+        was still crossing the trigger row, so each animation frame mounted
+        another page — one animated Home mounted the entire remaining head,
+        the unbounded render cost this bound exists to remove, paid
+        mid-interaction on the very sessions it targets.
         """
         if self._resume_paging or not self._resume_pending_head:
             return
         self._resume_paging = True
-        try:
-            head = self._resume_pending_head
-            # Same turn-boundary snap as the initial cut: a page that opened on
-            # a tool result whose call is still in the remaining head would
-            # paint a reply with no question at the top of the newly revealed
-            # history.
-            start = _resume_tail_start(head, RESUME_PAGE_MESSAGES)
-            page, self._resume_pending_head = head[start:], head[:start]
-            # Dedupe by stable ID, never by position: the tail was sliced off
-            # the same list, so an overlap should be impossible — but a message
-            # painted twice is a corrupted transcript the user cannot correct,
-            # while a message skipped here is one already on screen. The
-            # asymmetry is why the check exists at all.
-            page = [
-                message
-                for message in page
-                if str(getattr(message, "id", "")) not in self._resume_mounted_ids
-                or not getattr(message, "id", None)
-            ]
-            transcript = self._transcript_view()
-            notice = self._resume_head_notice
-            blocks = self._collect_resume_page_blocks(page)
-            if blocks:
-                # Index 1 when the notice heads the list: the page goes BELOW
-                # it and above the previously rendered rows, so the notice
-                # stays the top row and the conversation keeps its order.
-                mounted = transcript.blocks()
-                index = 1 if mounted and notice is not None and mounted[0] is notice else 0
-                transcript.insert_blocks(index, blocks)
-            if not self._resume_pending_head and notice is not None:
-                # The head is exhausted, so the promise of more becomes a
-                # statement of where the conversation begins. Restated in place
-                # rather than removed: removing it would shift every row above
-                # the viewport by one and undo the anchor the insert just held.
-                notice.restate(RESUME_START_NOTICE, "info")
-        finally:
+        head = self._resume_pending_head
+        # Same turn-boundary snap as the initial cut: a page that opened on
+        # a tool result whose call is still in the remaining head would
+        # paint a reply with no question at the top of the newly revealed
+        # history.
+        start = _resume_tail_start(head, RESUME_PAGE_MESSAGES)
+        page, self._resume_pending_head = head[start:], head[:start]
+        # The count the band shows shrinks with every page mounted; pushed
+        # synchronously so the figure cannot lag the gesture that changed it.
+        self._sync_deferred_segment()
+        # Dedupe by stable ID, never by position: the tail was sliced off
+        # the same list, so an overlap should be impossible — but a message
+        # painted twice is a corrupted transcript the user cannot correct,
+        # while a message skipped here is one already on screen. The
+        # asymmetry is why the check exists at all.
+        page = [
+            message
+            for message in page
+            if str(getattr(message, "id", "")) not in self._resume_mounted_ids
+            or not getattr(message, "id", None)
+        ]
+        transcript = self._transcript_view()
+        notice = self._resume_head_notice
+        blocks = self._collect_resume_page_blocks(page)
+
+        def release_gate() -> None:
+            # Cleared from the settle pass, not from a `finally`: the settle
+            # is the first moment the gesture that armed the gate is fully
+            # answered — the page is mounted, the gaps settled, and the anchor
+            # restore's own non-animated scroll (which force-stops any in-flight
+            # scroll animation) has landed the reader back where they were.
+            # Releasing any earlier re-opens the gate while an animated page-up
+            # is still crossing the trigger row, and the next animation frame
+            # mounts another page.
             self._resume_paging = False
+
+        if blocks:
+            # Index 1 when the notice heads the list: the page goes BELOW
+            # it and above the previously rendered rows, so the notice
+            # stays the top row and the conversation keeps its order.
+            mounted = transcript.blocks()
+            index = 1 if mounted and notice is not None and mounted[0] is notice else 0
+            transcript.insert_blocks(index, blocks, on_settled=release_gate)
+        else:
+            release_gate()
+        if not self._resume_pending_head and notice is not None:
+            # The head is exhausted, so the promise of more becomes a
+            # statement of where the conversation begins. Restated in place
+            # rather than removed: removing it would shift every row above
+            # the viewport by one and undo the anchor the insert just held.
+            notice.restate(RESUME_START_NOTICE, "info")
 
     def _collect_resume_page_blocks(self, page: list[Any]) -> list[Any]:
         """Build the blocks for one deferred page WITHOUT mounting them.
@@ -4423,6 +4535,10 @@ class OperatorApp(App[None]):
             # dead conversation's figure would stay on screen until the new one's
             # first turn ended.
             cost="",
+            # Same contract for the deferred count: it described the replaced
+            # conversation's bounded head, which is gone with the transcript.
+            # The new session's resume replay re-pushes it if it has one.
+            deferred=0,
         )
         return (*carried_spend, was_floor)
 
@@ -8943,6 +9059,10 @@ class OperatorApp(App[None]):
         # longer holds. The model's context is untouched by any of this, which
         # is what /clear already promises.
         self._resume_pending_head = []
+        # The band must not keep advertising older messages that no longer
+        # exist — `/clear` empties the screen, and a stale count beside an
+        # empty transcript would claim history the user just erased.
+        self._sync_deferred_segment()
         self._resume_results = {}
         self._resume_head_notice = None
         self._resume_mounted_ids.clear()
@@ -13035,6 +13155,46 @@ class OperatorApp(App[None]):
     def action_scroll_todos_up(self) -> None:
         """``ctrl+up`` — page the expanded todo overflow toward the start (U2)."""
         self._scroll_todos(down=False)
+
+    def _sync_deferred_segment(self) -> None:
+        """Mirror the deferred-head size into the status band (UX1, U3).
+
+        The band is the only chrome visible at REST — the head notice lives
+        four screens above the viewport, so without this nothing at first
+        paint says the transcript is bounded and the failure mode the notice
+        exists for ("a user believing history was LOST") is answered only
+        after scrolling. Called at every point the pending head changes size
+        or empties: the initial split, each page mount, `/clear`, and a fresh
+        resume resetting an old head. Tolerates a not-yet-constructed band,
+        which is the state during early boot when a resume replays first.
+        """
+        if self._status is None:
+            return
+        self._status.update(deferred=len(self._resume_pending_head))
+
+    def action_transcript_home(self) -> None:
+        """``ctrl+home`` — take the transcript to its oldest row (UX1, U2).
+
+        Goes through the transcript's own scroll action rather than calling
+        ``scroll_home`` directly, so the SAME path a focused-transcript ``home``
+        takes runs here: ``note_user_scroll`` first (the paging trigger, and
+        the tail-anchor release), then the animated scroll. Focus is left
+        untouched — the whole point of the chord is that the composer keeps
+        the caret, so a reader checking the start of a long session can type
+        the moment they return with ``ctrl+end``.
+        """
+        self._transcript_view().action_scroll_home()
+
+    def action_transcript_end(self) -> None:
+        """``ctrl+end`` — take the transcript back to the live tail (UX1, U2).
+
+        The counterpart of ``ctrl+home``: a reader who paged up to check
+        something returns to where new turns arrive without a mouse. Routes
+        through the transcript's own ``end`` action for the same reasons —
+        ``note_user_scroll`` plus the tail-anchor handoff the action already
+        performs.
+        """
+        self._transcript_view().action_scroll_end()
 
     def _scroll_todos(self, *, down: bool) -> None:
         """Drive the todo panel's keyboard scroll, the one path both keys share.
