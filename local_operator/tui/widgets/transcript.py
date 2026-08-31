@@ -2355,7 +2355,10 @@ class TranscriptView(ScrollableContainer):
         the earliest moment a caller that gates work on "the reader is back
         where they were" can safely re-open that gate. Running it from the
         anchor restore rather than the settle itself is load-bearing: between
-        the two, the offset still sits where the inserted rows pushed it.
+        the two, the offset still sits where the inserted rows pushed it. It
+        runs INSIDE the restore's programmatic-scroll guard so the gate never
+        opens on a frame where this widget's own scroll could still be
+        reported as a reader's (see ``restore_anchor``).
         """
         additions = list(blocks)
         if not additions:
@@ -2396,8 +2399,17 @@ class TranscriptView(ScrollableContainer):
                         y=max(0, anchor_block.virtual_region.y - anchor_gap),
                         animate=False,
                     )
-                if on_settled is not None:
-                    on_settled()
+                    # INSIDE the guard, not after it: `on_settled` re-opens the
+                    # caller's page gate, and the guard is what keeps THIS
+                    # widget's own restore scroll from being reported to that
+                    # caller as a reader's scroll. Releasing outside the guard
+                    # left a frame where the gate was open and the offset sat
+                    # inside the trigger zone — harmless only while every
+                    # consumer ALSO edge-triggers on zone entry, which is a
+                    # contract too easy to regress silently. Releasing inside
+                    # makes the window not exist rather than not matter.
+                    if on_settled is not None:
+                        on_settled()
 
             self.call_after_refresh(restore_anchor)
 

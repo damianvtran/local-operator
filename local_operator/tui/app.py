@@ -2122,6 +2122,24 @@ class OperatorApp(App[None]):
         #: is already scheduled and `_transcript_scrolled` must not queue a
         #: second. See that method for why unbounded requeues were a cascade.
         self._resume_check_pending = False
+        #: EDGE-TRIGGERED top-zone latch, the second half of the page-per-
+        #: arrival contract (the first half is `_resume_paging`'s one page
+        #: per GESTURE). ``True`` means armed: the next at-rest moment inside
+        #: the trigger rows mounts exactly ONE page, and the latch stays
+        #: consumed until a scroll GESTURE arrives after that page has landed
+        #: (`_transcript_scrolled` is the only re-arm). Without it the check
+        #: was LEVEL-triggered: after a page prepended, the anchor restore
+        #: parked the reader back inside the trigger rows, the gate opened,
+        #: and the next watch firing — a settle frame, or one more wheel
+        #: notch of a gesture that was still running — mounted another page,
+        #: and another: the reported "it loads chunks one after another
+        #: without me scrolling up again". A GESTURE as the re-arm is what
+        #: closes the hole an offset-based rule cannot: the prepend itself
+        #: displaces the reader out of the zone with no gesture involved, and
+        #: every input path (wheel, key, scrollbar, arrow affordance)
+        #: announces itself through ``note_user_scroll`` before it moves
+        #: anything — the one signal the mount can never synthesize.
+        self._resume_in_zone = True
         #: What the CURRENT turn has already been billed for, per model call, by
         #: `on_context_usage_reported`. `on_turn_ended` prices the same turn as a
         #: whole and is the authoritative figure, so it adds only the difference
@@ -3463,6 +3481,9 @@ class OperatorApp(App[None]):
         # A check queued for the OLD conversation must not fire against the
         # new one; a fresh head has no gesture in flight worth answering.
         self._resume_check_pending = False
+        # Re-armed with the rest of the resume state: a new conversation's
+        # first arrival at the top owes a page (see `_resume_in_zone`).
+        self._resume_in_zone = True
         self._project_settled_rows(history, bound=RESUME_RENDER_MESSAGES)
 
     def _project_settled_rows(self, history: list[Any], *, bound: int | None = None) -> bool:
@@ -3730,16 +3751,33 @@ class OperatorApp(App[None]):
         gesture that moves NOTHING — Home while already at the top changes no
         offset, so the watch alone would miss the one key that most clearly
         means "show me the start"). Both are needed, and neither alone is
-        enough; the guard inside :meth:`_check_resume_page` is what keeps the
-        many firings of one animated gesture to ONE page.
+        enough; the guards inside :meth:`_check_resume_page` are what keep
+        the many firings of one animated gesture to ONE page.
 
-        The offset is never read here — this fires mid-animation and at
-        gesture start, where the offset is pre-gesture or mid-flight. The
-        question is handed to :meth:`_check_resume_page` after the refresh,
-        which waits for the viewport to be at rest before answering.
+        This hook is also the latch's only re-arm (see `_resume_in_zone`).
+        Every INPUT path — wheel, key, scrollbar drag, arrow affordance —
+        announces itself here through ``note_user_scroll`` before it moves
+        anything, and the mount's own displacement never passes through it,
+        which is exactly the discrimination an offset-based re-arm cannot
+        make: the prepend pushes the reader out of the zone with no gesture
+        involved, and re-arming on THAT let a wheel still in motion walk the
+        whole head. A gesture pressed while already parked at the top
+        re-arms too — that is the deliberate "next page please" press, and
+        one press is one page because the check consumes the latch again.
         """
         if not self._resume_pending_head:
             return
+        if self._resume_paging:
+            # A page this same gesture requested is still mounting. The
+            # notches still arriving from that wheel land inside the trigger
+            # rows before the first page settles, and re-arming on them made
+            # one drag mount a second page the moment the gate re-opened.
+            # One gesture episode is one page; the next waits for a gesture
+            # that arrives after this one's page has landed.
+            return
+        # Re-arm unconditionally: a gesture is a gesture wherever it starts,
+        # and the settle/mount machinery can never fire this hook.
+        self._resume_in_zone = True
         # SINGLE-FLIGHT: exactly one deferred check may be pending at a time.
         # The watch fires once per animation frame and each firing used to
         # schedule its own check, so one animated gesture queued hundreds;
@@ -3773,6 +3811,16 @@ class OperatorApp(App[None]):
         :data:`RESUME_PAGE_TRIGGER_ROWS` fires slightly before the hard top so
         the rows are already there when the reader arrives, rather than
         appearing under a viewport that had stopped.
+
+        EDGE, not level: the mount below fires only on the latch
+        (`_resume_in_zone`), which is armed by a user gesture arriving after
+        the previous page landed and consumed by this mount. A level test
+        here mounted on every settle frame — the anchor restore after a page
+        lands the reader back INSIDE the zone by construction, which is the
+        whole point of preserving the anchor — and the next watch firing
+        mounted another page. Home pressed while already parked at the top
+        still loads one page: that gesture re-arms the latch (it is a real
+        input) and the check consumes it again — one press, one page.
         """
         if not self._resume_pending_head:
             return
@@ -3789,7 +3837,13 @@ class OperatorApp(App[None]):
         ):
             self._transcript_scrolled()
             return
-        if transcript.scroll_offset.y <= RESUME_PAGE_TRIGGER_ROWS:
+        if transcript.scroll_offset.y <= RESUME_PAGE_TRIGGER_ROWS and self._resume_in_zone:
+            # Consume FIRST, mount second: the mount's settle re-fires the
+            # watch, and an unconsumed latch would answer it with another
+            # page. `self._resume_paging` also holds across the mount, but
+            # the latch is the contract that survives a settle whose gate
+            # released while the reader stayed parked in the zone.
+            self._resume_in_zone = False
             self._mount_older_resume_page()
 
     def _mount_older_resume_page(self) -> None:

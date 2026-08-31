@@ -12,7 +12,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from textual.events import Key
+from textual.events import Key, MouseScrollUp
 
 from local_operator.tui.app import (
     RESUME_OLDER_NOTICE,
@@ -329,6 +329,95 @@ async def test_scrolling_up_a_long_resume_reveals_older_rows_in_order() -> None:
         # Model history still the original objects, in the original order.
         assert [m.id for m in session.history()] == original_ids
         assert not app._resume_pending_head
+
+
+@pytest.mark.asyncio
+async def test_arriving_at_the_top_mounts_one_page_then_stops() -> None:
+    """Arriving at the top loads ONE page — and nothing more until the reader
+    LEAVES the top zone and comes back.
+
+    The pre-fix trigger was LEVEL-triggered: after a page prepended and the
+    anchor restore parked the viewport back inside the trigger rows, the
+    gate released while the reader was still at the top, and the next watch
+    firing — the settle frames of the mount itself — mounted another page,
+    and another, until the deferred head was gone. To the reader that is "I
+    scroll to the top and it loads chunks one after another without me
+    scrolling up again". The trigger must be an EDGE: armed by a gesture
+    that starts outside the zone, consumed by exactly one page.
+
+    Driven with real wheel events, and the drag carries a momentum tail —
+    the notches a real hand still delivers after the first page begins to
+    mount. Pre-fix that tail mounted a second page from the one gesture.
+    """
+    session = FakeSession()
+    session._history = _history(200)  # 600 messages; many pages available
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _wait_for_resume(pilot, app)
+        view = app.query_one(TranscriptView)
+        assert len(app._resume_pending_head) > 2 * RESUME_PAGE_MESSAGES
+        # Scroll up with the wheel until the first page mounts, then deliver
+        # the momentum tail — the notches a real hand still sends — and stop
+        # entirely. Pre-fix the tail notches mounted a SECOND page from the
+        # one gesture (and a longer drag walked the whole head).
+        for _ in range(80):
+            view.post_message(
+                MouseScrollUp(
+                    widget=view,
+                    button=0,
+                    shift=False,
+                    meta=False,
+                    ctrl=False,
+                    x=10,
+                    y=10,
+                    delta_x=0,
+                    delta_y=-2,
+                )
+            )
+            await pilot.pause()
+            if len(app._resume_pending_head) < 522:
+                break
+        for _ in range(3):
+            view.post_message(
+                MouseScrollUp(
+                    widget=view,
+                    button=0,
+                    shift=False,
+                    meta=False,
+                    ctrl=False,
+                    x=10,
+                    y=10,
+                    delta_x=0,
+                    delta_y=-2,
+                )
+            )
+            await pilot.pause()
+        after_first = len(app._resume_pending_head)
+        blocks_after_first = len(view.blocks())
+        assert after_first == 522 - RESUME_PAGE_MESSAGES, "exactly one page mounted"
+        # Now WAIT. Nothing is animating, nothing is pending — the reader is
+        # parked below the top on the new height (the anchor restore put them
+        # back where they were). A generous pause is the whole test: the
+        # pre-fix cascade needed no further input, so no further input is
+        # given. Any additional mount here is the bug.
+        for _ in range(120):
+            await pilot.pause()
+        assert len(app._resume_pending_head) == after_first
+        assert len(view.blocks()) == blocks_after_first
+        # A DELIBERATE second trip — scroll down out of the zone, then back to
+        # the top — mounts exactly one more page, and stops again.
+        view.scroll_to(y=RESUME_PAGE_TRIGGER_ROWS + 40, animate=False)
+        await pilot.pause()
+        for _ in range(8):
+            await pilot.pause()
+        assert len(app._resume_pending_head) == after_first, "scrolling away mounts nothing"
+        view.focus()
+        await _press_and_settle(pilot, view, "home")
+        assert len(app._resume_pending_head) == after_first - RESUME_PAGE_MESSAGES
+        assert view.scroll_offset.y <= RESUME_PAGE_TRIGGER_ROWS
+        for _ in range(60):
+            await pilot.pause()
+        assert len(app._resume_pending_head) == after_first - RESUME_PAGE_MESSAGES
 
 
 @pytest.mark.asyncio

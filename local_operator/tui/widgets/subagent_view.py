@@ -1670,6 +1670,24 @@ class SubagentView(Vertical):
         self._history_error = False
         self._history_unavailable = True
         self._initial_tail_pending = False
+        #: EDGE-TRIGGERED page-back latch, not a level test. ``_scroll_changed``
+        #: fires for every offset the body passes through — including the
+        #: anchor restore ``insert_blocks`` performs after a page prepends,
+        #: and every settle frame after it. A level test there
+        #: (``scroll_y <= 1`` ⇒ load) mounted a page on each of those
+        #: firings while the reader sat parked at the top, and a wheel still
+        #: in motion crossed straight back into the top rows after the
+        #: prepend displaced it — a sustained drag walked the entire
+        #: transcript (the reported "chunks load one after another at the
+        #: top"). Consumed by one load; re-armed only by a USER GESTURE
+        #: arriving after that load landed (``_note_history_gesture``), the
+        #: one signal the mount cannot synthesize — every input path (wheel,
+        #: key, arrow affordance) announces itself through the body's
+        #: user-scroll hook before it moves anything, and the insert's own
+        #: restore scroll never passes through that hook. ``True`` here
+        #: means armed: the page opens with the reader at the tail, and the
+        #: FIRST arrival at the top must load.
+        self._history_at_top = True
         #: One-shot: the first laid-out body may land its sticky tail on a
         #: wrap fragment (a continuation line with no glyph). Snapped once
         #: onto a row head so the first glance is a statement; later
@@ -1718,6 +1736,12 @@ class SubagentView(Vertical):
         # happened to notice. Watching the reactive is the only signal that
         # fires exactly when the answer changes.
         self.watch(self._body, "scroll_y", self._scroll_changed, init=False)
+        # The page-back latch re-arms HERE, on the gesture signal, and nowhere
+        # else (see ``_history_at_top``). The body's user-scroll hook fires for
+        # every input path before it moves anything; the insert's own anchor
+        # restore never passes through it, which is exactly the discrimination
+        # an offset-based re-arm cannot make.
+        self._body.set_on_user_scroll(self._note_history_gesture)
         self._maybe_load_history(initial=True)
 
     def on_unmount(self) -> None:
@@ -1870,6 +1894,9 @@ class SubagentView(Vertical):
         self._history_exhausted = False
         self._history_error = False
         self._history_unavailable = not bool(directory)
+        # Re-armed on retarget (see ``_history_at_top``): a new job is a new
+        # reader at the tail whose first scroll to the top owes a page.
+        self._history_at_top = True
         # ``show`` runs immediately after ``screen.mount`` but before Textual
         # has mounted this child. ``on_mount`` owns the first request; later
         # retargets are already mounted and can start immediately.
@@ -1894,14 +1921,56 @@ class SubagentView(Vertical):
         if self.is_mounted:
             self._paint_chrome()
 
+    def _note_history_gesture(self, *_args: Any) -> None:
+        """A reader moved the body: re-arm the page-back latch.
+
+        The re-arm half of the edge trigger (``_history_at_top`` is the
+        consume half, in ``_scroll_changed``). Fired from the body's
+        user-scroll hook — wheel, keys, the arrow affordances — and never
+        from the insert's own restore scroll, so a page mounting cannot
+        re-arm the latch its own displacement would immediately consume.
+
+        Suppressed while a page this gesture already requested is in flight:
+        the notches still arriving from the same wheel land inside the top
+        rows before the first page has settled, and re-arming on them made
+        one drag issue a second (deduped, but real) request. One gesture
+        episode is one page; the NEXT page waits for a gesture that arrives
+        after this one's page has landed.
+        """
+        if not self._history_loading:
+            self._history_at_top = True
+
     def _scroll_changed(self, *_args: Any) -> None:
         self._arm_arrows()
-        if not self._initial_tail_pending and self._body.scroll_y <= 1:
+        # EDGE, not level: consume the latch only on the crossing INTO the
+        # top rows. The restore after a prepend lands the reader at the top
+        # of the new height by design, and that second firing is what made a
+        # level trigger cascade (see ``_history_at_top``). Staying at the top
+        # — the settle frames, the error repaint, a resize — fires this watch
+        # again and again and must load NOTHING.
+        at_top = self._body.scroll_y <= 1
+        if (
+            at_top
+            and self._history_at_top
+            # The same first-glance gate the level trigger carried: while
+            # the page still owes its reader a first look at the tail, a
+            # scroll that lands at the top is the OPENING layout settling,
+            # not a reader asking for history (the initial load itself can
+            # move the offset to the tail and back).
+            and not self._initial_tail_pending
+        ):
+            self._history_at_top = False
             # Edge arrival may discover another page, but an error parks here
             # until a NEW Home command explicitly accepts another disk read.
             # Otherwise the reconciliation repaint retriggers this watcher and
             # turns a persistent filesystem failure into a hot retry loop.
             self._maybe_load_history()
+        # No re-arm here. The offset leaving the top rows is NOT evidence of a
+        # reader leaving: the prepend itself displaces the reader down by a
+        # whole page, and an offset-based re-arm let a wheel still in motion
+        # walk the entire transcript. Only a GESTURE re-arms
+        # (``_note_history_gesture``), and a gesture that begins below the
+        # top and crosses into it is the one arrival that owes a page.
 
     def action_home(self) -> None:
         """Reach the earliest loaded row and request one missing page.
