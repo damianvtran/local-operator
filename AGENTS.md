@@ -354,6 +354,193 @@ so they are opt-in (`LO_RUN_SNAPSHOTS=1`) and regenerated with
 `--snapshot-update`. Do not add a golden as a substitute for looking at the
 change.
 
+## Timing, flakes, and how to assert that something is fast
+
+A test that spends a fixed budget waiting for asynchronous work, then asserts
+as though the budget were a guarantee, is not a test — it is a bet on machine
+load. On an idle dev box the budget is 20-50x more than the work needs, so it
+looks solid; under `-n auto` contention on a 4-vCPU CI runner the work
+stretches, the budget does not, and the suite goes red for reasons that have
+nothing to do with the code under test. This repo has paid for that lesson
+repeatedly (#122, #373, #461, #486, #496, #498, #499), so the rules below are
+not style preferences.
+
+### Wait on the event, never on the clock
+
+**Do not** poll a wall-clock deadline and assert afterwards:
+
+```python
+await asyncio.sleep(2.0)              # "surely it finished by now"
+assert store.detail is not None
+```
+
+**Do** wait on a publication from the code under test.
+`tests/unit/harness/test_comms.py` has the pattern: `ChangeSignal` subscribes
+to notifications the code already emits, and `wait_for` re-tests the predicate
+after each one. The subscriptions are what make it work, so build and release
+it in full:
+
+```python
+signal = ChangeSignal().watch_comms(comms).watch_session(parent)
+try:
+    await wait_for(lambda: comms.session_dir_of(job_id) is not None, signal=signal)
+finally:
+    signal.close()
+```
+
+A bare `ChangeSignal()` subscribes to nothing, so `wait_for` blocks the full
+`DEADLOCK_GUARD_S` and then reports "it is wedged, not merely slow" — a
+confident diagnosis of the wrong thing. Watch the sources you need.
+
+There is no elapsed-time comparison anywhere on the success path: the wait
+lasts exactly as long as the work does. The deadline exists so a genuine hang
+fails the run instead of blocking forever. It is a backstop, not the assertion.
+
+When there is nothing to subscribe to — an in-process coroutine the test
+itself scheduled — bound by **loop turns** (`MAX_PUMP_TURNS`) rather than
+seconds. A turn count survives contention that a wall-clock budget does not.
+
+If you catch yourself tuning a `sleep` until CI goes green, you are
+calibrating a bet, not fixing a test.
+
+### Prefer a structural invariant to a numeric one
+
+The strongest version of "this work happened off the event loop" is not a
+timing bound at all — it is thread identity.
+`test_store_maintenance_callbacks_run_off_the_event_loop_thread` wraps the real
+maintenance callbacks, records `threading.get_ident()` inside each, and asserts
+none of them equals the loop thread. That assertion cannot flake: it is a fact
+about where the code ran, not how long it took, and it fails deterministically
+the moment someone drops an `asyncio.to_thread`.
+
+This is not a stylistic preference — it is where this repo's timing bounds keep
+landing. `tests/unit/session/test_launch_subagent.py` carries the full account
+under "WHY THIS IS A STRUCTURAL SPY AND NOT A TIME BOUND": a flat 1.0 s wall
+bound failed, a calibrated bound failed, converting to `time.thread_time`
+removed the *load* sensitivity but not the *core-speed* sensitivity, and the
+conclusion was that **no portable numeric bound exists** for that site — the
+only window left was between CI's healthy 1156 ms and this box's 1315 ms
+regression, which is too narrow to sit a bound in. It was converted to a
+structural spy. Read that docstring before you reach for a number.
+
+Reach for a number only when no structural fact expresses the property.
+
+### If you must measure, measure CPU, not wall time
+
+Wall-clock gaps between probe wakes conflate two unrelated things: the event
+loop genuinely blocking, and the OS simply not scheduling the process. On a
+loaded runner the second dominates — measured here at 525-668 ms of "stall"
+with the loop idle and nothing blocked.
+
+Use `time.thread_time()`, which is per-thread and excludes time asleep or
+waiting on the GIL, so a sample is large only when the loop thread really ran
+without yielding. Two probes exist and they are **not interchangeable**:
+`LoopCpuProbe` (`tests/unit/tools/test_loop_liveness.py`) records CPU only;
+`StallRecorder` (`tests/unit/test_tui_responsiveness.py`) records CPU **and**
+wall, and asserts both. If you need the blocking-sleep backstop described
+below, use `StallRecorder` or add the wall assertion yourself — reusing
+`LoopCpuProbe` silently drops it.
+
+The distinction is measurable, not theoretical:
+
+| scenario                   | wall gap    | CPU gap |
+| -------------------------- | ----------- | ------- |
+| 60 MB sync parse on loop   | 96 ms       | 96 ms   |
+| pure `time.sleep` on loop  | 306 ms      | 0.1 ms  |
+| loop idle, OS-starved      | 525-668 ms  | 0.0 ms  |
+
+Note the middle row: the CPU clock is **blind to a pure blocking sleep**. If
+that shape matters at your site, keep a wall-clock assertion alongside it, with
+a ceiling set for catastrophe (seconds) rather than for precision.
+
+### Calibrate ceilings from CI, never from your laptop
+
+This is the mistake that cost three PRs. Local measurements of the same
+loaded-bar sites read 36-38 ms and ~0 ms; the CI runners recorded **206, 264,
+321, and 413 ms** of entirely legitimate loop CPU at those same sites. Every
+ceiling calibrated from the local numbers flaked a green tree within a day.
+
+A slower core burns more CPU-seconds on identical work, so a bound calibrated
+on a dev box is not a bound on CI — see the `test_launch_subagent.py` account
+above, where that spread ended in abandoning the bound entirely. If you have
+established a number is genuinely the only option:
+
+- Take the healthy maximum from **CI logs across several runs**, not from one
+  local run and not from one CI run.
+- Leave real headroom above it, and **write the dataset and the margin into the
+  docstring** so the next person is not re-deriving it from scratch.
+- A number copied from an older comment is not evidence. The 549 ms figure in
+  this repo's history is a **wall-clock** measurement from a probe that no
+  longer exists; citing it to justify a CPU ceiling compares two different
+  quantities.
+
+When a green tree trips the ceiling, **find out which it is before touching the
+number**. Either the tree is not as green as it looks, or the ceiling is
+miscalibrated — and "raise it" is only correct in the second case. Reproduce
+the sample, check whether the same test fails on `main` and on unrelated
+branches, and confirm the work under the probe is the legitimate kind. Widening
+a bound because it went red is how a guard stops guarding.
+
+### Prove the test can still fail
+
+A guard that cannot go red is worse than no guard, because it is believed. When
+you change how a test detects a regression, reintroduce the regression and
+watch it fail:
+
+```sh
+# put the synchronous call back on the loop, or delete the to_thread
+.venv/bin/python -m pytest tests/unit/test_tui_responsiveness.py::<test> -n0
+# expect a failure with a message that names the real cause, then revert
+```
+
+This is not hypothetical. In `test_tui_responsiveness.py` the loaded bar was
+raised to 500 ms to stop it flaking, which meant a 200-500 ms stall at the
+boot and turn sites — whose only guard is that bar — would pass unnoticed.
+That trade was made deliberately and on evidence: those sites recorded 321 ms
+and 413 ms of *legitimate* loop CPU on CI, so a tighter bar failed green trees
+instead. The strict 50 ms bar on the reconnect/connect sites was left alone
+precisely so the 90-130 ms parse regression stayed catchable. When you widen a
+ceiling, name what you just stopped catching — and record the measurements that
+forced your hand.
+
+Then check the other direction: run the file several times under load
+(`for i in $(seq 1 5)` with a few CPU spinners) and confirm it stays green.
+
+### When a test is already flaking
+
+Reproduce and classify before touching a threshold. A single failure out of
+~9900 on a different timing-sensitive test each run is a flake, not a
+regression; the same test failing on several branches at once — check `main` —
+is repo-wide and not yours. Re-run to confirm, then fix the measurement rather
+than widening the bound. Do not merge a red head on the assumption that it is
+"probably the known flake" without checking the log.
+
+### Two things this section cannot do for you
+
+**There is no `pytest-timeout` in this suite.** A test that waits forever hangs
+its CI job until the workflow's `timeout-minutes` reclaims the runner (40 min
+for `test`, and that ceiling exists because a job once held a slot for 3h38m).
+So an unbounded wait is not merely slow, it is expensive for everyone queued
+behind it — which is the other half of why `wait_for` carries
+`DEADLOCK_GUARD_S`.
+
+**A deadlock defeats every technique above.** If the failure mode is the event
+loop freezing at the C level rather than running slowly, a Python-level probe
+reports nothing — the coroutine that would record the sample never gets
+scheduled either. Nor do the obvious fallbacks: `watchdog.py` documents, with a
+measurement, that a `threading.Thread` watchdog needs a GIL the wedged thread
+never releases, and `pytest-timeout`'s default `signal` method never fires
+because a Python signal handler only runs between bytecodes. The pre-fix code
+ignored a 20 s thread watchdog and had to be `kill -9`'d.
+
+That class is covered by `tests/e2e/watchdog.py`, whose
+`faulthandler.dump_traceback_later(exit=True)` is armed in C and fires from a
+separate OS thread, so it survives a wedged interpreter and takes the process
+down with a full thread dump. It runs as its own CI stage (`tui-e2e`, both
+Linux and macOS) rather than in the unit run, since firing it under `-n auto`
+would kill a worker carrying unrelated tests. If you are guarding against a
+hang rather than a stall, that is the file to read.
+
 ## TUI conventions worth knowing before you edit a widget
 
 - **Do not shadow Textual's API.** `Widget` already owns `query`, `visible`,

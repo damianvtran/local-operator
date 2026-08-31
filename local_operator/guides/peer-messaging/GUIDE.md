@@ -1,21 +1,67 @@
 ---
 name: peer-messaging
-description: Hand a note or instruction from one local lop session to another with `lop send`, and list running sessions and their memory use with `lop sessions`. No cmux needed.
+description: Message another local lop session — the in-session `send` tool for agents, `lop send` for humans — and list running sessions with `lop sessions`. No cmux needed.
 ---
 
 # Peer messaging between lop sessions
 
 Any `lop` session on this machine can message any other, with no cmux and no
-network. The two commands ride the same control-socket + registry substrate the
+network. Both entry points ride the same control-socket + registry substrate the
 mobile (phone) stack already uses: every interactive `lop` process publishes a
-discovery record and runs an authenticated loopback control server, and `lop
-send` is just a short-lived client that dials one and speaks a single message
-op.
+discovery record and runs an authenticated loopback control server, and a send
+is just a short-lived client that dials one and speaks a single message op.
+
+Two entry points, one wire:
+
+- **The `send` tool** — the way an AGENT messages a peer from inside its own
+  session (below). Wake defaults ON, so an idle peer responds right away.
+- **`lop send`** — the shell command for HUMANS (further below). Mailbox by
+  default; `--wake` opts in to waking.
+
+They share the same target resolution and delivery semantics; the only
+difference is the default and who runs them.
 
 **Trust boundary is the account.** The discovery record is mode `0600` under a
 `0700` directory, so anything that can read a session's control key is already
 the owning user. Delivery is loopback only. There is no cross-account path; the
 same-account boundary is the whole authorization story.
+
+## The `send` tool — agent-facing, in-session
+
+An agent messages a peer with the `send` tool, not by shelling out to `lop
+send`: the tool call is its own auditable card, and its defaults are tuned for
+agent-to-agent hand-offs.
+
+Parameters:
+
+- `target` — case-insensitive substring of the conversation name, session id,
+  or cwd basename (`lop sessions` lists what is running).
+- `pid` — exact pid (unambiguous; the disambiguation error lists these).
+- `session` — exact session id.
+- `message` — the body; it lands in the peer's transcript as an inbound
+  cross-session card.
+- `wake` (default **true**) — mailbox mode: wake an idle peer so it responds
+  right away. `wake=False` is the quiet drop: the peer reads it on its next
+  turn and stays idle (the TUI card shows this mode as `quiet`).
+- `now` — steer the peer mid-turn instead of using the mailbox; opens a turn
+  if the peer is idle.
+
+**Agent sends wake idle targets by default.** A peer parked on a scheduled
+wake or an idle turn answers the moment the message lands — there is no
+"it will notice next time it wakes" gap. Pass `wake=False` deliberately for a
+non-urgent hand-off the peer may fold into whatever it does next.
+
+The result echoes the receive side's own detail string, so the sender knows
+exactly how the peer took it:
+
+- `delivered and woke the session` — mailbox + wake, peer was idle.
+- `delivered to the mailbox (will be read on the next turn)` — quiet drop, or
+  the peer was already busy (its running turn reads it anyway).
+- `delivered mid-turn (steered)` — `now=True` while the peer was working.
+- `delivered (opened a turn)` — `now=True` while the peer was idle.
+
+A session cannot send to itself (the tool refuses), and an ambiguous `target`
+returns the candidate list asking for a `pid`.
 
 ## `lop sessions` — what is running and what it costs
 
@@ -44,7 +90,11 @@ Columns:
 `--json` emits the same fields as a list of objects (bytes, not human sizes)
 for scripting.
 
-## `lop send` — hand a message to another session
+## `lop send` — the shell command (humans)
+
+The same wire, driven from a terminal. Mailbox by default — a human sending
+from a shell usually wants the non-interrupting drop; `--wake` opts in to
+waking an idle session.
 
 ```
 lop send "<target>" "your message"
@@ -92,8 +142,10 @@ than hanging on a dial.
 The delivered message appears in the target's transcript marked
 `↔ peer message from "<sender conversation>" (pid N, <model>)` in the TUI, and
 as an accented inbound card naming the sender in the phone surface. The sender
-identity is best-effort (the calling session, looked up by parent pid) and
-advisory — it labels the card but is never required for delivery.
+identity is best-effort and advisory — it labels the card but is never required
+for delivery. The CLI looks the session up by its PARENT pid (`lop send` is a
+child of the TUI that spawned it); the `send` tool runs inside the session
+process and looks itself up by pid. Both name the same sender.
 
 ### Examples
 

@@ -44,6 +44,10 @@ TOOL_BUILDERS: dict[str, Callable[[ToolContext], AgentTool | None]] = {
     "wait": lambda context: builtin.build_wait_tool(context),
     "jobs": lambda context: builtin.build_jobs_tool(context),
     "hub": lambda context: builtin.build_hub_tool(context),
+    # Unconditional createIf entry: peer messaging rides the registry + loopback
+    # substrate every session sits on, so the tool exists in every session even
+    # when no peer happens to be running right now (see build_send_tool).
+    "send": lambda context: builtin.build_send_tool(context),
     "ask": lambda context: builtin.build_ask_tool(context),
     "list_variables": lambda _context: builtin.build_list_variables_tool(),
     "read_variable": lambda _context: builtin.build_read_variable_tool(),
@@ -74,6 +78,7 @@ DEFAULT_TOOL_NAMES: list[str] = [
     "wait",
     "jobs",
     "hub",
+    "send",
     "ask",
     "list_variables",
     "read_variable",

@@ -153,10 +153,12 @@ agent that delegated to you — answer its questions, and speak up unprompted
 when you are blocked or the task turns out to be wrong.
 
 Other `lop` sessions on this machine are reachable directly: `lop sessions`
-lists them, and `lop send "<target>" "<message>"` hands a message to one —
-where `<target>` is a name/cwd substring, or `--pid <n>` to address one
-exactly (`--now` interrupts its current turn, `--wake` wakes an idle one).
-Never shell out to cmux or another multiplexer to message a session. Read
+(via `bash`) lists them, and the `send` tool hands a message to one — address
+the peer by `target` (name/cwd substring), `pid` (exact), or `session` (exact
+id). Delivery wakes an idle peer by default so it responds right away;
+`wake=False` is the quiet mailbox drop, and `now=True` steers mid-turn. Use
+the `send` tool for peer messaging — never shell out to `lop send`, and never
+shell out to cmux or another multiplexer to message a session. Read
 `guide://peer-messaging` for targeting and delivery modes.
 
 When a decision is the user's to make, use `ask` — never write lettered options
