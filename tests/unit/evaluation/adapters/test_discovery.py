@@ -24,6 +24,7 @@ from local_operator.evaluation.adapters.api import AdapterSelector
 from local_operator.evaluation.adapters.discovery import (
     AdapterDiscoveryError,
     _record_rows,
+    _resolve_module_artifact,
     _verified_entry_target,
     _verified_imports,
     _VerifiedDistributionFinder,
@@ -730,6 +731,95 @@ def test_unrecorded_source_beside_recorded_extension_is_refused(
         _forget_package()
 
 
+def test_module_recorded_as_both_file_and_package_is_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``mod.py`` beside ``mod/`` is refused: import and verification disagree.
+
+    CPython's FileFinder consults directories before file loaders, so an
+    ordinary import runs ``mod/__init__.py`` while a file-first rule would
+    verify ``mod.py``. The test proves that divergence is real on this host
+    before asserting the refusal, so it cannot pass on a host where the
+    precedence differs.
+    """
+
+    package = tmp_path / "advpkg"
+    package.mkdir()
+    (package / "__init__.py").write_text("")
+    (package / "entry.py").write_text(
+        "from . import helper\n\n\ndef create():\n    return helper.ORIGIN\n"
+    )
+    (package / "helper.py").write_text("ORIGIN = 'flat-module'\n")
+    nested = package / "helper"
+    nested.mkdir()
+    (nested / "__init__.py").write_text("ORIGIN = 'package-init'\n")
+
+    def load() -> object:
+        raise AssertionError("entry point must not be imported by the import system")
+
+    entry_point = FakeEntryPoint(load)
+    entry_point.name = "adv"
+    entry_point.value = "advpkg.entry:create"
+    distribution = FakeDistribution(tmp_path, [entry_point])
+    distribution.make_record()
+    rows = {row[0]: row for row in _record_rows(distribution)}
+    assert "advpkg/helper.py" in rows and "advpkg/helper/__init__.py" in rows
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    # Precondition: the import system really prefers the package here.
+    _forget_package()
+    try:
+        assert importlib.import_module("advpkg.helper").ORIGIN == "package-init"
+    finally:
+        _forget_package()
+
+    try:
+        with pytest.raises(AdapterDiscoveryError, match="both module and package"):
+            with _verified_imports(cast(importlib.metadata.Distribution, distribution), rows):
+                importlib.import_module("advpkg.entry")
+    finally:
+        _forget_package()
+
+
+def test_unrecorded_higher_priority_extension_is_refused(tmp_path: Path) -> None:
+    """An unrecorded artifact import ranks first must refuse, not be ignored.
+
+    Source already refused loudly; a higher-priority extension used to be passed
+    over in silence. Both are the same hazard -- the file the import system
+    reaches first is the one RECORD does not attest to.
+    """
+
+    suffixes = importlib.machinery.EXTENSION_SUFFIXES
+    if len(suffixes) < 2:
+        pytest.skip("platform exposes a single extension suffix")
+
+    package = tmp_path / "advpkg"
+    package.mkdir()
+    (package / "__init__.py").write_text("")
+    (package / "entry.py").write_text("def create():\n    return 'x'\n")
+    # Recorded under the LOWEST-priority suffix so a higher one can outrank it.
+    (package / f"helper{suffixes[-1]}").write_bytes(b"recorded-extension")
+
+    def load() -> object:
+        raise AssertionError("entry point must not be imported by the import system")
+
+    entry_point = FakeEntryPoint(load)
+    entry_point.name = "adv"
+    entry_point.value = "advpkg.entry:create"
+    distribution = FakeDistribution(tmp_path, [entry_point])
+    distribution.make_record()
+    rows = {row[0]: row for row in _record_rows(distribution)}
+    assert _resolve_module_artifact("advpkg/helper", rows, distribution) == (
+        f"advpkg/helper{suffixes[-1]}",
+        False,
+    )
+
+    # Plant an unrecorded artifact the import system ranks above the recorded one.
+    (package / f"helper{suffixes[0]}").write_bytes(b"planted")
+    with pytest.raises(AdapterDiscoveryError, match="higher-priority extension"):
+        _resolve_module_artifact("advpkg/helper", rows, distribution)
+
+
 def test_compiled_only_entry_module_is_accepted(tmp_path: Path) -> None:
     """An entry module shipping only as a verified extension must be allowed."""
 
@@ -821,7 +911,7 @@ def test_record_rejects_absolute_and_traversal_paths(tmp_path: Path) -> None:
     target = StringIO()
     csv.writer(target, lineterminator="\n").writerows(escaped)
     distribution._record = target.getvalue()
-    with pytest.raises(AdapterDiscoveryError, match="normalized relative path"):
+    with pytest.raises(AdapterDiscoveryError, match="escapes the distribution root"):
         distribution_digest(distribution)
 
 
