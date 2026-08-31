@@ -2127,6 +2127,10 @@ class OperatorApp(App[None]):
         # next substantive message retries, which is bounded by the user's own
         # sends and only ever fires while no name exists to displace.
         self._name_requested: bool = False
+        #: Last cmux label dispatched for THIS fork process. Name updates can
+        #: arrive provisionally, generated, and manually within seconds; exact
+        #: coalescing avoids three socket calls for an unchanged stored title.
+        self._fork_cmux_name: str = ""
         #: A receipt that must survive a session transition, as
         #: ``(fork_id, text)``. `fork.mode=switch` reboots onto the fork, which
         #: wipes the ledger about half a second after the notice is written, so
@@ -2847,7 +2851,17 @@ class OperatorApp(App[None]):
             cost=(
                 self._spend_text(cost) if cost is not None else ("$—" if billed_unknown else None)
             ),
-            conversation_name=str(getattr(state, "conversation_title", "") or ""),
+            # A local opener label is DISPLAY state until a generated title is
+            # accepted. Canonical snapshots correctly keep their persisted title
+            # empty during that interval, but must not turn "empty in storage"
+            # into "erase the better label already painted": todo/model-route
+            # updates arrive throughout the first turn, and one otherwise sends
+            # the terminal tab back to its cwd (often the unhelpful `tmp`). A
+            # real canonical title still wins immediately; reload/session swaps
+            # clear `_provisional_name` before adopting their replacement.
+            conversation_name=(
+                str(getattr(state, "conversation_title", "") or "") or self._provisional_name
+            ),
             # The fork tag follows the name, not the band's memory: a snapshot
             # arrives with EVERY name change, and `StatusLine.update` treats a
             # missing `forked=` as leave-alone — so a rename that cleared the
@@ -10209,11 +10223,68 @@ class OperatorApp(App[None]):
             return
         self._provisional_name = label
         self._status.update(conversation_name=label)
+        self._sync_fork_cmux_name(label)
         # The band is DISPLAY-only; the phone reads the session store, which
         # is still empty. Push the stand-in so the list and header name the
         # conversation the same frame the tab does, instead of "untitled"
         # until a generated title lands (or forever, if naming 429s).
         self._notify_mobile_title(label)
+
+    def _sync_fork_cmux_name(self, title: str) -> None:
+        """Rename only the cmux target this fork process owns, best-effort.
+
+        Terminal OSC titles identify the live surface but cmux workspace labels
+        do not follow them. Provenance is the safety gate: a parent/ordinary
+        session never calls the mutating cmux command, even when it happens to
+        run in the workspace from which a fork was created.
+        """
+        session = self._session
+        session_id = str(getattr(session, "session_id", "") or "") if session else ""
+        clean = " ".join(str(title).split()).strip()
+        if not session_id or not clean or clean == getattr(self, "_fork_cmux_name", ""):
+            return
+        try:
+            from local_operator.fork import fork_parent
+            from local_operator.paths import config_dir
+
+            if not fork_parent(config_dir() / "sessions" / session_id):
+                return
+        except Exception:
+            return
+        self._fork_cmux_name = clean
+
+        if getattr(self, "_fork_cmux_name_worker_running", False):
+            return
+        self._fork_cmux_name_worker_running = True
+
+        async def rename() -> None:
+            from local_operator.multiplexer.cmux import rename_fork_target
+            from local_operator.spawn.policy import fork_cmux_placement
+
+            applied = ""
+            try:
+                # One serial drain owns the subprocess boundary. A newer title
+                # arriving during a slow rename replaces the pending value; the
+                # old call may finish, but the drain always applies the newest
+                # value afterwards, making the externally visible result latest-wins.
+                while applied != getattr(self, "_fork_cmux_name", ""):
+                    pending = self._fork_cmux_name
+                    try:
+                        await asyncio.to_thread(
+                            rename_fork_target,
+                            dict(os.environ),
+                            pending,
+                            placement=fork_cmux_placement(self._config_values()),
+                        )
+                    except Exception:
+                        # A label is decoration; cmux restart/closure must never
+                        # disturb the conversation or roll back the stored title.
+                        logger.debug("fork cmux rename failed", exc_info=True)
+                    applied = pending
+            finally:
+                self._fork_cmux_name_worker_running = False
+
+        self.run_worker(rename(), group="fork-cmux-name", exclusive=False, exit_on_error=False)
 
     def _clock(self) -> float:
         """Monotonic seconds, as one overridable seam.
@@ -10510,6 +10581,7 @@ class OperatorApp(App[None]):
                 conversation_name=stored,
                 forked=bool(getattr(session, "wears_inherited_title", False)),
             )
+        self._sync_fork_cmux_name(stored)
         # The title lands on a detached worker AFTER the last turn event, so
         # the mobile fold never re-reads it on its own. Push now so the
         # phone's header and list update the same moment the band does.
@@ -10574,6 +10646,7 @@ class OperatorApp(App[None]):
                 conversation_name=stored,
                 forked=bool(getattr(session, "wears_inherited_title", False)),
             )
+        self._sync_fork_cmux_name(stored)
         self._notify_mobile_title(stored)
         # `stored`, not `arg`: the store collapses whitespace and caps the length
         # (`MAX_TITLE_CHARS`), and the receipt's whole job is to show the title
