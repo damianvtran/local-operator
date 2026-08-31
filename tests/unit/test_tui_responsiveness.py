@@ -145,16 +145,7 @@ class StallRecorder:
         """Loaded bar: 200 ms of loop-thread CPU, same 2 s wall backstop.
 
         200 ms suits the boot and turn paths, which record ~0 ms of healthy
-        loop CPU, and keeps their sensitivity to a 200-500 ms stall. The one
-        site that legitimately exceeds it — the title-scan test, whose
-        ``_prepare`` records a healthy 206 ms on a loaded CI runner — passes
-        ``cpu_ceiling_ms=500`` explicitly rather than raising this default,
-        so the other sites do not lose coverage.
-
-        For the title-scan test specifically, even the 500 ms ceiling is a
-        catastrophic backstop, not the primary guard: ``threading_get_ident()
-        not in seen_threads`` proves the scan ran off the loop and catches
-        the regression even when healthy and regressed CPU numbers overlap.
+        loop CPU, and keeps their sensitivity to a 200-500 ms stall.
 
         The wall ceiling is the same catastrophic backstop as
         :meth:`assert_no_stall`: a pure blocking sleep is invisible to the
