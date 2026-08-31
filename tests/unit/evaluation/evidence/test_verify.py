@@ -154,6 +154,16 @@ def test_root_artifact_symlink_fifo_and_unknown_entry_attacks(tmp_path: Path) ->
     assert "unknown_root_entry" in codes(root)
 
 
+def test_verifier_reports_unsafe_permissions_for_root_and_files(tmp_path: Path) -> None:
+    root = _bundle(tmp_path, events=1)
+    root.chmod(0o777)
+    (root / "events.jsonl").chmod(0o666)
+    report = verify_bundle(root)
+    locations = {(issue.code, issue.location) for issue in report.issues}
+    assert ("unsafe_permissions", ".") in locations
+    assert ("unsafe_permissions", "events.jsonl") in locations
+
+
 def test_state_is_diagnostic_and_terminal_files_win(tmp_path: Path) -> None:
     root = _bundle(tmp_path, events=0)
     state = json.loads((root / "state.json").read_bytes())

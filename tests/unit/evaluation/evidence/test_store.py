@@ -342,6 +342,134 @@ def test_death_between_finalizing_marker_and_scoring_start_is_abandon_only(
     assert verify_bundle(root).terminal_state == "abandoned"
 
 
+def test_journal_failure_poison_blocks_every_later_authority(tmp_path: Path) -> None:
+    class PartialThenFail:
+        def __init__(self) -> None:
+            self.armed = False
+            self.wrote_partial = False
+
+        def write(self, fd: int, data: bytes) -> int:
+            if self.armed and not self.wrote_partial:
+                self.wrote_partial = True
+                return os.write(fd, data[:7])
+            if self.armed:
+                raise OSError("journal-failure")
+            return os.write(fd, data)
+
+        def fsync(self, fd: int) -> None:
+            os.fsync(fd)
+
+        def link(self, src: str, dst: str, *, src_dir_fd: int, dst_dir_fd: int) -> None:
+            os.link(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+
+        def unlink(self, path: str, *, dir_fd: int) -> None:
+            os.unlink(path, dir_fd=dir_fd)
+
+    calls = PartialThenFail()
+    root = tmp_path / "bundle"
+    writer = EvidenceWriter.create(root, manifest(), redactions(), syscalls=calls)
+    calls.armed = True
+    initial = (writer._sequence, writer._head)
+    with pytest.raises(OSError, match="journal-failure"):
+        writer.append(
+            "cancel",
+            CancelPayload(cancellation_id="cancel", source="operator", diagnostic_code="x"),
+        )
+    partial = (root / "events.jsonl").read_bytes()
+    assert partial and not partial.endswith(b"\n")
+    assert (writer._sequence, writer._head) == initial
+    with pytest.raises(EvidenceRecoveryOnly):
+        writer.append(
+            "cancel",
+            CancelPayload(cancellation_id="later", source="operator", diagnostic_code="x"),
+        )
+    with pytest.raises(EvidenceRecoveryOnly):
+        writer.begin_finalization("final", None, FinalizationIntent(kind="unscored"))
+    with pytest.raises(EvidenceRecoveryOnly):
+        writer.seal(_outcome_draft_for_poison())
+    assert (root / "events.jsonl").read_bytes() == partial
+    writer.close()
+
+
+def _outcome_draft_for_poison() -> Any:
+    from local_operator.evaluation.evidence.models import OutcomeDraft
+
+    return OutcomeDraft(
+        finalization_id="final",
+        preflight_seal_id=DIGEST,
+        commitment_id=DIGEST,
+        reconciliation_id=DIGEST,
+        cleanup_result_id=DIGEST,
+        result=ScoreArtifact(status="unscored", reason="crash"),
+        reportability_label="unscored",
+        comparability_label="comparable",
+        ended_wall_time_ms=1,
+    )
+
+
+def test_fork_child_cannot_use_or_close_parent_writer(tmp_path: Path) -> None:
+    if "fork" not in multiprocessing.get_all_start_methods():
+        pytest.skip("fork start method unavailable")
+    root = tmp_path / "bundle"
+    writer = EvidenceWriter.create(root, manifest(), redactions())
+    context = multiprocessing.get_context("fork")
+    result = context.Queue()
+
+    def child() -> None:
+        try:
+            writer.append(
+                "cancel",
+                CancelPayload(cancellation_id="child", source="operator", diagnostic_code="x"),
+            )
+        except EvidenceRecoveryOnly:
+            result.put("rejected")
+        finally:
+            writer.close()
+
+    process = context.Process(target=child)
+    process.start()
+    process.join(10)
+    assert process.exitcode == 0
+    assert result.get(timeout=5) == "rejected"
+    writer.append(
+        "cancel",
+        CancelPayload(cancellation_id="parent", source="operator", diagnostic_code="x"),
+        monotonic_ns=1,
+        wall_time_ms=2,
+    )
+    writer.close()
+    report = verify_bundle(root)
+    assert report.valid and len(report.events) == 1
+
+
+@pytest.mark.parametrize("terminal", ["outcome.json", "abandonment.json"])
+def test_create_never_reopens_empty_terminal_bundle(tmp_path: Path, terminal: str) -> None:
+    root = tmp_path / "bundle"
+    writer = EvidenceWriter.create(root, manifest(), redactions())
+    writer.close()
+    state_before = (root / "state.json").read_bytes()
+    (root / terminal).write_bytes(b"{}")
+    with pytest.raises(EvidenceTerminal):
+        EvidenceWriter.create(root, manifest(), redactions())
+    assert (root / "state.json").read_bytes() == state_before
+    assert (root / "events.jsonl").read_bytes() == b""
+
+
+def test_unsafe_root_or_artifact_permissions_are_rejected(tmp_path: Path) -> None:
+    unsafe_root = tmp_path / "unsafe-root"
+    unsafe_root.mkdir(mode=0o700)
+    unsafe_root.chmod(0o777)
+    with pytest.raises(EvidenceBundleInvalid, match="permissions"):
+        EvidenceWriter.create(unsafe_root, manifest(), redactions())
+
+    root = tmp_path / "bundle"
+    writer = EvidenceWriter.create(root, manifest(), redactions())
+    writer.close()
+    (root / "artifacts").chmod(0o777)
+    with pytest.raises(EvidenceBundleInvalid, match="permissions"):
+        EvidenceWriter.create(root, manifest(), redactions())
+
+
 def test_hardlinked_artifact_is_rejected(tmp_path: Path) -> None:
     root = tmp_path / "bundle"
     with EvidenceWriter.create(root, manifest(), redactions()) as writer:

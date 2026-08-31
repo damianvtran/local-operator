@@ -19,6 +19,7 @@ import stat
 import sys
 import threading
 import time
+import weakref
 from collections.abc import Iterable, Mapping
 from typing import Any, BinaryIO, Protocol, cast
 from urllib.parse import unquote
@@ -118,19 +119,39 @@ def _safe_file(fd: int) -> None:
     info = os.fstat(fd)
     if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
         raise EvidenceBundleInvalid("unsafe evidence file")
+    _safe_owner_mode(info)
 
 
 def _safe_dir(fd: int) -> None:
-    if not stat.S_ISDIR(os.fstat(fd).st_mode):
+    info = os.fstat(fd)
+    if not stat.S_ISDIR(info.st_mode):
         raise EvidenceBundleInvalid("unsafe evidence directory")
+    _safe_owner_mode(info)
+
+
+def _safe_owner_mode(info: os.stat_result) -> None:
+    if not hasattr(os, "geteuid"):
+        raise EvidenceUnsupported("evidence ownership checks require geteuid")
+    if info.st_uid != os.geteuid():
+        raise EvidenceBundleInvalid("unsafe evidence ownership")
+    if stat.S_IMODE(info.st_mode) & 0o022:
+        raise EvidenceBundleInvalid("unsafe evidence permissions")
 
 
 def _write_all(fd: int, data: bytes, calls: Syscalls) -> None:
     view = memoryview(data)
+    interrupted = 0
     while view:
-        written = calls.write(fd, view.tobytes())
+        try:
+            written = calls.write(fd, view.tobytes())
+        except InterruptedError:
+            interrupted += 1
+            if interrupted >= 16:
+                raise EvidenceError("evidence write repeatedly interrupted") from None
+            continue
         if written <= 0:
             raise EvidenceError("incomplete evidence write")
+        interrupted = 0
         view = view[written:]
 
 
@@ -200,6 +221,18 @@ class EvidenceWriter:
         self._calls = syscalls
         self._thread_lock = threading.RLock()
         self._closed = False
+        self._poisoned = False
+        self._creator_pid = os.getpid()
+        reference = weakref.ref(self)
+
+        def inherited_child() -> None:
+            writer = reference()
+            if writer is not None:
+                writer._invalidate_inherited_child()
+
+        # flock state is attached to the inherited open-file description. The
+        # child closes only its copies; the parent's descriptor keeps the lock.
+        os.register_at_fork(after_in_child=inherited_child)
 
     @classmethod
     def create(
@@ -223,6 +256,8 @@ class EvidenceWriter:
             _safe_dir(root_fd)
             lock_fd = cls._lock(root_fd)
             try:
+                if cls._entry_exists(root_fd, _OUTCOME) or cls._entry_exists(root_fd, _ABANDONMENT):
+                    raise EvidenceTerminal("bundle already has an immutable terminal")
                 artifacts_fd = cls._open_artifacts(root_fd, create=True)
                 try:
                     try:
@@ -348,6 +383,14 @@ class EvidenceWriter:
             )
 
     @staticmethod
+    def _entry_exists(root_fd: int, name: str) -> bool:
+        try:
+            os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return False
+        return True
+
+    @staticmethod
     def _lock(root_fd: int) -> int:
         fd = os.open(_LOCK, _WRITE_FLAGS | os.O_CREAT, 0o600, dir_fd=root_fd)
         try:
@@ -441,7 +484,33 @@ class EvidenceWriter:
         os.rename(temp, _STATE, src_dir_fd=root_fd, dst_dir_fd=root_fd)
         calls.fsync(root_fd)
 
+    def _invalidate_inherited_child(self) -> None:
+        self._poisoned = True
+        self._closed = True
+        for name in ("_events_fd", "_artifacts_fd", "_lock_fd", "_root_fd"):
+            fd = getattr(self, name, -1)
+            if fd >= 0:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+                setattr(self, name, -1)
+
+    def _poison(self) -> None:
+        self._poisoned = True
+        if self._events_fd >= 0:
+            try:
+                os.close(self._events_fd)
+            except OSError:
+                pass
+            self._events_fd = -1
+
     def _ensure_open(self) -> None:
+        if os.getpid() != self._creator_pid:
+            self._invalidate_inherited_child()
+            raise EvidenceRecoveryOnly("fork-inherited writer is invalid")
+        if self._poisoned:
+            raise EvidenceRecoveryOnly("ambiguous I/O requires abandon-only recovery")
         if self._closed:
             raise EvidenceError("evidence writer is closed")
 
@@ -518,10 +587,14 @@ class EvidenceWriter:
             strict=True,
         )
         encoded = event.to_canonical_json() + b"\n"
-        _write_all(self._events_fd, encoded, self._calls)
-        # The memory head advances only after the durable journal commit. A
-        # failing fsync leaves memory pointing at the last known durable record.
-        self._calls.fsync(self._events_fd)
+        try:
+            _write_all(self._events_fd, encoded, self._calls)
+            # The memory head advances only after the durable journal commit. A
+            # failing fsync leaves memory pointing at the last known durable record.
+            self._calls.fsync(self._events_fd)
+        except (OSError, EvidenceError):
+            self._poison()
+            raise
         self._sequence += 1
         self._head = event.event_id
         self._last_monotonic_ns = now_monotonic
@@ -581,12 +654,16 @@ class EvidenceWriter:
                     raise EvidenceBundleInvalid("artifact byte count assertion failed")
                 ref = EvidenceArtifactRef(sha256=actual, media_type=media_type, byte_count=count)
                 self._calls.fsync(fd)
-            except BaseException:
+            except BaseException as error:
                 os.close(fd)
                 try:
                     self._calls.unlink(temp, dir_fd=self._artifacts_fd)
                 except FileNotFoundError:
                     pass
+                if isinstance(error, (OSError, EvidenceError)) and not isinstance(
+                    error, EvidenceBundleInvalid
+                ):
+                    self._poison()
                 raise
             os.close(fd)
             try:
@@ -609,7 +686,11 @@ class EvidenceWriter:
                     self._calls.unlink(temp, dir_fd=self._artifacts_fd)
                 except FileNotFoundError:
                     pass
-            self._calls.fsync(self._artifacts_fd)
+            try:
+                self._calls.fsync(self._artifacts_fd)
+            except OSError:
+                self._poison()
+                raise
             return ref
 
     def begin_finalization(
@@ -632,19 +713,23 @@ class EvidenceWriter:
                 raise EvidenceBundleInvalid("scoring intent and operation ID disagree")
             # Marker durability precedes scoring_start. If death lands between the
             # two, recovery observes an ambiguous no-rescore boundary and abandons.
-            self._write_state(
-                self._root_fd,
-                StateMarker(
-                    state="finalizing",
-                    bundle_id=self.manifest.bundle_id,
-                    updated_wall_time_ms=int(time.time_ns() // 1_000_000),
-                    finalization_id=finalization_id,
-                    scoring_operation_id=scoring_operation_id,
-                    intent=intent.kind,
-                    intent_digest=intent.intent_digest,
-                ),
-                self._calls,
-            )
+            try:
+                self._write_state(
+                    self._root_fd,
+                    StateMarker(
+                        state="finalizing",
+                        bundle_id=self.manifest.bundle_id,
+                        updated_wall_time_ms=int(time.time_ns() // 1_000_000),
+                        finalization_id=finalization_id,
+                        scoring_operation_id=scoring_operation_id,
+                        intent=intent.kind,
+                        intent_digest=intent.intent_digest,
+                    ),
+                    self._calls,
+                )
+            except (OSError, EvidenceError):
+                self._poison()
+                raise
             if intent.kind == "unscored":
                 return None
             assert scoring_operation_id is not None
@@ -811,21 +896,25 @@ class EvidenceWriter:
                 started_wall_time_ms=self.manifest.created_wall_time_ms,
                 ended_wall_time_ms=draft.ended_wall_time_ms,
             )
-            self._create_immutable(
-                self._root_fd, _OUTCOME, outcome.to_canonical_json(), self._calls
-            )
-            # Outcome publication is authoritative before this diagnostic update;
-            # a crash here still derives sealed from immutable outcome.json.
-            self._write_state(
-                self._root_fd,
-                StateMarker(
-                    state="sealed",
-                    bundle_id=self.manifest.bundle_id,
-                    updated_wall_time_ms=int(time.time_ns() // 1_000_000),
-                    terminal_id=outcome.evidence_root,
-                ),
-                self._calls,
-            )
+            try:
+                self._create_immutable(
+                    self._root_fd, _OUTCOME, outcome.to_canonical_json(), self._calls
+                )
+                # Outcome publication is authoritative before this diagnostic update;
+                # a crash here still derives sealed from immutable outcome.json.
+                self._write_state(
+                    self._root_fd,
+                    StateMarker(
+                        state="sealed",
+                        bundle_id=self.manifest.bundle_id,
+                        updated_wall_time_ms=int(time.time_ns() // 1_000_000),
+                        terminal_id=outcome.evidence_root,
+                    ),
+                    self._calls,
+                )
+            except (OSError, EvidenceError):
+                self._poison()
+                raise
             return outcome
 
     def abandon(self, reason: AbandonmentReason, diagnostic_code: str) -> AbandonmentRecord:
@@ -847,31 +936,39 @@ class EvidenceWriter:
                 event_count=len(events),
                 abandoned_wall_time_ms=int(time.time_ns() // 1_000_000),
             )
-            self._create_immutable(
-                self._root_fd,
-                _ABANDONMENT,
-                record.to_canonical_json(),
-                self._calls,
-            )
-            self._write_state(
-                self._root_fd,
-                StateMarker(
-                    state="abandoned",
-                    bundle_id=self.manifest.bundle_id,
-                    updated_wall_time_ms=int(time.time_ns() // 1_000_000),
-                    terminal_id=record.abandonment_id,
-                ),
-                self._calls,
-            )
+            try:
+                self._create_immutable(
+                    self._root_fd,
+                    _ABANDONMENT,
+                    record.to_canonical_json(),
+                    self._calls,
+                )
+                self._write_state(
+                    self._root_fd,
+                    StateMarker(
+                        state="abandoned",
+                        bundle_id=self.manifest.bundle_id,
+                        updated_wall_time_ms=int(time.time_ns() // 1_000_000),
+                        terminal_id=record.abandonment_id,
+                    ),
+                    self._calls,
+                )
+            except (OSError, EvidenceError):
+                self._poison()
+                raise
             return record
 
     def close(self) -> None:
+        if os.getpid() != self._creator_pid:
+            self._invalidate_inherited_child()
+            return
         with self._thread_lock:
             if self._closed:
                 return
             self._closed = True
             for fd in (self._events_fd, self._artifacts_fd, self._lock_fd, self._root_fd):
-                os.close(fd)
+                if fd >= 0:
+                    os.close(fd)
 
     def __enter__(self) -> "EvidenceWriter":
         return self

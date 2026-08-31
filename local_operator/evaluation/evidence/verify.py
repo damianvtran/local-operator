@@ -75,6 +75,14 @@ def _safe_directory(fd: int) -> bool:
     return stat.S_ISDIR(info.st_mode) and info.st_nlink >= 1
 
 
+def _check_owner_mode(fd: int, location: str, issues: _Issues) -> None:
+    info = os.fstat(fd)
+    if not hasattr(os, "geteuid") or info.st_uid != os.geteuid():
+        issues.error("unsafe_owner", location)
+    if stat.S_IMODE(info.st_mode) & 0o022:
+        issues.error("unsafe_permissions", location)
+
+
 def _read_file(
     root_fd: int, name: str, issues: _Issues, unsafe_code: VerificationIssueCode
 ) -> bytes | None:
@@ -89,6 +97,7 @@ def _read_file(
         if not _safe_regular(fd):
             issues.error(unsafe_code, name)
             return None
+        _check_owner_mode(fd, name, issues)
         chunks: list[bytes] = []
         while True:
             chunk = os.read(fd, 1024 * 1024)
@@ -185,6 +194,7 @@ def _read_artifacts(
         if not _safe_directory(artifacts_fd):
             issues.error("artifact_unsafe", "artifacts")
             return ()
+        _check_owner_mode(artifacts_fd, "artifacts", issues)
         for name in sorted(os.listdir(artifacts_fd)):
             if len(name) != _DIGEST_LENGTH or any(
                 character not in "0123456789abcdef" for character in name
@@ -200,6 +210,7 @@ def _read_artifacts(
                 if not _safe_regular(fd):
                     issues.error("artifact_unsafe", f"artifacts/{name}")
                     continue
+                _check_owner_mode(fd, f"artifacts/{name}", issues)
                 chunks: list[bytes] = []
                 while chunk := os.read(fd, 1024 * 1024):
                     chunks.append(chunk)
@@ -408,6 +419,7 @@ def verify_bundle(root: os.PathLike[str] | str) -> VerificationReport:
     try:
         if not _safe_directory(root_fd):
             issues.error("root_invalid", ".")
+        _check_owner_mode(root_fd, ".", issues)
         try:
             entries = set(os.listdir(root_fd))
         except OSError:

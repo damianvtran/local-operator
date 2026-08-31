@@ -619,6 +619,8 @@ VerificationIssueCode = Literal[
     "root_invalid",
     "unknown_root_entry",
     "unsafe_path",
+    "unsafe_owner",
+    "unsafe_permissions",
     "manifest_missing",
     "manifest_noncanonical",
     "manifest_invalid",
