@@ -69,6 +69,7 @@ from local_operator.tui.widgets.subagent_view import (
     TRUNCATION_NOTE,
     InstructionBlock,
     SubagentView,
+    _mark_consecutive_notices,
     entry_block,
     fold_trajectory,
 )
@@ -465,9 +466,149 @@ def test_two_distinct_notices_with_identical_text_stay_two_rows(stamped: bool) -
             notice[TRAJECTORY_SEQ_KEY] = index
         trajectory.append(notice)
 
-    rows = [entry for entry in fold_trajectory(trajectory) if not entry.head]
-    assert [entry.text for entry in rows] == [error, error]
+    rows = [
+        entry for entry in _mark_consecutive_notices(fold_trajectory(trajectory)) if not entry.head
+    ]
+    # Two rows still, because collapsing them would under-report the run
+    # (the data model is right). They are no longer byte-identical: a
+    # consecutive identical pair is the visual signature of the old
+    # duplicate-render bug, so each row carries its ordinal (issue #405).
+    assert len(rows) == 2
     assert len({entry.key for entry in rows}) == 2
+    assert rows[0].text == f"{error}  (1/2)"
+    assert rows[1].text == f"{error}  (2/2)"
+
+
+def test_consecutive_identical_notices_carry_an_ordinal() -> None:
+    """A genuine double failure must not look like the old duplicate-row bug.
+
+    Mutation: drop the ordinal and this assertion dies. A count-collapse
+    (``×2`` on one row) would also die — the data model keeps two rows.
+    """
+    error = "Invalid arguments: argument 'edits' does not match type array"
+    trajectory = [
+        {TRAJECTORY_SEQ_KEY: 0, "type": "notice", "kind": "error", "text": error},
+        {TRAJECTORY_SEQ_KEY: 1, "type": "notice", "kind": "error", "text": error},
+        {TRAJECTORY_SEQ_KEY: 2, "type": "notice", "kind": "error", "text": error},
+    ]
+    rows = [
+        entry for entry in _mark_consecutive_notices(fold_trajectory(trajectory)) if not entry.head
+    ]
+    assert [entry.text for entry in rows] == [
+        f"{error}  (1/3)",
+        f"{error}  (2/3)",
+        f"{error}  (3/3)",
+    ]
+    # Intervening prose breaks the run: two identical notices with a
+    # sentence between them already read as two attempts, so they stay
+    # unmarked. Numbering those would invent a sequence the page has no
+    # right to.
+    mixed = [
+        {TRAJECTORY_SEQ_KEY: 0, "type": "notice", "kind": "error", "text": error},
+        {
+            TRAJECTORY_SEQ_KEY: 1,
+            "type": "message_end",
+            "message": {
+                "role": "assistant",
+                "id": "m1",
+                "content": [{"type": "text", "text": "retrying"}],
+            },
+        },
+        {TRAJECTORY_SEQ_KEY: 2, "type": "notice", "kind": "error", "text": error},
+    ]
+    mixed_rows = [
+        entry for entry in _mark_consecutive_notices(fold_trajectory(mixed)) if not entry.head
+    ]
+    notices = [entry for entry in mixed_rows if entry.kind == "notice"]
+    assert [entry.text for entry in notices] == [error, error]
+
+
+@pytest.mark.asyncio
+async def test_the_page_paints_ordinals_on_a_consecutive_identical_pair() -> None:
+    """The overlay has to reach the mounted page, not just the pure fold.
+
+    ``_supersedes`` refuses notice revisions, so marking inside the fold
+    would freeze the first unmarked row and leave its twin as ``(2/2)``.
+    Marking at assemble time is what makes both rows update. Mutation:
+    mark only in ``fold_trajectory`` and this assertion dies on the
+    first row still reading the bare error.
+    """
+    error = "Invalid arguments: argument 'edits' does not match type array"
+    events = [
+        {TRAJECTORY_SEQ_KEY: 0, "type": "notice", "kind": "error", "text": error},
+        {TRAJECTORY_SEQ_KEY: 1, "type": "notice", "kind": "error", "text": error},
+    ]
+    job = _job_with(events, status="running")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        view = await _open(pilot, app, job)
+        for _ in range(6):
+            await pilot.pause()
+        rows = [row for row in view.rendered_rows() if error in row]
+        assert rows == [f"{error}  (1/2)", f"{error}  (2/2)"]
+
+
+def test_id_less_anchored_key_cannot_collide_with_a_real_id() -> None:
+    """An id-less fallback must not share a key with a producer-issued id.
+
+    On the pre-separator spelling, an id-less message stamped at sequence 5
+    keyed as ``ms5``; a child that emitted a real ``message.id`` of literally
+    ``"ms5"`` folded onto the same row (issue #408, confirmed on base). The
+    colon makes that collision unrepresentable: ``m:s5`` cannot equal ``ms5``.
+    The same shape holds for an id-less tool start (``t:s9`` vs ``ts9``).
+
+    Mutation: revert the separator and this assertion dies — the two
+    messages collapse to one row whose text is the REAL-ID one.
+    """
+    messages = fold_trajectory(
+        [
+            {
+                TRAJECTORY_SEQ_KEY: 5,
+                "type": "message_end",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "ID-LESS"}],
+                },
+            },
+            {
+                TRAJECTORY_SEQ_KEY: 6,
+                "type": "message_end",
+                "message": {
+                    "role": "assistant",
+                    "id": "ms5",
+                    "content": [{"type": "text", "text": "REAL-ID"}],
+                },
+            },
+        ],
+        settled=True,
+    )
+    texts = [entry for entry in messages if entry.kind == "text"]
+    assert {entry.text for entry in texts} == {"ID-LESS", "REAL-ID"}
+    assert {entry.key for entry in texts} == {"m:s5", "ms5"}
+
+    tools = fold_trajectory(
+        [
+            {
+                TRAJECTORY_SEQ_KEY: 9,
+                "type": "tool_execution_start",
+                "tool_name": "read",
+                "args": {"path": "a"},
+            },
+            {
+                TRAJECTORY_SEQ_KEY: 10,
+                "type": "tool_execution_start",
+                "tool_call_id": "ts9",
+                "tool_name": "bash",
+                "args": {"command": "b"},
+            },
+        ],
+        settled=True,
+    )
+    tool_rows = [entry for entry in tools if entry.kind == "tool"]
+    assert {entry.tool_name for entry in tool_rows} == {"read", "bash"}
+    assert {entry.key for entry in tool_rows} == {"t:s9", "ts9"}
 
 
 def test_id_less_message_and_tool_survive_eviction_without_duplicating() -> None:
@@ -2997,7 +3138,7 @@ async def test_a_history_page_lands_below_the_truncation_note(tmp_path) -> None:
         view = await _open(pilot, app, job)
         await _wait_history(pilot, view)
         assert view._head_block is not None, "the fixture needs a truncated trajectory"
-        assert view._body.blocks()[0] is view._head_block
+        assert view._truncation.display, "the truncation note is page chrome, not a body row"
 
         before = len(view._body.blocks())
         view.action_home()
@@ -3005,26 +3146,22 @@ async def test_a_history_page_lands_below_the_truncation_note(tmp_path) -> None:
         await _wait_geometry_settled(pilot, view._body)
         assert len(view._body.blocks()) > before, "no history page was prepended"
 
-        # The note still heads the page, and nothing was inserted above it.
-        assert view._body.blocks()[0] is view._head_block, "a history page landed above the note"
+        # The note is still page chrome (not a body row), and the prepended
+        # history did not displace it or land above the first durable row.
+        assert view._truncation.display
+        assert view._body.blocks()[0] is not view._head_block
 
 
 @pytest.mark.asyncio
 async def test_a_history_page_lands_in_order_when_the_cap_is_crossed_mid_read(tmp_path) -> None:
-    """The prepend offset keys on the note's POSITION, not its existence.
+    """Crossing the cap mid-read still prepends history in order.
 
-    `_head_block` is created lazily and appended at whatever length the body
-    has reached, so it heads the list only when the child was ALREADY
-    truncated when the page opened. A child that is under the cap at open and
-    crosses it while the reader watches mounts the note mid-list (measured:
-    index 5 of 257) — and correcting for a note that is not above the rows
-    pushes the prepended page one row too LOW, which reorders the durable
-    window (`durable 40` above `durable 0`).
-
-    That is the mirror image of round 1's N1 and it is the case `origin/main`
-    happened to get right, so it needs its own guard: the two scenarios are
-    disjoint and a fix conditioned on existence alone passes the other test
-    while breaking this one (review round 2, M3).
+    The truncation note is now pinned at the head the moment it appears
+    (issue #407), so a child that crosses the cap while the page is open
+    no longer mounts the note mid-list. The prepend offset still keys on
+    the note's POSITION, and this case is the one that used to break when
+    that position was mid-list and the offset assumed it was not
+    (`durable 40` above `durable 0`, review round 2, M3).
     """
     transcript = Transcript(tmp_path / "child")
     for index in range(140):
@@ -3042,7 +3179,12 @@ async def test_a_history_page_lands_in_order_when_the_cap_is_crossed_mid_read(tm
         await _wait_history(pilot, view)
         assert view._head_block is None, "the fixture must start under the cap"
 
-        # Now cross the cap under the reader, which appends the note mid-list.
+        # Now cross the cap under the reader. The note is PINNED at the
+        # head (issue #407) rather than appended mid-list, so it occupies
+        # index 0 the moment it exists — the same position a truncated-at-
+        # open child already had. The prepend offset still keys on that
+        # position, which is why this case used to break when the note
+        # sat mid-list and the offset assumed it did not.
         events: list[dict[str, Any]] = []
         while len(events) < TRAJECTORY_MAX_EVENTS + 10:
             events.extend(_text(f"m{len(events)}", f"live {len(events)}"))
@@ -3051,9 +3193,7 @@ async def test_a_history_page_lands_in_order_when_the_cap_is_crossed_mid_read(tm
         for _ in range(4):
             await pilot.pause()
         assert view._head_block is not None, "the fixture needs to cross the cap"
-        assert (
-            view._body.blocks()[0] is not view._head_block
-        ), "this test only means anything while the note is NOT at index 0"
+        assert view._truncation.display, "crossing the cap must pin the note as chrome"
 
         view.action_home()
         await _wait_history(pilot, view)
@@ -3064,3 +3204,119 @@ async def test_a_history_page_lands_in_order_when_the_cap_is_crossed_mid_read(tm
         durable = [row for row in view.rendered_rows() if row.strip().startswith("durable ")]
         ordering = [int(row.strip().split()[1]) for row in durable]
         assert ordering == sorted(ordering), f"the prepended page landed out of order: {ordering}"
+
+
+def _long_error_notice() -> dict[str, Any]:
+    """An error that wraps past a 62x24 body's viewport.
+
+    A two-line wrap still fits above the working line on a 9-row body, so
+    sticky-tail following never bisects it. The glyph only sits above the
+    fold when the notice itself is taller than the viewport-minus-tail,
+    which is the D3 frame: first visible line is a hanging continuation.
+    """
+    return {
+        "type": "notice",
+        "kind": "error",
+        "text": (
+            "Invalid arguments: argument 'edits' does not match type array "
+            "while calling edit on local_operator/tui/widgets/subagent_view.py "
+            "with a payload that also failed validation on every subsequent "
+            "field of the same call: path, old_text, new_text, replace_all, "
+            "and the trailing context the child included to justify the edit"
+        ),
+    }
+
+
+@pytest.mark.asyncio
+async def test_the_truncation_note_stays_in_the_viewport_when_the_body_scrolls() -> None:
+    """The note is page chrome, not a transcript row.
+
+    Mounted in the body it left the screen the moment content exceeded the
+    viewport — which is exactly when it is explaining why the run starts
+    mid-sentence (issue #407). Mutation: put it back in the body as an
+    ordinary head block and ``TRUNCATION_NOTE`` drops out of the visible
+    chrome once the body is scrolled to its tail.
+    """
+    events: list[dict[str, Any]] = []
+    while len(events) < TRAJECTORY_MAX_EVENTS:
+        events.extend(_text(f"m{len(events)}", f"step {len(events)} applying the review fixes"))
+    events.append(_long_error_notice())
+    job = _job_with(events, status="running")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(62, 24)) as pilot:
+        view = await _open(pilot, app, job)
+        for _ in range(8):
+            await pilot.pause()
+        assert view._head_block is not None, "the fixture needs a truncated trajectory"
+        assert view._truncation.display
+        # Follow the tail the way a live page does. The note is a sibling
+        # of the body, so its region.y cannot follow the body's scroll.
+        view._body.scroll_end(animate=False)
+        await _wait_geometry_settled(pilot, view._body)
+        assert view._truncation.display
+        assert view._truncation.region.y < view._body.region.y, (
+            f"truncation chrome is not above the body: "
+            f"note.y={view._truncation.region.y} body.y={view._body.region.y}"
+        )
+        assert TRUNCATION_NOTE in " ".join(view.rendered_rows())
+        # And it is NOT in the scrolling column, so a Home/End cycle
+        # cannot hide it.
+        assert view._head_block not in view._body.blocks()
+
+
+@pytest.mark.asyncio
+async def test_a_narrow_viewport_opens_on_a_row_head_not_a_wrap_fragment() -> None:
+    """At 62x24 the first visible transcript line must be a row HEAD.
+
+    Sticky-tail following can bisect a wrapping notice so the glyph sits
+    above the fold and the first glance is a hanging-indented continuation
+    in the notice's own red (issue #407). The wrap is correct; the landing
+    is not. Mutation: skip ``_snap_landing_to_row_head`` and a wrap that
+    straddles the offset makes ``rows_into_owner > 0``.
+    """
+    events: list[dict[str, Any]] = []
+    # Two short rows above the wrapping notice: enough that sticky-tail
+    # following overflows, not so many that the notice sits entirely
+    # below the fold. The notice itself is taller than the 9-row body,
+    # which is what puts a continuation line at the top of the viewport
+    # before the snap.
+    for index in range(2):
+        events.extend(_text(f"m{index}", f"Step {index}: applying the review fixes to the widget."))
+    events.append(_call("c1", "edit", path="local_operator/tui/widgets/subagent_view.py"))
+    events.append(
+        _result(
+            "c1",
+            "edit",
+            "Invalid arguments: argument 'edits' does not match type array",
+            is_error=True,
+        )
+    )
+    events.append(_long_error_notice())
+    job = _job_with(events, status="running")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(62, 24)) as pilot:
+        view = await _open(pilot, app, job)
+        for _ in range(12):
+            await pilot.pause()
+        body = view._body
+        offset = body.scroll_offset.y
+        owner_top = None
+        for block in body.blocks():
+            if block is view._head_block:
+                continue
+            top = block.virtual_region.y
+            if top <= offset < block.virtual_region.bottom:
+                owner_top = top
+                break
+        assert owner_top is not None, (
+            f"no block owns the landing offset {offset}; "
+            f"starts={[b.virtual_region.y for b in body.blocks()[:12]]}"
+        )
+        assert owner_top == offset, (
+            f"landing sits {offset - owner_top} rows into a block "
+            f"(offset={offset}, owner_top={owner_top}, max={body.max_scroll_y})"
+        )

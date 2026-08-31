@@ -678,7 +678,12 @@ def fold_trajectory(events: Sequence[Any], *, settled: bool = False) -> list[Sub
                 continue
             # ``or`` short-circuits, so the anchor is only resolved for a
             # message the child sent without an id — the uncommon case.
-            message_id = str(message.get("id") or f"m{anchors.of(event)}")
+            # The colon is load-bearing: without it an id-less message
+            # stamped at sequence 5 keys as ``ms5``, which is a spelling a
+            # real ``message.id`` can also take, and the two fold onto one
+            # row. A separator makes that collision unrepresentable
+            # (``m:s5`` cannot equal a producer id that is just ``ms5``).
+            message_id = str(message.get("id") or f"m:{anchors.of(event)}")
             if etype == "message_start":
                 streams[message_id] = ""
                 remember("text", message_id)
@@ -701,7 +706,10 @@ def fold_trajectory(events: Sequence[Any], *, settled: bool = False) -> list[Sub
             # reads. An id-less call still cannot be correlated with its end —
             # its card stays unsettled by design, which is a degraded row
             # rather than a wrong one.
-            call_id = str(event.get("tool_call_id") or f"t{anchors.of(event)}")
+            # Same separator as the message fallback above: ``t{anchor}``
+            # collides with a real ``tool_call_id`` of that spelling
+            # (``ts9``), ``t:{anchor}`` cannot.
+            call_id = str(event.get("tool_call_id") or f"t:{anchors.of(event)}")
             args = event.get("args")
             intent = event.get("intent")
             tools[call_id] = SubagentEntry(
@@ -809,6 +817,61 @@ def fold_trajectory(events: Sequence[Any], *, settled: bool = False) -> list[Sub
             if entry.text.strip():
                 rows.append(entry)
     return rows
+
+
+def _mark_consecutive_notices(rows: list[SubagentEntry]) -> list[SubagentEntry]:
+    """Make a genuine consecutive repeat distinguishable from a render bug.
+
+    Two identical notices stacked with nothing between them are the data
+    model telling the truth — the child really emitted the same failure
+    twice — and they are also a pixel-for-pixel two-row prefix of the
+    eleven-row flood this page used to paint. A reader who learned
+    "stacked identical red rows means the view is broken" will discount
+    the second failure. Collapsing them into one ``×N`` row would hide
+    that they are two events; leaving them byte-identical hides that they
+    are two events of a different kind. An ordinal on each run of
+    consecutive identical notices (same kind, same wording) is the
+    smallest mark that keeps both facts on screen.
+
+    Only consecutive runs are marked. Two identical notices with a tool
+    card or a sentence between them already read as two attempts, and
+    numbering those would invent a sequence the page has no right to.
+    The truncation note is excluded: it is chrome, not a child event.
+    """
+    if len(rows) < 2:
+        return rows
+    runs: list[tuple[int, int]] = []
+    start = 0
+    while start < len(rows):
+        end = start + 1
+        head = rows[start]
+        if head.kind == "notice" and not head.head:
+            while (
+                end < len(rows)
+                and rows[end].kind == "notice"
+                and not rows[end].head
+                and rows[end].notice_kind == head.notice_kind
+                and rows[end].text == head.text
+            ):
+                end += 1
+        if end - start >= 2:
+            runs.append((start, end))
+        start = end
+    if not runs:
+        return rows
+    marked = list(rows)
+    for start, end in runs:
+        count = end - start
+        for ordinal, index in enumerate(range(start, end), start=1):
+            entry = marked[index]
+            marked[index] = SubagentEntry(
+                key=entry.key,
+                kind="notice",
+                text=f"{entry.text}  ({ordinal}/{count})",
+                notice_kind=entry.notice_kind,
+                head=entry.head,
+            )
+    return marked
 
 
 class InstructionBlock(UserBlock):
@@ -1374,6 +1437,18 @@ class SubagentView(Vertical):
         self._title = Static(classes="subagent-view-title")
         self._breadcrumb = Static(classes="subagent-view-breadcrumb")
         self._rule = Static(classes="subagent-view-rule")
+        # The truncation note is PAGE chrome, not a transcript row. Mounted
+        # in the body it scrolled away the moment content exceeded the
+        # viewport — which is exactly when it is explaining why the run
+        # starts mid-sentence (issue #407). Held here, between the rule
+        # and the scrolling body, it stays on screen the way the title
+        # does; display is toggled when the fold first reports the cap.
+        # A real NoticeBlock so the glyph, hanging wrap and kind ink match
+        # every other notice on the page rather than being a second
+        # rendering of the same sentence.
+        self._truncation = NoticeBlock(TRUNCATION_NOTE, "note")
+        self._truncation.add_class("subagent-view-truncation")
+        self._truncation.display = False
         self._body = SubagentTranscriptView(classes="subagent-view-body")
         # One widget per hint so each can be hovered and clicked. The row
         # still sheds whole hints at narrow widths; it does that by hiding
@@ -1505,6 +1580,11 @@ class SubagentView(Vertical):
         self._history_error = False
         self._history_unavailable = True
         self._initial_tail_pending = False
+        #: One-shot: the first laid-out body may land its sticky tail on a
+        #: wrap fragment (a continuation line with no glyph). Snapped once
+        #: onto a row head so the first glance is a statement; later
+        #: refreshes leave a reader who has already scrolled alone.
+        self._landing_snap_pending = True
 
     @property
     def job_id(self) -> str:
@@ -1515,6 +1595,7 @@ class SubagentView(Vertical):
         yield self._title
         yield self._breadcrumb
         yield self._rule
+        yield self._truncation
         yield self._body
         with self._hints:
             yield self._parent_hint
@@ -1595,6 +1676,8 @@ class SubagentView(Vertical):
             self._entries = []
             self._blocks = []
             self._head_block = None
+            self._landing_snap_pending = True
+            self._truncation.display = False
             self._reset_history(transcript_directory)
             if self._body.is_mounted:
                 self._body.clear_blocks()
@@ -1671,7 +1754,7 @@ class SubagentView(Vertical):
                 self._known[entry.key] = entry
             elif _supersedes(entry, known):
                 self._known[entry.key] = entry
-        body = self._chronological_entries()
+        body = _mark_consecutive_notices(self._chronological_entries())
 
         tail = self._tail_entry(gone, progress)
         if tail is not None:
@@ -1850,6 +1933,16 @@ class SubagentView(Vertical):
 
             def settle_tail() -> None:
                 self._body.scroll_end(animate=False)
+                # A wrap fragment at the top of a short viewport is a
+                # continuation line with no glyph and no owning row — the
+                # ``✗`` that would explain it sits above the fold. Snap
+                # the landing onto the nearest row HEAD so the first
+                # glance is a statement, not a mid-sentence scrap
+                # (issue #407). Applied AFTER ``scroll_end`` because that
+                # is what put the fragment on screen; applied only on
+                # the initial open so a reader who has already scrolled
+                # is not yanked.
+                self._snap_landing_to_row_head()
                 self._initial_tail_pending = False
 
             self.call_after_refresh(settle_tail)
@@ -1899,7 +1992,7 @@ class SubagentView(Vertical):
     def _reconcile_current_body(
         self, *, anchor: float | None = None, prepend: bool = False
     ) -> None:
-        entries = self._chronological_entries()
+        entries = _mark_consecutive_notices(self._chronological_entries())
         tail = self._tail_entry(self._status == "gone", "")
         if tail is not None:
             entries.append(tail)
@@ -1934,37 +2027,13 @@ class SubagentView(Vertical):
                 # same body width every other block on this page does.
                 fold = self._body.scrollable_content_region.width
                 new_blocks = [entry_block(entry, fold_width=fold) for entry in new_entries]
-                # TWO LISTS, ONE INDEX. `prefix` counts entries, which exclude
-                # the truncation note; `insert_blocks` indexes the BODY's list,
-                # which also holds the note (`_sync_body` mounts it outside the
-                # diffed sequence and keeps it out of `self._blocks`). Measured
-                # on a truncated trajectory: `view._blocks` 168 against a body
-                # of 169. Without the offset a history page prepended to a
-                # truncated child lands one row too high — above the note that
-                # is supposed to head the page. Both conditions are needed at
-                # once, which is why it survived unnoticed (review round 1, N1).
-                #
-                # Keyed on the note's POSITION, not its existence. It is
-                # created lazily and appended at whatever length the body has
-                # reached, so it heads the list only when the child was already
-                # truncated at open. A child that crosses the cap while the
-                # page is open mounts it mid-list (measured: index 5 of 257),
-                # and correcting for a note that is not above the rows pushes
-                # the prepended page one row too low instead — which is how
-                # this arrived as a misordering the previous fix introduced
-                # (`durable 40` above `durable 0`) in a case `origin/main` had
-                # right (review round 2, M3).
-                mounted_blocks = self._body.blocks()
-                head_offset = (
-                    1
-                    if (
-                        self._head_block is not None
-                        and mounted_blocks
-                        and mounted_blocks[0] is self._head_block
-                    )
-                    else 0
-                )
-                self._body.insert_blocks(prefix + head_offset, new_blocks, anchor_offset=anchor)
+                # The truncation note is page chrome (``_truncation``), not a
+                # body block, so `prefix` and the body's index agree: there
+                # is no head-offset to apply. The previous offset existed
+                # because the note used to occupy body index 0 while being
+                # excluded from `_entries` (review round 1, N1 / round 2, M3);
+                # pinning it out of the column removes that skew entirely.
+                self._body.insert_blocks(prefix, new_blocks, anchor_offset=anchor)
                 self._blocks[prefix:prefix] = new_blocks
                 self._entries[prefix:prefix] = new_entries
                 self._pending = entries
@@ -2020,6 +2089,8 @@ class SubagentView(Vertical):
         internals passes happily while the page paints nothing.
         """
         rows: list[Any] = [self._title_text, self._rule_text]
+        if self._truncation.display:
+            rows.append(self._truncation.text())
         for block in self._body.blocks():
             # AssistantBlock renders Markdown, whose renderable is not text at
             # all; it exposes its source through `text()`, and the source is
@@ -2118,8 +2189,15 @@ class SubagentView(Vertical):
         # left finished messages folded as if they were still streaming.
         settled = not self._running and not self._queued
         if head is not None and self._head_block is None:
-            self._head_block = NoticeBlock(head.text, head.notice_kind)
-            self._body.append_block(self._head_block)
+            # Painted as page chrome (``_truncation``), not as a body
+            # block: a body-mounted note is an ordinary row at index 0
+            # and leaves the screen the moment the transcript exceeds
+            # the viewport. ``_head_block`` stays the same object
+            # ``rendered_rows`` and the history-prepend tests already
+            # hold; it is just never mounted into the scrolling column.
+            self._head_block = self._truncation
+            self._truncation.restate(head.text, head.notice_kind)
+            self._truncation.display = True
 
         # The terminating row is held OUT of the diffed sequence, for the same
         # reason the truncation row is: it is positioned by role rather than by
@@ -2185,6 +2263,68 @@ class SubagentView(Vertical):
 
         self._blocks = [*body_blocks, *([tail_block] if tail_block is not None else [])]
         self._entries = list(entries)
+        if self._landing_snap_pending:
+            # Two refreshes, not one: the first lays the blocks out, the
+            # body's sticky-tail follow then moves the offset onto the
+            # newest content (and, on a short viewport, onto a wrap
+            # fragment). Snapping on the first refresh sees offset 0 and
+            # would either no-op or consume the one-shot before the
+            # fragment exists.
+            self.call_after_refresh(self._schedule_landing_snap)
+
+    def _schedule_landing_snap(self) -> None:
+        if self._landing_snap_pending:
+            self.call_after_refresh(self._snap_landing_to_row_head)
+
+    def _snap_landing_to_row_head(self) -> None:
+        """Land the first glance on a row HEAD, not a wrap fragment.
+
+        Sticky-tail following puts the newest content at the bottom of the
+        viewport. On a short terminal that can bisect a wrapping notice:
+        the glyph and the start of the sentence sit above the fold, and
+        the first visible line is a hanging-indented continuation in the
+        notice's own red — a scrap that looks like a broken row rather
+        than the rest of one (issue #407).
+
+        The wrap itself is correct; only the landing is wrong. If the
+        current offset sits strictly inside a block, pull it back to that
+        block's start so the glyph (or the first line of prose) is the
+        first thing on screen. Never past the tail — a snap that hid the
+        working line would be a worse first glance than a fragment.
+
+        One-shot on open. A reader who has already scrolled owns the
+        offset; yanking it on a later refresh is the defect this is not.
+        """
+        if not self._landing_snap_pending:
+            return
+        body = self._body
+        if not body.is_mounted or not body.size.height:
+            return
+        # Layout has to have happened: a snap against a zero-height list
+        # (the first refresh after mount, before Textual assigns regions)
+        # would consume the one-shot and leave the wrap fragment in place.
+        if not body.blocks() or body.virtual_size.height <= body.size.height:
+            if body.max_scroll_y <= 0 and body.blocks():
+                # Content fits: there is no fragment to snap off. Done.
+                self._landing_snap_pending = False
+            return
+        offset = body.scroll_offset.y
+        target = offset
+        for block in body.blocks():
+            top = block.virtual_region.y
+            bottom = block.virtual_region.bottom
+            if top < offset < bottom:
+                target = top
+                break
+            if top >= offset:
+                break
+        cap = body.max_scroll_y
+        if cap > 0:
+            target = min(max(target, 0), cap)
+        if target != offset:
+            with body._tail_anchor.programmatic_scroll():
+                body.scroll_to(y=target, animate=False, immediate=True)
+        self._landing_snap_pending = False
 
     def _empty_state(self) -> str:
         """What the page says with nothing to show, by WHY it has nothing."""
