@@ -1083,12 +1083,6 @@ def browser_command(args: argparse.Namespace) -> int:
     return 1
 
 
-# Peer messaging body cap. Well under the registrant's 1 MB line limit so a
-# huge paste is rejected with a clear message here rather than becoming a
-# silently dropped oversized line on the wire.
-_PEER_MESSAGE_MAX_BYTES = 256 * 1024
-
-
 def _peer_red(message: str) -> None:
     """Print one red error line, matching the rest of the CLI's error style."""
     print(f"\n\033[1;31m{message}\033[0m", file=sys.stderr)
@@ -1115,32 +1109,12 @@ def _peer_sender_identity() -> "dict[str, Any]":
     """Best-effort identity of the calling session for the peer indicator.
 
     ``lop send`` is a short-lived child of the ``lop`` TUI that spawned it, so
-    the parent pid is the sending session's pid. We look that record up in the
-    registry and copy its conversation/model/session id so the target's
-    indicator can name the sender honestly. When the caller is headless or its
-    record cannot be found, we still carry the pid — the identity is advisory,
-    never load-bearing for delivery."""
-    from local_operator.mobile import registry
+    the parent pid is the sending session's pid — that is the pid the shared
+    core looks up. (The in-session ``send`` tool passes ``os.getpid()`` instead;
+    see ``mobile/peer_send.py`` for why the two differ.)"""
+    from local_operator.mobile.peer_send import peer_sender_identity
 
-    ppid = os.getppid()
-    sender: dict[str, Any] = {"pid": ppid}
-    try:
-        for record, state in registry.scan(config_dir()):
-            if record.pid == ppid:
-                sender.update(
-                    {
-                        "session_id": record.session_id,
-                        "conversation_name": record.conversation_name,
-                        "model_label": record.model_label,
-                        "cwd": record.cwd,
-                    }
-                )
-                break
-    except OSError:
-        # A scan failure never blocks a send: the message still delivers, it is
-        # just less labelled.
-        pass
-    return sender
+    return peer_sender_identity(os.getppid())
 
 
 def _resolve_peer_target(
@@ -1148,84 +1122,23 @@ def _resolve_peer_target(
 ) -> "tuple[Any | None, list[Any], str]":
     """Resolve a ``lop send`` target to one live SessionRecord.
 
-    Priority: ``--pid`` (exact), ``--session`` (exact session_id), then the
-    positional substring matched case-insensitively against conversation_name,
-    then session_id, then the cwd basename. Only ``live`` records are eligible
-    (a ``wedged`` owner will not service the socket promptly; ``stale`` is
-    dead). Returns ``(record, candidates, error)``: exactly one of record or
-    error is meaningful; ``candidates`` is populated on an ambiguous substring
-    so the caller can print them for disambiguation."""
-    import os as _os
+    Thin adapter over the shared send-side core
+    (``mobile.peer_send.resolve_peer_target``): the CLI's argparse namespace is
+    mapped onto the core's keyword arguments. The resolution rules themselves —
+    pid, then session id, then case-insensitive substring; only ``live`` records;
+    candidates returned on ambiguity — live in the core so the in-session
+    ``send`` tool resolves targets identically."""
+    from local_operator.mobile.peer_send import resolve_peer_target
 
-    from local_operator.mobile import registry
-
-    scanned = registry.scan(config_dir())
-    live = [(rec, state) for rec, state in scanned if state == "live"]
-
-    if args.pid is not None:
-        for rec, state in scanned:
-            if rec.pid == args.pid:
-                if state != "live":
-                    return (
-                        None,
-                        [],
-                        (
-                            f"target pid {args.pid} is {state}, not live "
-                            "(its owner is not responding); try again shortly"
-                        ),
-                    )
-                return rec, [], ""
-        return None, [], f"no session found with pid {args.pid}"
-
-    if args.session:
-        for rec, state in scanned:
-            if rec.session_id == args.session:
-                if state != "live":
-                    return None, [], (f"target session {args.session} is {state}, not live")
-                return rec, [], ""
-        return None, [], f"no session found with session id {args.session!r}"
-
-    target = (args.target or "").strip()
-    if not target:
-        return None, [], "no target given (pass a name/substring, --pid, or --session)"
-
-    needle = target.lower()
-    matches: list[Any] = []
-    for rec, _state in live:
-        haystacks = [
-            rec.conversation_name or "",
-            rec.session_id or "",
-            _os.path.basename(rec.cwd or ""),
-        ]
-        if any(needle in field.lower() for field in haystacks):
-            matches.append(rec)
-
-    if not matches:
-        # Distinguish "matched but not live" from "no match at all" so the user
-        # knows whether to wait or to fix the name.
-        wedged = [
-            rec
-            for rec, state in scanned
-            if state != "live"
-            and needle
-            in (
-                f"{rec.conversation_name or ''} {rec.session_id or ''} "
-                f"{_os.path.basename(rec.cwd or '')}"
-            ).lower()
-        ]
-        if wedged:
-            return (
-                None,
-                [],
-                (
-                    f"the only match for {target!r} is not responding "
-                    f"(pid {wedged[0].pid}); try again shortly"
-                ),
-            )
-        return None, [], f"no live session matches {target!r}"
-    if len(matches) > 1:
-        return None, matches, ""
-    return matches[0], [], ""
+    # The flag grammar is passed in so the CLI's user-visible error keeps saying
+    # `--pid` / `--session`, exactly as it did before the extraction.
+    return resolve_peer_target(
+        target=args.target,
+        pid=args.pid,
+        session=args.session,
+        pid_hint="--pid",
+        session_hint="--session",
+    )
 
 
 def send_command(args: argparse.Namespace) -> int:
@@ -1238,26 +1151,34 @@ def send_command(args: argparse.Namespace) -> int:
     import asyncio
 
     from local_operator.mobile.peer_client import send_peer_message
+    from local_operator.mobile.peer_send import candidate_lines, validate_peer_body
 
     record, candidates, error = _resolve_peer_target(args)
     if candidates:
         print(f"{len(candidates)} sessions match; disambiguate with --pid:", file=sys.stderr)
-        for rec in candidates:
-            name = rec.conversation_name or rec.session_id
-            print(f"  --pid {rec.pid}  {name}  ({rec.model_label})", file=sys.stderr)
+        for line in candidate_lines(candidates, indent="  ", prefix="--pid"):
+            print(line, file=sys.stderr)
         return 1
     if error or record is None:
         _peer_red(error or "no target resolved")
         return 1
 
-    # Self-send guard (U2): `lop send` is a child of the launching TUI, so
-    # os.getppid() IS the sending session's pid. A target resolving to that pid
-    # means the session is messaging itself, which would paint a
-    # "peer message from <own name>" card as though a DIFFERENT session sent it
-    # (and, in --wake/--now mode, self-trigger a turn). Refuse rather than
-    # deliver a mislabeled self-note; the composer is the way to talk to
-    # yourself.
-    if record.pid == os.getppid():
+    # Self-send guard (U2): a target resolving to the SENDING session means the
+    # session is messaging itself, which would paint a "peer message from <own
+    # name>" card as though a DIFFERENT session sent it (and, in --wake/--now
+    # mode, self-trigger a turn). Refuse rather than deliver a mislabeled
+    # self-note; the composer is the way to talk to yourself.
+    #
+    # The comparison uses the pid the IDENTITY walk resolved, not a bare
+    # os.getppid(). `lop send` is only sometimes a direct child of the TUI: run
+    # from an agent's bash tool or through a shell wrapper it is a grandchild,
+    # and then the two disagree — the guard compared the intermediate shell's
+    # pid, missed, and delivered a self-message that the ancestry-resolved
+    # identity then labelled confidently with the session's OWN name. Resolving
+    # once and using it for both is what keeps them from drifting apart again.
+    sender = _peer_sender_identity()
+    sender_pid = sender.get("pid")
+    if record.pid == sender_pid:
         _peer_red("that target is this session; use the composer to message yourself")
         return 1
 
@@ -1270,18 +1191,12 @@ def send_command(args: argparse.Namespace) -> int:
     else:
         _peer_red("no message given (pass it as an argument or pipe it on stdin)")
         return 1
-    if not text.strip():
-        _peer_red("message is empty")
-        return 1
-    if len(text.encode("utf-8")) > _PEER_MESSAGE_MAX_BYTES:
-        _peer_red(
-            f"message is too large ({len(text.encode('utf-8'))} bytes); "
-            f"cap is {_PEER_MESSAGE_MAX_BYTES} bytes"
-        )
+    body_error = validate_peer_body(text)
+    if body_error:
+        _peer_red(body_error)
         return 1
 
     mode = "steer" if args.steer else "mailbox"
-    sender = _peer_sender_identity()
     try:
         detail = asyncio.run(
             send_peer_message(

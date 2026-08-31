@@ -108,7 +108,7 @@ class FakeHandle:
 
     async def receive_peer_message(  # noqa: ANN001, ANN202
         self, text, *, mode="mailbox", wake=False, sender=None
-    ):
+    ) -> str:
         self.calls.append(
             ("receive_peer_message", (text,), {"mode": mode, "wake": wake, "sender": sender})
         )

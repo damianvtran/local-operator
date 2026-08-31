@@ -395,6 +395,47 @@ def _scalar_text(value: object) -> str:
     return ""
 
 
+def _send_summary(args: dict[str, object]) -> str:
+    """The send row: HOW it lands, WHO gets it, then a preview of the body.
+
+    The delivery-mode marker LEADS, and that ordering is the whole point. The
+    row builder truncates the composed summary from the right as one string, so
+    whatever sits rightmost dies first — with the marker after the target, three
+    cards with the same peer and three different delivery promises painted
+    byte-identical rows at ordinary widths (measured: a 37-cell conversation
+    name collides at 62 columns, a 26-cell ULID session id at 52). One of those
+    rows woke a peer and one did not, and the reader could not tell.
+
+    This is the same fix ``_describe_wake_approval`` already landed for the same
+    class of defect ("the BOUND leads the interval… a wake firing eight times
+    and one that never stops painted the same text at three widths"): put the
+    DISCRIMINATOR ahead of the free-text identity, so the field that separates
+    two rows is the one that survives.
+
+    The message preview carries no cap of its own. The row's own
+    ``truncate_cells`` already sheds it to the available budget; an extra
+    40-cell bound only left a third of the line empty at 100+ columns while
+    protecting nothing — the marker survives either way because it now leads.
+    """
+    # Both labels come from the tool's own helpers so the card and the approval
+    # prompt can never disagree about WHICH peer or WHICH delivery mode a call
+    # names — two copies of that precedence would drift the first time a mode is
+    # added. Imported in-function: this widget module must not pull the tool
+    # module in at import time.
+    from local_operator.tools.builtin import (
+        peer_send_mode_label,
+        peer_send_target_label,
+    )
+
+    mode = peer_send_mode_label(args)
+    # `who` may be a raw conversation substring, i.e. model-controlled text; it
+    # goes through the same scalar flattening every other summary field does.
+    who = _scalar_text(peer_send_target_label(args)) or "?"
+    message = _scalar_text(args.get("message"))
+    parts = [part for part in (mode, who, message) if part]
+    return " · ".join(parts)
+
+
 def _summary_from_args(tool_name: str, args: dict[str, object]) -> str:
     """One-line summary of WHAT the tool is acting on.
 
@@ -405,6 +446,12 @@ def _summary_from_args(tool_name: str, args: dict[str, object]) -> str:
     is recognisably an identity — an unknown or MCP-provided tool — the
     generic first-two-scalars scan still applies, in argument order.
     """
+    if tool_name == "send":
+        # A dedicated branch rather than the identity scan: the generic path
+        # would join target + message and lose the delivery-mode marker, the
+        # one word that says whether the peer was woken, steered, or quietly
+        # mailboxed.
+        return _send_summary(args) or tool_name
     parts = [
         text
         for key, value in args.items()
