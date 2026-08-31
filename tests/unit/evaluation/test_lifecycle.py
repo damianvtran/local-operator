@@ -608,6 +608,60 @@ def test_direct_overcap_reservation_and_forged_commitment_cannot_start() -> None
         authorized.start(permit, budget, forged)
 
 
+def test_finalization_rejects_reconciliation_from_different_commitment() -> None:
+    plan, budget, _cleanup_value, authorized, permit = _authorized()
+    reservation = reserve_budget(
+        budget,
+        "exact-commitment",
+        (ResourceAmount(resource="guest_actions", value=10),),
+    )
+    commitment = commit_budget(budget, (reservation,))
+    finalizing = authorized.start(permit, budget, commitment).begin_finalization()
+    valid = _reconciliation(budget, reservation)
+    payload = valid.model_dump(mode="json")
+    entries = [dict(entry) for entry in payload["entries"]]
+    guest = next(entry for entry in entries if entry["resource"] == "guest_actions")
+    guest["reserved"] = 99
+    forged_payload = {
+        **payload,
+        "entries": entries,
+        "commitment_id": "0" * 64,
+        "reconciliation_id": "0" * 64,
+    }
+    # Let the pure reconciliation validator derive the distinct internally
+    # consistent identities from the changed reserved totals.
+    from local_operator.evaluation.receipts import _identity as receipt_identity
+
+    commitment_payload = {
+        "episode_id": budget.episode_id,
+        "budget_id": budget.budget_id,
+        "authorization_digest": budget.budget_id,
+        "reservation_ids": tuple(item.reservation_id for item in (reservation,)),
+        "reserved": tuple(
+            ResourceAmount(resource=entry["resource"], value=entry["reserved"]).model_dump(
+                mode="json"
+            )
+            for entry in sorted(entries, key=lambda item: item["resource"])
+        ),
+    }
+    forged_payload["commitment_id"] = receipt_identity("budget-commitment-v1", commitment_payload)
+    forged_without_id = {
+        key: value for key, value in forged_payload.items() if key != "reconciliation_id"
+    }
+    forged_payload["reconciliation_id"] = receipt_identity(
+        "budget-reconciliation-v1", forged_without_id
+    )
+    forged = BudgetReconciliation.model_validate(forged_payload)
+    assert forged.reservation_ids == finalizing.reservation_ids
+    assert forged.commitment_id != finalizing.commitment_id
+    with pytest.raises(ValueError, match="does not match this episode"):
+        finalizing.finish_finalization(forged, _score(plan))
+    # Rejection happens before lifecycle consumption, so exact evidence can retry.
+    cleaning = finalizing.finish_finalization(valid, _score(plan))
+    assert cleaning.state == "cleaning"
+    assert cleaning.commitment_id == commitment.commitment_id
+
+
 def test_lifecycle_rejects_reconciliation_from_mutated_authorization() -> None:
     plan, budget, _cleanup_value, authorized, permit = _authorized()
     reservation = _reservation(budget)

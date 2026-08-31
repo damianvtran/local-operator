@@ -90,6 +90,7 @@ def _state_identity(payload: dict[str, Any]) -> str:
     complete.setdefault("preflight_seal_id", None)
     complete.setdefault("permit_id", None)
     complete.setdefault("reservation_ids", ())
+    complete.setdefault("commitment_id", None)
     complete.setdefault("reconciliation_id", None)
     complete.setdefault("reconciliation_reportable", None)
     complete.setdefault("score_id", None)
@@ -449,6 +450,7 @@ class EpisodeLifecycle(AuthorityModel):
     preflight_seal_id: Digest | None = None
     permit_id: Digest | None = None
     reservation_ids: tuple[Digest, ...] = ()
+    commitment_id: Digest | None = None
     reconciliation_id: Digest | None = None
     reconciliation_reportable: bool | None = None
     score_id: Digest | None = None
@@ -483,6 +485,12 @@ class EpisodeLifecycle(AuthorityModel):
         if tuple(sorted(self.reservation_ids)) != self.reservation_ids:
             raise ValueError("episode reservations must be canonical")
         before_running = self.state in ("planned", "preflighted", "authorized")
+        if before_running and self.commitment_id is not None:
+            raise ValueError("pre-running state cannot carry a budget commitment")
+        if self.reservation_ids and self.commitment_id is None:
+            raise ValueError("post-start state requires its exact budget commitment")
+        if self.commitment_id is not None and not self.reservation_ids:
+            raise ValueError("budget commitment requires reserved resources")
         if before_running and any(
             value is not None
             for value in (
@@ -692,6 +700,7 @@ class EpisodeLifecycle(AuthorityModel):
                 "start-episode",
                 state="running",
                 reservation_ids=commitment.reservation_ids,
+                commitment_id=commitment.commitment_id,
             )
             self._consume_source()
             _lookup_authority(permit, "side-effect-permit").consumed = True
@@ -847,6 +856,7 @@ class EpisodeLifecycle(AuthorityModel):
             or reconciliation.authorization_digest != self.budget_id
             or reconciliation.authorization.budget_id != self.budget_id
             or reconciliation.reservation_ids != self.reservation_ids
+            or reconciliation.commitment_id != self.commitment_id
         ):
             raise ValueError("cost reconciliation does not match this episode")
 
