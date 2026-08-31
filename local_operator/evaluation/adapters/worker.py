@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 import os
 from collections import OrderedDict
-from typing import cast
+from dataclasses import dataclass
+from typing import Any, cast
 
 from local_operator.evaluation.adapters.api import (
     KEYED_METHODS,
@@ -43,6 +44,18 @@ from local_operator.evaluation.protocol import ProtocolModel
 REQUEST_FD_ENV = "LO_ADAPTER_REQUEST_FD"
 RESPONSE_FD_ENV = "LO_ADAPTER_RESPONSE_FD"
 MAX_REPLAY = 128
+# An episode may legitimately exceed the request replay window. Operation
+# records are never evicted because losing one would turn a retry into a second
+# side effect; bounded exhaustion poisons before dispatch instead.
+MAX_OPERATION_RECORDS = 4096
+
+
+@dataclass(frozen=True)
+class _OperationRecord:
+    method: AdapterMethod
+    params_digest: str
+    result: dict[str, Any] | None
+    error: RpcError | None
 
 
 def _workspace_digest(selector: AdapterSelector) -> str:
@@ -54,7 +67,13 @@ def _workspace_digest(selector: AdapterSelector) -> str:
 
 
 class Worker:
-    def __init__(self, request_fd: int, response_fd: int) -> None:
+    def __init__(
+        self,
+        request_fd: int,
+        response_fd: int,
+        *,
+        max_operation_records: int = MAX_OPERATION_RECORDS,
+    ) -> None:
         self._reader = AsyncIncrementalReader(request_fd)
         self._writer = IncrementalWriter(response_fd)
         self._state: AdapterState = "NEW"
@@ -62,7 +81,8 @@ class Worker:
         self._selector: AdapterSelector | None = None
         self._last_id = 0
         self._replay: OrderedDict[int, tuple[AdapterMethod, str, bytes]] = OrderedDict()
-        self._operations: dict[tuple[AdapterMethod, str], str] = {}
+        self._operations: dict[str, _OperationRecord] = {}
+        self._max_operation_records = max_operation_records
         self._pending_line: asyncio.Task[bytes] | None = None
 
     def _line_task(self) -> asyncio.Task[bytes]:
@@ -147,6 +167,20 @@ class Worker:
         if request.id == self._last_id:
             raise RpcProtocolError("duplicate request ID is not cached")
         self._last_id = request.id
+        operation_id = getattr(params, "operation_id", None)
+        if request.method in KEYED_METHODS:
+            assert isinstance(operation_id, str)
+            previous_operation = self._operations.get(operation_id)
+            if previous_operation is not None:
+                if (
+                    previous_operation.method != request.method
+                    or previous_operation.params_digest != digest
+                ):
+                    raise RpcProtocolError("operation ID was reused with changed content")
+                self._replay_operation(request, digest, previous_operation)
+                return
+            if len(self._operations) >= self._max_operation_records:
+                raise RpcProtocolError("operation replay capacity is exhausted")
         if self._state not in METHOD_STATES[request.method]:
             self._write_error(
                 request,
@@ -155,26 +189,30 @@ class Worker:
                 digest=digest,
             )
             return
-        operation_id = getattr(params, "operation_id", None)
-        if request.method in KEYED_METHODS:
-            assert isinstance(operation_id, str)
-            operation_key = (request.method, operation_id)
-            prior_digest = self._operations.get(operation_key)
-            if prior_digest is not None and prior_digest != digest:
-                raise RpcProtocolError("operation ID was reused with changed parameters")
-            self._operations[operation_key] = digest
         try:
             result = await self._dispatch(request.method, params)
             result_type = RESULT_MODELS[request.method]
             if not isinstance(result, result_type):
                 raise TypeError("adapter returned the wrong closed result")
         except asyncio.CancelledError:
-            self._write_error(request, "cancelled", "adapter call was cancelled", digest=digest)
+            self._write_error(
+                request,
+                "cancelled",
+                "adapter call was cancelled",
+                digest=digest,
+                operation_id=operation_id,
+            )
             return
         except (AdapterDiscoveryError, Exception):
             # Adapter exceptions may contain reprs, paths, environment values, or
             # tracebacks.  The wire exposes only a closed code and fixed text.
-            self._write_error(request, "adapter_error", "adapter operation failed", digest=digest)
+            self._write_error(
+                request,
+                "adapter_error",
+                "adapter operation failed",
+                digest=digest,
+                operation_id=operation_id,
+            )
             return
         self._state = METHOD_NEXT_STATE[request.method]
         response = RpcResponse(
@@ -183,9 +221,7 @@ class Worker:
             method=request.method,
             result=result.model_dump(mode="json"),
         )
-        encoded = canonical_line(response)
-        self._cache(request.id, request.method, digest, encoded)
-        self._writer.write(encoded)
+        self._send_response(request, digest, response, operation_id=operation_id)
 
     async def _dispatch(self, method: AdapterMethod, params: ProtocolModel) -> ProtocolModel:
         if method == "hello":
@@ -211,9 +247,46 @@ class Worker:
         message: str,
         *,
         digest: str,
+        operation_id: str | None = None,
     ) -> None:
         error = RpcError.model_validate({"code": code, "message": message}, strict=True)
         response = RpcResponse(jsonrpc="2.0", id=request.id, method=request.method, error=error)
+        self._send_response(request, digest, response, operation_id=operation_id)
+
+    def _send_response(
+        self,
+        request: RpcRequest,
+        digest: str,
+        response: RpcResponse,
+        *,
+        operation_id: str | None,
+    ) -> None:
+        if operation_id is not None:
+            self._operations[operation_id] = _OperationRecord(
+                method=request.method,
+                params_digest=digest,
+                result=response.result,
+                error=response.error,
+            )
+        encoded = canonical_line(response)
+        self._cache(request.id, request.method, digest, encoded)
+        self._writer.write(encoded)
+
+    def _replay_operation(
+        self,
+        request: RpcRequest,
+        digest: str,
+        record: _OperationRecord,
+    ) -> None:
+        # Request IDs identify transport attempts, so durable operation replay
+        # repeats the closed outcome while correlating it to this new attempt.
+        response = RpcResponse(
+            jsonrpc="2.0",
+            id=request.id,
+            method=request.method,
+            result=record.result,
+            error=record.error,
+        )
         encoded = canonical_line(response)
         self._cache(request.id, request.method, digest, encoded)
         self._writer.write(encoded)
