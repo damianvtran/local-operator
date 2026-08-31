@@ -250,6 +250,130 @@ async def test_reset_restores_the_default(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_reset_on_a_default_row_leaves_config_byte_identical(tmp_path: Path) -> None:
+    """#440: `r` on a row already at its default must not WRITE.
+
+    `action_reset` had no default-state guard, so the key ran `reset_setting`
+    unconditionally — and `_delete` writes config.yml back whether or not the
+    key was there. Pressing `r` on an untouched row rewrote the file, and on a
+    machine with no config.yml at all it CREATED one out of a setting the user
+    had never chosen: the page's own undo gesture was the only thing in the
+    session that changed anything.
+
+    Asserted on config.yml's BYTES, the unit the issue's audit used, rather
+    than on the stored value. "The value is still the default" is true of the
+    broken behaviour too — `reset_setting` deletes a key that was already
+    absent and the value reads the same afterwards — so a value assertion
+    passes against the very bug this pins. Only the bytes distinguish "did
+    nothing" from "rewrote the file to the same meaning".
+
+    Both halves of the boundary are covered here because they are two states,
+    not one: NO FILE AT ALL (the issue's repro) and a file that exists with the
+    row at its default. A guard that only handled the first would leave the
+    second live.
+    """
+    config = tmp_path / "config.yml"
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 32)) as pilot:
+        await pilot.pause()
+        app._open_settings_view()
+        view = app.query_one(SettingsView)
+        await pilot.pause()
+
+        # ---- state 1: no config.yml at all -----------------------------
+        # Opening the app materialises one, so it is removed to reproduce the
+        # audit's starting state exactly: a machine that has never been
+        # configured, where `r` conjured 1005 bytes from nothing.
+        config.unlink(missing_ok=True)
+        _select(view, "retry.enabled")
+        setting = settings_io.resolve_key("retry.enabled")
+        assert setting is not None
+        assert settings_io.is_default(view._manager, setting)
+
+        await pilot.press("r")
+        await pilot.pause()
+        assert not config.exists(), (
+            "`r` on a default row CREATED config.yml out of a setting the user "
+            f"never chose: {config.read_bytes()!r}"
+        )
+
+        # ---- state 2: the file exists and the row is at its default -----
+        # Written through a DIFFERENT setting, so the file on disk carries a
+        # real non-default key while the highlighted row is still untouched —
+        # the state where a rewrite would be invisible in the values but
+        # visible in the bytes (and in the file's mtime).
+        other = settings_io.resolve_key("retry.maxRetries")
+        assert other is not None
+        settings_io.write_setting(view._manager, other, 7)
+        view._manager.reload()
+        view._repaint()
+        await pilot.pause()
+
+        _select(view, "retry.enabled")
+        assert settings_io.is_default(view._manager, setting)
+        before = config.read_bytes()
+
+        await pilot.press("r")
+        await pilot.pause()
+
+        assert config.read_bytes() == before, "`r` rewrote config.yml for a row already at default"
+        # The sibling is what proves the no-op is a no-op rather than a
+        # differently-shaped write that happened to round-trip.
+        view._manager.reload()
+        assert settings_io.read_setting(view._manager, other) == 7
+        # It REPORTS rather than swallowing the press: the footer advertises
+        # `r default` on this row, and a lit hint whose key does nothing
+        # silently is the bug one step earlier (UX round 1, U5).
+        assert "default" in view.notice_text, view.notice_text
+        assert view.error_text == "", "a row at its default is not an ERROR state"
+
+
+@pytest.mark.asyncio
+async def test_reset_still_writes_on_an_off_default_row(tmp_path: Path) -> None:
+    """The guard's other boundary: `r` MUST still reset a row that is off-default.
+
+    Paired with the test above deliberately. A guard that refused every reset
+    would pass that one perfectly while destroying the feature — the page's
+    only undo — so the two are meaningful only together: one pins that `r`
+    does not write when there is nothing to undo, this pins that it does when
+    there is.
+    """
+    config = tmp_path / "config.yml"
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 32)) as pilot:
+        await pilot.pause()
+        app._open_settings_view()
+        view = app.query_one(SettingsView)
+        await pilot.pause()
+
+        setting = settings_io.resolve_key("retry.enabled")
+        assert setting is not None
+        settings_io.write_setting(view._manager, setting, False)
+        view._manager.reload()
+        view._repaint()
+        await pilot.pause()
+
+        _select(view, "retry.enabled")
+        assert not settings_io.is_default(view._manager, setting)
+        before = config.read_bytes()
+
+        await pilot.press("r")
+        await pilot.pause()
+
+        assert config.read_bytes() != before, "`r` did not write on an off-default row"
+        view._manager.reload()
+        assert "enabled" not in _values(tmp_path).get("retry", {}), (
+            "`r` left the stored key in place: " f"{_values(tmp_path).get('retry')!r}"
+        )
+        assert settings_io.is_default(view._manager, setting)
+        # A successful reset says nothing: the value column already shows the
+        # change landing, so a notice here would be noise on the common path.
+        assert view.notice_text == "", view.notice_text
+
+
+@pytest.mark.asyncio
 async def test_every_movement_on_the_page_clamps_at_the_ends() -> None:
     """The ends HOLD, under every movement this page has.
 

@@ -42,6 +42,16 @@ STATE selects what the page is showing:
                painted into (D12) rather than against the settings list
     teams      the read-only teams pane
     agents     the read-only agents pane
+    reset-default  a row that IS at its shipped default (OUT.svg), then the
+               same row after pressing `r` (OUT.pressed.svg). `r` used to WRITE
+               here — on a config with no file at all it created one — so the
+               subject of this pair is the DETAIL LINE: the press now reports
+               `already at its default (...)` instead of rewriting the file.
+               A third frame, OUT.offdefault.svg, is the SAME row once it is
+               off-default, which is what proves `r` still resets when there
+               is something to undo. The footer still offers `r default` on
+               both sides — withholding it is the #440 redesign, not this
+               safety patch
     retired    scrolled to the retired section — the read-only bottom row the
                clamp now parks users on, whose footer must not advertise keys
                that cannot act on it
@@ -82,6 +92,7 @@ os.environ["LOCAL_OPERATOR_CONFIG_DIR"] = _SCRATCH
 
 from local_operator import settings_io  # noqa: E402
 from local_operator.config import ConfigManager  # noqa: E402
+from local_operator.settings_io import Setting  # noqa: E402
 from local_operator.tui.app import OperatorApp  # noqa: E402
 from local_operator.tui.widgets.assistant import AssistantBlock  # noqa: E402
 from local_operator.tui.widgets.settings_view import SettingsView  # noqa: E402
@@ -314,6 +325,30 @@ async def main() -> None:
             view.action_activate()
             await pilot.pause()
             app.save_screenshot(out.replace(".svg", ".open.svg"))
+        elif state == "reset-default":
+            # THREE frames. The `r` safety patch is a DETAIL-LINE question, not
+            # a footer one: the hint stays lit on a default row (withholding it
+            # is the #440 redesign), and the pair that matters is the same row
+            # at default (press reports, file unchanged) and off-default (press
+            # still resets). `display.shimmer` is used because `_seed_config`
+            # writes it, so both sides are reachable on one config.
+            _select(view, "display.shimmer")
+            settings_io.reset_setting(view._manager, _require("display.shimmer"))
+            view._manager.reload()
+            view._repaint()
+            await pilot.pause()
+            app.save_screenshot(out)
+            geometry = _geometry(app, view, state, size)
+            view.action_reset()
+            await pilot.pause()
+            app.save_screenshot(out.replace(".svg", ".pressed.svg"))
+            geometry += f" || after r at default: notice={view.notice_text!r}"
+            settings_io.write_setting(view._manager, _require("display.shimmer"), False)
+            view._manager.reload()
+            view._repaint()
+            await pilot.pause()
+            app.save_screenshot(out.replace(".svg", ".offdefault.svg"))
+            geometry += f" || off-default hints={view.rendered_hints()!r}"
         elif state == "retired":
             for _ in range(len(view._rows)):
                 view.action_jump(1)
@@ -395,6 +430,18 @@ def _scroll_to_show_group(view: SettingsView) -> None:
         last = index
     height = view._body.size.height
     view._body.scroll_to(y=max(0, min(view._selected - 1, last - height + 2)), animate=False)
+
+
+def _require(key: str) -> Setting:
+    """Resolve a shipped setting or fail loudly.
+
+    A capture that silently skipped a missing key would produce a frame of the
+    wrong state and caption it as the right one.
+    """
+    setting = settings_io.resolve_key(key)
+    if setting is None:
+        raise SystemExit(f"no setting {key}")
+    return setting
 
 
 def _corrupt_cascade() -> None:
