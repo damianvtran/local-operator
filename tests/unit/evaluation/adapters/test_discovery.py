@@ -19,8 +19,10 @@ import pytest
 from local_operator.evaluation.adapters.api import AdapterSelector
 from local_operator.evaluation.adapters.discovery import (
     AdapterDiscoveryError,
-    _execute_verified_chain,
-    _verified_module_chain,
+    _record_rows,
+    _verified_entry_target,
+    _verified_imports,
+    _verify_recorded_file,
     distribution_digest,
     load_selected_adapter,
     resolve_launch,
@@ -267,22 +269,217 @@ def test_forged_bytecode_cannot_execute_in_place_of_hashed_source(
 
     # The source is genuinely RECORD-covered, so verification must succeed while
     # still refusing to run the forged cache.
-    attribute, chain = _verified_module_chain(
+    module_name, attribute = _verified_entry_target(
         cast(importlib.metadata.Distribution, distribution), selector
     )
-    assert attribute == "create"
-    assert chain[-1].source == module.read_bytes()
+    assert (module_name, attribute) == ("tiny_adapter", "create")
+    rows = {row[0]: row for row in _record_rows(distribution)}
     try:
-        loaded = _execute_verified_chain(chain)
-        assert not marker.exists()
-        assert loaded.create() == "verified"
+        with _verified_imports(cast(importlib.metadata.Distribution, distribution), rows):
+            loaded = importlib.import_module("tiny_adapter")
+            assert not marker.exists()
+            assert loaded.create() == "verified"
     finally:
         sys.modules.pop("tiny_adapter", None)
     # The executed object descends from the verified byte string, not the cache.
-    assert (
-        hashlib.sha256(chain[-1].source).hexdigest()
-        == hashlib.sha256(module.read_bytes()).hexdigest()
+    verified_path, source = _verify_recorded_file(
+        cast(importlib.metadata.Distribution, distribution), rows, "tiny_adapter.py"
     )
+    assert verified_path == module
+    assert hashlib.sha256(source).hexdigest() == hashlib.sha256(module.read_bytes()).hexdigest()
+
+
+def _multi_module_distribution(tmp_path: Path, marker: Path, entry_body: str) -> FakeDistribution:
+    """Build a package whose helper carries forged bytecode but clean source."""
+
+    package = tmp_path / "advpkg"
+    package.mkdir()
+    (package / "__init__.py").write_text("")
+    helper = package / "helper.py"
+    helper.write_text("VALUE = 'verified'\n")
+    (package / "entry.py").write_text(entry_body)
+
+    def load() -> object:
+        raise AssertionError("entry point must not be imported by the import system")
+
+    entry_point = FakeEntryPoint(load)
+    entry_point.name = "adv"
+    entry_point.value = "advpkg.entry:create"
+    distribution = FakeDistribution(tmp_path, [entry_point])
+    distribution.make_record()
+    _forge_pycache(
+        helper,
+        f"from pathlib import Path\n"
+        f"Path({str(marker)!r}).write_text('pwned')\n"
+        f"VALUE = 'attacker'\n",
+    )
+    return distribution
+
+
+def _forget_package() -> None:
+    for name in [key for key in sys.modules if key == "advpkg" or key.startswith("advpkg.")]:
+        del sys.modules[name]
+
+
+@pytest.mark.parametrize(
+    "entry_body",
+    [
+        pytest.param(
+            "from . import helper\n\n\ndef create():\n    return helper.VALUE\n",
+            id="sibling-imported-by-entry",
+        ),
+        pytest.param(
+            "def create():\n    from . import helper\n\n    return helper.VALUE\n",
+            id="sibling-imported-lazily-inside-factory",
+        ),
+    ],
+)
+def test_forged_bytecode_in_sibling_module_never_executes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, entry_body: str
+) -> None:
+    """Verification must cover the distribution, not just the entry chain.
+
+    A chain can never be complete: it is computed before the entry module runs,
+    so anything that module imports afterwards would reach the ordinary loader
+    and execute a forged cache.
+    """
+
+    marker = tmp_path / "attacker-ran.marker"
+    distribution = _multi_module_distribution(tmp_path, marker, entry_body)
+    selector = selected(tmp_path, distribution_digest(distribution)).model_copy(
+        update={"entry_point": "advpkg.entry:create"}
+    )
+    # The entry module itself is legitimately RECORD-covered; the attack lives
+    # entirely in the sibling's cache.
+    assert _verified_entry_target(
+        cast(importlib.metadata.Distribution, distribution), selector
+    ) == ("advpkg.entry", "create")
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    # Prove the forgery is live on this host before asserting we refuse it.
+    _forget_package()
+    try:
+        attacked = importlib.import_module("advpkg.helper")
+        assert marker.exists(), "forged cache did not take effect on this host"
+        assert attacked.VALUE == "attacker"
+    finally:
+        _forget_package()
+    marker.unlink()
+
+    rows = {row[0]: row for row in _record_rows(distribution)}
+    try:
+        with _verified_imports(cast(importlib.metadata.Distribution, distribution), rows):
+            loaded = importlib.import_module("advpkg.entry")
+            assert loaded.create() == "verified"
+            assert not marker.exists()
+            # A normal import gives the parent package the child attribute.
+            assert sys.modules["advpkg"].entry is loaded
+    finally:
+        _forget_package()
+
+
+def test_forged_bytecode_imported_from_package_init_never_executes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    marker = tmp_path / "attacker-ran.marker"
+    distribution = _multi_module_distribution(
+        tmp_path, marker, "def create():\n    return 'verified'\n"
+    )
+    # The ancestor __init__ pulls the forged sibling in before the entry module.
+    package_init = tmp_path / "advpkg" / "__init__.py"
+    package_init.write_text("from . import helper\n")
+    distribution.make_record()
+    _forge_pycache(
+        tmp_path / "advpkg" / "helper.py",
+        f"from pathlib import Path\n"
+        f"Path({str(marker)!r}).write_text('pwned')\n"
+        f"VALUE = 'attacker'\n",
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    _forget_package()
+    try:
+        importlib.import_module("advpkg")
+        assert marker.exists(), "forged cache did not take effect on this host"
+    finally:
+        _forget_package()
+    marker.unlink()
+
+    rows = {row[0]: row for row in _record_rows(distribution)}
+    try:
+        with _verified_imports(cast(importlib.metadata.Distribution, distribution), rows):
+            loaded = importlib.import_module("advpkg.entry")
+            assert loaded.create() == "verified"
+            assert sys.modules["advpkg"].helper.VALUE == "verified"
+            assert not marker.exists()
+    finally:
+        _forget_package()
+
+
+def test_unrecorded_sibling_is_refused_and_finder_scope_is_narrow(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    marker = tmp_path / "attacker-ran.marker"
+    distribution = _multi_module_distribution(
+        tmp_path, marker, "from . import stowaway\n\n\ndef create():\n    return 'verified'\n"
+    )
+    # Present on disk but absent from RECORD: unrecorded code must be refused,
+    # never imported.
+    (tmp_path / "advpkg" / "stowaway.py").write_text(
+        f"from pathlib import Path\nPath({str(marker)!r}).write_text('pwned')\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    rows = {row[0]: row for row in _record_rows(distribution)}
+    _forget_package()
+    try:
+        with pytest.raises(AdapterDiscoveryError, match="not RECORD-covered"):
+            with _verified_imports(cast(importlib.metadata.Distribution, distribution), rows):
+                importlib.import_module("advpkg.entry")
+        assert not marker.exists()
+        # Failure unwinds every module the finder introduced, so a retry cannot
+        # inherit a half-imported distribution.
+        assert not [name for name in sys.modules if name.split(".")[0] == "advpkg"]
+    finally:
+        _forget_package()
+    # Scope check: unrelated imports are untouched by the finder.
+    with _verified_imports(cast(importlib.metadata.Distribution, distribution), rows) as finder:
+        assert finder.owned_roots == frozenset({"advpkg"})
+        assert finder.find_spec("json") is None
+        assert finder.find_spec("pydantic") is None
+        assert finder.find_spec("local_operator.evaluation") is None
+        assert importlib.import_module("json").dumps({"a": 1}) == '{"a": 1}'
+    assert not any(type(entry).__name__ == "_VerifiedDistributionFinder" for entry in sys.meta_path)
+
+
+def test_import_deferred_past_load_is_outside_the_finder_boundary(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Pin the documented limit so a later round changes it deliberately.
+
+    Imports performed while loading are verified; one an adapter defers until
+    after load returns is not, because the finder is removed so it cannot
+    govern the worker's later execution.
+    """
+
+    marker = tmp_path / "attacker-ran.marker"
+    distribution = _multi_module_distribution(
+        tmp_path,
+        marker,
+        "def create():\n    return 'verified'\n\n\n"
+        "def later():\n    from . import helper\n\n    return helper.VALUE\n",
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    rows = {row[0]: row for row in _record_rows(distribution)}
+    _forget_package()
+    try:
+        with _verified_imports(cast(importlib.metadata.Distribution, distribution), rows):
+            loaded = importlib.import_module("advpkg.entry")
+            assert loaded.create() == "verified"
+            assert not marker.exists()
+        # Outside the load, the ordinary loader is in charge again.
+        assert loaded.later() == "attacker"
+        assert marker.exists()
+    finally:
+        _forget_package()
 
 
 def test_record_rejects_absolute_and_traversal_paths(tmp_path: Path) -> None:
