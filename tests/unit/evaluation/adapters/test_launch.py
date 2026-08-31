@@ -19,8 +19,10 @@ import os
 import shutil
 import subprocess
 import sys
+import sysconfig
 from pathlib import Path
 
+import pydantic
 import pytest
 
 from local_operator.evaluation.adapters.api import AdapterSelector, Handshake
@@ -116,10 +118,31 @@ def _real_interpreter() -> Path:
     pytest.skip("no usable copied interpreter is available on this host")
 
 
+def _dependency_roots() -> list[str]:
+    """Locate the running interpreter's real import roots.
+
+    CI installs the project with ``pip install -e`` and never creates a repo
+    ``.venv``, so a hardcoded venv path leaves the spawned worker without
+    pydantic and it dies instead of skipping. Deriving the roots from this
+    interpreter works under both layouts.
+    """
+
+    roots = [str(Path(__file__).resolve().parents[4])]
+    purelib = sysconfig.get_paths().get("purelib")
+    if purelib:
+        roots.append(purelib)
+    # Follow an actually-imported third-party dependency, which stays correct
+    # for editable installs whose packages live outside purelib.
+    roots.append(str(Path(pydantic.__file__).resolve().parent.parent))
+    seen: list[str] = []
+    for root in roots:
+        if root not in seen and Path(root).is_dir():
+            seen.append(root)
+    return seen
+
+
 def _install_adapter(site: Path) -> str:
-    repo = Path(__file__).resolve().parents[4]
-    site_packages = repo / ".venv" / f"lib/python{sys.version_info.major}.{sys.version_info.minor}"
-    (site / "_local_operator_repo.pth").write_text(f"{repo}\n{site_packages / 'site-packages'}\n")
+    (site / "_local_operator_repo.pth").write_text("\n".join(_dependency_roots()) + "\n")
     module = site / "tiny_e2e_adapter.py"
     module.write_text(_ADAPTER_SOURCE)
     info = site / "tiny_e2e_adapter-1.0.dist-info"
