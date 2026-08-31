@@ -330,17 +330,16 @@ def test_list_is_metadata_only_and_get_loads_briefs_once(tmp_path: Path, monkeyp
         return real_read_text(path, *args, **kwargs)
 
     monkeypatch.setattr(Path, "read_text", tracked_read_text)
-    # R5-2 hydration reads briefs through a pinned directory descriptor, not
-    # ``Path.read_text`` — track BOTH seams so the assertion still measures
-    # "which brief files were read", not which API happened to read them.
-    real_optional_at = teams_module._read_optional_at
+    # R6-2 pins all three files before reading so backup cleanup cannot unlink
+    # one between sequential opens. Track that seam rather than Path.read_text.
+    real_open_at = teams_module._open_optional_at
     fd_reads: list[str] = []
 
-    def tracked_optional_at(directory_fd: int, filename: str) -> str:
+    def tracked_open_at(directory_fd: int, filename: str) -> int | None:
         fd_reads.append(filename)
-        return real_optional_at(directory_fd, filename)
+        return real_open_at(directory_fd, filename)
 
-    monkeypatch.setattr(teams_module, "_read_optional_at", tracked_optional_at)
+    monkeypatch.setattr(teams_module, "_open_optional_at", tracked_open_at)
     second = TeamRegistry(tmp_path)
     listed = second.list_teams()
     assert [row.name for row in listed] == ["ops"]
@@ -353,10 +352,10 @@ def test_list_is_metadata_only_and_get_loads_briefs_once(tmp_path: Path, monkeyp
     assert loaded is not None
     assert loaded.instructions == "Review before merging."
     assert loaded.project == "on-call"
-    assert sorted(fd_reads) == ["instructions.md", "project.md", "team.yml"]
+    assert sorted(fd_reads) == ["instructions.md", "project.md", "team.yml", "team.yml"]
 
     assert second.get_team(team.id) is loaded
-    assert len(fd_reads) == 3
+    assert len(fd_reads) == 4
 
 
 def test_saving_a_metadata_only_list_result_preserves_both_briefs(tmp_path: Path) -> None:

@@ -611,6 +611,9 @@ class TeamRegistry:
                         return pinned
                 finally:
                     os.close(directory_fd)
+                if attempt < 2:
+                    time.sleep(0.005)
+                    continue
                 break
         # Windows lacks openat pinning. Verify metadata bytes and directory
         # identity before/after all reads; any swap seam invalidates the sample.
@@ -1162,19 +1165,64 @@ def _parse_metadata_text(text: str | None) -> Team | None:
 
 
 def _read_row_through_fd(directory_fd: int) -> tuple[str | None, str, str]:
-    """Read metadata and both briefs through ONE pinned directory descriptor.
+    """Pin every row file before reading so backup cleanup cannot mix a row.
 
-    Returns captured metadata text plus both briefs. Everything comes through
-    the same fd, so all three files are guaranteed
-    to be the same directory revision even if that directory is renamed
-    mid-read — the kernel keeps the descriptor addressing the original inode.
+    A directory fd survives rename, but that alone is not enough: after the new
+    row publishes, backup cleanup can unlink the OLD directory's child files
+    while a reader opens them sequentially. Open all three first, then reopen
+    metadata as a liveness check. If cleanup raced any open, verification fails
+    and hydration retries the current target instead of treating a vanished
+    brief as an authored empty string. Once opened, file fds survive unlinking.
     """
-    metadata_text = _read_optional_at(directory_fd, "team.yml")
-    return (
-        metadata_text or None,
-        _read_optional_at(directory_fd, "instructions.md"),
-        _read_optional_at(directory_fd, "project.md"),
-    )
+    fds: list[int] = []
+    try:
+        metadata_fd = _open_optional_at(directory_fd, "team.yml")
+        if metadata_fd is None:
+            return None, "", ""
+        fds.append(metadata_fd)
+        instructions_fd = _open_optional_at(directory_fd, "instructions.md")
+        if instructions_fd is not None:
+            fds.append(instructions_fd)
+        project_fd = _open_optional_at(directory_fd, "project.md")
+        if project_fd is not None:
+            fds.append(project_fd)
+        verification_fd = _open_optional_at(directory_fd, "team.yml")
+        if verification_fd is None:
+            return None, "", ""
+        fds.append(verification_fd)
+
+        metadata_text = _read_text_fd(metadata_fd)
+        if not metadata_text or metadata_text != _read_text_fd(verification_fd):
+            return None, "", ""
+        return (
+            metadata_text,
+            _read_text_fd(instructions_fd) if instructions_fd is not None else "",
+            _read_text_fd(project_fd) if project_fd is not None else "",
+        )
+    finally:
+        for fd in fds:
+            os.close(fd)
+
+
+def _open_optional_at(directory_fd: int, filename: str) -> int | None:
+    """Open one no-follow row file relative to a pinned directory."""
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        return os.open(filename, flags, dir_fd=directory_fd)
+    except OSError:
+        return None
+
+
+def _read_text_fd(fd: int) -> str:
+    """Read a pinned text fd without taking ownership of the descriptor."""
+    os.lseek(fd, 0, os.SEEK_SET)
+    chunks: list[bytes] = []
+    while True:
+        chunk = os.read(fd, 64 * 1024)
+        if not chunk:
+            break
+        chunks.append(chunk)
+    return b"".join(chunks).decode("utf-8-sig", errors="replace")
 
 
 #: ``dir_fd`` reads need POSIX ``openat`` semantics. Windows lacks them, so
