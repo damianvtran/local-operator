@@ -32,7 +32,15 @@ from local_operator.evaluation.adapters.api import (
     ExecuteResult,
     Handshake,
     HelloParams,
+    InspectRequirementsParams,
+    ObservationResult,
+    ObserveParams,
+    PrepareParams,
+    PrepareResult,
+    RequirementsResult,
     RescueDescriptor,
+    ResetStartParams,
+    ScoreParams,
     ScoreResult,
     validate_execution,
     validate_observation,
@@ -302,7 +310,7 @@ class AdapterSupervisor:
             thread.start()
             self._drainers.append(thread)
 
-    async def call(
+    async def _call_raw(
         self,
         method: Any,
         params: ProtocolModel,
@@ -316,7 +324,7 @@ class AdapterSupervisor:
         return result_type.model_validate(payload, strict=True)
 
     async def handshake(self, *, timeout: float = 10.0) -> Handshake:
-        result = await self.call(
+        result = await self._call_raw(
             "hello", HelloParams(selector=self.selector), Handshake, timeout=timeout
         )
         assert isinstance(result, Handshake)
@@ -419,10 +427,7 @@ class HostVerifier:
         self.current_observation = observation
 
     def accept_output(self, observation: Any) -> None:
-        current = self.current_observation
-        if current is None or observation.sequence != current.sequence + 1:
-            raise SupervisionError("adapter output must be the exact next sequence")
-        self._validate_observation_content(observation)
+        self._validate_output(observation)
         self._sequences.add(observation.sequence)
         self.current_observation = observation
 
@@ -442,7 +447,7 @@ class HostVerifier:
         for frame in observation.frames:
             verify_artifact(self.artifact_root, frame.artifact)
 
-    def accept_execution(self, params: ExecuteParams, result: ExecuteResult) -> None:
+    def validate_execution_result(self, params: ExecuteParams, result: ExecuteResult) -> None:
         if self.current_observation is None:
             raise SupervisionError("execution has no current observation")
         validate_execution(
@@ -451,7 +456,18 @@ class HostVerifier:
             self.current_observation,
             seen_sequences=self._sequences,
         )
-        self.accept_output(result.observation)
+        self._validate_output(result.observation)
+
+    def accept_execution(self, params: ExecuteParams, result: ExecuteResult) -> None:
+        self.validate_execution_result(params, result)
+        self._sequences.add(result.observation.sequence)
+        self.current_observation = result.observation
+
+    def _validate_output(self, observation: Any) -> None:
+        current = self.current_observation
+        if current is None or observation.sequence != current.sequence + 1:
+            raise SupervisionError("adapter output must be the exact next sequence")
+        self._validate_observation_content(observation)
 
     def begin_ask(self, params: AskUserExchangeParams) -> None:
         if params.episode_id != self.episode_id:
@@ -484,15 +500,124 @@ class HostVerifier:
             params.model_dump(mode="json", exclude={"operation_id", "answer"}),
         )
 
-    def accept_score(self, result: ScoreResult) -> None:
+    def accept_score(self, params: ScoreParams, result: ScoreResult) -> None:
+        if params.episode_id != self.episode_id:
+            raise SupervisionError("score belongs to another episode")
         if result.score.score_id in self._score_ids:
             raise SupervisionError("score artifact identity is duplicated")
-        self._score_ids.add(result.score.score_id)
         if result.score.details is not None:
             reference = ArtifactRef.model_validate(
                 result.score.details.model_dump(mode="json"), strict=True
             )
             verify_artifact(self.artifact_root, reference)
+        # Consume identity only after every referenced byte passed verification,
+        # so a missing artifact can be repaired and retried safely.
+        self._score_ids.add(result.score.score_id)
+
+
+class VerifiedAdapterSession:
+    """Typed application surface that cannot bypass parent-owned verification."""
+
+    def __init__(self, supervisor: AdapterSupervisor, verifier: HostVerifier) -> None:
+        self._supervisor = supervisor
+        self.verifier = verifier
+
+    async def inspect_requirements(
+        self, params: InspectRequirementsParams, *, timeout: float
+    ) -> RequirementsResult:
+        result = await self._supervisor._call_raw(
+            "inspect_requirements", params, RequirementsResult, timeout=timeout
+        )
+        assert isinstance(result, RequirementsResult)
+        return result
+
+    async def prepare(self, params: PrepareParams, *, timeout: float) -> PrepareResult:
+        if params.episode_id != self.verifier.episode_id:
+            raise SupervisionError("prepare belongs to another episode")
+        result = await self._supervisor._call_raw("prepare", params, PrepareResult, timeout=timeout)
+        assert isinstance(result, PrepareResult)
+        if result.cleanup_plan.episode_id != self.verifier.episode_id:
+            raise SupervisionError("cleanup plan belongs to another episode")
+        return result
+
+    async def reset_start(self, params: ResetStartParams, *, timeout: float) -> ObservationResult:
+        if (params.task_id, params.episode_id) != (
+            self.verifier.task_id,
+            self.verifier.episode_id,
+        ):
+            raise SupervisionError("reset belongs to another task or episode")
+        ack = await self._supervisor._call_raw("reset_start", params, AckResult, timeout=timeout)
+        assert isinstance(ack, AckResult)
+        initial = await self._supervisor._call_raw(
+            "observe",
+            ObserveParams(episode_id=params.episode_id),
+            ObservationResult,
+            timeout=timeout,
+        )
+        assert isinstance(initial, ObservationResult)
+        self.verifier.accept_initial(initial.observation)
+        return initial
+
+    async def observe(self, params: ObserveParams, *, timeout: float) -> ObservationResult:
+        if params.episode_id != self.verifier.episode_id:
+            raise SupervisionError("observe belongs to another episode")
+        result = await self._supervisor._call_raw(
+            "observe", params, ObservationResult, timeout=timeout
+        )
+        assert isinstance(result, ObservationResult)
+        self.verifier.verify_current_snapshot(result.observation)
+        return result
+
+    async def execute(self, params: ExecuteParams, *, timeout: float) -> ExecuteResult:
+        current = self.verifier.current_observation
+        if current is None:
+            raise SupervisionError("execute has no current observation")
+        params.action_batch.validate_for(current)
+        result = await self._supervisor._call_raw("execute", params, ExecuteResult, timeout=timeout)
+        assert isinstance(result, ExecuteResult)
+        self.verifier.accept_execution(params, result)
+        return result
+
+    def begin_ask(self, params: AskUserExchangeParams) -> None:
+        self.verifier.begin_ask(params)
+
+    async def finish_ask(
+        self, params: AskUserExchangeParams, *, timeout: float
+    ) -> AskUserExchangeResult:
+        result = await self._supervisor._call_raw(
+            "ask_user_exchange", params, AskUserExchangeResult, timeout=timeout
+        )
+        assert isinstance(result, AskUserExchangeResult)
+        self.verifier.finish_ask(params, result)
+        return result
+
+    async def score(self, params: ScoreParams, *, timeout: float) -> ScoreResult:
+        if params.episode_id != self.verifier.episode_id:
+            raise SupervisionError("score belongs to another episode")
+        result = await self._supervisor._call_raw("score", params, ScoreResult, timeout=timeout)
+        assert isinstance(result, ScoreResult)
+        self.verifier.accept_score(params, result)
+        return result
+
+    async def cleanup(self, params: CleanupParams, *, timeout: float) -> CleanupResult:
+        if params.cleanup_plan.episode_id != self.verifier.episode_id:
+            raise SupervisionError("cleanup belongs to another episode")
+        result = await self._supervisor._call_raw("cleanup", params, CleanupResult, timeout=timeout)
+        assert isinstance(result, CleanupResult)
+        selected = set(params.action_ids)
+        if (
+            len(result.receipts) != len(selected)
+            or {receipt.action_id for receipt in result.receipts} != selected
+        ):
+            raise SupervisionError("cleanup receipts differ from selected actions")
+        return result
+
+    async def close(self, params: CloseParams, *, timeout: float) -> AckResult:
+        if params.episode_id not in (None, self.verifier.episode_id):
+            raise SupervisionError("close belongs to another episode")
+        result = await self._supervisor._call_raw("close", params, AckResult, timeout=timeout)
+        assert isinstance(result, AckResult)
+        return result
 
 
 def verify_artifact(root: Path, reference: ArtifactRef) -> bytes:
@@ -624,7 +749,7 @@ async def run_rescue(
         handshake = await supervisor.handshake()
         if handshake != descriptor.handshake:
             raise SupervisionError("rescue worker handshake differs from persisted pins")
-        begin = await supervisor.call(
+        begin = await supervisor._call_raw(
             "begin_rescue",
             BeginRescueParams(
                 operation_id=f"rescue-begin-{descriptor.descriptor_id[:32]}",
@@ -645,7 +770,7 @@ async def run_rescue(
             # One action per call preserves each action's own timeout/attempt cap
             # and makes missing or duplicate receipts independently detectable.
             operation_id = f"rescue-{descriptor.descriptor_id[:16]}-{action.action_id}"
-            result = await supervisor.call(
+            result = await supervisor._call_raw(
                 "cleanup",
                 CleanupParams(
                     operation_id=operation_id,
@@ -666,7 +791,7 @@ async def run_rescue(
                 raise SupervisionError("rescue receipt differs from persisted cleanup action")
             receipts.append(receipt)
         cleanup = aggregate_cleanup(descriptor.cleanup_plan, receipts)
-        closed = await supervisor.call(
+        closed = await supervisor._call_raw(
             "close",
             CloseParams(
                 operation_id=f"rescue-close-{descriptor.descriptor_id[:32]}",

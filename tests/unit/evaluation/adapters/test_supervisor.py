@@ -21,14 +21,19 @@ from local_operator.evaluation.adapters.api import (
     AskUserExchangeResult,
     CleanupResult,
     Handshake,
+    ObservationResult,
+    ObserveParams,
     PythonRuntime,
     RescueDescriptor,
+    ScoreParams,
+    ScoreResult,
     observation_content_id,
 )
 from local_operator.evaluation.adapters.supervisor import (
     MAX_DIAGNOSTIC_TAIL,
     HostVerifier,
     SupervisionError,
+    VerifiedAdapterSession,
     _Tail,
     _terminate_process_group,
     load_pending_rescue,
@@ -37,6 +42,7 @@ from local_operator.evaluation.adapters.supervisor import (
     run_rescue,
     verify_artifact,
 )
+from local_operator.evaluation.evidence.models import EvidenceArtifactRef, ScoreArtifact
 from local_operator.evaluation.lifecycle import (
     CleanupAction,
     CleanupPlan,
@@ -200,6 +206,49 @@ def test_ask_exchange_requires_expected_episode_and_preserves_pending_on_error(
     verifier.begin_ask(begin.model_copy(update={"operation_id": "next", "ask_id": "next"}))
 
 
+class RawSupervisor:
+    def __init__(self, responses: list[Any]) -> None:
+        self.responses = responses
+
+    async def _call_raw(self, *args: Any, **kwargs: Any) -> Any:
+        del args, kwargs
+        return self.responses.pop(0)
+
+
+def test_verified_session_rejects_bad_observe_without_mutation(tmp_path: Path) -> None:
+    verifier = HostVerifier("task", "episode", tmp_path)
+    initial = observation("task", "episode", 0)
+    verifier.accept_initial(initial)
+    raw = RawSupervisor([ObservationResult(observation=observation("task", "other", 0))])
+    session = VerifiedAdapterSession(raw, verifier)  # type: ignore[arg-type]
+
+    async def run() -> None:
+        with pytest.raises(SupervisionError, match="snapshot differs"):
+            await session.observe(ObserveParams(episode_id="episode"), timeout=1)
+
+    import asyncio
+
+    asyncio.run(run())
+    assert verifier.current_observation == initial
+
+
+def test_score_missing_artifact_can_retry_after_file_appears(tmp_path: Path) -> None:
+    verifier = HostVerifier("task", "episode", tmp_path)
+    data = b'{"detail":true}'
+    digest = hashlib.sha256(data).hexdigest()
+    reference = EvidenceArtifactRef(
+        sha256=digest, media_type="application/json", byte_count=len(data)
+    )
+    score = ScoreResult(score=ScoreArtifact(status="scored", binary=1, details=reference))
+    params = ScoreParams(operation_id="score", episode_id="episode")
+    with pytest.raises(SupervisionError, match="unsafe or unavailable"):
+        verifier.accept_score(params, score)
+    (tmp_path / digest).write_bytes(data)
+    verifier.accept_score(params, score)
+    with pytest.raises(SupervisionError, match="duplicated"):
+        verifier.accept_score(params, score)
+
+
 def test_environment_is_constructed_without_parent_secrets() -> None:
     environment = minimal_environment(
         {
@@ -316,7 +365,7 @@ class FakeSupervisor:
     async def handshake(self) -> Handshake:
         return self.expected.handshake
 
-    async def call(
+    async def _call_raw(
         self,
         method: Any,
         params: Any,
