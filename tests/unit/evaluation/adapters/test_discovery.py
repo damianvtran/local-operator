@@ -588,7 +588,7 @@ def test_stale_module_in_second_owned_root_is_purged_before_load(
     # A prior import in this worker leaves the second root in sys.modules;
     # importlib short-circuits on it unless the purge spans every owned root.
     poisoned = ModuleType("sidelib")
-    poisoned.VALUE = "attacker-preexisting"
+    setattr(poisoned, "VALUE", "attacker-preexisting")
     monkeypatch.setitem(sys.modules, "sidelib", poisoned)
     _forget_package()
 
@@ -602,7 +602,7 @@ def test_stale_module_in_second_owned_root_is_purged_before_load(
             load_selected_adapter(selector)
         bound = sys.modules["advpkg.entry"]
         assert bound.create() == "verified"
-        assert sys.modules["sidelib"].VALUE == "verified"
+        assert getattr(sys.modules["sidelib"], "VALUE") == "verified"
     finally:
         _forget_package()
         sys.modules.pop("sidelib", None)

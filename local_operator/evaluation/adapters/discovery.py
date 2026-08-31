@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import csv
 import hashlib
+import importlib.machinery
 import importlib.metadata
 import importlib.util
 import json
