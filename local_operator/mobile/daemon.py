@@ -885,10 +885,24 @@ def _fan_out(entry: SessionEntry, daemon: "MobileDaemon | None" = None) -> None:
 
 
 class MobileDaemon:
-    def __init__(self, *, port: int = DEFAULT_PORT, password: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        port: int = DEFAULT_PORT,
+        password: str | None = None,
+        dial_registrants: bool = True,
+    ) -> None:
         self.port = port
         self.password = password
         self.table = SessionTable()
+        # False makes this daemon a READ-ONLY observer of the record directory:
+        # it lists sessions and serves durable folds, but never dials a
+        # registrant's control socket and never reaps a stale claim. A second
+        # daemon on the same machine MUST run this way: a registrant admits at
+        # most ONE daemon connection, so a secondary dial would evict the
+        # production daemon's live bridge mid-session. Set via
+        # ``LO_MOBILE_NO_DIAL=1`` (see ``service.amain``).
+        self.dial_registrants = dial_registrants
         # Per-session "last seen by phone" state, persisted across daemon
         # restarts (see :mod:`.seen`). The merge reads it for every summary
         # row; it persists itself on change.
@@ -1175,14 +1189,18 @@ class MobileDaemon:
                 # record pid dead; the lease helper revalidates generation and
                 # process identity under the recovery lock before removing only
                 # that claim and its pid mirror. Transcript data is untouched.
-                from local_operator.paths import config_dir
-                from local_operator.session_lease import reap_proven_dead_session_claim
+                # A no-dial daemon is an observer: lease reaping belongs to the
+                # production daemon that owns the session, and two reapers on
+                # one store is a claim race.
+                if self.dial_registrants:
+                    from local_operator.paths import config_dir
+                    from local_operator.session_lease import reap_proven_dead_session_claim
 
-                await asyncio.to_thread(
-                    reap_proven_dead_session_claim,
-                    config_dir() / "sessions" / record.session_id,
-                    record.pid,
-                )
+                    await asyncio.to_thread(
+                        reap_proven_dead_session_claim,
+                        config_dir() / "sessions" / record.session_id,
+                        record.pid,
+                    )
                 self.table.provisional_active.discard(record.session_id)
                 projection = await asyncio.to_thread(_durable_projection, record.session_id)
                 if projection is not None:
@@ -1207,8 +1225,10 @@ class MobileDaemon:
             # Degraded is precisely "we owe this session a redial" — the only
             # gates are ended, an open socket, and the backoff clock. Excluding
             # degraded entries here was the starvation bug: one refused dial
-            # meant never trying again.
-            if not entry.ended and entry.writer is None:
+            # meant never trying again. A no-dial daemon owes no dial at all:
+            # its entries exist so the list and durable routes work, and the
+            # production daemon owns every control socket.
+            if self.dial_registrants and not entry.ended and entry.writer is None:
                 if time.monotonic() >= entry.next_dial_at and (
                     record.pid not in self._dial_tasks or self._dial_tasks[record.pid].done()
                 ):
@@ -1335,6 +1355,10 @@ class MobileDaemon:
         local_operator.mobile.child``), so the record + control socket path is
         literally the same code the TUI uses.
         """
+        if not self.dial_registrants:
+            # An observer daemon cannot adopt what it spawns (it never dials),
+            # so a spawned child would be orphaned from its own control plane.
+            raise RuntimeError("observer daemon cannot start sessions")
         import sys
 
         env = dict(os.environ)
@@ -1805,6 +1829,10 @@ def build_app(daemon: MobileDaemon):
                 # from spawning a child that can never own a transcript.
                 if _durable_user_session_dir(session_id) is None:
                     raise KeyError(session_id)
+                if not daemon.dial_registrants:
+                    # Waking starts a host process the observer could never
+                    # dial; the production daemon owns wake transitions.
+                    raise RuntimeError("observer daemon cannot wake sessions")
                 from local_operator.mobile.attach_client import continue_command
 
                 command = ContinuationCommand.from_json(
