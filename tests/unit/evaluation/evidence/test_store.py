@@ -315,6 +315,64 @@ def test_percent_scanner_incomplete_escape_is_literal_and_case_sensitive(
         )
 
 
+@pytest.mark.parametrize("suffix", [b"%", b"%7"])
+def test_terminal_incomplete_percent_is_flushed_as_literal(tmp_path: Path, suffix: bytes) -> None:
+    with EvidenceWriter.create(
+        tmp_path / "bundle", manifest(), redactions("benign-value")
+    ) as writer:
+        ref = writer.publish_artifact(b"benign" + suffix, media_type="application/octet-stream")
+    assert ref.byte_count == len(b"benign" + suffix)
+
+
+def test_fully_encoded_prefix_plus_trailing_percent_still_rejects(
+    tmp_path: Path,
+) -> None:
+    payload = b"%76%65%72%79%2D%73%65%63%72%65%74%2D%76%61%6C%75%65%"
+    with EvidenceWriter.create(
+        tmp_path / "bundle", manifest(), redactions("very-secret-value")
+    ) as writer:
+        with pytest.raises(EvidenceBundleInvalid):
+            writer.publish_artifact(payload, media_type="application/octet-stream")
+    assert list((tmp_path / "bundle" / "artifacts").iterdir()) == []
+
+
+def test_scanner_finish_is_idempotent_and_feed_after_finish_rejects(
+    tmp_path: Path,
+) -> None:
+    from local_operator.evaluation.evidence.store import _RedactionScanner
+
+    with EvidenceWriter.create(
+        tmp_path / "bundle", manifest(), redactions("very-secret-value")
+    ) as writer:
+        scanner = _RedactionScanner(writer)
+        scanner.feed(b"safe%")
+        scanner.finish()
+        retained = scanner.retained_bytes
+        scanner.finish()
+        assert scanner.retained_bytes == retained
+        with pytest.raises(EvidenceBundleInvalid, match="finalized"):
+            scanner.feed(b"later")
+
+
+def test_publish_calls_scanner_finish_before_link(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator.evaluation.evidence import store
+
+    called = False
+    original = store._RedactionScanner.finish
+
+    def finish(self: Any) -> None:
+        nonlocal called
+        called = True
+        original(self)
+
+    monkeypatch.setattr(store._RedactionScanner, "finish", finish)
+    with EvidenceWriter.create(tmp_path / "bundle", manifest(), redactions()) as writer:
+        writer.publish_artifact(b"safe", media_type="application/octet-stream")
+    assert called
+
+
 def test_invalid_artifact_expectations_and_media_leave_no_target(tmp_path: Path) -> None:
     root = tmp_path / "bundle"
     with EvidenceWriter.create(root, manifest(), redactions()) as writer:

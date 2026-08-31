@@ -224,6 +224,7 @@ class _RedactionScanner:
         self._hex_tail = bytearray()
         self._percent_tail = bytearray()
         self._percent_pending = bytearray()
+        self._finished = False
 
     @property
     def retained_bytes(self) -> int:
@@ -236,6 +237,8 @@ class _RedactionScanner:
         )
 
     def feed(self, chunk: bytes) -> None:
+        if self._finished:
+            raise EvidenceBundleInvalid("redaction scanner is already finalized")
         for offset in range(0, len(chunk), _REDACTION_SCAN_BLOCK):
             block = chunk[offset : offset + _REDACTION_SCAN_BLOCK]
             # Scan prior overlap plus every incoming byte before retaining only
@@ -263,6 +266,24 @@ class _RedactionScanner:
             if any(value.lower() in folded for value in self._hex):
                 raise EvidenceBundleInvalid("evidence redaction rejected content")
             self._hex_tail[:] = folded[-self._normalized_limit :]
+
+    def finish(self) -> None:
+        """Flush incomplete percent syntax exactly once at end-of-stream.
+
+        Base64 and hex state compare normalized suffixes during every feed and
+        therefore have no buffered syntax to flush. Only ``%`` and ``%H`` wait
+        for future bytes and must become literal when no future bytes exist.
+        """
+
+        if self._finished:
+            return
+        self._finished = True
+        if self._percent_pending:
+            percent_window = bytes(self._percent_tail) + bytes(self._percent_pending)
+            if any(value in percent_window for value in self._plain):
+                raise EvidenceBundleInvalid("evidence redaction rejected content")
+            self._percent_tail[:] = percent_window[-self._raw_limit :]
+            self._percent_pending.clear()
 
     @staticmethod
     def _hex_value(byte: int) -> int | None:
@@ -784,6 +805,7 @@ class EvidenceWriter:
                     digest.update(chunk)
                     count += len(chunk)
                     _write_all(fd, chunk, self._calls)
+                scanner.finish()
                 if media_type != "application/octet-stream" and count > MAX_PARSED_MEDIA_BYTES:
                     raise EvidenceBundleInvalid("structured artifact exceeds validation byte limit")
                 actual = digest.hexdigest()
