@@ -37,6 +37,8 @@ from local_operator.tui.app import (
     COMPOSER_SHELL_CLASS,
     MODEL_SWITCH_MID_TURN_NOTICE,
     PERSIST_HINT,
+    PROMPT_CHEVRON,
+    SHELL_CHEVRON,
     SLASH_COMMANDS,
     OperatorApp,
     _splash_toast_headline,
@@ -2344,6 +2346,63 @@ async def test_bang_on_empty_composer_enters_shell_mode() -> None:
         assert app.query_one("#input-dock").has_class(COMPOSER_SHELL_CLASS)
         assert chevron_colour(composer_cells(app)) == theme_mod.semantic_color("string").lower()
         assert chevron_colour(composer_cells(app)) != theme_mod.semantic_color("accent").lower()
+        # Shape, not hue: bang-mode changes what Enter does, and a colour-only
+        # cue is invisible under NO_COLOR / monochrome / colour-vision
+        # deficiency (#385). The glyph is the surviving signal.
+        cells = composer_cells(app)
+        assert any(SHELL_CHEVRON in text for text, _fg, _bg in cells)
+        assert not any(PROMPT_CHEVRON in text for text, _fg, _bg in cells)
+
+
+@pytest.mark.asyncio
+async def test_shell_mode_is_legible_without_hue_once_the_buffer_has_text() -> None:
+    """The placeholder is gone the moment the buffer has text, so the mode
+    has to be carried by the frame itself — a hue-only chevron was the
+    whole remaining signal, and two frames that differed only in ink
+    were TEXT-IDENTICAL (#385).
+
+    Asserted against the compositor, not against the widget: a reader
+    who cannot see colour sees the glyphs, and the glyphs have to
+    disagree. Mutation-checked: restoring ``❯`` while the mode is on
+    fails this test, which is the defect.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await pilot.press("l", "s")
+        await pilot.pause()
+        prompt = "".join(text for text, _fg, _bg in composer_cells(app))
+        editor.clear_content()
+        await pilot.press("!")
+        await pilot.press("l", "s")
+        await pilot.pause()
+        shell = "".join(text for text, _fg, _bg in composer_cells(app))
+        assert editor.shell_mode is True
+        assert SHELL_CHEVRON in shell
+        assert PROMPT_CHEVRON not in shell
+        assert PROMPT_CHEVRON in prompt
+        assert SHELL_CHEVRON not in prompt
+        # The two frames must disagree in TEXT, not only in ink. A
+        # colour-only swap made this comparison True, which is the gap.
+        assert prompt != shell, (
+            "shell-mode and prompt-mode frames are text-identical once the "
+            "buffer has text, so a reader who cannot see hue has no cue "
+            "that Enter will run a command (#385)"
+        )
+
+
+def test_composer_markers_match_the_app() -> None:
+    """``conftest`` mirrors the glyphs so it does not import the app
+    module. Drift here would make every colour/caret assertion look at
+    the wrong cell the moment bang-mode is on."""
+    from tests.unit.tui import conftest as tui_conftest
+
+    assert tui_conftest.PROMPT_CHEVRON == PROMPT_CHEVRON
+    assert tui_conftest.SHELL_CHEVRON == SHELL_CHEVRON
+    assert PROMPT_CHEVRON != SHELL_CHEVRON
 
 
 @pytest.mark.asyncio
@@ -7726,6 +7785,10 @@ async def test_the_paste_key_rows_do_not_wrap_at_eighty_columns() -> None:
     for key, tail in (
         ("ctrl+v", "system clipboard"),
         ("cmd+v", "not Terminal.app"),
+        ("!", "shell command"),
+        ("option+left/right", "by word"),
+        ("shift+tab", "reasoning effort"),
+        ("ctrl+d", "empty composer"),
     ):
         row = next(
             (row for row in painted if row.strip().startswith(f"{key} ")),
@@ -9415,4 +9478,86 @@ async def test_help_documents_the_composer_copy_key_and_its_release() -> None:
         # 76 cannot fire at the boundary where the defect first appears (review
         # round 2, F3).
         for row in (rows[index], release):
+            assert len(row) <= 74, f"{row!r} is {len(row)} cells and wraps at 80 columns"
+
+
+@pytest.mark.asyncio
+async def test_help_documents_shell_mode_and_the_composer_chords() -> None:
+    """``/help`` is the in-app key reference (#385). Until these rows
+    existed the README was the only channel, and a user already inside
+    the TUI had no way to ask what keys exist.
+
+    Tightly scoped: another change (#430) may also add discovery for
+    ``ctrl+v`` against this same block, so this asserts CONTENT of the
+    new rows rather than their exact neighbours. The wrap ceiling is
+    the same 74-cell bound the copy/paste rows pin, mutation-checked
+    the same way: a row padded to 75 fails it.
+    """
+    from rich.console import Group
+    from rich.padding import Padding
+    from rich.text import Text
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        padding = cast(Padding, app._help_block().renderable)
+        group = cast(Group, padding.renderable)
+        rows = [cast(Text, row).plain for row in group.renderables]
+        text = "\n".join(rows)
+
+        # Bang-mode's marker is named because the glyph is the
+        # colour-independent signal. A row that names ``!`` without
+        # saying what ``$`` on the composer means leaves the same gap
+        # the hue-only chevron did.
+        bang = next((row for row in rows if row.lstrip().startswith("! ")), None)
+        assert bang is not None, "/help must name bang-mode"
+        assert "shell" in bang.lower() or "command" in bang.lower(), bang
+        marker = next((row for row in rows if "$" in row and "❯" in row), None)
+        assert marker is not None, "/help must name the $ / ❯ swap"
+
+        required = (
+            "option+left/right",
+            "option+up/down",
+            "shift+tab",
+            "ctrl+l",
+            "ctrl+t",
+            "ctrl+g",
+            "ctrl+b",
+            "esc",
+            "ctrl+d",
+        )
+        missing = [key for key in required if key not in text]
+        assert not missing, f"/help is missing key rows: {missing}"
+
+        # Same wrap ceiling as the copy/paste rows. A hanging tail at
+        # column 0 reads as another key row (#402 D2). Continuations
+        # (empty gutter) are included: they wrap at the same bound.
+        keys = (
+            "ctrl+c",
+            "ctrl+v",
+            "cmd+v",
+            "!",
+            "option+left/right",
+            "option+up/down",
+            "shift+tab",
+            "ctrl+l",
+            "ctrl+t",
+            "ctrl+g",
+            "ctrl+b",
+            "esc",
+            "ctrl+d",
+        )
+        keyed: list[str] = []
+        capturing = False
+        for row in rows:
+            lead = row[:20].strip()
+            if lead in keys or (lead == "!" and "!" in keys):
+                capturing = True
+                keyed.append(row)
+            elif capturing and not lead:
+                keyed.append(row)
+            else:
+                capturing = False
+        assert keyed, "no key-reference rows found in /help"
+        for row in keyed:
             assert len(row) <= 74, f"{row!r} is {len(row)} cells and wraps at 80 columns"

@@ -135,7 +135,28 @@ _LABEL_BUDGET = _VALUE_COLUMN - _ROW_INDENT - _MARKER_WIDTH - 1
 #: — `_repaint` runs from `on_mount`, before layout, where every child size is
 #: still 0, and a pane budgeted against 0 rows paints a different first frame
 #: from its settled one.
+#:
+#: This is the FULL-chrome count. On a short terminal
+#: :meth:`SettingsView._apply_height_ladder` sheds 1-row units (padding,
+#: then the rule) so the body keeps at least :data:`_BODY_MIN_ROWS`, and
+#: :meth:`SettingsView._pane_height` subtracts the live count rather than
+#: this constant — otherwise the pane would keep claiming rows the body
+#: just reclaimed (#431).
 _PANE_CHROME_ROWS = 7
+
+#: Fewest setting rows the body may paint. Below this the page is honest
+#: about being a settings page and silent about every setting — header,
+#: rule, detail, hints, and a blank band (#431). Chrome pays for this
+#: floor, one row at a time: a 2-row shed (the detail line) at 16 rows
+#: would give the body 2 rows, and restoring that chrome at 17 would
+#: drop the body to 1, so the page would get worse as the terminal grew.
+_BODY_MIN_ROWS = 1
+
+#: What the detail line says when even the 1-row sheds cannot free a
+#: body row (terminal ≲ 14). A blank band here would repeat #431 at a
+#: smaller size; naming the constraint is the other option the issue
+#: offered, and it is the one that stays monotonic.
+_TOO_SHORT = "terminal too short for settings — make it taller"
 
 #: The right-hand pane's two read-only tabs. Read-only on purpose: teams and
 #: agents are configured in files, and a page that showed an editable-looking
@@ -348,6 +369,13 @@ class SettingsView(Vertical):
         self._list_text = Text()
         self._detail_text = Text()
         self._pane_text = Text()
+        #: Live height-ladder flags, so `_pane_height` and `_paint_detail`
+        #: read the same decision `_apply_height_ladder` just made rather
+        #: than re-deriving it against a size that may not have settled.
+        self._chrome_rule = True
+        self._chrome_pad = True
+        self._chrome_columns = True
+        self._too_short = False
 
     # -- composition --------------------------------------------------------
     def compose(self):  # type: ignore[override]
@@ -377,8 +405,19 @@ class SettingsView(Vertical):
 
     def on_resize(self) -> None:
         # The rule spans the page and the hints shed against a width only the
-        # layout knows, so both are repainted on resize.
+        # layout knows, so both are repainted on resize. Parking a 1-row
+        # body on the selected setting has to wait until AFTER this
+        # refresh: `_body.size.height` is still the previous layout's
+        # during `on_resize`, so scrolling now at 17 rows (body about to
+        # become 2) used the stale height of 1 and hid the section header
+        # the extra row had just made room for.
         self._repaint()
+        # Immediate, and `_scroll_to_selection` uses the DERIVED body
+        # height rather than `_body.size` — during resize the child
+        # size is still the previous layout, so a 16→17 grow would
+        # scroll as if the body were still 1 row and hide the header
+        # the extra row had just made room for.
+        self._scroll_to_selection(immediate=True)
 
     # -- data ---------------------------------------------------------------
     def load(
@@ -698,10 +737,7 @@ class SettingsView(Vertical):
         write rather than merely painted in the same frame — see
         :meth:`_reveal_cursor`.
         """
-        try:
-            height = self._body.size.height
-        except Exception:
-            return
+        height = self._body_rows()
         if height <= 0:
             return
         offset = self._body.scroll_offset.y
@@ -714,9 +750,17 @@ class SettingsView(Vertical):
         # users dwell there long enough to notice (UX round 1, U1). Only the
         # contiguous run of headers directly above the row is included, so this
         # reveals the row's own title and never scrolls past unrelated content.
+        #
+        # SKIPPED when the body is a single row. Including the header then
+        # parks the viewport on the header and clips the selected setting —
+        # at 16 rows that is the whole body, so the page would still show
+        # chrome and no setting, which is #431 with a header in the blank
+        # band. The selected row wins; the header returns the moment there
+        # is a second body row to hold it.
         top = self._selected
-        while top > 0 and self._rows[top - 1].kind == "header":
-            top -= 1
+        if height > 1:
+            while top > 0 and self._rows[top - 1].kind == "header":
+                top -= 1
         if top < offset:
             self._body.scroll_to(y=top, animate=False, immediate=immediate)
         elif self._selected >= offset + height:
@@ -2112,6 +2156,10 @@ class SettingsView(Vertical):
 
     # -- painting -----------------------------------------------------------
     def _repaint(self) -> None:
+        # Height ladder BEFORE the paints: it toggles `display` / padding
+        # on the chrome widgets, which is what the layout reads, and the
+        # paints (detail text, pane budget) have to see the same decision.
+        self._apply_height_ladder()
         self._rows = self._build_rows()
         indices = self._selectable()
         if indices and self._selected not in indices:
@@ -2465,7 +2513,12 @@ class SettingsView(Vertical):
         text = Text(no_wrap=True, overflow="ellipsis")
         row = self._current()
         question, contract = self._confirm_parts()
-        if question:
+        if self._too_short:
+            # The body is hidden: there is no row to explain, and a help
+            # string about an invisible setting would repeat #431's lie
+            # in words. The constraint is the only useful thing to say.
+            text.append(_TOO_SHORT, style=faint)
+        elif question:
             # Above the error and above the help: an unanswered destructive
             # question is the only thing the user needs the row to say.
             #
@@ -3030,10 +3083,104 @@ class SettingsView(Vertical):
         # have on a very short terminal — at 16 rows the view is 7 tall and the
         # pane is laid out 1 row high, so a budget of 4 overpainted it by three
         # lines however carefully the caller then measured (review round 2, D6).
-        # Measured against the laid-out `_pane_view.size.height` at every height
-        # from 16 to 44: `view height - _PANE_CHROME_ROWS` matches it exactly
-        # once the floor stops interfering.
-        return max(height - _PANE_CHROME_ROWS, 1)
+        # Subtracts the LIVE chrome count rather than `_PANE_CHROME_ROWS`:
+        # the height ladder sheds 1-row units (padding, then the rule) so
+        # the body keeps a setting row, and a pane still budgeted against
+        # the full 7 would claim rows the body just reclaimed (#431).
+        return max(height - self._chrome_rows(), 1)
+
+    def _body_rows(self) -> int:
+        """Rows the settings list occupies, derived from the VIEW's height.
+
+        Derived rather than read off ``self._body.size`` for the same
+        reason :meth:`_pane_height` records: during ``on_resize`` the
+        child's size is still the previous layout, and a scroll computed
+        against that stale height parks a 2-row body as if it were 1
+        (hiding the section header the extra row had just made room for).
+        """
+        try:
+            height = self.size.height
+        except Exception:
+            return 0
+        if height <= 0:
+            return 0
+        return max(height - self._chrome_rows(), 0)
+
+    def _chrome_rows(self) -> int:
+        """Rows of page chrome currently shown, for the pane's height budget.
+
+        Title + detail + hints are never shed (5). The rule and the
+        columns' top padding are the 1-row units the height ladder
+        spends; counting them live is what keeps the pane's budget
+        honest after a shed.
+        """
+        rows = _PANE_CHROME_ROWS
+        if not self._chrome_rule:
+            rows -= 1
+        if not self._chrome_pad:
+            rows -= 1
+        return rows
+
+    def _apply_height_ladder(self) -> None:
+        """Shed 1-row chrome units until the body can paint a setting row.
+
+        The width ladder in :meth:`_paint_hints` already sheds whole
+        hints so a narrow terminal keeps ``esc``. The vertical analogue
+        was missing: at 16 rows the view is 7 tall, the 1fr columns
+        resolved to 0 content rows, and the page kept its full chrome
+        around a blank band (#431).
+
+        Units, first to last, each 1 row so restoring one never drops
+        the body — a 2-row shed (the detail line) at 16 would give the
+        body 2 rows, and putting it back at 17 would drop the body to
+        1, so the page would get worse as the terminal grew:
+
+        1. the columns' top padding (the quiet row above the list),
+        2. the rule.
+
+        Title, ``esc``, and the detail line stay: the detail is where
+        a validation error and a delete ask live, and shedding 2 rows
+        is the non-monotonic move above. Below even that (view ≲ 5)
+        the columns hide and the detail names the constraint rather
+        than describing a row the user cannot see.
+
+        ``self.size.height`` is 0 on the mount paint, before layout.
+        Leaving chrome at stylesheet defaults there is what keeps the
+        first frame at a normal size identical to the settled one
+        (the opening-frame test); ``on_resize`` applies the ladder
+        against the real height.
+        """
+        try:
+            height = self.size.height
+        except Exception:
+            height = 0
+        if height <= 0:
+            return
+        # Fixed chrome: title (1) + detail (2) + hints (2) = 5.
+        # Full chrome is 7 (those plus rule and pad). Restore a unit
+        # only when the body would still meet its floor WITH that unit
+        # on — otherwise a growing terminal spends the new row on
+        # padding instead of a second setting, which is chrome winning
+        # the trade the issue forbids.
+        #
+        #   height 6: no rule, no pad, body 1
+        #   height 7: rule,    no pad, body 1
+        #   height 8: rule,    no pad, body 2
+        #   height 9: rule,    pad,    body 2   ← pad returns, body holds
+        show_rule = height - 5 - 1 >= _BODY_MIN_ROWS
+        show_pad = height - 5 - 1 - 1 >= 2
+        body = height - 5 - (1 if show_rule else 0) - (1 if show_pad else 0)
+        too_short = body < _BODY_MIN_ROWS
+        self._chrome_pad = show_pad and not too_short
+        self._chrome_rule = show_rule and not too_short
+        self._chrome_columns = not too_short
+        self._too_short = too_short
+        self._rule.display = self._chrome_rule
+        self._columns.display = self._chrome_columns
+        # Stylesheet default is `padding: 1 0 0 0`. Clearing it is the
+        # first 1-row shed; restoring it is a 1-row cost, so a terminal
+        # growing from 16 to 17 never loses the body row it just gained.
+        self._columns.styles.padding = (1, 0, 0, 0) if self._chrome_pad else (0, 0, 0, 0)
 
     def _paint_chrome(self) -> None:
         muted = Style(color=theme_mod.semantic_color("muted"))
