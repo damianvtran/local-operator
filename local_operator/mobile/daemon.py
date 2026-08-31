@@ -201,10 +201,14 @@ class SessionTable:
         # generations. Entries route watch commands but never own these queues.
         self.session_subscribers: dict[str, set[asyncio.Queue[dict[str, Any]]]] = {}
         self.provisional_active: set[str] = set()
-        # Injected by MobileDaemon: the persisted per-session seen state the
-        # "unseen" verdict reads. None keeps a bare SessionTable (unit tests)
-        # reporting every session seen.
-        self.seen_store: Any = None
+        # Per-session seen state the "unseen" verdict reads. Owned by the table
+        # (the merge reads it per row) and created LAZILY on first verdict (see
+        # the property), so a test that patches config_dir AFTER construction
+        # still gets ITS directory, and a bare SessionTable never touches disk
+        # until a verdict actually runs. The daemon's own seen_store property
+        # delegates here so the /seen endpoint and the verdict share ONE
+        # instance.
+        self._seen_store: Any = None
         # The durable half of summaries() is a directory scan; cache it behind a
         # short TTL (SUMMARIES_CACHE_TTL_S) with single-flight refresh so N
         # concurrent list consumers pay one scan, not N. The merged summary list
@@ -374,16 +378,28 @@ class SessionTable:
             except asyncio.QueueFull:
                 pass
 
+    @property
+    def seen_store(self):
+        """The persisted seen-state store, created on first use.
+
+        Lazy so the store resolves ``config_dir()`` at verdict time — tests
+        patch it after building the table, and a bare SessionTable pays
+        nothing until a verdict runs.
+        """
+        if self._seen_store is None:
+            from local_operator.mobile.seen import SEEN_STORE_NAME, SeenStore
+            from local_operator.paths import config_dir
+
+            self._seen_store = SeenStore(config_dir() / SEEN_STORE_NAME)
+        return self._seen_store
+
     def _is_unseen(self, session_id: str, row: Any, entry: SessionEntry | None) -> bool:
         """The seen-store verdict for one summary row.
 
-        ``seen_store`` is injected by ``MobileDaemon`` (it owns the persisted
-        store). Cheap: dict lookups only, no disk access — the store is fully
-        in memory and persists itself.
+        Cheap: dict lookups only, no disk access — the store is fully in
+        memory and persists itself on ``mark_seen``.
         """
         store = self.seen_store
-        if store is None:
-            return False
         activity = row.mtime if row is not None else entry.record.heartbeat_at if entry else 0.0
         if not activity:
             return False
@@ -903,11 +919,10 @@ class MobileDaemon:
         # production daemon's live bridge mid-session. Set via
         # ``LO_MOBILE_NO_DIAL=1`` (see ``service.amain``).
         self.dial_registrants = dial_registrants
-        # Per-session "last seen by phone" state, persisted across daemon
-        # restarts (see :mod:`.seen`). The merge reads it for every summary
-        # row; it persists itself on change.
-        self._seen_store: Any = None
-        self.table.seen_store = self.seen_store
+        # Per-session "last seen by phone" state lives on the table (the merge
+        # reads it per row); the daemon's ``seen_store`` property delegates to
+        # it so the /seen endpoint and the verdict share one lazily-created
+        # store.
         # The session repaint carries only roster summaries. Full child state is
         # retained separately and fetched for the active route, otherwise one
         # busy descendant makes every root token repaint resend every transcript.
@@ -941,13 +956,9 @@ class MobileDaemon:
 
     @property
     def seen_store(self):
-        """The persisted seen-state store, created on first use."""
-        if self._seen_store is None:
-            from local_operator.mobile.seen import SEEN_STORE_NAME, SeenStore
-            from local_operator.paths import config_dir
-
-            self._seen_store = SeenStore(config_dir() / SEEN_STORE_NAME)
-        return self._seen_store
+        """The persisted seen-state store — delegates to the table so the
+        /seen endpoint and the summaries verdict share one instance."""
+        return self.table.seen_store
 
     def _prune_projection_generation(self, session_id: str) -> None:
         """Retire ordering only when no durable in-memory route can emit again."""
