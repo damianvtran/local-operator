@@ -1803,13 +1803,21 @@ def _sse(event: str, data: dict[str, Any]) -> str:
 
 
 def _past_sessions(limit: int = 20) -> list[dict[str, Any]]:
-    """Resumable past sessions for the phone's history list."""
+    """Resumable past sessions for the phone's history list.
+
+    ``forked`` rides along for the same reason the TUI picker draws it: a fork
+    that has not named itself yet displays the title it inherited, so it and its
+    parent are byte-identical rows — same name, same age — separable only by a
+    12-hex id. The row builder already knows the fact (it is derived from the
+    ``origin.json`` the scan parsed), and dropping it here is what would make
+    the phone the one surface still showing the twin rows.
+    """
     try:
         from local_operator.paths import config_dir
         from local_operator.resume import recent_session_rows
 
         return [
-            {"id": row.id, "name": row.name, "mtime": row.mtime}
+            {"id": row.id, "name": row.name, "mtime": row.mtime, "forked": row.forked}
             for row in recent_session_rows(config_dir(), limit=limit)
         ]
     except Exception:  # noqa: BLE001
@@ -1826,7 +1834,7 @@ def _search_sessions(query: str, limit: int = 40) -> list[dict[str, Any]]:
     result the filter had no reason to return.
     """
     from local_operator.paths import config_dir
-    from local_operator.resume import recent_session_rows
+    from local_operator.resume import fork_haystack, recent_session_rows
     from local_operator.session.search_index import build_index, search_digests
 
     cfg = config_dir()
@@ -1834,7 +1842,13 @@ def _search_sessions(query: str, limit: int = 40) -> list[dict[str, Any]]:
     needle = query.strip().lower()
     if not needle:
         return [
-            {"id": r.id, "name": r.name, "mtime": r.mtime, "body_match": False}
+            {
+                "id": r.id,
+                "name": r.name,
+                "mtime": r.mtime,
+                "body_match": False,
+                "forked": r.forked,
+            }
             for r in rows[:limit]
         ]
     try:
@@ -1844,7 +1858,10 @@ def _search_sessions(query: str, limit: int = 40) -> list[dict[str, Any]]:
         body_hits = set()
     out = []
     for r in rows:
-        name_hit = needle in r.name.lower() or needle in r.id.lower()
+        # Through the picker's own composition, so typing `fork` on the phone
+        # finds the rows the phone visibly tags — the same what-is-shown-is-
+        # searchable invariant `resume.fork_haystack` documents.
+        name_hit = needle in fork_haystack(r).lower() or needle in r.id.lower()
         body_hit = r.id in body_hits
         if not (name_hit or body_hit):
             continue
@@ -1855,6 +1872,7 @@ def _search_sessions(query: str, limit: int = 40) -> list[dict[str, Any]]:
                 "mtime": r.mtime,
                 # Marked only when the name/id did NOT explain the match.
                 "body_match": body_hit and not name_hit,
+                "forked": r.forked,
             }
         )
         if len(out) >= limit:

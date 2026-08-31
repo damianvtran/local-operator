@@ -1528,6 +1528,12 @@ class Session:
         #: ``_background_tasks`` because dispose CANCELS those and this one has
         #: to be awaited instead — see :meth:`_spawn_conversation_name_write`.
         self._conversation_name_task: "asyncio.Future[None] | None" = None
+        #: True while this session is a FORK still wearing its parent's title —
+        #: the fact behind :attr:`wears_inherited_title`. Defaults False so an
+        #: ordinary session (and any host that never reaches the resume path)
+        #: is never tagged; ``_load_conversation_name`` sets it from the
+        #: ``_is_unnamed_fork()`` verdict it already computes at construction.
+        self._wears_inherited_title = False
         #: The ``provider/model_id`` this session was CONSTRUCTED with — the
         #: boot selection resolved from agent > CLI flag > config. Captured
         #: before any restore or switch moves ``_model``, because it is the
@@ -3169,6 +3175,32 @@ class Session:
         return self._conversation_name.text
 
     @property
+    def wears_inherited_title(self) -> bool:
+        """True while this session is a FORK that has not yet named itself.
+
+        The picker's row marker answers this question from disk
+        (``resume.wears_inherited_title``); this is the same fact for the
+        session that is RUNNING, so a host can tag the surfaces that name a live
+        conversation — the terminal/tab title above all.
+
+        It matters most exactly where it is least visible. An unnamed fork's
+        ``conversation_name`` is EMPTY by design (:meth:`_load_conversation_name`
+        declines the parent's title), so every host falls back to a label
+        derived from the replayed history — which is the parent's opening
+        message — or to the working directory. Both make a fork's window read
+        identically to its parent's in a switcher, which is the one surface a
+        user scans to find the window that just opened.
+
+        **Costs no I/O.** ``_is_unnamed_fork()`` already runs once at
+        construction inside :meth:`_load_conversation_name` and its verdict was
+        thrown away; this keeps it. The flag is cleared in
+        :meth:`set_conversation_name` — the one path a fork's own name can
+        arrive by — so the tag marks the ambiguous STATE and not ancestry,
+        exactly as the picker's marker does.
+        """
+        return self._wears_inherited_title
+
+    @property
     def conversation_name_state(self) -> ConversationName:
         """The title holder itself — hosts need the ``user_set`` precedence
         flag and the once-only request latch, not just the string."""
@@ -3193,6 +3225,12 @@ class Session:
         before = (self._conversation_name.text, self._conversation_name.user_set)
         stored = self._conversation_name.set(text, user_set=user_set)
         if (stored, self._conversation_name.user_set) != before:
+            # The fork now has a name of its own, so it is no longer wearing an
+            # inherited one and every surface must stop saying that it is. This
+            # is the ONLY way a name reaches a live session (both the naming
+            # errand and `/rename` land here), so clearing it here cannot be
+            # forgotten by a third caller.
+            self._wears_inherited_title = False
             self._conversation_name_dirty = True
             self._spawn_conversation_name_write()
             # Mirror the human name into the analytics ledger so the
@@ -3341,6 +3379,14 @@ class Session:
         # fork has no title of its own, so once the naming path writes one, every
         # later ``/resume`` of this fork restores that name normally.
         if self._is_unnamed_fork():
+            # Remembered rather than recomputed: this is the one place the
+            # question is asked (it needs the origin marker and the transcript's
+            # newest title entry, both of which are in hand here at boot and
+            # neither of which a host should re-read per frame), and the answer
+            # is what every surface naming this session needs in order not to
+            # display it under the parent's identity. See
+            # :attr:`wears_inherited_title`.
+            self._wears_inherited_title = True
             return
         details = self._transcript.latest_custom(CONVERSATION_NAME_CUSTOM_TYPE)
         if not details:

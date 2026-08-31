@@ -889,3 +889,353 @@ class TestTheForkInheritsItsParentsCacheKey:
 
         assert body["prompt_cache_key"] == PARENT_ID
         assert body["prompt_cache_retention"] == "24h"
+
+
+class TestTheForkMarkSurvivesTruncation:
+    """U1. The shipped ``(fork)`` suffix was truncated away on ordinary titles.
+
+    The suffix lived INSIDE the name field, which is the first thing an
+    ellipsis eats. The name is condensed to ``resume.NAME_MAX_CHARS`` (64)
+    before the picker sees it and the card's name column measures 48 cells at
+    100 columns, so any title over ~40 characters lost the mark at EVERY
+    terminal width — 17% of the titles in the operator's real store. That
+    returns the twin-row confusion the mark exists to resolve, on exactly the
+    long descriptive conversations a user is most likely to fork from.
+
+    The tag now rides in reserved chrome ahead of the name, so what truncates
+    is the tail of the title.
+    """
+
+    #: 56 characters — past the ~40 at which the old suffix disappeared.
+    LONG = "Refactor the YAML loader to stream anchors instead of buf"
+
+    def _rows(self):
+        from local_operator.resume import SessionRow
+
+        return [
+            SessionRow("a1b2c3d4e5f6", 1_700_000_000.0, self.LONG, forked=True),
+            SessionRow("9f8e7d6c5b4a", 1_700_000_000.0, self.LONG),
+        ]
+
+    @pytest.mark.parametrize("width", [100, 80, 70, 60])
+    def test_the_tag_survives_at_every_width(self, width: int) -> None:
+        from local_operator.tui.widgets.session_picker import render_rows
+
+        lines = [line.plain for line in render_rows(self._rows(), 0, width, 1_700_000_000.0)]
+
+        assert "[fork]" in lines[0], f"the mark was truncated away at {width} columns"
+        # And the row is no longer identical to its parent's, which is the
+        # property the mark exists for.
+        assert lines[0].strip() != lines[1].strip()
+
+    def test_unforked_rows_pad_the_column_so_names_stay_aligned(self) -> None:
+        """A ragged left edge on the one field read down the list is D2's
+        defect moved onto the fork column."""
+        from local_operator.tui.widgets.session_picker import render_rows
+
+        lines = [line.plain for line in render_rows(self._rows(), 0, 100, 1_700_000_000.0)]
+
+        assert lines[0].index("Refactor") == lines[1].index("Refactor")
+
+    def test_a_list_with_no_fork_reserves_nothing(self) -> None:
+        """The column is chrome only when the RESULT SET has a fork in it, so
+        an ordinary store's picker is exactly as wide as it was."""
+        from local_operator.resume import SessionRow
+        from local_operator.tui.widgets.session_picker import render_rows
+
+        plain = [SessionRow("9f8e7d6c5b4a", 1_700_000_000.0, "Refactor the loader")]
+        line = render_rows(plain, 0, 100, 1_700_000_000.0)[0].plain
+
+        assert "[fork]" not in line
+        assert line.index("Refactor") == 2, "the name moved for a column nothing uses"
+
+    def test_the_column_is_reserved_from_the_result_set_not_the_page(self) -> None:
+        """A fork off-page must still hold the column, or every name jumps
+        sideways as it scrolls past — D2's ragged edge on the time axis."""
+        from local_operator.resume import SessionRow
+        from local_operator.tui.widgets.session_picker import render_rows
+
+        page = [
+            SessionRow("9f8e7d6c5b4a", 1_700_000_000.0, self.LONG),
+            SessionRow("77c1aa02bd31", 1_700_000_000.0, "Wire the retention sweep"),
+        ]
+        without = render_rows(page, 0, 80, 1_700_000_000.0, forked=False)[0].plain
+        with_col = render_rows(page, 0, 80, 1_700_000_000.0, forked=True)[0].plain
+
+        assert "[fork]" not in with_col, "the page itself has no fork to paint"
+        # The reserved blanks push the name right of where it sits without the
+        # column, which is the scroll-stability property: names stay put as a
+        # fork scrolls in and out of view.
+        assert with_col.index("Refactor") > without.index("Refactor")
+
+    def test_the_tag_is_dim_not_name_ink(self) -> None:
+        """D7. At name weight it read as part of the title — as though the
+        conversation were called \"Refactor the loader (fork)\". It is metadata
+        about the row, so it takes the ink the age and the id already use."""
+        from rich.style import Style
+
+        from local_operator.tui import theme as theme_mod
+        from local_operator.tui.widgets.session_picker import render_rows
+
+        line = render_rows(self._rows(), 0, 100, 1_700_000_000.0)[0]
+        tag_style = next(
+            span.style
+            for span in line.spans
+            if line.plain[span.start : span.end].strip() == "[fork]"
+        )
+
+        assert isinstance(tag_style, Style)
+        assert tag_style.color is not None
+        assert tag_style.color.name == theme_mod.semantic_color("dim")
+        # And a step quieter than the body-match marker, which is `muted`
+        # because it is the only thing explaining an otherwise unmatched row.
+        assert tag_style.color.name != theme_mod.semantic_color("muted")
+
+
+class TestAForkIsFindableByTypingFork:
+    """U3. The mark was spliced in at render time, so ``filter_rows`` could not
+    see it: a user who read ``[fork]`` on screen and typed it got ZERO rows —
+    a picker saying "no session matches" about a store full of visibly tagged
+    forks, which reads as a broken filter rather than an unsupported query.
+    """
+
+    def _rows(self):
+        from local_operator.resume import SessionRow
+
+        return [
+            SessionRow("a1b2c3d4e5f6", 2.0, "Refactor the loader", forked=True),
+            SessionRow("9f8e7d6c5b4a", 1.0, "Refactor the loader"),
+        ]
+
+    def test_the_filter_admits_a_tagged_fork(self) -> None:
+        from local_operator.tui.widgets.session_picker import filter_rows
+
+        assert [row.id for row in filter_rows(self._rows(), "fork")] == ["a1b2c3d4e5f6"]
+
+    def test_the_bracket_form_matches_too(self) -> None:
+        """What is on screen is what is typed."""
+        from local_operator.tui.widgets.session_picker import filter_rows
+
+        assert [row.id for row in filter_rows(self._rows(), "[fork]")] == ["a1b2c3d4e5f6"]
+
+    def test_a_fork_admitted_on_its_tag_ranks_in_the_name_tier(self) -> None:
+        """Ranked through the same composition it was admitted by, or it would
+        fall to the soft tier and sort below every incidental body hit."""
+        from local_operator.resume import SessionRow
+        from local_operator.tui.widgets.session_picker import rank_rows
+
+        fork = SessionRow("a1b2c3d4e5f6", 1.0, "Refactor the loader", forked=True)
+        body_only = SessionRow("ccc3ccc3ccc3", 9.0, "Unrelated", forked=False)
+
+        ranked = rank_rows([body_only, fork], "fork", {"ccc3ccc3ccc3"})
+
+        assert ranked[0].id == "a1b2c3d4e5f6"
+
+    def test_the_tag_is_not_also_explained_as_a_body_match(self) -> None:
+        """The row already carries a visible tag; a second mark saying "found
+        in the conversation" would contradict it."""
+        from local_operator.tui.widgets.session_picker import matched_in_body
+
+        rows = self._rows()
+        assert matched_in_body(rows[0], "fork", {"a1b2c3d4e5f6"}) is False
+
+    def test_an_ordinary_row_is_unaffected(self) -> None:
+        from local_operator.tui.widgets.session_picker import filter_rows
+
+        assert filter_rows(self._rows(), "loader") == self._rows()
+
+
+class TestTheMobileSurfaceCarriesTheForkMark:
+    """U4. ``_past_sessions``/``_search_sessions`` built ``{id, name, mtime}``
+    and DISCARDED ``forked``, so the phone's history list kept showing the twin
+    identical rows the TUI had stopped showing.
+    """
+
+    def test_the_history_payload_carries_it(self, tmp_path: Path, monkeypatch) -> None:
+        import local_operator.mobile.daemon as daemon_mod
+
+        _seed_named_parent(tmp_path, "Refactor the loader")
+        fork_id = fork_session(tmp_path, PARENT_ID)
+        monkeypatch.setattr("local_operator.paths.config_dir", lambda: tmp_path)
+
+        rows = {row["id"]: row for row in daemon_mod._past_sessions()}
+
+        assert rows[fork_id]["forked"] is True
+        assert rows[PARENT_ID]["forked"] is False
+
+    def test_the_search_payload_carries_it_and_matches_on_it(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        import local_operator.mobile.daemon as daemon_mod
+
+        _seed_named_parent(tmp_path, "Refactor the loader")
+        fork_id = fork_session(tmp_path, PARENT_ID)
+        monkeypatch.setattr("local_operator.paths.config_dir", lambda: tmp_path)
+
+        empty = {row["id"]: row for row in daemon_mod._search_sessions("")}
+        assert empty[fork_id]["forked"] is True
+
+        hits = daemon_mod._search_sessions("fork")
+        assert [row["id"] for row in hits] == [fork_id]
+
+
+class TestTheWindowTitleNamesTheFork:
+    """U2. A running fork's ``conversation_name`` is EMPTY by design, so every
+    host fell back to a label derived from the replayed history — which is the
+    PARENT's opening message — or to the cwd. Two cmux sidebar rows then read
+    identically, on the one surface a user scans to find the window that just
+    opened.
+    """
+
+    def test_the_session_exposes_the_inherited_title_state(self, tmp_path: Path) -> None:
+        _seed_named_parent(tmp_path, "Refactor the loader")
+        fork_id = fork_session(tmp_path, PARENT_ID)
+
+        fork = _build_session(tmp_path / "sessions" / fork_id)
+        parent = _build_session(tmp_path / "sessions" / PARENT_ID)
+
+        assert fork.wears_inherited_title is True
+        assert fork.conversation_name == "", "the empty name is what makes the tag necessary"
+        assert parent.wears_inherited_title is False
+
+    def test_naming_the_fork_clears_it(self, tmp_path: Path) -> None:
+        """The tag marks the ambiguous STATE, not ancestry."""
+        _seed_named_parent(tmp_path, "Refactor the loader")
+        fork_id = fork_session(tmp_path, PARENT_ID)
+        fork = _build_session(tmp_path / "sessions" / fork_id)
+
+        fork.set_conversation_name("Streaming parser attempt", user_set=False)
+
+        assert fork.wears_inherited_title is False
+
+    def test_the_tab_of_an_unnamed_fork_carries_the_mark(self) -> None:
+        """Through the REAL band and the REAL title writer, so the fallback
+        chain and the rendered OSC string are the live ones.
+
+        The fork's own name is empty, so the label resolves to the cwd — the
+        same string the parent's tab would show. That is the collision."""
+        forked = _title_written(_titled_band(forked=True))
+        ordinary = _title_written(_titled_band(forked=False))
+
+        assert forked == "lo \u203a [fork] lop-forkux"
+        assert ordinary == "lo \u203a lop-forkux"
+        assert forked != ordinary, "the fork's tab still reads as the parent's"
+
+    def test_a_named_session_tab_is_untouched(self) -> None:
+        """The tag rides on the unnamed-fork state, so a session with a name of
+        its own — including a fork that has named itself — is unaffected."""
+        assert _title_written(_titled_band(name="Refactor the loader")) == (
+            "lo \u203a Refactor the loader"
+        )
+
+
+class TestAPendingForkIsVisibleAndRevocable:
+    """U6. The deferred acknowledgement scrolls away behind a long tool run,
+    leaving nothing on screen saying a fork is armed — and then a window opens
+    minutes later with no visible cause. Esc has always withdrawn it, and
+    nothing ever said so.
+    """
+
+    def test_the_deferred_receipt_names_the_escape(self) -> None:
+        import inspect
+
+        from local_operator.tui.app import OperatorApp
+
+        source = inspect.getsource(OperatorApp._cmd_fork)
+
+        assert "esc to cancel" in source
+
+    def test_the_band_shows_a_pending_fork(self) -> None:
+        from local_operator.tui.widgets.status_line import FORK_PENDING_TEXT, StatusLine
+
+        band = _band()
+        band._fork_pending = True
+
+        row = StatusLine._render(band, 120).plain
+
+        assert FORK_PENDING_TEXT in row
+
+    def test_an_idle_band_says_nothing_about_forking(self) -> None:
+        from local_operator.tui.widgets.status_line import FORK_PENDING_TEXT, StatusLine
+
+        assert FORK_PENDING_TEXT not in StatusLine._render(_band(), 120).plain
+
+
+class TestTheOpenedReceiptSaysHowToReachTheFork:
+    """U5. The success receipt named the place and stopped there, which made it
+    strictly LESS actionable than the failure receipt beside it — that one
+    hands the user a ``lop --resume`` command. The fork is deliberately never
+    focused, so "a workspace exists somewhere" leaves the user asking why
+    nothing happened.
+    """
+
+    def test_it_says_not_focused_and_how_to_reach_it(self) -> None:
+        import inspect
+
+        from local_operator.tui.app import OperatorApp
+
+        source = inspect.getsource(OperatorApp._on_fork_complete)
+
+        assert "(not focused)" in source
+        assert "lop --resume {fork_id}" in source
+
+
+def _band():
+    """A ``StatusLine`` with the fields ``_render`` reads, and no widget."""
+    from local_operator.tui.widgets.status_line import McpStatus, StatusLine
+
+    band = StatusLine.__new__(StatusLine)
+    band._model_label = "test/model"
+    band._model_name = ""
+    band._effort = ""
+    band._agent_profile = ""
+    band._team = ""
+    band._cwd = "/tmp"
+    band._context_tokens = 0
+    band._context_is_estimate = False
+    band._context_window = 0
+    band._subagents = 0
+    band._jobs = 0
+    band._streaming = False
+    band._cost = ""
+    band._conversation_name = ""
+    band._forked = False
+    band._fork_pending = False
+    band._mcp = McpStatus()
+    band._dropped = frozenset()
+    band._approvals_auto = False
+    band._approvals_always = False
+    band._attention = False
+    band._active_seconds = 0.0
+    band._turn_started_at = None
+    band._spinner_index = 0
+    band._subagent = None
+    band._title = None
+    return band
+
+
+def _titled_band(*, forked: bool = False, name: str = ""):
+    """A ``StatusLine`` wired to a REAL ``TerminalTitle`` over a capture sink."""
+    from local_operator.tui.terminal_title import TerminalTitle
+    from local_operator.tui.widgets.status_line import StatusLine
+
+    band = _band()
+    band._conversation_name = name
+    band._cwd = "/tmp/lop-forkux"
+    band._forked = forked
+    # A real writer over a sink that goes nowhere: what is asserted is the
+    # rendered title (``TerminalTitle.current``), and the sink only keeps the
+    # OSC escape out of the test's stdout.
+    band._title = TerminalTitle(lambda _escape: None)
+    assert isinstance(band, StatusLine)
+    return band
+
+
+def _title_written(band) -> str:
+    """The label the band pushes at the title writer, as ``build_title`` renders
+    it — read back off the writer rather than off a stub, so the assertion is
+    about the string that reaches the terminal."""
+    from local_operator.tui.widgets.status_line import StatusLine
+
+    StatusLine._sync_terminal_title(band)
+    return band._title.current
