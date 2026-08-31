@@ -204,3 +204,48 @@ def test_reload_from_disk(tmp_path: Path) -> None:
     assert loaded is not None
     assert loaded.project == "on-call"
     assert loaded.members[0].role == "scout"
+
+
+def test_list_is_metadata_only_and_get_loads_briefs_once(tmp_path: Path, monkeypatch) -> None:
+    """Picker refreshes must not pay for either 8k brief until a full lookup."""
+    first = TeamRegistry(tmp_path)
+    team = first.create_team(
+        TeamEditFields(
+            name="ops",
+            manager="manager",
+            instructions="Review before merging.",
+            project="on-call",
+        )
+    )
+
+    brief_paths = {
+        tmp_path / "teams" / team.id / "instructions.md",
+        tmp_path / "teams" / team.id / "project.md",
+    }
+    real_read_text = Path.read_text
+    reads: list[Path] = []
+
+    def tracked_read_text(path: Path, *args, **kwargs) -> str:
+        if path in brief_paths:
+            reads.append(path)
+        return real_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", tracked_read_text)
+    second = TeamRegistry(tmp_path)
+    listed = second.list_teams()
+    assert [row.name for row in listed] == ["ops"]
+    assert listed[0].instructions == ""
+    assert listed[0].project == ""
+    assert reads == []
+
+    loaded = second.get_team_by_name("OPS")
+    assert loaded is not None
+    assert loaded.instructions == "Review before merging."
+    assert loaded.project == "on-call"
+    assert reads == [
+        tmp_path / "teams" / team.id / "instructions.md",
+        tmp_path / "teams" / team.id / "project.md",
+    ]
+
+    assert second.get_team(team.id) is loaded
+    assert len(reads) == 2

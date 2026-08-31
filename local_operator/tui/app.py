@@ -2493,6 +2493,13 @@ class OperatorApp(App[None]):
         """
         self._invalidate_pending_frontend_state()
         self._session = session
+        # The user can type `/team lop` while the boot worker is still building
+        # the session. Its one opening fill then sees no registry, so adoption is
+        # the second authoritative edge that must refill the CURRENT query and
+        # publish the name snapshot without asking for a backspace.
+        editor = self._editor()
+        if editor.argument_command in ("team", "teams", "agent", "agents"):
+            self._fill_name_argument_list(editor, editor.argument_command)
         self._mobile_adopted(session)
         # Every production session supplies the same frontend contract. Install
         # it before reading status/panel fields so owner and follower take one
@@ -4985,6 +4992,20 @@ class OperatorApp(App[None]):
             )
         return choices
 
+    def _fill_name_argument_list(self, editor: Any, command: str) -> None:
+        """Fill one team/agent list and its O(1) highlighter snapshot together."""
+        picker = editor.picker
+        picker.set_notice("")
+        if command in ("team", "teams"):
+            choices = self._team_argument_choices(editor)
+            picker.set_choices(choices)
+            editor.set_name_choices(frozenset(c.name.lower() for c in self._team_choices()))
+            return
+        if command in ("agent", "agents"):
+            choices = self._agent_choices()
+            picker.set_choices(choices)
+            editor.set_name_choices(frozenset(c.name.lower() for c in choices))
+
     def _team_argument_choices(self, editor: Any) -> list[ArgumentChoice]:
         """Rows for the ``/team <…>`` list: team NAMES first, then `chart`.
 
@@ -5014,6 +5035,14 @@ class OperatorApp(App[None]):
         argument = slash_argument(editor.text, editor._argument_commands)
         first, space, _rest = (argument or "").partition(" ")
         teams = self._team_choices()
+        # A synthetic `chart` row must not make a real-but-empty registry look
+        # filled: the editor's empty-only catch-up is keyed to `_choices`, so an
+        # empty TeamRegistry keeps retrying cheaply. A reduced adopted session
+        # with no registry still gets the historical chart-only fallback (its
+        # handler explains that no team is attached), while pre-adoption has no
+        # source of truth yet and must remain empty for the adoption refill.
+        if not teams and (self._session is None or self._team_registry() is not None):
+            return []
         if first.lower() == "chart" and space:
             # Second slot: `chart <query>` → team names feeding the chart.
             return [
@@ -14835,24 +14864,10 @@ class OperatorApp(App[None]):
             picker.set_choices(self._credential_choices())
             picker.set_notice("")
             return
-        if message.command in ("team", "teams"):
-            picker.set_notice("")
-            choices = self._team_argument_choices(editor)
-            picker.set_choices(choices)
-            # Hand the editor a cheap immutable snapshot of the names so its
-            # syntax highlighter can recognize the typed team name without
-            # walking the registry on every render frame (see
-            # ``Editor.set_name_choices``). Only the plain team names are
-            # highlightable as names — the `chart` subcommand row is not a team
-            # name, and the `chart <name>` compound rows are not typed as bare
-            # names — so the snapshot is the team names alone.
-            editor.set_name_choices(frozenset(c.name.lower() for c in self._team_choices()))
-            return
-        if message.command in ("agent", "agents"):
-            choices = self._agent_choices()
-            picker.set_choices(choices)
-            picker.set_notice("")
-            editor.set_name_choices(frozenset(c.name.lower() for c in choices))
+        if message.command in ("team", "teams", "agent", "agents"):
+            # Rows and the render-time name snapshot are one fill operation. The
+            # open, late-adoption, and empty-only refresh edges must not diverge.
+            self._fill_name_argument_list(editor, message.command)
             return
         if message.command == "effort":
             levels = self._effort_levels()
@@ -14931,15 +14946,11 @@ class OperatorApp(App[None]):
             # a notice of its own that must survive the refill.
             picker.set_notice("")
             picker.set_choices(self._mcp_argument_choices(editor))
-        elif message.command in ("team", "teams"):
-            # `/team chart ` just gained its space: the first-slot rows (the
-            # `chart` subcommand + team names) must give way to the second-slot
-            # team list that FEEDS the chart. Refilled through the same builder
-            # the opening used, so the two levels stay one implementation.
-            picker = editor.picker
-            picker.set_notice("")
-            picker.set_choices(self._team_argument_choices(editor))
-            editor.set_name_choices(frozenset(c.name.lower() for c in self._team_choices()))
+        elif message.command in ("team", "teams", "agent", "agents"):
+            # This is both `/team chart ` crossing slots and the empty-only
+            # catch-up used when a team/agent registry appears after the list
+            # opened. Reuse the opening fill so rows and snapshots stay paired.
+            self._fill_name_argument_list(editor, message.command)
 
     def _credential_choices(self) -> list[ArgumentChoice]:
         """The verbs ``/credential`` offers, plus each stored key to forget.

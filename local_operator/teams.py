@@ -264,6 +264,10 @@ class TeamRegistry:
         # creates the tree on first write, and ``_load`` treats a missing
         # directory as "no teams".
         self._teams: dict[str, Team] = {}
+        # Picker/listing callers need only ``team.yml`` metadata. Briefs can be
+        # 8k each and sit on the session's five-second refresh path, so remember
+        # which teams paid that I/O only when an attach/show/preamble lookup asks.
+        self._briefs_loaded: set[str] = set()
         self._last_refresh_time = 0.0
         self._refresh_interval = refresh_interval
         self._load()
@@ -274,6 +278,7 @@ class TeamRegistry:
             children = list(self.teams_dir.iterdir())
         except OSError:
             self._teams = {}
+            self._briefs_loaded = set()
             self._last_refresh_time = time.time()
             return
         for child in children:
@@ -287,13 +292,14 @@ class TeamRegistry:
                     data = yaml.safe_load(handle) or {}
                 if not isinstance(data, dict):
                     continue
-                data["instructions"] = _read_optional(child / "instructions.md")
-                data["project"] = _read_optional(child / "project.md")
                 team = Team.model_validate(data)
                 loaded[team.id] = team
             except Exception as exc:  # noqa: BLE001 — one bad file must not hide the rest
                 logger.warning("invalid team metadata in %s: %s", child.name, exc)
         self._teams = loaded
+        # A refresh replaces every model with metadata-only instances. Keeping
+        # an old loaded marker would return blank briefs from the replacement.
+        self._briefs_loaded = set()
         self._last_refresh_time = time.time()
 
     def _refresh_if_needed(self) -> None:
@@ -304,12 +310,22 @@ class TeamRegistry:
         self._refresh_if_needed()
         return sorted(self._teams.values(), key=lambda team: team.name.lower())
 
+    def _load_briefs(self, team: Team) -> Team:
+        """Populate a metadata-only team the first time a full lookup needs it."""
+        if team.id in self._briefs_loaded:
+            return team
+        team_dir = self.teams_dir / team.id
+        team.instructions = _read_optional(team_dir / "instructions.md")
+        team.project = _read_optional(team_dir / "project.md")
+        self._briefs_loaded.add(team.id)
+        return team
+
     def get_team(self, team_id: str) -> Team:
         self._refresh_if_needed()
         team = self._teams.get(team_id)
         if team is None:
             raise KeyError(f"Team with id {team_id} not found")
-        return team
+        return self._load_briefs(team)
 
     def get_team_by_name(self, name: str) -> Team | None:
         self._refresh_if_needed()
@@ -318,7 +334,7 @@ class TeamRegistry:
             return None
         for team in self._teams.values():
             if team.name.casefold() == key:
-                return team
+                return self._load_briefs(team)
         return None
 
     def create_team(self, fields: TeamEditFields) -> Team:
@@ -377,6 +393,9 @@ class TeamRegistry:
         except Exception as exc:
             raise Exception(f"Failed to save team metadata: {exc}") from exc
         self._teams[team.id] = team
+        # The caller supplied the briefs that were just persisted; rereading the
+        # same files on the next get would add I/O without recovering any state.
+        self._briefs_loaded.add(team.id)
         return team
 
     def delete_team(self, team_id: str) -> None:
@@ -393,6 +412,7 @@ class TeamRegistry:
         if team_dir.exists():
             shutil.rmtree(team_dir)
         self._teams.pop(team_id)
+        self._briefs_loaded.discard(team_id)
 
 
 def parse_members(raw: Iterable[str] | None) -> list[TeamMember]:

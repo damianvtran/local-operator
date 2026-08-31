@@ -1178,8 +1178,9 @@ class Editor(TextArea):
         # A frozenset so the render pass tests membership in O(1): the render
         # path must never walk the team/agent registries itself — that is I/O,
         # and ``render_line`` runs on every keystroke-frame. Empty until the
-        # list has opened at least once; a name hand-typed in full before the
-        # list ever filled goes un-highlighted, an accepted affordance gap.
+        # list has opened at least once. Empty-only catch-up asks the app again
+        # when a registry arrives late, so a hand-typed exact name lights as soon
+        # as the roster snapshot exists without putting I/O on the render path.
         self._name_choices: frozenset[str] = frozenset()
         # Which command FAMILY (`team` vs `agent`) the snapshot above was filled
         # for. The two families offer disjoint rosters, so a snapshot is only
@@ -4707,20 +4708,19 @@ class Editor(TextArea):
             # drop it so a highlight can never outlive the list that filled it
             # (e.g. the command word was deleted back to `/tea`).
             #
-            # EXCEPT for a multi-line LEADING NAME+message command WHOSE FAMILY
-            # MATCHES the snapshot. `slash_argument` is single-line and (post
-            # #250) caret-anchored, so it returns None the instant the user adds
-            # a newline to `/team <name> <message>` — but that command's body is
-            # DEFINED to span lines and the leading command still dispatches, so
-            # its command and name tokens must stay highlighted. Clearing the
-            # snapshot here would blank the name token on the first newline (the
-            # reported bug), so keep it while the buffer is a live multi-line name
-            # command of the SAME family the snapshot was filled for.
+            # EXCEPT for a LEADING NAME+message command WHOSE FAMILY MATCHES the
+            # snapshot. `slash_argument` is caret-anchored, so it returns None
+            # whenever inline completion reassembles `/team <name> <draft>` to the
+            # front and leaves the caret in the message — on one line or many.
+            # The leading command still dispatches, so clearing the snapshot here
+            # would make the exact team/agent name fall back to prose immediately
+            # after completion. Keep it while the leading command still owns the
+            # same roster family.
             #
             # The family gate is what makes the within-family "cannot mispaint"
             # guarantee hold across a family switch: an atomic word-swap
-            # `/team <team-name>\n…` → `/agent <team-name>\n…` while already
-            # multiline never re-opens a list (multiline suppresses it), so
+            # `/team <team-name> …` → `/agent <team-name> …` while the caret is
+            # in the message never re-opens a list, so
             # without this the team roster would survive and paint a team name
             # green under `/agent`. Dropping the snapshot on a family mismatch
             # falls the name token back to prose, which is correct: the name is
@@ -4729,11 +4729,9 @@ class Editor(TextArea):
             # line. Uses the LEADING word, not the caret-anchored one, because the
             # caret is normally down in the message body. The leading family is
             # named out so the guard below reads as its two conditions: "still a
-            # multi-line name command" AND "same roster family".
+            # leading name command" AND "same roster family".
             leading_family = self._name_command_family(self._leading_command_word())
-            keep = self._is_multiline_name_command() and (
-                self._name_choices_family == leading_family
-            )
+            keep = leading_family is not None and self._name_choices_family == leading_family
             if not keep:
                 self._name_choices = frozenset()
                 self._name_choices_family = None
@@ -4827,6 +4825,19 @@ class Editor(TextArea):
                     if was_chart_slot != is_chart_slot:
                         self.post_message(RefreshArgumentChoices(command, cursor))
             self._picker.sync_argument(list_argument)
+            # The opening message can race session adoption or an in-flight
+            # registry load. Retry ONLY these cheap name registries while their
+            # row set is still empty; credential-backed lists deliberately remain
+            # transition-only, and a filled name list must never be refreshed on
+            # later keystrokes because that would erase the parked D5 hint.
+            if (
+                command is not None
+                and self._is_name_argument_command(command)
+                and " " not in list_argument
+                and not self._picker._choices
+                and self._picker._dismissed_query is None
+            ):
+                self.post_message(RefreshArgumentChoices(command, cursor))
             # U1/U2 discoverability hint. The moment a NAME+message name is
             # autofilled (or hand-typed) to `/<cmd> <name> ` with an empty tail,
             # the picker closes and NOTHING on screen says the two outcomes now
@@ -4922,26 +4933,6 @@ class Editor(TextArea):
         line/slash split.
         """
         return slash_word(self.text, self._caret_offset(), self._command_names)
-
-    def _is_multiline_name_command(self) -> bool:
-        """Whether the buffer is a LEADING NAME+message command with a body.
-
-        The one state where the name snapshot must survive `_sync_picker`'s
-        "no argument list is open" branch: `/team <name>` (or `/agent …`) on the
-        first content line, followed by a newline and a message. `slash_argument`
-        reports no list on multiline (and #250 also anchors it at the caret), but
-        the leading command is still live and its name token must stay painted,
-        so recognition of the typed name has to keep the snapshot the list left
-        behind. Reads the LEADING word (:meth:`_leading_command_word`), not the
-        caret-anchored one, because the caret is usually down in the message
-        body. Ordinary commands never reach this — only the NAME+message ones
-        carry a multi-line body by design.
-        """
-        lines = self.text.split("\n")
-        first = next((i for i, line in enumerate(lines) if line.strip()), None)
-        if first is None or len(lines) <= first + 1:
-            return False
-        return self._is_name_argument_command(self._leading_command_word())
 
     def _complete_model(self, row: ModelRow) -> None:
         """Put ``row``'s selector in the ``/model`` argument without acting on it.

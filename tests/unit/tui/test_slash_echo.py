@@ -23,6 +23,7 @@ import pytest
 from rich.style import Style
 
 from local_operator.session.goal import MAX_GOAL_CHARS, GoalState
+from local_operator.tui import theme as theme_mod
 from local_operator.tui.app import SLASH_COMMANDS, OperatorApp, slash_command_for
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView, UserBlock
@@ -470,6 +471,63 @@ async def test_completing_a_team_name_keeps_the_parked_hint_in_the_real_app() ->
         assert (
             "switch" in editor.picker._notice and "send" in editor.picker._notice
         ), editor.picker._notice
+
+
+@pytest.mark.asyncio
+async def test_session_adoption_catches_up_team_picker_and_name_highlight() -> None:
+    """Typing `/team lop` before boot must recover when the registry appears."""
+    from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
+
+    session = FakeSession()
+    registry = TeamRegistry(Path(tempfile.mkdtemp()))
+    registry.create_team(
+        TeamEditFields(
+            name="lopdev",
+            manager="manager",
+            members=[TeamMember(role="coder")],
+        )
+    )
+    session.team_registry = registry
+    release = asyncio.Event()
+
+    async def delayed_factory() -> FakeSession:
+        await release.wait()
+        return session
+
+    app = OperatorApp(delayed_factory)
+    async with app.run_test(size=(120, 40)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        for char in "/team lop":
+            await pilot.press("slash" if char == "/" else ("space" if char == " " else char))
+        await pilot.pause()
+        assert app._session is None
+        assert editor.picker.is_pending()
+        assert editor.picker._query == "lop"
+
+        release.set()
+        await _boot(pilot, app)
+        await pilot.pause()
+        assert editor.text == "/team lop"
+        assert editor.picker.is_open()
+        assert editor.picker.highlighted_name() == "lopdev"
+        assert editor._name_choices == frozenset({"lopdev"})
+
+        # Complete the exact name by hand and type a message; the snapshot
+        # delivered during adoption must paint it without another list-opening.
+        editor.text = "/team lopdev fix it"
+        editor.move_cursor(editor._end_of_buffer())
+        editor._sync_picker()
+        await pilot.pause()
+        green = Style.parse(theme_mod.semantic_color("string")).color
+        assert green is not None
+        line = editor.render_line(0)
+        painted = [
+            segment
+            for segment in line._segments
+            if segment.text == "lopdev" and segment.style and segment.style.color == green
+        ]
+        assert painted
 
 
 @pytest.mark.asyncio
