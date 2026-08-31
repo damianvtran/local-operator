@@ -322,7 +322,10 @@ def _verify_semantics(
     usage: set[str] = set()
     observations: dict[str, ObservationPayload] = {}
     batches: dict[str, ActionBatchPayload] = {}
+    observation_batches: dict[str, str] = {}
     steps: set[str] = set()
+    batch_steps: dict[str, str] = {}
+    next_observation_sequence = 0
     exchanges: set[str] = set()
     last_exchange: str | None = None
     lifecycle: dict[str, LifecycleTransitionPayload] = {}
@@ -365,16 +368,25 @@ def _verify_semantics(
                 issues.error("receipt_binding_invalid", location)
             usage.add(payload.request_id)
         elif isinstance(payload, ObservationPayload):
-            if payload.observation_id in observations:
+            if (
+                payload.observation_id in observations
+                or payload.sequence != next_observation_sequence
+            ):
                 issues.error("receipt_binding_invalid", location)
             observations[payload.observation_id] = payload
+            next_observation_sequence += 1
         elif isinstance(payload, ActionBatchPayload):
-            if payload.action_batch_id in batches or payload.observation_id not in observations:
+            if (
+                payload.action_batch_id in batches
+                or payload.observation_id not in observations
+                or payload.observation_id in observation_batches
+            ):
                 issues.error("receipt_binding_invalid", location)
             batches[payload.action_batch_id] = payload
+            observation_batches[payload.observation_id] = payload.action_batch_id
         elif isinstance(payload, EnvironmentStepPayload):
             batch = batches.get(payload.action_batch_id)
-            if payload.step_id in steps or batch is None:
+            if payload.step_id in steps or batch is None or payload.action_batch_id in batch_steps:
                 issues.error("receipt_binding_invalid", location)
             elif (
                 payload.observation_id is not None
@@ -382,6 +394,7 @@ def _verify_semantics(
             ):
                 issues.error("receipt_binding_invalid", location)
             steps.add(payload.step_id)
+            batch_steps[payload.action_batch_id] = payload.step_id
         elif isinstance(payload, UserSimulatorExchangePayload):
             if payload.exchange_id in exchanges or payload.previous_exchange_id != last_exchange:
                 issues.error("receipt_binding_invalid", location)
@@ -432,6 +445,25 @@ def _verify_semantics(
                 issues.error("score_invalid", "state.json")
         elif starts or results:
             issues.error("score_invalid", "state.json")
+    terminal_states = [
+        state for state in lifecycle.values() if state.state in {"completed", "failed", "cancelled"}
+    ]
+    terminal_location = "outcome.json" if outcome is not None else "events.jsonl"
+    if outcome is not None or terminal_states:
+        # Open bundles may legitimately have in-flight requests or batches. A
+        # terminal lifecycle snapshot begins sealing authority, so every initiated
+        # operation must already have its exact completion receipt.
+        if set(requests) != responses or set(requests) != usage:
+            issues.error("receipt_binding_invalid", terminal_location)
+        if set(batches) != set(batch_steps):
+            issues.error("receipt_binding_invalid", terminal_location)
+        if observations and len(observation_batches) not in (
+            len(observations),
+            len(observations) - 1,
+        ):
+            issues.error("receipt_binding_invalid", terminal_location)
+        if len(terminal_states) != 1:
+            issues.error("finalization_invalid", terminal_location)
     if outcome is not None:
         if outcome.event_count != len(events):
             issues.error("counter_mismatch", "outcome.json")

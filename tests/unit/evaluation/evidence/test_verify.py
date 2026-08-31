@@ -172,6 +172,47 @@ def test_semantic_graph_rejects_broken_observation_action_step_links(
     assert "receipt_binding_invalid" in {issue.code for issue in report.issues}
 
 
+def test_open_graph_rejects_sequence_gap_duplicate_batch_and_step(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "bundle"
+    with EvidenceWriter.create(root, manifest(), RedactionSet.from_resolved_values(())) as writer:
+        writer.append(
+            "observation",
+            ObservationPayload(observation_id="observation", sequence=99),
+            monotonic_ns=1,
+            wall_time_ms=1,
+        )
+        for batch_id in ("batch-1", "batch-2"):
+            writer.append(
+                "action_batch",
+                ActionBatchPayload(
+                    action_batch_id=batch_id,
+                    observation_id="observation",
+                    action_count=1,
+                    action_artifact=ARTIFACT,
+                ),
+                monotonic_ns=2 if batch_id == "batch-1" else 3,
+                wall_time_ms=2 if batch_id == "batch-1" else 3,
+            )
+        for step_id in ("step-1", "step-2"):
+            writer.append(
+                "environment_step",
+                EnvironmentStepPayload(
+                    step_id=step_id,
+                    action_batch_id="batch-1",
+                    receipt_id=DIGEST,
+                    observation_id="observation",
+                    terminated=False,
+                    truncated=False,
+                ),
+                monotonic_ns=4 if step_id == "step-1" else 5,
+                wall_time_ms=4 if step_id == "step-1" else 5,
+            )
+    report = verify_bundle(root)
+    assert "receipt_binding_invalid" in {issue.code for issue in report.issues}
+
+
 def test_partial_tail_refuses_append_without_repair(tmp_path: Path) -> None:
     root = _bundle(tmp_path, events=1)
     with (root / "events.jsonl").open("ab") as handle:

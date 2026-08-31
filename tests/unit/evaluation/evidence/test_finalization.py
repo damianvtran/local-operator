@@ -12,6 +12,7 @@ import pytest
 from local_operator.evaluation.evidence.models import (
     FinalizationIntent,
     LifecycleTransitionPayload,
+    ModelRequestPayload,
     OutcomeDraft,
     ScoreArtifact,
     ScoringResultPayload,
@@ -23,7 +24,12 @@ from local_operator.evaluation.evidence.store import (
 )
 from local_operator.evaluation.evidence.verify import verify_bundle
 from local_operator.evaluation.receipts import RedactionSet
-from tests.unit.evaluation.evidence.test_models import DIGEST, OTHER_DIGEST, manifest
+from tests.unit.evaluation.evidence.test_models import (
+    DIGEST,
+    OTHER_DIGEST,
+    ROUTE,
+    manifest,
+)
 
 
 def _append_completed(writer: EvidenceWriter, *, monotonic_ns: int, wall_time_ms: int) -> None:
@@ -94,6 +100,46 @@ def test_seal_recomputes_all_assertions_and_verifies_terminal(tmp_path: Path) ->
     assert report.terminal_state == "sealed"
     assert report.outcome == outcome
     assert report.outcome is not None and report.outcome.result.binary == 0
+
+
+def test_seal_rejects_orphan_model_request(tmp_path: Path) -> None:
+    root = tmp_path / "bundle"
+    writer = EvidenceWriter.create(root, manifest(), RedactionSet.from_resolved_values(()))
+    try:
+        writer.append(
+            "model_request",
+            ModelRequestPayload(
+                request_id="orphan",
+                requested_route=ROUTE,
+                tool_schema_digest=DIGEST,
+                input_tokens=1,
+                message_count=1,
+                tool_count=0,
+            ),
+            monotonic_ns=1,
+            wall_time_ms=1,
+        )
+        writer.begin_finalization(
+            "final",
+            "score-op",
+            FinalizationIntent(kind="score", scorer_id="scorer", scorer_version="1"),
+            monotonic_ns=2,
+            wall_time_ms=2,
+        )
+        score = ScoreArtifact(status="scored", binary=0)
+        writer.record_scoring_result(
+            ScoringResultPayload(
+                finalization_id="final", scoring_operation_id="score-op", score=score
+            ),
+            monotonic_ns=3,
+            wall_time_ms=3,
+        )
+        _append_completed(writer, monotonic_ns=4, wall_time_ms=4)
+        with pytest.raises(EvidenceBundleInvalid, match="independent seal verification"):
+            writer.seal(_draft(score))
+    finally:
+        writer.close()
+    assert "receipt_binding_invalid" in {issue.code for issue in verify_bundle(root).issues}
 
 
 def test_seal_rejects_forged_finalization_and_lifecycle_score(tmp_path: Path) -> None:
