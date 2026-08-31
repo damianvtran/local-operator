@@ -8,6 +8,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Barrier, BrokenBarrierError, Thread
@@ -1871,6 +1872,132 @@ def test_failed_restore_keeps_raising_rather_than_reporting_empty(
         with pytest.raises(TeamRegistryRecoveryError, match="fix registry permissions"):
             registry.list_teams()
     assert backup.is_dir()
+
+
+def test_repaired_registry_heals_within_one_cooldown_without_a_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R8-1: the failed-restore latch bounds the ATTEMPT RATE, not the outcome.
+
+    The error tells the user to fix registry permissions and retry, so a latch
+    that never re-attempts makes that instruction false. The registry is
+    session-lifetime and the TUI's `_team_choices` swallows the exception, so a
+    permanent latch meant `/team` silently offered NO teams for the rest of the
+    session while the row sat healthy on disk — the R6-4/U6-1 failure mode
+    reached from the other direction.
+    """
+    registry = TeamRegistry(tmp_path)
+    team = registry.create_team(TeamEditFields(name="survivor"))
+    backup = _strand_backup(registry, team.id)
+    real_replace = teams_module.os.replace
+    denied = {"on": True}
+
+    def deny(src, dst, **kwargs):
+        if denied["on"] and Path(src) == backup:
+            raise PermissionError("denied")
+        return real_replace(src, dst, **kwargs)
+
+    monkeypatch.setattr(teams_module.os, "replace", deny)
+    registry._last_refresh_time = 0.0
+    with pytest.raises(TeamRegistryRecoveryError):
+        registry.list_teams()
+
+    # The user does exactly what the message instructs.
+    denied["on"] = False
+    # Inside the cooldown the read still fails CLOSED rather than reporting the
+    # hidden row as absent — the repair is not yet proven, and an empty answer
+    # would be the U6-1 lie.
+    registry._last_refresh_time = 0.0
+    with pytest.raises(TeamRegistryRecoveryError):
+        registry.list_teams()
+
+    # Past the cooldown the set is re-attempted, and the repair takes effect
+    # with no restart. Driven by the module's own cooldown rather than a sleep.
+    registry._recovery_attempted_at -= teams_module._READ_RECOVERY_COOLDOWN_S + 0.1
+    registry._last_refresh_time = 0.0
+    assert [t.name for t in registry.list_teams()] == ["survivor"]
+    assert not backup.is_dir()
+    assert registry._recovery_failed_for is None
+    assert registry._recovery_failure is None
+
+
+def test_still_broken_registry_keeps_failing_closed_across_cooldowns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R8-1's re-attempt must not soften a genuine, still-failing restore.
+
+    The sibling of the heal test: the same re-attempt that lets a repaired tree
+    recover must never let an unrepaired one answer "no teams" (R6-4).
+    """
+    registry = TeamRegistry(tmp_path)
+    team = registry.create_team(TeamEditFields(name="survivor"))
+    backup = _strand_backup(registry, team.id)
+    real_replace = teams_module.os.replace
+
+    def deny(src, dst, **kwargs):
+        if Path(src) == backup:
+            raise PermissionError("denied")
+        return real_replace(src, dst, **kwargs)
+
+    monkeypatch.setattr(teams_module.os, "replace", deny)
+    for crossing in range(4):  # reads inside AND past several cooldowns
+        for _ in range(5):
+            registry._last_refresh_time = 0.0
+            with pytest.raises(TeamRegistryRecoveryError, match="fix registry permissions"):
+                registry.list_teams()
+        registry._recovery_attempted_at -= teams_module._READ_RECOVERY_COOLDOWN_S + 0.1
+    assert backup.is_dir()
+
+
+def test_latched_reads_do_not_churn_the_lock_or_grow_the_traceback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R8-1 keeps R7-1's bound; R8-2: the raised traceback must not grow.
+
+    Re-raising ONE stored exception appended a frame set per read (~4 frames,
+    805 by read 200, each retaining its locals) because `/team` fans several
+    reads out per keystroke. A fresh object per raise keeps it at one stack.
+    """
+    registry = TeamRegistry(tmp_path)
+    team = registry.create_team(TeamEditFields(name="survivor"))
+    backup = _strand_backup(registry, team.id)
+    real_replace = teams_module.os.replace
+
+    def deny(src, dst, **kwargs):
+        if Path(src) == backup:
+            raise PermissionError("denied")
+        return real_replace(src, dst, **kwargs)
+
+    monkeypatch.setattr(teams_module.os, "replace", deny)
+
+    attempts = 0
+    real_lock = TeamRegistry._persistence_lock
+
+    def counting_lock(self, *args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        return real_lock(self, *args, **kwargs)
+
+    monkeypatch.setattr(TeamRegistry, "_persistence_lock", counting_lock)
+
+    depths = []
+    causes = []
+    for _ in range(200):
+        registry._last_refresh_time = 0.0
+        with pytest.raises(TeamRegistryRecoveryError) as caught:
+            registry.list_teams()
+        depths.append(len(traceback.extract_tb(caught.value.__traceback__)))
+        causes.append(caught.value.__cause__)
+    # No idle churn: one attempt for the whole burst, which sits inside one
+    # cooldown — the R7-1 property the re-attempt must not have loosened.
+    assert attempts == 1, f"{attempts} attempts for one unchanged artifact in one cooldown"
+    assert (
+        max(depths) - min(depths) <= 4
+    ), f"traceback grew across reads: {depths[:3]}..{depths[-3:]}"
+    assert max(depths) < 40, f"unbounded traceback: {max(depths)} frames"
+    # The chained storage cause survives the fresh-object repeat, so diagnostics
+    # still reach the PermissionError that actually stopped the restore.
+    assert all(isinstance(cause, PermissionError) for cause in causes)
 
 
 def test_construction_never_raises_and_defers_the_error_to_first_use(

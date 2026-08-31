@@ -494,11 +494,13 @@ class TeamRegistry:
         self._recovery_attempted_for: frozenset[str] | None = None
         self._recovery_attempted_at = 0.0
         # The artifact set a restore was attempted against and FAILED. Distinct
-        # from the attempt latch above because the two get opposite treatment:
-        # a contended attempt serves the current view, a failed restore keeps
-        # raising while the artifact is on disk (R6-4). The exception itself is
-        # kept so the repeat carries the ORIGINAL cause and wording rather than
-        # a re-derived approximation of it.
+        # from the attempt latch above because the two get opposite treatment
+        # INSIDE the cooldown: a contended attempt serves the current view, a
+        # failed restore keeps raising while the artifact is on disk (R6-4).
+        # It does NOT suppress the re-attempt past the cooldown — a repaired
+        # tree must heal without a restart (R8-1). The exception is kept so the
+        # repeat carries the ORIGINAL cause and wording rather than a re-derived
+        # approximation of it.
         self._recovery_failed_for: frozenset[str] | None = None
         self._recovery_failure: TeamRegistryRecoveryError | None = None
         # Recovery is the sole startup read that may create a lock sidecar, and
@@ -610,10 +612,36 @@ class TeamRegistry:
         Re-raised rather than latched forever: the next call re-attempts
         recovery through the normal path, so fixing the permissions and
         retrying works without restarting the session.
+
+        :meth:`_recover_for_read_if_needed` holds the same property by a
+        different mechanism (a cooldown-gated re-attempt rather than a one-shot
+        memo pop) because it runs on every read and must also bound its attempt
+        RATE. The two are deliberately not merged: this one is a one-shot hand-
+        off of a construction-time error, and folding it into the rate limiter
+        would make a boot failure wait out a cooldown before the first read
+        could report it. What they must share — and now do — is that no failure
+        state survives the repair that fixes it (R8-1).
         """
         error, self.recovery_error = self.recovery_error, None
         if error is not None:
             raise error
+
+    def _recovery_failure_repeat(self) -> TeamRegistryRecoveryError:
+        """A FRESH exception carrying the latched failure's wording and cause.
+
+        Re-``raise``-ing the stored instance appends the new raise site to that
+        one object's ``__traceback__`` on every read, and ``/team`` fans out
+        several reads per keystroke — measured at ~4 frames per read, 805 frames
+        by read 200, each retaining its locals (R8-2). A new object per raise
+        keeps the traceback the size of one stack while preserving what the user
+        and the diagnostics need: the original guidance text and the chained
+        storage error that caused it.
+        """
+        stored = self._recovery_failure
+        assert stored is not None  # only called under a set latch
+        repeat = TeamRegistryRecoveryError(*stored.args)
+        repeat.__cause__ = stored.__cause__
+        return repeat
 
     def _recover_for_read_if_needed(self, *, wait: float | None = None) -> None:
         """Recover hidden backups before a read can report a row as missing.
@@ -637,6 +665,17 @@ class TeamRegistry:
         * Restore attempted and FAILED — authoritative. ``_recover_interrupted
           _swap_locked`` raises :class:`TeamRegistryRecoveryError` and it
           propagates, so no read can present a durable row as missing.
+
+        A proven failure latches the ATTEMPT RATE, never the OUTCOME (R8-1).
+        The error text instructs the user to fix registry permissions and retry,
+        so a latch that never re-attempts makes that instruction false: the
+        registry is session-lifetime, and the TUI's ``_team_choices`` swallows
+        the exception, so ``/team`` silently offered NO teams for the rest of
+        the session while the row sat healthy on disk — the same "durable row
+        presented as absent" mode R6-4/U6-1 exist to prevent. So a failed set is
+        re-attempted once the cooldown elapses (and immediately when the set
+        CHANGES), and every read inside the cooldown still fails closed on the
+        latched error rather than softening to "no teams".
         """
         try:
             artifacts = frozenset(
@@ -655,14 +694,12 @@ class TeamRegistry:
             self._recovery_failed_for = None
             self._recovery_failure = None
             return
-        # A set we have already PROVEN unrecoverable stays an error for as long
-        # as it is on disk (R6-4). This is the one case the cooldown must not
-        # soften into "serve the current view": the artifact is authoritative,
-        # restore actually failed, and reporting the row as missing would send
-        # the user off to re-create something that still exists. Cheap — it is
-        # a set comparison against the listing this method already did.
-        if artifacts == self._recovery_failed_for and self._recovery_failure is not None:
-            raise self._recovery_failure
+        # A set we have already PROVEN unrecoverable (R6-4). Held as state, not
+        # as a verdict: it decides what a read INSIDE the cooldown answers, and
+        # never whether a read past the cooldown re-attempts.
+        proven_failed = (
+            artifacts == self._recovery_failed_for and self._recovery_failure is not None
+        )
         # Bound the ATTEMPTS. An unchanged artifact set we tried to heal
         # recently and could not even get the lock for is not worth re-probing
         # on every keystroke; a CHANGED set is a new crash and is attempted
@@ -672,6 +709,11 @@ class TeamRegistry:
             artifacts == self._recovery_attempted_for
             and now - self._recovery_attempted_at < _READ_RECOVERY_COOLDOWN_S
         ):
+            if proven_failed:
+                # Not re-probing is a rate decision; it cannot downgrade a
+                # proven failure into "serve the current view", which would be
+                # the U6-1 silent-empty answer with the row still on disk.
+                raise self._recovery_failure_repeat()
             return
         self._recovery_attempted_for = artifacts
         self._recovery_attempted_at = now
@@ -684,11 +726,18 @@ class TeamRegistry:
         except TeamRegistryLockTimeout:
             # Transient contention only — see the docstring. The current
             # snapshot stands and the next read past the cooldown retries.
+            if proven_failed:
+                # ...unless this set is already proven unrecoverable. Losing a
+                # lock race does not un-prove that, and answering from the
+                # snapshot here would hide the row exactly as R6-4 forbids.
+                raise self._recovery_failure_repeat() from None
             return
         except TeamRegistryRecoveryError as exc:
             # Restore was attempted and genuinely failed. Latch the exact
-            # artifact set so the cooldown above cannot turn the next read into
-            # a silent empty answer, and let the caller see the guidance.
+            # artifact set so reads inside the cooldown cannot turn into a
+            # silent empty answer, and let the caller see the guidance. `exc` is
+            # a fresh object per attempt, so replacing the stored one here also
+            # keeps the retained traceback bounded (R8-2).
             self._recovery_failed_for = artifacts
             self._recovery_failure = exc
             raise
