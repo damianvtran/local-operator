@@ -8,12 +8,9 @@ side-effect authority cannot be reconstructed from bytes after a crash.
 
 from __future__ import annotations
 
-import base64
-import binascii
 import errno
 import fcntl
 import hashlib
-import io
 import os
 import re
 import secrets
@@ -60,6 +57,44 @@ _DIGEST_CHARS = frozenset("0123456789abcdef")
 # Only this exact semantic issue is expected when the finalizing marker reaches
 # disk before scoring_start. Integrity and confinement findings always block.
 _AMBIGUOUS_FINALIZATION_ISSUES = frozenset({("score_invalid", "state.json")})
+MAX_ARTIFACT_BYTES = 256 * 1024 * 1024
+MAX_PARSED_MEDIA_BYTES = 32 * 1024 * 1024
+_REDACTION_SCAN_BLOCK = 64 * 1024
+_MAX_REDACTION_WINDOW = 1024 * 1024
+_FORK_REGISTRY_LOCK = threading.Lock()
+_FORK_WRITERS: weakref.WeakSet[EvidenceWriter] = weakref.WeakSet()
+_FORK_SNAPSHOT: tuple[EvidenceWriter, ...] = ()
+
+
+def _before_fork() -> None:
+    global _FORK_SNAPSHOT
+    _FORK_REGISTRY_LOCK.acquire()
+    _FORK_SNAPSHOT = tuple(_FORK_WRITERS)
+
+
+def _after_fork_parent() -> None:
+    global _FORK_SNAPSHOT
+    _FORK_SNAPSHOT = ()
+    _FORK_REGISTRY_LOCK.release()
+
+
+def _after_fork_child() -> None:
+    global _FORK_REGISTRY_LOCK, _FORK_SNAPSHOT, _FORK_WRITERS
+    # The before-fork snapshot avoids acquiring an inherited Python lock in the
+    # child. Each writer validates descriptor identity before closing its copy.
+    snapshot = _FORK_SNAPSHOT
+    _FORK_SNAPSHOT = ()
+    _FORK_REGISTRY_LOCK = threading.Lock()
+    _FORK_WRITERS = weakref.WeakSet()
+    for writer in snapshot:
+        writer._invalidate_inherited_child()
+
+
+os.register_at_fork(
+    before=_before_fork,
+    after_in_parent=_after_fork_parent,
+    after_in_child=_after_fork_child,
+)
 _WRITE_FLAGS = os.O_WRONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
 _READ_FLAGS = (
     os.O_RDONLY
@@ -163,6 +198,44 @@ def _write_all(fd: int, data: bytes, calls: Syscalls) -> None:
         view = view[written:]
 
 
+class _RedactionScanner:
+    """Bounded rolling scanner for the raw and exposed encoded byte surface.
+
+    Compressed pixels are intentionally opaque; adapters remain responsible for
+    redacting content before image encoding. The scanner covers raw UTF-8/ASCII,
+    percent escapes, hex, and base64 variants, including chunk boundaries and
+    whitespace separators within the bounded rolling window.
+    """
+
+    def __init__(self, writer: EvidenceWriter) -> None:
+        self._writer = writer
+        variants = (
+            writer._redactions._plaintext_canaries
+            + writer._redactions._exact_encoded_canaries
+            + writer._redactions._percent_canaries
+            + writer._redactions._hex_canaries
+        )
+        longest = max((len(value.encode("utf-8")) for value in variants), default=1)
+        self._window = min(
+            _MAX_REDACTION_WINDOW,
+            max(_REDACTION_SCAN_BLOCK, longest * 4 + 256),
+        )
+        self._tail = b""
+
+    @property
+    def retained_bytes(self) -> int:
+        return len(self._tail)
+
+    def feed(self, chunk: bytes) -> None:
+        for offset in range(0, len(chunk), _REDACTION_SCAN_BLOCK):
+            block = chunk[offset : offset + _REDACTION_SCAN_BLOCK]
+            window = self._tail + block
+            projections = _binary_projections(window)
+            projections.append(window.decode("utf-8", errors="ignore"))
+            self._writer._assert_redacted(projections)
+            self._tail = window[-self._window :]
+
+
 def _project_artifact(data: bytes, media_type: str) -> Any:
     try:
         projection = validate_media(data, media_type)
@@ -193,22 +266,14 @@ def _binary_projections(data: bytes) -> list[str]:
     for candidate in candidates:
         compact = "".join(character for character in candidate if not character.isspace())
         if 8 <= len(compact) <= len(data) + 4:
-            padded = compact + "=" * (-len(compact) % 4)
-            for altchars in (None, b"-_"):
-                try:
-                    decoded = base64.b64decode(
-                        padded.encode("ascii"), altchars=altchars, validate=True
-                    )
-                except (ValueError, binascii.Error):
-                    continue
-                projections.append(decoded.decode("utf-8", errors="ignore"))
+            # RedactionSet already carries exact standard and URL-safe base64
+            # variants. Comparing the normalized spelling avoids allocating a
+            # decoded copy of an attacker-controlled candidate.
+            projections.append(compact)
     for candidate in re.findall(r"(?<![0-9A-Fa-f])(?:[0-9A-Fa-f]{2}[ \t\r\n]*){8,}", text):
         hex_compact = "".join(character for character in candidate if not character.isspace())
         if len(hex_compact) % 2 == 0:
-            try:
-                projections.append(bytes.fromhex(hex_compact).decode("utf-8", errors="ignore"))
-            except ValueError:
-                pass
+            projections.append(hex_compact)
     return projections
 
 
@@ -249,16 +314,12 @@ class EvidenceWriter:
         self._closed = False
         self._poisoned = False
         self._creator_pid = os.getpid()
-        reference = weakref.ref(self)
-
-        def inherited_child() -> None:
-            writer = reference()
-            if writer is not None:
-                writer._invalidate_inherited_child()
-
-        # flock state is attached to the inherited open-file description. The
-        # child closes only its copies; the parent's descriptor keeps the lock.
-        os.register_at_fork(after_in_child=inherited_child)
+        self._fd_identities = {
+            name: self._descriptor_identity(getattr(self, name))
+            for name in ("_events_fd", "_artifacts_fd", "_lock_fd", "_root_fd")
+        }
+        with _FORK_REGISTRY_LOCK:
+            _FORK_WRITERS.add(self)
 
     @classmethod
     def create(
@@ -513,17 +574,28 @@ class EvidenceWriter:
         os.rename(temp, _STATE, src_dir_fd=root_fd, dst_dir_fd=root_fd)
         calls.fsync(root_fd)
 
+    @staticmethod
+    def _descriptor_identity(fd: int) -> tuple[int, int, int]:
+        info = os.fstat(fd)
+        return (info.st_dev, info.st_ino, stat.S_IFMT(info.st_mode))
+
     def _invalidate_inherited_child(self) -> None:
         self._poisoned = True
         self._closed = True
         for name in ("_events_fd", "_artifacts_fd", "_lock_fd", "_root_fd"):
             fd = getattr(self, name, -1)
-            if fd >= 0:
+            if fd < 0:
+                continue
+            try:
+                current = self._descriptor_identity(fd)
+            except OSError:
+                current = None
+            if current == self._fd_identities.get(name):
                 try:
                     os.close(fd)
                 except OSError:
                     pass
-                setattr(self, name, -1)
+            setattr(self, name, -1)
 
     def _poison(self) -> None:
         self._poisoned = True
@@ -664,18 +736,19 @@ class EvidenceWriter:
             )
             digest = hashlib.sha256()
             count = 0
-            collected = io.BytesIO()
+            scanner = _RedactionScanner(self)
             try:
                 for chunk in stream:
                     if not isinstance(chunk, bytes):
                         raise EvidenceBundleInvalid("artifact stream must yield bytes")
+                    if count + len(chunk) > MAX_ARTIFACT_BYTES:
+                        raise EvidenceBundleInvalid("artifact exceeds maximum byte count")
+                    scanner.feed(chunk)
                     digest.update(chunk)
                     count += len(chunk)
-                    collected.write(chunk)
                     _write_all(fd, chunk, self._calls)
-                data = collected.getvalue()
-                projection = _project_artifact(data, media_type)
-                self._assert_redacted(projection)
+                if media_type != "application/octet-stream" and count > MAX_PARSED_MEDIA_BYTES:
+                    raise EvidenceBundleInvalid("structured artifact exceeds validation byte limit")
                 actual = digest.hexdigest()
                 if expected_sha256 is not None and expected_sha256 != actual:
                     raise EvidenceBundleInvalid("artifact digest assertion failed")
@@ -695,7 +768,14 @@ class EvidenceWriter:
                     self._poison()
                 raise
             os.close(fd)
+            link_attempted = False
             try:
+                if media_type != "application/octet-stream":
+                    data = self._read_regular(self._artifacts_fd, temp)
+                    projection = _project_artifact(data, media_type)
+                    if media_type in ("application/json", "text/plain"):
+                        self._assert_redacted(projection)
+                link_attempted = True
                 self._calls.link(
                     temp,
                     ref.sha256,
@@ -709,7 +789,14 @@ class EvidenceWriter:
                     or len(existing) != ref.byte_count
                 ):
                     raise EvidenceBundleInvalid("existing artifact conflicts with digest")
-                _project_artifact(existing, media_type)
+                if media_type != "application/octet-stream":
+                    _project_artifact(existing, media_type)
+            except BaseException:
+                if link_attempted:
+                    # link may have created the target before surfacing an error.
+                    # No caller may continue under ambiguous publication state.
+                    self._poison()
+                raise
             finally:
                 try:
                     self._calls.unlink(temp, dir_fd=self._artifacts_fd)
@@ -1018,10 +1105,24 @@ class EvidenceWriter:
         with self._thread_lock:
             if self._closed:
                 return
-            self._closed = True
-            for fd in (self._events_fd, self._artifacts_fd, self._lock_fd, self._root_fd):
-                if fd >= 0:
+            with _FORK_REGISTRY_LOCK:
+                _FORK_WRITERS.discard(self)
+            first_error: OSError | None = None
+            for name in ("_events_fd", "_artifacts_fd", "_root_fd", "_lock_fd"):
+                fd = getattr(self, name)
+                if fd < 0:
+                    continue
+                setattr(self, name, -1)
+                try:
                     os.close(fd)
+                except OSError as error:
+                    if first_error is None:
+                        first_error = error
+            # Mark closed only after every cleanup attempt. Descriptor fields are
+            # already -1, so a caller retry after an exception safely no-ops.
+            self._closed = True
+            if first_error is not None:
+                raise first_error
 
     def __enter__(self) -> "EvidenceWriter":
         return self

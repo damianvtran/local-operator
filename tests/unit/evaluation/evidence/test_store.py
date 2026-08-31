@@ -7,6 +7,7 @@ import multiprocessing
 import os
 import signal
 import threading
+import tracemalloc
 from multiprocessing.synchronize import Event as ProcessEvent
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,7 @@ from local_operator.evaluation.evidence.models import (
     ScoringResultPayload,
 )
 from local_operator.evaluation.evidence.store import (
+    MAX_ARTIFACT_BYTES,
     EvidenceBundleBusy,
     EvidenceBundleInvalid,
     EvidenceRecoveryOnly,
@@ -490,6 +492,132 @@ def test_unsafe_root_or_artifact_permissions_are_rejected(tmp_path: Path) -> Non
     (root / "artifacts").chmod(0o777)
     with pytest.raises(EvidenceBundleInvalid, match="permissions"):
         EvidenceWriter.create(root, manifest(), redactions())
+
+
+def test_closed_writer_fork_does_not_close_reused_descriptors(tmp_path: Path) -> None:
+    if "fork" not in multiprocessing.get_all_start_methods():
+        pytest.skip("fork start method unavailable")
+    writer = EvidenceWriter.create(tmp_path / "bundle", manifest(), redactions())
+    former_fds = (writer._events_fd, writer._artifacts_fd, writer._lock_fd, writer._root_fd)
+    writer.close()
+    replacements: dict[int, int] = {}
+    opened: list[int] = []
+    try:
+        while set(former_fds) - set(replacements):
+            fd = os.open("/dev/null", os.O_RDONLY)
+            opened.append(fd)
+            if fd in former_fds:
+                replacements[fd] = fd
+        context = multiprocessing.get_context("fork")
+        child = context.Process(target=lambda: None)
+        child.start()
+        child.join(10)
+        assert child.exitcode == 0
+        for fd in replacements:
+            os.fstat(fd)
+    finally:
+        for fd in opened:
+            os.close(fd)
+
+
+def test_streaming_redaction_memory_is_bounded_for_64mib(tmp_path: Path) -> None:
+    chunk = b"x" * (1024 * 1024)
+    scanner_peak = 0
+
+    def source() -> Any:
+        nonlocal scanner_peak
+        for _ in range(64):
+            yield chunk
+            _current, peak = tracemalloc.get_traced_memory()
+            scanner_peak = max(scanner_peak, peak)
+
+    tracemalloc.start()
+    try:
+        with EvidenceWriter.create(
+            tmp_path / "bundle", manifest(), redactions("very-secret-value")
+        ) as writer:
+            ref = writer.publish_artifact(source(), media_type="application/octet-stream")
+    finally:
+        tracemalloc.stop()
+    assert ref.byte_count == 64 * 1024 * 1024
+    assert scanner_peak < 32 * 1024 * 1024
+
+
+def test_streaming_redaction_catches_chunk_boundary_canary(tmp_path: Path) -> None:
+    with EvidenceWriter.create(
+        tmp_path / "bundle", manifest(), redactions("very-secret-value")
+    ) as writer:
+        with pytest.raises(EvidenceBundleInvalid):
+            writer.publish_artifact(
+                (b"prefix-very-sec", b"ret-value-suffix"),
+                media_type="application/octet-stream",
+            )
+
+
+def test_artifact_limit_rejects_before_unbounded_write(tmp_path: Path) -> None:
+    with EvidenceWriter.create(tmp_path / "bundle", manifest(), redactions()) as writer:
+        with pytest.raises(EvidenceBundleInvalid, match="maximum"):
+            writer.publish_artifact(
+                (b"x" * (1024 * 1024) for _ in range(MAX_ARTIFACT_BYTES // (1024 * 1024) + 1)),
+                media_type="application/octet-stream",
+            )
+
+
+def test_ambiguous_artifact_link_poisons_writer(tmp_path: Path) -> None:
+    class LinkFails:
+        def write(self, fd: int, data: bytes) -> int:
+            return os.write(fd, data)
+
+        def fsync(self, fd: int) -> None:
+            os.fsync(fd)
+
+        def link(self, src: str, dst: str, *, src_dir_fd: int, dst_dir_fd: int) -> None:
+            raise OSError("link-ambiguous")
+
+        def unlink(self, path: str, *, dir_fd: int) -> None:
+            os.unlink(path, dir_fd=dir_fd)
+
+    writer = EvidenceWriter.create(
+        tmp_path / "bundle", manifest(), redactions(), syscalls=LinkFails()
+    )
+    with pytest.raises(OSError, match="link-ambiguous"):
+        writer.publish_artifact(b"safe", media_type="text/plain")
+    with pytest.raises(EvidenceRecoveryOnly):
+        writer.append(
+            "cancel",
+            CancelPayload(cancellation_id="cancel", source="operator", diagnostic_code="x"),
+        )
+    writer.close()
+
+
+def test_close_attempts_all_fds_and_releases_lock_on_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "bundle"
+    writer = EvidenceWriter.create(root, manifest(), redactions())
+    events_fd = writer._events_fd
+    real_close = os.close
+    failed = False
+
+    def close(fd: int) -> None:
+        nonlocal failed
+        if fd == events_fd and not failed:
+            failed = True
+            real_close(fd)
+            raise OSError("close-failure")
+        real_close(fd)
+
+    monkeypatch.setattr(os, "close", close)
+    with pytest.raises(OSError, match="close-failure"):
+        writer.close()
+    assert all(
+        getattr(writer, name) == -1
+        for name in ("_events_fd", "_artifacts_fd", "_lock_fd", "_root_fd")
+    )
+    writer.close()
+    monkeypatch.setattr(os, "close", real_close)
+    with EvidenceWriter.create(root, manifest(), redactions()):
+        pass
 
 
 def test_hardlinked_artifact_is_rejected(tmp_path: Path) -> None:
