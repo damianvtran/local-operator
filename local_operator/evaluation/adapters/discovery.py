@@ -65,6 +65,14 @@ def _symlink_free(path: Path) -> os.stat_result:
         raise AdapterDiscoveryError("adapter launch path is unavailable") from error
 
 
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def resolve_launch(selector: AdapterSelector) -> ResolvedLaunch:
     """Capture symlink-free identities for both spawn boundaries to recheck."""
 
@@ -78,10 +86,7 @@ def resolve_launch(selector: AdapterSelector) -> ResolvedLaunch:
         or not os.access(executable, os.X_OK)
     ):
         raise AdapterDiscoveryError("adapter Python must be one executable non-hardlinked file")
-    executable_digest = hashlib.sha256()
-    with executable.open("rb") as stream:
-        while chunk := stream.read(1024 * 1024):
-            executable_digest.update(chunk)
+    executable_digest = _file_sha256(executable)
     if not stat.S_ISDIR(workspace_info.st_mode):
         raise AdapterDiscoveryError("adapter workspace is not a directory")
     return ResolvedLaunch(
@@ -90,7 +95,7 @@ def resolve_launch(selector: AdapterSelector) -> ResolvedLaunch:
         executable_inode=executable_info.st_ino,
         executable_mode=executable_info.st_mode,
         executable_size=executable_info.st_size,
-        executable_sha256=executable_digest.hexdigest(),
+        executable_sha256=executable_digest,
         executable_nlink=executable_info.st_nlink,
         workspace=str(workspace),
         workspace_device=workspace_info.st_dev,
@@ -104,16 +109,13 @@ def validate_resolved_launch(launch: ResolvedLaunch) -> None:
     workspace_info = _symlink_free(Path(launch.workspace))
     if not stat.S_ISREG(executable_info.st_mode) or executable_info.st_nlink != 1:
         raise AdapterDiscoveryError("adapter Python identity is unsafe")
-    executable_digest = hashlib.sha256()
-    with Path(launch.executable).open("rb") as stream:
-        while chunk := stream.read(1024 * 1024):
-            executable_digest.update(chunk)
+    executable_digest = _file_sha256(Path(launch.executable))
     current = (
         executable_info.st_dev,
         executable_info.st_ino,
         executable_info.st_mode,
         executable_info.st_size,
-        executable_digest.hexdigest(),
+        executable_digest,
         executable_info.st_nlink,
         workspace_info.st_dev,
         workspace_info.st_ino,
