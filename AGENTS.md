@@ -375,19 +375,25 @@ assert store.detail is not None
 ```
 
 **Do** wait on a publication from the code under test. `tests/unit/harness/
-test_comms.py` has the pattern: `ChangeSignal` subscribes to the notifications
-the code already emits, and `wait_for` re-tests the predicate after each one:
+test_comms.py` has the pattern: `ChangeSignal` subscribes to notifications the
+code already emits, and `wait_for` re-tests the predicate after each one. The
+subscriptions are what make it work, so build and release it in full:
 
 ```python
-await wait_for(lambda: store.detail is not None, signal=signal)
-assert store.detail is not None
+signal = ChangeSignal().watch_comms(comms).watch_session(parent)
+try:
+    await wait_for(lambda: comms.session_dir_of(job_id) is not None, signal=signal)
+finally:
+    signal.close()
 ```
 
-There is no elapsed-time comparison anywhere on the success path — the wait
-lasts exactly as long as the work does. The only deadline is
-`DEADLOCK_GUARD_S`, which exists so a genuine hang fails the run with "it is
-wedged, not merely slow" instead of blocking forever. It is a backstop, not
-the assertion.
+A bare `ChangeSignal()` subscribes to nothing, so `wait_for` blocks the full
+`DEADLOCK_GUARD_S` and then reports "it is wedged, not merely slow" — a
+confident diagnosis of the wrong thing. Watch the sources you need.
+
+There is no elapsed-time comparison anywhere on the success path: the wait
+lasts exactly as long as the work does. The deadline exists so a genuine hang
+fails the run instead of blocking forever. It is a backstop, not the assertion.
 
 When there is nothing to subscribe to — an in-process coroutine the test
 itself scheduled — bound by **loop turns** (`MAX_PUMP_TURNS`) rather than
@@ -406,6 +412,16 @@ none of them equals the loop thread. That assertion cannot flake: it is a fact
 about where the code ran, not how long it took, and it fails deterministically
 the moment someone drops an `asyncio.to_thread`.
 
+This is not a stylistic preference — it is where this repo's timing bounds keep
+landing. `tests/unit/session/test_launch_subagent.py` carries the full account
+under "WHY THIS IS A STRUCTURAL SPY AND NOT A TIME BOUND": a flat 1.0 s wall
+bound failed, a calibrated bound failed, converting to `time.thread_time`
+removed the *load* sensitivity but not the *core-speed* sensitivity, and the
+conclusion was that **no portable numeric bound exists** for that site — CI's
+healthy 1056-1156 ms sat above the box's 1315 ms regression threshold. It was
+converted to a structural spy. Read that docstring before you reach for a
+number.
+
 Reach for a number only when no structural fact expresses the property.
 
 ### If you must measure, measure CPU, not wall time
@@ -417,9 +433,12 @@ with the loop idle and nothing blocked.
 
 Use `time.thread_time()`, which is per-thread and excludes time asleep or
 waiting on the GIL, so a sample is large only when the loop thread really ran
-without yielding. `LoopCpuProbe` in `tests/unit/tools/test_loop_liveness.py`
-and `StallRecorder` in `tests/unit/test_tui_responsiveness.py` are the two
-implementations; reuse one rather than writing a third.
+without yielding. Two probes exist and they are **not interchangeable**:
+`LoopCpuProbe` (`tests/unit/tools/test_loop_liveness.py`) records CPU only;
+`StallRecorder` (`tests/unit/test_tui_responsiveness.py`) records CPU **and**
+wall, and asserts both. If you need the blocking-sleep backstop described
+below, use `StallRecorder` or add the wall assertion yourself — reusing
+`LoopCpuProbe` silently drops it.
 
 The distinction is measurable, not theoretical:
 
@@ -440,22 +459,26 @@ loaded-bar sites read 36-38 ms and ~0 ms; the CI runners recorded **206, 264,
 321, and 413 ms** of entirely legitimate loop CPU at those same sites. Every
 ceiling calibrated from the local numbers flaked a green tree within a day.
 
-A slower core burns more CPU-seconds on identical work —
-`tests/unit/session/test_launch_subagent.py` documents ubuntu-latest reporting
-1056-1156 ms against a bound a dev box met at 393-492 ms, on an unmodified
-healthy tree. So:
+A slower core burns more CPU-seconds on identical work, so a bound calibrated
+on a dev box is not a bound on CI — see the `test_launch_subagent.py` account
+above, where that spread ended in abandoning the bound entirely. If you have
+established a number is genuinely the only option:
 
 - Take the healthy maximum from **CI logs across several runs**, not from one
   local run and not from one CI run.
 - Leave real headroom above it, and **write the dataset and the margin into the
   docstring** so the next person is not re-deriving it from scratch.
-- Say what to do when it is exceeded. If a green tree trips the ceiling, the
-  ceiling is wrong until proven otherwise — raise it on evidence rather than
-  assuming the probe found a regression.
 - A number copied from an older comment is not evidence. The 549 ms figure in
   this repo's history is a **wall-clock** measurement from a probe that no
   longer exists; citing it to justify a CPU ceiling compares two different
   quantities.
+
+When a green tree trips the ceiling, **find out which it is before touching the
+number**. Either the tree is not as green as it looks, or the ceiling is
+miscalibrated — and "raise it" is only correct in the second case. Reproduce
+the sample, check whether the same test fails on `main` and on unrelated
+branches, and confirm the work under the probe is the legitimate kind. Widening
+a bound because it went red is how a guard stops guarding.
 
 ### Prove the test can still fail
 
@@ -469,10 +492,15 @@ watch it fail:
 # expect a failure with a message that names the real cause, then revert
 ```
 
-This is how a 500 ms ceiling was found to be silently swallowing the ~90-130 ms
-regression it was written to catch. Then check the other direction: run the file
-several times under load (`for i in $(seq 1 5)` with a few CPU spinners) and
-confirm it stays green.
+This is not hypothetical. In `test_tui_responsiveness.py` the loaded bar was
+raised to 500 ms to stop it flaking, which meant a 200-500 ms stall at the
+boot and turn sites — whose only guard is that bar — would have passed
+unnoticed. The strict 50 ms bar on the reconnect/connect sites was deliberately
+left alone precisely so the 90-130 ms parse regression stayed catchable. When
+you widen a ceiling, name what you just stopped catching.
+
+Then check the other direction: run the file several times under load
+(`for i in $(seq 1 5)` with a few CPU spinners) and confirm it stays green.
 
 ### When a test is already flaking
 
@@ -482,6 +510,25 @@ regression; the same test failing on several branches at once — check `main` �
 is repo-wide and not yours. Re-run to confirm, then fix the measurement rather
 than widening the bound. Do not merge a red head on the assumption that it is
 "probably the known flake" without checking the log.
+
+### Two things this section cannot do for you
+
+**There is no `pytest-timeout` in this suite.** A test that waits forever hangs
+its CI job until the workflow's `timeout-minutes` reclaims the runner (40 min
+for `test`, and that ceiling exists because a job once held a slot for 3h38m).
+So an unbounded wait is not merely slow, it is expensive for everyone queued
+behind it — which is the other half of why `wait_for` carries
+`DEADLOCK_GUARD_S`.
+
+**A deadlock defeats every technique above.** If the failure mode is the event
+loop freezing rather than running slowly, no in-process probe reports anything,
+because the process that would report is the one that is stuck. That class is
+covered by `tests/e2e/watchdog.py`, whose
+`faulthandler.dump_traceback_later(exit=True)` survives a kernel-level deadlock
+and takes the process down with a full thread dump. It runs as its own CI stage
+(`tui-e2e`, both Linux and macOS) rather than in the unit run, since firing it
+under `-n auto` would kill a worker carrying unrelated tests. If you are
+guarding against a hang rather than a stall, that is the file to read.
 
 ## TUI conventions worth knowing before you edit a widget
 
