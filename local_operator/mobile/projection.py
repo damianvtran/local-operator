@@ -23,6 +23,7 @@ safe to call from any thread that serializes calls per session.
 
 from __future__ import annotations
 
+import json
 import time
 from collections.abc import Mapping
 from typing import Any
@@ -107,6 +108,33 @@ SUBAGENT_OUTCOME_CHARS = 200
 #: wrong". This costs almost nothing on frame size: 2000 chars across the worst
 #: ~81-subagent roster is ~150 KB, well under the 1 MB control-frame cap.
 SUBAGENT_ERROR_CHARS = 2_000
+
+
+#: Soft cap for one serialized projection frame, applied by
+#: :func:`cap_projection_frame` BEFORE the frame is written to a socket or an
+#: SSE stream. The daemon's control-socket StreamReader refuses a line past
+#: 1 MB (``limit=1 << 20`` in ``daemon._dial``) and drains it, so an oversized
+#: push is a silently dropped repaint; a FLOOD of them (one session measured
+#: 48k drops at 14% idle CPU) starves the daemon loop and stalls EVERY other
+#: session's load. 700 KB keeps a generous margin under the hard limit for the
+#: frame envelope and JSON escaping inflation (a payload of quotes/backslashes
+#: can nearly double when escaped).
+PROJECTION_FRAME_SOFT_CAP_BYTES = 700_000
+
+#: Minimal bounds the frame cap degrades subagent text to. The cap only fires
+#: past the soft cap, so these are preview lengths, not the normal ones: the
+#: full prompt/result stay reachable through the child transcript's lazy
+#: /history fetch, and a degraded roster row still names the child and its
+#: state — the wedge alternative is no repaint at all.
+FRAME_CAP_PROMPT_CHARS = 120
+FRAME_CAP_RESULT_CHARS = 200
+FRAME_CAP_ERROR_CHARS = 400
+
+#: Floor for the transcript tail under the frame cap. Tier 3 halves the tail
+#: toward this bound; below it the phone keeps the opening user message plus
+#: the newest few rows and pages the rest from /history, which is exactly the
+#: scroll contract the 80-row cap already established.
+FRAME_CAP_TRANSCRIPT_FLOOR = 16
 
 
 def _message_text(message: AgentMessage) -> str:
@@ -201,6 +229,76 @@ def _diff_counts(details: dict[str, Any] | None) -> tuple[int, int]:
         return int(added), int(removed)
     except (TypeError, ValueError):
         return 0, 0
+
+
+def _frame_bytes(data: dict[str, Any]) -> int:
+    return len(json.dumps(data).encode("utf-8"))
+
+
+def cap_projection_frame(
+    projection: SessionProjection, *, cap_bytes: int = PROJECTION_FRAME_SOFT_CAP_BYTES
+) -> tuple[dict[str, Any], bool]:
+    """Serialize ``projection``, degrading optional payload tiers until the
+    frame fits ``cap_bytes``. Returns ``(frame_dict, degraded)``.
+
+    The registrant broadcasts ~30 repaints/s and the daemon's control reader
+    drops any line past 1 MB, so an oversized projection is not an error the
+    peer reports — it is a silently lost repaint, and a flood of them starves
+    the daemon loop for every OTHER session (the wedge this cap exists to
+    stop at the source). The tiers drop in order of recoverability:
+
+    1. Subagent text previews (prompt/result/error) shrink to minimal bounds.
+       The full text stays reachable through the child transcript's lazy
+       /history fetch, so nothing is lost that a tap cannot recover.
+    2. Transcript rows lose their ``details`` expand payload (args/output/
+       diff). The collapsed row still renders; expanding an old row is the
+       one gesture that can re-fetch from /history.
+    3. The transcript tail halves toward ``FRAME_CAP_TRANSCRIPT_FLOOR``,
+       keeping the pinned opening user message — the same scroll contract the
+       80-row cap already establishes, just tighter.
+
+    The projection itself is never mutated (the fold owns it and republishes
+    it; the daemon retains it): degradation happens on the serialized dict.
+    """
+    data = projection.to_json()
+    if _frame_bytes(data) <= cap_bytes:
+        return data, False
+
+    # Tier 1: subagent text previews down to minimal bounds.
+    for row in data.get("subagents") or []:
+        row["prompt"] = _compact(str(row.get("prompt") or ""), FRAME_CAP_PROMPT_CHARS)
+        row["result_text"] = _compact_multiline(
+            str(row.get("result_text") or ""), FRAME_CAP_RESULT_CHARS
+        )
+        row["error_text"] = _compact_multiline(
+            str(row.get("error_text") or ""), FRAME_CAP_ERROR_CHARS
+        )
+        # A hydrated child transcript on the wire predates the lazy /history
+        # fetch; if one is still embedded it is pure frame weight.
+        row["transcript"] = []
+    if _frame_bytes(data) <= cap_bytes:
+        return data, True
+
+    # Tier 2: drop the expand payload of every transcript row.
+    for entry in data.get("transcript") or []:
+        entry["details"] = {}
+    if _frame_bytes(data) <= cap_bytes:
+        return data, True
+
+    # Tier 3: halve the transcript tail toward the floor, pinning the opening
+    # user message exactly like ``ProjectionFold._cap_tail`` does.
+    entries = data.get("transcript") or []
+    limit = max(FRAME_CAP_TRANSCRIPT_FLOOR, PROJECTION_TRANSCRIPT_LIMIT // 2)
+    while len(entries) > FRAME_CAP_TRANSCRIPT_FLOOR:
+        first_user = next((e for e in entries if e.get("kind") == "user"), None)
+        entries = entries[-limit:]
+        if first_user is not None and first_user not in entries:
+            entries = [first_user, *entries[1:]]
+        data["transcript"] = entries
+        if _frame_bytes(data) <= cap_bytes:
+            return data, True
+        limit = max(FRAME_CAP_TRANSCRIPT_FLOOR, limit // 2)
+    return data, True
 
 
 def fold_messages_to_entries(history: list[AgentMessage]) -> list[TranscriptEntry]:

@@ -712,6 +712,28 @@ def _transcript_entry_json(entry: Any) -> dict[str, Any]:
     return entry.to_json()
 
 
+def _projection_frame(projection: SessionProjection) -> dict[str, Any]:
+    """The daemon's serialization boundary: one capped frame dict.
+
+    Both wire paths must agree on size. The registrant caps before broadcast
+    (see ``Registrant._projection_payload``); the daemon serves the SAME
+    projection shape over SSE and republishes durable rebuilds, so it caps at
+    every serialization site too — a durable fold of a long session can embed
+    80 rows x 8 KB tool outputs, which no socket or phone renderer wants
+    whole. Degradation is tiered and lossless for the collapsed view (see
+    ``cap_projection_frame``); the retained projection object is untouched.
+    """
+    from local_operator.mobile.projection import cap_projection_frame
+
+    data, degraded = cap_projection_frame(projection)
+    if degraded:
+        logger.debug(
+            "mobile daemon: capped oversized projection frame for session %s",
+            projection.session_id,
+        )
+    return data
+
+
 def _history_page(
     session_id: str, before: str | None, limit: int, *, durable_only: bool = True
 ) -> tuple[list[Any], bool]:
@@ -817,7 +839,7 @@ def _fan_out(entry: SessionEntry, daemon: "MobileDaemon | None" = None) -> None:
     """Push a repaint to durable session viewers, never one pid generation."""
     if entry.projection is None:
         return
-    frame = entry.projection.to_json()
+    frame = _projection_frame(entry.projection)
     queues = (
         daemon.table.session_subscribers.get(entry.record.session_id, set())
         if daemon is not None
@@ -1131,12 +1153,15 @@ class MobileDaemon:
                         projection, record=record, terminal=True
                     )
                     for queue in self.table.session_subscribers.get(record.session_id, set()):
+                        # Serialize ONCE per repaint: the QueueFull retry below
+                        # re-puts the same frame, and capping is a json.dumps.
+                        frame = _projection_frame(projection)
                         try:
-                            queue.put_nowait(projection.to_json())
+                            queue.put_nowait(frame)
                         except asyncio.QueueFull:
                             try:
                                 queue.get_nowait()
-                                queue.put_nowait(projection.to_json())
+                                queue.put_nowait(frame)
                             except asyncio.QueueEmpty:
                                 pass
                 self._prune_projection_generation(record.session_id)
@@ -1166,12 +1191,13 @@ class MobileDaemon:
                             projection, record=entry.record, terminal=True
                         )
                         for queue in self.table.session_subscribers.get(session_id, set()):
+                            frame = _projection_frame(projection)
                             try:
-                                queue.put_nowait(projection.to_json())
+                                queue.put_nowait(frame)
                             except asyncio.QueueFull:
                                 try:
                                     queue.get_nowait()
-                                    queue.put_nowait(projection.to_json())
+                                    queue.put_nowait(frame)
                                 except asyncio.QueueEmpty:
                                     pass
                     self._prune_projection_generation(session_id)
@@ -1195,7 +1221,7 @@ class MobileDaemon:
                         projection = self.capture_subagent_details(projection, terminal=True)
                         for queue in self.table.session_subscribers.get(session_id, set()):
                             try:
-                                queue.put_nowait(projection.to_json())
+                                queue.put_nowait(_projection_frame(projection))
                             except asyncio.QueueFull:
                                 pass
                     self.table.notify_list_changed()
@@ -1487,7 +1513,7 @@ def build_app(daemon: MobileDaemon):
                             # keepalive carries the view.
                             projection = None
                 if projection is not None:
-                    yield _sse("projection", projection.to_json())
+                    yield _sse("projection", _projection_frame(projection))
                 while True:
                     try:
                         frame = await asyncio.wait_for(queue.get(), timeout=SSE_KEEPALIVE_S)
@@ -1748,7 +1774,7 @@ def build_app(daemon: MobileDaemon):
                         projection = None
                     if projection is not None:
                         for target in daemon.table.session_subscribers.get(session_id, set()):
-                            target.put_nowait(projection.to_json())
+                            target.put_nowait(_projection_frame(projection))
                 try:
                     client, detail = await continue_command(config_dir(), command)
                 except BaseException:
