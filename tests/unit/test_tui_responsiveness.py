@@ -40,22 +40,67 @@ TICK_S = 0.005
 
 
 class StallRecorder:
-    """Records event-loop gaps above ``stall_ms`` while it runs."""
+    """Records loop-thread CPU bursts AND wall-clock gaps while it runs.
+
+    Two clocks, because neither alone can do this job:
+
+    * ``time.thread_time`` (CPU) is per-thread and excludes time asleep or
+      waiting on the GIL, so a sample is large only when the loop thread
+      genuinely ran without yielding — never merely because the machine was
+      busy. This is the same statistic ``tests/unit/tools/
+      test_loop_liveness.py`` adopted for ``LoopCpuProbe``. It is the clock
+      that sees the reconnect regression (a synchronous 60 MB transcript
+      parse, ~90-130 ms of CPU on the loop) and is blind to OS scheduler
+      starvation (the flake that produced 525 ms and 668 ms wall gaps on
+      loaded CI runners whose sibling runs passed).
+    * ``time.perf_counter`` (wall) sees a pure blocking sleep on the loop,
+      which the CPU clock cannot (a 300 ms ``time.sleep`` records 0.1 ms of
+      CPU). Its ceiling is set high enough that scheduler noise of hundreds
+      of milliseconds cannot trip it, and low enough that a multi-second
+      block (a 2 s scan, a 5 s pricing call) still does.
+
+    Measured on the real shapes with this probe:
+
+      ========================  =========  =========
+      scenario                  wall gap   CPU gap
+      ========================  =========  =========
+      60 MB sync parse on loop   96 ms      96 ms
+      pure sleep block           306 ms     0.1 ms
+      loop idle, OS-starved      525-668 ms 0.0 ms
+      ========================  =========  =========
+
+    Call-site ceilings are site-appropriate, not global. The reconnect and
+    connect tests use the strict 50 ms CPU bar (healthy sample 0 ms,
+    regression 116 ms). Sites with legitimate loop CPU — the title-scan
+    test records a healthy 36-38 ms — use a 200 ms CPU bar, because the
+    same work measured 2.4× slower on ubuntu-latest in
+    ``test_launch_subagent.py`` (393-492 ms on a dev box, 1056-1156 ms on
+    CI), and a 50 ms bar would flake a green tree. The wall ceiling is
+    2000 ms everywhere: 3× the worst observed scheduler-noise gap, and
+    still well below the multi-second regressions.
+    """
 
     def __init__(self, stall_ms: float = STALL_MS) -> None:
         self.stall_ms = stall_ms
-        self.stalls: list[float] = []
+        self.cpu_stalls: list[float] = []
+        self.wall_stalls: list[float] = []
         self._task: asyncio.Task[None] | None = None
 
     async def _probe(self) -> None:
-        last = time.perf_counter()
+        last_cpu = time.thread_time()
+        last_wall = time.perf_counter()
         while True:
             await asyncio.sleep(TICK_S)
-            now = time.perf_counter()
-            gap_ms = (now - last) * 1000.0
-            if gap_ms >= self.stall_ms:
-                self.stalls.append(gap_ms)
-            last = now
+            now_cpu = time.thread_time()
+            now_wall = time.perf_counter()
+            cpu_gap_ms = (now_cpu - last_cpu) * 1000.0
+            wall_gap_ms = (now_wall - last_wall) * 1000.0
+            if cpu_gap_ms >= self.stall_ms:
+                self.cpu_stalls.append(cpu_gap_ms)
+            if wall_gap_ms >= self.stall_ms:
+                self.wall_stalls.append(wall_gap_ms)
+            last_cpu = now_cpu
+            last_wall = now_wall
 
     async def start(self) -> None:
         self._task = asyncio.create_task(self._probe())
@@ -73,32 +118,49 @@ class StallRecorder:
             pass
         self._task = None
 
-    def assert_no_stall(self, ceiling_ms: float = 50.0) -> None:
-        worst = max(self.stalls) if self.stalls else 0.0
-        assert worst < ceiling_ms, (
-            f"event loop stalled {worst:.0f} ms (ceiling {ceiling_ms:.0f} ms); "
-            f"all stalls: {[round(s, 1) for s in self.stalls]}"
+    def assert_no_stall(
+        self, cpu_ceiling_ms: float = 50.0, wall_ceiling_ms: float = 2000.0
+    ) -> None:
+        """Strict bar: 50 ms of loop-thread CPU, 2 s of wall as catastrophe.
+
+        Used by the reconnect and connect tests, whose healthy CPU sample is
+        0 ms and whose regression (a synchronous transcript parse) is
+        90-130 ms. The wall ceiling is a backstop for a pure blocking sleep
+        the CPU clock cannot see; it is 3× the worst scheduler-noise gap
+        observed on CI (668 ms) so that noise cannot trip it.
+        """
+        worst_cpu = max(self.cpu_stalls) if self.cpu_stalls else 0.0
+        worst_wall = max(self.wall_stalls) if self.wall_stalls else 0.0
+        assert worst_cpu < cpu_ceiling_ms, (
+            f"event loop consumed {worst_cpu:.0f} ms of CPU without yielding "
+            f"(ceiling {cpu_ceiling_ms:.0f} ms); "
+            f"all CPU stalls: {[round(s, 1) for s in self.cpu_stalls]}"
+        )
+        assert worst_wall < wall_ceiling_ms, (
+            f"event loop blocked for {worst_wall:.0f} ms of wall time "
+            f"(ceiling {wall_ceiling_ms:.0f} ms); "
+            f"all wall stalls: {[round(s, 1) for s in self.wall_stalls]}"
         )
 
-    def assert_no_stall_loaded(self, ceiling_ms: float = 500.0) -> None:
-        """The same assertion with a ceiling tolerant of a LOADED runner.
+    def assert_no_stall_loaded(
+        self, cpu_ceiling_ms: float = 200.0, wall_ceiling_ms: float = 2000.0
+    ) -> None:
+        """Loaded bar: 200 ms of loop-thread CPU, same 2 s wall backstop.
 
-        Under ``-n auto`` the worker processes contend for the same cores,
-        and the 5 ms probe itself gets scheduled late — a 50 ms gap can be
-        scheduler noise rather than loop work. On CI under coverage the
-        contention is worse: a Textual layout pass for a full screen of
-        mounted blocks measured 549 ms on a 4-vCPU runner with three
-        sibling workers (observed on a run whose identical sibling run
-        passed), so the ceiling sits above the worst observed contention
-        and far below the regressions it guards. The unit tests that share
-        a machine with the whole suite use this ceiling; the number that
-        matters (50 ms, the design's bar) is asserted by the end-to-end
-        boot test, which measures the real path the user sees. A regression
-        that reintroduces a 2 s scan stall or a 10 s pricing block still
-        blows this loaded ceiling, so the guard is weakened in sensitivity,
-        not in kind.
+        The title-scan test records a healthy 36-38 ms of loop CPU for a
+        120-session scan. The same class of CPU-bound work measured 2.4×
+        slower on ubuntu-latest than on a dev box
+        (``test_launch_subagent.py``, 393-492 ms vs 1056-1156 ms), so a
+        50 ms bar would flake a green tree on a slow CI core (~90 ms).
+        200 ms is 2× that projected CI cost and still well below the
+        multi-second regressions (a 2 s scan, a 5 s pricing block).
+
+        The wall ceiling is the same catastrophic backstop as
+        :meth:`assert_no_stall`: a pure blocking sleep is invisible to the
+        CPU clock, and 2000 ms sits 3× above the worst observed scheduler
+        noise so that noise cannot trip it.
         """
-        self.assert_no_stall(ceiling_ms=ceiling_ms)
+        self.assert_no_stall(cpu_ceiling_ms=cpu_ceiling_ms, wall_ceiling_ms=wall_ceiling_ms)
 
 
 # --- A2: the title backfill answers a no-title directory once ----------------
@@ -344,7 +406,11 @@ async def test_remote_connect_replay_does_not_stall_the_loop(tmp_path: Path) -> 
             takeover_factory=_never_take_over,
         )
         await recorder.stop()
-        recorder.assert_no_stall_loaded()
+        # Strict 50 ms CPU bar: healthy sample is 0 ms, the regression this
+        # test exists to catch (a synchronous 60 MB parse on the loop) is
+        # 90-130 ms. The 2 s wall backstop covers a pure blocking sleep the
+        # CPU clock cannot see.
+        recorder.assert_no_stall()
         assert len(remote._history) == 400  # the replay genuinely happened
     finally:
         if remote is not None:
@@ -435,7 +501,10 @@ async def test_reconnect_gap_replay_does_not_stall_the_loop(tmp_path: Path) -> N
             assert remote._recovering is False
             deltas = [event for event in events if event.type == "history_delta"]
             assert len(deltas) == 1  # the gap genuinely replayed
-            recorder.assert_no_stall_loaded()
+            # Strict 50 ms CPU bar: same rationale as the connect-path twin
+            # above. This is the test that originally flaked at 525/668 ms of
+            # wall-clock scheduler noise against a 500 ms ceiling.
+            recorder.assert_no_stall()
         finally:
             replacement.close()
     finally:
@@ -955,12 +1024,15 @@ async def test_dispose_during_deferred_wiring_cancels_cleanly(
 
 @pytest.mark.asyncio
 async def test_s1_boot_paints_and_stays_responsive_over_the_first_seconds() -> None:
-    """S1: over the app's first 3 s, no loop stall above the design's 50 ms
-    bar, and the model label lands on the band — the two facts the "startup
-    waits for MCP" report was made of. The boot session is a fake (the real
-    factory's loop work is covered by the unit tests above); what this test
-    measures is the app's own boot composition — paint, adoption, timers —
-    against the same bar the design set for the real boot."""
+    """S1: over the app's first 3 s, no loop stall above the loaded bar, and
+    the model label lands on the band — the two facts the "startup waits for
+    MCP" report was made of. The boot session is a fake (the real factory's
+    loop work is covered by the unit tests above); what this test measures
+    is the app's own boot composition — paint, adoption, timers. The loaded
+    bar (200 ms CPU / 2 s wall) is the right one here: boot has legitimate
+    loop CPU from Textual layout, and the reconnect/connect tests are the
+    ones that assert the strict 50 ms CPU bar against the parse regression.
+    """
     from local_operator.tui.app import OperatorApp
     from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
@@ -1051,9 +1123,10 @@ async def test_s2_send_to_agent_end_keeps_the_loop_under_the_bar() -> None:
             await asyncio.sleep(0.02)
         discovery.available_models = original  # type: ignore[assignment]
         configure.invalidate_model_info_cache()
-        # Loaded ceiling: under `-n auto` the probe contends with sibling
-        # workers; the strict 50 ms evidence lives in the wall-clock assert
-        # above and in bench/before.json vs after.json.
+        # Loaded bar (200 ms CPU / 2 s wall): this path has legitimate loop
+        # CPU from Textual layout, and the reconnect/connect tests are the
+        # ones that assert the strict 50 ms CPU bar against the parse
+        # regression. Bench numbers live in bench/before.json vs after.json.
         recorder.assert_no_stall_loaded()
 
 
