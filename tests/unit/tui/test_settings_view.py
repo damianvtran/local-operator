@@ -1795,7 +1795,11 @@ async def test_the_editor_says_what_moving_does() -> None:
         assert "enter saves \u00b7 esc cancels" in row, row
         assert "\u2191\u2193 saves" not in row, f"the row still promises that moving saves: {row}"
         # The footer says what the arrows do, on the key it applies to.
-        assert "cancels" in view.rendered_hints(), view.rendered_hints()
+        # `" move · cancels"` painted as `↑↓  move · cancels`, which does not
+        # parse (design round 1, D2). `" move cancel"` is the verb.
+        hints = view.rendered_hints()
+        assert "cancel" in hints, hints
+        assert "move · cancels" not in hints, hints
 
 
 @pytest.mark.asyncio
@@ -2099,18 +2103,19 @@ async def test_a_hint_whose_label_grows_is_painted_at_its_new_width(
 
         assert view.editing_key == "retry.maxRetries"
         logical = hint.rendered()
-        # The clause is `move \u00b7 cancels` since #440 rather than `move \u00b7 saves`
-        # \u2014 the rule reversed, the widths did not, and U21's finding is about
-        # what happens to a hint whose label GROWS, whatever it grows into.
-        assert "cancels" in logical, "the model no longer states the rule at all"
+        # The clause is `move cancel` (design round 1, D2) rather than the
+        # ungrammatical `move · cancels` #440 first painted. U21's finding is
+        # about what happens to a hint whose label GROWS, whatever it grows
+        # into — `" cancel"` is 7 cells on top of `" move"`.
+        assert "cancel" in logical, "the model no longer states the rule at all"
         assert hint.size.width >= cell_len(logical), (
             f"the move hint is painted {hint.size.width} cells wide for a "
             f"{cell_len(logical)}-cell label {logical!r}, so the clause naming what an "
             f"arrow key does to this value is clipped off the frame"
         )
         frame = _painted_frame(app)
-        assert "cancels" in frame, (
-            "the painted frame does not contain `cancels` anywhere, so nothing on screen "
+        assert "cancel" in frame, (
+            "the painted frame does not contain `cancel` anywhere, so nothing on screen "
             f"tells the user that moving off this row will discard it:\n{frame}"
         )
 
@@ -3329,6 +3334,65 @@ async def test_space_still_toggles_a_bool_in_place(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_space_on_an_open_bool_owner_collapses_and_writes_nothing(tmp_path: Path) -> None:
+    """Review round 1, C3. Spec §2.5 keeps `space` as the RESTING-row
+    accelerator. After `enter` on a bool the cursor sits on a choice; `up`
+    lands back on the owner, which is still a BOOL setting row, so `space`
+    used to write immediately AND leave `_expanded` set — the `●` stayed on
+    the value that was no longer stored.
+
+    Collapse (same cancel as re-pressing `enter` on the owner) rather than
+    write-and-leave-open. The owner is neither resting nor a choice."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 32)) as pilot:
+        await pilot.pause()
+        view = await _open_page(pilot, app)
+        _select(view, "retry.enabled")
+        await pilot.press("enter")
+        await pilot.pause()
+        assert view.expanded_key == "retry.enabled"
+        await pilot.press("up")
+        await pilot.pause()
+        assert view.selected_key == "retry.enabled"
+        before = _config_bytes(tmp_path)
+        await pilot.press("space")
+        await pilot.pause()
+        assert _config_bytes(tmp_path) == before, "`space` on the open owner wrote"
+        assert view.expanded_key is None, "`space` on the open owner left the group open"
+
+
+@pytest.mark.asyncio
+async def test_the_default_clause_is_not_the_dimmest_ink_on_the_page(tmp_path: Path) -> None:
+    """Design round 1, D3. `· default: 10` was `#4a4539` on `#14110c` — 1.97:1,
+    the faint token used for help-text noise. It is the one new fact the `r`
+    gating adds, so it takes the existing `dim` rung (`#837c6d`, already the
+    key-path ink) rather than inventing a colour."""
+    from local_operator.tui import theme as theme_mod
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(140, 40)) as pilot:
+        await pilot.pause()
+        view = await _open_page(pilot, app)
+        _select(view, "retry.maxRetries")
+        await pilot.press("enter")
+        for _ in range(len(view._buffer)):
+            await pilot.press("backspace")
+        await pilot.press("4")
+        await pilot.press("enter")
+        await pilot.pause()
+        dim = theme_mod.semantic_color("dim").lower()
+        faint = theme_mod.semantic_color("faint").lower()
+        clause_inks = [
+            (fragment, style.color.name.lower() if style.color is not None else "")
+            for fragment, style in view.detail_spans()
+            if "default:" in fragment
+        ]
+        assert clause_inks, "the default clause was not painted"
+        for fragment, ink in clause_inks:
+            assert ink == dim, f"{fragment!r} is {ink}, not dim {dim} (faint is {faint})"
+
+
+@pytest.mark.asyncio
 async def test_activation_reveals_an_offscreen_cursor_before_acting(tmp_path: Path) -> None:
     """Issue #440's second comment, and the hazard #447 made reachable.
 
@@ -3473,22 +3537,33 @@ async def test_previewing_a_theme_writes_nothing_and_esc_restores_it(tmp_path: P
 
         await pilot.press("enter")
         await pilot.pause()
-        # Browse until the highlighted choice is NOT the stored theme.
-        for _ in range(3):
+        # Browse onto Monokai specifically. `light` shares enough of dark's
+        # ramp that a cancelled preview can look restored in the SVG even
+        # while the page is still wearing the wrong theme; Monokai's lime
+        # cursor (`#a6e22e`) and cream headings (`#f8f8f2`) do not. The
+        # committed `after/preview-*.reverted.svg` stills WERE that leak
+        # (design round 1, D1).
+        for _ in range(40):
             await pilot.press("down")
             await pilot.pause()
-            if theme_mod.current_theme() != opened_on:
+            if theme_mod.current_theme() == "monokai":
                 break
-        assert theme_mod.current_theme() != opened_on, "browsing themes previewed nothing"
+        assert theme_mod.current_theme() == "monokai", "did not land on a Monokai preview"
         assert _config_bytes(tmp_path) is None, "a preview wrote config.yml"
 
         await pilot.press("escape")
         await pilot.pause()
         assert theme_mod.current_theme() == opened_on, "`esc` left the preview applied"
         assert _config_bytes(tmp_path) is None
+        svg = app.export_screenshot()
+        assert "#a6e22e" not in svg, "cancelled preview left Monokai lime on screen"
+        assert "#f8f8f2" not in svg, "cancelled preview left Monokai headings on screen"
 
 
-@pytest.mark.parametrize("exit_route", ("move-off", "leave-page", "click-elsewhere"))
+@pytest.mark.parametrize(
+    "exit_route",
+    ("move-off", "leave-page", "click-elsewhere", "end", "home", "pageup", "pagedown"),
+)
 @pytest.mark.asyncio
 async def test_a_theme_preview_reverts_on_every_exit_route(tmp_path: Path, exit_route: str) -> None:
     """The risk table's High row: "preview leaves the app in a theme the file
@@ -3496,6 +3571,14 @@ async def test_a_theme_preview_reverts_on_every_exit_route(tmp_path: Path, exit_
     `test_previewing_a_theme_writes_nothing_and_esc_restores_it` covers — has
     to put the captured theme back, so each route is driven separately rather
     than trusting one of them to stand for the rest.
+
+    `home` / `end` / `pageup` / `pagedown` are in spec §2.3's CHOOSING table as
+    leave-group routes. The 96-case anchor test presses them from INSIDE the
+    group (one `down` off the stored choice), so `_settle_expansion` never has
+    a destination outside it to notice — green against a wrong surface, the
+    #387 class (review round 1, C1 / U1). This test opens a previewed
+    expansion, then jumps, and asserts BOTH `current_theme()` restored AND
+    `_expanded is None`. Bytes-only stays green.
 
     The WHEEL is deliberately not among them. Under the scroll model (#447) it
     moves the viewport and leaves the cursor on its choice, so it is not an
@@ -3525,6 +3608,8 @@ async def test_a_theme_preview_reverts_on_every_exit_route(tmp_path: Path, exit_
             # (a session swap, a `/clear`) and the one where a leaked preview
             # would be least recoverable.
             app._close_settings_view()
+        elif exit_route in ("end", "home", "pageup", "pagedown"):
+            await pilot.press(exit_route)
         else:
             # A click on a row OUTSIDE the group, which leaves it exactly as an
             # arrow past its end does. A DIFFERENT setting, not the owner: the
@@ -3545,6 +3630,11 @@ async def test_a_theme_preview_reverts_on_every_exit_route(tmp_path: Path, exit_
         assert (
             theme_mod.current_theme() == opened_on
         ), f"leaving the expansion by {exit_route} kept the previewed theme"
+        if exit_route != "leave-page":
+            assert view.expanded_key is None, (
+                f"leaving the expansion by {exit_route} left CHOOSING open "
+                f"(expanded={view.expanded_key!r}); esc then teleports back"
+            )
         assert _config_bytes(tmp_path) is None
 
 
@@ -3695,6 +3785,18 @@ async def test_the_footer_teaches_the_state_it_is_in(tmp_path: Path) -> None:
         painted = view.rendered_hints()
         assert "saves" not in painted, "the footer still promises that moving saves"
         assert "cancel" in painted, f"the editing footer does not name the cancel: {painted!r}"
+        # Asserted on the PAINTED frame, never `rendered_hints()` alone — D2's
+        # `move · cancels` and `esc back to conversation` both reached the
+        # model string. `r default` must not be advertised: printables belong
+        # to the buffer (U5).
+        frame = _painted_frame(app)
+        assert "move · cancels" not in frame, f"open-editor footer is ungrammatical: {frame}"
+        assert (
+            "back to conversation" not in frame
+        ), f"`esc` is advertised as leaving the page while it cancels the editor: {frame}"
+        assert (
+            "r  default" not in frame and "r default" not in frame
+        ), f"`r` is advertised during an open editor, where it types into the buffer: {frame}"
 
         await pilot.press("escape")
         _select(view, "retry.enabled")
@@ -3774,12 +3876,13 @@ async def test_the_detail_clause_sheds_whole_rather_than_clipping(
         await pilot.press("enter")
         await pilot.pause()
         detail = view.render_lines_for_test()[-1]
-        clause = "nothing is saved until you press enter"
-        # Either the clause is there whole, or it is absent — never a prefix of
-        # it, which is what a clip would leave behind.
-        if "nothing is saved" in detail:
-            assert clause in detail, f"the choosing clause was clipped mid-sentence: {detail!r}"
-            assert cell_len(detail) <= view._detail_width(), (cell_len(detail), detail)
+        clause = "not saved until enter"
+        # Present WHOLE at every width this page measures (80×24, 100×30,
+        # 140×40). The long form only fitted at 160 columns (review round 1,
+        # U2); a clip of either form is still a rendering fault.
+        assert clause in detail, f"the choosing clause is missing at {size}: {detail!r}"
+        assert "nothing is saved until you press enter" not in detail or clause in detail
+        assert cell_len(detail) <= view._detail_width(), (cell_len(detail), detail)
         await pilot.press("escape")
         await pilot.pause()
 
@@ -3792,6 +3895,7 @@ async def test_the_detail_clause_sheds_whole_rather_than_clipping(
         await pilot.press("enter")
         await pilot.pause()
         detail = view.render_lines_for_test()[-1]
-        if "default:" in detail:
-            assert "default: 10" in detail, f"the default clause was clipped: {detail!r}"
-            assert cell_len(detail) <= view._detail_width(), (cell_len(detail), detail)
+        assert (
+            "default: 10" in detail
+        ), f"`r` is offered without naming what it restores at {size}: {detail!r}"
+        assert cell_len(detail) <= view._detail_width(), (cell_len(detail), detail)

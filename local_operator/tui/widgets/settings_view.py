@@ -525,13 +525,7 @@ class SettingsView(Vertical):
         # AFTER the cursor has landed: whether it left an open choice group is
         # a question only the destination answers, and the same arrow browses
         # within the group before it eventually leaves (invariant 8).
-        self._settle_expansion()
-        # A previewing setting paints the highlighted choice on the running app
-        # as the cursor crosses it. Storing nothing — that is the whole point —
-        # and reverted by `_settle_expansion` above on the move that leaves.
-        self._preview_choice()
-        self._repaint()
-        self._scroll_to_selection()
+        self._land()
 
     def _position_of(self, identity: "tuple[str, str, int] | None", indices: list[int]) -> int:
         """Where the row with ``identity`` sits in the REBUILT selectable list.
@@ -590,8 +584,7 @@ class SettingsView(Vertical):
                 indices = self._selectable()
                 if indices:
                     self._selected = indices[-1]
-                    self._repaint()
-                    self._scroll_to_selection()
+                    self._land()
             return
         wanted = self._rows[headers[target]].section
         if not self._settle_row():
@@ -610,14 +603,36 @@ class SettingsView(Vertical):
             return
         if not self._settle_row():
             return
-        # Re-derived after the commit for the reason `action_move` records: the
-        # ends of the list move when a commit inserts or drops rows.
+        # Re-derived after the cursor has landed, for the reason `action_move`
+        # records: closing an expansion DROPS its choice rows, so the ends of
+        # the list move even though movement itself no longer writes.
         indices = self._selectable()
         if not indices:
             return
         self._selected = indices[-1] if to_end else indices[0]
+        self._land()
+
+    def _land(self, *, scroll: bool = True) -> None:
+        """Settle an expansion AFTER the cursor has landed, then paint.
+
+        The counterpart every mover that can leave a choice group has to call.
+        `_settle_row` runs BEFORE the cursor moves so an arrow can still browse
+        inside an open group; whether the destination is still inside that group
+        is a question only the landing answers. `action_move` and `on_click`
+        already did this; `action_jump` / `action_section` did not, so `end`
+        from a previewed theme left `_expanded` set, the live theme unrestored,
+        and `esc` teleporting back into the group instead of leaving (review
+        round 1, C1 / U1).
+
+        ``scroll`` is False for a click: a click names a row the user is already
+        looking at, and recentring under the pointer is the jump `on_click`
+        documents as not belonging here.
+        """
+        self._settle_expansion()
+        self._preview_choice()
         self._repaint()
-        self._scroll_to_selection()
+        if scroll:
+            self._scroll_to_selection()
 
     def _select_after(self, header_index: int) -> None:
         """Put the cursor on the first selectable row at or after a header."""
@@ -635,8 +650,7 @@ class SettingsView(Vertical):
             if self._rows[index].selectable:
                 self._selected = index
                 break
-        self._repaint()
-        self._scroll_to_selection()
+        self._land()
 
     def action_pane(self, delta: int) -> None:
         """←/→ switch the read-only side pane between teams and agents.
@@ -713,24 +727,25 @@ class SettingsView(Vertical):
 
         The wheel moves the viewport and leaves the cursor behind
         (:meth:`_scroll_rows`), so the cursor can sit off screen while the user
-        reads somewhere else. This page writes IMMEDIATELY, with no undo beyond
-        ``r``, so without this the keys the footer advertises act on a row that
-        is nowhere on screen and the frame does not change: measured at 100x30,
-        ``enter`` on an off-screen ``retry.enabled`` wrote config.yml and left
-        all 14 painted rows byte-identical (UX round 1, U1). That is the same
-        "wrote a setting they never chose" hazard the class docstring records
-        for the focus slip (UX round 3, U19), reopened from a new direction by
-        the scroll model.
+        reads somewhere else. Under #440 a first ``enter`` on a resting row
+        opens rather than writes, but the SECOND ``enter`` (or ``space`` on a
+        bool, or ``r``) still mutates config, and without this those keys act
+        on a row that is nowhere on screen: measured at 100x30, ``enter`` on an
+        off-screen ``retry.enabled`` used to write config.yml and leave all 14
+        painted rows byte-identical (UX round 1, U1). That is the same "acted
+        on a setting they never chose" hazard the class docstring records for
+        the focus slip (UX round 3, U19), reopened from a new direction by the
+        scroll model.
 
         REVEAL, NOT INTERLOCK. The press still does what it says on the first
-        try; it just scrolls the target into view first, so the write is one the
-        user watches happen. An earlier revision made the first press re-centre
-        and only the second act — that is a second, competing rule on the
-        activate/commit paths the edit-mode redesign (#440) rewrites, and it
+        try; it just scrolls the target into view first, so the action is one
+        the user watches happen. An earlier revision made the first press
+        re-centre and only the second act — that is a second, competing rule on
+        the activate/commit paths the edit-mode redesign (#440) rewrites, and it
         broke 19 tests. This adds no rule to those paths at all: it moves the
         VIEWPORT, which is this page's own scroll concern.
 
-        Applied ``immediate``, so the scroll is ordered BEFORE the write rather
+        Applied ``immediate``, so the scroll is ordered BEFORE the action rather
         than landing in the same frame by luck — the assertion a regression test
         can actually make is "config bytes unchanged until the row is visible".
         A no-op when the cursor is already on screen, which is every press that
@@ -924,6 +939,17 @@ class SettingsView(Vertical):
         # both. Only a resting BOOL row reaches the toggle.
         if self._editing is not None:
             self.action_activate()
+            return
+        # While THIS bool's group is open the owner is neither resting nor a
+        # choice. Spec §2.5 keeps `space` as the resting-row accelerator;
+        # firing it here wrote the flipped value AND left `_expanded` set, so
+        # the `●` stayed on the value that was no longer stored (review round
+        # 1, C3). Collapse instead — same cancel as re-pressing `enter` on the
+        # owner — so the accelerator never fights the expansion it sits in.
+        if self._expanded == setting.key:
+            self._revert_preview()
+            self._expanded = None
+            self._repaint()
             return
         self._confirm_delete = None
         current = settings_io.read_setting(self._manager, setting)
@@ -1442,7 +1468,26 @@ class SettingsView(Vertical):
         if restore is None:
             return
         self._preview_before = None
-        self.post_message(SettingsPreview("tui.theme", restore))
+        # Apply NOW, not via a posted message that lands after `_repaint`.
+        # `_paint_list` / `_paint_chrome` bake `semantic_color()` into rich
+        # `Style` objects at build time, so a `_repaint` that runs while
+        # `current_theme()` is still the previewed ramp produces a frame whose
+        # headings and cursor wear Monokai while the model already says `dark`
+        # (design round 1, D1). The committed `after/preview-*.reverted.svg`
+        # stills WERE that frame.
+        #
+        # Calling `_apply_theme` directly (the same path
+        # `revert_preview_for_teardown` already uses) also settles the
+        # transcript: a cancel is a settle, so `preview=False` re-inks
+        # off-screen blocks rather than leaving them on the previewed ramp
+        # (review round 1, C4). A posted `SettingsPreview` cannot do this in
+        # time for the page's own paint.
+        app = getattr(self, "app", None)
+        apply_theme = getattr(app, "_apply_theme", None)
+        if apply_theme is not None:
+            apply_theme(restore)
+        else:
+            theme_mod.set_theme(restore)
 
     def _caret_left(self) -> None:
         self._caret = max(0, self._caret - 1)
@@ -1893,10 +1938,9 @@ class SettingsView(Vertical):
         self._selected = settled
         # A click can land outside an open choice group, which is a way of
         # leaving it exactly as an arrow past its end is — same rule, same
-        # cancel, same preview revert (invariant 8).
-        self._settle_expansion()
-        self._preview_choice()
-        self._repaint()
+        # cancel, same preview revert (invariant 8). Deliberately does NOT
+        # scroll: a click names a row the user is already looking at.
+        self._land(scroll=False)
 
     def on_mouse_move(self, event) -> None:  # type: ignore[no-untyped-def]
         index = self._index_at(event)
@@ -2451,22 +2495,40 @@ class SettingsView(Vertical):
         elif row.kind == "hop_add":
             text.append("enter, then type: <provider>/<model>", style=faint)
         elif row.setting is not None:
-            text.append(row.setting.help, style=faint)
-            # The clause SHEDS rather than being clipped (#440 §4.4). It is
-            # measured against the row it is painted into and dropped whole
-            # when it will not fit, because half of "nothing is saved until you
-            # press enter" is worse than none of it — a sentence cut mid-clause
-            # reads as a rendering fault, which is the same reasoning D4 used
-            # for the label budget and D8 for the delete ask. It sheds BEFORE
-            # the help, which answers "what is this" and is the more
-            # load-bearing half for a user who is lost.
+            # The clause SHEDS rather than being clipped (#440 §4.4). Half of
+            # a sentence cut mid-clause reads as a rendering fault (D4, D8).
+            # When BOTH help and the clause will not fit, the clause wins:
+            # CHOOSING's "not saved until enter" is the sentence the redesign
+            # exists to make true, and `default: N` is the payload of an
+            # unconfirmed `r` — help is already on the collapsed row, and at
+            # 80×24 / 100×30 the long form never survived next to it (review
+            # round 1, U2 / U3).
             clause = self._detail_clause(row)
+            key_suffix = f"   {row.setting.key}"
+            key_style = Style(color=theme_mod.semantic_color("dim"))
+            # `default: N` is the one new fact the gating adds; faint (#4a4539)
+            # was 1.97:1 on the page ground. `dim` is already the key-path
+            # ink (4.55:1) and does not invent a colour (design round 1, D3).
+            clause_style = (
+                Style(color=theme_mod.semantic_color("dim"))
+                if clause.startswith("default:")
+                else faint
+            )
+            width = self._detail_width()
+            help_text = row.setting.help
             if clause:
-                key_room = cell_len(row.setting.key) + 3
-                used = cell_len(text.plain) + key_room
-                if used + cell_len(f" · {clause}") <= self._detail_width():
-                    text.append(f" · {clause}", style=faint)
-            text.append(f"   {row.setting.key}", style=Style(color=theme_mod.semantic_color("dim")))
+                both = cell_len(help_text) + cell_len(f" · {clause}") + cell_len(key_suffix)
+                clause_only = cell_len(clause) + cell_len(key_suffix)
+                if both <= width:
+                    text.append(help_text, style=faint)
+                    text.append(f" · {clause}", style=clause_style)
+                elif clause_only <= width:
+                    text.append(clause, style=clause_style)
+                else:
+                    text.append(help_text, style=faint)
+            else:
+                text.append(help_text, style=faint)
+            text.append(key_suffix, style=key_style)
         self._detail_text = text
         self._detail.update(text)
 
@@ -2491,7 +2553,11 @@ class SettingsView(Vertical):
         if setting is None:
             return ""
         if self._expanded == setting.key:
-            return "nothing is saved until you press enter"
+            # Short enough to survive 80×24 and 100×30 next to the key path.
+            # The long form ("nothing is saved until you press enter") only
+            # fitted at 160 columns, which is not a size this page measures
+            # (review round 1, U2).
+            return "not saved until enter"
         if not settings_io.is_default(self._manager, setting):
             return f"default: {_render_value(setting.default)}"
         return ""
@@ -3020,9 +3086,14 @@ class SettingsView(Vertical):
         question from whether the value matches, and they diverge for a value
         stored explicitly at the shipped default.
         """
-        if self._editing is not None or self._confirm_delete is not None:
-            # An in-progress state owns the footer's wording, exactly as
-            # `_current_is_readonly` documents.
+        if self._editing is not None:
+            # Printables belong to the buffer. Advertising `r default` here is
+            # the #425 anti-pattern: the hint is not inert, it types `r` into
+            # the value (review round 1, U5).
+            return False
+        if self._confirm_delete is not None:
+            # An armed delete owns the footer's wording, exactly as
+            # `_current_is_readonly` documents. `r` still disarms the ask.
             return True
         row = self._current()
         if row is None:
@@ -3078,32 +3149,31 @@ class SettingsView(Vertical):
         # meaning while the detail row said `esc cancels`, so both were on
         # screen at once disagreeing about one key (design round 2, D7).
         #
-        # While an editor is open, MOVING SAVES. The page committed on move but
-        # taught only `enter saves · esc cancels`, and a two-exit contract with
-        # `esc` beside it implies that anything else is neither — which is how a
-        # user arrows away from a value expecting to abandon it and stores it
-        # instead (UX round 2, U14). Naming it on the move hint puts the rule on
-        # the key it applies to.
+        # While an editor is open, MOVING CANCELS. U14 taught the old
+        # commit-on-move rule on this hint; #440 inverted the rule and the
+        # clause has to stay grammatical. `" move · cancels"` painted as
+        # `↑↓  move · cancels`, which does not parse, and `esc` was still
+        # labelled `back to conversation` even though the first press closes
+        # the editor and stays on the page (design round 1, D2 / UX round 1,
+        # U4). `" move cancel"` reads as the key's verb; `esc cancel` matches
+        # the row contract.
         # A third state joins them with #440: while CHOOSING, `esc` closes the
         # expansion rather than leaving the page (the Esc ladder already worked
         # this way; the footer was the half that did not say so), and `enter`
         # picks rather than opens. Advertising `back to conversation` on a key
         # that cancels is the same footer-vs-detail disagreement D7 found.
-        if self._confirm_delete is not None or self._expanded is not None:
+        if (
+            self._confirm_delete is not None
+            or self._expanded is not None
+            or self._editing is not None
+        ):
             exit_label = "cancel"
         else:
             exit_label = "back to conversation"
         if self._expanded is not None:
             enter = (self._enter_hint, " choose", True)
         if self._editing is not None:
-            # U14's `· saves` clause, INVERTED rather than removed. Moving off
-            # an open editor now cancels (see `_settle_row`), and the reason
-            # U14 put the rule on this hint in the first place still holds: a
-            # contract naming exactly two exits implies everything else is
-            # neither, so the key that is neither has to say what it is. The
-            # clause stays the same width class it was, which is what keeps
-            # U21's shedding measurement valid.
-            move = (self._move_hint, " move · cancels", False)
+            move = (self._move_hint, " move cancel", False)
             enter = (self._enter_hint, " save", True)
 
         def rung(
@@ -3144,7 +3214,11 @@ class SettingsView(Vertical):
         # shedding it back to `back` would restore the very ambiguity D7 is
         # about.
         narrow = (
-            "cancel" if self._confirm_delete is not None or self._expanded is not None else "back"
+            "cancel"
+            if self._confirm_delete is not None
+            or self._expanded is not None
+            or self._editing is not None
+            else "back"
         )
         # The narrower rungs are DERIVED from what this row actually offers,
         # dropping one hint at a time from the right, rather than restating the

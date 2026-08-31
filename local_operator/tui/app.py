@@ -10849,9 +10849,10 @@ class OperatorApp(App[None]):
         ``preview=True`` bounds the repaint to the rows actually on screen,
         which is the same cost control the `/theme` argument-highlight browse
         uses: this runs on every arrow key, and a full sweep is linear in
-        transcript length. The full sweep arrives with the settle — every
-        preview ends in a commit or a revert, and the revert also comes
-        through here.
+        transcript length. A revert does NOT come through here: `_revert_preview`
+        calls `_apply_theme` directly with the default full sweep, because a
+        cancel is a settle (review round 1, C4) and because the page's own
+        `_repaint` has to run AFTER `current_theme()` is restored (D1).
         """
         message.stop()
         try:
