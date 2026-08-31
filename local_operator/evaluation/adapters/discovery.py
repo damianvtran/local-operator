@@ -299,25 +299,69 @@ def verify_distribution(selector: AdapterSelector) -> importlib.metadata.Distrib
     return distribution
 
 
-def _module_stem(filename: str) -> str:
-    """Strip an importable suffix so a file name yields its module name.
-
-    Extension suffixes are checked longest-first because ``.abi3.so`` and
-    ``.so`` overlap, and the shorter one would otherwise leave ``.abi3``
-    attached and silently fail the identifier test. Handling extensions here is
-    what makes an owned root independent of whether the module ships as source
-    or as a compiled artifact.
-    """
-
-    suffixes = sorted(
-        [*importlib.machinery.SOURCE_SUFFIXES, *importlib.machinery.EXTENSION_SUFFIXES],
+# Longest-first because ``.abi3.so`` and ``.so`` overlap: the shorter match
+# would leave ``.abi3`` attached and silently fail the identifier test. Computed
+# once here rather than per call, since the interpreter's suffixes are fixed for
+# the life of the process.
+_IMPORTABLE_SUFFIXES: tuple[str, ...] = tuple(
+    sorted(
+        {*importlib.machinery.SOURCE_SUFFIXES, *importlib.machinery.EXTENSION_SUFFIXES},
         key=len,
         reverse=True,
     )
-    for suffix in suffixes:
+)
+
+
+def _module_stem(filename: str) -> str:
+    """Strip an importable suffix so a file name yields its module name.
+
+    Handling extensions here is what makes an owned root independent of whether
+    the module ships as source or as a compiled artifact.
+    """
+
+    for suffix in _IMPORTABLE_SUFFIXES:
         if filename.endswith(suffix):
             return filename[: -len(suffix)]
     return filename
+
+
+def _resolve_module_artifact(
+    stem: str, rows: dict[str, list[str]], distribution: importlib.metadata.Distribution
+) -> tuple[str, bool] | None:
+    """Pick the one artifact to load for a module stem, or None when absent.
+
+    Returns the RECORD-relative path and whether it is a package init.
+
+    mypyc- and Cython-built wheels ship BOTH ``mod.py`` and ``mod<EXT>`` for the
+    same stem -- black, tomli and charset-normalizer all do -- so treating that
+    pair as ambiguous would refuse ordinary wheels. Source WINS: it executes
+    from the in-memory bytes that were hashed, which is the stronger of the two
+    verification paths, and it is what the import system would have used.
+
+    Genuine ambiguity is narrower and is still refused: a stem whose source sits
+    on disk UNRECORDED while an extension is recorded, because then the artifact
+    the import system would prefer is precisely the one RECORD does not attest
+    to, and silently loading the extension would misrepresent what ran.
+    """
+
+    for is_package, base in ((False, stem), (True, f"{stem}/__init__")):
+        source = f"{base}.py"
+        extensions = sorted(
+            f"{base}{suffix}"
+            for suffix in importlib.machinery.EXTENSION_SUFFIXES
+            if f"{base}{suffix}" in rows
+        )
+        if source in rows:
+            return source, is_package
+        if extensions:
+            if Path(str(distribution.locate_file(source))).exists():
+                raise AdapterDiscoveryError(
+                    "adapter module source is present but not RECORD-covered"
+                )
+            if len(extensions) > 1:
+                raise AdapterDiscoveryError("adapter module is ambiguously RECORD-covered")
+            return extensions[0], is_package
+    return None
 
 
 def _verify_recorded_file(
@@ -360,8 +404,10 @@ def _verified_entry_target(
     if not all(part.isidentifier() for part in parts):
         raise AdapterDiscoveryError("adapter entry module is not a dotted identifier")
     rows = {row[0]: row for row in _record_rows(distribution)}
-    candidates = {f"{'/'.join(parts)}.py", f"{'/'.join(parts)}/__init__.py"}
-    if len(candidates & rows.keys()) != 1:
+    # Resolved with the same rule the finder uses, so a compiled-only entry
+    # module is admitted exactly like a compiled-only submodule; a gate that
+    # accepted a narrower set here would refuse adapters the loader can load.
+    if _resolve_module_artifact("/".join(parts), rows, distribution) is None:
         raise AdapterDiscoveryError("adapter entry module is not uniquely RECORD-covered")
     return module, attribute
 
@@ -498,14 +544,8 @@ class _VerifiedDistributionFinder:
         # would reject the very artifact the pin attests to. Bytecode is
         # deliberately absent: a `.pyc` is never a match, so it always falls
         # through to refusal.
-        candidates: dict[str, bool] = {f"{stem}.py": False, f"{stem}/__init__.py": True}
-        for suffix in importlib.machinery.EXTENSION_SUFFIXES:
-            candidates[f"{stem}{suffix}"] = False
-            candidates[f"{stem}/__init__{suffix}"] = True
-        matches = sorted(candidates.keys() & self._rows.keys())
-        if len(matches) > 1:
-            raise AdapterDiscoveryError("adapter module is ambiguously RECORD-covered")
-        if not matches:
+        resolved = _resolve_module_artifact(stem, self._rows, self._distribution)
+        if resolved is None:
             # A directory with no recorded __init__ is a genuine namespace
             # package; anything else importable on disk is unrecorded code.
             # Probing only the two .py names would hand the name back to the
@@ -516,9 +556,8 @@ class _VerifiedDistributionFinder:
             # verify bytecode we have no recorded source for.
             self._refuse_unrecorded_artifacts(stem)
             return None
-        relative = matches[0]
+        relative, is_package = resolved
         verified_path, source = _verify_recorded_file(self._distribution, self._rows, relative)
-        is_package = candidates[relative]
         search = [str(verified_path.parent)] if is_package else None
         if relative.endswith(".py"):
             return importlib.util.spec_from_file_location(
