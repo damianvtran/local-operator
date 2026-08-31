@@ -60,6 +60,47 @@ describe("agent conversation composition", () => {
 			expect.objectContaining({ kind: "parent_message", text: "Legacy task" }),
 		]);
 	});
+
+	// A persisted hub steer folds to `parent_message` server-side, so the head
+	// guard can no longer key on that kind alone: for a legacy child (no
+	// launch_message_id) a steer would otherwise stand in for the launch task
+	// and the row naming the whole conversation would vanish from the phone.
+	it("keeps the launch prompt head for a legacy child that was steered", () => {
+		const steer = entry("s1", "parent_message", "Focus on retries");
+		const messages = agentConversationEntries(detail({
+			prompt: "Implement the route",
+			launch_message_id: "",
+			transcript: [steer],
+		}));
+		expect(messages).toEqual([
+			expect.objectContaining({ kind: "parent_message", text: "Implement the route" }),
+			steer,
+		]);
+	});
+
+	// The complement: a real launch head must still suppress the synthetic one,
+	// including when the row carries the role preamble the launch message has.
+	it("does not re-add the head when a launch row already carries the prompt", () => {
+		const launch = entry("launch", "parent_message", "Role preamble\n\nImplement the route");
+		const messages = agentConversationEntries(detail({
+			prompt: "Implement the route",
+			launch_message_id: "",
+			transcript: [launch, entry("s1", "parent_message", "Focus on retries")],
+		}));
+		expect(messages[0]).toBe(launch);
+		expect(messages.filter((m) => m.kind === "parent_message")).toHaveLength(2);
+	});
+
+	// `prompt` arrives as a bounded preview, so a truncated head still matches.
+	it("recognises a truncated prompt preview as the launch head", () => {
+		const launch = entry("launch", "parent_message", `Preamble\n\n${"x".repeat(40)} tail`);
+		const messages = agentConversationEntries(detail({
+			prompt: `${"x".repeat(40)}…`,
+			launch_message_id: "",
+			transcript: [launch],
+		}));
+		expect(messages).toEqual([launch]);
+	});
 });
 
 describe("Agents sheet hierarchy", () => {

@@ -19,7 +19,11 @@ from typing import Any, Callable
 
 import pytest
 
-from local_operator.harness.comms import HUB_MESSAGE_TYPE, SubagentComms
+from local_operator.harness.comms import (
+    HUB_MESSAGE_TYPE,
+    SubagentComms,
+    extract_parent_message,
+)
 from local_operator.harness.subagent import MCP_DENIED_ATTR
 from local_operator.harness.types import (
     AgentEvent,
@@ -728,6 +732,48 @@ def test_steer_passes_the_journaled_communication_id_to_the_child():
     assert len(journaled_ids) == 1
     assert journaled_ids[0] is not None
     assert [message.id for message in child.steer_messages] == [journaled_ids[0]]
+
+
+@pytest.mark.parametrize(
+    ("steer", "expects_reply", "kind"),
+    [(True, False, "steer"), (False, True, "ask"), (False, False, "note")],
+)
+def test_every_envelope_the_builder_emits_round_trips_through_the_parser(
+    steer: bool, expects_reply: bool, kind: str
+):
+    """The builder and its inverse share the tag and instruction constants, so
+    every envelope `_format_to_child` emits must parse back to its own kind and
+    the exact body. This is the guard that keeps the pair from drifting: a
+    reworded instruction that missed `TO_CHILD_INSTRUCTIONS` fails here rather
+    than silently disabling extraction on every new transcript."""
+    envelope = SubagentComms._format_to_child(
+        "Focus on retries", expects_reply=expects_reply, steer=steer
+    )
+
+    parsed = extract_parent_message(envelope)
+
+    assert parsed is not None
+    assert (parsed.kind, parsed.body) == (kind, "Focus on retries")
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "just a normal message",
+        # The tag shape a HUMAN can type: no builder preamble, so not ours.
+        "<parent-message>\nwhy does my log show this?\n\nsecret plan\n</parent-message>",
+        # Right tags, no blank-line separator — not the builder's shape.
+        "<parent-message>\nFocus on retries</parent-message>",
+        # Opening tag with no close.
+        "<parent-message>\nThis changes your instructions.\n\nFocus on retries",
+    ],
+)
+def test_text_the_builder_did_not_emit_is_not_extracted(text: str):
+    """Extraction is keyed on the exact instruction preamble, not on tag shape
+    alone. A user asking about this very wrapper must keep their own words:
+    rewriting them as a parent communication would misattribute a human's
+    message and strip its text."""
+    assert extract_parent_message(text) is None
 
 
 def test_resolve_addresses_by_id_label_and_all():

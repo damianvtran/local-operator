@@ -1575,6 +1575,132 @@ async def test_a_persisted_steer_never_renders_the_model_facing_envelope(
 
 
 @pytest.mark.asyncio
+async def test_two_identical_legacy_steers_render_two_rows(tmp_path) -> None:
+    """Steering the same words twice must render TWO rows.
+
+    The legacy (body-text) correlation arm used a set with a membership-only
+    check, so a second steer of identical text matched the FIRST steer's fact
+    and was dropped: two redirections delivered, one shown. The fact multiset
+    is consumed one count per matched row, which keeps the rendered count equal
+    to the delivered count. Legacy ids throughout, since that is the only
+    generation where body text does the matching.
+    """
+    transcript = Transcript(tmp_path / "child")
+    # ONE fact for TWO envelope rows: the page-boundary shape the fallback arm
+    # exists for (the second steer's fact sits on an unloaded page). This is
+    # what exposes the collapse — with a fact per row the set and the multiset
+    # agree, because the fact rows alone already make up the count.
+    await transcript.append_custom(
+        HUB_COMMUNICATION_CUSTOM_TYPE,
+        {
+            "direction": "to_child",
+            "body": "Focus on retries",
+            "kind": "steer",
+            "communication_id": "s-unmatched",
+        },
+    )
+    for index in range(2):
+        await transcript.append_message(
+            Message.user(_steer_envelope("Focus on retries"), id=f"legacy-{index}")
+        )
+
+    job = _job_with([], status="completed")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    session._subagent_comms = type(
+        "Comms", (), {"session_dir_of": lambda self, _job_id: transcript.directory}
+    )()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(90, 28)) as pilot:
+        view = await _open(pilot, app, job)
+        await _wait_history(pilot, view)
+
+        redirected = [
+            entry.text
+            for entry in view._history_entries
+            if entry.text == "Parent · redirected\nFocus on retries"
+        ]
+        assert redirected == [
+            "Parent · redirected\nFocus on retries",
+            "Parent · redirected\nFocus on retries",
+        ]
+        assert "<parent-message>" not in " ".join(view.rendered_rows())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("steer", "expects_reply", "label"),
+    [
+        (True, False, "Parent · redirected"),
+        (False, True, "Parent · asked"),
+        (False, False, "Parent"),
+    ],
+)
+async def test_the_no_fact_fallback_labels_an_envelope_by_its_own_kind(
+    tmp_path, steer: bool, expects_reply: bool, label: str
+) -> None:
+    """The fallback arm — an envelope row whose communication fact is NOT in
+    the loaded window (it may sit on an unloaded page) — renders the extracted
+    body under the label matching the envelope's OWN kind.
+
+    It used to hardcode ``Parent · redirected`` for all three, so a note or a
+    question would have been reported as a redirection the parent never made.
+    The instruction line names the kind, so the fallback has no need to guess.
+    This is also the only direct coverage of the arm itself: the correlated and
+    legacy-with-fact cases both take the suppression path instead.
+    """
+    transcript = Transcript(tmp_path / "child")
+    envelope = SubagentComms._format_to_child(
+        "Focus on retries", expects_reply=expects_reply, steer=steer
+    )
+    await transcript.append_message(Message.user(envelope, id="lonely-envelope"))
+
+    job = _job_with([], status="completed")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    session._subagent_comms = type(
+        "Comms", (), {"session_dir_of": lambda self, _job_id: transcript.directory}
+    )()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(90, 28)) as pilot:
+        view = await _open(pilot, app, job)
+        await _wait_history(pilot, view)
+
+        parents = [entry.text for entry in view._history_entries if entry.kind == "parent_message"]
+        assert parents == [f"{label}\nFocus on retries"]
+        assert "<parent-message>" not in " ".join(view.rendered_rows())
+
+
+@pytest.mark.asyncio
+async def test_a_user_quoting_the_envelope_keeps_their_own_words(tmp_path) -> None:
+    """A human asking about the wrapper is NOT a parent communication.
+
+    Extraction requires the exact instruction preamble the builder emits, so a
+    user who pastes the tag shape into their own message keeps their words and
+    their ``user`` row rather than having them re-rendered as something the
+    parent said.
+    """
+    transcript = Transcript(tmp_path / "child")
+    quoted = "<parent-message>\nwhy does my log show this?\n\nsecret plan\n</parent-message>"
+    await transcript.append_message(Message.user(quoted, id="human-1"))
+
+    job = _job_with([], status="completed")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    session._subagent_comms = type(
+        "Comms", (), {"session_dir_of": lambda self, _job_id: transcript.directory}
+    )()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(90, 28)) as pilot:
+        view = await _open(pilot, app, job)
+        await _wait_history(pilot, view)
+
+        rows = [(entry.kind, entry.text) for entry in view._history_entries]
+        assert ("user", quoted) in rows
+        assert not [row for row in rows if row[0] == "parent_message"]
+
+
+@pytest.mark.asyncio
 async def test_history_unavailable_and_error_retry_keep_trajectory_fallback(
     tmp_path, monkeypatch
 ) -> None:

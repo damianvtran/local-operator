@@ -55,6 +55,35 @@ function agentPath(sessionId: string, jobId: string): string {
 	return `/s/${encodeURIComponent(sessionId)}/a/${encodeURIComponent(jobId)}`;
 }
 
+function normalizeText(text: string): string {
+	return text.replace(/\s+/g, " ").trim();
+}
+
+/** Does this `parent_message` row already carry the child's LAUNCH task?
+ *
+ * Identity first: an id equal to `launch_message_id` is conclusive. Legacy and
+ * summary-stripped rows have no such id, so fall back to the prompt text —
+ * but anchored at the END, not as a loose substring, because the launch row is
+ * `{role preamble}\n\n{prompt}` while a steer that merely quotes the task
+ * ("Implement the route more narrowly") would satisfy a substring test and
+ * wrongly suppress the head.
+ *
+ * `prompt` arrives as a bounded PREVIEW (`SUBAGENT_PROMPT_PREVIEW_CHARS`
+ * compacts it and appends an ellipsis), so a truncated preview is matched as a
+ * prefix of the row instead. That branch is only reachable at ~1000 characters
+ * of agreement, far past coincidence. */
+function isLaunchHead(entry: TranscriptEntry, detail: SubagentDetail): boolean {
+	if (detail.launch_message_id && entry.id === detail.launch_message_id) return true;
+	const prompt = normalizeText(detail.prompt);
+	if (!prompt) return false;
+	const text = normalizeText(entry.text);
+	if (prompt.endsWith("…")) {
+		const head = prompt.slice(0, -1);
+		return head.length > 0 && text.includes(head);
+	}
+	return text === prompt || text.endsWith(` ${prompt}`);
+}
+
 /** The launch prompt is durable child history, while `prompt` is the raw
  * parent task retained for queued/legacy rows. Correlation identity lets the
  * opening role-expanded user row carry that task's visual semantics without
@@ -70,7 +99,18 @@ export function agentConversationEntries(detail: SubagentDetail): TranscriptEntr
 			);
 		}
 	}
-	if (!detail.prompt || detail.transcript.some((entry) => entry.kind === "parent_message")) {
+	// Only a row carrying the LAUNCH task suppresses the synthesized head. The
+	// guard used to test for `parent_message` as such, which broke once a
+	// persisted hub steer started folding to that kind server-side: a legacy
+	// child (no `launch_message_id`, or a summary row whose id the daemon
+	// stripped) that had ever been steered lost the row naming what the whole
+	// conversation is about. A steer is a mid-conversation redirection and
+	// never stands in for the launch task, so match on the launch text rather
+	// than on the kind.
+	const hasLaunchHead = detail.transcript.some(
+		(entry) => entry.kind === "parent_message" && isLaunchHead(entry, detail),
+	);
+	if (!detail.prompt || hasLaunchHead) {
 		return detail.transcript;
 	}
 	return [

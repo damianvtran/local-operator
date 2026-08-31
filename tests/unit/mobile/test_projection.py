@@ -638,6 +638,43 @@ def test_a_live_delivered_steer_never_renders_the_envelope() -> None:
     assert "<parent-message>" not in row.text
 
 
+def test_a_phone_typed_envelope_reconciles_its_echo_instead_of_doubling() -> None:
+    """A message the phone sent that happens to carry the envelope shape must
+    reconcile against its optimistic echo, not append beside it.
+
+    The envelope branch used to return before the pending-echo pop, so the row
+    rendered twice under ONE id — and the stranded echo still displayed the raw
+    XML this path exists to suppress. Two rows sharing an id is also bad input
+    for the web client's list reconciliation.
+    """
+    fold = make_fold()
+    envelope = _steer_envelope("Focus on retries")
+    fold.note_user_message(envelope, steer=True, message_id="cmd-1")
+
+    added = fold.absorb_user_event(Message.user(envelope, id="cmd-1"))
+
+    assert added is False
+    rows = fold.projection.transcript
+    assert len(rows) == 1
+    assert (rows[0].id, rows[0].kind, rows[0].text) == (
+        "cmd-1",
+        "parent_message",
+        "Focus on retries",
+    )
+    assert "<parent-message>" not in rows[0].text
+
+
+def test_a_user_quoting_the_envelope_keeps_their_own_words() -> None:
+    """Extraction requires the builder's exact instruction preamble, so a human
+    quoting the wrapper keeps their words and their ``user`` row."""
+    from local_operator.mobile.projection import fold_messages_to_entries
+
+    quoted = "<parent-message>\nwhy does my log show this?\n\nsecret plan\n</parent-message>"
+    entries = fold_messages_to_entries([Message.user(quoted, id="human-1")])
+
+    assert [(entry.kind, entry.text) for entry in entries] == [("user", quoted)]
+
+
 def test_transcript_is_capped_from_the_front() -> None:
     fold = make_fold()
     for i in range(PROJECTION_TRANSCRIPT_LIMIT + 25):
