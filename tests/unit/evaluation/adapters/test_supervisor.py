@@ -450,6 +450,17 @@ def test_process_group_termination_kills_stubborn_grandchild(tmp_path: Path) -> 
     _terminate_process_group(process, process.pid)
     assert process.returncode == -signal.SIGKILL
     grandchild = int(pid_file.read_text())
+    # SIGKILL is delivered synchronously, but the orphan stays a zombie until
+    # init reaps it, and signalling a zombie still succeeds. Poll for the pid to
+    # disappear rather than asserting on the first observation, which races init
+    # and fails about once in twenty runs.
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            os.kill(grandchild, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.001)
     with pytest.raises(ProcessLookupError):
         os.kill(grandchild, 0)
 

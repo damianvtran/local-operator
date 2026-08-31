@@ -809,7 +809,8 @@ def test_unrecorded_higher_priority_extension_is_refused(tmp_path: Path) -> None
     distribution = FakeDistribution(tmp_path, [entry_point])
     distribution.make_record()
     rows = {row[0]: row for row in _record_rows(distribution)}
-    assert _resolve_module_artifact("advpkg/helper", rows, distribution) == (
+    typed = cast(importlib.metadata.Distribution, distribution)
+    assert _resolve_module_artifact("advpkg/helper", rows, typed) == (
         f"advpkg/helper{suffixes[-1]}",
         False,
     )
@@ -817,7 +818,7 @@ def test_unrecorded_higher_priority_extension_is_refused(tmp_path: Path) -> None
     # Plant an unrecorded artifact the import system ranks above the recorded one.
     (package / f"helper{suffixes[0]}").write_bytes(b"planted")
     with pytest.raises(AdapterDiscoveryError, match="higher-priority extension"):
-        _resolve_module_artifact("advpkg/helper", rows, distribution)
+        _resolve_module_artifact("advpkg/helper", rows, typed)
 
 
 def test_compiled_only_entry_module_is_accepted(tmp_path: Path) -> None:
