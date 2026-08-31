@@ -130,8 +130,37 @@ class TeamEditFields(BaseModel):
     project: str | None = None
 
 
+class _UnloadedBrief(str):
+    """Module-private sentinel: a brief whose file has not been read yet.
+
+    A ``str`` SUBCLASS so it flows through pydantic validation and every
+    existing ``str`` consumer unchanged, and private (leading underscore,
+    no re-export) so it can never leak into a tool schema, ``model_dump``
+    output, or public API. Its single job is to make "the registry handed
+    out this team without reading its briefs" a distinguishable state from
+    "the brief is intentionally empty": both surface as ``''`` on the
+    public field, and only the first must be PRESERVED by ``save_team``
+    rather than written back as an empty file (review round 1, R1-1).
+    ``save_team`` and ``_load_briefs`` are the only readers; everyone else
+    sees an ordinary empty string via :attr:`Team.instructions`. It deliberately
+    inherits ``str.__repr__`` too: even debug/public model representations show
+    ``''``, never a sentinel label.
+    """
+
+
 class Team(BaseModel):
-    """A durable team: manager + members + layered instruction briefs."""
+    """A durable team: manager + members + layered instruction briefs.
+
+    ``instructions`` and ``project`` read as plain strings everywhere, but
+    their DEFAULT is the :class:`_UnloadedBrief` sentinel rather than ``""``:
+    a team constructed from ``team.yml`` alone (``list_teams`` and every
+    picker refresh) has not paid the brief I/O yet, and a later
+    ``save_team`` of that object must re-read the files instead of
+    overwriting them with the empty strings it happens to carry. Constructing
+    a ``Team`` with explicit ``instructions=""`` — as ``create_team`` and a
+    deliberate ``update_team(..., TeamEditFields(instructions=""))`` do —
+    keeps the empty string and therefore still clears the file on purpose.
+    """
 
     id: str
     name: str
@@ -139,8 +168,13 @@ class Team(BaseModel):
     description: str = ""
     manager: str = "manager"
     members: list[TeamMember] = Field(default_factory=list)
-    instructions: str = ""
-    project: str = ""
+    # Sentinel default, not "": see the class docstring. ``exclude`` in
+    # ``save_team``'s dump already keeps both fields out of ``team.yml``;
+    # the sentinel itself is a private str subclass that serializes as ""
+    # should anyone ever dump these fields, so it cannot leak a marker into
+    # YAML, JSON, or tool output.
+    instructions: str = _UnloadedBrief()
+    project: str = _UnloadedBrief()
 
     @field_validator("name")
     @classmethod
@@ -320,6 +354,25 @@ class TeamRegistry:
         self._briefs_loaded.add(team.id)
         return team
 
+    def _persist_brief(self, team: Team, filename: str, value: str) -> str:
+        """The brief text to write for ``filename``, hydrating an unloaded one.
+
+        R1-1: ``list_teams`` hands out teams whose briefs were never read (they
+        are two 8k files on a five-second refresh path), and a caller that
+        mutates such an object's METADATA and saves it must not lose the briefs
+        it never touched. The sentinel default marks "not loaded"; here it is
+        the one place that turns it back into the on-disk text so the write
+        preserves the file verbatim. An explicit empty string — the only other
+        value ``Team`` construction can carry once ``create_team`` and
+        ``update_team`` normalize to ``""`` — is an INTENTIONAL clear and is
+        written as-is. Reads are best-effort like ``_load_briefs``: an
+        unreadable file logs and saves empty rather than failing the whole
+        metadata save, matching how ``_load`` treats bad YAML.
+        """
+        if not isinstance(value, _UnloadedBrief):
+            return value
+        return _read_optional(self.teams_dir / team.id / filename)
+
     def get_team(self, team_id: str) -> Team:
         self._refresh_if_needed()
         team = self._teams.get(team_id)
@@ -348,8 +401,8 @@ class TeamRegistry:
             description=(fields.description or "").strip(),
             manager=(fields.manager or "manager").strip() or "manager",
             members=list(fields.members or []),
-            instructions=_bounded(fields.instructions or ""),
-            project=_bounded(fields.project or ""),
+            instructions=_bounded(fields.instructions) if fields.instructions is not None else "",
+            project=_bounded(fields.project) if fields.project is not None else "",
         )
         return self.save_team(team)
 
@@ -376,6 +429,9 @@ class TeamRegistry:
             # after an update, before a reload can rehydrate them from YAML.
             current.members = list(fields.members)
         if "instructions" in updates and updates["instructions"] is not None:
+            # An explicit "" is a DELIBERATE clear (R1-1's other edge): the
+            # sentinel only ever means "never read", so normalizing to ""
+            # here keeps update_team's save writing exactly what was asked.
             current.instructions = _bounded(updates["instructions"])
         if "project" in updates and updates["project"] is not None:
             current.project = _bounded(updates["project"])
@@ -385,6 +441,14 @@ class TeamRegistry:
         team_dir = self.teams_dir / team.id
         team_dir.mkdir(parents=True, exist_ok=True)
         payload = team.model_dump(mode="json", exclude={"instructions", "project"})
+        # R1-1: hydrate before writing AND before caching. A metadata-only team
+        # (straight from ``list_teams``) reaches here carrying sentinels; writing
+        # them as text would truncate the briefs to empty files, and caching the
+        # object with sentinels still set would hand the NEXT ``get_team`` an
+        # unloaded-looking team it considers loaded. Both fixes are this pair of
+        # assignments — the sentinel never survives a save.
+        team.instructions = self._persist_brief(team, "instructions.md", team.instructions)
+        team.project = self._persist_brief(team, "project.md", team.project)
         try:
             with (team_dir / "team.yml").open("w", encoding="utf-8") as handle:
                 yaml.safe_dump(payload, handle, default_flow_style=False, sort_keys=False)

@@ -4976,6 +4976,14 @@ class OperatorApp(App[None]):
             # Both success and refusal/failure reopen the same ordinary composer:
             # either the new session is now authoritative or the old one remains.
             self._session_transition_pending = False
+            # If the settled session has an authoritative EMPTY roster, retire
+            # the one-row transition reserve now. Waiting for another keystroke
+            # would leave a blank/loading hole indefinitely after a refused
+            # attach or an empty replacement session. A filled roster is cheap
+            # to re-derive and stays in the same reserved geometry.
+            editor = self._editor()
+            if editor.argument_command in ("team", "teams", "agent", "agents"):
+                self._fill_name_argument_list(editor, editor.argument_command)
 
     def composer_submission_blocked(self) -> bool:
         """Whether Editor must retain rather than submit its current draft."""
@@ -5409,10 +5417,50 @@ class OperatorApp(App[None]):
             )
         return choices
 
+    def _name_list_pending_notice(self, command: str) -> str:
+        """The one-row placeholder a name list shows while adoption is pending.
+
+        D1 (design round 1): the catch-up fills `/team <query>` the moment a
+        delayed registry arrives, and without a reserved row that fill PUSHES
+        the dock up by one line — the composer, the welcome splash, everything
+        above the band jumped a full row exactly when the user was mid-type.
+        Reserving the row for the whole pending window makes the empty and
+        filled frames geometrically identical: the placeholder is REPLACED
+        in place by the first real row, so nothing moves.
+
+        Scoped to the windows where the roster is genuinely still ARRIVING, on
+        purpose (the reviewer's constraint, not a guess):
+
+        * ``_session_transition_pending`` — a resume/attach the user just asked
+          for. Set by ``_run_session_transition`` and cleared on BOTH success
+          and refusal, so the placeholder cannot outlive the transition.
+        * ``self._session is None`` — no session has been adopted yet. That is
+          the original reported boot race: ``/team lop`` typed while the boot
+          worker was still constructing. The transition flag is False during
+          initial boot, so without this explicit readiness check the race this
+          PR fixes would reserve nothing. This is deliberately NOT keyed to the
+          welcome/boot LAYOUT: an adopted but empty session keeps the welcome
+          visible, while its empty roster is already authoritative and must not
+          leave an eternal placeholder hole.
+
+        An ADOPTED session past both windows with an empty roster is a real
+        answer ("no teams yet"), and holding a blank hole there forever would
+        read as a stuck list, so it gets no row. No timer drives any of this:
+        the editor re-syncs the picker on every keystroke and the app refills
+        at adoption, so the placeholder retires the moment a window closes.
+        """
+        if not self._session_transition_pending and self._session is not None:
+            return ""
+        # Same voice as every other picker notice (the `/effort` and `/logout`
+        # rows): lowercase, no period, says why the list is empty. Command word
+        # in the text because `/team` and `/agent` share this row and the user
+        # should not have to guess which registry is still loading.
+        return f"loading {command} roster…" if command in ("agent", "agents") else "loading teams…"
+
     def _fill_name_argument_list(self, editor: Any, command: str) -> None:
         """Fill one team/agent list and its O(1) highlighter snapshot together."""
         picker = editor.picker
-        picker.set_notice("")
+        picker.set_notice(self._name_list_pending_notice(command))
         if command in ("team", "teams"):
             choices = self._team_argument_choices(editor)
             picker.set_choices(choices)

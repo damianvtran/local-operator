@@ -249,3 +249,95 @@ def test_list_is_metadata_only_and_get_loads_briefs_once(tmp_path: Path, monkeyp
 
     assert second.get_team(team.id) is loaded
     assert len(reads) == 2
+
+
+def test_saving_a_metadata_only_list_result_preserves_both_briefs(tmp_path: Path) -> None:
+    """R1-1 regression: a metadata-only ``list_teams`` row must not blank briefs.
+
+    The exact reported repro: create a team with real briefs, reconstruct the
+    registry (so ``list_teams`` hands back a team whose briefs were never
+    read), mutate only its METADATA, save, reconstruct again — and both brief
+    files must still hold their original text. Before the sentinel, the
+    unloaded briefs read as ordinary ``""`` and the save wrote them back as
+    empty files, destroying up to 16k of authored instructions in one
+    metadata edit.
+    """
+    first = TeamRegistry(tmp_path)
+    first.create_team(
+        TeamEditFields(
+            name="ops",
+            manager="manager",
+            instructions="KEEP INSTRUCTIONS",
+            project="KEEP PROJECT",
+        )
+    )
+
+    second = TeamRegistry(tmp_path)
+    listed = second.list_teams()[0]
+    # The precondition the fix exists for: this object has NOT read the briefs.
+    # Asserted through the registry, not the private class, so the test states
+    # the contract ("a listed team is metadata-only") rather than the mechanism.
+    assert listed.instructions == "" and listed.project == ""
+    listed.description = "mutated, not the briefs"
+    second.save_team(listed)
+
+    third = TeamRegistry(tmp_path)
+    reloaded = third.get_team_by_name("ops")
+    assert reloaded is not None
+    assert reloaded.instructions == "KEEP INSTRUCTIONS"
+    assert reloaded.project == "KEEP PROJECT"
+    assert reloaded.description == "mutated, not the briefs"
+    # And the saved object itself no longer carries the unloaded state, so a
+    # caller reading the briefs off its own save result sees the real text.
+    assert listed.instructions == "KEEP INSTRUCTIONS"
+    assert listed.project == "KEEP PROJECT"
+
+
+def test_intentional_empty_brief_update_still_clears_the_files(tmp_path: Path) -> None:
+    """The sentinel must not make an explicit clear impossible (R1-1's edge).
+
+    ``update_team(..., TeamEditFields(instructions="", project=""))`` is the
+    supported way to retire both briefs; pinning the preserve behaviour above
+    without pinning this would let a future refactor trade one data-loss bug
+    for an un-writable state.
+    """
+    registry = TeamRegistry(tmp_path)
+    team = registry.create_team(
+        TeamEditFields(
+            name="ops",
+            manager="manager",
+            instructions="retire me",
+            project="and me",
+        )
+    )
+    registry.update_team(team.id, TeamEditFields(instructions="", project=""))
+
+    reloaded = TeamRegistry(tmp_path)
+    after = reloaded.get_team_by_name("ops")
+    assert after is not None
+    assert after.instructions == ""
+    assert after.project == ""
+
+
+def test_unloaded_brief_sentinel_never_leaks_into_serialization() -> None:
+    """The private marker is a str subclass that serializes as ``''``.
+
+    ``Team.model_dump`` is what ``save_team`` writes into ``team.yml`` (and
+    what any tool or transport would carry), so the sentinel must survive a
+    round trip as plain text, not as a named marker a user could find in a
+    file or an API response.
+    """
+    team = Team(
+        id="t",
+        name="ops",
+        created_date=datetime.now(timezone.utc),
+    )
+    dumped = team.model_dump(mode="json")
+    assert dumped["instructions"] == ""
+    assert dumped["project"] == ""
+    assert "unloaded" not in team.model_dump_json().lower()
+    assert "unloaded" not in repr(team).lower()
+    # A caller that DOES pass explicit empty strings keeps them (intentional
+    # empty briefs constructed directly must not become the sentinel).
+    explicit = team.model_copy(update={"instructions": "", "project": ""})
+    assert explicit.instructions == "" and explicit.project == ""

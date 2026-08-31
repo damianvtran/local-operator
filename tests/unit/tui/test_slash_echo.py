@@ -495,7 +495,10 @@ async def test_session_adoption_catches_up_team_picker_and_name_highlight() -> N
         return session
 
     app = OperatorApp(delayed_factory)
-    async with app.run_test(size=(120, 40)) as pilot:
+    # The committed real-app evidence uses the product's standard 100x30 frame;
+    # pin the regression to that same viewport so these cell coordinates map
+    # directly to the SVG y positions cited in the PR body.
+    async with app.run_test(size=(100, 30)) as pilot:
         editor = app.query_one(Editor)
         editor.focus()
         for char in "/team lop":
@@ -505,9 +508,59 @@ async def test_session_adoption_catches_up_team_picker_and_name_highlight() -> N
         assert editor.picker.is_pending()
         assert editor.picker._query == "lop"
 
+        # D1 (design review round 1): while the registry is genuinely still
+        # arriving, the picker reserves exactly one NON-SELECTABLE notice row.
+        # The real row must replace it in place — not expand the dock and jump
+        # the composer/welcome/status geometry under a mid-keystroke user.
+        empty_geometry = {
+            "composer": editor.region.y,
+            "welcome": app.query_one(WelcomeView).region.y,
+            "status": app.query_one("#status-band").region.y,
+            "picker": editor.picker.region.y,
+            "picker_height": editor.picker.region.height,
+            "screen": app.screen.size,
+            "virtual": app.screen.virtual_size,
+        }
+        assert editor.picker.display is True
+        assert editor.picker.is_open() is False  # the reserve is not selectable
+        assert editor.picker._notice == "loading teams…"
+        assert empty_geometry["picker_height"] == 1
+
         release.set()
         await _boot(pilot, app)
+        # Consecutive post-adoption frames must be settled at the same geometry.
         await pilot.pause()
+        filled_geometry = {
+            "composer": editor.region.y,
+            "welcome": app.query_one(WelcomeView).region.y,
+            "status": app.query_one("#status-band").region.y,
+            "picker": editor.picker.region.y,
+            "picker_height": editor.picker.region.height,
+            "screen": app.screen.size,
+            "virtual": app.screen.virtual_size,
+        }
+        await pilot.pause()
+        settled_geometry = {
+            "composer": editor.region.y,
+            "welcome": app.query_one(WelcomeView).region.y,
+            "status": app.query_one("#status-band").region.y,
+            "picker": editor.picker.region.y,
+            "picker_height": editor.picker.region.height,
+            "screen": app.screen.size,
+            "virtual": app.screen.virtual_size,
+        }
+        # The picker itself may not ADD geometry: its one pending row is
+        # replaced by the one real row. FakeSession adoption also changes
+        # unrelated welcome/status content (model label + status segments), so
+        # compare the picker's invariant as relative geometry and pin the two
+        # consecutive post-adoption frames exactly. The committed real-Session
+        # evidence carries the absolute pre/post coordinates with stable facts.
+        assert empty_geometry["picker_height"] == filled_geometry["picker_height"] == 1
+        assert empty_geometry["status"] - empty_geometry["composer"] == 2
+        assert filled_geometry["status"] - filled_geometry["composer"] == 2
+        assert empty_geometry["picker"] - empty_geometry["composer"] == 1
+        assert filled_geometry["picker"] - filled_geometry["composer"] == 1
+        assert filled_geometry == settled_geometry
         assert editor.text == "/team lop"
         assert editor.picker.is_open()
         assert editor.picker.highlighted_name() == "lopdev"
@@ -528,6 +581,77 @@ async def test_session_adoption_catches_up_team_picker_and_name_highlight() -> N
             if segment.text == "lopdev" and segment.style and segment.style.color == green
         ]
         assert painted
+
+
+@pytest.mark.asyncio
+async def test_pending_name_row_collapses_on_escape_and_stays_dismissed_after_adoption() -> None:
+    """Esc releases D1's reserve; the late registry must not resurrect it."""
+    from local_operator.teams import TeamEditFields, TeamRegistry
+
+    session = FakeSession()
+    registry = TeamRegistry(Path(tempfile.mkdtemp()))
+    registry.create_team(TeamEditFields(name="lopdev", manager="manager"))
+    session.team_registry = registry
+    release = asyncio.Event()
+
+    async def delayed_factory() -> FakeSession:
+        await release.wait()
+        return session
+
+    app = OperatorApp(delayed_factory)
+    async with app.run_test(size=(120, 40)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        for char in "/team lop":
+            await pilot.press("slash" if char == "/" else ("space" if char == " " else char))
+        await pilot.pause()
+        assert editor.picker.is_pending()
+        assert editor.picker.display is True
+        assert editor.picker.region.height == 1
+        reserved_y = editor.region.y
+
+        await pilot.press("escape")
+        await pilot.pause()
+        assert editor.text == "/team lop"
+        assert editor.picker.display is False
+        assert editor.picker._dismissed_query == "lop"
+        assert editor.region.y == reserved_y + 1  # the reserved row collapsed
+
+        release.set()
+        await _boot(pilot, app)
+        await pilot.pause()
+        assert editor.text == "/team lop"
+        assert editor.picker.display is False
+        assert editor.picker.is_open() is False
+        assert editor.picker._dismissed_query == "lop"
+        # Adoption may change unrelated status/welcome rows in FakeSession;
+        # dismissal's invariant is that no picker row is reintroduced.
+        assert editor.picker.region.height == 0
+        assert app.query_one("#status-band").region.y - editor.region.y == 1
+
+
+@pytest.mark.asyncio
+async def test_adopted_empty_roster_does_not_leave_a_pending_name_row() -> None:
+    """A genuinely empty adopted roster is final, not an eternal blank hole."""
+    from local_operator.teams import TeamRegistry
+
+    session = FakeSession()
+    session.team_registry = TeamRegistry(Path(tempfile.mkdtemp()))
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        editor = app.query_one(Editor)
+        editor.focus()
+        for char in "/team lop":
+            await pilot.press("slash" if char == "/" else ("space" if char == " " else char))
+        await pilot.pause()
+        assert app._session is session
+        assert editor.picker.is_pending()
+        # Pending is the input state (an argument list with no matches), not a
+        # promise that more rows are coming; adopted-empty must take no space.
+        assert editor.picker.display is False
+        assert editor.picker._notice == ""
+        assert editor.picker.region.height == 0
 
 
 @pytest.mark.asyncio
