@@ -95,18 +95,26 @@ coverage: ## Generate test coverage report
 # ============================================================================
 # Code Quality Commands
 # ============================================================================
-# Format code with black and isort
+# Invoke formatters/linters the same way AGENTS.md documents the gates.
+# Bare `.venv/bin/black` (and flake8/isort/pyright) console scripts carry a
+# shebang baked in at install time; after a worktree that owned the venv
+# is deleted they fail with `bad interpreter` and exit 126. `rc=126`
+# disappears inside a pipeline (`cmd | tail` reports tail's 0), so a gate
+# that never ran looks green. `python -m` uses the interpreter's module
+# path; `uvx` fetches a pinned tool into an isolated cache. Neither reads
+# those shebangs. black/isort are deliberately NOT in the dev extra, so
+# format goes through uvx at the versions CI pins.
 format: ## Format code with black and isort
-	black .
-	isort .
+	uvx --from black==26.1.0 black .
+	uvx isort==5.13.2 .
 
 # Run linting with flake8
 lint: ## Run linting with flake8
-	flake8
+	.venv/bin/python -m flake8 .
 
 # Run type checking with pyright
 type-check: ## Run type checking with pyright
-	pyright
+	.venv/bin/python -m pyright --pythonpath .venv/bin/python .
 
 # Run security audit with pip-audit
 security: ## Run security audit with pip-audit
