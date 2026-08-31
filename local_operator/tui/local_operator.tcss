@@ -427,7 +427,7 @@ ToolCard:focus, WakeBlock:focus {
 /* Bang-mode recolors the marker AND swaps the glyph (`❯` → `$`; see
  * `OperatorApp.on_shell_mode_changed`). Colour is the redundant cue for
  * readers who can see it; the glyph is the one that survives `NO_COLOR`,
- * a monochrome terminal, and red-green colour vision deficiency (#385).
+ * a monochrome terminal, and red-green colour vision deficiency (issue 385).
  * `string` is the ramp's command/success green — a step off the accent,
  * so a shell-mode composer does not spend the "turn is live" ink (D5).
  * Outranks the focus brightness: the mode is the louder fact, and a
@@ -1533,7 +1533,7 @@ Screen.org-chart #input-dock #prompt-chevron {
     /* Default quiet row above the list. `SettingsView._apply_height_ladder`
      * CLEARS this padding on a short terminal so the body keeps a setting
      * row — a 1-row shed, so restoring it as the terminal grows never
-     * drops the body (#431). Do not raise this to 2: a 2-row unit is the
+     * drops the body (issue 431). Do not raise this to 2: a 2-row unit is the
      * non-monotonic move that issue forbids. */
     padding: 1 0 0 0;
 }
