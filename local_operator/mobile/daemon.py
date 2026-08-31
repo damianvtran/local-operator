@@ -413,9 +413,37 @@ class SessionTable:
 
         Cheap: dict lookups only, no disk access — the store is fully in
         memory and persists itself on ``mark_seen``.
+
+        Two rules the naive version got wrong:
+
+        - **Holding the projection SSE stream IS viewing** (spec §3). A user
+          watching a turn finish must never come back to that session marked
+          new, so an open subscriber re-stamps ``last_seen`` here rather than
+          relying on the client to POST /seen again after every repaint.
+        - **The activity clock is never ``heartbeat_at``.** That is rewritten
+          unconditionally every HEARTBEAT_INTERVAL_S whether or not anything
+          happened, so using it re-lit a just-cleared session every 15 s
+          forever. Only the transcript mtime dates real activity; without a
+          durable row there is nothing to date against, and the session's own
+          ``started_at`` is a fixed instant that cannot creep.
         """
         store = self.seen_store
-        activity = row.mtime if row is not None else entry.record.heartbeat_at if entry else 0.0
+        if self.session_subscribers.get(session_id):
+            # Viewing now: keep the stamp at the current instant so activity
+            # arriving during the watch is already covered when it lands. The
+            # disk write is debounced inside the store — this runs on every
+            # repaint of a watched session.
+            store.touch_watched(session_id)
+            return False
+        if row is not None:
+            activity = row.mtime
+        elif entry is not None:
+            # A live session with no durable row yet (younger than its first
+            # transcript write, or outside the 100-row window). started_at is
+            # a birth instant, not a liveness clock.
+            activity = entry.record.started_at
+        else:
+            activity = 0.0
         if not activity:
             return False
         return store.is_unseen(session_id, activity)

@@ -373,6 +373,94 @@ async def test_unseen_rows_sort_above_newer_seen_rows(tmp_path, monkeypatch) -> 
     assert ordered.index("old-unread") < ordered.index("new-read")
 
 
+@pytest.mark.asyncio
+async def test_watching_a_session_over_sse_keeps_it_seen(tmp_path, monkeypatch) -> None:
+    """Holding the projection SSE stream IS viewing (A4, spec §3).
+
+    A user sitting in a session watching a turn finish must not come back to
+    that session marked new. Before this, the only writer was the client's
+    /seen POST on mount, so any activity after mount re-lit the mark.
+    """
+    import os
+    import time
+
+    cfg = tmp_path / "config"
+    session_dir = cfg / "sessions" / "watched"
+    session_dir.mkdir(parents=True)
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+    await _write_turns_async(session_dir, 1)
+    transcript = session_dir / "transcript.jsonl"
+
+    table = SessionTable()
+    opened_at = time.time()
+    os.utime(transcript, (opened_at, opened_at))
+
+    rows = await table.summaries()
+    assert next(r["unseen"] for r in rows if r["session_id"] == "watched") is False
+
+    # The phone holds the projection stream for this session.
+    table.session_subscribers["watched"] = {asyncio.Queue()}
+    table.invalidate_summaries_cache()
+    await table.summaries()
+
+    # A turn completes while the user is still watching.
+    completed_at = opened_at + 30
+    os.utime(transcript, (completed_at, completed_at))
+    table.invalidate_summaries_cache()
+    rows = await table.summaries()
+    assert next(r["unseen"] for r in rows if r["session_id"] == "watched") is False
+
+    # They navigate away; activity after that DOES light the mark.
+    table.session_subscribers.pop("watched")
+    later = time.time() + 120
+    os.utime(transcript, (later, later))
+    table.invalidate_summaries_cache()
+    rows = await table.summaries()
+    assert next(r["unseen"] for r in rows if r["session_id"] == "watched") is True
+
+
+@pytest.mark.asyncio
+async def test_live_row_activity_clock_ignores_the_heartbeat(tmp_path, monkeypatch) -> None:
+    """A live session with no durable row must not re-light on its heartbeat (A5).
+
+    ``heartbeat_at`` is rewritten every HEARTBEAT_INTERVAL_S whether or not
+    anything happened, so using it as the activity clock brought a cleared
+    mark back 15 s later, forever.
+    """
+    import time
+
+    from local_operator.mobile.daemon import SessionEntry
+    from local_operator.mobile.types import SessionRecord
+
+    cfg = tmp_path / "config"
+    (cfg / "sessions").mkdir(parents=True)
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+
+    table = SessionTable()
+    now = time.time()
+    record = SessionRecord(
+        pid=4242,
+        kind="tui",
+        session_id="live-only",
+        conversation_name="x",
+        cwd="/tmp",
+        model_label="m",
+        control_port=1,
+        control_key="k",
+    )
+    record.started_at = now
+    record.heartbeat_at = now
+    table.entries[4242] = SessionEntry(record)
+    table.seen_store.mark_seen("live-only", now=now)
+
+    for bump in (0, 15, 30, 45):
+        record.heartbeat_at = now + bump
+        table.invalidate_summaries_cache()
+        rows = await table.summaries()
+        row = next(r for r in rows if r["session_id"] == "live-only")
+        assert row["unseen"] is False, f"heartbeat +{bump}s re-lit a cleared mark"
+
+
 # ---------------------------------------------------------------------------
 # Seen store
 # ---------------------------------------------------------------------------

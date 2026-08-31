@@ -53,6 +53,15 @@ SEEN_STORE_NAME = "mobile-seen.json"
 #: uninteresting, and the baseline rule re-derives itself on re-observation.
 MAX_SEEN_ENTRIES = 4096
 
+#: How often a WATCH re-stamp is allowed to reach the disk. Holding the
+#: projection SSE stream counts as viewing (spec §3), and that verdict runs on
+#: every list repaint — ~30x/s while a watched session streams. The stamp must
+#: advance in memory every time (it is what keeps the mark clear), but writing
+#: the JSON file at that rate would be pure I/O churn for state whose only
+#: consumer after a crash is "was this roughly seen recently". 30 s bounds the
+#: worst-case loss to one interval of watching.
+WATCH_PERSIST_INTERVAL_S = 30.0
+
 
 class SeenStore:
     """The daemon's per-session seen state, persisted across restarts."""
@@ -62,6 +71,8 @@ class SeenStore:
         self._lock = threading.Lock()
         self._last_seen: dict[str, float] = {}
         self._baselines: dict[str, float] = {}
+        # Wall-clock of the last watch-driven write (see touch_watched).
+        self._last_watch_persist_at = 0.0
         self._load()
 
     # -- verdicts -------------------------------------------------------------
@@ -91,6 +102,26 @@ class SeenStore:
             self._baselines.setdefault(session_id, stamp)
             self._bound_locked()
             self._persist_locked()
+
+    def touch_watched(self, session_id: str, *, now: float | None = None) -> None:
+        """Re-stamp a session the user is CURRENTLY watching over SSE.
+
+        Same in-memory effect as :meth:`mark_seen` — the mark stays clear
+        while the stream is held, which is what makes "completions observed
+        live never flip to unread" true — but the disk write is debounced to
+        ``WATCH_PERSIST_INTERVAL_S``. This runs on every list repaint of a
+        watched session (~30x/s while it streams), and persisting each one
+        would rewrite the store file at that rate for no added correctness:
+        an explicit /seen POST still writes through immediately.
+        """
+        stamp = now if now is not None else time.time()
+        with self._lock:
+            self._last_seen[session_id] = stamp
+            self._baselines.setdefault(session_id, stamp)
+            if stamp - self._last_watch_persist_at >= WATCH_PERSIST_INTERVAL_S:
+                self._last_watch_persist_at = stamp
+                self._bound_locked()
+                self._persist_locked()
 
     def last_seen(self, session_id: str) -> float | None:
         with self._lock:
