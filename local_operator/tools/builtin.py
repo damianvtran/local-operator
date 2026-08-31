@@ -3250,9 +3250,17 @@ async def execute_glob(
         # Correct only this observed misuse so every ordinary glob error keeps
         # its concise, generic diagnostic.
         if Path(pattern).is_absolute() and pattern.lower().endswith("skill.md"):
+            # A conservative resource segment avoids reflecting path syntax or
+            # prose into a URL while still covering normal catalog names.
+            skill_name = Path(pattern).parent.name
+            resource = (
+                f"skill://{skill_name}"
+                if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", skill_name)
+                else "skill://<name>"
+            )
             message += (
                 " Do not scan the filesystem for SKILL.md; read the selected skill "
-                "directly with `skill://<name>`."
+                f"directly with `{resource}`."
             )
         return _error(tool_call_id, "glob", message)
 
