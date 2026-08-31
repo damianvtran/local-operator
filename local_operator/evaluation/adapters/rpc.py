@@ -103,6 +103,24 @@ def parse_canonical_line(line: bytes, model: type[ProtocolModel]) -> ProtocolMod
     return parsed
 
 
+def parse_request_or_cancel(line: bytes) -> RpcRequest | CancelRequest:
+    """Decode the application and control planes without accepting extra shapes."""
+
+    request_error: RpcProtocolError | None = None
+    try:
+        parsed = parse_canonical_line(line, RpcRequest)
+        assert isinstance(parsed, RpcRequest)
+        return parsed
+    except RpcProtocolError as error:
+        request_error = error
+    try:
+        parsed = parse_canonical_line(line, CancelRequest)
+        assert isinstance(parsed, CancelRequest)
+        return parsed
+    except RpcProtocolError:
+        raise request_error
+
+
 class IncrementalReader:
     """Bound allocation before newline and reject EOF in a partial frame."""
 
@@ -123,6 +141,45 @@ class IncrementalReader:
                 raise RpcProtocolError("RPC message exceeds one MiB before newline")
             try:
                 chunk = os.read(self.fd, min(65536, MAX_RPC_BYTES + 1 - len(self._buffer)))
+            except InterruptedError:
+                continue
+            if not chunk:
+                if self._buffer:
+                    raise RpcProtocolError("partial RPC message at EOF")
+                raise EOFError
+            self._buffer.extend(chunk)
+
+
+class AsyncIncrementalReader:
+    """Event-loop pipe reader so cancel remains readable without executor leaks."""
+
+    def __init__(self, fd: int) -> None:
+        self.fd = fd
+        self._buffer = bytearray()
+        os.set_blocking(fd, False)
+
+    async def read_line(self) -> bytes:
+        loop = asyncio.get_running_loop()
+        while True:
+            newline = self._buffer.find(b"\n")
+            if newline >= 0:
+                line = bytes(self._buffer[: newline + 1])
+                del self._buffer[: newline + 1]
+                if len(line) - 1 > MAX_RPC_BYTES:
+                    raise RpcProtocolError("RPC message exceeds one MiB")
+                return line
+            if len(self._buffer) > MAX_RPC_BYTES:
+                raise RpcProtocolError("RPC message exceeds one MiB before newline")
+            ready = asyncio.Event()
+            loop.add_reader(self.fd, ready.set)
+            try:
+                await ready.wait()
+            finally:
+                loop.remove_reader(self.fd)
+            try:
+                chunk = os.read(self.fd, min(65536, MAX_RPC_BYTES + 1 - len(self._buffer)))
+            except BlockingIOError:
+                continue
             except InterruptedError:
                 continue
             if not chunk:

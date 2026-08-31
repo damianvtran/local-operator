@@ -27,14 +27,15 @@ from local_operator.evaluation.adapters.discovery import (
     load_selected_adapter,
 )
 from local_operator.evaluation.adapters.rpc import (
-    IncrementalReader,
+    AsyncIncrementalReader,
+    CancelRequest,
     IncrementalWriter,
     RpcError,
     RpcProtocolError,
     RpcRequest,
     RpcResponse,
     canonical_line,
-    parse_canonical_line,
+    parse_request_or_cancel,
 )
 from local_operator.evaluation.evidence.models import canonical_digest
 from local_operator.evaluation.protocol import ProtocolModel
@@ -54,7 +55,7 @@ def _workspace_digest(selector: AdapterSelector) -> str:
 
 class Worker:
     def __init__(self, request_fd: int, response_fd: int) -> None:
-        self._reader = IncrementalReader(request_fd)
+        self._reader = AsyncIncrementalReader(request_fd)
         self._writer = IncrementalWriter(response_fd)
         self._state: AdapterState = "NEW"
         self._adapter: EvaluationAdapter | None = None
@@ -62,19 +63,64 @@ class Worker:
         self._last_id = 0
         self._replay: OrderedDict[int, tuple[AdapterMethod, str, bytes]] = OrderedDict()
         self._operations: dict[tuple[AdapterMethod, str], str] = {}
+        self._pending_line: asyncio.Task[bytes] | None = None
+
+    def _line_task(self) -> asyncio.Task[bytes]:
+        if self._pending_line is None:
+            self._pending_line = asyncio.create_task(self._reader.read_line())
+        return self._pending_line
+
+    async def _take_line(self) -> bytes:
+        task = self._line_task()
+        raw = await task
+        # A completed adapter call may have left this exact task reading ahead.
+        # Clear only that consumed task, never a successor installed elsewhere.
+        if self._pending_line is task:
+            self._pending_line = None
+        return raw
 
     async def run(self) -> int:
         while self._state not in ("CLOSED", "POISONED"):
             try:
-                raw = await asyncio.to_thread(self._reader.read_line)
-                request = cast(RpcRequest, parse_canonical_line(raw, RpcRequest))
-                await self._handle(request)
+                raw = await self._take_line()
+                message = parse_request_or_cancel(raw)
+                if isinstance(message, CancelRequest):
+                    raise RpcProtocolError("cancel has no in-flight application call")
+                await self._handle_with_cancel(message)
             except EOFError:
+                await self._cancel_pending_line()
                 return 0
             except RpcProtocolError:
                 self._state = "POISONED"
+                await self._cancel_pending_line()
                 return 70
+        await self._cancel_pending_line()
         return 0 if self._state == "CLOSED" else 70
+
+    async def _cancel_pending_line(self) -> None:
+        task = self._pending_line
+        self._pending_line = None
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    async def _handle_with_cancel(self, request: RpcRequest) -> None:
+        task = asyncio.create_task(self._handle(request))
+        reader = self._line_task()
+        done, _ = await asyncio.wait({task, reader}, return_when=asyncio.FIRST_COMPLETED)
+        if task in done:
+            await task
+            return
+        raw = await reader
+        if self._pending_line is reader:
+            self._pending_line = None
+        control = parse_request_or_cancel(raw)
+        if not isinstance(control, CancelRequest) or control.id != request.id:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            raise RpcProtocolError("only matching cancel is valid during an application call")
+        task.cancel()
+        await task
 
     async def _handle(self, request: RpcRequest) -> None:
         if request.id < self._last_id:
@@ -83,7 +129,12 @@ class Worker:
         try:
             params = params_type.model_validate(request.params, strict=True)
         except Exception:
-            self._write_error(request, "invalid_request", "request parameters are invalid")
+            self._write_error(
+                request,
+                "invalid_request",
+                "request parameters are invalid",
+                digest=canonical_digest("adapter-invalid-request-v1", request.params),
+            )
             return
         digest = canonical_params_digest(request.method, params)
         previous = self._replay.get(request.id)
@@ -97,7 +148,12 @@ class Worker:
             raise RpcProtocolError("duplicate request ID is not cached")
         self._last_id = request.id
         if self._state not in METHOD_STATES[request.method]:
-            self._write_error(request, "invalid_state", "method is invalid in current state")
+            self._write_error(
+                request,
+                "invalid_state",
+                "method is invalid in current state",
+                digest=digest,
+            )
             return
         operation_id = getattr(params, "operation_id", None)
         if request.method in KEYED_METHODS:
@@ -113,12 +169,12 @@ class Worker:
             if not isinstance(result, result_type):
                 raise TypeError("adapter returned the wrong closed result")
         except asyncio.CancelledError:
-            self._write_error(request, "cancelled", "adapter call was cancelled")
+            self._write_error(request, "cancelled", "adapter call was cancelled", digest=digest)
             return
         except (AdapterDiscoveryError, Exception):
             # Adapter exceptions may contain reprs, paths, environment values, or
             # tracebacks.  The wire exposes only a closed code and fixed text.
-            self._write_error(request, "adapter_error", "adapter operation failed")
+            self._write_error(request, "adapter_error", "adapter operation failed", digest=digest)
             return
         self._state = METHOD_NEXT_STATE[request.method]
         response = RpcResponse(
@@ -153,16 +209,13 @@ class Worker:
         request: RpcRequest,
         code: str,
         message: str,
+        *,
+        digest: str,
     ) -> None:
         error = RpcError.model_validate({"code": code, "message": message}, strict=True)
         response = RpcResponse(jsonrpc="2.0", id=request.id, method=request.method, error=error)
         encoded = canonical_line(response)
-        self._cache(
-            request.id,
-            request.method,
-            canonical_digest("adapter-invalid-request-v1", request.params),
-            encoded,
-        )
+        self._cache(request.id, request.method, digest, encoded)
         self._writer.write(encoded)
 
     def _cache(self, request_id: int, method: AdapterMethod, digest: str, response: bytes) -> None:
