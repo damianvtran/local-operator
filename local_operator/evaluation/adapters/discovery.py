@@ -236,6 +236,18 @@ def worker_argv(selector: AdapterSelector) -> tuple[str, ...]:
 
 
 def _record_rows(distribution: Any) -> list[list[str]]:
+    """Return every RECORD row after verifying it against the installed file.
+
+    An adapter distribution must contain only files inside its own install root.
+    That rules out console scripts, whose RECORD rows are written as
+    ``../../../bin/<name>`` -- black and pip both have them. The rows are
+    refused rather than skipped: hashing one means following an attacker-
+    controlled path out of the distribution root, which is the traversal this
+    validation exists to stop, and skipping it silently would drop those bytes
+    from ``package_digest`` while still claiming the release was attested. An
+    adapter wheel therefore must not declare console scripts.
+    """
+
     record = distribution.read_text("RECORD")
     if record is None:
         raise AdapterDiscoveryError("adapter distribution has no wheel RECORD")
@@ -258,7 +270,10 @@ def _record_rows(distribution: Any) -> list[list[str]]:
         # joined onto the install root, so no entry escapes the distribution.
         normalized = posixpath.normpath(path)
         if normalized != path or posixpath.isabs(path) or normalized.split("/")[0] == "..":
-            raise AdapterDiscoveryError("adapter RECORD path is not a normalized relative path")
+            raise AdapterDiscoveryError(
+                f"adapter RECORD path {path!r} escapes the distribution root; adapter"
+                " wheels must not declare console scripts or other external files"
+            )
         file_path = Path(str(distribution.locate_file(path)))
         try:
             info = file_path.stat()
@@ -334,33 +349,68 @@ def _resolve_module_artifact(
 
     mypyc- and Cython-built wheels ship BOTH ``mod.py`` and ``mod<EXT>`` for the
     same stem -- black, tomli and charset-normalizer all do -- so treating that
-    pair as ambiguous would refuse ordinary wheels. Source WINS: it executes
-    from the in-memory bytes that were hashed, which is the stronger of the two
-    verification paths, and it is what the import system would have used.
+    pair as ambiguous would refuse ordinary wheels. Source WINS there, but NOT
+    because it is what CPython would pick: measured on this interpreter, an
+    ordinary import of a stem with both artifacts loads the EXTENSION. Source is
+    chosen because it executes from the in-memory bytes that were hashed, the
+    strictly stronger verification path, and because for these wheels the two
+    artifacts are built from the same code, so the choice changes how strongly
+    the module is attested rather than what it does.
 
-    Genuine ambiguity is narrower and is still refused: a stem whose source sits
-    on disk UNRECORDED while an extension is recorded, because then the artifact
-    the import system would prefer is precisely the one RECORD does not attest
-    to, and silently loading the extension would misrepresent what ran.
+    A ``mod.py`` beside a ``mod/`` package is different in kind and is REFUSED.
+    CPython's FileFinder consults directories before file loaders, so it would
+    run ``mod/__init__.py`` while any file-first rule here would verify
+    ``mod.py``: the verified artifact and the executed artifact would be
+    different files, which is precisely the divergence this subsystem exists to
+    prevent. Refusing is legible; silently picking either side is not.
+
+    Also refused: a higher-priority artifact present on disk but UNRECORDED
+    beside a recorded lower-priority one, because then the file the import
+    system ranks first is the one RECORD does not attest to.
     """
+
+    flat = f"{stem}.py"
+    package_init = f"{stem}/__init__.py"
+    if flat in rows and package_init in rows:
+        raise AdapterDiscoveryError(
+            "adapter module is ambiguously RECORD-covered as both module and package"
+        )
 
     for is_package, base in ((False, stem), (True, f"{stem}/__init__")):
         source = f"{base}.py"
-        extensions = sorted(
+        # Ranked as the import system ranks them, so "higher priority" below
+        # means what CPython would actually have reached first.
+        extensions = [
             f"{base}{suffix}"
             for suffix in importlib.machinery.EXTENSION_SUFFIXES
             if f"{base}{suffix}" in rows
-        )
+        ]
         if source in rows:
             return source, is_package
         if extensions:
+            chosen = extensions[0]
+            outranking = [
+                f"{base}{suffix}"
+                for suffix in importlib.machinery.EXTENSION_SUFFIXES[
+                    : importlib.machinery.EXTENSION_SUFFIXES.index(chosen[len(base) :])
+                ]
+            ]
+            # Source and outranking extensions get the same treatment: an
+            # unrecorded file the import system prefers over the verified one is
+            # refused whatever its suffix, rather than only when it is source.
             if Path(str(distribution.locate_file(source))).exists():
                 raise AdapterDiscoveryError(
                     "adapter module source is present but not RECORD-covered"
                 )
+            for unattested in outranking:
+                if Path(str(distribution.locate_file(unattested))).exists():
+                    raise AdapterDiscoveryError(
+                        "adapter module has a higher-priority extension that is"
+                        " not RECORD-covered"
+                    )
             if len(extensions) > 1:
                 raise AdapterDiscoveryError("adapter module is ambiguously RECORD-covered")
-            return extensions[0], is_package
+            return chosen, is_package
     return None
 
 
