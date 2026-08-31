@@ -4577,6 +4577,210 @@ async def execute_wake(
 
 
 # ---------------------------------------------------------------------------
+# send — hand a message to another local lop session
+# ---------------------------------------------------------------------------
+#
+# Why this is a tool and not a `bash` of ``lop send``: shelling out buries a
+# cross-session delivery inside an opaque shell trace (hard to audit, easy to
+# miss in approval), and the CLI's DEFAULT is mailbox-only — an idle target
+# parked on a scheduled wake then sits on the note until its next wake fires.
+# The tool defaults ``wake`` ON so an idle peer answers right away, names the
+# delivery in its own card, and prompts at the write tier like every other
+# capability that starts autonomous work. Receive semantics live entirely in
+# ``Session.receive_peer_message``; this side only resolves, validates and
+# dials, through the shared send-side core in ``mobile/peer_send.py``.
+
+
+class SendParams(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    target: str | None = Field(
+        default=None,
+        description=(
+            "Peer to message: case-insensitive substring of the conversation name, "
+            "session id, or cwd basename (`lop sessions` lists what is running)."
+        ),
+    )
+    pid: int | None = Field(default=None, description="Exact pid of the peer session.")
+    session: str | None = Field(default=None, description="Exact session id of the peer.")
+    message: str = Field(
+        min_length=1,
+        description="The message body; it lands in the peer's transcript as an inbound card.",
+    )
+    wake: bool = Field(
+        default=True,
+        description=(
+            "Mailbox mode: wake an idle peer so it responds right away. Defaults ON; "
+            "False is the quiet drop the peer reads on its next turn. Ignored when "
+            "now=True."
+        ),
+    )
+    now: bool = Field(
+        default=False,
+        description=(
+            "Steer the peer mid-turn instead of using the mailbox; opens a turn if "
+            "the peer is idle."
+        ),
+    )
+
+
+def _describe_send_approval(args: dict[str, Any], cwd: str) -> str:
+    """``send to <target> (<mode>): <body>`` — who gets it, how it lands, what
+    it says.
+
+    All three are the decision: waking an idle session and quietly dropping a
+    note are different commitments, and ``pid 48213`` versus a substring is the
+    difference between one peer and whichever matches. The body is truncated
+    because an approval row is read at a glance (same bound as ``hub``).
+    """
+    pid = args.get("pid")
+    session = str(args.get("session") or "").strip()
+    target = " ".join(str(args.get("target") or "").split())
+    if isinstance(pid, int) and not isinstance(pid, bool):
+        who = f"pid {pid}"
+    elif session:
+        who = f"session {session}"
+    elif target:
+        who = target
+    else:
+        who = "?"
+    mode = "now" if args.get("now") else ("quiet" if args.get("wake") is False else "wake")
+    body = " ".join(str(args.get("message") or "").split())
+    if len(body) > 60:
+        body = body[:57] + "..."
+    return f"send to {who} ({mode}): {body}" if body else f"send to {who} ({mode})"
+
+
+def build_send_tool(context: ToolContext) -> AgentTool | None:
+    """Always-on builder: an unconditional factory in the createIf table.
+
+    Unlike ``wake`` or ``browser``, the capability does not depend on an
+    attachment THIS session carries — every session sits on the same registry +
+    loopback control substrate, and "no peer matches right now" is a per-call
+    answer, not a missing capability. Gating it away would strip it from exactly
+    the sessions that message peers.
+    """
+    return AgentTool(
+        name="send",
+        label="Peer send",
+        describe_approval=_describe_send_approval,
+        description=(
+            "Hand a message to another local lop session on this machine (no cmux). "
+            "Address the peer by `target` (name/cwd substring), `pid` (exact), or "
+            "`session` (exact session id); `lop sessions` lists what is running. By "
+            "default the message lands in the peer's mailbox AND wakes the peer if it "
+            "is idle, so an idle peer responds right away; `wake=False` is the quiet "
+            "mailbox drop (read on the peer's next turn), and `now=True` steers "
+            "mid-turn (opens a turn if the peer is idle). The result says how the "
+            "peer received it."
+        ),
+        parameters=SendParams.model_json_schema(),
+        # write tier: a delivery can start an autonomous turn in ANOTHER session
+        # (wake drives an idle peer's turn; now steers or opens one) — the same
+        # commitment wake's write tier names, so it prompts like a mutation.
+        approval_tier="write",
+        # shared, not exclusive: each call is a one-shot dial to the target's
+        # own socket and no state is shared between calls (contrast wake, whose
+        # create/cancel rewrite one schedule list), so concurrent sends to
+        # different peers are independent.
+        concurrency="shared",
+        # interruptible: the only wait is the peer's ack under a bounded
+        # deadline; cancelling on Esc/steer is free (the frame either acked or
+        # it did not) and keeps the turn responsive like the other network tools.
+        interruptible=True,
+        execute=execute_send,
+    )
+
+
+@_guard("send")
+async def execute_send(
+    tool_call_id: str,
+    args: dict[str, Any],
+    signal: AbortSignal | None = None,
+    on_update: Callable[[AgentToolUpdate], None] | None = None,
+    context: ToolContext | None = None,
+) -> ToolResult:
+    """Resolve a peer session, validate the body, and deliver over the loopback
+    control socket, returning the receive side's own detail string."""
+    try:
+        params = SendParams(**args)
+    except ValidationError as exc:
+        return _validation_error(tool_call_id, "send", exc)
+
+    from local_operator.mobile.peer_send import (
+        candidate_lines,
+        peer_sender_identity,
+        resolve_peer_target,
+        validate_peer_body,
+    )
+
+    record, candidates, error = resolve_peer_target(
+        target=params.target, pid=params.pid, session=params.session
+    )
+    if candidates:
+        lines = [f"{len(candidates)} sessions match; disambiguate with pid:"]
+        lines.extend(candidate_lines(candidates, indent="  ", prefix="pid"))
+        return _error(tool_call_id, "send", "\n".join(lines))
+    if error or record is None:
+        return _error(tool_call_id, "send", error or "no target resolved")
+
+    # Self-send guard: the tool runs INSIDE the sender's session process, so
+    # os.getpid() IS the sending session — the CLI child checks os.getppid()
+    # for the same reason (its parent is the session). A target resolving to
+    # this pid would paint a "peer message from <own name>" card as though a
+    # DIFFERENT session sent it and, with wake/now, self-trigger a turn.
+    # Refuse before any dial.
+    if record.pid == os.getpid():
+        return _error(
+            tool_call_id,
+            "send",
+            "that target is this session; a session cannot peer-message itself — "
+            "fold the note into your own work instead",
+        )
+
+    body_error = validate_peer_body(params.message)
+    if body_error:
+        return _error(tool_call_id, "send", body_error)
+
+    mode = "steer" if params.now else "mailbox"
+    sender = peer_sender_identity(os.getpid())
+    if "session_id" not in sender and context is not None:
+        # No registry record named this process (a reduced host that never
+        # published one): fall back to the ToolContext identity so the peer's
+        # inbound indicator can still name the sender. session_name maps to
+        # ``conversation_name`` because that is the key the indicator reads.
+        if context.session_id:
+            sender["session_id"] = context.session_id
+        if context.session_name:
+            sender["conversation_name"] = context.session_name
+
+    from local_operator.mobile.peer_client import send_peer_message
+
+    try:
+        # Awaited directly — this execute is already async; an asyncio.run here
+        # would try to nest a loop inside the running one.
+        detail = await send_peer_message(
+            record,
+            text=params.message,
+            mode=mode,
+            wake=bool(params.wake),
+            sender=sender,
+        )
+    except (RuntimeError, ConnectionError, OSError, ValueError) as exc:
+        # ValueError covers a read fault the frame reader can still surface
+        # (e.g. an oversized non-welcome line): it must become the same soft
+        # "could not deliver" result the CLI prints, never a traceback.
+        return _error(tool_call_id, "send", f"could not deliver: {exc}")
+    name = record.conversation_name or record.session_id
+    return _text(
+        tool_call_id,
+        "send",
+        f"→ {name} (pid {record.pid}): {detail}",
+        details={"pid": record.pid, "mode": mode, "wake": bool(params.wake)},
+    )
+
+
+# ---------------------------------------------------------------------------
 # variables — list / read session variables (values never enter the prompt)
 # ---------------------------------------------------------------------------
 
