@@ -181,7 +181,16 @@ def test_ask_exchange_requires_expected_episode_and_preserves_pending_on_error(
     result = AskUserExchangeResult(ask_id="ask", accepted=True)
     with pytest.raises(SupervisionError, match="stale, unsolicited, or mismatched"):
         verifier.finish_ask(wrong_finish, result)
-    # The failed finish must leave the original exchange outstanding.
+    changed_prompt = wrong_finish.model_copy(
+        update={
+            "operation_id": "ask-finish-changed",
+            "episode_id": "episode",
+            "prompt": "Different question?",
+        }
+    )
+    with pytest.raises(SupervisionError, match="stale, unsolicited, or mismatched"):
+        verifier.finish_ask(changed_prompt, result)
+    # Failed finishes must leave the original immutable request outstanding.
     with pytest.raises(SupervisionError, match="begin once"):
         verifier.begin_ask(begin.model_copy(update={"operation_id": "again"}))
     correct_finish = wrong_finish.model_copy(

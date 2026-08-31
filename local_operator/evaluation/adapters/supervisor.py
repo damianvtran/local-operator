@@ -408,7 +408,7 @@ class HostVerifier:
         self.artifact_root = artifact_root
         self.current_observation: Any | None = None
         self._sequences: set[int] = set()
-        self._outstanding_ask: str | None = None
+        self._outstanding_ask: tuple[AskUserExchangeParams, Digest] | None = None
         self._score_ids: set[str] = set()
 
     def accept_initial(self, observation: Any) -> None:
@@ -458,17 +458,31 @@ class HostVerifier:
             raise SupervisionError("ask-user exchange belongs to another episode")
         if self._outstanding_ask is not None or params.answer is not None:
             raise SupervisionError("ask-user exchange must begin once without an answer")
-        self._outstanding_ask = params.ask_id
+        request_digest = self._ask_request_digest(params)
+        self._outstanding_ask = (params, request_digest)
 
     def finish_ask(self, params: AskUserExchangeParams, result: AskUserExchangeResult) -> None:
+        outstanding = self._outstanding_ask
+        request_digest = self._ask_request_digest(params)
         if (
             params.episode_id != self.episode_id
-            or self._outstanding_ask != params.ask_id
+            or outstanding is None
+            or outstanding[1] != request_digest
+            or outstanding[0].ask_id != params.ask_id
             or result.ask_id != params.ask_id
             or params.answer is None
         ):
             raise SupervisionError("ask-user response is stale, unsolicited, or mismatched")
         self._outstanding_ask = None
+
+    @staticmethod
+    def _ask_request_digest(params: AskUserExchangeParams) -> Digest:
+        # The answer and retry operation key are completion data. Everything
+        # model-visible in the initiating request remains immutable.
+        return canonical_digest(
+            "adapter-ask-user-request-v1",
+            params.model_dump(mode="json", exclude={"operation_id", "answer"}),
+        )
 
     def accept_score(self, result: ScoreResult) -> None:
         if result.score.score_id in self._score_ids:

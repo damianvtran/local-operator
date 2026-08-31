@@ -204,6 +204,15 @@ class Worker:
             if previous_action is not None:
                 if previous_action.params_digest != self._rescue_action_digest(params):
                     raise RpcProtocolError("rescue action was reused with changed content")
+                assert isinstance(operation_id, str)
+                # Reserve the alias before replying. Otherwise a second logical
+                # action could reuse this new operation key after we replayed it.
+                self._operations[operation_id] = _OperationRecord(
+                    method=request.method,
+                    params_digest=digest,
+                    result=previous_action.result,
+                    error=previous_action.error,
+                )
                 self._replay_operation(request, digest, previous_action)
                 return
         try:

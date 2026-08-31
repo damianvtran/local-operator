@@ -400,25 +400,39 @@ async def test_real_worker_rescue_invokes_each_cleanup_once_and_blocks_normal_fl
             ),
         )
         assert response.error is None
-        assert adapter.cleanup_calls == ["one", "two"]
-        forbidden = PrepareParams(
-            operation_id="forbidden", episode_id="episode", secret_refs=(), infra_values=()
-        )
-        response = await exchange(
+        alias_replay = await exchange(
             writer,
             reader,
             RpcRequest(
                 jsonrpc="2.0",
                 id=6,
-                method="prepare",
-                params=forbidden.model_dump(mode="json"),
+                method="cleanup",
+                params=duplicate.model_dump(mode="json"),
             ),
         )
-        assert response.error is not None and response.error.code == "invalid_state"
+        assert alias_replay.result == response.result
+        conflicting_alias = CleanupParams(
+            operation_id="second-key-same-action",
+            cleanup_plan=cleanup_plan,
+            action_ids=("two",),
+        )
+        writer.write(
+            canonical_line(
+                RpcRequest(
+                    jsonrpc="2.0",
+                    id=7,
+                    method="cleanup",
+                    params=conflicting_alias.model_dump(mode="json"),
+                )
+            )
+        )
+        os.close(request_write)
+        request_write = -1
+        assert await asyncio.wait_for(task, 1) == 70
         assert adapter.cleanup_calls == ["one", "two"]
     finally:
-        os.close(request_write)
-        assert await asyncio.wait_for(task, 1) == 0
+        if request_write >= 0:
+            os.close(request_write)
         for fd in (request_read, response_read, response_write):
             os.close(fd)
 
