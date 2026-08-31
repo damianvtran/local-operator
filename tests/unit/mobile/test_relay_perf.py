@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import string
 
 import pytest
 from starlette.testclient import TestClient
@@ -700,6 +701,25 @@ def test_frame_cap_bounds_many_individually_large_rows() -> None:
     assert len(json.dumps(frame).encode("utf-8")) < (1 << 20)
 
 
+#: Alphabets the frame-cap fuzz draws from. The non-ASCII entries are
+#: load-bearing, not decoration: ``json.dumps`` defaults to
+#: ``ensure_ascii=True``, so one CJK character costs 6 wire bytes and one
+#: astral emoji 12, while Python ``len()`` counts both as 1. An ASCII-only
+#: fuzz therefore cannot generate the input that breaks a character-counting
+#: size estimate — which is exactly how that defect shipped green twice.
+_FUZZ_ALPHABETS = (
+    string.ascii_letters,
+    '"\\\n',  # escape-dense ASCII
+    "\u4e2d\u6587\u5b57",  # CJK: 6 wire bytes per char
+    "\u00e9\u00f1\u00e0",  # Latin-1 accents: 6 wire bytes per char
+    "\u0434\u0430",  # Cyrillic: 6 wire bytes per char
+    "\U0001f600\U0001f680",  # astral emoji: 12 wire bytes per char
+)
+
+#: Single-character fillers for the roster/pending fields, same rationale.
+_FUZZ_FILLERS = ("Z", "\u4e2d", "\u00e9", "\U0001f600")
+
+
 def test_frame_measurement_gate_never_lets_an_oversized_frame_through() -> None:
     """The measurement short-circuit must never pass an oversized frame (A12/A13).
 
@@ -731,21 +751,34 @@ def test_frame_measurement_gate_never_lets_an_oversized_frame_through() -> None:
     random.seed(11)
     for _ in range(120):
         projection = SessionProjection(session_id="s", pid=1, kind="tui")
-        for i in range(random.randint(0, 60)):
-            alphabet = '"\\\n' if random.random() < 0.5 else string.ascii_letters
+        # Row count and per-row length reach the region where a CJK/emoji
+        # frame clears the cap: at 6-12 wire bytes per character, ~40 rows of
+        # ~3,000 chars is already past 700 KB while a character-counting
+        # estimate still reads it as ~120 KB. Drawn as a whole-projection
+        # profile rather than per row so a run actually lands there instead of
+        # averaging out to a harmless mix.
+        row_count = random.randint(0, 60)
+        row_chars = random.choice((200, 800, 2000, 3000))
+        for i in range(row_count):
+            alphabet = random.choice(_FUZZ_ALPHABETS)
             projection.transcript.append(
                 TranscriptEntry(
                     id=f"t{i}",
                     kind="assistant",
-                    text="".join(random.choice(alphabet) for _ in range(random.randint(0, 2000))),
+                    text="".join(random.choice(alphabet) for _ in range(row_chars)),
                 )
             )
-        for j in range(random.randint(0, 60)):
+        # A roster or a pending card FORCES measurement, so a fuzz that always
+        # generates one never exercises the gate's own arithmetic — the path
+        # where a character-counting estimate silently vouched for a 1.17 MB
+        # CJK frame. Half the runs are deliberately bare.
+        subagent_count = 0 if random.random() < 0.5 else random.randint(1, 60)
+        for j in range(subagent_count):
             projection.subagents.append(
                 SubagentRow(
                     job_id=f"job-{j}" * 3,
                     label="L" * 20,
-                    result_text="Z" * random.randint(0, 1500),
+                    result_text=random.choice(_FUZZ_FILLERS) * random.randint(0, 1500),
                     ancestors=["anc" * 10] * random.randint(0, 8),
                     ancestor_ids=["id" * 12] * random.randint(0, 8),
                     child_ids=["c" * 12] * random.randint(0, 8),
@@ -756,13 +789,17 @@ def test_frame_measurement_gate_never_lets_an_oversized_frame_through() -> None:
                         TodoPhase(
                             name="Todos",
                             items=[
-                                TodoItem(text="T" * random.randint(0, 600))
+                                TodoItem(text=random.choice(_FUZZ_FILLERS) * random.randint(0, 600))
                                 for _ in range(random.randint(0, 25))
                             ],
                         )
                     ],
                     transcript=[
-                        TranscriptEntry(id=f"c{k}", kind="assistant", text="Z" * 1500)
+                        TranscriptEntry(
+                            id=f"c{k}",
+                            kind="assistant",
+                            text=random.choice(_FUZZ_FILLERS) * 1500,
+                        )
                         for k in range(random.randint(0, 6))
                     ],
                 )
@@ -774,13 +811,16 @@ def test_frame_measurement_gate_never_lets_an_oversized_frame_through() -> None:
                     items=[TodoItem(text="t" * 80) for _ in range(random.randint(0, 20))],
                 )
             )
-        if random.random() < 0.4:
+        if subagent_count and random.random() < 0.4:
             projection.pending = PendingRequest(
                 request_id="r",
                 kind="ask",
-                title="T" * random.randint(0, 2000),
+                title=random.choice(_FUZZ_FILLERS) * random.randint(0, 2000),
                 options=[
-                    AskOptionWire(label="o" * 40, description="D" * random.randint(0, 20000))
+                    AskOptionWire(
+                        label="o" * 40,
+                        description=random.choice(_FUZZ_FILLERS) * random.randint(0, 20000),
+                    )
                     for _ in range(random.randint(0, 20))
                 ],
             )
@@ -793,6 +833,73 @@ def test_frame_measurement_gate_never_lets_an_oversized_frame_through() -> None:
             assert (
                 real <= PROJECTION_FRAME_SOFT_CAP_BYTES
             ), f"measurement gate passed a {real}-byte frame as undegraded"
+
+
+def test_frame_cap_bounds_non_ascii_prose_with_no_roster() -> None:
+    """CJK/emoji prose alone must not slip the measurement gate (A12).
+
+    ``json.dumps`` defaults to ``ensure_ascii=True``, so one CJK character is
+    6 wire bytes and one astral emoji is 12, while Python ``len()`` counts
+    both as 1. A character-counting gate therefore vouched for frames of
+    1.17 MB (80 rows x 2,400 CJK chars) and 1.14 MB (one pasted CJK document)
+    with no subagents and no pending card — returned ``degraded=False``, so no
+    tier ran, nothing was logged, and the daemon's 1 MB reader dropped the
+    repaint in silence. Ordinary Chinese, Japanese, Russian or accented French
+    prose sits on this curve; it was never exotic input.
+    """
+    from local_operator.mobile.types import TranscriptEntry
+
+    for label, rows, chars, char in (
+        ("cjk-many-rows", 80, 2400, "\u4e2d"),
+        ("cjk-pasted-doc", 1, 190_000, "\u4e2d"),
+        ("emoji-pasted-doc", 1, 190_000, "\U0001f600"),
+        ("latin1-french", 100, 2000, "\u00e9"),
+        ("cyrillic", 100, 2000, "\u0434"),
+    ):
+        projection = SessionProjection(session_id="s", pid=1, kind="tui")
+        for i in range(rows):
+            projection.transcript.append(
+                TranscriptEntry(id=f"t{i}", kind="assistant", text=char * chars)
+            )
+        frame, degraded = cap_projection_frame(projection)
+        size = len(json.dumps(frame).encode("utf-8"))
+        assert degraded is True, f"{label}: oversized non-ASCII frame not degraded"
+        assert size <= PROJECTION_FRAME_SOFT_CAP_BYTES, f"{label}: {size} bytes"
+        assert size < (1 << 20), f"{label}: over the daemon's hard reader limit"
+
+    # The all-ASCII control still takes the cheap path: the fix must not cost
+    # the hot repaint its short-circuit.
+    from local_operator.mobile.projection import _frame_skips_measurement
+
+    control = SessionProjection(session_id="s", pid=1, kind="tui")
+    for i in range(120):
+        control.transcript.append(TranscriptEntry(id=f"t{i}", kind="assistant", text="a" * 1500))
+    assert _frame_skips_measurement(control) is True
+    _, degraded = cap_projection_frame(control)
+    assert degraded is False
+
+
+def test_wire_charge_never_under_counts_the_serializer() -> None:
+    """``_wire_charge`` must be an upper bound on what the wire charges (A12).
+
+    The gate is only safe while this holds: it decides whether to skip the
+    real measurement, so an under-count is a silently dropped repaint.
+    """
+    from local_operator.mobile.projection import _wire_charge
+
+    for text in (
+        "plain ascii text",
+        '"quotes" and \\backslashes\\',
+        "\u4e2d\u6587\u5b57" * 100,
+        "\u00e9\u00f1\u00e0" * 100,
+        "\u0434\u0430" * 100,
+        "\U0001f600\U0001f680" * 100,
+        "mixed \u4e2d ascii \U0001f600 prose",
+        "",
+    ):
+        # What the serializer actually charges for this field, minus its quotes.
+        actual = len(json.dumps(text).encode("utf-8")) - 2
+        assert _wire_charge(text) >= actual, f"under-counted {text[:20]!r}"
 
 
 def test_frame_cap_bounds_a_deep_roster_carrying_todos() -> None:

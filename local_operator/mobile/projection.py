@@ -264,8 +264,70 @@ def _frame_bytes(data: dict[str, Any]) -> int:
     return len(json.dumps(data).encode("utf-8"))
 
 
-#: Safety margin on the cheap size estimate, covering JSON escaping (worst
-#: case ~2x on quote/backslash-dense text) plus the fixed frame envelope.
+#: Worst-case wire bytes per NON-ASCII character. ``_frame_bytes`` measures
+#: ``json.dumps(...).encode("utf-8")`` and ``json.dumps`` defaults to
+#: ``ensure_ascii=True``, so the wire never sees UTF-8 for these — it sees
+#: ASCII escapes. Measured, per character:
+#:
+#:     'a'              -> 1 byte
+#:     'é' / 'д' / '中'  -> 6 bytes   (\uXXXX)
+#:     astral emoji     -> 12 bytes  (surrogate pair, \uXXXX\uXXXX)
+#:
+#: This is why counting CHARACTERS — or even UTF-8 bytes, which stops at 8x for
+#: an emoji — under-counts the wire and let an oversized frame past the gate as
+#: "not degraded". 12 is the true ceiling, so charging it can only ever
+#: OVER-estimate, which is the safe direction for a gate that decides whether
+#: to skip the real measurement: over-estimating forces a measurement that is
+#: always correct, under-estimating drops a repaint in silence.
+_WIRE_BYTES_PER_NON_ASCII_CHAR = 12
+
+#: ASCII characters the serializer does NOT pass through 1:1. Quote and
+#: backslash become two bytes; the C0 controls become six (``\u0007``), except
+#: the five with short forms (``\n``, ``\t``, ``\r``, ``\b``, ``\f``) which
+#: become two. Charging the 6-byte ceiling for every one of them is exact
+#: enough and costs one ``str.count`` per class — both are C-level scans.
+#:
+#: Counting them rather than multiplying the whole string by a ceiling matters:
+#: a flat 6x charge stopped an ordinary 140 KB English chat frame from taking
+#: the cheap path at all, which is the hot repaint A7 exists to keep cheap.
+_WIRE_ESCAPE_TWO_BYTE = '"\\'
+_WIRE_ESCAPE_SIX_BYTE_CEILING = 6
+
+#: Deletion table for :meth:`str.translate` holding every ASCII codepoint the
+#: serializer escapes. Counting them as ``len(s) - len(s.translate(table))`` is
+#: one C-level pass; the obvious Python generator over the string measured
+#: 1,840 us across an 80-row frame against 152 us to serialize the whole thing,
+#: i.e. it made the "cheap" estimate 12x more expensive than the work it
+#: exists to avoid.
+_WIRE_ESCAPED_ASCII = {ord(char): None for char in ('"', "\\", *(chr(i) for i in range(0x20)), "\x7f")}
+
+
+def _wire_charge(text: str) -> int:
+    """Upper bound on the bytes ``text`` will occupy on the wire.
+
+    ``str.isascii()`` is a single C-level scan with no allocation, so the
+    overwhelmingly common all-ASCII field costs one branch plus its own
+    length and the cheap path stays cheap (measured: 1.9 us across an 80-row
+    frame, against 1.4 us for a bare ``len()`` sum). Non-ASCII text is charged
+    the ceiling rather than measured exactly, because an exact per-field
+    ``json.dumps`` costs 130 us across that same frame against 167 us to
+    measure the WHOLE frame properly — exactness here would buy nothing over
+    just doing the real thing.
+    """
+    if not text.isascii():
+        return len(text) * _WIRE_BYTES_PER_NON_ASCII_CHAR
+    # All-ASCII: one byte each, plus the extra bytes the escaped ones cost.
+    # Quotes and backslashes take one extra byte; any control character is
+    # charged the 6-byte ceiling, so \n (really 2) is over-charged by 4 — the
+    # safe direction, and cheap enough that exactness buys nothing.
+    escaped = len(text) - len(text.translate(_WIRE_ESCAPED_ASCII))
+    return len(text) + escaped * (_WIRE_ESCAPE_SIX_BYTE_CEILING - 1)
+
+
+#: Safety margin on the cheap size estimate, covering the fixed frame envelope
+#: and the per-field quoting the estimate does not model. The CHARACTER->byte
+#: inflation is charged exactly by :func:`_wire_charge`, not smuggled in here:
+#: a divisor cannot absorb a 12x term (see that function).
 _FRAME_CHEAP_PROXY_DIVISOR = 3
 
 #: Per-row charge for the JSON envelope a transcript row carries regardless of
@@ -314,21 +376,29 @@ def _frame_skips_measurement(projection: SessionProjection) -> bool:
     # Rows are bounded in COUNT above; bound them in SIZE here so one pasted
     # file cannot ride through. Only the fields a row can grow without bound
     # are summed, because the row count is already capped.
+    #
+    # Every text field goes through _wire_charge, never bare len(): the wire
+    # charges BYTES and json.dumps escapes non-ASCII, so a character sum
+    # under-counted a CJK or emoji frame by 6-12x and vouched for a payload
+    # the socket then dropped in silence. Ordinary Chinese, Japanese, Russian
+    # or accented French prose is on that curve — this was never exotic input.
     budget = PROJECTION_FRAME_SOFT_CAP_BYTES // _FRAME_CHEAP_PROXY_DIVISOR
     total = 0
     for entry in projection.transcript:
         total += _FRAME_ROW_ENVELOPE_BYTES
-        total += len(entry.text) + len(entry.summary) + len(entry.error)
-        total += len(entry.tool_name) + len(entry.tool_call_id) + len(entry.intent)
-        total += sum(len(str(ref)) for ref in entry.images)
+        total += _wire_charge(entry.text) + _wire_charge(entry.summary)
+        total += _wire_charge(entry.error) + _wire_charge(entry.tool_name)
+        total += _wire_charge(entry.tool_call_id) + _wire_charge(entry.intent)
+        total += sum(_wire_charge(str(ref)) for ref in entry.images)
         for value in entry.details.values():
-            total += len(str(value))
+            total += _wire_charge(str(value))
         if total > budget:
             return False
     for phase in projection.todos:
-        total += len(phase.name) + _FRAME_ROW_ENVELOPE_BYTES
+        total += _wire_charge(phase.name) + _FRAME_ROW_ENVELOPE_BYTES
         for item in phase.items:
-            total += len(item.text) + len(item.reason) + _FRAME_ROW_ENVELOPE_BYTES
+            total += _wire_charge(item.text) + _wire_charge(item.reason)
+            total += _FRAME_ROW_ENVELOPE_BYTES
         if total > budget:
             return False
     return total <= budget
