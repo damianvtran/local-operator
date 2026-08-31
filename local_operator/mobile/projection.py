@@ -154,6 +154,17 @@ FRAME_CAP_ENTRY_TEXT_CHARS = 4_000
 #: the frame is structurally as small as this function can make it.
 FRAME_CAP_ENTRY_TEXT_FLOOR = 200
 
+#: Bound for one roster todo's text under the frame cap. Roster todos ride the
+#: wire by design and are agent-authored, so a deep roster can carry hundreds
+#: of unbounded strings; a todo only has to be recognisable in a working line.
+FRAME_CAP_TODO_TEXT_CHARS = 120
+
+#: Bounds for a pending card under the frame cap. The card is never dropped —
+#: it is the one thing on the phone that blocks a turn — so these are generous
+#: enough to answer the question and bounded enough to fit.
+FRAME_CAP_PENDING_TITLE_CHARS = 2_000
+FRAME_CAP_PENDING_DETAIL_CHARS = 2_000
+
 
 def _message_text(message: AgentMessage) -> str:
     if isinstance(message, Message):
@@ -253,63 +264,74 @@ def _frame_bytes(data: dict[str, Any]) -> int:
     return len(json.dumps(data).encode("utf-8"))
 
 
-#: Cheap upper bound on the bytes a frame will serialize to, used to skip the
-#: measuring ``json.dumps`` on the overwhelmingly common under-cap repaint.
-#: Summing variable-length strings plus a fixed per-row envelope charge is
-#: ~100x cheaper than serializing. The divisor is the safety margin for JSON
-#: escaping (worst case ~2x on quote/backslash-dense text); it is validated by
-#: ``test_frame_cheap_proxy_never_lets_an_oversized_frame_through``, which
-#: fuzzes deep rosters and escape-dense text against the real serializer.
+#: Safety margin on the cheap size estimate, covering JSON escaping (worst
+#: case ~2x on quote/backslash-dense text) plus the fixed frame envelope.
 _FRAME_CHEAP_PROXY_DIVISOR = 3
 
-#: Per-row charge for the JSON envelope a row carries regardless of its text
-#: (its keys, numeric fields, booleans). Without it the proxy under-counts a
-#: frame made of many SHORT rows — measured 3.5x under on a 90-row roster —
-#: which is precisely the deep-roster shape the cap exists for. Derived from
-#: the empty serialized size of each dataclass, rounded up.
+#: Per-row charge for the JSON envelope a transcript row carries regardless of
+#: its text (keys, numeric fields, booleans). Without it the estimate
+#: under-counts a frame made of many SHORT rows — measured 3.5x under on a
+#: 90-row roster. Derived from the empty serialized size of the dataclass.
 _FRAME_ROW_ENVELOPE_BYTES = 400
-_FRAME_SUBAGENT_ENVELOPE_BYTES = 500
-_FRAME_TODO_ENVELOPE_BYTES = 80
+
+#: Transcript rows the STRUCTURAL gate will vouch for without measuring. A
+#: frame of this many rows cannot approach the cap once each row is charged
+#: the envelope above and its own text.
+_FRAME_CHEAP_PROXY_MAX_ROWS = 120
 
 
-def _frame_text_total(projection: SessionProjection) -> int:
-    """Cheap size estimate for a projection, without serializing it.
+def _frame_skips_measurement(projection: SessionProjection) -> bool:
+    """Whether this projection is STRUCTURALLY too simple to need measuring.
 
-    Text plus a fixed envelope charge per row. Deliberately an OVER-estimate:
-    it gates a short-circuit that must never let a genuinely oversized frame
-    past as "not degraded".
+    The gate is deliberately structural rather than exhaustive, and that
+    choice is the whole point. An earlier revision summed every text field it
+    knew about and skipped the measurement whenever the sum cleared a margin —
+    which silently reintroduced the oversized-frame defect this cap exists to
+    stop, because it did not know about the fields that actually grow: a
+    subagent's ``todos`` (kept on the wire BY DESIGN by
+    ``set_subagent_hydrated_details``, agent-authored and unbounded), a
+    subagent's ``transcript``, and ``projection.pending``. Measured on the real
+    shape: 80 children x 25 todos x 600 chars estimated 40,860 bytes against a
+    real 1,331,102 — returned as "not degraded", so neither the registrant's
+    warning nor the tier-4 warning fired and the daemon's 1 MB reader dropped
+    the frame in silence.
+
+    An exhaustive estimate is only correct until someone adds a field, and its
+    failure mode is silent over-cap frames. So the gate asks a question that
+    stays true as the payload evolves: does this projection have any of the
+    parts that can grow without bound? A roster, a pending card, or more than
+    a screenful of rows all mean "measure it". Anything added to those
+    structures in future is covered automatically, because their mere presence
+    already forces the measurement — the gate fails CLOSED.
+
+    What remains is still the overwhelmingly common repaint: an ordinary
+    conversation with no children and nothing waiting on the user.
     """
+    if projection.subagents or projection.pending is not None:
+        return False
+    if len(projection.transcript) > _FRAME_CHEAP_PROXY_MAX_ROWS:
+        return False
+    # Rows are bounded in COUNT above; bound them in SIZE here so one pasted
+    # file cannot ride through. Only the fields a row can grow without bound
+    # are summed, because the row count is already capped.
+    budget = PROJECTION_FRAME_SOFT_CAP_BYTES // _FRAME_CHEAP_PROXY_DIVISOR
     total = 0
     for entry in projection.transcript:
         total += _FRAME_ROW_ENVELOPE_BYTES
         total += len(entry.text) + len(entry.summary) + len(entry.error)
         total += len(entry.tool_name) + len(entry.tool_call_id) + len(entry.intent)
         total += sum(len(str(ref)) for ref in entry.images)
-        details = entry.details
-        if details:
-            # A rough charge for the expand payload rather than a walk: it is
-            # dropped wholesale by tier 2 anyway, so precision buys nothing.
-            total += sum(len(str(value)) for value in details.values())
-    for row in projection.subagents:
-        total += (
-            len(row.prompt)
-            + len(row.result_text)
-            + len(row.error_text)
-            + len(row.progress)
-            + len(row.activity)
-        )
-        # A deep roster's lineage lists are the one non-text payload that
-        # scales with roster depth rather than with a fixed row count, so they
-        # have to be charged or the proxy under-counts exactly the deep-roster
-        # frame this cap was written for.
-        for lineage in (row.ancestors, row.ancestor_ids, row.child_ids, row.peer_ids):
-            total += sum(len(item) + 4 for item in lineage)
-        total += _FRAME_SUBAGENT_ENVELOPE_BYTES + len(row.job_id) + len(row.label)
+        for value in entry.details.values():
+            total += len(str(value))
+        if total > budget:
+            return False
     for phase in projection.todos:
-        total += _FRAME_TODO_ENVELOPE_BYTES + len(phase.name)
+        total += len(phase.name) + _FRAME_ROW_ENVELOPE_BYTES
         for item in phase.items:
-            total += _FRAME_TODO_ENVELOPE_BYTES + len(item.text) + len(item.reason)
-    return total
+            total += len(item.text) + len(item.reason) + _FRAME_ROW_ENVELOPE_BYTES
+        if total > budget:
+            return False
+    return total <= budget
 
 
 def cap_projection_frame(
@@ -324,9 +346,17 @@ def cap_projection_frame(
     the daemon loop for every OTHER session (the wedge this cap exists to
     stop at the source). The tiers drop in order of recoverability:
 
-    1. Subagent text previews (prompt/result/error) shrink to minimal bounds.
-       The full text stays reachable through the child transcript's lazy
-       /history fetch, so nothing is lost that a tap cannot recover.
+    1. Subagent text previews (prompt/result/error) shrink to minimal bounds,
+       any embedded child transcript is dropped, and — if that is not enough —
+       roster todo text is truncated and then the roster's todo lists are
+       dropped entirely. The full text stays reachable through the child
+       transcript's lazy /history fetch, so nothing is lost that a tap cannot
+       recover. Roster todos are agent-authored and unbounded, and a deep
+       roster puts many of them on the wire at once, so they are the tier's
+       real work rather than a corner of it.
+    1b. A pending card's option consequence lines shrink to a readable bound.
+       The card itself is the loudest thing on the phone and is never dropped;
+       only the prose under each option is trimmed.
     2. Transcript rows lose their ``details`` expand payload (args/output/
        diff). The collapsed row still renders; expanding an old row is the
        one gesture that can re-fetch from /history.
@@ -350,9 +380,11 @@ def cap_projection_frame(
     """
     data = projection.to_json()
     # The under-cap repaint is the hot path (~30/s per streaming session), and
-    # measuring it by serializing the whole frame doubled the cost of every
-    # push. Clear the cheap text proxy first and skip the measurement entirely.
-    if _frame_text_total(projection) <= cap_bytes // _FRAME_CHEAP_PROXY_DIVISOR:
+    # measuring it by serializing the whole frame doubles the cost of every
+    # push. Skip that only for projections whose STRUCTURE cannot approach the
+    # cap (see _frame_skips_measurement for why the test is structural rather
+    # than a sum of known fields). Everything else is measured for real.
+    if cap_bytes >= PROJECTION_FRAME_SOFT_CAP_BYTES and _frame_skips_measurement(projection):
         return data, False
     if _frame_bytes(data) <= cap_bytes:
         return data, False
@@ -369,6 +401,42 @@ def cap_projection_frame(
         # A hydrated child transcript on the wire predates the lazy /history
         # fetch; if one is still embedded it is pure frame weight.
         row["transcript"] = []
+    if _frame_bytes(data) <= cap_bytes:
+        return data, True
+
+    # Tier 1b: the pending card's option prose. The card is the loudest thing
+    # on the phone, so the card and its option LABELS always survive — only
+    # the consequence lines under them are bounded.
+    pending = data.get("pending")
+    if isinstance(pending, dict):
+        pending["title"] = _compact(str(pending.get("title") or ""), FRAME_CAP_PENDING_TITLE_CHARS)
+        pending["detail"] = _compact_multiline(
+            str(pending.get("detail") or ""), FRAME_CAP_PENDING_DETAIL_CHARS
+        )
+        for option in pending.get("options") or []:
+            if isinstance(option, dict):
+                option["description"] = _compact(
+                    str(option.get("description") or ""), FRAME_CAP_PENDING_DETAIL_CHARS
+                )
+        if _frame_bytes(data) <= cap_bytes:
+            return data, True
+
+    # Tier 1c: roster todo text, then the todo lists themselves. Kept on the
+    # wire by design (set_subagent_hydrated_details), so a deep roster carries
+    # many unbounded agent-authored strings — the shape that measured
+    # 1,331,102 bytes from 80 children x 25 todos. Truncate first so the
+    # working line still reads, and only drop the lists if that is not enough.
+    for row in data.get("subagents") or []:
+        for phase in row.get("todos") or []:
+            for item in phase.get("items") or []:
+                item["text"] = _compact(str(item.get("text") or ""), FRAME_CAP_TODO_TEXT_CHARS)
+                item["reason"] = _compact(
+                    str(item.get("reason") or ""), FRAME_CAP_TODO_TEXT_CHARS
+                )
+    if _frame_bytes(data) <= cap_bytes:
+        return data, True
+    for row in data.get("subagents") or []:
+        row["todos"] = []
     if _frame_bytes(data) <= cap_bytes:
         return data, True
 

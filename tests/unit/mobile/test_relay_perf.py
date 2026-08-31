@@ -600,24 +600,28 @@ def test_frame_cap_bounds_many_individually_large_rows() -> None:
     assert len(json.dumps(frame).encode("utf-8")) < (1 << 20)
 
 
-def test_frame_cheap_proxy_never_lets_an_oversized_frame_through() -> None:
-    """The A7 short-circuit must be an OVER-estimate, always (A7 safety).
+def test_frame_measurement_gate_never_lets_an_oversized_frame_through() -> None:
+    """The measurement short-circuit must never pass an oversized frame (A12/A13).
 
-    ``cap_projection_frame`` skips its measuring ``json.dumps`` when the cheap
-    text/envelope estimate clears a margin. If that estimate ever UNDER-counts
-    a real frame, an oversized payload returns as ``degraded=False`` and the
-    socket drops it — the exact silent loss the cap prevents. Fuzzed over deep
-    rosters, escape-dense text and many short rows, which is where an earlier
-    text-only proxy measured 3.5x under.
+    ``cap_projection_frame`` skips its measuring ``json.dumps`` when a
+    projection is structurally too simple to approach the cap. If that gate
+    ever says "skip" for a frame that is actually over, the payload returns as
+    ``degraded=False``, neither the registrant warning nor the tier-4 warning
+    fires, and the socket drops the repaint in silence.
+
+    An earlier revision gated on a SUM of known text fields and did exactly
+    that: it never walked ``subagents[].todos`` (kept on the wire by design),
+    ``subagents[].transcript`` or ``projection.pending``, so 80 children x 25
+    todos x 600 chars estimated 40,860 bytes against a real 1,331,102. This
+    fuzz therefore populates precisely those three fields — it passes
+    vacuously without them, which is how the defect shipped.
     """
     import random
     import string
 
-    from local_operator.mobile.projection import (
-        _FRAME_CHEAP_PROXY_DIVISOR,
-        _frame_text_total,
-    )
     from local_operator.mobile.types import (
+        AskOptionWire,
+        PendingRequest,
         SubagentRow,
         TodoItem,
         TodoPhase,
@@ -625,7 +629,6 @@ def test_frame_cheap_proxy_never_lets_an_oversized_frame_through() -> None:
     )
 
     random.seed(11)
-    threshold = PROJECTION_FRAME_SOFT_CAP_BYTES // _FRAME_CHEAP_PROXY_DIVISOR
     for _ in range(120):
         projection = SessionProjection(session_id="s", pid=1, kind="tui")
         for i in range(random.randint(0, 60)):
@@ -647,6 +650,21 @@ def test_frame_cheap_proxy_never_lets_an_oversized_frame_through() -> None:
                     ancestor_ids=["id" * 12] * random.randint(0, 8),
                     child_ids=["c" * 12] * random.randint(0, 8),
                     peer_ids=["p" * 12] * random.randint(0, 8),
+                    # The three fields the old estimate ignored, at the
+                    # magnitudes the real wire carries.
+                    todos=[
+                        TodoPhase(
+                            name="Todos",
+                            items=[
+                                TodoItem(text="T" * random.randint(0, 600))
+                                for _ in range(random.randint(0, 25))
+                            ],
+                        )
+                    ],
+                    transcript=[
+                        TranscriptEntry(id=f"c{k}", kind="assistant", text="Z" * 1500)
+                        for k in range(random.randint(0, 6))
+                    ],
                 )
             )
         for _k in range(random.randint(0, 4)):
@@ -656,12 +674,80 @@ def test_frame_cheap_proxy_never_lets_an_oversized_frame_through() -> None:
                     items=[TodoItem(text="t" * 80) for _ in range(random.randint(0, 20))],
                 )
             )
-        proxy = _frame_text_total(projection)
-        real = len(json.dumps(projection.to_json()).encode("utf-8"))
-        if proxy <= threshold:
-            assert (
-                real <= PROJECTION_FRAME_SOFT_CAP_BYTES
-            ), f"proxy {proxy} short-circuited a {real}-byte frame"
+        if random.random() < 0.4:
+            projection.pending = PendingRequest(
+                request_id="r",
+                kind="ask",
+                title="T" * random.randint(0, 2000),
+                options=[
+                    AskOptionWire(label="o" * 40, description="D" * random.randint(0, 20000))
+                    for _ in range(random.randint(0, 20))
+                ],
+            )
+
+        frame, degraded = cap_projection_frame(projection)
+        real = len(json.dumps(frame).encode("utf-8"))
+        if not degraded:
+            # The gate vouched for this frame without measuring it, so the
+            # claim it made must be true.
+            assert real <= PROJECTION_FRAME_SOFT_CAP_BYTES, (
+                f"measurement gate passed a {real}-byte frame as undegraded"
+            )
+
+
+def test_frame_cap_bounds_a_deep_roster_carrying_todos() -> None:
+    """A deep roster's todos are on the wire by design and must be bounded (A12).
+
+    ``set_subagent_hydrated_details`` keeps ``row.todos`` while dropping the
+    child transcript, and todo text is agent-authored and unbounded. 80
+    children x 25 todos x 600 chars measured 1,331,102 bytes returned as
+    ``degraded=False`` before this was fixed — past the daemon's 1 MB reader,
+    and silent.
+    """
+    from local_operator.mobile.types import SubagentRow, TodoItem, TodoPhase
+
+    projection = SessionProjection(session_id="s", pid=1, kind="tui")
+    for i in range(80):
+        projection.subagents.append(
+            SubagentRow(
+                job_id=f"j{i}",
+                label=f"child {i}",
+                status="running",
+                todos=[
+                    TodoPhase(
+                        name="Todos",
+                        items=[TodoItem(text="T" * 600) for _ in range(25)],
+                    )
+                ],
+            )
+        )
+    frame, degraded = cap_projection_frame(projection)
+    assert degraded is True
+    assert len(json.dumps(frame).encode("utf-8")) < (1 << 20)
+
+
+def test_frame_cap_bounds_a_pending_card_with_long_options() -> None:
+    """A pending card's option prose is bounded, and the card still ships (A12).
+
+    ``projection.pending`` was never counted at all, so an ask with long
+    consequence lines measured 1,123,365 bytes and returned undegraded.
+    """
+    from local_operator.mobile.types import AskOptionWire, PendingRequest
+
+    projection = SessionProjection(session_id="s", pid=1, kind="tui")
+    projection.pending = PendingRequest(
+        request_id="r",
+        kind="ask",
+        title="T" * 200,
+        options=[AskOptionWire(label="o" * 60, description="D" * 40_000) for _ in range(28)],
+    )
+    frame, degraded = cap_projection_frame(projection)
+    assert degraded is True
+    assert len(json.dumps(frame).encode("utf-8")) < (1 << 20)
+    # The card itself survives: it is the one thing on the phone that blocks a
+    # turn, so only the prose under each option is trimmed.
+    assert frame["pending"] is not None
+    assert len(frame["pending"]["options"]) == 28
 
 
 def test_frame_cap_tier2_drops_transcript_details() -> None:
