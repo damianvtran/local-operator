@@ -15,7 +15,9 @@ the next safe boundary. What is pinned here is the part that makes that safe:
 - history added while the pass ran survives it;
 - the ceiling path and manual ``/compact`` stay SYNCHRONOUS — the safety net
   must not become async-only;
-- a failed background pass leaves the session exactly as if none had run.
+- a failed background pass leaves the session exactly as if none had run;
+- a ceiling pass starting while a background pass is in flight CANCELS it
+  rather than double-billing (issue #413).
 
 Real compaction throughout, as in ``test_compaction_advisor.py``: only the
 ruler and the provider stream are substituted, never the gate.
@@ -735,4 +737,106 @@ async def test_a_consumed_hint_still_widens_the_cut_on_a_size_pass(tmp_path, mon
         f"the consumed hint widened to {max(widths)}, expected the clamp at {cap} "
         "(_advisor_floor_cap bounds a hint wider than the cap)"
     )
+    await session.dispose()
+
+
+# --- A CEILING PASS MUST NOT DOUBLE-BILL AN IN-FLIGHT BACKGROUND PASS ------
+#
+# Issue #413. The in-flight latch bounds background passes against each other,
+# not against a synchronous one. A sub-ceiling advisory pass still running
+# when the context crosses the ceiling used to let the ceiling path start a
+# second summarization of the same history; the background result was then
+# discarded as stale. Correctness held; spend did not.
+#
+# Awaiting the background pass was rejected in review (unbounded wait on the
+# safety net). The ceiling path now CANCELS the in-flight pass and runs its
+# own. The number of model calls is the whole point, so the assertions count
+# them rather than inspecting a flag.
+
+
+@pytest.mark.asyncio
+async def test_a_ceiling_pass_does_not_run_alongside_an_in_flight_background_pass(
+    tmp_path, monkeypatch
+):
+    """THE #413 interleaving: background in flight, then the ceiling fires.
+
+    Against the pre-fix latch this FAILS: both calls run at once
+    (``peak_concurrent_summaries == 2``) and both complete. After the fix
+    the background call is cancelled, concurrency stays at 1, and only the
+    ceiling pass commits.
+    """
+    stream = SlowSummaryStream()
+    session = make_session(tmp_path, stream=stream)
+    await talk(session)
+    events: list[Any] = []
+    session.subscribe(events.append)
+    pin_measured_context(monkeypatch, 400_000)
+    seed_hint(session)
+
+    stream.gate = asyncio.Event()
+    await asyncio.wait_for(drive_boundary(session, 400_000), timeout=5.0)
+    await _until(lambda: stream.summary_calls == 1, "the background summarization never started")
+    assert session._compaction_pass_in_flight
+    assert stream.peak_concurrent_summaries == 1
+
+    # Context has now crossed the ceiling while that call is still open.
+    pin_measured_context(monkeypatch, 700_000)
+    ceiling = asyncio.ensure_future(drive_boundary(session, 700_000))
+    # The gate stays closed until the ceiling path has cancelled the
+    # background pass. Opening it first would let both calls run at
+    # once and hide the double-bill this test exists to catch.
+    await _until(
+        lambda: not session._compaction_pass_in_flight,
+        "the ceiling pass did not cancel the in-flight background pass",
+    )
+    stream.gate.set()
+    await asyncio.wait_for(ceiling, timeout=10.0)
+
+    assert stream.peak_concurrent_summaries == 1, (
+        f"{stream.peak_concurrent_summaries} summarization calls ran at once — "
+        "the ceiling pass ran alongside the background one rather than "
+        "cancelling it, which is the double-bill #413 records"
+    )
+    ends = [event for event in events if isinstance(event, CompactionEndEvent) and event.success]
+    assert len(ends) == 1, (
+        f"{len(ends)} successful compaction commits — the cancelled background "
+        "pass must not also land, and the ceiling pass must"
+    )
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_in_flight_pass_does_not_skip_the_ceiling_pass(tmp_path, monkeypatch):
+    """The failure mode #413 names: trading a double-bill for a missed
+    compaction is worse — it means running into the context ceiling.
+
+    A background pass that FAILS must leave the latch clear so a subsequent
+    ceiling boundary still runs its own summarization. Counted on the stream,
+    not inferred from a flag: the ceiling call has to actually happen.
+    """
+    stream = SlowSummaryStream()
+    stream.fail_summary = True
+    session = make_session(tmp_path, stream=stream)
+    await talk(session)
+    events: list[Any] = []
+    session.subscribe(events.append)
+    pin_measured_context(monkeypatch, 400_000)
+    seed_hint(session)
+
+    await drive_boundary(session, 400_000)
+    await settle_background(session)
+    assert stream.summary_calls == 1
+    assert not session._compaction_pass_in_flight
+
+    stream.fail_summary = False
+    pin_measured_context(monkeypatch, 700_000)
+    await asyncio.wait_for(drive_boundary(session, 700_000), timeout=10.0)
+
+    assert stream.summary_calls == 2, (
+        f"{stream.summary_calls} summarization calls — the ceiling pass did not "
+        "run after the in-flight background pass failed, which is a missed "
+        "compaction"
+    )
+    ends = [event for event in events if isinstance(event, CompactionEndEvent) and event.success]
+    assert ends, "the ceiling pass never committed after the background failure"
     await session.dispose()

@@ -188,6 +188,13 @@ PASTE_READING_NOTICE_DELAY_S = 0.35
 #: their own text. It only ever DELAYS the retirement, never the paste itself:
 #: the marker or text lands the instant the read returns, and only the card
 #: lingers.
+#:
+#: The floor binds on the attach / retire-in-finally routes. Failure
+#: notices that ``Toast.show`` a replacement card early are not held to
+#: it — the slot stays occupied, so there is no flash to prevent. "The
+#: floor guarantees 400 ms" is therefore a statement about the progress
+#: card's own lifetime, not about every notice that can occupy the slot
+#: (issue #422).
 PASTE_READING_NOTICE_MIN_S = 0.4
 
 #: A paste is treated as paths only if EVERY segment looks like one. Requiring
@@ -548,16 +555,21 @@ class EditorCopyStale(Message):
 #: ``self.app.set_timer``         1.510 s      after the read
 #: =============================  ==========  ================================
 #:
-#: So it is NOT that "the Editor's pump is blocked and the App's is free", and
-#: it is NOT a direct call: ``MessagePump.set_timer`` wraps every callback in
-#: ``partial(self.call_next, callback)``, so this is a ``call_next`` on the
-#: EDITOR's pump. ``call_next`` queues onto ``_next_callbacks``, which is
-#: flushed by ``_flush_next_callbacks`` after each dispatched message rather
-#: than through the message queue \u2014 and the Editor is the pump whose flush
-#: still runs while this action is suspended. The App's does not, which is why
-#: ``self.app.set_timer`` and ``self.app.call_next`` both land late; a message
-#: posted to THIS widget is late too, because messages take the queue and the
-#: queue is what the awaited handler is holding.
+#: The discriminator is WHICH PUMP the awaited action occupies, not "the
+#: Editor's pump is blocked and the App's is free". Bindings dispatch via
+#: ``App._check_bindings``, so the awaited ``action_system_paste`` runs on
+#: the App's pump; ``MessagePump.set_timer`` wraps every callback in
+#: ``partial(self.call_next, callback)``, so ``self.set_timer`` is a
+#: ``call_next`` on the EDITOR's pump. ``call_next`` queues onto
+#: ``_next_callbacks``, which is flushed by ``_flush_next_callbacks`` after
+#: each dispatched message rather than through the message queue — and the
+#: Editor is the pump whose flush still runs while this action is
+#: suspended on the App. The App's flush does not, which is why
+#: ``self.app.set_timer`` and ``self.app.call_next`` both land late. A
+#: message posted to THIS widget and handled by THIS widget arrives on
+#: time at 0.000 s rather than late: messages take the queue, and the
+#: queue that is held is the App's, not the Editor's. The late cases in
+#: the table are the ones that occupy the App's pump.
 #:
 #: The practical consequence, stated plainly because it is the thing a future
 #: reader will get wrong: **"simplify" this to ``self.app.set_timer`` and U3
@@ -3980,20 +3992,26 @@ class Editor(TextArea):
         # the common one and a card that appears and vanishes on every paste is
         # worse than the pause it explains. `set_timer` is stopped in the
         # `finally`, so a read that beats the delay never raises anything.
-        notice: Callable[[bool], None] | None = getattr(self.app, PASTE_READING_HOOK, None)
+        notice: Callable[..., object | None] | None = getattr(self.app, PASTE_READING_HOOK, None)
         raised = False
         raised_at = 0.0
         reading_notice = None
+        # The owner of the card THIS paste raised, returned by the hook.
+        # Carried onto the deferred retirement so a later paste's card
+        # cannot be dismissed by this one's timer (D15 / issue #422). Same
+        # class as the steer-receipt guard (PR #452): the owning context
+        # rides the event, and a mismatch drops the delivery.
+        paste_owner: object | None = None
 
-        def _raise_reading_notice(show: Callable[[bool], None]) -> None:
+        def _raise_reading_notice(show: Callable[..., object | None]) -> None:
             # Nonlocal rather than a return value: a timer callback's result
             # goes nowhere, and the `finally` below has to know whether there
             # is a card to retire. Retiring one that was never raised would
             # withdraw whatever else happens to hold the shared slot.
-            nonlocal raised, raised_at
+            nonlocal raised, raised_at, paste_owner
             raised = True
             raised_at = time.monotonic()
-            show(True)
+            paste_owner = show(True)
 
         if notice is not None:
             # `notice` is bound as an argument rather than closed over, so the
@@ -4029,12 +4047,26 @@ class Editor(TextArea):
                 # `[DELAY, DELAY + MIN)`, showing the failure card for 0 ms at a
                 # 0.74 s read: a keypress with a visible pause and no response,
                 # which is issue #372's own symptom (design round 3, D14).
-                # `self.set_timer` for the same pump reason as above.
+                #
+                # Owner matching is not enough against a LATER card of the
+                # SAME owner (D15): a second ctrl+v raises another progress
+                # card, and this timer would retire it. The per-paste token
+                # the hook returned at raise is what names THIS paste's card;
+                # a mismatch is a no-op. `self.set_timer` for the same pump
+                # reason as above.
                 shown_for = time.monotonic() - raised_at
+                owned = paste_owner
+
+                def _retire_this_card(
+                    show: Callable[..., object | None] = notice,
+                    token: object | None = owned,
+                ) -> None:
+                    show(False, owner=token)
+
                 if shown_for >= PASTE_READING_NOTICE_MIN_S:
-                    notice(False)
+                    _retire_this_card()
                 else:
-                    self.set_timer(PASTE_READING_NOTICE_MIN_S - shown_for, lambda: notice(False))
+                    self.set_timer(PASTE_READING_NOTICE_MIN_S - shown_for, _retire_this_card)
         if contents.image is not None:
             markers = await self._attach_image_bytes([contents.image.data])
             if markers is not None:
