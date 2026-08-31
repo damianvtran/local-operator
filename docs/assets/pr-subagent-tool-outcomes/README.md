@@ -14,7 +14,8 @@ whose end events carry `is_error=True`.
 The before header says `2 tools`; the after header says `2 tools · 2 failed`.
 At 62 columns the existing truncation ladder sheds the disposable `coder` role
 before losing the outcome, so the label, live status, elapsed time, attempts,
-and failures all remain whole.
+and failures all remain whole. At still tighter widths, attempts and failures
+are one indivisible field: both remain complete or both leave together.
 
 ## Geometry
 

@@ -2658,8 +2658,8 @@ async def test_the_title_tracks_failed_attempts_without_mislabeling_in_flight_ca
 
 
 @pytest.mark.asyncio
-async def test_failed_tool_summary_has_a_truthful_compact_truncation_rung() -> None:
-    """The full count compacts to a ratio before leaving as one whole field."""
+async def test_failed_tool_summary_drops_as_one_truthful_field() -> None:
+    """The ladder keeps both counts whole or drops the outcome field entirely."""
     job = _Job("sub-1", "RetryBudgetScout", status="running")
     session = FakeSession()
     session.jobs = _fake_jobs(job)
@@ -2671,11 +2671,11 @@ async def test_failed_tool_summary_has_a_truthful_compact_truncation_rung() -> N
             for width in range(20, 121)
         }
         assert any("2 tools · 2 failed" in row for row in rows.values())
-        assert any("2/2 failed" in row for row in rows.values())
+        assert any("failed" not in row for row in rows.values())
         for width, row in rows.items():
             assert cell_len(row) <= width, (width, row)
             if "failed" in row:
-                assert "2 tools · 2 failed" in row or "2/2 failed" in row, (width, row)
+                assert "2 tools · 2 failed" in row, (width, row)
 
 
 @pytest.mark.asyncio
