@@ -371,6 +371,13 @@ class _VerifiedSourceLoader:
         code = compile(self._source, str(self._path), "exec", dont_inherit=True)
         exec(code, module.__dict__)
 
+    def load_module(self, fullname: str) -> ModuleType:
+        # Part of the legacy loader protocol. It is refused rather than
+        # implemented because it would reintroduce the caching path this loader
+        # exists to avoid.
+        del fullname
+        raise AdapterDiscoveryError("adapter modules load only through exec_module")
+
 
 class _VerifiedDistributionFinder:
     """Serve only RECORD-covered source for one distribution's own modules.
