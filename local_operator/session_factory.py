@@ -1180,6 +1180,17 @@ def _transcript_dir_and_agent_id(
 #: the loop cannot garbage-collect a task nobody awaits.
 _STORE_MAINTENANCE_TASK: "asyncio.Task[None] | None" = None
 
+#: Give session construction and the front end a bounded uncontended window
+#: before four whole-store walks enter the worker pool. A single ``sleep(0)``
+#: only yields to ``_prepare``'s next ``to_thread`` and lets both paths race on a
+#: cold filesystem cache; the elapsed delay is the contention barrier.
+_STORE_MAINTENANCE_IDLE_DELAY_SECONDS = 0.75
+
+
+async def _wait_for_store_maintenance_idle_window() -> None:
+    """Wait until first paint can win the disk/thread-pool contention race."""
+    await asyncio.sleep(_STORE_MAINTENANCE_IDLE_DELAY_SECONDS)
+
 
 def reset_store_maintenance_for_tests() -> None:
     """Forget that maintenance ran, so every test starts un-swept.
@@ -1192,6 +1203,11 @@ def reset_store_maintenance_for_tests() -> None:
     effects regardless of the order it happens to run in.
     """
     global _STORE_MAINTENANCE_TASK
+    task = _STORE_MAINTENANCE_TASK
+    if task is not None and not task.done():
+        # Most session-factory tests return before the production idle window;
+        # do not let their delayed task enter a later test's temporary store.
+        task.cancel()
     _STORE_MAINTENANCE_TASK = None
 
 
@@ -1219,6 +1235,13 @@ async def _run_store_maintenance(
 ) -> None:
     """Run every whole-store maintenance pass, in a worker thread, in order.
 
+    The initial idle window is load-bearing rather than cosmetic. Merely putting
+    this coroutine in the background still lets it begin at ``_prepare``'s next
+    ``to_thread`` and contend with model/session construction on a cold
+    filesystem cache. Maintenance is unrelated to the current session, so it
+    yields a short, explicit window for ``create_session`` to return and its
+    caller to paint before the first disk walk reaches the worker pool.
+
     Each pass is a disk walk over OTHER sessions' directories and none of them
     has anything to do with the session being constructed; they are triggered by
     a session starting only because that is when the store is known to be quiet.
@@ -1231,6 +1254,11 @@ async def _run_store_maintenance(
     any way at all and a session must neither fail nor be delayed by it, which
     is why the caller never awaits it and why each pass carries its own guard.
     """
+    # Delay before imports and callback construction too: on a cold cache even
+    # loading maintenance-only modules can steal I/O from session construction.
+    # Exit during this best-effort window is harmless; the next process retries.
+    await _wait_for_store_maintenance_idle_window()
+
     from local_operator.resume import backfill_session_origins, backfill_session_titles
     from local_operator.session.retention import sweep_from_config
     from local_operator.tools.group_reaper import sweep_orphan_groups
@@ -1292,10 +1320,14 @@ def _start_store_maintenance(
 
     Two changes, together:
 
-    - **Not awaited.** The session is returned as soon as it is built; the
-      maintenance runs behind first paint. Nothing in it is read by session
-      construction, so there is nothing to wait for. This is the same
-      fire-and-track shape the deferred MCP wiring uses.
+    - **Dispatched after construction, not awaited, and delayed.** Every
+      ``create_session`` path dispatches at its last synchronous point before
+      return, after deferred/eager MCP setup has reached its intended state. The
+      task therefore cannot execute until the completed coroutine gives control
+      back to its caller. It then waits through a short idle window before the
+      store walks, giving the TUI time to adopt the session and paint. Nothing in
+      maintenance is read by session construction, so there is nothing to wait
+      for. This is the same fire-and-track shape the deferred MCP wiring uses.
     - **Once per process.** Maintenance answers a question about the STORE, and
       the store does not become dirty again because the user pressed
       ``/resume``. The first session in the process runs it; later ones find the
@@ -1390,14 +1422,12 @@ async def _prepare(
     claim_session(transcript_dir)
     transcript_dir.mkdir(parents=True, exist_ok=True)
 
-    # Whole-store maintenance (retention sweep, orphan-group reaper, origin and
-    # title backfills) is DISPATCHED here and deliberately NOT awaited. See
-    # :func:`_start_store_maintenance` for what runs and why none of it belongs
-    # on this path. The lease/claim above stay synchronous and on the loop —
-    # sole-writer ordering (lease before transcript creation) is an invariant,
-    # and putting a yield inside that window is how two cold resumes lose the
-    # race the lease exists to arbitrate.
-    _start_store_maintenance(config_manager, Path(agent_registry.config_dir), transcript_dir)
+    # The lease/claim above stay synchronous and on the loop — sole-writer
+    # ordering (lease before transcript creation) is an invariant, and putting a
+    # yield inside that window is how two cold resumes lose the race the lease
+    # exists to arbitrate. Whole-store maintenance is dispatched only after
+    # ``create_session`` finishes ALL construction; starting it here lets the
+    # runner contend as soon as the model configuration below yields to a worker.
 
     # --- model + stream fn (stream B contracts) ---------------------------
     from local_operator.env import get_env_config
@@ -2088,6 +2118,14 @@ async def create_session(
         # ``session.dispose()`` once, so this is the one place teardown can
         # live without teaching each caller about the boot path.
         session.add_dispose_hook(_cancel_task(wiring_task))
+        # Dispatch at the last synchronous point before returning. A task cannot
+        # execute until this coroutine gives the loop back to its caller, so the
+        # runner's idle window begins only after construction has completed.
+        _start_store_maintenance(
+            config_manager,
+            Path(agent_registry.config_dir),
+            Path(session._transcript.directory),
+        )
         return session
 
     mcp_manager = await wire_mcp_into_session(
@@ -2100,6 +2138,14 @@ async def create_session(
     )
     if mcp_manager is not None:
         attach_mcp_dispose(session, mcp_manager)
+    # Headless and exec callers wire MCP eagerly, so dispatch after that await as
+    # well: every successful create_session return gets the same uncontended
+    # construction boundary regardless of front end.
+    _start_store_maintenance(
+        config_manager,
+        Path(agent_registry.config_dir),
+        Path(session._transcript.directory),
+    )
     return session
 
 
