@@ -27,6 +27,7 @@ from local_operator.evaluation.adapters.discovery import (
     _verified_entry_target,
     _verified_imports,
     _VerifiedDistributionFinder,
+    _VerifiedSourceLoader,
     _verify_recorded_file,
     distribution_digest,
     load_selected_adapter,
@@ -553,12 +554,19 @@ def test_sourceless_bytecode_under_owned_root_never_executes(
         _forget_package()
 
 
-def _compile_extension(tmp_path: Path, module_name: str) -> Path:
-    """Compile a real extension, skipping when this host cannot build one.
+def _compile_extension(tmp_path: Path, module_name: str, marker: str) -> Path:
+    """Compile a real extension for this platform.
 
     A hand-written fake ``.so`` would prove nothing here: the point is that the
     ordinary loader really dlopens the verified path, which only a genuine
     module with a ``PyInit`` symbol exercises.
+
+    The link flags are platform-specific because Mach-O must be told that
+    ``Py*`` symbols resolve in the host interpreter at load time, while ELF
+    leaves them undefined by default. Getting this wrong on Linux used to make
+    the build fail and the test SKIP, which is the masking failure mode these
+    regression tests exist to prevent -- so a build failure on a host that has
+    both a compiler and headers is now a hard failure, never a skip.
     """
 
     compiler = shutil.which("cc") or shutil.which("gcc")
@@ -571,7 +579,7 @@ def _compile_extension(tmp_path: Path, module_name: str) -> Path:
         "#include <Python.h>\n"
         "static PyObject *value(PyObject *self, PyObject *args) {\n"
         "    (void)self; (void)args;\n"
-        '    return PyUnicode_FromString("native-verified");\n'
+        f'    return PyUnicode_FromString("{marker}");\n'
         "}\n"
         "static PyMethodDef Methods[] = {\n"
         '    {"value", value, METH_NOARGS, "marker"},\n'
@@ -582,21 +590,19 @@ def _compile_extension(tmp_path: Path, module_name: str) -> Path:
         f"PyMODINIT_FUNC PyInit_{module_name}(void) {{ return PyModule_Create(&mod); }}\n"
     )
     built = tmp_path / f"{module_name}{importlib.machinery.EXTENSION_SUFFIXES[0]}"
+    link_flags = (
+        ["-undefined", "dynamic_lookup"]
+        if sys.platform == "darwin"
+        else ["-fPIC", "-Wl,--unresolved-symbols=ignore-all"]
+    )
     result = subprocess.run(
-        [
-            compiler,
-            "-shared",
-            "-undefined",
-            "dynamic_lookup",
-            f"-I{include}",
-            "-o",
-            str(built),
-            str(source),
-        ],
+        [compiler, "-shared", *link_flags, f"-I{include}", "-o", str(built), str(source)],
         capture_output=True,
     )
-    if result.returncode != 0:
-        pytest.skip(f"extension build unsupported here: {result.stderr.decode()[:200]}")
+    assert result.returncode == 0, (
+        "extension build failed on a host with a compiler and headers; "
+        f"fix the flags rather than skipping: {result.stderr.decode()[:400]}"
+    )
     source.unlink()
     return built
 
@@ -610,7 +616,7 @@ def test_record_covered_extension_loads_and_is_hash_verified(
     package = tmp_path / "advpkg"
     package.mkdir()
     (package / "__init__.py").write_text("")
-    built = _compile_extension(tmp_path, "_speedups")
+    built = _compile_extension(tmp_path, "_speedups", "native-verified")
     if placement == "in-package":
         extension = package / built.name
         built.rename(extension)
@@ -655,6 +661,99 @@ def test_record_covered_extension_loads_and_is_hash_verified(
     finally:
         _forget_package()
         sys.modules.pop("_speedups", None)
+
+
+def _dual_artifact_distribution(tmp_path: Path) -> tuple[FakeDistribution, Path]:
+    """Build the shape mypyc and Cython wheels ship: ``.py`` AND ``.so``.
+
+    The two artifacts return DIFFERENT strings, so the assertion identifies
+    which one actually executed rather than merely that something imported.
+    """
+
+    package = tmp_path / "advpkg"
+    package.mkdir()
+    (package / "__init__.py").write_text("")
+    (package / "entry.py").write_text(
+        "from . import helper\n\n\ndef create():\n    return helper.value()\n"
+    )
+    (package / "helper.py").write_text("def value():\n    return 'source-verified'\n")
+    built = _compile_extension(tmp_path, "helper", "native-not-preferred")
+    extension = package / built.name
+    built.rename(extension)
+
+    def load() -> object:
+        raise AssertionError("entry point must not be imported by the import system")
+
+    entry_point = FakeEntryPoint(load)
+    entry_point.name = "adv"
+    entry_point.value = "advpkg.entry:create"
+    distribution = FakeDistribution(tmp_path, [entry_point])
+    distribution.make_record()
+    return distribution, extension
+
+
+def test_dual_artifact_module_loads_verified_source(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Wheels shipping both artifacts must load, preferring hashed source."""
+
+    distribution, extension = _dual_artifact_distribution(tmp_path)
+    rows = {row[0]: row for row in _record_rows(distribution)}
+    assert "advpkg/helper.py" in rows
+    assert str(extension.relative_to(tmp_path)) in rows
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    try:
+        with _verified_imports(cast(importlib.metadata.Distribution, distribution), rows):
+            module = importlib.import_module("advpkg.entry")
+            assert module.create() == "source-verified"
+            helper = sys.modules["advpkg.helper"]
+            assert isinstance(helper.__loader__, _VerifiedSourceLoader)
+    finally:
+        _forget_package()
+
+
+def test_unrecorded_source_beside_recorded_extension_is_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The artifact import would prefer is unattested, so the choice is unsafe."""
+
+    distribution, _ = _dual_artifact_distribution(tmp_path)
+    rows = {row[0]: row for row in _record_rows(distribution) if row[0] != "advpkg/helper.py"}
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    try:
+        with pytest.raises(AdapterDiscoveryError, match="present but not RECORD-covered"):
+            with _verified_imports(cast(importlib.metadata.Distribution, distribution), rows):
+                importlib.import_module("advpkg.entry")
+    finally:
+        _forget_package()
+
+
+def test_compiled_only_entry_module_is_accepted(tmp_path: Path) -> None:
+    """An entry module shipping only as a verified extension must be allowed."""
+
+    package = tmp_path / "advpkg"
+    package.mkdir()
+    (package / "__init__.py").write_text("")
+    built = _compile_extension(tmp_path, "nativeentry", "native-entry")
+    built.rename(package / built.name)
+
+    def load() -> object:
+        raise AssertionError("entry point must not be imported by the import system")
+
+    entry_point = FakeEntryPoint(load)
+    entry_point.name = "adv"
+    entry_point.value = "advpkg.nativeentry:value"
+    distribution = FakeDistribution(tmp_path, [entry_point])
+    distribution.make_record()
+
+    selector = selected(tmp_path, distribution_digest(distribution)).model_copy(
+        update={"entry_point": "advpkg.nativeentry:value", "adapter_id": "adv"}
+    )
+    assert _verified_entry_target(
+        cast(importlib.metadata.Distribution, distribution), selector
+    ) == ("advpkg.nativeentry", "value")
 
 
 def _two_root_distribution(tmp_path: Path) -> FakeDistribution:
