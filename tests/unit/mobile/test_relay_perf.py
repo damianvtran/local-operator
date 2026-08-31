@@ -83,6 +83,14 @@ def test_fold_cache_matches_full_reparse_on_append(tmp_path, monkeypatch) -> Non
     state = cache.load(directory)
     assert [e.id for e in state.render] == _fresh_render(directory)
     assert len(state.render) > len(first_render)
+    # entry_count is the cursor/file agreement invariant (A10): the tail read
+    # must have consumed exactly the lines a full re-parse would see.
+    file_lines = [
+        line
+        for line in (directory / "transcript.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    assert state.entry_count == len(file_lines)
 
 
 def test_fold_cache_refolds_on_compaction_in_tail(tmp_path, monkeypatch) -> None:

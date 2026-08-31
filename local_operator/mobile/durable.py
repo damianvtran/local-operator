@@ -81,11 +81,21 @@ _TRACKED_CUSTOM_TYPES = frozenset({"subagent_roster", "todo_snapshot"})
 
 #: Bound on cached durable folds, in sessions. One entry holds the replayed
 #: history plus the UNCAPPED render rows (the history endpoint serves the full
-#: conversation, not a tail): ~1 MB of rows plus a few MB of rehydrated
-#: messages on the worst measured transcript (53 MB file, 413-message replay
-#: window). 16 of those is a bounded ~tens-of-MB for the daemon; eviction is
-#: LRU and costs nothing but a re-fold on the next open of an evicted session.
-MAX_DURABLE_FOLD_CACHE = 16
+#: conversation, not a tail).
+#:
+#: MEASURED, not estimated: ``tracemalloc`` against the operator's largest real
+#: transcript (55.8 MB file, 441 replayed messages, 358 render rows) retains
+#: **6.9 MB per entry** and takes ~1.2 s to fold. An earlier revision of this
+#: comment called 16 entries "a bounded ~tens-of-MB", which was ~4x optimistic:
+#: 16 x 6.9 MB is ~110 MB resident for a daemon that runs all day, and that is
+#: a different decision from the one the number implied.
+#:
+#: 8 is the corrected bound, ~55 MB worst case. The phone opens a handful of
+#: sessions in a sitting, so the hit rate barely moves; eviction costs only a
+#: re-fold on the next open of an evicted session, and the incremental tail
+#: read means a re-fold is paid once, not per request. Worst-case entries are
+#: also the rare ones — a typical session folds to well under a megabyte.
+MAX_DURABLE_FOLD_CACHE = 8
 
 
 @dataclass
@@ -120,11 +130,14 @@ class DurableFoldState:
     history: list[AgentMessage] = field(default_factory=list)
     render: list[Any] = field(default_factory=list)
     prunes: dict[str, str] = field(default_factory=dict)
+    #: Transcript entries consumed so far. Not read by the fold itself — it is
+    #: the cheap invariant that says the incremental cursor and the file agree,
+    #: which the cache tests assert against a full re-parse.
+    entry_count: int = 0
     #: Newest-wins custom-entry details by type, mirroring the store's
     #: ``latest_custom``. The durable projection reads the subagent roster and
     #: a child's todo snapshot from here instead of re-parsing transcripts.
     latest_customs: dict[str, dict[str, Any]] = field(default_factory=dict)
-    entry_count: int = 0
     offset: int = 0
     fingerprint: _FileFingerprint | None = None
     #: Serializes rebuilds of THIS session; concurrent opens of one session pay
