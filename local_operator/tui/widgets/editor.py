@@ -1195,6 +1195,11 @@ class Editor(TextArea):
         # BEFORE ``super().__init__`` because TextArea's constructor loads the
         # initial document through ``load_text`` → ``_sync_picker``.
         self._suspend_picker_sync = False
+        # Last parse phase `_sync_picker` settled. Compared by
+        # `_sync_picker_if_phase_changed` so a caret move that stays inside
+        # one phase does not re-open an Esc-dismissed list. Set BEFORE
+        # ``super().__init__`` because that constructor already syncs.
+        self._picker_phase_at_last_sync: str | None = None
         # The escape action held for one pump turn, or ``None`` when no escape
         # is in flight (the resting state). See the escape-coalescing block
         # below :meth:`_on_key` for why an escape is ever held at all.
@@ -3804,17 +3809,26 @@ class Editor(TextArea):
         # during base-class construction, before this subclass's attributes
         # exist, and `_ghost_completion` reads several of them.
         #
-        # Re-derive the PICKER here, not just the ghost. `_on_key` syncs
-        # BEFORE the caret-moving binding runs, so a round trip of `home`
-        # then `end` used to close an ARGUMENT list at the start of the line
-        # and never ask again once the caret was back in the argument —
-        # while a COMMAND list survived because `slash_context` still matches
-        # at column 0 of an unterminated word (#393). Asking at the settled
-        # caret is the only reopen path that cannot depend on which key got
-        # you here. Skipped while `_set_text_and_caret` is parking the caret
-        # so that helper's one-sync-at-the-final-position contract (D5) holds.
+        # Re-derive the PICKER here, not just the ghost — but ONLY when the
+        # caret has crossed a parse PHASE. `_on_key` syncs BEFORE the
+        # caret-moving binding runs, so a round trip of `home` then `end`
+        # used to close an ARGUMENT list at the start of the line and never
+        # ask again once the caret was back in the argument (#393). Asking
+        # at the settled caret is the reopen path that cannot depend on
+        # which key got you here.
+        #
+        # Unconditional `_sync_picker` here is the wrong answer: that helper
+        # re-opens a list whose query still matches, so an Esc-dismissed
+        # model/command list came back on the next caret move (`shift+up`
+        # in the model picker, CI 3.12/3.13). The phase check is what
+        # keeps a dismissal a dismissal: `home` on `/mcp ` leaves the
+        # argument, `end` re-enters it, and a motion that stays inside
+        # the same phase (or outside every list) is a no-op for the
+        # picker. Skipped while `_set_text_and_caret` is parking the caret
+        # so that helper's one-sync-at-the-final-position contract (D5)
+        # holds.
         if hasattr(self, "_picker") and not getattr(self, "_suspend_picker_sync", False):
-            self._sync_picker()
+            self._sync_picker_if_phase_changed()
 
     # -- paste ----------------------------------------------------------------
     async def _on_paste(self, event: events.Paste) -> None:
@@ -4599,6 +4613,42 @@ class Editor(TextArea):
         self.text = f"{text[:start]}{text[end:]}"
         self.move_cursor(self._location_at_offset(start))
 
+    def _picker_phase(self) -> str | None:
+        """Which list the caret is currently inside, or ``None``.
+
+        ``"argument"`` while :func:`slash_argument` matches, ``"command"``
+        while :func:`slash_context` matches, ``None`` otherwise. The three
+        answers are mutually exclusive by construction (the space that
+        opens an argument closes the command word). Used by
+        :meth:`_sync_picker_if_phase_changed` so a caret move that stays
+        inside one phase does not re-open an Esc-dismissed list.
+        """
+        cursor = self._caret_offset()
+        if (
+            slash_argument(self.text, self._argument_commands, cursor, self._command_names)
+            is not None
+        ):
+            return "argument"
+        if slash_context(self.text, cursor, self._command_names) is not None:
+            return "command"
+        return None
+
+    def _sync_picker_if_phase_changed(self) -> None:
+        """Re-sync the picker only when the caret crossed a parse phase.
+
+        The #393 reopen (`end` after `home` on `/mcp `) is a phase change:
+        column 0 is outside the argument, the end of the line is inside
+        it. A motion that stays in the same phase — arrows inside a word,
+        `shift+up` with a model list dismissed — must not call
+        :meth:`_sync_picker`, because that helper treats a matching query
+        as "show the list" and would undo Esc.
+        """
+        phase = self._picker_phase()
+        if phase == getattr(self, "_picker_phase_at_last_sync", None):
+            self._sync_ghost()
+            return
+        self._sync_picker()
+
     def _sync_picker(self) -> None:
         """Re-derive EVERY list from the buffer.
 
@@ -4782,6 +4832,7 @@ class Editor(TextArea):
         if argument is None:
             if self._model_picker.is_open():
                 self._model_picker.close()
+            self._picker_phase_at_last_sync = self._picker_phase()
             return
         if self._model_picker.is_open():
             self._model_picker.set_query(argument)
@@ -4790,6 +4841,10 @@ class Editor(TextArea):
             # Transition only. Posting per keystroke would re-fetch every provider
             # for each character the user types into the query.
             self.post_message(ModelQueryOpened())
+        # Recorded after both list branches so a later caret-only move can
+        # tell whether the parse PHASE changed (#393 reopen vs. an
+        # Esc-dismissed list that must stay closed).
+        self._picker_phase_at_last_sync = self._picker_phase()
 
     def _on_picker_highlight(self, name: str | None) -> None:
         """Relay the picker's highlight to the app (see ArgumentHighlightChanged).

@@ -1087,8 +1087,9 @@ class WelcomeView(Static):
         # Pin :data:`TIP_PASTE` as the opening tip on Terminal.app. Captured
         # once at construction: the markers cannot change under a running
         # process, and reading them per frame would make a still frame depend
-        # on the host's TERM_PROGRAM (the suite's autouse fixture seeds
-        # GHOSTTY_BIN, so a per-frame read would never pin in tests either).
+        # on the host's TERM_PROGRAM. The suite's autouse fixture deletes
+        # TERM_PROGRAM (F1) so a developer running tests inside Terminal.app
+        # still gets TIPS[0]; the Apple_Terminal test sets it itself.
         self._pin_paste_tip = terminals.is_apple_terminal()
 
     def on_mount(self) -> None:

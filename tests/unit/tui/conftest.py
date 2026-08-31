@@ -48,6 +48,13 @@ def hermetic_tui_env(monkeypatch: pytest.MonkeyPatch) -> None:
     # itself set their own markers/settings and override this within the test.
     monkeypatch.delenv("LOCAL_OPERATOR_NO_NERD_ICONS", raising=False)
     monkeypatch.setenv("GHOSTTY_BIN", "/usr/bin/ghostty")
+    # `WelcomeView` pins the opening tip from `TERM_PROGRAM` alone
+    # (`terminals.is_apple_terminal` does not look at `GHOSTTY_BIN`). A host
+    # running the suite inside Terminal.app would otherwise open every splash
+    # on the paste tip and fail assertions that the first frame is `TIPS[0]`
+    # (review round 1, F1). Tests that exercise the Apple_Terminal pin set
+    # this themselves.
+    monkeypatch.delenv("TERM_PROGRAM", raising=False)
     # The splash starts a one-shot PyPI probe on mount. Unit tests must not
     # pay a 5 s timeout (or a real GET) for news they are not asserting.
     # Patch the worker, not ``check_latest``: ``/update`` needs the real

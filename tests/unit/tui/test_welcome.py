@@ -1404,23 +1404,23 @@ async def test_toggling_shimmer_does_not_leak_or_double_the_tip_timer(
         welcome._sync_tip_timer()
         assert welcome._tip_timer is first, "a second sync stacked a new tip timer"
         # Force the glow on, then off again; the tip timer must be untouched.
-        # Patch where welcome.py bound the name, not the shimmer module —
-        # `_sync_pulse_timer` reads the imported symbol.
-        original = welcome_mod.shimmer_enabled
+        # Patch where welcome.py bound the name: the pulse reads
+        # ``motion_enabled``, the tip reads ``animation_focused``.
+        original_motion = welcome_mod.motion_enabled
         try:
-            welcome_mod.shimmer_enabled = lambda: True
+            welcome_mod.motion_enabled = lambda: True
             welcome._sync_pulse_timer()
             welcome._sync_tip_timer()
             assert welcome._pulse_timer is not None
             assert welcome._tip_timer is first
-            welcome_mod.shimmer_enabled = lambda: False
+            welcome_mod.motion_enabled = lambda: False
             welcome._sync_pulse_timer()
             welcome._sync_tip_timer()
             assert welcome._pulse_timer is None
             assert welcome._tip_timer is first
             assert first._task is not None, "the original tip timer was stopped"
         finally:
-            welcome_mod.shimmer_enabled = original
+            welcome_mod.motion_enabled = original_motion
 
 
 def test_a_terminal_app_launch_opens_on_the_paste_tip() -> None:
@@ -1453,9 +1453,9 @@ async def test_the_composed_splash_pins_paste_on_apple_terminal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The pin is not just the builder: the REAL splash, with Apple_Terminal
-    in the environment, opens on the paste tip. Captured at construction so a
-    host that is not Terminal.app (this suite seeds GHOSTTY_BIN) does not
-    pin, and a host that is does."""
+    in the environment, opens on the paste tip. The suite's autouse fixture
+    deletes TERM_PROGRAM so a host running inside Terminal.app still opens
+    on TIPS[0]; this test is the one that sets it."""
     monkeypatch.setenv("TERM_PROGRAM", "Apple_Terminal")
     # Drop the suite's ghostty marker so is_apple_terminal is the only hit.
     monkeypatch.delenv("GHOSTTY_BIN", raising=False)
