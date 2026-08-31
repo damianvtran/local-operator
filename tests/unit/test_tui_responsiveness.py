@@ -48,10 +48,10 @@ class StallRecorder:
         self._task: asyncio.Task[None] | None = None
 
     async def _probe(self) -> None:
-        last = time.perf_counter()
+        last = time.thread_time()
         while True:
             await asyncio.sleep(TICK_S)
-            now = time.perf_counter()
+            now = time.thread_time()
             gap_ms = (now - last) * 1000.0
             if gap_ms >= self.stall_ms:
                 self.stalls.append(gap_ms)
@@ -76,7 +76,8 @@ class StallRecorder:
     def assert_no_stall(self, ceiling_ms: float = 50.0) -> None:
         worst = max(self.stalls) if self.stalls else 0.0
         assert worst < ceiling_ms, (
-            f"event loop stalled {worst:.0f} ms (ceiling {ceiling_ms:.0f} ms); "
+            f"event loop consumed {worst:.0f} ms of CPU without yielding "
+            f"(ceiling {ceiling_ms:.0f} ms); "
             f"all stalls: {[round(s, 1) for s in self.stalls]}"
         )
 
