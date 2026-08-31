@@ -991,3 +991,35 @@ async def test_none_is_not_an_owner(method: str) -> None:
 
         assert toast.message == "⊙ MCP failed: github"
         assert toast.display
+
+
+@pytest.mark.asyncio
+async def test_withdraw_of_one_owner_does_not_retire_another_owners_card() -> None:
+    """THE D15 guard at the toast: identity, not a shared tag.
+
+    Two operations, two owners, one slot. Withdrawing the first must leave
+    the second showing. This is the mechanism the paste path now uses
+    (issue #422): a deferred timer carries the owner it scheduled against,
+    and a mismatch is a no-op. Mutation-tested: matching on a shared
+    sentinel instead of the per-raise token makes this fail.
+    """
+    first = object()
+    second = object()
+    async with ToastApp().run_test(size=(80, 24)) as pilot:
+        toast = pilot.app.query_one(Toast)
+        toast.show("Reading the clipboard…", owner=first)
+        await pilot.pause()
+        toast.show("Reading the clipboard…", owner=second)
+        await pilot.pause()
+        assert toast.display
+        held = toast.generation
+
+        toast.withdraw(first)
+        await pilot.pause()
+
+        assert toast.display, "withdrawing paste 1's owner hid paste 2's card"
+        assert toast.message == "Reading the clipboard…"
+        assert toast.generation == held, (
+            "withdrawing a stale owner dismissed and re-raised the current "
+            "card — the identity check is not holding"
+        )

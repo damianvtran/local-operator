@@ -1323,6 +1323,14 @@ COMPOSER_PASTE_NOTICE = object()
 #: retirement can only ever reach the progress card, whatever the timing. The
 #: failure notices keep `COMPOSER_PASTE_NOTICE` so `EditorPasteAttached` still
 #: retires a held one through the machinery it already used.
+#:
+#: This object is the FALLBACK owner for a host that does not mint a
+#: per-paste token. The live path mints a fresh token per raise (issue
+#: #422 / D15): two overlapping pastes sharing this object is how paste 1's
+#: deferred timer killed paste 2's progress card. Identity, not a
+#: generation — ``Toast.generation`` names a painted card and is unchanged
+#: by a declined ``show``, which is the case that made it unusable for the
+#: copy receipt.
 COMPOSER_READING_NOTICE = object()
 
 #: What the composer says while a clipboard read is in flight. 22 cells, so it
@@ -5929,7 +5937,9 @@ class OperatorApp(App[None]):
         """
         self.query_one(Toast).withdraw(COMPOSER_COPY)
 
-    def show_clipboard_reading_notice(self, reading: bool) -> None:
+    def show_clipboard_reading_notice(
+        self, reading: bool, owner: object | None = None
+    ) -> object | None:
         """Raise or retire the in-flight clipboard-read card.
 
         **Called DIRECTLY by the composer, not driven by a message, and the
@@ -5950,9 +5960,11 @@ class OperatorApp(App[None]):
 
         A COURTESY, not a failure: the user just pressed a key and this is news
         about their own gesture, so `yield_to_actionable` keeps it from
-        evicting an MCP error they have not read. It takes the paste notices'
-        owner, so a later outcome replaces or withdraws it through the
-        machinery those notices already use.
+        evicting an MCP error they have not read. Each raise mints its own
+        owner token so a deferred retirement cannot dismiss a later paste's
+        card (D15 / issue #422); the outcome notices keep
+        `COMPOSER_PASTE_NOTICE` so `EditorPasteAttached` still retires a
+        held one through the machinery it already used.
         """
         from local_operator.tui.widgets.toast import TOAST_DEFAULT_MS
 
@@ -5973,19 +5985,33 @@ class OperatorApp(App[None]):
             # that took the slot while the read ran is never pulled out from
             # under the user — and, since this owner is the READING card's
             # alone, neither is the paste outcome's own notice. That separation
-            # is what makes the deferred retirement safe (see
-            # `COMPOSER_READING_NOTICE`): by the time a delayed withdrawal
-            # fires, the slot may already belong to the failure card that
-            # replaced this one, and owner matching is the only thing standing
-            # between that card and a `dismiss_toast` (D14).
-            toast.withdraw(COMPOSER_READING_NOTICE)
-            return
+            # is what makes the deferred retirement safe against a DIFFERENT
+            # owner (see `COMPOSER_READING_NOTICE` / D14).
+            #
+            # It is not enough against a LATER card of the SAME owner: a
+            # second ctrl+v raises another progress card, and paste 1's
+            # deferred timer would retire it (D15 / issue #422). Same class
+            # as the steer-receipt guard (PR #452): the owner names the
+            # operation that scheduled the retirement, and a mismatch drops
+            # the delivery. ``COMPOSER_READING_NOTICE`` is the fallback for
+            # a host that never minted a per-paste token.
+            toast.withdraw(owner if owner is not None else COMPOSER_READING_NOTICE)
+            return None
+        # A fresh token per raise, so two overlapping pastes cannot share an
+        # owner. Identity, not a generation: ``Toast.generation`` names a
+        # painted card and is unchanged by a declined ``show``, which is
+        # exactly the case that made it unusable for the copy receipt
+        # (design round 4, D14 on that path). Object identity answers
+        # "which paste scheduled this timer?" the same way PR #452 answers
+        # "which session posted this event?".
+        paste_owner = object() if owner is None else owner
         toast.show(
             CLIPBOARD_READING_NOTICE,
             duration_ms=TOAST_DEFAULT_MS,
             yield_to_actionable=True,
-            owner=COMPOSER_READING_NOTICE,
+            owner=paste_owner,
         )
+        return paste_owner
 
     def on_editor_paste_empty(self, message: EditorPasteEmpty) -> None:
         """A paste that could only have been an image attached nothing — say so.
