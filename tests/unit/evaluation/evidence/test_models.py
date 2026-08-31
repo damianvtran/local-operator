@@ -14,6 +14,7 @@ from local_operator.evaluation.evidence.models import (
     EnvironmentStepPayload,
     ErrorPayload,
     EventRecord,
+    EvidenceArtifactRef,
     EvidenceManifest,
     LifecycleTransitionPayload,
     ModelRequestPayload,
@@ -27,12 +28,11 @@ from local_operator.evaluation.evidence.models import (
     UsageCostPayload,
     UserSimulatorExchangePayload,
 )
-from local_operator.evaluation.protocol import ArtifactRef
 
 DIGEST = "0123456789abcdef" * 4
 OTHER_DIGEST = "abcdef0123456789" * 4
 ROUTE = RouteIdentity(provider_id="provider", route_id="route", model_id="model")
-ARTIFACT = ArtifactRef(sha256=DIGEST, media_type="text/plain", byte_count=4)
+ARTIFACT = EvidenceArtifactRef(sha256=DIGEST, media_type="text/plain", byte_count=4)
 
 
 def manifest() -> EvidenceManifest:
