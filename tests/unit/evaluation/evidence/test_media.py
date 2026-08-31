@@ -32,17 +32,29 @@ def png() -> bytes:
 
 
 def jpeg() -> bytes:
+    dqt = b"\x00" + b"\x01" * 64
+    dht_dc = b"\x00" + b"\x01" + b"\x00" * 15 + b"\x00"
+    dht_ac = b"\x10" + b"\x01" + b"\x00" * 15 + b"\x00"
     sof = b"\x08\x00\x01\x00\x01\x01\x01\x11\x00"
     scan = b"\x01\x01\x00\x00\x3f\x00"
-    return (
-        b"\xff\xd8\xff\xc0"
+    segments = (
+        b"\xff\xdb"
+        + (len(dqt) + 2).to_bytes(2, "big")
+        + dqt
+        + b"\xff\xc4"
+        + (len(dht_dc) + 2).to_bytes(2, "big")
+        + dht_dc
+        + b"\xff\xc4"
+        + (len(dht_ac) + 2).to_bytes(2, "big")
+        + dht_ac
+        + b"\xff\xc0"
         + (len(sof) + 2).to_bytes(2, "big")
         + sof
         + b"\xff\xda"
         + (len(scan) + 2).to_bytes(2, "big")
         + scan
-        + b"\x00\xff\xd9"
     )
+    return b"\xff\xd8" + segments + b"\x00\xff\xd9"
 
 
 def gif() -> bytes:
@@ -54,8 +66,8 @@ def gif() -> bytes:
 
 
 def webp() -> bytes:
-    payload = b"\x00\x00\x00\x9d\x01\x2a\x01\x00\x01\x00"
-    chunk = b"VP8 " + len(payload).to_bytes(4, "little") + payload
+    payload = b"\x20\x00\x00\x9d\x01\x2a\x01\x00\x01\x00\x00"
+    chunk = b"VP8 " + len(payload).to_bytes(4, "little") + payload + b"\x00"
     return b"RIFF" + (len(chunk) + 4).to_bytes(4, "little") + b"WEBP" + chunk
 
 
@@ -101,6 +113,20 @@ def test_png_rejects_crc_dimension_truncation_and_trailing_bytes() -> None:
     ):
         with pytest.raises(MediaValidationError):
             validate_media(payload, "image/png")
+
+
+def test_reviewer_header_only_fixtures_are_rejected() -> None:
+    empty_scan = jpeg()[:-3] + b"\xff\xd9"
+    invalid_gif = gif().replace(b"\x02\x02\x4c\x01", b"\x00\x00")
+    vp8x = b"VP8X" + (10).to_bytes(4, "little") + b"\x00" * 10
+    header_only_webp = b"RIFF" + (len(vp8x) + 4).to_bytes(4, "little") + b"WEBP" + vp8x
+    for media_type, payload in (
+        ("image/jpeg", empty_scan),
+        ("image/gif", invalid_gif),
+        ("image/webp", header_only_webp),
+    ):
+        with pytest.raises(MediaValidationError):
+            validate_media(payload, media_type)
 
 
 @pytest.mark.parametrize(

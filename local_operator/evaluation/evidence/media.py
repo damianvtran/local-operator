@@ -126,12 +126,17 @@ def _jpeg(data: bytes) -> None:
     if len(data) < 4 or data[:2] != b"\xff\xd8":
         raise MediaValidationError("invalid JPEG")
     offset = 2
-    saw_sof = False
+    components: set[int] = set()
+    quant_tables: set[int] = set()
+    huffman_dc: set[int] = set()
+    huffman_ac: set[int] = set()
+    saw_scan_data = False
     in_scan = False
     while offset < len(data):
         if data[offset] != 0xFF:
             if not in_scan:
                 raise MediaValidationError("invalid JPEG marker")
+            saw_scan_data = True
             offset += 1
             continue
         while offset < len(data) and data[offset] == 0xFF:
@@ -145,7 +150,7 @@ def _jpeg(data: bytes) -> None:
         if in_scan and 0xD0 <= marker <= 0xD7:
             continue
         if marker == 0xD9:
-            if not saw_sof or offset != len(data):
+            if not components or not saw_scan_data or offset != len(data):
                 raise MediaValidationError("invalid JPEG EOI")
             return
         in_scan = False
@@ -172,32 +177,110 @@ def _jpeg(data: bytes) -> None:
             0xCE,
             0xCF,
         }:
-            if len(payload) < 6:
+            if len(payload) < 6 or payload[0] not in (8, 12):
                 raise MediaValidationError("truncated JPEG SOF")
+            count = payload[5]
+            if count == 0 or len(payload) != 6 + 3 * count:
+                raise MediaValidationError("invalid JPEG components")
             _dimensions(
                 int.from_bytes(payload[3:5], "big"),
                 int.from_bytes(payload[1:3], "big"),
             )
-            saw_sof = True
+            components = {payload[6 + index * 3] for index in range(count)}
+            if len(components) != count:
+                raise MediaValidationError("duplicate JPEG component")
+            referenced_quant = {payload[8 + index * 3] for index in range(count)}
+            if referenced_quant - quant_tables:
+                raise MediaValidationError("undefined JPEG quantization table")
+        elif marker == 0xDB:
+            cursor = 0
+            while cursor < len(payload):
+                precision_table = payload[cursor]
+                cursor += 1
+                size = 64 * (2 if precision_table >> 4 else 1)
+                if precision_table >> 4 not in (0, 1) or cursor + size > len(payload):
+                    raise MediaValidationError("invalid JPEG DQT")
+                quant_tables.add(precision_table & 0x0F)
+                cursor += size
+        elif marker == 0xC4:
+            cursor = 0
+            while cursor < len(payload):
+                table = payload[cursor]
+                cursor += 1
+                if cursor + 16 > len(payload):
+                    raise MediaValidationError("invalid JPEG DHT")
+                symbols = sum(payload[cursor : cursor + 16])
+                cursor += 16
+                if cursor + symbols > len(payload):
+                    raise MediaValidationError("invalid JPEG DHT")
+                (huffman_ac if table >> 4 else huffman_dc).add(table & 0x0F)
+                cursor += symbols
         if marker == 0xDA:
-            if not saw_sof:
+            if not components or len(payload) < 6:
                 raise MediaValidationError("JPEG scan precedes SOF")
+            count = payload[0]
+            if count == 0 or len(payload) != 1 + 2 * count + 3:
+                raise MediaValidationError("invalid JPEG SOS")
+            for index in range(count):
+                component = payload[1 + 2 * index]
+                tables = payload[2 + 2 * index]
+                if (
+                    component not in components
+                    or tables >> 4 not in huffman_dc
+                    or tables & 0x0F not in huffman_ac
+                ):
+                    raise MediaValidationError("undefined JPEG scan table")
+            saw_scan_data = False
             in_scan = True
         offset += length
     raise MediaValidationError("missing JPEG EOI")
 
 
-def _subblocks(data: bytes, offset: int) -> int:
+def _subblocks(data: bytes, offset: int) -> tuple[int, bytes]:
+    collected = bytearray()
     while True:
         if offset >= len(data):
             raise MediaValidationError("truncated GIF subblocks")
         length = data[offset]
         offset += 1
         if length == 0:
-            return offset
+            return offset, bytes(collected)
         if offset + length > len(data):
             raise MediaValidationError("truncated GIF subblock")
+        collected.extend(data[offset : offset + length])
         offset += length
+
+
+def _gif_lzw(payload: bytes, minimum_code_size: int) -> None:
+    if minimum_code_size < 2 or minimum_code_size > 8 or not payload:
+        raise MediaValidationError("invalid GIF LZW stream")
+    clear = 1 << minimum_code_size
+    end = clear + 1
+    code_size = minimum_code_size + 1
+    next_code = end + 1
+    bit_offset = 0
+    saw_clear = False
+    while bit_offset + code_size <= len(payload) * 8:
+        byte_offset = bit_offset // 8
+        shift = bit_offset % 8
+        value = int.from_bytes(payload[byte_offset : byte_offset + 3], "little")
+        code = (value >> shift) & ((1 << code_size) - 1)
+        bit_offset += code_size
+        if code == clear:
+            saw_clear = True
+            code_size = minimum_code_size + 1
+            next_code = end + 1
+            continue
+        if code == end:
+            if not saw_clear:
+                raise MediaValidationError("GIF LZW end precedes clear")
+            return
+        if not saw_clear or code > next_code:
+            raise MediaValidationError("invalid GIF LZW code")
+        next_code += 1
+        if next_code == (1 << code_size) and code_size < 12:
+            code_size += 1
+    raise MediaValidationError("missing GIF LZW end code")
 
 
 def _gif(data: bytes) -> None:
@@ -223,7 +306,7 @@ def _gif(data: bytes) -> None:
             if offset >= len(data):
                 raise MediaValidationError("truncated GIF extension")
             offset += 1
-            offset = _subblocks(data, offset)
+            offset, _extension = _subblocks(data, offset)
         elif introducer == 0x2C:
             if offset + 9 > len(data):
                 raise MediaValidationError("truncated GIF image descriptor")
@@ -235,8 +318,10 @@ def _gif(data: bytes) -> None:
                 offset += 3 * (2 ** ((image_packed & 0x07) + 1))
             if offset >= len(data):
                 raise MediaValidationError("truncated GIF image")
-            offset += 1  # LZW minimum code size
-            offset = _subblocks(data, offset)
+            minimum_code_size = data[offset]
+            offset += 1
+            offset, compressed = _subblocks(data, offset)
+            _gif_lzw(compressed, minimum_code_size)
             saw_image = True
         else:
             raise MediaValidationError("invalid GIF block")
@@ -250,6 +335,7 @@ def _webp(data: bytes) -> None:
         raise MediaValidationError("invalid WebP RIFF size")
     offset = 12
     saw_image = False
+    saw_extended = False
     while offset < len(data):
         if offset + 8 > len(data):
             raise MediaValidationError("truncated WebP chunk")
@@ -262,21 +348,25 @@ def _webp(data: bytes) -> None:
             raise MediaValidationError("truncated WebP chunk")
         payload = data[start:end]
         if kind == b"VP8X":
-            if len(payload) != 10:
+            if len(payload) != 10 or saw_extended or saw_image:
                 raise MediaValidationError("invalid WebP VP8X")
             width = 1 + int.from_bytes(payload[4:7], "little")
             height = 1 + int.from_bytes(payload[7:10], "little")
             _dimensions(width, height)
-            saw_image = True
+            saw_extended = True
         elif kind == b"VP8L":
-            if len(payload) < 5 or payload[0] != 0x2F:
+            if len(payload) <= 5 or payload[0] != 0x2F:
                 raise MediaValidationError("invalid WebP VP8L")
             bits = int.from_bytes(payload[1:5], "little")
             _dimensions((bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1)
             saw_image = True
         elif kind == b"VP8 ":
-            if len(payload) < 10 or payload[3:6] != b"\x9d\x01\x2a":
+            if len(payload) <= 10 or payload[3:6] != b"\x9d\x01\x2a":
                 raise MediaValidationError("invalid WebP VP8")
+            frame_tag = int.from_bytes(payload[:3], "little")
+            partition_length = frame_tag >> 5
+            if frame_tag & 1 or partition_length == 0 or partition_length + 10 > len(payload):
+                raise MediaValidationError("invalid WebP VP8 partition")
             _dimensions(
                 int.from_bytes(payload[6:8], "little") & 0x3FFF,
                 int.from_bytes(payload[8:10], "little") & 0x3FFF,
