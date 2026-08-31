@@ -71,11 +71,15 @@ class StallRecorder:
 
     Call-site ceilings are site-appropriate, not global. The reconnect and
     connect tests use the strict 50 ms CPU bar (healthy sample 0 ms,
-    regression 116 ms). Sites with legitimate loop CPU — the title-scan
-    test records a healthy 36-38 ms — use a 200 ms CPU bar, because the
-    same work measured 2.4× slower on ubuntu-latest in
-    ``test_launch_subagent.py`` (393-492 ms on a dev box, 1056-1156 ms on
-    CI), and a 50 ms bar would flake a green tree. The wall ceiling is
+    regression 90-130 ms). The loaded default is 200 ms of CPU, which suits
+    the boot and turn paths that record ~0 ms healthy CPU. The ONE exception
+    is the title-scan test, which drives ``_prepare`` and records a healthy
+    206 ms of loop CPU on a loaded CI runner (measured on the merge run of
+    this probe; 130-206 ms locally), so it passes ``cpu_ceiling_ms=500``
+    explicitly rather than raising the shared default. Its REAL guard is
+    structural, not the ceiling — ``threading_get_ident() not in
+    seen_threads`` proves the scan ran off the loop, and it catches the
+    regression even when the CPU numbers overlap. The wall ceiling is
     2000 ms everywhere: 3× the worst observed scheduler-noise gap, and
     still well below the multi-second regressions.
     """
@@ -147,13 +151,17 @@ class StallRecorder:
     ) -> None:
         """Loaded bar: 200 ms of loop-thread CPU, same 2 s wall backstop.
 
-        The title-scan test records a healthy 36-38 ms of loop CPU for a
-        120-session scan. The same class of CPU-bound work measured 2.4×
-        slower on ubuntu-latest than on a dev box
-        (``test_launch_subagent.py``, 393-492 ms vs 1056-1156 ms), so a
-        50 ms bar would flake a green tree on a slow CI core (~90 ms).
-        200 ms is 2× that projected CI cost and still well below the
-        multi-second regressions (a 2 s scan, a 5 s pricing block).
+        200 ms suits the boot and turn paths, which record ~0 ms of healthy
+        loop CPU, and keeps their sensitivity to a 200-500 ms stall. The one
+        site that legitimately exceeds it — the title-scan test, whose
+        ``_prepare`` records a healthy 206 ms on a loaded CI runner — passes
+        ``cpu_ceiling_ms=500`` explicitly rather than raising this default,
+        so the other sites do not lose coverage.
+
+        For the title-scan test specifically, even the 500 ms ceiling is a
+        catastrophic backstop, not the primary guard: ``threading_get_ident()
+        not in seen_threads`` proves the scan ran off the loop and catches
+        the regression even when healthy and regressed CPU numbers overlap.
 
         The wall ceiling is the same catastrophic backstop as
         :meth:`assert_no_stall`: a pure blocking sleep is invisible to the
@@ -340,7 +348,12 @@ async def test_prepare_store_scans_do_not_stall_the_loop(
         await await_store_maintenance_for_tests()
     finally:
         await recorder.stop()
-    recorder.assert_no_stall_loaded()
+    # 500 ms, not the 200 ms loaded default: this test drives ``_prepare``,
+    # which records a healthy 206 ms of loop CPU on a loaded CI runner
+    # (measured on the merge run of the dual-signal probe). The default would
+    # flake a green tree here, and the real guard is the structural assertion
+    # below anyway — the ceiling is only a catastrophic backstop.
+    recorder.assert_no_stall_loaded(cpu_ceiling_ms=500)
     # And the scan genuinely ran — in a worker thread, not on the loop.
     assert seen_threads, "the title backfill never executed"
     assert threading_get_ident() not in seen_threads
