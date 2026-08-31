@@ -12,6 +12,10 @@ from __future__ import annotations
 
 import os
 import time
+from pathlib import Path
+from unittest import mock
+
+import pytest
 
 from local_operator.session.retention import (
     DEFAULT_MAX_AGE_DAYS,
@@ -374,19 +378,22 @@ def test_a_claim_landing_mid_sweep_is_honoured_before_the_rmtree(tmp_path):
     victim.mkdir(parents=True)  # empty, first in line to be reaped
     other = _session(sessions, "other", size=100)
 
-    # A live session claims ``victim`` while the sweep is busy sizing ``other``.
-    original = retention._dir_size
+    # A live session claims ``victim`` while the sweep is busy classifying
+    # ``other``. Hooked on ``_holds_content`` because that is the call the
+    # sweep actually makes now; the previous hook on ``_dir_size`` would never
+    # fire and the test would pass for the wrong reason (the grace window).
+    original = retention._holds_content
 
     def claim_mid_sweep(directory):
         if directory.name == "other" and not (victim / ".session.pid").exists():
             retention.claim_session(victim, pid=os.getpid())
         return original(directory)
 
-    retention._dir_size = claim_mid_sweep
+    retention._holds_content = claim_mid_sweep
     try:
         sweep_sessions(sessions)
     finally:
-        retention._dir_size = original
+        retention._holds_content = original
 
     assert victim.exists(), "a claim that landed mid-sweep was ignored"
     assert (other / "transcript.jsonl").exists()
@@ -469,3 +476,210 @@ def test_on_an_unverifiable_platform_a_fresh_claim_is_kept(tmp_path, monkeypatch
 
     assert fresh.exists()
     assert result.evicted == 0
+
+
+# --- the emptiness probe that replaced the byte sum ---------------------------
+#
+# ``sweep_sessions`` only ever needed the zero/non-zero BIT of ``_dir_size``, so
+# the reap gate is now ``_holds_content`` — a short-circuiting probe with a
+# one-stat fast path, which on a 3574-session store costs 33 ms where the byte
+# sum cost 287 ms. These tests pin its ANSWERS rather than its speed: every case
+# below is one the sweep's deletion decision turns on, and a wrong ``False`` here
+# deletes a user's session.
+
+
+def test_the_probe_agrees_with_the_byte_sum_on_every_shape(tmp_path):
+    """The probe is a faster way to ask ``_dir_size(d) > 0``, so it must answer
+    exactly that on every directory shape the store actually contains.
+
+    ``_dir_size`` is the oracle deliberately: it is unchanged, it is what the
+    sweep used to consult, and pinning the two together is what makes the
+    replacement a refactor rather than a new policy. The one intended
+    disagreement (an unreadable directory) has its own test below.
+    """
+    from local_operator.session.retention import _dir_size, _holds_content
+
+    root = tmp_path / "sessions"
+    root.mkdir()
+
+    def build(name: str) -> Path:
+        directory = root / name
+        directory.mkdir()
+        return directory
+
+    shapes = {
+        "empty": lambda d: None,
+        # The liveness marker is bookkeeping, not content: a hard-killed run
+        # leaves exactly this, and it must stay reapable.
+        "marker_only": lambda d: (d / ".session.pid").write_text("4242"),
+        # origin.json IS content (#154/#192) — an aborted child is protected.
+        "origin_only": lambda d: (d / "origin.json").write_text('{"origin": "subagent"}'),
+        # A session that crashed before its first write. Zero bytes is not
+        # content, exactly as the byte sum said, or every such corpse leaks.
+        "zero_byte_transcript": lambda d: (d / "transcript.jsonl").write_text(""),
+        "nonempty_transcript": lambda d: (d / "transcript.jsonl").write_text("{}\n"),
+        "nested_empty_dir": lambda d: (d / "sub").mkdir(),
+        "nested_zero_byte_file": lambda d: (
+            (d / "sub").mkdir(),
+            (d / "sub" / "out.txt").write_text(""),
+        ),
+        "nested_content": lambda d: (
+            (d / "sub").mkdir(),
+            (d / "sub" / "out.txt").write_text("x"),
+        ),
+        # Neither implementation follows a symlink into a directory, and a
+        # dangling one is not a file to either.
+        "dangling_symlink": lambda d: os.symlink(str(d / "nope"), d / "link"),
+        "marker_and_zero_transcript": lambda d: (
+            (d / ".session.pid").write_text("1"),
+            (d / "transcript.jsonl").write_text(""),
+        ),
+    }
+
+    for name, populate in shapes.items():
+        directory = build(name)
+        populate(directory)  # type: ignore[operator]
+        assert _holds_content(directory) == (_dir_size(directory) > 0), (
+            f"the probe disagreed with the byte sum on {name!r}: "
+            f"_holds_content={_holds_content(directory)} _dir_size={_dir_size(directory)}"
+        )
+
+
+def test_a_zero_byte_transcript_is_not_content(tmp_path):
+    """A session killed before its first write leaves a zero-byte transcript,
+    and that directory must still be reapable.
+
+    This is the case a naive ``scandir`` probe (any entry means content) gets
+    wrong, and getting it wrong is not merely conservative: every such corpse
+    would become immortal, which is the leak the claim marker exists to
+    prevent. The byte sum counted it as 0 bytes and so must the probe.
+    """
+    from local_operator.session.retention import _holds_content
+
+    sessions = tmp_path / "sessions"
+    corpse = _hollow(sessions, "crashed")
+    (corpse / "transcript.jsonl").write_text("")
+    when = time.time() - EMPTY_DIR_GRACE_SECONDS - 60.0
+    os.utime(corpse, (when, when))
+
+    assert _holds_content(corpse) is False
+
+    result = sweep_sessions(sessions)
+
+    assert not corpse.exists(), "a zero-byte-transcript corpse was not reaped"
+    assert result.evicted == 1
+
+
+def test_a_directory_the_sweep_cannot_read_is_never_reaped(tmp_path):
+    """DELIBERATE BEHAVIOUR CHANGE, pinned here so it cannot be undone quietly.
+
+    ``_dir_size`` returned 0 for a directory it could not open (``rglob``
+    swallows the error), so the sweep read "unreadable" as "empty and
+    reapable" and could delete a session whose contents it had never managed
+    to look at. ``_holds_content`` resolves every ``OSError`` to "content":
+    if emptiness cannot be proven, nothing is deleted. Strictly safer, and the
+    direction this module errs in everywhere else.
+    """
+    from local_operator.session.retention import _dir_size, _holds_content
+
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    locked = sessions / "unreadable"
+    locked.mkdir()
+    (locked / "transcript.jsonl").write_text("real work nobody can see")
+    when = time.time() - EMPTY_DIR_GRACE_SECONDS - 60.0
+    os.utime(locked, (when, when))
+    os.chmod(locked, 0o000)
+
+    try:
+        if os.access(locked, os.R_OK):  # pragma: no cover - root ignores the mode
+            pytest.skip("running as a user that can read a 0o000 directory")
+        # The old behaviour, still observable: the byte sum reports nothing.
+        assert _dir_size(locked) == 0
+        # The new one refuses to conclude emptiness from a failed read.
+        assert _holds_content(locked) is True
+
+        result = sweep_sessions(sessions)
+
+        assert locked.exists(), "an unreadable directory was reaped"
+        assert result.evicted == 0
+    finally:
+        os.chmod(locked, 0o755)
+
+
+def test_an_unreadable_subdirectory_protects_its_parent(tmp_path):
+    """Same rule one level down: a subdirectory that cannot be read may hold
+    content, so the session is kept. The probe recurses, so this is a distinct
+    path from the unreadable-root case above."""
+    from local_operator.session.retention import _holds_content
+
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    directory = sessions / "sess"
+    directory.mkdir()
+    hidden = directory / "sub"
+    hidden.mkdir()
+    (hidden / "output.txt").write_text("content")
+    when = time.time() - EMPTY_DIR_GRACE_SECONDS - 60.0
+    os.utime(directory, (when, when))
+    os.chmod(hidden, 0o000)
+
+    try:
+        if os.access(hidden, os.R_OK):  # pragma: no cover - root ignores the mode
+            pytest.skip("running as a user that can read a 0o000 directory")
+        assert _holds_content(directory) is True
+
+        result = sweep_sessions(sessions)
+
+        assert directory.exists()
+        assert result.evicted == 0
+    finally:
+        os.chmod(hidden, 0o755)
+
+
+def test_the_probe_stops_at_the_first_byte_of_content(tmp_path):
+    """The probe short-circuits rather than walking the whole tree — that is
+    the property the whole change rests on, so it is asserted rather than
+    assumed. A directory with a non-empty transcript is answered by ONE stat,
+    without ever opening the directory."""
+    from local_operator.session.retention import _holds_content
+
+    directory = tmp_path / "sess"
+    directory.mkdir()
+    (directory / "transcript.jsonl").write_text("{}\n")
+    for index in range(50):
+        (directory / f"pad{index}.txt").write_text("x" * 100)
+
+    scandir_calls: list[str] = []
+    real_scandir = os.scandir
+
+    def counting_scandir(path, *args, **kwargs):
+        scandir_calls.append(str(path))
+        return real_scandir(path, *args, **kwargs)
+
+    with mock.patch.object(os, "scandir", counting_scandir):
+        assert _holds_content(directory) is True
+
+    assert scandir_calls == [], (
+        "the transcript fast path was not taken: the probe walked the directory "
+        f"({len(scandir_calls)} scandir calls) to answer a question one stat answers"
+    )
+
+
+def test_a_reaped_directory_is_still_gated_by_claim_and_grace(tmp_path):
+    """The probe replaced the SIZE call and nothing else. The claim marker and
+    the grace window still decide the fate of a directory that reads as empty,
+    so a fresh empty directory and a live-claimed one both survive a sweep that
+    reaps their aged, unclaimed neighbour."""
+    sessions = tmp_path / "sessions"
+    aged = _hollow(sessions, "aged")
+    fresh = _hollow(sessions, "fresh", age_seconds=1.0)
+    claimed = _hollow(sessions, "claimed")
+    (claimed / ".session.pid").write_text(str(os.getpid()))
+
+    result = sweep_sessions(sessions)
+
+    assert not aged.exists(), "an aged, unclaimed empty directory should be reaped"
+    assert fresh.exists(), "the grace window no longer protects a fresh empty dir"
+    assert claimed.exists(), "a live claim no longer protects its empty dir"
+    assert result.evicted == 1

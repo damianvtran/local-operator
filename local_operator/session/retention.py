@@ -82,6 +82,21 @@ LIVE_MARKER_NAME = ".session.pid"
 #: agree on the list.
 _SIDECAR_NAMES = frozenset({LIVE_MARKER_NAME})
 
+#: The transcript file's name, used by :func:`_holds_content` as a fast-path
+#: sentinel: a session that has written a turn has a non-empty one, and a
+#: non-empty transcript is content that can never be reaped.
+#:
+#: Spelled here rather than imported from
+#: ``local_operator.session.transcript``, matching ``resume.TRANSCRIPT_NAME``
+#: which keeps its own copy for the same reason. This module is imported on the
+#: session-construction path and is deliberately lean (115 modules, 13 ms);
+#: importing ``transcript`` for one string literal pulls in the harness types
+#: and attachment store with it (259 modules, 90 ms) and would spend more time
+#: on the import than the probe saves on the walk. The literal is stable \u2014 it
+#: is the on-disk format's name \u2014 and a change to it would break far more than
+#: this constant.
+TRANSCRIPT_FILENAME = "transcript.jsonl"
+
 #: This module's view of the platform. A module-local copy rather than reading
 #: ``sys.platform`` at the point of use, so a test can steer the Windows branch
 #: by patching THIS name instead of the global ``sys.platform`` — patching that
@@ -148,12 +163,15 @@ class SweepResult:
     the tests can assert on it instead of scraping log lines.
 
     ``evicted`` counts only empty directories — a non-zero value never means
-    a transcript was removed, because transcripts are never removed."""
+    a transcript was removed, because transcripts are never removed.
+
+    Store size is not reported: computing it meant summing every byte in the
+    store on every sweep, and nothing read the number.
+    """
 
     scanned: int = 0
     evicted: int = 0
     bytes_freed: int = 0
-    bytes_remaining: int = 0
     errors: int = 0
 
     @property
@@ -181,6 +199,12 @@ def _dir_size(directory: Path) -> int:
     such a directory reads as empty and the reap in :func:`sweep_sessions`
     removes it once :func:`_is_claimed` confirms no live process owns it —
     while a directory with any real content stays untouchable regardless.
+
+    NOT on the sweep's path any more. :func:`sweep_sessions` only ever needed
+    the zero/non-zero BIT of this number and now asks :func:`_holds_content`
+    for exactly that bit, which answers without summing the store. This stays
+    because the byte total is still the honest answer to "how big is this
+    session", and the tests pin the sidecar/origin charging rules here.
     """
     total = 0
     for entry in directory.rglob("*"):
@@ -190,6 +214,106 @@ def _dir_size(directory: Path) -> int:
         except OSError:
             continue
     return total
+
+
+def _holds_content(directory: Path) -> bool:
+    """Does ``directory`` hold anything the sweep must never delete?
+
+    This is the sweep's reap gate, and it answers exactly one question:
+    **is there at least one non-sidecar byte anywhere under this directory?**
+    It replaced ``_dir_size(child) > 0``, which computed a full byte total to
+    read a single bit off it. On the store this was written for — 3574 session
+    directories, 1.38 GB — that total cost 7111 ``scandir``s and 44372 ``stat``s
+    on every boot AND every ``/resume``, to discover that 0 directories were
+    empty. Measured on that store: 257 ms for the byte sum against 24 ms here.
+
+    WHAT IT IS ALLOWED TO CONCLUDE, and why each rule matches the byte sum it
+    replaced — read this before "simplifying" it, because the failure mode of a
+    wrong ``False`` is a deleted session:
+
+    - **A file with a non-zero size is content, and ends the search.** This is
+      the whole point: it short-circuits, where the sum had to keep walking.
+    - **A ZERO-BYTE file is NOT content**, matching the sum exactly (it added
+      0). This is the rule a naive ``scandir``-and-return-False probe gets
+      wrong, and getting it wrong is not merely conservative: a session that
+      crashed before its first write leaves a zero-byte ``transcript.jsonl``,
+      and calling that content makes every such corpse immortal, which is the
+      leak this module's claim marker exists to prevent.
+    - **:data:`_SIDECAR_NAMES` is skipped at every depth**, same set and same
+      reason as the sum: the liveness marker is bookkeeping about the run, so a
+      hard-killed session's marker-only directory must still read as empty and
+      stay reapable. ``origin.json`` is deliberately NOT in that set and so
+      still counts as content, preserving #154/#192.
+    - **Symlinks are not followed into directories**, matching ``rglob``, which
+      does not descend them — so a directory holding only a symlink to a full
+      directory reads as empty under both. A symlink to a non-empty FILE does
+      count under both, because ``stat`` follows it.
+    - **A vanished entry is not content.** A concurrent process disposing its
+      own session mid-walk is normal, exactly as in the sum.
+
+    DELIBERATE BEHAVIOUR CHANGE — an UNREADABLE directory now reads as
+    CONTENT. ``_dir_size`` returned 0 for a directory it could not open
+    (``rglob`` swallows the error), so the sweep read "unreadable" as "empty
+    and reapable" and could ``rmtree`` a session whose contents it had never
+    managed to look at. Every ``OSError`` here resolves to ``True`` instead:
+    if we cannot prove a directory is empty, we do not delete it. That is the
+    direction this whole module errs in — a retained empty directory costs
+    bytes, a wrongly reaped one costs the user their session — but it IS a
+    change, not a pure optimization, and it is why this function is named for
+    what it proves (content) rather than for what the caller wants (emptiness).
+    """
+    # Fast path: one stat answers ~92% of a real store. A session that has
+    # written even one turn has a non-empty transcript, which is content by
+    # definition and can never be reaped — so the common case never opens the
+    # directory at all, let alone walks it. A missing or zero-byte transcript
+    # falls through to the full probe rather than concluding anything: absence
+    # of a transcript is not absence of content (``origin.json``, attachments
+    # and nested output all live beside it).
+    try:
+        if (directory / TRANSCRIPT_FILENAME).stat().st_size > 0:
+            return True
+    except OSError:
+        # Not there, or unreadable. Neither answers the question on its own;
+        # the walk below decides, and it is the walk that owns the
+        # unreadable-means-content rule.
+        pass
+    return _walk_holds_content(directory)
+
+
+def _walk_holds_content(directory: Path) -> bool:
+    """Depth-first search for one non-sidecar byte, stopping at the first hit.
+
+    Split from :func:`_holds_content` so the recursion does not re-run the
+    transcript fast path at every depth — the sentinel is meaningful only at
+    the session root, and a nested file named ``transcript.jsonl`` must be
+    judged as ordinary content by the same rules as anything else.
+    """
+    try:
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                try:
+                    if entry.name in _SIDECAR_NAMES:
+                        continue
+                    # follow_symlinks=False mirrors ``rglob``, which does not
+                    # descend a symlinked directory.
+                    if entry.is_dir(follow_symlinks=False):
+                        if _walk_holds_content(Path(entry.path)):
+                            return True
+                        continue
+                    # A symlink to a file is followed here exactly as the byte
+                    # sum's ``stat`` followed it; a dangling one is not a file
+                    # and contributes nothing, under both.
+                    if entry.is_file() and entry.stat().st_size > 0:
+                        return True
+                except OSError:
+                    # This ENTRY could not be read. It may hold content we
+                    # cannot see, so it counts as content — the safe side.
+                    return True
+    except OSError:
+        # The DIRECTORY could not be opened. See the behaviour-change note in
+        # :func:`_holds_content`: unprovable emptiness is never a reap.
+        return True
+    return False
 
 
 def _process_alive(pid: int) -> bool:
@@ -424,7 +548,6 @@ def sweep_sessions(
     scanned = 0
     evicted = 0
     errors = 0
-    bytes_remaining = 0
     moment = now if now is not None else time.time()
     live_resolved = live_dir.resolve() if live_dir is not None else None
     try:
@@ -440,13 +563,16 @@ def sweep_sessions(
                 # The caller just created this directory and has not written
                 # a turn. It is empty by construction and must still survive.
                 continue
-            size = _dir_size(child)
+            holds_content = _holds_content(child)
         except OSError:
             # A directory another process removed mid-scan. Nothing to do.
             continue
-        if size > 0:
+        if holds_content:
             # Any real content (the liveness marker aside) — never touched.
-            bytes_remaining += size
+            # This is the ONLY question the reap ever asked of the old byte
+            # sum, and ``_holds_content`` answers it without reading the store's
+            # size; note it also treats an unreadable directory as content,
+            # where the sum reported it as empty. See ``_holds_content``.
             continue
         # Reads as empty: no content, at most a leftover liveness marker.
         #
@@ -532,7 +658,6 @@ def sweep_sessions(
         scanned=scanned,
         evicted=evicted,
         bytes_freed=0,  # empty directories free nothing measurable
-        bytes_remaining=bytes_remaining,
         errors=errors,
     )
     if result.changed:
