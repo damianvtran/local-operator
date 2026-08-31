@@ -71,16 +71,17 @@ class StallRecorder:
 
     Call-site ceilings are site-appropriate, not global. The reconnect and
     connect tests use the strict 50 ms CPU bar (healthy sample 0 ms,
-    regression 90-130 ms). Sites with legitimate loop CPU use a 500 ms CPU
-    bar: ``_prepare`` records a healthy 130-206 ms of loop CPU on a loaded
-    CI runner (measured on the merge run of this probe), so any ceiling
-    below that flakes a green tree, while a multi-second block still blows
-    through it. The title-scan test's REAL guard is structural, not the
-    ceiling — ``threading_get_ident() not in seen_threads`` proves the scan
-    ran off the loop, and it catches the regression even when the CPU
-    numbers overlap. The wall ceiling is 2000 ms everywhere: 3× the worst
-    observed scheduler-noise gap, and still well below the multi-second
-    regressions.
+    regression 90-130 ms). The loaded default is 200 ms of CPU, which suits
+    the boot and turn paths that record ~0 ms healthy CPU. The ONE exception
+    is the title-scan test, which drives ``_prepare`` and records a healthy
+    206 ms of loop CPU on a loaded CI runner (measured on the merge run of
+    this probe; 130-206 ms locally), so it passes ``cpu_ceiling_ms=500``
+    explicitly rather than raising the shared default. Its REAL guard is
+    structural, not the ceiling — ``threading_get_ident() not in
+    seen_threads`` proves the scan ran off the loop, and it catches the
+    regression even when the CPU numbers overlap. The wall ceiling is
+    2000 ms everywhere: 3× the worst observed scheduler-noise gap, and
+    still well below the multi-second regressions.
     """
 
     def __init__(self, stall_ms: float = STALL_MS) -> None:
@@ -146,20 +147,21 @@ class StallRecorder:
         )
 
     def assert_no_stall_loaded(
-        self, cpu_ceiling_ms: float = 500.0, wall_ceiling_ms: float = 2000.0
+        self, cpu_ceiling_ms: float = 200.0, wall_ceiling_ms: float = 2000.0
     ) -> None:
-        """Loaded bar: 500 ms of loop-thread CPU, same 2 s wall backstop.
+        """Loaded bar: 200 ms of loop-thread CPU, same 2 s wall backstop.
 
-        ``_prepare`` records a healthy 130-206 ms of loop CPU on a loaded CI
-        runner (measured on the merge run of this probe, where a 200 ms
-        ceiling flaked a green tree at 206 ms). 500 ms is 2.4× that observed
-        healthy max and still well below the multi-second regressions (a 2 s
-        scan, a 5 s pricing block).
+        200 ms suits the boot and turn paths, which record ~0 ms of healthy
+        loop CPU, and keeps their sensitivity to a 200-500 ms stall. The one
+        site that legitimately exceeds it — the title-scan test, whose
+        ``_prepare`` records a healthy 206 ms on a loaded CI runner — passes
+        ``cpu_ceiling_ms=500`` explicitly rather than raising this default,
+        so the other sites do not lose coverage.
 
-        For the title-scan test specifically, this ceiling is a catastrophic
-        backstop, not the primary guard: ``threading_get_ident() not in
-        seen_threads`` proves the scan ran off the loop and catches the
-        regression even when healthy and regressed CPU numbers overlap.
+        For the title-scan test specifically, even the 500 ms ceiling is a
+        catastrophic backstop, not the primary guard: ``threading_get_ident()
+        not in seen_threads`` proves the scan ran off the loop and catches
+        the regression even when healthy and regressed CPU numbers overlap.
 
         The wall ceiling is the same catastrophic backstop as
         :meth:`assert_no_stall`: a pure blocking sleep is invisible to the
@@ -346,7 +348,12 @@ async def test_prepare_store_scans_do_not_stall_the_loop(
         await await_store_maintenance_for_tests()
     finally:
         await recorder.stop()
-    recorder.assert_no_stall_loaded()
+    # 500 ms, not the 200 ms loaded default: this test drives ``_prepare``,
+    # which records a healthy 206 ms of loop CPU on a loaded CI runner
+    # (measured on the merge run of the dual-signal probe). The default would
+    # flake a green tree here, and the real guard is the structural assertion
+    # below anyway — the ceiling is only a catastrophic backstop.
+    recorder.assert_no_stall_loaded(cpu_ceiling_ms=500)
     # And the scan genuinely ran — in a worker thread, not on the loop.
     assert seen_threads, "the title backfill never executed"
     assert threading_get_ident() not in seen_threads
