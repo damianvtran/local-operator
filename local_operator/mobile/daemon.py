@@ -75,6 +75,18 @@ DEFAULT_PORT = 4098
 #: evicting detail alone leaves a retained projection advertising dead routes.
 MAX_RETAINED_SESSION_PROJECTIONS = 64
 
+#: TTL for the summaries cache. The durable half of a listing is a 100-directory
+#: scan plus bounded head reads (300 ms to several seconds under loop
+#: contention, measured on the operator's 3,925-session store), and a live
+#: session repaints the list ~30x/s — without a TTL every repaint re-ran that
+#: scan and starved every other request on the single daemon loop. The TTL is
+#: the staleness bound for the DURABLE half only (a new terminal session
+#: appears within it); live-projection fields are merged fresh on every call,
+#: so streaming/pending state never ages. Structural changes (registration,
+#: heartbeat, wake, session death) invalidate the cache outright via
+#: ``notify_list_changed``, so the TTL is only what a quiet machine pays.
+SUMMARIES_CACHE_TTL_S = 1.0
+
 
 class _StaleProjection(Exception):
     """A fenced owner frame with no retained payload to republish."""
@@ -156,13 +168,106 @@ class SessionTable:
         # generations. Entries route watch commands but never own these queues.
         self.session_subscribers: dict[str, set[asyncio.Queue[dict[str, Any]]]] = {}
         self.provisional_active: set[str] = set()
+        # The durable half of summaries() is a directory scan; cache it behind a
+        # short TTL (SUMMARIES_CACHE_TTL_S) with single-flight refresh so N
+        # concurrent list consumers pay one scan, not N. The merged summary list
+        # is cached separately because the merge itself walks every live entry.
+        self._durable_rows_cache: dict[str, Any] | None = None
+        self._durable_rows_at = 0.0
+        self._durable_rows_task: asyncio.Task[dict[str, Any]] | None = None
+        self._summaries_cache: list[dict[str, Any]] | None = None
+        self._summaries_at = 0.0
+        self._summaries_task: asyncio.Task[list[dict[str, Any]]] | None = None
 
-    def summaries(self) -> list[dict[str, Any]]:
-        """Reconcile live generations with durable conversations by session id."""
+    def invalidate_summaries_cache(self) -> None:
+        """Drop both summaries caches so the next read rescans.
+
+        Called on every structural change (registration, heartbeat, wake,
+        session death — all funnel through ``notify_list_changed``) and when
+        the phone marks a session seen. The TTL alone would heal the same
+        facts within a second; outright invalidation makes the next repaint
+        correct instead of merely eventually correct.
+        """
+        self._durable_rows_cache = None
+        self._durable_rows_at = 0.0
+        self._summaries_cache = None
+        self._summaries_at = 0.0
+
+    async def _refresh_durable_rows(self) -> dict[str, Any]:
+        """Single-flight TTL refresh of the durable listing rows.
+
+        Runs ``recent_session_rows`` OFF the event loop: it stats and reads a
+        hundred session directories, which measured 300 ms to several seconds
+        under contention — blocking work that froze every SSE stream on this
+        loop while it ran. A concurrent caller joins the in-flight task
+        instead of starting a second scan.
+        """
         from local_operator.paths import config_dir
         from local_operator.resume import recent_session_rows
 
-        durable = {row.id: row for row in recent_session_rows(config_dir(), limit=100)}
+        task = self._durable_rows_task
+        if task is not None and not task.done():
+            return await task
+
+        async def _load() -> dict[str, Any]:
+            rows = await asyncio.to_thread(recent_session_rows, config_dir(), 100)
+            return {row.id: row for row in rows}
+
+        task = asyncio.ensure_future(_load())
+        self._durable_rows_task = task
+        try:
+            rows = await task
+        except BaseException:
+            # A failed scan must not poison the shared task: the next caller
+            # retries instead of awaiting a raised future forever.
+            if self._durable_rows_task is task:
+                self._durable_rows_task = None
+            raise
+        self._durable_rows_cache = rows
+        self._durable_rows_at = time.monotonic()
+        return rows
+
+    async def summaries(self) -> list[dict[str, Any]]:
+        """Reconcile live generations with durable conversations by session id.
+
+        Async because its durable half is blocking disk work (see
+        ``_refresh_durable_rows``); every call site awaits it off the loop.
+        The result is cached for ``SUMMARIES_CACHE_TTL_S`` — live-projection
+        fields are merged fresh on every build, so only the durable rows can
+        age, and structural changes invalidate the cache outright.
+        """
+        now = time.monotonic()
+        cached = self._summaries_cache
+        if cached is not None and now - self._summaries_at < SUMMARIES_CACHE_TTL_S:
+            return cached
+        task = self._summaries_task
+        if task is not None and not task.done():
+            return await task
+
+        async def _build() -> list[dict[str, Any]]:
+            rows = self._durable_rows_cache
+            if rows is None or time.monotonic() - self._durable_rows_at >= SUMMARIES_CACHE_TTL_S:
+                rows = await self._refresh_durable_rows()
+            return self._merge_summaries(rows)
+
+        task = asyncio.ensure_future(_build())
+        self._summaries_task = task
+        try:
+            out = await task
+        except BaseException:
+            if self._summaries_task is task:
+                self._summaries_task = None
+            raise
+        self._summaries_cache = out
+        self._summaries_at = time.monotonic()
+        return out
+
+    def _merge_summaries(self, durable: dict[str, Any]) -> list[dict[str, Any]]:
+        """Merge cached durable rows with fresh live state into summary rows.
+
+        Pure in-memory work (safe on the loop); split out of ``summaries`` so
+        the cache layer and the row shape are separately testable.
+        """
         active: dict[str, SessionEntry] = {}
         for entry in self.entries.values():
             if entry.ended:
@@ -201,6 +306,10 @@ class SessionTable:
                         if todo.status in ("pending", "blocked")
                     ),
                     "mtime": row.mtime if row else entry.record.started_at if entry else 0,
+                    # Placeholder shape: the seen-store (a later step of this
+                    # change) computes the real value; the web layer receives a
+                    # stable key from the first release of the endpoint.
+                    "unseen": False,
                 }
             )
         out.sort(
@@ -215,6 +324,10 @@ class SessionTable:
         return out
 
     def notify_list_changed(self) -> None:
+        # Structural change: the cached durable rows and merged summaries may
+        # both be stale (a session registered, ended, or woke). Drop them so
+        # the repaint this notification triggers reads fresh state.
+        self.invalidate_summaries_cache()
         for queue in self.list_subscribers:
             try:
                 queue.put_nowait(None)
@@ -1284,7 +1397,7 @@ def build_app(daemon: MobileDaemon):
         denied = gate(request)
         if denied is not None:
             return denied
-        return JSONResponse({"sessions": daemon.table.summaries()})
+        return JSONResponse({"sessions": await daemon.table.summaries()})
 
     async def api_session_events(request: Request) -> Response:
         """SSE repaint stream for one session — the phone's only realtime
@@ -1362,11 +1475,11 @@ def build_app(daemon: MobileDaemon):
 
         async def stream():
             try:
-                yield _sse("sessions", {"sessions": daemon.table.summaries()})
+                yield _sse("sessions", {"sessions": await daemon.table.summaries()})
                 while True:
                     try:
                         await asyncio.wait_for(queue.get(), timeout=SSE_KEEPALIVE_S)
-                        yield _sse("sessions", {"sessions": daemon.table.summaries()})
+                        yield _sse("sessions", {"sessions": await daemon.table.summaries()})
                     except TimeoutError:
                         yield ": keepalive\n\n"
             finally:
