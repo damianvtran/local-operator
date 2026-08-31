@@ -3961,7 +3961,26 @@ class Session:
 
         Returns a short human-readable detail string for the sender's ack.
         """
-        sender = sender or {}
+        # Resolve the sender against the LOCAL registry before anything renders
+        # or persists. The identity arrives over the wire as the sender's own
+        # self-report and can be empty or pid-only (a `lop send` whose ancestry
+        # walk found no session record), which painted `peer message from
+        # (pid 1)` — no name, no model, nothing to follow in a busy transcript.
+        # The registry is same-account, local, and written by the owning process
+        # itself, so it is the authoritative answer to "who is pid N"; the
+        # sender's own values win only where it actually supplied them. Done
+        # HERE, at the single point where an inbound peer message enters the
+        # session, so the enrichment reaches the persisted row, the live
+        # receipt, AND the model-visible provenance envelope alike — putting it
+        # in the registrant dispatch would leave the transcript path to
+        # re-derive it, and putting it in the TUI would fix only the card.
+        #
+        # Imported in-function: `mobile.peer_send` reaches the registry and the
+        # config path, and this module must not grow a module-level dependency
+        # on the mobile package for a per-message nicety.
+        from local_operator.mobile.peer_send import resolve_sender_identity
+
+        sender = resolve_sender_identity(sender)
         message = self._peer_custom_message(text, sender)
         busy = self._is_streaming
         if mode == "steer":

@@ -299,3 +299,71 @@ async def test_the_mailbox_wake_appends_nothing_extra_to_context(tmp_path):
     assert len(session._context.messages) == before + 1
     assert session._peer_arrival.count() == 1
     await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_pid_only_sender_is_named_from_the_local_registry(tmp_path, monkeypatch):
+    """The receive side resolves the sender against the registry rather than
+    trusting its self-report.
+
+    A `lop send` whose ancestry lookup found no session record arrives as
+    `{"pid": N}`, which painted `peer message from (pid 1)` — no name, no model,
+    nothing to follow in a busy transcript. The registry is same-account and
+    local, so it is the authoritative answer to "who is pid N", and the
+    enrichment has to land where BOTH the card and the model-visible provenance
+    envelope read it.
+    """
+    from local_operator.mobile import peer_send as peer_send_mod
+    from local_operator.mobile import registry
+
+    class _Rec:
+        pid = 4321
+        session_id = "peer-session-id"
+        conversation_name = "release cutter"
+        model_label = "anthropic/claude-opus-5"
+        cwd = "/tmp/release"
+
+    monkeypatch.setattr(peer_send_mod.registry, "scan", lambda root=None: [(_Rec(), "live")])
+    assert registry is not None  # the module the enrichment reads
+
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")]])
+    session = make_session(tmp_path, stream)
+    await session.receive_peer_message(
+        "the gates are green",
+        mode="mailbox",
+        wake=False,
+        sender={"pid": 4321},
+    )
+
+    rows = _peer_rows(session)
+    assert len(rows) == 1
+    details = rows[0].payload["details"]
+
+    # The indicator (TUI/phone) reads details["sender"].
+    sender = details["sender"]
+    assert sender["conversation_name"] == "release cutter"
+    assert sender["model_label"] == "anthropic/claude-opus-5"
+    assert sender["session_id"] == "peer-session-id"
+
+    # The MODEL reads details["text"] — the provenance envelope — so the
+    # enrichment must reach it too, not just the card.
+    assert "release cutter" in details["text"]
+    assert "anthropic/claude-opus-5" in details["text"]
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_sender_with_no_record_still_delivers(tmp_path, monkeypatch):
+    """Enrichment is a nicety: an unknown pid must not break delivery."""
+    from local_operator.mobile import peer_send as peer_send_mod
+
+    monkeypatch.setattr(peer_send_mod.registry, "scan", lambda root=None: [])
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")]])
+    session = make_session(tmp_path, stream)
+    detail = await session.receive_peer_message(
+        "still lands", mode="mailbox", wake=False, sender={"pid": 999999}
+    )
+    assert "mailbox" in detail
+    rows = _peer_rows(session)
+    assert rows[0].payload["details"]["sender"] == {"pid": 999999}
+    await session.dispose()

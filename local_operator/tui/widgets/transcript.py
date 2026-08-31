@@ -28,7 +28,9 @@ reads from the SHAPE of each mark, a spanning bar against a single glyph.
 
 from __future__ import annotations
 
+import os
 import time
+import unicodedata
 from contextlib import contextmanager
 from typing import Callable, ClassVar, Iterator, Literal, Sequence
 
@@ -1546,6 +1548,53 @@ class WakeBlock(ExpandableActionBlock):
         return self._row_count > 1
 
 
+#: Cell cap on one advisory sender field. The header is an identity label, and
+#: no honest conversation name, model label or directory basename approaches
+#: this — but the field crosses the wire, so its length is the peer's choice
+#: rather than ours. Uncapped, a 50,000-character name wrapped to a block 865
+#: rows tall that pushed the entire conversation off screen. Generous enough
+#: that a real name is never clipped, small enough that a hostile one cannot
+#: own the viewport.
+_SENDER_FIELD_MAX_CHARS = 120
+
+
+def _sanitize_sender_field(value: object) -> str:
+    """One line of bounded, plain text from an advisory sender field.
+
+    The sender identity crosses the wire from another process, so these strings
+    are the least trusted data this widget renders: a conversation name is
+    free text the peer chose. Three separate hazards, all of which have to be
+    closed here because this is the only place the value is touched before it
+    is painted:
+
+    - **Shape.** A newline split the header into rows the block never counted
+      (its height is PINNED to the row count it computed, so the extra row
+      painted outside the reserved space and lapped the block below).
+    - **Rendering.** An escape sequence would re-ink the transcript from inside
+      a label, and a format character (Unicode ``Cf`` — RTL override, ZWSP,
+      BOM) reorders the glyphs AROUND it: an unterminated ``U+202E`` visibly
+      scrambled the pid, which is the one field a reader uses to address the
+      peer back. A label that misreports the address is worse than no label.
+    - **Size.** Length is bounded so the block cannot own the viewport.
+
+    Offending characters are dropped rather than escaped because the header is
+    an identity label, not a place to display what an odd name contained.
+    """
+    text = str(value or "")
+    # Whitespace runs (newlines and tabs included) collapse to single spaces so
+    # the header stays exactly one paragraph.
+    text = " ".join(text.split())
+    # C0/C1 controls AND Unicode format characters. `unicodedata.category` is
+    # what makes the Cf class exhaustive — an explicit codepoint list would
+    # miss the next bidi control someone finds.
+    text = "".join(
+        char
+        for char in text
+        if ord(char) >= 32 and not 0x7F <= ord(char) <= 0x9F and unicodedata.category(char) != "Cf"
+    )
+    return text[:_SENDER_FIELD_MAX_CHARS]
+
+
 class PeerMessageBlock(TranscriptBlock):
     """An inbound message from ANOTHER local lop session (`lop send`).
 
@@ -1586,15 +1635,26 @@ class PeerMessageBlock(TranscriptBlock):
     HEADER_TOKEN = "muted"
     TEXT_TOKEN = "fg"
     MIN_BODY = 8
+    #: The model label is attached only when the WHOLE header still fits on one
+    #: row with it (see ``_header``). A fixed column threshold cannot express
+    #: that: it was calibrated against a 14-cell name, and at 22-26 cells — the
+    #: ordinary length here — crossing it re-attached a ~23-cell label that
+    #: cost more than the columns just gained, so widening a pane from 70 to 80
+    #: made the card TALLER. The rule is now about fit rather than width, which
+    #: is what makes wrapping monotonic: more columns never yields more rows.
 
     def __init__(self, body: str, sender: dict[str, object] | None = None) -> None:
         super().__init__()
         self.add_class("peer-message-block")
         self._text = body
         self._sender = sender or {}
-        #: Rendered index of the header row (always 0 when present), so
-        #: ``copy_row_is_chrome`` matches the frame without re-deriving it.
-        self._header_row: int | None = None
+        #: How many rendered rows the header occupies. The header is ONE
+        #: paragraph but wraps to several rows at narrow widths and with a long
+        #: sender name, so a single index cannot describe it: set by ``_build``
+        #: at the width it actually wrapped at, so ``copy_row_is_chrome`` never
+        #: re-derives it and cannot disagree with the frame (the discipline
+        #: ``UserBlock._receipt_row`` already follows).
+        self._header_rows: int = 0
         self.set_content(self._build())
         self.finalize()
 
@@ -1607,29 +1667,76 @@ class PeerMessageBlock(TranscriptBlock):
         """The sender label: 'peer message from "<name>" (pid N, <model>)'.
 
         Every field is advisory — a leaner sender omits some — so the label is
-        assembled from whatever is present and never assumes a key exists."""
-        name = str(self._sender.get("conversation_name") or "").strip()
+        assembled from whatever is present and never assumes a key exists.
+
+        When the conversation name is genuinely absent even after the receive
+        side's registry enrichment, the label falls back to the sender's cwd
+        basename and then to a short session id rather than showing a bare pid.
+        A row reading `peer message from (pid 1)` names nothing a reader can act
+        on — the whole point of the indicator is to say WHICH session reached
+        in, and a working directory or an id prefix answers that where a pid
+        assigned by the kernel does not."""
+        name = _sanitize_sender_field(self._sender.get("conversation_name"))
         pid = self._sender.get("pid")
-        model = str(self._sender.get("model_label") or "").strip()
+        model = _sanitize_sender_field(self._sender.get("model_label"))
+        # Quoted only for a name the peer CHOSE. A directory basename and an id
+        # prefix are the app guessing, and rendering them identically to a real
+        # title told the reader nothing about which they were looking at — two
+        # sessions in sibling checkouts would both read as "user-dashboard".
+        quoted = True
+        if not name:
+            cwd = _sanitize_sender_field(self._sender.get("cwd")).rstrip("/")
+            if cwd:
+                name = os.path.basename(cwd) + "/"  # trailing slash: a directory
+                quoted = False
+        if not name:
+            session_id = _sanitize_sender_field(self._sender.get("session_id"))
+            if session_id:
+                # A short prefix: a full ULID is 26 cells of entropy that pushes
+                # the pid and model out of the header without helping the eye.
+                name = session_id[:8]
+                quoted = False
         bits: list[str] = []
         if pid is not None:
             bits.append(f"pid {pid}")
-        if model:
-            bits.append(model)
-        detail = f" ({', '.join(bits)})" if bits else ""
-        if name:
-            return f'peer message from "{name}"{detail}'
-        if bits:
-            return f"peer message from{detail}"
-        return "peer message from another session"
+
+        def _compose(parts: list[str]) -> str:
+            detail = f" ({', '.join(parts)})" if parts else ""
+            if name:
+                label = f'"{name}"' if quoted else name
+                return f"peer message from {label}{detail}"
+            if parts:
+                return f"peer message from{detail}"
+            return "peer message from another session"
+
+        header = _compose(bits)
+        if not model:
+            return header
+
+        # The model is context, not an address: it is the least useful field for
+        # "which session reached in, so I can go and talk to it", so it is the
+        # first thing to give way (the information order name -> pid -> model is
+        # also the shed order). It is attached only when the result still fits
+        # on ONE row, measured against the same body width ``_build`` wraps at.
+        # Testing the terminal width instead made the behaviour non-monotonic:
+        # a wider pane could re-attach a label that cost more than the extra
+        # columns and push the header onto a second row.
+        body = max((self.size.width or 80) - self.RULE_COLS, self.MIN_BODY)
+        with_model = _compose(bits + [model])
+        return with_model if cell_len(with_model) <= body else header
 
     def copy_gutter(self, index: int) -> int:
         """The rule occupies the gutter on every row (same as UserBlock)."""
         return self.RULE_COLS
 
     def copy_row_is_chrome(self, index: int) -> bool:
-        """The sender header is the app talking, not the peer's message body."""
-        return self._header_row is not None and index == self._header_row
+        """The sender header is the app talking, not the peer's message body.
+
+        Every row the header wrapped to, not merely the first — the count comes
+        from the same build that produced the frame, so a resize cannot make
+        the two disagree.
+        """
+        return index < self._header_rows
 
     def on_resize(self, event: object) -> None:
         """Re-wrap at the new width and re-ask the spacing gap, matching the
@@ -1684,11 +1791,14 @@ class PeerMessageBlock(TranscriptBlock):
         body = max((self.size.width or 80) - self.RULE_COLS, self.MIN_BODY)
         gutter = self.RULE + " " * (self.RULE_COLS - cell_len(self.RULE))
 
-        # The header is one wrapped paragraph; the body rows follow. The header
-        # is row 0 so a copy can exclude it.
+        # The header is one wrapped paragraph; the body rows follow. EVERY
+        # header row is chrome, not just the first: an ordinary sender name
+        # wraps the header at 60-70 columns, and marking only row 0 meant
+        # dragging over a peer message copied app chrome above it ("…claude-
+        # opus-4)\ngates are green").
         header_rows = wrap_cells(self._header(), body) or [""]
         body_rows = self._body_rows(body)
-        self._header_row = 0
+        self._header_rows = len(header_rows)
 
         rows: list[tuple[str, bool]] = [(row, True) for row in header_rows]
         rows.extend((row, False) for row in body_rows)

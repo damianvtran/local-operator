@@ -100,6 +100,7 @@ NERD_TOOL_ICONS: dict[str, str] = {
     "web_fetch": "\uf019",  # nf-fa-download — a page pulled down over the wire
     "task": "\uf0c0",  # nf-fa-users — work handed to another agent
     "agent": "\uf0c0",
+    "send": "\uf1d8",  # nf-fa-paper_plane — a note handed to a peer session
 }
 
 #: Nerd Font glyph for any ``mcp__*`` tool: a plug, because what the row is
@@ -131,6 +132,7 @@ PLAIN_TOOL_ICONS: dict[str, str] = {
     "web_fetch": "\u2193",  # a downward arrow: content pulled down from a URL
     "task": "»",  # work passed onward
     "agent": "»",
+    "send": "\u2192",  # a rightward arrow: a message handed across to a peer
 }
 
 #: Plain fallback for ``mcp__*`` — a discrete module docked onto the harness.
