@@ -1,0 +1,54 @@
+Picker read-cost measurement — dev-fork-ux vs its base (dev-fork-cache-proof)
+=============================================================================
+
+WHY. A previous review round removed a per-row `origin.json` read from the
+picker's synchronous UI-thread scan as a MAJOR performance finding (2.00 ->
+1.00 reads/row on a store with no forks). The `[fork]` marker this branch
+adds is PURE RENDERING: `SessionRow.forked` already carries the fact, threaded
+out of the origin verdict the scan parsed once for the whole store. This
+measures both trees with the identical harness to prove nothing was given back.
+
+Method: patch `Path.read_text` and count per-row opens during
+`recent_session_rows()`. The store-wide `origin-verdicts.json` is excluded —
+it is read once for the whole scan, not per row (same exclusion the
+regression test in tests/unit/test_fork.py uses).
+
+----------------------------------------------------------------------------
+[BASE 506876e4] 40 ordinary sessions, no forks
+    rows                 : 40
+    per-row read_text    : 40
+    reads/row            : 1.00
+    files opened per row : ['title.json']
+    forked rows          : 0
+    scan wall time       : 4.0 ms
+[BASE 506876e4] 32 sessions + 8 real forks
+    rows                 : 40
+    per-row read_text    : 64
+    reads/row            : 1.60
+    files opened per row : ['origin.json', 'title.json']
+    forked rows          : 8
+    scan wall time       : 5.5 ms
+----------------------------------------------------------------------------
+[THIS BRANCH] 40 ordinary sessions, no forks
+    rows                 : 40
+    per-row read_text    : 40
+    reads/row            : 1.00
+    files opened per row : ['title.json']
+    forked rows          : 0
+    scan wall time       : 3.9 ms
+[THIS BRANCH] 32 sessions + 8 real forks
+    rows                 : 40
+    per-row read_text    : 64
+    reads/row            : 1.60
+    files opened per row : ['origin.json', 'title.json']
+    forked rows          : 8
+    scan wall time       : 4.7 ms
+----------------------------------------------------------------------------
+
+RESULT: identical, to the read. 1.00 reads/row on a fork-free store with
+`origin.json` absent from the per-row set — the exact shape the earlier fix
+landed and the regression test pins. A row already known to be a fork pays one
+extra bounded sidecar probe (`wears_inherited_title`, which decides whether
+the fork has named itself yet); that is pre-existing, is the ONLY thing that
+reads `origin.json`, and is charged to forks alone — 8 forks in 40 sessions is
+already a far denser store than the operator's real one.

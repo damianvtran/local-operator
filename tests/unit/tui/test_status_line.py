@@ -994,6 +994,11 @@ def test_the_quiet_ladder_moves_mcp_and_the_alarm_is_last_either_way() -> None:
     assert drop_ladder(McpStatus()) is _DROP_LADDER_QUIET
     assert _DROP_LADDER[-1] == "approvals"
     assert _DROP_LADDER[-2] == "mcp", "the danger count still outlives every reading"
+    # A pending fork is a transient STATE, not a figure, so it outlives every
+    # reading and sheds only ahead of the two remaining alarms. Bounded, so it
+    # is a legal neighbour of the tail under `_UNBOUNDED_RUNGS`.
+    assert _DROP_LADDER.index("fork") == _DROP_LADDER.index("mcp") - 1
+    assert "fork" not in _UNBOUNDED_RUNGS
     assert _DROP_LADDER_QUIET.index("mcp") == _DROP_LADDER_QUIET.index("cwd") - 1
     # Promoting mcp cannot dislodge the alarm, because the alarm was never
     # sitting behind it.

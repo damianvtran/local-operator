@@ -1,0 +1,139 @@
+=== Does a FORKED session keep OpenAI prompt-cache warmth? ===
+
+Question this closes: the shipped acceptance evidence
+(docs/evidence/fork/cache-warmth.txt) proved the ANTHROPIC path only and said
+the OpenAI path -- the one where the inherited `prompt_cache_key` is actually
+written to the wire -- was "unverified-but-plausible on the one path where it
+actually matters". This is that measurement.
+
+Script: docs/evidence/fork-cache/measure_fork_cache_openai.py
+Date:   2026-08-30
+
+----------------------------------------------------------------------
+VEHICLE
+----------------------------------------------------------------------
+
+Provider: OpenRouter (api_key credential), model `openai/gpt-5.4`, driven over
+OpenRouter's real `/responses` endpoint through the harness' OWN wire client
+(`OpenAICompatClient`, `openai_api="responses"`) -- so the body on the wire is
+the one `_build_responses_body` builds, not a hand-rolled request.
+
+Why not a direct OpenAI key: there is none in the store. The only OpenAI
+credential is a ChatGPT/Codex OAuth account, which rejects direct `gpt-5` calls
+("The 'gpt-5' model is not supported when using Codex with a ChatGPT account"),
+and the reachable Codex model reports cached_tokens=0 even for a trivially-warm
+same-key control. That endpoint cannot demonstrate anything either way; this one
+can, and each of its three required properties was verified rather than assumed:
+
+  - `openai/gpt-5.4` is cache-capable in the registry     -> supports_prompt_cache=True
+  - the body the harness builds carries the key           -> prompt_cache_key present,
+                                                             == the parent's id,
+                                                             prompt_cache_retention=24h
+  - the endpoint RETURNS usable counts                    -> input_tokens_details.cached_tokens
+                                                             non-zero on a warm control
+
+NOTE: `client_for_spec` pins every non-`openai` provider to `chat_completions`,
+and a chat-completions body NEVER carries `prompt_cache_key` -- only
+`_build_responses_body` sets it. The script therefore constructs the client with
+`openai_api="responses"` explicitly. Driving OpenRouter through the ordinary
+provider path would have measured a request without the key and proved nothing.
+
+----------------------------------------------------------------------
+LINEAGE, THROUGH THE REAL BOOT WIRING
+----------------------------------------------------------------------
+
+A REAL `fork_session()` clone, with the cache key derived exactly as
+`session_factory` derives it at boot (`cache_lineage_id=fork_parent(dir) or None`):
+
+  parent session id          : parent-b6e66bb0a85a
+  fork session id            : (fresh 12-hex id per run)
+  fork origin.json parent    : parent-b6e66bb0a85a
+  fork cache key (inherited) : parent-b6e66bb0a85a   <- the PARENT's id
+  fork sticky-cred scope     : the FORK's own id
+  cache key vs cred scope    : SEPARATE (correct)
+
+The round-1 reviewer's finding HOLDS: the cache key and the sticky-credential
+scope remain separate values. `auth_store._set_sticky` keys on
+`(provider, session_id)` and is passed `_session_id` directly, never
+`_cache_lineage_id`, so two sessions sharing a cache key never share a pinned
+credential row.
+
+----------------------------------------------------------------------
+THE MEASUREMENT
+----------------------------------------------------------------------
+
+Design: PAIRED. Every trial gets its own nonce'd ~21k-token prefix and its own
+real parent+fork, so nothing is warm in advance and an arm can only read what
+its own pair warmed. Call 1 carries the parent's key (must be cold); call 2
+carries the arm's key. Arms interleaved, not blocked.
+
+  arm         second-call READ   rate   cached tokens per trial
+  inherited            10/10     100%   [21248 x10]
+  own                  10/10     100%   [21248 x10]
+  none                  9/10      90%   [21248 x7, 0, 21248, 21248]
+  wrong                10/10     100%   [21248 x10]
+
+  All 40 first calls were cold (cache_read=0), as required.
+
+----------------------------------------------------------------------
+WHAT THIS ESTABLISHES
+----------------------------------------------------------------------
+
+ESTABLISHED -- A FORK READS WARM ON THE OPENAI PATH. The fork's first request,
+carrying the key it inherited from its parent, read 21,248 of ~21,837 prompt
+tokens from cache, in 10 of 10 trials. This held in EVERY run performed during
+this investigation -- four runs of the script plus a dozen smaller probes across
+three different transports (harness streaming client, raw httpx streaming, raw
+httpx non-streaming, stdlib urllib), with and without
+`prompt_cache_retention`. The inherited arm never missed once, in any
+configuration. The feature does what it claims: a fork does not pay again for
+the prefix its parent already warmed.
+
+NOT ESTABLISHED -- THAT THE KEY IS WHAT DID IT, on this endpoint. The control
+arms are not stable here. Across runs the `own` arm (same prefix, its own
+distinct key) ranged from 0/6 to 10/10, and the `wrong`-key negative control
+likewise ranged from 3/8 to 10/10. Representative runs, same script shape, same
+model, minutes apart:
+
+  run A (per-trial keys, urllib)      inherited 6/6    own 0/6    none 1/6
+  run B (harness client, N=8)         inherited 8/8    own 3/8    none 3/8
+  run C (httpx non-streaming, N=4)    inherited 4/4    own 1/4
+  run D (harness client, N=10)        inherited 10/10  own 10/10  wrong 10/10
+  run E (canonical, N=10)             inherited 10/10  own 10/10  none 9/10
+
+The reason is not noise in the harness but the provider: OpenAI's prompt cache
+is CONTENT-ADDRESSED underneath, and `prompt_cache_key` is a routing/stickiness
+hint layered on top of that, not a lock. A keyless or wrong-keyed repeat of an
+identical prefix can therefore still land on the warm entry, and how often it
+does depends on routing conditions this measurement does not control. Three
+plausible confounds were tested and EXCLUDED as the explanation --
+`prompt_cache_retention` (24h vs absent), streaming vs non-streaming, and the
+HTTP transport -- and the control's variance persisted across all of them.
+
+So the honest reading is the conservative one: on this vehicle the inherited key
+is demonstrably SUFFICIENT for a warm fork and never once cost a hit, but this
+endpoint cannot prove it is NECESSARY. That is the same shape of conclusion the
+Anthropic evidence reached for a different reason -- there the control also read,
+because that provider keys on prefix content outright.
+
+What would settle the necessity question is a direct OpenAI API key, where the
+cache is not fronted by an aggregator's own routing. That credential does not
+exist on this host, and this is recorded as a limitation rather than papered
+over.
+
+----------------------------------------------------------------------
+WHY THE FEATURE IS STILL CORRECT AS SHIPPED
+----------------------------------------------------------------------
+
+The inheritance is the right behaviour on the evidence available: the fork
+replays a byte-identical prefix, so pointing it at the parent's cache entry is
+what the key is FOR, it measurably never costs a hit, and on the aggregator path
+it is at worst neutral. The failure mode it guards against -- a fork routed as a
+fresh prefix -- is the same class of regression previously measured when this key
+was stripped entirely, which moved cache-read rates from ~97-98% to ~89-90%.
+
+Regression coverage added in tests/unit/test_fork.py
+(`TestTheForkInheritsItsParentsCacheKey`), pinning the two things whose failure
+is silent: that the REAL boot path derives the key from `origin.json`, and that
+the cache key and credential scope stay separate. Verified to FAIL against a
+tree with the boot plumbing removed, not merely to pass against the fixed one.

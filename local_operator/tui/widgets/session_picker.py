@@ -73,7 +73,10 @@ from textual.containers import Container
 from textual.screen import ModalScreen
 from textual.widgets import Static
 
-from local_operator.resume import SessionRow, format_age
+# ``fork_haystack`` is imported rather than restated here: the phone's session
+# search matches over the same rows, and two spellings of "what text does this
+# row have" is how one surface ends up finding a fork the other cannot.
+from local_operator.resume import SessionRow, fork_haystack, format_age
 from local_operator.session.search_index import SoftSearchIndex, search_digests
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets.tool_card import truncate_cells
@@ -172,6 +175,30 @@ GUTTER_CELLS = 2
 #: "something was said here", which is what the mark actually means.
 BODY_MATCH_MARKER = "” "
 
+#: Prefix on a FORK that is still wearing the title it inherited from its
+#: parent, drawn in its own reserved column AHEAD of the name.
+#:
+#: A PREFIX and not a suffix, and that is the whole point of it. The first
+#: shipped form spliced ``(fork)`` onto the end of the name, inside the name
+#: field — where it is the first thing an ellipsis eats. The name is condensed
+#: to ``resume.NAME_MAX_CHARS`` (64) before this module ever sees it and the
+#: card's name column measures 48 cells at 100 columns, so any title over ~40
+#: characters lost the mark at EVERY terminal width, not just narrow ones. On
+#: this machine's real store 17% of titles exceed that, so roughly one fork in
+#: six rendered byte-identical to its parent — the exact twin-row confusion the
+#: mark exists to resolve, and long descriptive titles are the ones users fork
+#: from most. At 70 columns the suffix additionally ran straight into the age
+#: column with no separating gap.
+#:
+#: In the fixed chrome ahead of the name, nothing truncates it: the ellipsis
+#: now eats the tail of the title instead of the metadata about the row.
+#: Verified at 80 and 70 columns against the real app (docs/evidence/fork-ux).
+#:
+#: Seven cells (``"[fork] "``), reserved for EVERY row whenever any row in the
+#: result set is forked, exactly as the body-match marker reserves its column
+#: and for the identical reason — see ``plan_columns``.
+FORK_MARKER = "[fork] "
+
 
 def filter_rows(
     rows: Sequence[SessionRow],
@@ -186,6 +213,10 @@ def filter_rows(
     when a query is active — keeping the "filtering never reorders" property
     literally true of this function while the query-scoped ranking sits in the
     one place that also re-homes the cursor.
+
+    The searchable name is composed by :func:`fork_haystack`, so a row visibly
+    tagged ``[fork]`` is found by typing ``fork`` — the tag is on screen, so it
+    has to be in the index.
 
     The name/id test stays exact substring: those fields are a sentence the user
     wrote and a hex id, where an exact match is what a precise query expects.
@@ -207,7 +238,7 @@ def filter_rows(
     return [
         row
         for row in rows
-        if needle in row.name.lower() or needle in row.id.lower() or row.id in matched
+        if needle in fork_haystack(row).lower() or needle in row.id.lower() or row.id in matched
     ]
 
 
@@ -222,7 +253,10 @@ def matched_in_body(row: SessionRow, query: str, body_matches: AbstractSet[str])
     needle = query.strip().lower()
     if not needle:
         return False
-    if needle in row.name.lower() or needle in row.id.lower():
+    # Same haystack the filter admitted on, so a row surfaced by its VISIBLE
+    # fork tag is not additionally explained as a body match — the tag is
+    # already on the row and the two marks would contradict each other.
+    if needle in fork_haystack(row).lower() or needle in row.id.lower():
         return False
     return row.id in body_matches
 
@@ -275,7 +309,10 @@ def rank_rows(
     body = body_matches or frozenset()
 
     def tier(row: SessionRow) -> int:
-        if needle in row.name.lower():
+        # Through the same composition :func:`filter_rows` admits on: a fork
+        # admitted on its tag must rank in the NAME tier, not fall through to
+        # the soft tier and sort below every incidental body hit.
+        if needle in fork_haystack(row).lower():
             return _RANK_NAME
         if needle in row.id.lower():
             return _RANK_ID
@@ -335,7 +372,11 @@ def _wrap_cells(text: str, width: int) -> list[str]:
 
 
 def plan_columns(
-    rows: Sequence[SessionRow], width: int, ages: Sequence[str], marked: bool = False
+    rows: Sequence[SessionRow],
+    width: int,
+    ages: Sequence[str],
+    marked: bool = False,
+    forked: bool = False,
 ) -> tuple[int, int, int]:
     """``(name, age, id)`` cell budgets for ``width``, dropping before cutting.
 
@@ -358,8 +399,21 @@ def plan_columns(
     * Reserving it only on matched rows started names at a different column
       depending on how each row matched, so a filtered list rendered a ragged
       left edge for the one field the user is reading down.
+
+    ``forked`` reserves :data:`FORK_MARKER`'s cells on exactly the same terms,
+    for exactly the same two reasons. It is asked of the RESULT SET rather than
+    of the page for the scroll-stability argument recorded below: a column that
+    appears as a forked row scrolls into view and disappears as it scrolls out
+    makes every name on the list jump sideways on one arrow press.
+
+    Reserved as FIXED CHROME rather than subtracted from the name afterwards,
+    which is what keeps the drop ladder honest — the id surrenders its cells
+    before the age, and the age before the name, and a marker that helped
+    itself to the name's budget after the fact would jump that queue and could
+    push a name under :data:`NAME_MIN_CELLS`.
     """
     marker_col = cell_len(BODY_MATCH_MARKER) if marked else 0
+    marker_col += cell_len(FORK_MARKER) if forked else 0
     age_col = max((cell_len(age) for age in ages), default=0)
     # Measured rather than assumed at 12: an id written by an older build with
     # a different length must still line up instead of ragging the column.
@@ -380,6 +434,7 @@ def render_rows(
     now: float,
     hovered: int | None = None,
     body_matched: AbstractSet[str] = frozenset(),
+    forked: bool | None = None,
 ) -> list[Text]:
     """One line per session: cursor, name, age, id.
 
@@ -402,8 +457,18 @@ def render_rows(
     # that depends on scroll position is D2's ragged edge moved onto the time
     # axis, where it is worse — motion draws the eye, a static offset does not.
     marked = bool(body_matched)
-    name_col, age_col, id_col = plan_columns(rows, width, ages, marked)
+    # Whether the RESULT SET carries a fork decides the fork column, on the
+    # same page-versus-result-set argument as `marked` above: `rows` here is
+    # one page of a scrolling list, so asking it would move every name two
+    # columns sideways as a fork scrolled past. The picker therefore passes
+    # the result-set fact; the default (None) is only for callers that have
+    # no paging — tests, a one-page list — and then the page IS the set.
+    any_forked = (
+        bool(forked) if forked is not None else any(getattr(row, "forked", False) for row in rows)
+    )
+    name_col, age_col, id_col = plan_columns(rows, width, ages, marked, any_forked)
     marker_col = cell_len(BODY_MATCH_MARKER) if marked else 0
+    fork_col = cell_len(FORK_MARKER) if any_forked else 0
 
     lines: list[Text] = []
     for index, (row, age) in enumerate(zip(rows, ages)):
@@ -439,16 +504,6 @@ def render_rows(
         # pinning it to the floor made selecting it darker than every
         # unselected row, so the highlight inverted.
         name = row.name or "(unnamed session)"
-        # A fork still wearing its parent's title is otherwise a byte-identical
-        # row to the parent — same name, same age — separable only by a hex id,
-        # and that is precisely the moment a user opens this picker looking for
-        # one of the two. The suffix is dropped the instant the fork writes its
-        # own name (``forked`` is only set while the title is inherited), so it
-        # marks the ambiguous state rather than permanently labelling the
-        # session. Inside the name field so it truncates with the name and
-        # cannot ragged the columns beside it.
-        if getattr(row, "forked", False):
-            name = f"{name}  (fork)"
         if row.name:
             name_colour = fg if current else muted
         else:
@@ -472,6 +527,33 @@ def render_rows(
             line.append(
                 _pad_cells(BODY_MATCH_MARKER if row.id in body_matched else "", marker_col),
                 style=row_bg + Style(color=muted),
+            )
+        # A fork still wearing its parent's title is otherwise a byte-identical
+        # row to the parent — same name, same age — separable only by a hex id,
+        # and that is precisely the moment a user opens this picker looking for
+        # one of the two. The tag clears the instant the fork writes its own
+        # name (``forked`` is only set while the title is inherited), so it
+        # marks the ambiguous STATE rather than permanently labelling a session
+        # by its ancestry.
+        #
+        # The INHERITED TITLE IS KEPT beside it, rather than the row reading
+        # "[fork] untitled": for a fork made seconds ago the borrowed title is
+        # the only text on the row that says which conversation this branched
+        # from, and it is how the user recognises it. The tag says the title is
+        # borrowed; it does not have to replace it.
+        #
+        # `dim`, NOT the name's own ink. The shipped suffix painted at name
+        # weight and read as part of the name — as though the conversation were
+        # called "Refactor the YAML loader (fork)". This is metadata about the
+        # row, so it takes the ink the age and the id already use, which is the
+        # correct signal for a lookup key. Deliberately a step quieter than
+        # BODY_MATCH_MARKER's `muted`: that mark is load-bearing (it is the only
+        # thing explaining why an unmatched row is in the results), whereas this
+        # one qualifies a name the user is already reading.
+        if fork_col:
+            line.append(
+                _pad_cells(FORK_MARKER if getattr(row, "forked", False) else "", fork_col),
+                style=row_bg + Style(color=dim),
             )
         line.append(
             _pad_cells(truncate_cells(name, name_col), name_col),
@@ -668,7 +750,7 @@ class SessionPickerScreen(ModalScreen[str | None]):
         # fuzzy additions would only dilute it.
         precise = 0
         for row in self._all:
-            if needle in row.name.lower() or needle in row.id.lower():
+            if needle in fork_haystack(row).lower() or needle in row.id.lower():
                 precise += 1
                 if precise >= _PRECISE_HITS_ENOUGH:
                     return False
@@ -1049,6 +1131,10 @@ class SessionPickerScreen(ModalScreen[str | None]):
                     self._now,
                     None if self._hovered is None else self._hovered - self._offset,
                     self.body_matched_ids,
+                    # The RESULT SET, not this page: a column that appears as a
+                    # fork scrolls into view and disappears as it scrolls out
+                    # makes every name jump sideways on one arrow press.
+                    any(getattr(row, "forked", False) for row in rows),
                 )
             ):
                 if index:

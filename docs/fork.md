@@ -29,6 +29,11 @@ a dead end that keeps being re-billed, `/new` and rebuilding from scratch, or
    modified in any way.
 4. If you passed a message, the fork starts working on it as its first turn.
 
+The argument is a **message, not a title**: `/fork try the streaming parser`
+spends a real model call in the new window the moment it opens, and that turn is
+billed like any other. A bare `/fork` opens the branch idle and costs nothing
+until you send it something.
+
 While a `/compact` is running, `/fork` refuses rather than defers: compaction
 rewrites the head of the transcript, and a copy taken mid-rewrite can capture a
 half-written file. Wait for it to finish.
@@ -59,7 +64,18 @@ is named from that.
 This matters because forks are how you end up with several related sessions at
 once, and a picker listing four rows all called "Refactor the loader" is not a
 picker. Until the fork's own title lands (a second or two), its `/resume` row
-shows the parent's name so it is never a blank row.
+shows the parent's name so it is never a blank row — tagged `[fork]` ahead of
+the borrowed title, so the branch and the trunk are never two identical rows:
+
+```
+❯ [fork] Refactor the YAML loader to stream a…  just now  a1b2c3d4e5f6
+        Refactor the YAML loader to stream a…   just now  9f8e7d6c5b4a
+```
+
+The tag is searchable — typing `fork` in `/resume` lists the forks that are
+still wearing an inherited title. The same mark prefixes the window/tab title
+and the phone's history list, and all three drop it the moment the fork names
+itself.
 
 ## Cache warmth
 

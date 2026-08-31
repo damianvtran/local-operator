@@ -21,19 +21,25 @@ ESTABLISHED (Anthropic): a fork's FIRST request reads the parent's warm prefix
 in full (6472 of 6472 tokens read, zero written). The clone is byte-identical,
 so the prefix is identical, which is what this provider keys on.
 
-NOT ESTABLISHED (OpenAI Responses): the design note's §4.3 acceptance test names
-gpt-5.x, and the inherited `prompt_cache_key` only reaches the wire on that path
-(`OpenAICompatClient._build_responses_body`). It could not be measured on this
-host: the only stored OpenAI credential is a ChatGPT/Codex OAuth account, which
-rejects direct model calls --
+MEASURED SEPARATELY (OpenAI Responses): the design note's 4.3 acceptance test
+names gpt-5.x, and the inherited `prompt_cache_key` only reaches the wire on
+that path (`OpenAICompatClient._build_responses_body`). It could not be measured
+from this file's vehicle -- the only stored OpenAI credential is a ChatGPT/Codex
+OAuth account, which rejects direct model calls --
 
   ProviderError: invalid request (HTTP 400): The 'gpt-5' model is not supported
   when using Codex with a ChatGPT account.
 
 and the Codex-backed model that IS reachable (gpt-5.6-sol) reported
-cache_read=0 / cache_write=0 on every call INCLUDING the same-key control
-(same session, identical prefix, twice), so that endpoint reports no cache
-counts at all and cannot demonstrate a difference either way.
+cache_read=0 / cache_write=0 on every call INCLUDING the same-key control.
+
+That gap is now closed by a separate measurement against real `openai/gpt-5.4`
+over a real `/responses` endpoint (OpenRouter), driven through the harness' own
+wire client. A fork's first request read 21,248 of ~21,837 prompt tokens from
+its parent's cache, in 10 of 10 trials and in every run and transport tried.
+The control arms are unstable on that aggregator, so it establishes the
+inherited key is SUFFICIENT for a warm fork but not that it is NECESSARY; see
+docs/evidence/fork-cache/results.txt for the full numbers and limitations.
 
 The control above is what makes the Anthropic number meaningful rather than an
 artifact: caching demonstrably works on this account, and the cold-prefix run
@@ -42,5 +48,7 @@ writes before the fork reads.
 Note the third row: the control session, carrying its OWN key, also reads. That
 is the note's §4.2 prediction confirmed -- Anthropic keys the cache on prefix
 CONTENT, not on `prompt_cache_key`, so on this provider the inherited key is
-neutral. The inheritance is therefore unverified-but-plausible on the one path
-where it actually matters, and this evidence should not be read as proving it.
+neutral. THIS file therefore does not prove the inheritance on the path where
+the key is actually written to the wire -- that is what the OpenAI measurement
+above (docs/evidence/fork-cache/) is for, and it should be read alongside this
+one rather than in place of it.

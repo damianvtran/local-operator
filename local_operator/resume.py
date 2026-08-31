@@ -1275,6 +1275,30 @@ class SessionRow(NamedTuple):
     forked: bool = False
 
 
+#: The fork tag's text as a FILTER sees it. The mark itself is drawn per
+#: surface (``session_picker.FORK_MARKER`` in the TUI, the phone's list
+#: renderer on mobile); this is the one spelling every one of them searches by.
+FORK_HAYSTACK = "[fork]"
+
+
+def fork_haystack(row: SessionRow) -> str:
+    """``row``'s searchable text, including the fork tag when it wears one.
+
+    Every surface splices the tag in at RENDER time, so without this a user who
+    reads ``[fork]`` on screen and types it into the filter gets zero rows back
+    — a picker reporting "no matches" about a store full of visibly marked
+    forks, which reads as a broken filter rather than as an unsupported query.
+    A filter has to hold the invariant that what is displayed is matchable.
+
+    Lives HERE, beside :class:`SessionRow`, rather than in the TUI picker that
+    first needed it, because the phone's session search matches on the same
+    rows and must not disagree about what a row's text is — and importing the
+    picker into ``mobile.daemon`` to share one expression would pull Textual
+    into the daemon's import graph for a string join.
+    """
+    return f"{FORK_HAYSTACK} {row.name}" if row.forked else row.name
+
+
 def stored_session_title(session_dir: Path) -> str:
     """The title this session was last named, or ``""`` when it has none.
 
