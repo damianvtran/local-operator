@@ -69,7 +69,7 @@ def _thaw(value: Any) -> JsonValue:
 
 
 @dataclass(slots=True)
-class AuthorityRecord:
+class _AuthorityRecord:
     """Non-serializable process-local capability stored outside model instances."""
 
     kind: str
@@ -80,7 +80,7 @@ class AuthorityRecord:
 
 
 _AUTHORITY_REGISTRY_LOCK = RLock()
-_AUTHORITY_REGISTRY: dict[int, tuple[weakref.ReferenceType[AuthorityModel], AuthorityRecord]] = {}
+_AUTHORITY_REGISTRY: dict[int, tuple[weakref.ReferenceType[AuthorityModel], _AuthorityRecord]] = {}
 
 
 def _remove_authority(model_id: int, reference: weakref.ReferenceType[AuthorityModel]) -> None:
@@ -98,14 +98,14 @@ def _register_authority(
     *,
     lineage: Any = None,
     receipts: tuple[Any, ...] = (),
-) -> AuthorityRecord:
+) -> _AuthorityRecord:
     model_id = id(model)
 
     def remove(reference: weakref.ReferenceType[AuthorityModel]) -> None:
         _remove_authority(model_id, reference)
 
     reference = weakref.ref(model, remove)
-    record = AuthorityRecord(kind=kind, lineage=lineage, receipts=receipts)
+    record = _AuthorityRecord(kind=kind, lineage=lineage, receipts=receipts)
     with _AUTHORITY_REGISTRY_LOCK:
         _AUTHORITY_REGISTRY[model_id] = (reference, record)
     return record
@@ -116,7 +116,7 @@ def _lookup_authority(
     kind: str,
     *,
     allow_consumed: bool = False,
-) -> AuthorityRecord:
+) -> _AuthorityRecord:
     with _AUTHORITY_REGISTRY_LOCK:
         current = _AUTHORITY_REGISTRY.get(id(model))
         if current is None or current[0]() is not model or current[1].kind != kind:
@@ -975,14 +975,11 @@ class BudgetCommitment(AuthorityModel):
     def __reduce__(self) -> Any:
         raise TypeError("budget commitment authority cannot be pickled")
 
-    def authority_record(self) -> AuthorityRecord:
+    def assert_authority(self, authorization: BudgetAuthorization) -> None:
         try:
-            return _lookup_authority(self, "budget-commitment")
+            _lookup_authority(self, "budget-commitment")
         except ValueError as error:
             raise ValueError("budget commitment lacks factory authority") from error
-
-    def assert_authority(self, authorization: BudgetAuthorization) -> None:
-        self.authority_record()
         if (
             self.episode_id != authorization.episode_id
             or self.budget_id != authorization.budget_id
@@ -995,9 +992,6 @@ class BudgetCommitment(AuthorityModel):
         )
         if self.commitment_id != expected:
             raise ValueError("budget commitment authority was mutated")
-
-    def consume_authority(self) -> None:
-        self.authority_record().consumed = True
 
 
 def commit_budget(

@@ -288,7 +288,7 @@ def test_side_effect_start_is_impossible_before_seal_permit_and_reservation() ->
     reservation = _reservation(budget)
     with pytest.raises(ValueError, match="illegal episode transition"):
         planned.start(permit, budget, _commitment(budget, reservation))
-    with pytest.raises(ValueError, match="factory authority"):
+    with pytest.raises(ValueError, match="factory authority|process-local authority"):
         authorized.start(permit, budget, BudgetCommitment.model_construct())
     forged_payload = {**permit.model_dump(), "episode_id": "episode-other"}
     with pytest.raises(ValidationError):
@@ -604,7 +604,7 @@ def test_direct_overcap_reservation_and_forged_commitment_cannot_start() -> None
     legitimate = _reservation(budget)
     commitment = _commitment(budget, legitimate)
     forged = BudgetCommitment.model_construct(**commitment.model_dump())
-    with pytest.raises(ValueError, match="factory authority"):
+    with pytest.raises(ValueError, match="factory authority|process-local authority"):
         authorized.start(permit, budget, forged)
 
 
@@ -1424,7 +1424,7 @@ def test_registry_dead_callback_cannot_remove_reused_identity_entry() -> None:
     from local_operator.evaluation.receipts import (
         _AUTHORITY_REGISTRY,
         _AUTHORITY_REGISTRY_LOCK,
-        AuthorityRecord,
+        _AuthorityRecord,
         _remove_authority,
     )
 
@@ -1436,7 +1436,7 @@ def test_registry_dead_callback_cannot_remove_reused_identity_entry() -> None:
     with _AUTHORITY_REGISTRY_LOCK:
         _AUTHORITY_REGISTRY[synthetic_id] = (
             current_reference,
-            AuthorityRecord(kind="preflight-seal"),
+            _AuthorityRecord(kind="preflight-seal"),
         )
     _remove_authority(synthetic_id, stale_reference)
     with _AUTHORITY_REGISTRY_LOCK:
@@ -1485,3 +1485,69 @@ def test_base_copy_duplicate_path_rejects_and_originals_complete_once() -> None:
     with pytest.raises(ValueError, match="process-local authority"):
         cleaning.finish_cleanup(cloned_result)
     assert cleaning.finish_cleanup(result).state == "completed"
+
+
+def test_permit_minting_has_no_public_api_and_cannot_repeat() -> None:
+    import inspect
+
+    from local_operator.evaluation import lifecycle as lifecycle_module
+
+    public_functions = {
+        name
+        for name, value in vars(lifecycle_module).items()
+        if inspect.isfunction(value) and not name.startswith("_")
+    }
+    assert "mint_side_effect_permit" not in public_functions
+    assert not hasattr(lifecycle_module, "mint_side_effect_permit")
+    source = inspect.getsource(lifecycle_module)
+    assert source.count("_mint_side_effect_permit(") == 2  # definition + authorize call
+
+    plan, budget, _cleanup_value, planned = _planned()
+    seal = _seal(plan)
+    preflighted = planned.preflight(seal)
+    authorized, permit = preflighted.authorize(seal, budget)
+    with pytest.raises(ValueError, match="transition authority"):
+        preflighted.authorize(seal, budget)
+    permit.assert_authority()
+    assert authorized.permit_id == permit.permit_id
+
+
+def test_authority_models_do_not_expose_mutable_records() -> None:
+    import inspect
+
+    from local_operator.evaluation.receipts import AuthorityModel, _AuthorityRecord
+
+    plan, budget, cleanup, authorized, permit = _authorized()
+    reservation = _reservation(budget)
+    models = (
+        _seal(plan),
+        _commitment(budget, reservation),
+        _cleanup(cleanup),
+        permit,
+        authorized,
+    )
+    for model in models:
+        assert not hasattr(model, "authority_record")
+        for name, member in inspect.getmembers(type(model)):
+            if name.startswith("_") or not callable(member):
+                continue
+            annotation = inspect.signature(member).return_annotation
+            assert annotation not in (_AuthorityRecord, "_AuthorityRecord")
+    source = inspect.getsource(AuthorityModel)
+    assert "return _lookup_authority" not in source
+
+
+def test_revoked_permit_has_no_public_revival_path() -> None:
+    _plan_value, _budget_value, _cleanup_value, authorized, permit = _authorized()
+    failed = authorized.fail_before_running(
+        kind="infrastructure",
+        reason="allocator unavailable",
+        permit=permit,
+    )
+    assert failed.state == "failed"
+    with pytest.raises(ValueError, match="factory authority|process-local authority"):
+        permit.assert_authority()
+    assert not hasattr(permit, "authority_record")
+    for method in (permit.copy, permit.model_copy):
+        with pytest.raises(ValueError, match="cannot be copied"):
+            method()

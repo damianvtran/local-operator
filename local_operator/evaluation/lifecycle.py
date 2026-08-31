@@ -22,7 +22,6 @@ from local_operator.evaluation.receipts import (
     MAX_DECLARATIONS,
     ZERO_DIGEST,
     AuthorityModel,
-    AuthorityRecord,
     BudgetAuthorization,
     BudgetCommitment,
     BudgetReconciliation,
@@ -31,6 +30,7 @@ from local_operator.evaluation.receipts import (
     SafeCount,
     SealedPreflight,
     StrictIdentifier,
+    _AuthorityRecord,
     _lookup_authority,
     _register_authority,
 )
@@ -71,7 +71,7 @@ def _identity(kind: str, payload: Any) -> str:
 
 
 @contextmanager
-def _authority_locks(*records: AuthorityRecord) -> Iterator[None]:
+def _authority_locks(*records: _AuthorityRecord) -> Iterator[None]:
     """Acquire process-local authority locks in one deadlock-safe order."""
 
     ordered = sorted({id(record): record for record in records}.values(), key=id)
@@ -262,12 +262,9 @@ class CleanupResult(AuthorityModel):
     def __reduce__(self) -> Any:
         raise TypeError("cleanup result authority cannot be pickled")
 
-    def authority_record(self) -> AuthorityRecord:
-        return _lookup_authority(self, "cleanup-result")
-
     def assert_authority(self) -> None:
         try:
-            record = self.authority_record()
+            record = _lookup_authority(self, "cleanup-result")
         except ValueError as error:
             raise ValueError("cleanup result lacks factory authority") from error
         actual: list[str] = []
@@ -287,9 +284,6 @@ class CleanupResult(AuthorityModel):
         )
         if self.cleanup_result_id != expected_result:
             raise ValueError("cleanup result authority was mutated")
-
-    def consume_authority(self) -> None:
-        self.authority_record().consumed = True
 
 
 def aggregate_cleanup(
@@ -364,12 +358,9 @@ class SideEffectPermit(AuthorityModel):
     def __reduce__(self) -> Any:
         raise TypeError("side-effect permit authority cannot be pickled")
 
-    def authority_record(self) -> AuthorityRecord:
-        return _lookup_authority(self, "side-effect-permit")
-
     def assert_authority(self) -> None:
         try:
-            self.authority_record()
+            _lookup_authority(self, "side-effect-permit")
         except ValueError as error:
             raise ValueError("side-effect permit lacks factory authority") from error
         expected = _identity(
@@ -379,11 +370,8 @@ class SideEffectPermit(AuthorityModel):
         if self.permit_id != expected:
             raise ValueError("side-effect permit authority was mutated")
 
-    def consume_authority(self) -> None:
-        self.authority_record().consumed = True
 
-
-def mint_side_effect_permit(
+def _mint_side_effect_permit(
     *,
     episode_id: StrictIdentifier,
     plan_id: Digest,
@@ -585,7 +573,7 @@ class EpisodeLifecycle(AuthorityModel):
     def __deepcopy__(self, memo: dict[int, Any] | None = None) -> Self:
         raise TypeError("episode lifecycle authority cannot be copied")
 
-    def _authority_record(self) -> AuthorityRecord:
+    def _authority_record(self) -> _AuthorityRecord:
         try:
             return _lookup_authority(self, "episode-lifecycle")
         except ValueError as error:
@@ -652,7 +640,9 @@ class EpisodeLifecycle(AuthorityModel):
                 raise ValueError("illegal or mismatched episode authorization")
             if budget.budget_id != self.budget_id:
                 raise ValueError("budget authorization does not match the planned budget")
-            permit = mint_side_effect_permit(
+            # Permit minting is deliberately private and only reachable while
+            # this single-use preflighted parent is locked for authorization.
+            permit = _mint_side_effect_permit(
                 episode_id=self.episode_id,
                 plan_id=self.plan_id,
                 preflight=seal,
@@ -678,8 +668,8 @@ class EpisodeLifecycle(AuthorityModel):
         # never recreates authority in another process.
         with _authority_locks(
             self._authority_record(),
-            permit.authority_record(),
-            commitment.authority_record(),
+            _lookup_authority(permit, "side-effect-permit"),
+            _lookup_authority(commitment, "budget-commitment"),
         ):
             self._assert_authority()
             if self.state != "authorized":
@@ -704,8 +694,8 @@ class EpisodeLifecycle(AuthorityModel):
                 reservation_ids=commitment.reservation_ids,
             )
             self._consume_source()
-            permit.consume_authority()
-            commitment.consume_authority()
+            _lookup_authority(permit, "side-effect-permit").consumed = True
+            _lookup_authority(commitment, "budget-commitment").consumed = True
             return running
 
     def begin_finalization(self) -> Self:
@@ -790,7 +780,9 @@ class EpisodeLifecycle(AuthorityModel):
             )
         if permit is None:
             raise ValueError("authorized failure requires its side-effect permit")
-        with _authority_locks(self._authority_record(), permit.authority_record()):
+        with _authority_locks(
+            self._authority_record(), _lookup_authority(permit, "side-effect-permit")
+        ):
             self._assert_authority()
             permit.assert_authority()
             if (
@@ -809,11 +801,13 @@ class EpisodeLifecycle(AuthorityModel):
                 failure_reason=reason,
             )
             self._consume_source()
-            permit.consume_authority()
+            _lookup_authority(permit, "side-effect-permit").consumed = True
             return failed
 
     def finish_cleanup(self, result: CleanupResult) -> Self:
-        with _authority_locks(self._authority_record(), result.authority_record()):
+        with _authority_locks(
+            self._authority_record(), _lookup_authority(result, "cleanup-result")
+        ):
             self._assert_authority()
             result.assert_authority()
             if result.cleanup_plan_id != self.cleanup_plan_id:
@@ -843,7 +837,7 @@ class EpisodeLifecycle(AuthorityModel):
             # validation error leaves lifecycle and result retryable together.
             terminal = self._transition("cleaning", "finish-cleanup", **updates)
             self._consume_source()
-            result.consume_authority()
+            _lookup_authority(result, "cleanup-result").consumed = True
             return terminal
 
     def _validate_reconciliation(self, reconciliation: BudgetReconciliation) -> None:
