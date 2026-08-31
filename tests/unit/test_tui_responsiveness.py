@@ -235,6 +235,7 @@ async def test_prepare_store_scans_do_not_stall_the_loop(
     from local_operator import resume as resume_mod
     from local_operator.session_factory import (
         _prepare,
+        _start_store_maintenance,
         await_store_maintenance_for_tests,
     )
     from tests.unit.test_session_factory import FakeConfigManager, FakeRegistry, _args
@@ -261,13 +262,18 @@ async def test_prepare_store_scans_do_not_stall_the_loop(
     recorder = StallRecorder()
     await recorder.start()
     try:
-        await _prepare(
+        plan = await _prepare(
             args,
             cast_config(FakeConfigManager({"hosting": "test", "model_name": "test-model"})),
             CredentialManager(config_dir),
             cast_registry(FakeRegistry(config_dir)),
             has_ui=True,
             cwd=str(tmp_path),
+        )
+        _start_store_maintenance(
+            cast_config(FakeConfigManager({"hosting": "test", "model_name": "test-model"})),
+            config_dir,
+            plan.session_kwargs["transcript"].directory,
         )
         await await_store_maintenance_for_tests()
     finally:

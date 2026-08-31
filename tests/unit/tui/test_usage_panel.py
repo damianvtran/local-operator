@@ -390,6 +390,22 @@ async def test_scrolling_clamps_at_both_ends_rather_than_wrapping() -> None:
 
 
 @pytest.mark.asyncio
+async def test_show_reports_keeps_the_reader_where_they_were() -> None:
+    """A refresh replaces numbers the user is already reading; snapping their
+    place is jostling, not a new open. `_repaint` still clamps if the new body
+    is shorter than the offset they held."""
+    async with _panel_app() as panel:
+        panel.show_reports(_many_reports())
+        panel.action_scroll_page(1)
+        offset = panel.view_offset
+        assert offset > 0
+        panel.show_reports(_many_reports())
+        assert panel.view_offset == offset
+        panel.show_reports([_report(_percent("a:5h", "5 hour", 5.0, shared=True))])
+        assert panel.view_offset == 0
+
+
+@pytest.mark.asyncio
 async def test_the_title_and_hints_stay_pinned_while_the_body_scrolls() -> None:
     """A user scrolling a long report must never lose the way out."""
     async with _panel_app() as panel:
