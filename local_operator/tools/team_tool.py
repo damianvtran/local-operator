@@ -34,6 +34,7 @@ from local_operator.teams import (
     MAX_TEAM_INSTRUCTIONS_CHARS,
     TeamEditFields,
     TeamRegistry,
+    TeamRegistryLockTimeout,
     parse_members,
 )
 from local_operator.tools.builtin import (
@@ -213,6 +214,10 @@ async def _op_write(
             assert existing is not None  # guarded above
             team = registry.update_team(existing.id, fields)
             verb = "updated"
+    except TeamRegistryLockTimeout as exc:
+        # U5-1: contention is recoverable, so the model gets the same concise
+        # guidance the CLI prints rather than a generic "could not save".
+        return _error(tool_call_id, "team", str(exc))
     except ValueError as exc:
         return _error(tool_call_id, "team", str(exc))
     except Exception as exc:  # noqa: BLE001

@@ -2,18 +2,23 @@
 
 from __future__ import annotations
 
+import os
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Barrier, BrokenBarrierError, Thread
 
 import pytest
+import yaml
 
+import local_operator.teams as teams_module
 from local_operator.teams import (
     MAX_TEAM_INSTRUCTIONS_CHARS,
     Team,
     TeamEditFields,
     TeamMember,
     TeamRegistry,
+    TeamRegistryLockTimeout,
     parse_members,
 )
 
@@ -255,24 +260,33 @@ def test_list_is_metadata_only_and_get_loads_briefs_once(tmp_path: Path, monkeyp
         return real_read_text(path, *args, **kwargs)
 
     monkeypatch.setattr(Path, "read_text", tracked_read_text)
+    # R5-2 hydration reads briefs through a pinned directory descriptor, not
+    # ``Path.read_text`` — track BOTH seams so the assertion still measures
+    # "which brief files were read", not which API happened to read them.
+    real_optional_at = teams_module._read_optional_at
+    fd_reads: list[str] = []
+
+    def tracked_optional_at(directory_fd: int, filename: str) -> str:
+        fd_reads.append(filename)
+        return real_optional_at(directory_fd, filename)
+
+    monkeypatch.setattr(teams_module, "_read_optional_at", tracked_optional_at)
     second = TeamRegistry(tmp_path)
     listed = second.list_teams()
     assert [row.name for row in listed] == ["ops"]
     assert listed[0].instructions == ""
     assert listed[0].project == ""
     assert reads == []
+    assert fd_reads == []
 
     loaded = second.get_team_by_name("OPS")
     assert loaded is not None
     assert loaded.instructions == "Review before merging."
     assert loaded.project == "on-call"
-    assert reads == [
-        tmp_path / "teams" / team.id / "instructions.md",
-        tmp_path / "teams" / team.id / "project.md",
-    ]
+    assert sorted(fd_reads) == ["instructions.md", "project.md", "team.yml", "team.yml"]
 
     assert second.get_team(team.id) is loaded
-    assert len(reads) == 2
+    assert len(fd_reads) == 4
 
 
 def test_saving_a_metadata_only_list_result_preserves_both_briefs(tmp_path: Path) -> None:
@@ -729,3 +743,557 @@ def test_same_registry_does_not_trust_loadedness_for_a_transported_copy(tmp_path
     assert after.instructions == "KEEP INSTRUCTIONS"
     assert after.project == "KEEP PROJECT"
     assert after.description == "safe metadata edit"
+
+
+# --- R5-1: staging invisibility and directory/id agreement ------------------
+
+
+def test_reader_during_create_sees_no_row_until_publish(tmp_path: Path) -> None:
+    """R5-1: a paused writer's staged team.yml is invisible to other registries.
+
+    The writer is paused immediately after staging ``team.yml`` — before the
+    briefs and before the publish rename. A concurrent reader must not see the
+    row at all: pre-fix, ``_load`` trusted the staged YAML, hydrated "" briefs
+    as canonical, and a later save of that object erased the authored briefs.
+    """
+    import local_operator.teams as module
+
+    writer = TeamRegistry(tmp_path)
+    paused = threading.Event()
+    release = threading.Event()
+    real_write = module._write_row_files
+
+    def paused_write(directory, metadata, team):
+        real_write(directory, metadata, team)
+        if directory.parent == writer.teams_dir:
+            paused.set()
+            release.wait(timeout=10)
+
+    module._write_row_files = paused_write
+    try:
+        thread = threading.Thread(
+            target=lambda: writer.create_team(
+                TeamEditFields(name="race", instructions="KEEP-I", project="KEEP-P")
+            )
+        )
+        thread.start()
+        assert paused.wait(timeout=5), "writer never staged the row"
+
+        # The exact window the blocker found: staged team.yml exists on disk,
+        # the row is not published. A concurrent registry must see NOTHING.
+        staged = next(p for p in writer.teams_dir.iterdir() if p.name.startswith("."))
+        assert (staged / "team.yml").is_file()
+        reader = TeamRegistry(tmp_path)
+        assert reader.list_teams() == []
+        assert reader.get_team_by_name("race") is None
+
+        release.set()
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+    finally:
+        module._write_row_files = real_write
+
+    fresh = TeamRegistry(tmp_path)
+    seen = fresh.get_team_by_name("race")
+    assert seen is not None
+    assert seen.instructions == "KEEP-I"
+    assert seen.project == "KEEP-P"
+
+
+def test_saving_a_row_seen_during_staging_cannot_erase_authored_briefs(
+    tmp_path: Path,
+) -> None:
+    """R5-1 belt-and-braces: even a poisoned cache cannot truncate the briefs.
+
+    Pre-fix, a reader in the create gap hydrated a metadata-only row and its
+    later save wrote "" over both authored briefs. Post-fix the row is not
+    visible in the gap at all — this test goes further and injects the poisoned
+    cache state directly, then saves it AFTER the creator finished. The save
+    must preserve the authored briefs: hydration reads them from disk.
+    """
+    import local_operator.teams as module
+
+    writer = TeamRegistry(tmp_path)
+    paused = threading.Event()
+    release = threading.Event()
+    real_write = module._write_row_files
+
+    def paused_write(directory, metadata, team):
+        real_write(directory, metadata, team)
+        if directory.parent == writer.teams_dir:
+            paused.set()
+            release.wait(timeout=10)
+
+    module._write_row_files = paused_write
+    poisoned: dict[str, object] = {}
+    try:
+        thread = threading.Thread(
+            target=lambda: writer.create_team(
+                TeamEditFields(name="race", instructions="KEEP-I", project="KEEP-P")
+            )
+        )
+        thread.start()
+        assert paused.wait(timeout=5)
+
+        # The pre-fix reader's exact state, reconstructed by hand: a
+        # metadata-only object adopted into the cache while the row was staged.
+        staged_dir = next(p for p in writer.teams_dir.iterdir() if p.name.startswith("."))
+        staged = Team.model_validate(yaml.safe_load((staged_dir / "team.yml").read_text()))
+        reader = TeamRegistry(tmp_path)
+        reader._teams[staged.id] = staged
+        poisoned["id"] = staged.id
+
+        release.set()
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+
+        # The hostile save: metadata edit on the never-hydrated object.
+        staged.description = "hostile metadata edit"
+        reader.save_team(staged)
+    finally:
+        module._write_row_files = real_write
+
+    fresh = TeamRegistry(tmp_path)
+    seen = fresh.get_team(str(poisoned["id"]))
+    assert seen.instructions == "KEEP-I"
+    assert seen.project == "KEEP-P"
+    assert seen.description == "hostile metadata edit"
+
+
+def test_crash_staging_artifact_with_valid_team_yml_stays_hidden(tmp_path: Path) -> None:
+    """R5-1: a crash-left staging directory is ignored even with valid metadata.
+
+    Pre-fix, a staged (or orphaned) directory whose team.yml named a team made
+    that team discoverable. Post-fix, any dot-prefixed sibling of ``teams/``
+    is not a row — forever — because no rename ever published it.
+    """
+    teams = tmp_path / "teams"
+    teams.mkdir()
+    staging = teams / ".11111111-2222-3333-4444-555555555555.crashed"
+    staging.mkdir()
+    (staging / "team.yml").write_text(
+        yaml.safe_dump(
+            {
+                "id": "11111111-2222-3333-4444-555555555555",
+                "name": "ghost",
+                "created_date": "2026-01-01T00:00:00Z",
+                "manager": "manager",
+                "members": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    registry = TeamRegistry(tmp_path)
+    assert registry.list_teams() == []
+    assert registry.get_team_by_name("ghost") is None
+
+
+def test_published_directory_name_must_match_metadata_id(tmp_path: Path) -> None:
+    """R5-1: a directory whose YAML id points elsewhere is skipped as invalid."""
+    teams = tmp_path / "teams"
+    teams.mkdir()
+    good = teams / "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    good.mkdir()
+    (good / "team.yml").write_text(
+        yaml.safe_dump(
+            {
+                "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+                "name": "real",
+                "created_date": "2026-01-01T00:00:00Z",
+                "manager": "manager",
+                "members": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    # Directory name disagrees with the id inside its team.yml: the row would
+    # load under a cache key whose briefs and deletion target another path.
+    bad = teams / "ffffffff-0000-0000-0000-000000000000"
+    bad.mkdir()
+    (bad / "team.yml").write_text(
+        yaml.safe_dump(
+            {
+                "id": "99999999-9999-9999-9999-999999999999",
+                "name": "phantom",
+                "created_date": "2026-01-01T00:00:00Z",
+                "manager": "manager",
+                "members": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    registry = TeamRegistry(tmp_path)
+    assert [team.name for team in registry.list_teams()] == ["real"]
+
+
+# --- R5-2: directory-level transaction for existing rows ---------------------
+
+
+@pytest.mark.parametrize(
+    "failure_at",
+    [
+        "staged_metadata",
+        "staged_instructions",
+        "staged_project",
+        "target_aside",
+        "publish",
+    ],
+)
+def test_injected_update_failure_preserves_old_complete_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure_at: str
+) -> None:
+    """R5-2: failure after each staged write and each swap step keeps the row whole.
+
+    Old row is (old, old-desc, old-inst, old-proj); the update targets
+    (new, new-desc, new-inst, new-proj). Whichever step is made to fail, a
+    FRESH registry must read the OLD complete row and ``teams/`` must hold no
+    dot-prefixed leftovers. ``os.replace`` is the seam for the swap steps;
+    ``_write_row_files`` is the seam for the staged writes (its fsync-per-file
+    design means a mid-row failure leaves the staging directory incomplete,
+    which the caller's ``except`` removes before the error surfaces).
+    """
+    import local_operator.teams as module
+
+    registry = TeamRegistry(tmp_path)
+    team = registry.create_team(
+        TeamEditFields(
+            name="old",
+            description="old-desc",
+            instructions="old-inst",
+            project="old-proj",
+        )
+    )
+    staged_writes: list[str] = []
+    swap_renames: list[str] = []
+
+    real_write = module._write_row_files
+    row_files = ("team.yml", "instructions.md", "project.md")
+
+    def failing_write(directory, metadata, team):
+        # Only writes into a STAGING directory (dot-prefixed sibling of
+        # teams/) count; nothing else in the process is disturbed.
+        if directory.parent != registry.teams_dir or not directory.name.startswith("."):
+            real_write(directory, metadata, team)
+            return
+        target_index = {
+            "staged_metadata": 0,
+            "staged_instructions": 1,
+            "staged_project": 2,
+        }[failure_at]
+        staged_writes.append(row_files[target_index])
+        # Fail DURING the staged row: the named file and everything before it
+        # are on disk, everything after is not — the exact mid-row crash.
+        if target_index < 2:
+            real_partial = module._write_row_files_after
+            real_partial(directory, metadata, team, stop_after=row_files[target_index])
+            raise OSError(f"injected failure after staged {row_files[target_index]}")
+        real_write(directory, metadata, team)
+        raise OSError("injected failure after staged project.md")
+
+    real_replace = module.os.replace
+
+    def failing_replace(src, dst, *, src_dir_fd=None, dst_dir_fd=None):
+        src_path, dst_path = Path(str(src)), Path(str(dst))
+        in_teams = src_path.parent == registry.teams_dir
+        staging_source = in_teams and src_path.name.startswith(".")
+        backup_destination = dst_path.parent == registry.teams_dir and dst_path.name.startswith(".")
+        if staging_source and backup_destination and failure_at == "target_aside":
+            swap_renames.append("aside")
+            raise OSError("injected failure at target->backup")
+        if (
+            staging_source
+            and not backup_destination
+            and dst_path.name == team.id
+            and failure_at == "publish"
+        ):
+            swap_renames.append("publish")
+            raise OSError("injected failure at staged->target")
+        return real_replace(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+
+    monkeypatch.setattr(module, "_write_row_files", failing_write)
+    monkeypatch.setattr(module.os, "replace", failing_replace)
+
+    with pytest.raises(Exception, match="Failed to save team metadata"):
+        registry.update_team(
+            team.id,
+            TeamEditFields(
+                name="new",
+                description="new-desc",
+                instructions="new-inst",
+                project="new-proj",
+            ),
+        )
+
+    monkeypatch.undo()
+    fresh = TeamRegistry(tmp_path)
+    seen = fresh.get_team_by_name("old")
+    assert seen is not None, "old row vanished entirely"
+    assert (seen.name, seen.description, seen.instructions, seen.project) == (
+        "old",
+        "old-desc",
+        "old-inst",
+        "old-proj",
+    )
+    leftovers = [p.name for p in (tmp_path / "teams").iterdir() if p.name.startswith(".")]
+    assert leftovers == []
+
+
+def test_crash_between_swap_renames_recovers_on_next_locked_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R5-2: target->backup done, staged->target never ran — recovery restores.
+
+    The injected ``KeyboardInterrupt`` simulates process death at the exact
+    gap: the live row exists only under its hidden backup name. The next
+    locked mutation (here, an unrelated create) runs recovery first, so the
+    stranded row is restored whole before anything else observes the registry.
+    """
+    import local_operator.teams as module
+
+    registry = TeamRegistry(tmp_path)
+    team = registry.create_team(
+        TeamEditFields(name="old", instructions="old-inst", project="old-proj")
+    )
+    renames: list[str] = []
+    real_replace = module.os.replace
+
+    def die_at_publish(src, dst, *, src_dir_fd=None, dst_dir_fd=None):
+        src_path, dst_path = Path(str(src)), Path(str(dst))
+        in_teams = src_path.parent == registry.teams_dir
+        staging_source = in_teams and src_path.name.startswith(".")
+        backup_destination = dst_path.parent == registry.teams_dir and dst_path.name.startswith(".")
+        if backup_destination:
+            renames.append("aside")
+            return real_replace(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+        if staging_source and dst_path.name == team.id and "publish" not in renames:
+            renames.append("publish")
+            raise KeyboardInterrupt  # process death between the two renames
+        return real_replace(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+
+    monkeypatch.setattr(module.os, "replace", die_at_publish)
+    with pytest.raises(BaseException):
+        registry.update_team(team.id, TeamEditFields(instructions="new-inst"))
+    assert renames == ["aside", "publish"]
+
+    # The writer CAUGHT the interrupt and rolled the backup back into place,
+    # so a fresh reader sees the OLD complete row (never a mixed one). The
+    # true process-death variant is covered below by simulating the stranded
+    # state directly.
+    monkeypatch.undo()
+    survivor = TeamRegistry(tmp_path)
+    seen = survivor.get_team(team.id)
+    assert (seen.name, seen.instructions, seen.project) == ("old", "old-inst", "old-proj")
+    assert [p.name for p in (tmp_path / "teams").iterdir() if p.name.startswith(".")] == []
+
+    # True crash state: target gone, row only in the hidden backup. No reader
+    # can see it, and the next locked mutation must restore it whole.
+    row_dir = tmp_path / "teams" / team.id
+    backup_dir = tmp_path / "teams" / f".{team.id}.backup.stranded"
+    row_dir.rename(backup_dir)
+    assert TeamRegistry(tmp_path).list_teams() == []
+
+    healed = TeamRegistry(tmp_path)
+    healed.create_team(TeamEditFields(name="other"))
+    restored = healed.get_team(team.id)
+    assert restored.instructions == "old-inst"
+    assert restored.project == "old-proj"
+    names = sorted(p.name for p in (tmp_path / "teams").iterdir())
+    assert names and all(not name.startswith(".") for name in names)
+
+
+def test_backup_left_beside_newer_target_is_cleaned_under_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R5-2: a crash after publish leaves target authoritative, backup cleaned.
+
+    The swap completed (new revision is live) but the backup removal did not.
+    A later locked mutation must treat the target as authoritative and remove
+    the stale hidden backup rather than restore the older revision over it.
+    """
+    import local_operator.teams as module
+
+    registry = TeamRegistry(tmp_path)
+    team = registry.create_team(TeamEditFields(name="row", instructions="I", project="P"))
+    real_rmtree = module.shutil.rmtree
+
+    def die_on_backup_cleanup(path, *args, **kwargs):
+        if Path(str(path)).name.startswith(".") and ".backup." in Path(str(path)).name:
+            raise KeyboardInterrupt  # death between publish and cleanup
+        return real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(module.shutil, "rmtree", die_on_backup_cleanup)
+    with pytest.raises(BaseException):
+        registry.update_team(team.id, TeamEditFields(instructions="I2"))
+    monkeypatch.undo()
+
+    # Both the new target and the stale backup exist right now.
+    leftovers = [p.name for p in (tmp_path / "teams").iterdir() if ".backup." in p.name]
+    assert len(leftovers) == 1
+
+    healed = TeamRegistry(tmp_path)
+    seen = healed.get_team(team.id)
+    assert seen.instructions == "I2"
+    healed.create_team(TeamEditFields(name="unrelated"))
+    assert [p.name for p in (tmp_path / "teams").iterdir() if ".backup." in p.name] == []
+
+
+def test_new_row_create_is_published_atomically(tmp_path: Path) -> None:
+    """R5-2: the create path still publishes by one directory rename.
+
+    A create must never leave a visible directory without its complete file
+    set; the staging name is dot-prefixed and removed on any failure.
+    """
+    import local_operator.teams as module
+
+    registry = TeamRegistry(tmp_path)
+    real_replace = module.os.replace
+    seen: list[str] = []
+
+    def recording_replace(src, dst, *, src_dir_fd=None, dst_dir_fd=None):
+        src_path, dst_path = Path(str(src)), Path(str(dst))
+        if dst_path.parent == registry.teams_dir and not dst_path.name.startswith("."):
+            staged = src_path.parent == registry.teams_dir and src_path.name.startswith(".")
+            seen.append(f"{staged}->{dst_path.name}")
+        return real_replace(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(module.os, "replace", recording_replace)
+    try:
+        team = registry.create_team(TeamEditFields(name="fresh", instructions="FI", project="FP"))
+    finally:
+        monkeypatch.undo()
+
+    assert seen == [f"True->{team.id}"]
+    row = tmp_path / "teams" / team.id
+    assert sorted(p.name for p in row.iterdir()) == [
+        "instructions.md",
+        "project.md",
+        "team.yml",
+    ]
+
+
+# --- U5-1: lock timeout surface ---------------------------------------------
+
+
+def test_lock_timeout_is_a_domain_exception_with_guidance(tmp_path: Path) -> None:
+    """U5-1: the timeout carries retry guidance and a catchable narrow type."""
+    registry = TeamRegistry(tmp_path)
+    registry.create_team(TeamEditFields(name="seed"))
+
+    holder = TeamRegistry(tmp_path)
+    with holder._persistence_lock():
+        with pytest.raises(TeamRegistryLockTimeout) as excinfo:
+            registry.create_team(TeamEditFields(name="blocked"))
+    message = str(excinfo.value)
+    assert "Timed out waiting for the teams registry lock" in message
+    assert "retry after the other lop process finishes" in message
+    assert isinstance(excinfo.value, TimeoutError)
+
+
+def test_cli_lock_timeout_prints_one_line_without_traceback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """U5-1: the CLI presents registry contention as recoverable, not a crash.
+
+    A peer process holds the lock past the bounded wait. The supported
+    ``lop teams create`` path must exit non-zero with the retry guidance and
+    WITHOUT the stack-trace panel the generic handler prints.
+    """
+    from local_operator.cli import main as cli_main
+
+    cfg = tmp_path / ".local-operator"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(cfg))
+
+    holder = TeamRegistry(cfg)
+    holder.create_team(TeamEditFields(name="seed"))  # creates the lock sidecar
+
+    # Hold the lock from a raw fd so the CLI's own registry cannot acquire it.
+    import fcntl
+
+    lock_path = cfg / ".teams.lock"
+    fd = os.open(lock_path, os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        # Shrink the bounded wait so the test is fast; the surface under test
+        # (message + no traceback) is independent of the wait duration.
+        monkeypatch.setattr("local_operator.teams._TEAM_LOCK_TIMEOUT_S", 0.2)
+        monkeypatch.setattr("sys.argv", ["local-operator", "teams", "create", "blocked-squad"])
+        code = cli_main()
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+    assert code == 1
+    captured = capsys.readouterr()
+    assert "Timed out waiting for the teams registry lock" in captured.err
+    assert "retry after the other lop process finishes" in captured.err
+    assert "Stack Trace" not in captured.err
+    assert "Traceback (most recent call last)" not in captured.err
+    assert captured.out == ""
+
+
+def test_concurrent_readers_never_see_mixed_row_during_repeated_updates(
+    tmp_path: Path,
+) -> None:
+    """R5-2: unlocked readers observe old-complete or new-complete, never mixed.
+
+    One writer flips a team between two complete revisions (both fields change
+    together) while several readers refresh continuously. Every observation
+    must be one of the two complete tuples; a file-by-file writer would show
+    (new-name, old-brief) mixtures.
+    """
+    writer = TeamRegistry(tmp_path)
+    team = writer.create_team(
+        TeamEditFields(name="rev-a", instructions="brief-a", project="proj-a")
+    )
+    revisions = [
+        ("rev-a", "brief-a", "proj-a"),
+        ("rev-b", "brief-b", "proj-b"),
+    ]
+    stop = threading.Event()
+    mixed: list[tuple[str, str, str]] = []
+    observations = [0]
+    gaps = [0]
+
+    def reader_loop() -> None:
+        reader = TeamRegistry(tmp_path, refresh_interval=0)
+        while not stop.is_set():
+            for row in reader.list_teams():
+                observations[0] += 1
+                # Hydrate briefs the way a real attach does. A reader hitting
+                # the exact swap gap misses the row entirely — the documented
+                # tiny window with no target — so a transient KeyError is a
+                # legitimate observation. The INVARIANT under test is that no
+                # observation is a MIXED revision (new metadata with old or
+                # empty briefs), which a file-by-file writer would produce.
+                try:
+                    full = reader.get_team(row.id)
+                except KeyError:
+                    gaps[0] += 1
+                    continue
+                triple = (full.name, full.instructions, full.project)
+                if triple not in revisions:
+                    mixed.append(triple)
+
+    readers = [threading.Thread(target=reader_loop) for _ in range(3)]
+    for r in readers:
+        r.start()
+    try:
+        for flip in range(40):
+            target = revisions[flip % 2]
+            writer.update_team(
+                team.id,
+                TeamEditFields(name=target[0], instructions=target[1], project=target[2]),
+            )
+    finally:
+        stop.set()
+        for r in readers:
+            r.join(timeout=10)
+    assert all(not r.is_alive() for r in readers)
+    # The writer finished on the last revision it wrote.
+    assert observations[0] > 0, "readers never observed the registry"
+    assert mixed == [], f"mixed revisions observed: {mixed[:5]}"
+    final = TeamRegistry(tmp_path).get_team(team.id)
+    assert (final.name, final.instructions, final.project) in revisions
