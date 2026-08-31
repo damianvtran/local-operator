@@ -1594,9 +1594,24 @@ class Session:
         self._ask_user: AskUserFn | None = None
 
         self._loop = AgentLoop()
+        replayed_messages = list(transcript.build_llm_history())
+        # A fork's inherited bytes stay untouched for prompt-cache continuity;
+        # its lineage warning exists only at the live context tail and is
+        # consumed once, so resume never accumulates synthetic transcript rows.
+        from local_operator.fork import consume_fork_boundary
+
+        fork_boundary = consume_fork_boundary(transcript.directory)
+        if fork_boundary:
+            replayed_messages.append(
+                CustomMessage(
+                    custom_type="fork_boundary",
+                    attribution="system",
+                    details={"text": fork_boundary},
+                )
+            )
         self._context = LoopContext(
             system_blocks=[],
-            messages=list(transcript.build_llm_history()),
+            messages=replayed_messages,
             tools=self._tools,
         )
         self._handlers: list[EventHandler] = []
@@ -7831,6 +7846,14 @@ class Session:
     # -- wakes -------------------------------------------------------------------
 
     def _load_wake_schedules(self) -> None:
+        # A wake is active ownership, not conversation history. The copied
+        # transcript may contain legacy/current schedule snapshots alongside
+        # ordinary wake tool calls/results; a fork must keep the latter visible
+        # while starting with no schedules it could fire or cancel for its parent.
+        from local_operator.fork import fork_parent
+
+        if fork_parent(self._transcript.directory):
+            return
         details = self._transcript.latest_custom(WAKE_SCHEDULES_CUSTOM_TYPE)
         if not details:
             return
@@ -8131,6 +8154,15 @@ class Session:
         in the CHILD's own transcript and is recovered by resuming or
         ``hub op='peek'``-ing it, never by re-reading it here.
         """
+        # Forks inherit historical transcript content, not process ownership.
+        # This provenance gate suppresses BOTH the modern sidecar and legacy
+        # ``subagent_roster`` customs, including when a seed sidecar write was
+        # lost. New children launched by this session still populate the empty
+        # manager/comms objects normally and persist under the fork directory.
+        from local_operator.fork import fork_parent
+
+        if fork_parent(self._transcript.directory):
+            return
         details = _read_roster_sidecar(self._transcript.directory / SUBAGENT_ROSTER_SIDECAR)
         loaded_sidecar = details is not None
         if details is None:

@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pytest
 from textual.widgets import Static
@@ -31,8 +31,11 @@ from local_operator.fork import (
     BOOT_PROMPT_NAME,
     COPIED_SIDECARS,
     EXCLUDED_SIDECARS,
+    FORK_BOUNDARY_INSTRUCTION,
+    FORK_BOUNDARY_NAME,
     ForkError,
     consume_boot_prompt,
+    consume_fork_boundary,
     fork_parent,
     fork_session,
     write_boot_prompt,
@@ -115,6 +118,7 @@ class TestTheCloneItself:
             TRANSCRIPT_NAME,
             ATTACHMENT_SIDECAR_NAME,
             TITLE_SIDECAR_NAME,
+            FORK_BOUNDARY_NAME,  # written by the fork, not inherited
             "origin.json",  # written by the fork itself, not copied
         }
 
@@ -211,6 +215,51 @@ class TestProvenance:
         assert "cccccccccccc" not in listed
 
 
+class TestTheForkBoundary:
+    def test_every_fork_gets_exactly_one_nonpersistent_context_boundary(
+        self, tmp_path: Path
+    ) -> None:
+        parent = _seed_parent(tmp_path)
+        before = (parent / TRANSCRIPT_NAME).read_bytes()
+        fork_id = fork_session(tmp_path, PARENT_ID)
+        fork_dir = tmp_path / "sessions" / fork_id
+
+        assert (fork_dir / TRANSCRIPT_NAME).read_bytes() == before
+        assert consume_fork_boundary(fork_dir) == FORK_BOUNDARY_INSTRUCTION
+        assert consume_fork_boundary(fork_dir) == ""
+        assert (fork_dir / TRANSCRIPT_NAME).read_bytes() == before
+
+    @pytest.mark.asyncio
+    async def test_session_places_the_boundary_once_at_the_inherited_context_tail(
+        self, tmp_path: Path
+    ) -> None:
+        from local_operator.session.transcript import Transcript
+
+        parent = tmp_path / "sessions" / PARENT_ID
+        parent.mkdir(parents=True)
+        transcript = Transcript(parent)
+        await transcript.append_message(_user("read the loader"))
+        await transcript.append_message(_assistant("It parses YAML."))
+        fork_id = fork_session(tmp_path, PARENT_ID)
+        fork_dir = tmp_path / "sessions" / fork_id
+
+        first = _build_session(fork_dir)
+        inherited = first.history()
+        assert [getattr(message, "role", "") for message in inherited[:2]] == [
+            "user",
+            "assistant",
+        ]
+        boundary = inherited[-1]
+        assert getattr(boundary, "custom_type", "") == "fork_boundary"
+        assert getattr(boundary, "details", {})["text"] == FORK_BOUNDARY_INSTRUCTION
+        assert (fork_dir / TRANSCRIPT_NAME).read_text(encoding="utf-8").count("fork_boundary") == 0
+
+        resumed = _build_session(fork_dir)
+        assert all(
+            getattr(message, "custom_type", "") != "fork_boundary" for message in resumed.history()
+        )
+
+
 class TestTheBootPrompt:
     def test_the_message_round_trips_and_fires_exactly_once(self, tmp_path: Path) -> None:
         """T6. The delete is the load-bearing half.
@@ -271,6 +320,122 @@ class TestTheBootPrompt:
         session_dir.mkdir(parents=True)
         write_boot_prompt(session_dir, "refactor the café loader — twice")
         assert consume_boot_prompt(session_dir) == "refactor the café loader — twice"
+
+
+class TestForkRuntimeOwnership:
+    @pytest.mark.asyncio
+    async def test_parent_runtime_ownership_stays_parent_only(self, tmp_path: Path) -> None:
+        from local_operator.harness.wake import WakeSchedule
+        from local_operator.session.session import WAKE_SCHEDULES_CUSTOM_TYPE
+        from local_operator.session.transcript import Transcript
+
+        parent = tmp_path / "sessions" / PARENT_ID
+        parent.mkdir(parents=True)
+        transcript = Transcript(parent)
+        await transcript.append_message(_user("schedule the audit and delegate research"))
+        await transcript.append_custom(
+            WAKE_SCHEDULES_CUSTOM_TYPE,
+            {
+                "schedules": [
+                    {
+                        "id": "w-parent",
+                        "message": "audit now",
+                        "next_due_at": 9_999_999_999_999,
+                        "created_at": 1,
+                    }
+                ]
+            },
+        )
+        await transcript.append_custom(
+            "subagent_roster",
+            {
+                "generation": 4,
+                "records": [{"job_id": "parent-job", "session_dir": "child-parent"}],
+                "jobs": [],
+            },
+        )
+        parent_session = _build_session(parent)
+        assert [wake.id for wake in parent_session.wake_scheduler.schedules] == ["w-parent"]
+        assert parent_session.subagent_comms.session_dir_of("parent-job") == Path("child-parent")
+
+        fork_id = fork_session(tmp_path, PARENT_ID)
+        fork = _build_session(tmp_path / "sessions" / fork_id)
+        assert fork.wake_scheduler.schedules == ()
+        assert fork.jobs.get("parent-job") is None
+        assert fork.subagent_comms.session_dir_of("parent-job") is None
+        # Parent ownership was read, never moved or cancelled.
+        assert [wake.id for wake in parent_session.wake_scheduler.schedules] == ["w-parent"]
+        assert parent_session.subagent_comms.session_dir_of("parent-job") == Path("child-parent")
+
+        own = WakeSchedule(
+            id="w-fork", message="divergent audit", next_due_at=9_999_999_999_999, created_at=2
+        )
+        await fork.set_wake_schedules([own])
+        assert [wake.id for wake in fork.wake_scheduler.schedules] == ["w-fork"]
+        assert [wake.id for wake in parent_session.wake_scheduler.schedules] == ["w-parent"]
+
+        # Isolation must not disable the capability: the fork owns children it
+        # launches after boot, while the inherited parent's child stays absent.
+        fork.subagent_comms.restore(
+            [{"job_id": "fork-job", "session_dir": "child-fork", "label": "new research"}]
+        )
+        assert fork.subagent_comms.session_dir_of("fork-job") == Path("child-fork")
+        assert fork.subagent_comms.session_dir_of("parent-job") is None
+        assert parent_session.subagent_comms.session_dir_of("fork-job") is None
+
+
+class TestForkCmuxOwnership:
+    def test_parent_never_schedules_a_cmux_rename(self, tmp_path: Path, monkeypatch) -> None:
+        from local_operator.tui.app import OperatorApp
+
+        parent = _seed_parent(tmp_path)
+        scheduled: list[Any] = []
+        app = cast(
+            OperatorApp,
+            type(
+                "ForkNameHarness",
+                (),
+                {
+                    "_session": type("SessionStub", (), {"session_id": parent.name})(),
+                    "_fork_cmux_name": "",
+                    "run_worker": lambda self, awaitable, **kwargs: scheduled.append(awaitable),
+                },
+            )(),
+        )
+        monkeypatch.setattr("local_operator.paths.config_dir", lambda: tmp_path)
+
+        OperatorApp._sync_fork_cmux_name(app, "Parent work")
+
+        assert scheduled == []
+        assert app._fork_cmux_name == ""
+
+    def test_fork_schedules_only_its_owned_target_rename(self, tmp_path: Path, monkeypatch) -> None:
+        from local_operator.tui.app import OperatorApp
+
+        _seed_parent(tmp_path)
+        fork_id = fork_session(tmp_path, PARENT_ID)
+        scheduled: list[Any] = []
+        app = cast(
+            OperatorApp,
+            type(
+                "ForkNameHarness",
+                (),
+                {
+                    "_session": type("SessionStub", (), {"session_id": fork_id})(),
+                    "_fork_cmux_name": "",
+                    "run_worker": lambda self, awaitable, **kwargs: scheduled.append(awaitable),
+                },
+            )(),
+        )
+        monkeypatch.setattr("local_operator.paths.config_dir", lambda: tmp_path)
+
+        OperatorApp._sync_fork_cmux_name(app, "  Divergent   work ")
+
+        assert app._fork_cmux_name == "Divergent work"
+        assert len(scheduled) == 1
+        # The harness deliberately does not run the worker: argv construction is
+        # covered separately, and closing avoids a false un-awaited warning.
+        scheduled[0].close()
 
 
 class TestTheClonedTranscriptIsLegalOnTheWire:

@@ -350,16 +350,16 @@ TIP_PASTE = "ctrl+v attaches an image from the system clipboard"
 TIPS: tuple[str, ...] = (
     "/resume picks up a recent session where you left off",
     "/team <name> <message> sends work to the manager",
-    "Ask to create an agent with its own instruction set",
     "/model <provider>/<id> switches this session only",
-    "/usage shows how much provider quota is left",
     TIP_PASTE,
     "/approvals <ask|auto> sets whether tools ask first",
-    "ctrl+c copies what you highlight in the composer",
     "esc stops the agent without ending the session",
     "Ask for parallel work and the agent fans out subagents",
     "! on an empty composer runs a shell command",
-    "/goal sets the objective that /loop iterates toward",
+    "/fork branches; /fork <message> starts divergent work",
+    "/settings → Fork → Where a fork opens changes default",
+    "Under cmux, Where it opens sets workspace or surface",
+    "lop detects terminal or multiplexer, then picks placement",
 )
 
 #: The tip the SETUP state opens on, in place of the pinned ``TIPS[0]``. The
