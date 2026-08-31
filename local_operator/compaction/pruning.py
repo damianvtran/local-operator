@@ -7,10 +7,10 @@ details. The flags never reach provider wire formats.
 
 Two passes (``pruneSupersededToolResults``):
 
-(a) **Superseded reads** — a later tool result for the same path makes the
-    earlier output dead weight (the model re-read precisely because the old
-    copy was stale). The supersede key is ``details['path']``; results without
-    a path group by tool name.
+(a) **Superseded results** — a later tool result for the same path, or with
+    the same explicitly declared ``details['supersede_key']``, makes the
+    earlier output dead weight. Results with neither key are exempt: grouping
+    pathless results by tool name would collapse legitimately distinct output.
 (b) **Useless-flagged results** — tools self-flag contextually worthless
     output (zero-match search, timed-out wait); blanked once consumed.
 
@@ -55,7 +55,7 @@ __all__ = [
 MIN_PRUNE_TOKENS = 50
 
 #: Exact placeholder written over a superseded tool result.
-SUPERSEDED_NOTICE = "[Superseded by a newer read of this file]"
+SUPERSEDED_NOTICE = "[Superseded by a newer result for the same resource]"
 
 #: Exact placeholder written over an elided useless tool result.
 USELESS_NOTICE = "[Uneventful result elided]"
@@ -152,11 +152,33 @@ def _supersede_key(message: Message) -> str | None:
     The range rides in the key: a ranged read must NOT supersede a different
     range of the same file (they share not one line), while a full-file read
     supersedes every earlier range — handled in the pass below.
+
+    ``details['supersede_key']`` lets a tool opt a result in explicitly, for
+    resources a path does not name: a URL, a page, a live surface. It is an
+    OPT-IN the emitting tool states, deliberately not inferred from ambient
+    fields like a url or a surface handle. Inference is unsafe here because a
+    single handle covers many DIFFERENT results: the browser tool stamps its
+    ``surface_id`` on every action, so keying on it made a 40-character
+    ``click`` blank the accessibility snapshot and console errors the agent had
+    just gathered to decide what to click. Only the tool knows which of its
+    results are re-reads of one thing and which are distinct observations of
+    it, so only the tool may say so.
+
+    The value must therefore identify the CONTENT, including any variant that
+    changes what comes back (a raw versus rendered fetch of one URL is two
+    different answers, not one superseding the other).
     """
     details = _details_of(message)
+    if not message.tool_name:
+        return None
     path = details.get("path")
-    if isinstance(path, str) and path and message.tool_name:
-        return f"{message.tool_name}:{path}:{details.get('range') or 'full'}"
+    if isinstance(path, str) and path:
+        # The namespace marker prevents a path crafted like a declared key
+        # from colliding with a tool's explicit opt-in contract.
+        return f"{message.tool_name}:path:{path}:{details.get('range') or 'full'}"
+    declared = details.get("supersede_key")
+    if isinstance(declared, str) and declared:
+        return f"{message.tool_name}:declared:{declared}"
     return None
 
 
