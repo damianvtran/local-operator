@@ -168,3 +168,69 @@ def test_the_header_falls_back_to_cwd_then_session_id_not_a_bare_pid() -> None:
 
     # Nothing at all: the old bare-pid shape is still the last resort.
     assert "pid 1" in PeerMessageBlock("body", {"pid": 1})._header()
+
+
+@pytest.mark.asyncio
+async def test_dragging_over_a_peer_message_copies_no_app_chrome() -> None:
+    """Every row the header WRAPPED to is chrome, not just the first.
+
+    The header is one paragraph, but an ordinary sender name wraps it at
+    half-screen widths. Marking only row 0 meant a drag over the message copied
+    the tail of the app's own label into the user's clipboard — text they never
+    wrote, landing in whatever they were quoting into.
+    """
+    from textual.selection import Selection as ScreenSelection
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(62, 14)) as pilot:
+        await _settle_for_session(pilot, app)
+        block = PeerMessageBlock(
+            "gates are green",
+            {
+                "pid": 48213,
+                "conversation_name": "minerva-user-dashboard-release-cutter",
+                "model_label": "anthropic/claude-opus-5",
+            },
+        )
+        app._append_block(block)
+        await pilot.pause()
+
+        # The case only bites when the header actually wraps.
+        assert block._header_rows > 1, "widen the case: the header did not wrap"
+
+        copied = block.get_selection(ScreenSelection(None, None))
+        assert copied is not None
+        text = copied[0]
+        assert "gates are green" in text
+        # No fragment of the app's label may ride along.
+        assert "peer message from" not in text
+        assert "minerva-user-dashboard" not in text
+        assert "claude-opus" not in text
+        assert "pid 48213" not in text
+
+
+@pytest.mark.asyncio
+async def test_a_control_character_in_a_sender_name_cannot_break_the_row() -> None:
+    """The sender name crosses the wire from another process, so it is the
+    least trusted string this widget paints.
+
+    A newline split the header into rows the block never counted — its height is
+    PINNED to that count, so the extra row paints outside the reserved space —
+    and an escape sequence would re-ink the transcript from inside a label.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 14)) as pilot:
+        await _settle_for_session(pilot, app)
+        block = PeerMessageBlock(
+            "body",
+            {"pid": 7, "conversation_name": "line1\nline2\nline3", "model_label": "m\x1b[31m"},
+        )
+        app._append_block(block)
+        await pilot.pause()
+
+        header = block._header()
+        assert "\n" not in header
+        assert "\x1b" not in header
+        # The pinned height matches what the block actually painted.
+        assert block.styles.height is not None
+        assert block.styles.height.value == block._header_rows + 1
