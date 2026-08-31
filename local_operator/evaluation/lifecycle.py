@@ -613,6 +613,13 @@ class EpisodeLifecycle(ProtocolModel):
             raise ValueError("episode lifecycle authority was mutated")
 
     def _transition(self, expected: EpisodeState, operation: str, **updates: Any) -> Self:
+        """Construct a child while the caller holds this authority's lock.
+
+        Consumption deliberately happens only after this method returns. A
+        validator or injected construction failure therefore leaves the parent
+        live and retryable.
+        """
+
         self._assert_authority()
         if self.state != expected:
             raise ValueError(f"illegal episode transition from {self.state}")
@@ -624,39 +631,54 @@ class EpisodeLifecycle(ProtocolModel):
             context={"lifecycle_factory": _LIFECYCLE_FACTORY},
         )
 
+    def _consume_source(self) -> None:
+        self._consumed = True
+        object.__setattr__(self, "_authority", None)
+
+    def _consume_transition(self, expected: EpisodeState, operation: str, **updates: Any) -> Self:
+        """Atomically mint one child and consume this process-local authority."""
+
+        with self._lock:
+            child = self._transition(expected, operation, **updates)
+            self._consume_source()
+            return child
+
     def preflight(self, seal: SealedPreflight) -> Self:
         seal.assert_authority()
         if not seal.successful:
             raise ValueError("failed preflight cannot enter preflighted state")
         if seal.plan_id != self.plan_id:
             raise ValueError("preflight seal belongs to another dependency plan")
-        return self._transition(
+        return self._consume_transition(
             "planned", "seal-preflight", state="preflighted", preflight_seal_id=seal.seal_id
         )
 
     def authorize(
         self, seal: SealedPreflight, budget: BudgetAuthorization
     ) -> tuple[Self, SideEffectPermit]:
-        seal.assert_authority()
-        if self.state != "preflighted" or self.preflight_seal_id != seal.seal_id:
-            raise ValueError("illegal or mismatched episode authorization")
-        if budget.budget_id != self.budget_id:
-            raise ValueError("budget authorization does not match the planned budget")
-        permit = mint_side_effect_permit(
-            episode_id=self.episode_id,
-            plan_id=self.plan_id,
-            preflight=seal,
-            budget=budget,
-        )
-        return (
-            self._transition(
+        # The seal is reusable plan evidence; the episode parent is the
+        # single-use authority that prevents two authorized children.
+        with self._lock:
+            self._assert_authority()
+            seal.assert_authority()
+            if self.state != "preflighted" or self.preflight_seal_id != seal.seal_id:
+                raise ValueError("illegal or mismatched episode authorization")
+            if budget.budget_id != self.budget_id:
+                raise ValueError("budget authorization does not match the planned budget")
+            permit = mint_side_effect_permit(
+                episode_id=self.episode_id,
+                plan_id=self.plan_id,
+                preflight=seal,
+                budget=budget,
+            )
+            authorized = self._transition(
                 "preflighted",
                 "authorize-side-effects",
                 state="authorized",
                 permit_id=permit.permit_id,
-            ),
-            permit,
-        )
+            )
+            self._consume_source()
+            return authorized, permit
 
     def start(
         self,
@@ -690,14 +712,13 @@ class EpisodeLifecycle(ProtocolModel):
                 state="running",
                 reservation_ids=commitment.reservation_ids,
             )
-            self._consumed = True
-            object.__setattr__(self, "_authority", None)
+            self._consume_source()
             permit.consume_authority()
             commitment.consume_authority()
             return running
 
     def begin_finalization(self) -> Self:
-        return self._transition("running", "begin-finalization", state="finalizing")
+        return self._consume_transition("running", "begin-finalization", state="finalizing")
 
     def finish_finalization(
         self,
@@ -707,7 +728,7 @@ class EpisodeLifecycle(ProtocolModel):
         self._validate_reconciliation(reconciliation)
         if score.episode_id != self.episode_id or score.plan_id != self.plan_id:
             raise ValueError("score receipt does not match this episode")
-        return self._transition(
+        return self._consume_transition(
             "finalizing",
             "finish-finalization",
             state="cleaning",
@@ -723,7 +744,7 @@ class EpisodeLifecycle(ProtocolModel):
         reason: str,
     ) -> Self:
         self._validate_reconciliation(reconciliation)
-        return self._transition(
+        return self._consume_transition(
             "finalizing",
             "finish-finalization",
             state="cleaning",
@@ -737,7 +758,7 @@ class EpisodeLifecycle(ProtocolModel):
     def crash(self, reason: str) -> Self:
         if self.state not in ("running", "finalizing"):
             raise ValueError(f"illegal episode transition from {self.state}")
-        return self._transition(
+        return self._consume_transition(
             self.state,
             "record-crash",
             state="cleaning",
@@ -749,7 +770,7 @@ class EpisodeLifecycle(ProtocolModel):
     def cancel(self, reason: str) -> Self:
         if self.state not in ("running", "finalizing"):
             raise ValueError(f"illegal episode transition from {self.state}")
-        return self._transition(
+        return self._consume_transition(
             self.state,
             "record-cancellation",
             state="cleaning",
@@ -765,7 +786,7 @@ class EpisodeLifecycle(ProtocolModel):
     ) -> Self:
         if self.state not in ("planned", "preflighted", "authorized"):
             raise ValueError("post-start failure must enter cleaning first")
-        return self._transition(
+        return self._consume_transition(
             self.state,
             "fail-before-running",
             state="failed",
@@ -803,8 +824,7 @@ class EpisodeLifecycle(ProtocolModel):
             # Terminal construction precedes both consumes: a construction or
             # validation error leaves lifecycle and result retryable together.
             terminal = self._transition("cleaning", "finish-cleanup", **updates)
-            self._consumed = True
-            object.__setattr__(self, "_authority", None)
+            self._consume_source()
             result.consume_authority()
             return terminal
 

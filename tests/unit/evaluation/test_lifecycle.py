@@ -309,8 +309,14 @@ def test_unreportable_usage_or_incomplete_cleanup_cannot_complete() -> None:
     failed = cleaning.finish_cleanup(_cleanup(cleanup))
     assert failed.state == "failed"
     assert failed.failure_kind == "unreportable"
+    plan, budget, cleanup, authorized, permit = _authorized()
+    reservation = _reservation(budget)
     reportable = _reconciliation(budget, reservation)
-    cleaning = finalizing.finish_finalization(reportable, _score(plan))
+    cleaning = (
+        authorized.start(permit, budget, _commitment(budget, reservation))
+        .begin_finalization()
+        .finish_finalization(reportable, _score(plan))
+    )
     rescue = cleaning.finish_cleanup(_cleanup(cleanup, volume="failed"))
     assert rescue.state == "failed"
     assert rescue.failure_kind == "cleanup"
@@ -326,6 +332,9 @@ def test_crash_and_cancel_after_running_must_flow_through_cleanup() -> None:
     failed = crashed.finish_cleanup(_cleanup(cleanup))
     assert failed.state == "failed"
     assert failed.cleanup_result_id is not None
+    _plan_value, budget, cleanup, authorized, permit = _authorized()
+    reservation = _reservation(budget)
+    running = authorized.start(permit, budget, _commitment(budget, reservation))
     cancelled = running.cancel("operator requested cancellation")
     assert cancelled.state == "cleaning"
     terminal = cancelled.finish_cleanup(_cleanup(cleanup))
@@ -348,6 +357,12 @@ def test_preflight_and_infrastructure_failures_are_unscored() -> None:
     assert failed.score_id is None
     with pytest.raises(ValueError, match="illegal"):
         failed.begin_finalization()
+    planned = EpisodeLifecycle.planned(
+        episode_id="episode-1",
+        plan_id=plan.plan_id,
+        budget_id=budget.budget_id,
+        cleanup_plan_id=cleanup.cleanup_plan_id,
+    )
     preflighted = planned.preflight(_seal(plan))
     infrastructure = preflighted.fail_before_running(
         kind="infrastructure", reason="allocator unavailable"
@@ -390,32 +405,41 @@ def test_ambiguous_finalization_is_terminal_after_cleanup_and_cannot_rescore() -
 def test_illegal_transition_table(state: str, operation: str) -> None:
     plan, budget, cleanup, authorized, permit = _authorized()
     reservation = _reservation(budget)
-    running = authorized.start(permit, budget, _commitment(budget, reservation))
-    reconciliation = _reconciliation(budget, reservation)
-    finalizing = running.begin_finalization()
-    cleaning = finalizing.finish_finalization(reconciliation, _score(plan))
-    episodes = {
-        "planned": EpisodeLifecycle.planned(
+    if state == "planned":
+        episode = EpisodeLifecycle.planned(
             episode_id="episode-1",
             plan_id=plan.plan_id,
             budget_id=budget.budget_id,
             cleanup_plan_id=cleanup.cleanup_plan_id,
-        ),
-        "preflighted": EpisodeLifecycle.planned(
+        )
+    elif state == "preflighted":
+        episode = EpisodeLifecycle.planned(
             episode_id="episode-1",
             plan_id=plan.plan_id,
             budget_id=budget.budget_id,
             cleanup_plan_id=cleanup.cleanup_plan_id,
-        ).preflight(_seal(plan)),
-        "authorized": authorized,
-        "running": running,
-        "finalizing": finalizing,
-        "cleaning": cleaning,
-        "completed": cleaning.finish_cleanup(_cleanup(cleanup)),
-        "failed": running.crash("crash").finish_cleanup(_cleanup(cleanup)),
-        "cancelled": running.cancel("cancel").finish_cleanup(_cleanup(cleanup)),
-    }
-    episode = episodes[state]
+        ).preflight(_seal(plan))
+    elif state == "authorized":
+        episode = authorized
+    else:
+        running = authorized.start(permit, budget, _commitment(budget, reservation))
+        if state == "running":
+            episode = running
+        elif state == "failed":
+            episode = running.crash("crash").finish_cleanup(_cleanup(cleanup))
+        elif state == "cancelled":
+            episode = running.cancel("cancel").finish_cleanup(_cleanup(cleanup))
+        else:
+            finalizing = running.begin_finalization()
+            if state == "finalizing":
+                episode = finalizing
+            else:
+                cleaning = finalizing.finish_finalization(
+                    _reconciliation(budget, reservation), _score(plan)
+                )
+                episode = (
+                    cleaning.finish_cleanup(_cleanup(cleanup)) if state == "completed" else cleaning
+                )
     if operation == "preflight":
         with pytest.raises(ValueError, match="illegal"):
             episode.preflight(_seal(plan))
@@ -842,3 +866,177 @@ def test_finish_cleanup_is_atomic_and_rolls_back_construction_failure(
     with pytest.raises(ValueError, match="injected terminal construction failure"):
         cleaning3.finish_cleanup(retryable_result)
     assert cleaning3.finish_cleanup(retryable_result).state == "completed"
+
+
+def test_every_lifecycle_parent_is_sequentially_single_use() -> None:
+    plan = _plan()
+    seal = _seal(plan)
+    budget = _budget()
+    cleanup = _cleanup_plan()
+    planned = EpisodeLifecycle.planned(
+        episode_id=budget.episode_id,
+        plan_id=plan.plan_id,
+        budget_id=budget.budget_id,
+        cleanup_plan_id=cleanup.cleanup_plan_id,
+    )
+    preflighted = planned.preflight(seal)
+    with pytest.raises(ValueError, match="lacks transition authority"):
+        planned.preflight(seal)
+
+    authorized, permit = preflighted.authorize(seal, budget)
+    with pytest.raises(ValueError, match="lacks transition authority"):
+        preflighted.authorize(seal, budget)
+
+    reservation = reserve_budget(
+        budget,
+        "linear-reservation",
+        tuple(ResourceAmount(resource=resource, value=10) for resource in BUDGET_RESOURCES),
+    )
+    running = authorized.start(permit, budget, commit_budget(budget, (reservation,)))
+    finalizing = running.begin_finalization()
+    with pytest.raises(ValueError, match="lacks transition authority"):
+        running.crash("late sibling")
+
+    cleaning = finalizing.finish_finalization(_reconciliation(budget, reservation), _score(plan))
+    with pytest.raises(ValueError, match="lacks transition authority"):
+        finalizing.finish_finalization(_reconciliation(budget, reservation), _score(plan))
+    terminal = cleaning.finish_cleanup(_cleanup(cleanup))
+    assert terminal.state == "completed"
+    with pytest.raises(ValueError, match="lacks transition authority"):
+        cleaning.finish_cleanup(_cleanup(cleanup))
+
+
+def test_authorize_and_finalization_edges_are_atomic_under_race() -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    plan = _plan()
+    seal = _seal(plan)
+    budget = _budget()
+    cleanup = _cleanup_plan()
+    preflighted = EpisodeLifecycle.planned(
+        episode_id=budget.episode_id,
+        plan_id=plan.plan_id,
+        budget_id=budget.budget_id,
+        cleanup_plan_id=cleanup.cleanup_plan_id,
+    ).preflight(seal)
+    barrier = Barrier(2)
+
+    def authorize() -> object:
+        barrier.wait()
+        try:
+            return preflighted.authorize(seal, budget)
+        except ValueError as error:
+            return error
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = tuple(executor.map(lambda _index: authorize(), (0, 1)))
+    assert sum(isinstance(item, tuple) for item in outcomes) == 1
+    assert sum(isinstance(item, ValueError) for item in outcomes) == 1
+
+    plan, budget, _cleanup_value, authorized, permit = _authorized()
+    reservation = _reservation(budget)
+    finalizing = authorized.start(
+        permit, budget, _commitment(budget, reservation)
+    ).begin_finalization()
+    reconciliation = _reconciliation(budget, reservation)
+    score = _score(plan)
+    barrier = Barrier(2)
+
+    def finalize() -> object:
+        barrier.wait()
+        try:
+            return finalizing.finish_finalization(reconciliation, score)
+        except ValueError as error:
+            return error
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = tuple(executor.map(lambda _index: finalize(), (0, 1)))
+    assert sum(isinstance(item, EpisodeLifecycle) for item in outcomes) == 1
+    assert sum(isinstance(item, ValueError) for item in outcomes) == 1
+
+
+def test_running_competing_edges_and_constructor_rollback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    _plan_value, budget, _cleanup_value, authorized, permit = _authorized()
+    reservation = _reservation(budget)
+    running = authorized.start(permit, budget, _commitment(budget, reservation))
+    barrier = Barrier(2)
+
+    def compete(operation: str) -> object:
+        barrier.wait()
+        try:
+            return (
+                running.begin_finalization() if operation == "finalize" else running.crash("boom")
+            )
+        except ValueError as error:
+            return error
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = tuple(executor.map(compete, ("finalize", "crash")))
+    assert sum(isinstance(item, EpisodeLifecycle) for item in outcomes) == 1
+    assert sum(isinstance(item, ValueError) for item in outcomes) == 1
+
+    plan = _plan()
+    seal = _seal(plan)
+    budget = _budget()
+    cleanup = _cleanup_plan()
+    planned = EpisodeLifecycle.planned(
+        episode_id="episode-construction-retry",
+        plan_id=plan.plan_id,
+        budget_id=budget.budget_id,
+        cleanup_plan_id=cleanup.cleanup_plan_id,
+    )
+    original = EpisodeLifecycle._transition
+    calls = 0
+
+    def fail_once(self, expected, operation, **updates):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise ValueError("injected edge construction failure")
+        return original(self, expected, operation, **updates)
+
+    monkeypatch.setattr(EpisodeLifecycle, "_transition", fail_once)
+    with pytest.raises(ValueError, match="injected edge construction failure"):
+        planned.preflight(seal)
+    assert planned.preflight(seal).state == "preflighted"
+
+
+def test_reusable_seal_stays_plan_bound_while_episode_authorities_do_not_cross() -> None:
+    plan = _plan()
+    seal = _seal(plan)
+    cleanup = _cleanup_plan()
+    budgets = (
+        _budget(),
+        BudgetAuthorization(
+            episode_id="episode-2",
+            allowances=_budget().allowances,
+        ),
+    )
+    episodes = tuple(
+        EpisodeLifecycle.planned(
+            episode_id=budget.episode_id,
+            plan_id=plan.plan_id,
+            budget_id=budget.budget_id,
+            cleanup_plan_id=CleanupPlan(
+                episode_id=budget.episode_id,
+                actions=cleanup.actions,
+            ).cleanup_plan_id,
+        ).preflight(seal)
+        for budget in budgets
+    )
+    authorized1, permit1 = episodes[0].authorize(seal, budgets[0])
+    authorized2, _permit2 = episodes[1].authorize(seal, budgets[1])
+    reservation2 = reserve_budget(
+        budgets[1],
+        "episode-2-reservation",
+        (ResourceAmount(resource="guest_actions", value=1),),
+    )
+    with pytest.raises(ValueError, match="does not match this episode"):
+        authorized2.start(permit1, budgets[1], commit_budget(budgets[1], (reservation2,)))
+    assert authorized1.episode_id != authorized2.episode_id

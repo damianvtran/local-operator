@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import re
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import date as Date
 from datetime import datetime, timezone
@@ -408,6 +409,15 @@ def record_preflight(
     )
 
 
+_PERCENT_ESCAPE_RE = re.compile(r"%([0-9A-Fa-f]{2})")
+
+
+def _canonical_percent_escapes(value: str) -> str:
+    """Normalize escape digits without changing literal plaintext case."""
+
+    return _PERCENT_ESCAPE_RE.sub(lambda match: "%" + match.group(1).upper(), value)
+
+
 class RedactionSet:
     """Ephemeral plaintext and common deterministic encodings checked at sealing.
 
@@ -417,17 +427,24 @@ class RedactionSet:
     an adapter responsibility.
     """
 
-    __slots__ = ("_exact_encoded_canaries", "_folded_encoded_canaries", "_plaintext_canaries")
+    __slots__ = (
+        "_exact_encoded_canaries",
+        "_hex_canaries",
+        "_percent_canaries",
+        "_plaintext_canaries",
+    )
 
     def __init__(
         self,
         plaintext_canaries: tuple[str, ...],
         exact_encoded_canaries: tuple[str, ...],
-        folded_encoded_canaries: tuple[str, ...],
+        percent_canaries: tuple[str, ...],
+        hex_canaries: tuple[str, ...],
     ) -> None:
         self._plaintext_canaries = plaintext_canaries
         self._exact_encoded_canaries = exact_encoded_canaries
-        self._folded_encoded_canaries = folded_encoded_canaries
+        self._percent_canaries = percent_canaries
+        self._hex_canaries = hex_canaries
 
     @classmethod
     def from_resolved_values(cls, values: Iterable[str]) -> "RedactionSet":
@@ -437,7 +454,8 @@ class RedactionSet:
         if any(not isinstance(value, str) or not value for value in snapshot):
             raise ValueError("redaction canaries must be non-empty strings")
         exact_encoded_variants: set[str] = set()
-        folded_encoded_variants: set[str] = set()
+        percent_variants: set[str] = set()
+        hex_variants: set[str] = set()
         for value in snapshot:
             raw = value.encode("utf-8")
             # Short encoded fragments collide too readily with ordinary evidence;
@@ -449,13 +467,15 @@ class RedactionSet:
             exact_encoded_variants.update(
                 {standard, standard.rstrip("="), urlsafe, urlsafe.rstrip("=")}
             )
-            # Percent escapes and hexadecimal digits are semantically
-            # case-insensitive, unlike base64 and the original secret text.
-            folded_encoded_variants.update({quote(value, safe="").casefold(), raw.hex().casefold()})
+            # Escape DIGITS are case-insensitive, while unescaped literals are
+            # not. Raw hexadecimal has no literal/plaintext distinction.
+            percent_variants.add(_canonical_percent_escapes(quote(value, safe="")))
+            hex_variants.add(raw.hex().casefold())
         return cls(
             tuple(sorted(set(snapshot), key=lambda value: (-len(value), value))),
             tuple(sorted(exact_encoded_variants, key=lambda value: (-len(value), value))),
-            tuple(sorted(folded_encoded_variants, key=lambda value: (-len(value), value))),
+            tuple(sorted(percent_variants, key=lambda value: (-len(value), value))),
+            tuple(sorted(hex_variants, key=lambda value: (-len(value), value))),
         )
 
     def __repr__(self) -> str:
@@ -477,7 +497,11 @@ class RedactionSet:
             if (
                 any(canary in candidate for canary in self._plaintext_canaries)
                 or any(canary in candidate for canary in self._exact_encoded_canaries)
-                or any(canary in candidate.casefold() for canary in self._folded_encoded_canaries)
+                or any(
+                    canary in _canonical_percent_escapes(candidate)
+                    for canary in self._percent_canaries
+                )
+                or any(canary in candidate.casefold() for canary in self._hex_canaries)
             ):
                 # Never include the candidate or canary: validation errors often
                 # cross process boundaries and become durable logs.

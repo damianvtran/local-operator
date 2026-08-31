@@ -478,27 +478,24 @@ def test_redaction_rejects_common_encoded_canary_variants(encoded: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "transform",
+    ("encoding", "candidate"),
     [
-        lambda value: value.lower(),
-        lambda value: value.upper(),
-        lambda value: "".join(
-            character.upper() if index % 2 else character.lower()
-            for index, character in enumerate(value)
+        ("percent", "Secret%2fValue%2b42"),
+        ("percent", "Secret%2FValue%2B42"),
+        ("percent", "Secret%2fValue%2B42"),
+        ("hex", "Secret/Value+42".encode().hex().lower()),
+        ("hex", "Secret/Value+42".encode().hex().upper()),
+        (
+            "hex",
+            "".join(
+                character.upper() if index % 2 else character.lower()
+                for index, character in enumerate("Secret/Value+42".encode().hex())
+            ),
         ),
     ],
-    ids=("lower", "upper", "mixed"),
 )
-@pytest.mark.parametrize("encoding", ["percent", "hex"])
-def test_redaction_matches_percent_and_hex_case_insensitively(
-    encoding: str,
-    transform: object,
-) -> None:
-    from urllib.parse import quote
-
+def test_redaction_matches_encoded_case_semantics(encoding: str, candidate: str) -> None:
     secret = "Secret/Value+42"
-    encoded = quote(secret, safe="") if encoding == "percent" else secret.encode().hex()
-    candidate = transform(encoded)  # type: ignore[operator]
     plan = _plan((_requirements()[0],))
     receipt = record_preflight(
         plan,
@@ -510,3 +507,16 @@ def test_redaction_matches_percent_and_hex_case_insensitively(
     with pytest.raises(ValueError) as caught:
         seal_preflight(plan, (receipt,), RedactionSet.from_resolved_values((secret,)))
     assert secret not in str(caught.value)
+
+
+def test_percent_redaction_preserves_unescaped_literal_case() -> None:
+    secret = "Secret/Value+42"
+    plan = _plan((_requirements()[0],))
+    receipt = record_preflight(
+        plan,
+        "compute",
+        status="pass",
+        evidence={"nested": {"encoded": "secret%2fvalue%2b42"}},
+        duration_ms=1,
+    )
+    assert seal_preflight(plan, (receipt,), RedactionSet.from_resolved_values((secret,))).successful
