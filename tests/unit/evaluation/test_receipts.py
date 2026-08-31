@@ -13,6 +13,7 @@ from local_operator.evaluation.receipts import (
     BUDGET_RESOURCES,
     AvailableUsage,
     BudgetAuthorization,
+    BudgetReconciliation,
     BudgetReservation,
     CappedAllowance,
     ClockRequirement,
@@ -32,6 +33,7 @@ from local_operator.evaluation.receipts import (
     UncappedAllowance,
     Usage,
     reconcile_budget,
+    record_preflight,
     reserve_budget,
     seal_preflight,
 )
@@ -113,9 +115,9 @@ def _plan(requirements: tuple[Requirement, ...] | None = None) -> DependencyPlan
 
 def _receipts(plan: DependencyPlan) -> tuple[PreflightReceipt, ...]:
     return tuple(
-        PreflightReceipt(
-            requirement_id=item.requirement_id,
-            necessity=item.necessity,
+        record_preflight(
+            plan,
+            item.requirement_id,
             status="pass",
             evidence={"nested": ["safe", {"ok": True}]},
             duration_ms=1,
@@ -190,11 +192,16 @@ def test_requirement_metadata_is_bounded_portable_and_frozen() -> None:
 
 
 def test_receipts_enforce_skip_and_safe_timing() -> None:
+    required_plan = _plan((_requirements()[0],))
     with pytest.raises(ValidationError, match="only optional"):
-        PreflightReceipt(requirement_id="r", necessity="required", status="skip", duration_ms=0)
-    receipt = PreflightReceipt(
-        requirement_id="r",
-        necessity="optional",
+        record_preflight(required_plan, "compute", status="skip", duration_ms=0)
+    optional = _requirements()[0].model_copy(
+        update={"requirement_id": "optional-compute", "necessity": "optional"}
+    )
+    optional_plan = _plan((optional,))
+    receipt = record_preflight(
+        optional_plan,
+        "optional-compute",
         status="skip",
         started_at_ms=10,
         ended_at_ms=12,
@@ -229,9 +236,9 @@ def test_optional_failure_or_skip_seals_but_is_not_successful() -> None:
     )
     plan = _plan((optional,))
     for status in ("fail", "skip"):
-        receipt = PreflightReceipt(
-            requirement_id=optional.requirement_id,
-            necessity="optional",
+        receipt = record_preflight(
+            plan,
+            optional.requirement_id,
             status=status,
             duration_ms=0,
         )
@@ -258,9 +265,9 @@ def test_secret_canaries_fail_at_every_nested_location_without_echo(
     elif location == "metadata_map":
         requirement = requirement.model_copy(update={"metadata": {"nested": {"value": secret}}})
     plan = _plan((requirement,))
-    receipt = PreflightReceipt(
-        requirement_id=requirement.requirement_id,
-        necessity=requirement.necessity,
+    receipt = record_preflight(
+        plan,
+        requirement.requirement_id,
         status="pass",
         evidence={"value": secret} if location == "evidence_value" else {"value": "safe"},
         duration_ms=1,
@@ -275,9 +282,9 @@ def test_secret_reference_names_serialize_but_resolved_values_never_seal() -> No
     requirement = _requirements()[2]
     plan = _plan((requirement,))
     assert b'"account_ref":"WORKSPACE_ACCOUNT"' in plan.to_canonical_json()
-    safe = PreflightReceipt(
-        requirement_id=requirement.requirement_id,
-        necessity="required",
+    safe = record_preflight(
+        plan,
+        requirement.requirement_id,
         status="pass",
         evidence={"account_ref": "WORKSPACE_ACCOUNT"},
         duration_ms=1,
@@ -312,10 +319,12 @@ def test_reservation_prevents_overcommit_and_identities_round_trip() -> None:
     authorization = _authorization(cap=10)
     first = reserve_budget(
         authorization,
+        "reservation-1",
         (ResourceAmount(resource="provider_usd_micros", value=6),),
     )
     second = reserve_budget(
         authorization,
+        "reservation-2",
         (ResourceAmount(resource="provider_usd_micros", value=4),),
         (first,),
     )
@@ -324,12 +333,14 @@ def test_reservation_prevents_overcommit_and_identities_round_trip() -> None:
     with pytest.raises(ValueError, match="exceeds"):
         reserve_budget(
             authorization,
+            "reservation-over",
             (ResourceAmount(resource="provider_usd_micros", value=5),),
             (first,),
         )
     uncapped = _authorization(cap=0, uncapped={"provider_usd_micros"})
     reserve_budget(
         uncapped,
+        "reservation-uncapped",
         (ResourceAmount(resource="provider_usd_micros", value=10**9),),
     )
 
@@ -339,6 +350,7 @@ def test_reconciliation_records_under_exact_and_over_cap(actual: int, overrun: i
     authorization = _authorization(cap=10)
     reservation = reserve_budget(
         authorization,
+        "reservation-all",
         tuple(ResourceAmount(resource=resource, value=10) for resource in BUDGET_RESOURCES),
     )
     reconciliation = reconcile_budget(authorization, (reservation,), _usage(actual))
@@ -372,3 +384,89 @@ def test_money_is_integer_micros_and_has_no_hidden_seventy_five_dollar_default()
     text = open(source, encoding="utf-8").read()  # noqa: SIM115 - test fixture inspection
     assert "75000000" not in text
     assert "$75" not in text
+
+
+def test_preflight_receipt_replay_rejects_changed_plan_or_declaration() -> None:
+    plan = _plan((_requirements()[0],))
+    receipt = record_preflight(plan, "compute", status="pass", duration_ms=1)
+    changed_requirement = _requirements()[0].model_copy(update={"disk_bytes": 10_001})
+    changed = _plan((changed_requirement,))
+    with pytest.raises(ValueError, match="another dependency plan|another requirement"):
+        seal_preflight(changed, (receipt,), RedactionSet.from_resolved_values(()))
+    mutated = PreflightReceipt.model_validate(
+        {**receipt.model_dump(exclude={"receipt_id"}), "requirement_digest": DIGEST}
+    )
+    with pytest.raises(ValueError, match="another requirement"):
+        seal_preflight(plan, (mutated,), RedactionSet.from_resolved_values(()))
+
+
+def test_reservation_keys_disambiguate_equal_amounts_and_reject_retry() -> None:
+    authorization = _authorization(cap=10)
+    amount = (ResourceAmount(resource="guest_actions", value=5),)
+    first = reserve_budget(authorization, "operation-a", amount)
+    second = reserve_budget(authorization, "operation-b", amount, (first,))
+    assert first.reservation_id != second.reservation_id
+    with pytest.raises(ValueError, match="duplicate reservation key"):
+        reserve_budget(authorization, "operation-a", amount, (first,))
+
+
+def test_reconciliation_rejects_allowance_overrun_and_commitment_mutation() -> None:
+    authorization = _authorization(cap=10)
+    reservation = reserve_budget(
+        authorization,
+        "operation",
+        (ResourceAmount(resource="guest_actions", value=5),),
+    )
+    reconciliation = reconcile_budget(authorization, (reservation,), _usage(11))
+    payload = reconciliation.model_dump()
+    entries = [dict(entry) for entry in payload["entries"]]
+    entries[0]["overrun"] = 0
+    with pytest.raises(ValidationError, match="overrun"):
+        BudgetReconciliation.model_validate({**payload, "entries": entries})
+    entries = [dict(entry) for entry in payload["entries"]]
+    entries[0]["allowance"] = CappedAllowance(
+        resource=entries[0]["resource"], value=9, reporting="required"
+    )
+    with pytest.raises(ValidationError, match="allowance"):
+        BudgetReconciliation.model_validate({**payload, "entries": entries})
+    with pytest.raises(ValidationError, match="commitment"):
+        BudgetReconciliation.model_validate({**payload, "commitment_id": DIGEST})
+
+
+def test_clock_values_are_real_and_canonical() -> None:
+    base = _requirements()[4].model_dump()
+    for field, value in (
+        ("date", "2026-02-30"),
+        ("fixed_clock", "2026-13-30T12:00:00Z"),
+        ("timezone", "Mars/Olympus"),
+    ):
+        payload = {**base, "date": None, "fixed_clock": "2026-08-30T12:00:00Z", field: value}
+        if field == "date":
+            payload["fixed_clock"] = None
+        with pytest.raises(ValidationError):
+            ClockRequirement.model_validate(payload)
+
+
+@pytest.mark.parametrize("encoded", ["base64", "urlsafe", "hex", "percent"])
+def test_redaction_rejects_common_encoded_canary_variants(encoded: str) -> None:
+    import base64
+    from urllib.parse import quote
+
+    secret = "s3cret/value+42"
+    variants = {
+        "base64": base64.b64encode(secret.encode()).decode(),
+        "urlsafe": base64.urlsafe_b64encode(secret.encode()).decode().rstrip("="),
+        "hex": secret.encode().hex(),
+        "percent": quote(secret, safe=""),
+    }
+    plan = _plan((_requirements()[0],))
+    receipt = record_preflight(
+        plan,
+        "compute",
+        status="pass",
+        evidence={"encoded": variants[encoded]},
+        duration_ms=1,
+    )
+    with pytest.raises(ValueError) as caught:
+        seal_preflight(plan, (receipt,), RedactionSet.from_resolved_values((secret,)))
+    assert secret not in str(caught.value)

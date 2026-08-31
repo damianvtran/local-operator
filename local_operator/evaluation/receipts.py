@@ -8,15 +8,22 @@ side-effect boundary.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 from collections.abc import Iterable, Mapping, Sequence
+from datetime import date as Date
+from datetime import datetime, timezone
 from typing import Annotated, Any, Literal, TypeAlias
+from urllib.parse import quote
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import (
     Field,
     JsonValue,
+    PrivateAttr,
     TypeAdapter,
+    ValidationInfo,
     field_serializer,
     field_validator,
     model_validator,
@@ -38,6 +45,7 @@ MAX_TOOLS = 128
 MAX_REASON_LENGTH = 2_000
 MAX_CANARIES = 256
 ZERO_DIGEST = "0" * 64
+_BUDGET_COMMITMENT_FACTORY = object()
 
 StrictIdentifier = Annotated[
     str,
@@ -213,6 +221,25 @@ class ClockRequirement(_RequirementBase):
             raise ValueError("clock requirement needs a date or fixed clock")
         if self.date is not None and self.fixed_clock is not None:
             raise ValueError("clock requirement chooses either date or fixed clock")
+        try:
+            ZoneInfo(self.timezone)
+        except (ZoneInfoNotFoundError, ValueError) as error:
+            raise ValueError("clock timezone must be a canonical IANA zone") from error
+        if self.date is not None:
+            try:
+                parsed_date = Date.fromisoformat(self.date)
+            except ValueError as error:
+                raise ValueError("clock date must be a valid ISO calendar date") from error
+            if parsed_date.isoformat() != self.date:
+                raise ValueError("clock date must use canonical ISO syntax")
+        if self.fixed_clock is not None:
+            try:
+                parsed_clock = datetime.fromisoformat(self.fixed_clock.replace("Z", "+00:00"))
+            except ValueError as error:
+                raise ValueError("fixed clock must be a valid UTC instant") from error
+            canonical = parsed_clock.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            if parsed_clock.microsecond or canonical != self.fixed_clock:
+                raise ValueError("fixed clock must use canonical UTC second syntax")
         return self
 
     def conflict_key(self) -> tuple[str, ...]:
@@ -296,8 +323,16 @@ class DependencyPlan(ProtocolModel):
         return self
 
 
+def requirement_digest(requirement: Requirement) -> str:
+    """Bind observations to the entire selected declaration, not only its label."""
+
+    return _identity("requirement-v1", requirement.model_dump(mode="json"))
+
+
 class PreflightReceipt(_MetadataModel):
+    plan_id: Digest
     requirement_id: StrictIdentifier
+    requirement_digest: Digest
     necessity: RequirementNecessity
     status: Literal["pass", "fail", "skip"]
     evidence: PortableMetadataObject = Field(default_factory=dict, validate_default=True)
@@ -329,8 +364,46 @@ class PreflightReceipt(_MetadataModel):
         return self
 
 
+def record_preflight(
+    plan: DependencyPlan,
+    requirement_id: StrictIdentifier,
+    *,
+    status: Literal["pass", "fail", "skip"],
+    evidence: Mapping[str, JsonValue] | None = None,
+    started_at_ms: int | None = None,
+    ended_at_ms: int | None = None,
+    duration_ms: int | None = None,
+) -> PreflightReceipt:
+    """Record evidence against the exact declaration selected by this plan."""
+
+    requirement = next(
+        (item for item in plan.requirements if item.requirement_id == requirement_id), None
+    )
+    if requirement is None:
+        raise ValueError("preflight requirement is not selected by the dependency plan")
+    return PreflightReceipt.model_validate(
+        {
+            "plan_id": plan.plan_id,
+            "requirement_id": requirement_id,
+            "requirement_digest": requirement_digest(requirement),
+            "necessity": requirement.necessity,
+            "status": status,
+            "evidence": {} if evidence is None else dict(evidence),
+            "started_at_ms": started_at_ms,
+            "ended_at_ms": ended_at_ms,
+            "duration_ms": duration_ms,
+        }
+    )
+
+
 class RedactionSet:
-    """Ephemeral resolved canaries used only while sealing portable evidence."""
+    """Ephemeral plaintext and common deterministic encodings checked at sealing.
+
+    This bounded substring check is not a general secret scanner. It covers the
+    resolved plaintext plus UTF-8 base64, URL-safe base64, percent-encoding, and
+    hexadecimal variants generated here; transformations outside that set remain
+    an adapter responsibility.
+    """
 
     __slots__ = ("_canaries",)
 
@@ -344,7 +417,26 @@ class RedactionSet:
             raise ValueError("too many redaction canaries")
         if any(not isinstance(value, str) or not value for value in snapshot):
             raise ValueError("redaction canaries must be non-empty strings")
-        return cls(tuple(sorted(set(snapshot), key=lambda value: (-len(value), value))))
+        variants: set[str] = set(snapshot)
+        for value in snapshot:
+            raw = value.encode("utf-8")
+            # Short encoded fragments collide too readily with ordinary evidence;
+            # plaintext is still checked regardless of this conservative floor.
+            if len(raw) < 8:
+                continue
+            standard = base64.b64encode(raw).decode("ascii")
+            urlsafe = base64.urlsafe_b64encode(raw).decode("ascii")
+            variants.update(
+                {
+                    standard,
+                    standard.rstrip("="),
+                    urlsafe,
+                    urlsafe.rstrip("="),
+                    quote(value, safe=""),
+                    raw.hex(),
+                }
+            )
+        return cls(tuple(sorted(variants, key=lambda value: (-len(value), value))))
 
     def __repr__(self) -> str:
         return f"RedactionSet(count={len(self._canaries)})"
@@ -448,6 +540,10 @@ def seal_preflight(
     requirements = {item.requirement_id: item for item in plan.requirements}
     for requirement_id, receipt in by_id.items():
         requirement = requirements[requirement_id]
+        if receipt.plan_id != plan.plan_id:
+            raise ValueError("preflight receipt belongs to another dependency plan")
+        if receipt.requirement_digest != requirement_digest(requirement):
+            raise ValueError("preflight receipt belongs to another requirement declaration")
         if receipt.necessity != requirement.necessity:
             raise ValueError("preflight receipt necessity disagrees with its requirement")
         if receipt.status == "skip" and requirement.necessity != "optional":
@@ -571,6 +667,7 @@ class ResourceAmount(ProtocolModel):
 class BudgetReservation(ProtocolModel):
     episode_id: StrictIdentifier
     budget_id: Digest
+    reservation_key: StrictIdentifier
     amounts: tuple[ResourceAmount, ...] = Field(min_length=1, max_length=len(BUDGET_RESOURCES))
     reservation_id: Digest = ZERO_DIGEST
 
@@ -594,36 +691,136 @@ class BudgetReservation(ProtocolModel):
         return self
 
 
+def _validate_reservations(
+    authorization: BudgetAuthorization,
+    reservations: Sequence[BudgetReservation],
+) -> dict[BudgetResource, int]:
+    totals: dict[BudgetResource, int] = {resource: 0 for resource in BUDGET_RESOURCES}
+    keys: set[str] = set()
+    for reservation in reservations:
+        if (
+            reservation.budget_id != authorization.budget_id
+            or reservation.episode_id != authorization.episode_id
+        ):
+            raise ValueError("reservation belongs to another budget authorization")
+        if reservation.reservation_key in keys:
+            # Keys are operation-level idempotency identities. Reusing one is an
+            # ambiguous retry, so callers must retrieve the first reservation.
+            raise ValueError("duplicate reservation key")
+        keys.add(reservation.reservation_key)
+        for amount in reservation.amounts:
+            totals[amount.resource] += amount.value
+    for resource, total in totals.items():
+        allowance = authorization.allowance_for(resource)
+        if isinstance(allowance, CappedAllowance) and total > allowance.value:
+            raise ValueError("reservation exceeds an authorized cap")
+    return totals
+
+
 def reserve_budget(
     authorization: BudgetAuthorization,
+    reservation_key: StrictIdentifier,
     request: Sequence[ResourceAmount],
     existing: Sequence[BudgetReservation] = (),
 ) -> BudgetReservation:
-    """Reserve capacity before work; a zero cap remains distinct from uncapped."""
+    """Reserve capacity before work; unique keys distinguish equal operations."""
 
     requested = tuple(request)
     if not requested:
         raise ValueError("reservation request must not be empty")
-    totals: dict[BudgetResource, int] = {resource: 0 for resource in BUDGET_RESOURCES}
-    for reservation in existing:
-        if reservation.budget_id != authorization.budget_id:
-            raise ValueError("existing reservation belongs to another budget")
-        for amount in reservation.amounts:
-            totals[amount.resource] += amount.value
+    prior = tuple(existing)
+    _validate_reservations(authorization, prior)
+    if any(item.reservation_key == reservation_key for item in prior):
+        raise ValueError("duplicate reservation key")
     seen: set[BudgetResource] = set()
     for amount in requested:
         if amount.resource in seen:
             raise ValueError("reservation request contains duplicate resources")
         seen.add(amount.resource)
-        totals[amount.resource] += amount.value
-    for resource, total in totals.items():
-        allowance = authorization.allowance_for(resource)
-        if isinstance(allowance, CappedAllowance) and total > allowance.value:
-            raise ValueError("reservation exceeds an authorized cap")
-    return BudgetReservation(
+    reservation = BudgetReservation(
         episode_id=authorization.episode_id,
         budget_id=authorization.budget_id,
+        reservation_key=reservation_key,
         amounts=requested,
+    )
+    _validate_reservations(authorization, (*prior, reservation))
+    return reservation
+
+
+class BudgetCommitment(ProtocolModel):
+    """Factory-only authority over the complete validated reservation set."""
+
+    _authority: object = PrivateAttr()
+
+    episode_id: StrictIdentifier
+    budget_id: Digest
+    authorization_digest: Digest
+    reservation_ids: tuple[Digest, ...]
+    reserved: tuple[ResourceAmount, ...]
+    commitment_id: Digest
+
+    @field_validator("reservation_ids", "reserved", mode="before")
+    @classmethod
+    def _freeze_lists(cls, value: Any) -> Any:
+        return tuple(value) if isinstance(value, list) else value
+
+    @model_validator(mode="after")
+    def _factory_only(self, info: ValidationInfo) -> "BudgetCommitment":
+        context = info.context if isinstance(info.context, dict) else {}
+        if context.get("budget_commitment_factory") is not _BUDGET_COMMITMENT_FACTORY:
+            raise ValueError("budget commitments can only be minted from validated reservations")
+        resources = tuple(item.resource for item in self.reserved)
+        if resources != tuple(sorted(BUDGET_RESOURCES)):
+            raise ValueError("budget commitment requires every resource exactly once")
+        if self.reservation_ids != tuple(sorted(self.reservation_ids)):
+            raise ValueError("budget commitment reservation IDs must be canonical")
+        expected = _identity(
+            "budget-commitment-v1",
+            self.model_dump(mode="json", exclude={"commitment_id"}),
+        )
+        if self.commitment_id != expected:
+            raise ValueError("budget commitment identity does not match reservations")
+        object.__setattr__(self, "_authority", _BUDGET_COMMITMENT_FACTORY)
+        return self
+
+    def assert_authority(self, authorization: BudgetAuthorization) -> None:
+        if getattr(self, "_authority", None) is not _BUDGET_COMMITMENT_FACTORY:
+            raise ValueError("budget commitment lacks factory authority")
+        if (
+            self.episode_id != authorization.episode_id
+            or self.budget_id != authorization.budget_id
+            or self.authorization_digest != authorization.budget_id
+        ):
+            raise ValueError("budget commitment belongs to another authorization")
+        expected = _identity(
+            "budget-commitment-v1",
+            self.model_dump(mode="json", exclude={"commitment_id"}),
+        )
+        if self.commitment_id != expected:
+            raise ValueError("budget commitment authority was mutated")
+
+
+def commit_budget(
+    authorization: BudgetAuthorization,
+    reservations: Sequence[BudgetReservation],
+) -> BudgetCommitment:
+    """Seal the exact reservation set cooperative adapters may allocate against."""
+
+    snapshot = tuple(reservations)
+    totals = _validate_reservations(authorization, snapshot)
+    payload = {
+        "episode_id": authorization.episode_id,
+        "budget_id": authorization.budget_id,
+        "authorization_digest": authorization.budget_id,
+        "reservation_ids": tuple(sorted(item.reservation_id for item in snapshot)),
+        "reserved": tuple(
+            ResourceAmount(resource=resource, value=totals[resource]).model_dump(mode="json")
+            for resource in sorted(BUDGET_RESOURCES)
+        ),
+    }
+    return BudgetCommitment.model_validate(
+        {**payload, "commitment_id": _identity("budget-commitment-v1", payload)},
+        context={"budget_commitment_factory": _BUDGET_COMMITMENT_FACTORY},
     )
 
 
@@ -660,6 +857,9 @@ class ReconciliationEntry(ProtocolModel):
 class BudgetReconciliation(ProtocolModel):
     episode_id: StrictIdentifier
     budget_id: Digest
+    authorization_digest: Digest
+    authorization: BudgetAuthorization
+    commitment_id: Digest
     reservation_ids: tuple[Digest, ...]
     entries: tuple[ReconciliationEntry, ...]
     reportable: bool
@@ -680,6 +880,36 @@ class BudgetReconciliation(ProtocolModel):
             raise ValueError("reconciliation contains duplicate reservations")
         object.__setattr__(self, "entries", entries)
         object.__setattr__(self, "reservation_ids", reservations)
+        if self.authorization.episode_id != self.episode_id:
+            raise ValueError("reconciliation authorization belongs to another episode")
+        if self.authorization.budget_id != self.budget_id:
+            raise ValueError("reconciliation budget identity disagrees with authorization")
+        if self.authorization_digest != self.authorization.budget_id:
+            raise ValueError("reconciliation authorization digest is invalid")
+        commitment_payload = {
+            "episode_id": self.episode_id,
+            "budget_id": self.budget_id,
+            "authorization_digest": self.authorization_digest,
+            "reservation_ids": reservations,
+            "reserved": tuple(
+                ResourceAmount(resource=entry.resource, value=entry.reserved).model_dump(
+                    mode="json"
+                )
+                for entry in entries
+            ),
+        }
+        if self.commitment_id != _identity("budget-commitment-v1", commitment_payload):
+            raise ValueError("reconciliation commitment does not match reservations")
+        for entry in entries:
+            if entry.allowance != self.authorization.allowance_for(entry.resource):
+                raise ValueError("reconciliation allowance disagrees with authorization")
+            expected_overrun = 0
+            if isinstance(entry.usage, AvailableUsage) and isinstance(
+                entry.allowance, CappedAllowance
+            ):
+                expected_overrun = max(0, entry.usage.value - entry.allowance.value)
+            if entry.overrun != expected_overrun:
+                raise ValueError("reconciliation overrun disagrees with actual usage")
         expected_reportable = all(
             not (
                 entry.allowance.reporting == "required"
@@ -705,12 +935,8 @@ def reconcile_budget(
     """Record exact/under/over usage; integer USD micros avoid floating ambiguity."""
 
     reservation_snapshot = tuple(reservations)
-    reserved: dict[BudgetResource, int] = {resource: 0 for resource in BUDGET_RESOURCES}
-    for item in reservation_snapshot:
-        if item.budget_id != authorization.budget_id:
-            raise ValueError("reservation belongs to another budget")
-        for amount in item.amounts:
-            reserved[amount.resource] += amount.value
+    totals = _validate_reservations(authorization, reservation_snapshot)
+    commitment = commit_budget(authorization, reservation_snapshot)
     parsed_usage = tuple(_USAGE_ADAPTER.validate_python(item, strict=True) for item in usage)
     by_resource = {item.resource: item for item in parsed_usage}
     if len(by_resource) != len(parsed_usage) or set(by_resource) != set(BUDGET_RESOURCES):
@@ -726,7 +952,7 @@ def reconcile_budget(
             ReconciliationEntry(
                 resource=resource,
                 allowance=allowance,
-                reserved=reserved[resource],
+                reserved=totals[resource],
                 usage=actual,
                 overrun=overrun,
             )
@@ -738,6 +964,9 @@ def reconcile_budget(
     return BudgetReconciliation(
         episode_id=authorization.episode_id,
         budget_id=authorization.budget_id,
+        authorization_digest=authorization.budget_id,
+        authorization=authorization,
+        commitment_id=commitment.commitment_id,
         reservation_ids=tuple(item.reservation_id for item in reservation_snapshot),
         entries=tuple(entries),
         reportable=reportable,
