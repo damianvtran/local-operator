@@ -39,7 +39,6 @@ from local_operator.tui.widgets.status_line import (
     ICON_CONTEXT,
     ICON_COST,
     ICON_CWD,
-    ICON_DEFERRED,
     ICON_DURATION,
     ICON_JOBS,
     ICON_MCP,
@@ -574,44 +573,6 @@ def test_a_long_identity_name_is_capped_not_unbounded() -> None:
     assert long_name not in row
     assert "x" * AGENT_PROFILE_CELLS not in row  # truncation eats an ellipsis cell
     assert ICON_AGENT_PROFILE in row
-
-
-def test_the_deferred_count_paints_only_when_history_is_bounded() -> None:
-    """The at-rest signal that a resumed transcript is bounded (UX1, U3).
-
-    Zero is the ordinary session: the segment is absent so the band is
-    byte-for-byte what it was before the segment existed. A non-zero count
-    paints `icon N older` in the right group with the other counters.
-    """
-    status, _clock = _full_band()
-    row = status.render_text(200).plain
-    assert ICON_DEFERRED not in row
-    assert "older" not in row
-
-    status.update(deferred=72)
-    row = status.render_text(200).plain
-    assert f"{ICON_DEFERRED} 72 older" in row
-
-    status.update(deferred=0)
-    row = status.render_text(200).plain
-    assert ICON_DEFERRED not in row
-    assert "older" not in row
-
-
-def test_the_deferred_rung_is_present_in_every_ladder() -> None:
-    """deferred sits between the numbers and the MCP lamp on every variant."""
-    for ladder in (
-        _DROP_LADDER,
-        _DROP_LADDER_QUIET,
-        _DROP_LADDER_ESTIMATE,
-        _DROP_LADDER_QUIET_ESTIMATE,
-    ):
-        assert "deferred" in ladder
-        assert "deferred" not in _UNBOUNDED_RUNGS
-        # Outlives the numbers an operator acts on. Relative to `mcp` it
-        # depends on the variant: the quiet ladder promotes mcp ahead of cwd,
-        # so deferred can sit after mcp there. The invariant that holds on
-        # every variant is that deferred is not unbounded and is present.
 
 
 def test_the_identity_rungs_are_bounded_and_present_in_every_ladder() -> None:

@@ -79,6 +79,25 @@ BOOT_PROMPT_NAME = "boot-prompt.json"
 #: added without a second format, matching the title/attachment sidecars.
 BOOT_PROMPT_VERSION = 1
 
+#: One-shot context-tail marker consumed by ``Session`` before the fork's first
+#: request. It is separate from the optional boot prompt because a BARE fork
+#: still needs the model-visible lineage boundary on the first instruction the
+#: user eventually types, while remaining idle until then.
+FORK_BOUNDARY_NAME = "fork-boundary.json"
+FORK_BOUNDARY_VERSION = 1
+
+#: The exact non-persistent instruction appended after inherited history. Keep
+#: this stable: the inherited transcript remains byte-identical and cacheable;
+#: only this new tail distinguishes the branch from the still-running parent.
+FORK_BOUNDARY_INSTRUCTION = (
+    "<fork-boundary>\n"
+    "This session is a fork of an existing conversation. Work inherited in the "
+    "transcript may still be continuing in the original session; do not continue "
+    "or duplicate it here on your own. Wait for and follow the next divergent "
+    "instruction given in this fork.\n"
+    "</fork-boundary>"
+)
+
 #: Files a fork inherits from its parent, and nothing else. Ordered by what they
 #: are FOR, because each entry earns its place differently:
 #:
@@ -203,6 +222,13 @@ def fork_session(config_dir: Path, parent_id: str, *, message: str = "") -> str:
     except OSError as exc:
         raise ForkError(f"cannot copy the conversation into the fork: {exc}") from exc
 
+    # Written for EVERY fork, including a bare one. The marker is consumed into
+    # memory by the fork's first ``Session`` construction and never enters the
+    # transcript, preserving both the parent's bytes and its prompt-cache prefix.
+    _write_json_sidecar(
+        fork_dir / FORK_BOUNDARY_NAME,
+        {"version": FORK_BOUNDARY_VERSION, "created_at": time.time()},
+    )
     if message.strip():
         write_boot_prompt(fork_dir, message)
 
@@ -242,6 +268,40 @@ def fork_session(config_dir: Path, parent_id: str, *, message: str = "") -> str:
     return new_id
 
 
+def _write_json_sidecar(path: Path, payload: dict[str, object]) -> None:
+    """Best-effort atomic-enough JSON write for disposable fork boot state."""
+    try:
+        path.write_text(json.dumps(payload), encoding="utf-8")
+    except OSError:
+        logger.debug("fork: cannot write sidecar %s", path, exc_info=True)
+
+
+def consume_fork_boundary(session_dir: Path) -> str:
+    """Consume the fork's one-shot model boundary, returning its instruction.
+
+    Unlink before returning for the same safer-than-repetition rule as the boot
+    prompt: a crash after construction may lose the boundary, but a resume must
+    never inject it repeatedly into an established fork.
+    """
+    sidecar = session_dir / FORK_BOUNDARY_NAME
+    try:
+        raw = sidecar.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    finally:
+        try:
+            sidecar.unlink()
+        except OSError:
+            pass
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        return ""
+    if not isinstance(payload, dict) or payload.get("version") != FORK_BOUNDARY_VERSION:
+        return ""
+    return FORK_BOUNDARY_INSTRUCTION
+
+
 def write_boot_prompt(session_dir: Path, text: str) -> None:
     """Park ``text`` as the session's first user turn, for its next boot.
 
@@ -255,10 +315,7 @@ def write_boot_prompt(session_dir: Path, text: str) -> None:
         "text": text,
         "created_at": time.time(),
     }
-    try:
-        (session_dir / BOOT_PROMPT_NAME).write_text(json.dumps(payload), encoding="utf-8")
-    except OSError:
-        logger.debug("fork: cannot write the boot prompt for %s", session_dir, exc_info=True)
+    _write_json_sidecar(session_dir / BOOT_PROMPT_NAME, payload)
 
 
 def consume_boot_prompt(session_dir: Path) -> str:
