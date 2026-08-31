@@ -395,16 +395,19 @@ class _VerifiedDistributionFinder:
     pydantic, local_operator itself) returns ``None`` here and proceeds through
     the normal machinery untouched.
 
-    Coverage boundary, measured rather than assumed: the finder is active for
-    the duration of the load, so it governs the entry module, its ancestors, and
-    anything they import while executing — including imports inside the factory
-    call. It does NOT govern an import an adapter defers until after loading has
-    returned, because by then the finder has been removed so it cannot dictate
-    the worker's later imports. Modules already imported under it stay verified
-    in ``sys.modules``; a genuinely new deferred import would fall back to the
-    ordinary loader. Closing that remaining window means keeping the adapter's
-    own modules unresolvable afterwards, which is a separate decision about
-    worker-lifetime import policy, not part of load verification.
+    What this actually guarantees, stated precisely: load-time verification
+    binds the adapter's INITIAL MODULE GRAPH to the RECORD digest, so a result
+    can be attributed to an exact ``package_digest`` for reproducible
+    evaluation. It is NOT a runtime import sandbox. The finder is active only
+    for the duration of the load, so it governs the entry module, its ancestors,
+    and anything they import while executing, including imports inside the
+    factory call; an import an adapter defers until after loading returns falls
+    back to the ordinary loader. Modules already imported under the finder stay
+    verified in ``sys.modules``. Closing that window would mean governing
+    worker-lifetime imports, which is a separate policy decision, and it buys
+    little against the real threat model: an adapter is already arbitrary code
+    in an isolated worker and can simply inline whatever it wants in its own
+    verified source.
     """
 
     def __init__(
@@ -425,6 +428,25 @@ class _VerifiedDistributionFinder:
     def owned_roots(self) -> frozenset[str]:
         return frozenset(self._owned)
 
+    def _refuse_unrecorded_artifacts(self, stem: str) -> None:
+        """Reject any importable file at a stem RECORD does not cover.
+
+        The suffix list is taken from the running interpreter rather than
+        hardcoded, so a build that recognises additional extension suffixes
+        cannot smuggle one past a stale literal.
+        """
+
+        suffixes = [
+            *importlib.machinery.SOURCE_SUFFIXES,
+            *importlib.machinery.BYTECODE_SUFFIXES,
+            *importlib.machinery.EXTENSION_SUFFIXES,
+        ]
+        for suffix in suffixes:
+            if Path(str(self._distribution.locate_file(f"{stem}{suffix}"))).exists():
+                raise AdapterDiscoveryError("adapter module is not RECORD-covered")
+            if Path(str(self._distribution.locate_file(f"{stem}/__init__{suffix}"))).exists():
+                raise AdapterDiscoveryError("adapter package init is not RECORD-covered")
+
     def find_spec(self, fullname: str, path: Any = None, target: Any = None) -> Any:
         del path, target
         if fullname.split(".")[0] not in self._owned:
@@ -440,11 +462,14 @@ class _VerifiedDistributionFinder:
             raise AdapterDiscoveryError("adapter module is ambiguously RECORD-covered")
         if not matches:
             # A directory with no recorded __init__ is a genuine namespace
-            # package; anything else present on disk is unrecorded code.
-            if Path(str(self._distribution.locate_file(package_init))).exists():
-                raise AdapterDiscoveryError("adapter package init is not RECORD-covered")
-            if Path(str(self._distribution.locate_file(module_file))).exists():
-                raise AdapterDiscoveryError("adapter module is not RECORD-covered")
+            # package; anything else importable on disk is unrecorded code.
+            # Probing only the two .py names would hand the name back to the
+            # ordinary machinery, where a planted sourceless .pyc or extension
+            # module executes with no hash consulted at all -- a weaker
+            # precondition than a forged cache, since it needs only a file
+            # write. Refuse every importable artifact rather than trying to
+            # verify bytecode we have no recorded source for.
+            self._refuse_unrecorded_artifacts(stem)
             return None
         relative = matches[0]
         verified_path, source = _verify_recorded_file(self._distribution, self._rows, relative)
@@ -506,14 +531,12 @@ def load_selected_adapter(selector: AdapterSelector) -> EvaluationAdapter:
         # the entry module, its ancestors, and anything they import later during
         # execution — is served from verified bytes, so `.load()` and the
         # ordinary loader never get a chance to run a cached artifact.
-        with _verified_imports(distribution, rows):
-            for stale in [
-                name
-                for name in sys.modules
-                if name == module_name.split(".")[0]
-                or name.startswith(f"{module_name.split('.')[0]}.")
-            ]:
-                # A pre-existing entry would otherwise be returned unverified.
+        with _verified_imports(distribution, rows) as finder:
+            for stale in [name for name in sys.modules if name.split(".")[0] in finder.owned_roots]:
+                # A pre-existing entry short-circuits importlib, so the adapter
+                # would bind an object the finder never verified. The purge has
+                # to span every root the finder claims, not just the entry
+                # module's, or a second owned root survives unverified.
                 del sys.modules[stale]
             loaded = importlib.import_module(module_name)
             factory = cast(Callable[[], Any], getattr(loaded, attribute))
