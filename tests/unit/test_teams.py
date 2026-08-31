@@ -5,6 +5,7 @@ from __future__ import annotations
 import errno
 import os
 import subprocess
+import sys
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1463,7 +1464,7 @@ def _run_teams_cli(config_dir: Path, *args: str) -> subprocess.CompletedProcess[
     env["LOCAL_OPERATOR_CONFIG_DIR"] = str(config_dir)
     return subprocess.run(
         [
-            str(Path(__file__).parents[2] / ".venv" / "bin" / "python"),
+            sys.executable,
             "-c",
             "import sys; from local_operator.cli import main; sys.exit(main())",
             "teams",
