@@ -78,16 +78,40 @@ const SUBAGENT_PROMPT_PREVIEW_CHARS = 1_000;
  * blank line in front of the restatement and so never yields a matching
  * candidate, while a genuine launch row does.
  *
- * Whitespace inside each candidate is normalised by the caller because the
- * wire `prompt` has already been flattened by `_compact`; only the paragraph
- * boundaries themselves must survive long enough to be split on. */
-function launchCandidates(text: string): string[] {
-	const candidates = [text];
-	const separator = /\n[ \t]*\n/g;
-	for (let match = separator.exec(text); match; match = separator.exec(text)) {
-		candidates.push(text.slice(match.index + match[0].length));
+ * Whitespace inside each candidate is normalised because the wire `prompt` has
+ * already been flattened by `_compact`; only the paragraph boundaries
+ * themselves must survive long enough to be split on.
+ *
+ * Returned as ONE normalised string plus the offset each candidate starts at,
+ * rather than as a list of suffix strings, to keep the work linear. Building
+ * and normalising every suffix separately re-scans the tail of the row once
+ * per paragraph break — (breaks x length), measured at 9.4s for a 580KB row
+ * with 2000 breaks. The wire `text` for `user`, `assistant` and
+ * `parent_message` rows is NOT length-bounded (only `notice`, tool args/output
+ * and outcome fields go through `_compact`), so a long pasted row is a
+ * reachable input, and the phone renders this on the main thread.
+ *
+ * The rewrite is exact rather than approximate: normalising collapses every
+ * whitespace run to one space, so the normalised full text is just its words
+ * joined by single spaces, and the normalised form of a suffix beginning at a
+ * paragraph break is the same string from that word onward. Segments that
+ * normalise to nothing (consecutive breaks) contribute no words and so are
+ * dropped — they can only duplicate the following candidate's offset. Each
+ * comparison then costs the needle's length instead of the row's. */
+function launchCandidates(text: string): { normalized: string; offsets: number[] } {
+	const offsets: number[] = [];
+	const parts: string[] = [];
+	let length = 0;
+	for (const segment of text.split(/\n[ \t]*\n/)) {
+		const part = normalizeText(segment);
+		if (!part) continue;
+		// Offset of this segment's first word in the joined string, which is where
+		// the candidate starting at the preceding break begins.
+		offsets.push(length);
+		parts.push(part);
+		length += part.length + 1; // +1 for the single space the join inserts.
 	}
-	return candidates;
+	return { normalized: parts.join(" "), offsets };
 }
 
 /** Does this `parent_message` row already carry the child's LAUNCH task?
@@ -113,10 +137,15 @@ function isLaunchHead(entry: TranscriptEntry, detail: SubagentDetail): boolean {
 	const truncated = prompt.endsWith("…") && prompt.length >= SUBAGENT_PROMPT_PREVIEW_CHARS - 1;
 	const needle = truncated ? prompt.slice(0, -1) : prompt;
 	if (!needle) return false;
-	return launchCandidates(entry.text).some((candidate) => {
-		const text = normalizeText(candidate);
-		return truncated ? text.startsWith(needle) : text === needle;
-	});
+	const { normalized, offsets } = launchCandidates(entry.text);
+	return offsets.some((offset) =>
+		// `startsWith(needle, offset)` is the candidate's prefix test without
+		// materialising the suffix; equality additionally demands that the
+		// candidate end where the needle does.
+		truncated
+			? normalized.startsWith(needle, offset)
+			: normalized.length - offset === needle.length && normalized.startsWith(needle, offset),
+	);
 }
 
 /** The launch prompt is durable child history, while `prompt` is the raw

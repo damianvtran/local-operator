@@ -1628,15 +1628,27 @@ async def test_two_identical_legacy_steers_render_two_rows(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_mixed_vintage_pair_of_identical_steers_renders_two_rows(tmp_path) -> None:
+@pytest.mark.parametrize("legacy_first", [True, False])
+async def test_a_mixed_vintage_pair_of_identical_steers_renders_two_rows(
+    tmp_path, legacy_first: bool
+) -> None:
     """A child steered identically BEFORE and AFTER the id fix shows two rows.
 
-    The two correlation arms draw on one budget: ``communication_bodies`` counts
-    the facts available to supersede a row. The id arm suppressed its row
-    without spending the matching fact's count, so the leftover count was still
-    on the books when the older, id-less envelope carrying the same words
-    arrived — and that row was suppressed too, by a fact already consumed by its
-    successor. Two redirections delivered, one rendered.
+    ``communication_bodies`` is a budget of facts available to supersede a row,
+    and a fact must be spent at most once and only by ITS OWN row. Having both
+    correlation arms decrement that budget during the ordered walk broke the
+    second half of that invariant: whichever row the walk reached first spent
+    the other's fact. So the fix is order-dependent unless the id matches are
+    resolved in the pre-pass, which is why this case is parametrised on the row
+    order rather than seeded in one.
+
+    ``legacy_first`` is the ordering that actually occurs on disk and the one
+    that stayed broken after the first attempt: the legacy row is OLDER — it
+    was persisted before steers carried their fact's id — so it is reached
+    first, consumes the id-correlated row's fact by body text, and the id row is
+    then suppressed on identity anyway. Two redirections delivered, one
+    rendered. Durable page boundaries are arbitrary, so neither order may be
+    assumed.
 
     This is the mixed-vintage shape specifically: one fact carries a
     ``communication_id`` matching its own row, while the legacy row's own fact
@@ -1653,11 +1665,72 @@ async def test_a_mixed_vintage_pair_of_identical_steers_renders_two_rows(tmp_pat
         },
     )
     # Post-upgrade: the envelope carries its fact's id, so it correlates by id.
-    await transcript.append_message(Message.user(_steer_envelope("Focus on retries"), id="m1"))
     # Pre-upgrade: same words, unrelated id, and no fact of its own in the
     # window. It must fall through to the labelled fallback, not be eaten by
     # the id-matched row's fact.
-    await transcript.append_message(Message.user(_steer_envelope("Focus on retries"), id="legacy"))
+    order = ["legacy", "m1"] if legacy_first else ["m1", "legacy"]
+    for message_id in order:
+        await transcript.append_message(
+            Message.user(_steer_envelope("Focus on retries"), id=message_id)
+        )
+
+    job = _job_with([], status="completed")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    session._subagent_comms = type(
+        "Comms", (), {"session_dir_of": lambda self, _job_id: transcript.directory}
+    )()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(90, 28)) as pilot:
+        view = await _open(pilot, app, job)
+        await _wait_history(pilot, view)
+
+        redirected = [
+            entry.text
+            for entry in view._history_entries
+            if entry.text == "Parent · redirected\nFocus on retries"
+        ]
+        assert redirected == [
+            "Parent · redirected\nFocus on retries",
+            "Parent · redirected\nFocus on retries",
+        ]
+        assert "<parent-message>" not in " ".join(view.rendered_rows())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("legacy_first", [True, False])
+async def test_two_facts_for_an_id_row_and_a_legacy_row_render_two_rows(
+    tmp_path, legacy_first: bool
+) -> None:
+    """Each of two identical steers has its OWN fact loaded: still two rows.
+
+    This is the case that rules out the cheap repair of finding 11 — withholding
+    from the legacy budget every fact whose ``communication_id`` names a loaded
+    row. That fixes the legacy-first pair above but over-withholds here: the id
+    row's fact is correctly held back, the legacy row then finds nothing left to
+    spend even though its own fact IS loaded, and it renders a third row beside
+    the two facts. Withholding has to be per-fact — one fact reserved for the
+    one row that claims it — not per-body, which is only visible when the count
+    of facts and the count of claiming rows differ.
+    """
+    transcript = Transcript(tmp_path / "child")
+    for communication_id in ("b1", "b2"):
+        await transcript.append_custom(
+            HUB_COMMUNICATION_CUSTOM_TYPE,
+            {
+                "direction": "to_child",
+                "body": "Focus on retries",
+                "kind": "steer",
+                "communication_id": communication_id,
+            },
+        )
+    # Only `b1` has a row carrying its id; `b2`'s row predates the id fix, so
+    # `b2` is the fact the body-text arm must be left to spend on it.
+    order = ["legacy", "b1"] if legacy_first else ["b1", "legacy"]
+    for message_id in order:
+        await transcript.append_message(
+            Message.user(_steer_envelope("Focus on retries"), id=message_id)
+        )
 
     job = _job_with([], status="completed")
     session = FakeSession()

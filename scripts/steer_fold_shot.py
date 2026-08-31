@@ -18,6 +18,11 @@ they labelled as what the parent did?":
     an identical one with a legacy id whose own fact is off-page. The id arm
     used to suppress its row without spending the fact, leaving a count the
     legacy row was then wrongly consumed by — two redirections, one row.
+    Seeded LEGACY-FIRST, which is the order that occurs on disk: the legacy
+    row predates the id fix, so it is the older of the two. Resolving id
+    matches during the ordered walk rather than in the pre-pass renders this
+    order as a single row while the opposite order looks correct, so the frame
+    has to seed the real one to show anything.
 
 Both must render the parent's words and never the ``<parent-message>`` XML.
 """
@@ -81,7 +86,7 @@ async def seed(directory: Path) -> Transcript:
             "communication_id": "m1",
         },
     )
-    for message_id in ("m1", "legacy-timeout"):
+    for message_id in ("legacy-timeout", "m1"):
         await transcript.append_message(
             Message.user(
                 SubagentComms._format_to_child(

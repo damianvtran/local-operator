@@ -123,6 +123,58 @@ describe("agent conversation composition", () => {
 		]);
 	});
 
+	// Finding 8, the case that GUARDS the length gate. The test above asserts an
+	// outcome both versions of the predicate produce: its steer QUOTES the task,
+	// so it fails the loose path's `startsWith` whether or not the gate is there.
+	// Removing only the gate leaves it green. A steer that BEGINS with the stem
+	// does reach that branch, so it flips from "head kept" to "suppressed" the
+	// moment the length gate stops holding a short author-typed `…` off the
+	// loose path — which is the regression this pair exists to catch.
+	it("keeps the head when a steer begins with an author's own ellipsis prompt", () => {
+		const prompt = "Fix the retry loop…";
+		const steer = entry("s1", "parent_message", "Fix the retry loop, but only for 5xx responses");
+		const messages = agentConversationEntries(detail({
+			prompt,
+			launch_message_id: "",
+			transcript: [steer],
+		}));
+		expect(messages).toEqual([
+			expect.objectContaining({ kind: "parent_message", text: prompt }),
+			steer,
+		]);
+	});
+
+	// Finding 12. Head detection walks the row's paragraph-delimited suffixes.
+	// Materialising and normalising each one re-scans the tail per break, which
+	// is quadratic in row length (9.4s for a 580KB row with 2000 breaks), and
+	// the wire `text` for these row kinds is not length-bounded. The linear form
+	// normalises once and compares at offsets, so this must stay well under the
+	// old cost while still anchoring at a paragraph boundary and nowhere else.
+	it("matches a launch head deep in a long row without quadratic cost", () => {
+		const prompt = "Implement the retry route";
+		const filler = Array.from({ length: 2_000 }, (_, i) => `paragraph ${i} ${"y".repeat(300)}`);
+		// The task sits at a real paragraph boundary far into the row.
+		const head = entry("h1", "parent_message", `${filler.join("\n\n")}\n\n${prompt}`);
+		// Same bulk, but the task is mid-sentence, so it must NOT suppress.
+		const steer = entry("s1", "parent_message", `${filler.join("\n\n")} and ${prompt}`);
+
+		const started = performance.now();
+		expect(agentConversationEntries(detail({
+			prompt, launch_message_id: "", transcript: [head],
+		}))).toEqual([head]);
+		expect(agentConversationEntries(detail({
+			prompt, launch_message_id: "", transcript: [steer],
+		}))).toEqual([
+			expect.objectContaining({ kind: "parent_message", text: prompt }),
+			steer,
+		]);
+		// Measured on this exact shape: the suffix-materialising walk takes ~4.3s
+		// for the pair, the linear form ~20ms. The threshold sits two orders of
+		// magnitude above the fixed cost and ~3x below the broken one, so it fails
+		// on a reintroduced quadratic without flaking on a loaded CI runner.
+		expect(performance.now() - started).toBeLessThan(1_500);
+	});
+
 	// Finding 9. End-anchoring alone accepted a steer that CLOSES by restating
 	// the task. The launch row is structurally `{preamble}\n\n{prompt}`, so the
 	// task always begins at a paragraph boundary; a restatement mid-sentence

@@ -538,12 +538,12 @@ def fold_transcript_entries(
                     duration,
                 )
     communication_ids: set[str] = set()
-    # Body text -> how many to-child facts carry it. A MULTISET, not a set: the
-    # legacy arm below CONSUMES one count per matched envelope row, so steering
-    # the same words twice ("focus on retries" after each of two failures is a
-    # normal operator move) still renders two rows. Membership-only matching
-    # collapsed N identical steers into one and under-reported history the
-    # parent actually sent.
+    # Body text -> how many to-child facts are available to supersede a LEGACY
+    # (id-less) envelope row. A MULTISET, not a set: the legacy arm below
+    # CONSUMES one count per matched row, so steering the same words twice
+    # ("focus on retries" after each of two failures is a normal operator move)
+    # still renders two rows. Membership-only matching collapsed N identical
+    # steers into one and under-reported history the parent actually sent.
     communication_bodies: Counter[str] = Counter()
     # Host communication facts supersede their replay-visible custom message:
     # the former include replies and correlation while the latter contain XML
@@ -551,19 +551,41 @@ def fold_transcript_entries(
     # are retained too: a hub steer persists as a plain user row, and
     # transcripts written before steers carried their fact's id can only be
     # correlated by body text.
+    #
+    # CONSTRAINT — a fact may be spent at most once, and only by ITS OWN row.
+    # The two correlation arms must therefore not draw on one budget during the
+    # ordered walk: whichever row the walk reaches first would spend the other
+    # row's fact, and in a real mixed-vintage transcript the LEGACY row is the
+    # older one, so it comes first and eats the id-correlated row's fact. Two
+    # delivered steers then render as one. So id matches are resolved HERE, in
+    # the pre-pass over the whole loaded window, and the legacy budget is built
+    # from only the facts left over. That also makes the outcome independent of
+    # durable page order, which is arbitrary: a fact and its row routinely land
+    # on opposite sides of a page boundary.
+    entry_ids = {entry.id for entry in entries}
+    to_child_facts: list[tuple[str, str]] = []
     for entry in entries:
         if (
             entry.type == ENTRY_CUSTOM
             and entry.payload.get("custom_type") == HUB_COMMUNICATION_CUSTOM_TYPE
         ):
             details = entry.payload.get("details") or {}
-            communication_id = details.get("communication_id")
+            communication_id = str(details.get("communication_id") or "")
             if communication_id:
-                communication_ids.add(str(communication_id))
+                communication_ids.add(communication_id)
             if details.get("direction") == "to_child":
                 fact_body = strip_control_sequences(str(details.get("body") or "")).strip()
                 if fact_body:
-                    communication_bodies[fact_body] += 1
+                    to_child_facts.append((communication_id, fact_body))
+    for communication_id, fact_body in to_child_facts:
+        # A fact whose id names a row in this window is already CLAIMED by that
+        # row, which the walk suppresses on identity alone. Withholding it from
+        # the legacy budget is what stops an identical id-less row consuming it.
+        # A fact with no such row (its row sits on an unloaded page, or predates
+        # id-carrying steers) is what the body-text arm exists to spend.
+        if communication_id and communication_id in entry_ids:
+            continue
+        communication_bodies[fact_body] += 1
     for entry in entries:
         payload = entry.payload
         if entry.type == ENTRY_CUSTOM:
@@ -620,17 +642,9 @@ def fold_transcript_entries(
                 # person either way.
                 body = parent_message.body
                 if entry.id in communication_ids:
-                    # Correlated by id, so this row's fact is accounted for.
-                    # Consume its body count too: the counter is a budget of
-                    # facts still available to supersede a LEGACY row, and a
-                    # fact already spent on an id match must not be spent again.
-                    # A mixed-vintage child (steered both before and after
-                    # steers began carrying their fact's id) otherwise leaves
-                    # the id-matched fact's count behind for an identical
-                    # legacy row to consume, and two delivered steers render as
-                    # one.
-                    if communication_bodies[body]:
-                        communication_bodies[body] -= 1
+                    # Correlated by id: its fact renders the row and was already
+                    # withheld from the legacy budget by the pre-pass, so there
+                    # is nothing to consume here.
                     continue
                 if communication_bodies[body]:
                     # Consume this occurrence so a SECOND identical steer is
