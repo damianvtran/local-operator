@@ -1721,6 +1721,11 @@ class Session:
         # ``_advisor_in_flight``, and is what stops a boundary that fires every
         # tool batch from spawning a pass per batch while the first still runs.
         self._compaction_pass_in_flight = False
+        # The Task wrapping that pass, so a ceiling pass can CANCEL it rather
+        # than run a second summarization alongside it (issue #413). Identity,
+        # not a generation: there is at most one, and the latch already
+        # enforces that. ``None`` whenever nothing is in flight.
+        self._compaction_pass_task: asyncio.Task[Any] | None = None
         # Last completed provider request (epoch ms). Distinct from
         # _last_activity_ms: the idle-flush pruning must measure provider-cache
         # age, and stamping turn bookkeeping right before the check made the
@@ -4879,12 +4884,17 @@ class Session:
             await self._run_turn([message])
             continuations += 1
 
-    def _spawn_background(self, coro: Coroutine[Any, Any, Any]) -> None:
+    def _spawn_background(self, coro: Coroutine[Any, Any, Any]) -> asyncio.Task[Any] | None:
         """Route a fire-and-forget coroutine through the session task group
         when one is open (wake deliveries, aside persistence); otherwise fall
         back to ``ensure_future``. Every spawned task is tracked so
         :meth:`dispose` can cancel and await it. After dispose nothing is
         spawned, so a late wake delivery cannot raise into an unobserved task.
+
+        Returns the Task so a caller that later needs to CANCEL this one
+        specifically (the ceiling compaction pass, issue #413) can, without
+        walking ``_background_tasks``. ``None`` after dispose: nothing was
+        spawned.
 
         The coroutine is wrapped so its failure is logged, never raised: an
         exception escaping into a TaskGroup would cancel every sibling task.
@@ -4898,7 +4908,7 @@ class Session:
             # path (the runner schedules a roster persist just as teardown
             # flips this flag).
             coro.close()
-            return
+            return None
 
         started = False
 
@@ -4932,6 +4942,7 @@ class Session:
                 coro.close()
 
         task.add_done_callback(_on_done)
+        return task
 
     def _build_tool_context(self) -> ToolContext:
         # This context is REBUILT on every turn, so anything that must outlive
@@ -6353,9 +6364,85 @@ class Session:
         reaches the threshold the turn cannot safely continue, so the pass that
         relieves it must complete before the next request is built. Making the
         ceiling asynchronous would remove the one safety net that has to block.
+
+        Cancels an in-flight background pass first (issue #413). Running
+        alongside it double-bills a summarization of the same history; awaiting
+        it would make this safety net wait on a call with no deadline.
         """
+        await self._cancel_background_compaction()
         await self._emit(CompactionStartEvent(reason=reason))
         return await self._finish_compaction(plan, reason=reason, summarized=None)
+
+    async def _cancel_background_compaction(self) -> None:
+        """Stop an in-flight background pass so a synchronous one does not double-bill.
+
+        Issue #413: a ceiling (or manual) pass starting while a background
+        pass is summarizing used to run alongside it. The background result
+        was discarded as stale, so correctness held and only spend was
+        affected — two summarization calls over the same history.
+
+        Awaiting the background pass was rejected in review: it would make
+        the safety net wait on a call with no deadline. Cancelling it
+        instead stops the spend we can still stop, and the synchronous pass
+        proceeds immediately. Tokens already in flight are lost either way.
+
+        Failure of the background pass is NOT a reason to skip the ceiling
+        one: this method only cancels, it never decides whether the
+        synchronous pass runs. A background pass that already FAILED has
+        cleared the latch in its ``finally``, so this is a no-op and the
+        ceiling path continues as it always did.
+
+        Bounded wait (0.1 s), not one event-loop tick: that bound is what
+        delivers ``CancelledError`` to the pass so the new summarization
+        does not overlap it, then proceeds. Waiting for the provider to
+        acknowledge the cancel would reintroduce the unbounded wait.
+        """
+        task = self._compaction_pass_task
+        self._compaction_pass_task = None
+        try:
+            if task is not None and not task.done():
+                task.cancel()
+                # Bounded wait so the cancelled pass can unwind its in-flight
+                # summarization before we start another. Shielded: awaiting a
+                # cancelled task without a shield would CancelledError THIS
+                # (ceiling) pass, which is the one that must complete. Timed:
+                # if cancellation were swallowed, an unbounded await would be
+                # the wait this method exists to avoid.
+                try:
+                    await asyncio.wait_for(asyncio.shield(task), timeout=0.1)
+                except asyncio.TimeoutError:
+                    pass
+                except asyncio.CancelledError:
+                    # Awaiting a cancelled task raises CancelledError even
+                    # through ``shield``. That is the inner pass unwinding,
+                    # which is success — unless WE were cancelled (dispose
+                    # mid-ceiling), in which case the ceiling pass must not
+                    # swallow it. ``Task.cancelling()`` is 3.11+; this
+                    # project requires 3.12.
+                    me = asyncio.current_task()
+                    if me is not None and me.cancelling():
+                        raise
+                except Exception:
+                    # The inner pass's swallows currently keep this path
+                    # dead. If they ever stop, ``wait_for`` would raise
+                    # into ``_run_compaction`` BEFORE the ceiling starts —
+                    # the missed-compaction trap #413 named as worse than
+                    # a double-bill (review round 1, F1). Cancel still
+                    # happened; the ceiling must proceed.
+                    pass
+        finally:
+            # Whatever the background pass produced is about to be stale:
+            # we are committing a different pass against the live history.
+            # Drop it so a later boundary cannot apply a summary of a
+            # prefix we are about to replace. Also covers the race where
+            # cancel was requested after the summary returned and the
+            # write of ``_pending_compaction`` ran anyway (no await
+            # between those two, so CancelledError is not delivered until
+            # the next yield). In ``finally`` so a surprise from
+            # ``wait_for`` cannot skip the latch-clear and then skip the
+            # ceiling pass (F1).
+            self._pending_compaction = None
+            self._compaction_pass_in_flight = False
 
     async def _summarize_for_compaction(
         self, plan: _CompactionPlan
@@ -6795,16 +6882,15 @@ class Session:
         would spawn a summarization call per batch — each against a snapshot
         the next one invalidates, and all of them billed.
 
-        KNOWN, ACCEPTED (issue #413): the latch bounds background passes
-        against each other, not against a synchronous one. If the context
-        crosses the ceiling while a legitimately sub-ceiling pass is running,
-        the next boundary correctly runs a synchronous pass alongside it and
-        two summarizations are billed over the same history — the background
-        one is then discarded as stale, so correctness holds and only spend is
-        affected. Having the ceiling AWAIT the background pass instead was
-        considered and rejected in agent review round 5: it would make the one
+        The latch still only bounds BACKGROUND passes against each other. A
+        ceiling pass that starts while one is in flight CANCELS it rather than
+        awaiting it or running alongside it — see
+        :meth:`_cancel_background_compaction`. Awaiting was independently
+        rejected in agent review round 5 (#413): it would make the one
         non-deferrable pass wait on a call this design deliberately leaves
-        unbounded, which is round 4's MAJOR-1 in a subtler form.
+        unbounded, which is round 4's MAJOR-1 in a subtler form. Running
+        alongside bills two summarizations of the same history, and the
+        background result is then discarded as stale.
         """
         if self._disposed or self._compaction_pass_in_flight:
             return
@@ -6824,7 +6910,13 @@ class Session:
             # replace, guaranteeing the loser is discarded as stale.
             return
         self._compaction_pass_in_flight = True
-        self._spawn_background(self._run_compaction_async(plan, reason=reason))
+        task = self._spawn_background(self._run_compaction_async(plan, reason=reason))
+        # Dispose can race the spawn and return None; the latch still has to
+        # drop or a later session would think a pass was outstanding.
+        if task is None:
+            self._compaction_pass_in_flight = False
+            return
+        self._compaction_pass_task = task
 
     async def _run_compaction_async(self, plan: _CompactionPlan, *, reason: str) -> None:
         """The detached half: summarize against the snapshot, park the result.
@@ -6838,12 +6930,20 @@ class Session:
 
         Total, like the advisor call it descends from: every failure is a
         missing pending pass, which is exactly the state the session was in
-        before. The ceiling path is untouched and still fires synchronously if
-        the context actually reaches the threshold.
+        before. A ceiling pass that starts while this is in flight cancels
+        it (issue #413) rather than running alongside; the identity check
+        below is what stops a cancelled pass from parking a stale result.
         """
         try:
             summary, preserve_data = await self._summarize_for_compaction(plan)
-            if self._disposed:
+            # Identity, not a disposed flag: a ceiling pass that cancelled us
+            # has already dropped the handle (issue #413), and there is no
+            # await between this return and the write below, so CancelledError
+            # may not have been delivered yet. Writing pending then would park
+            # a summary the ceiling pass is about to make stale. Same shape as
+            # the steer-receipt guard (PR #452): drop the delivery when the
+            # owner is no longer the current one.
+            if self._disposed or self._compaction_pass_task is not asyncio.current_task():
                 return
             self._pending_compaction = _PendingCompaction(
                 plan=plan,
@@ -6854,13 +6954,23 @@ class Session:
             )
         except asyncio.CancelledError:
             # Caught for the reason ``_run_advisor`` catches it: this task is
-            # detached and routinely cancelled at dispose, and a teardown
-            # traceback for a pass nobody awaited is noise.
-            pass
+            # detached and routinely cancelled at dispose AND when a ceiling
+            # pass starts (issue #413). A traceback for a pass nobody awaited
+            # is noise. Re-raise so the wrapping ``_spawn_background`` task
+            # still settles as cancelled — ``Task.cancel()`` is how the
+            # ceiling path stops the call, and swallowing here would leave
+            # that Task running until the provider returned.
+            raise
         except Exception:  # noqa: BLE001 — a speculative pass must never break a turn
             logger.debug("asynchronous compaction pass failed", exc_info=True)
         finally:
-            self._compaction_pass_in_flight = False
+            # Only clear the latch if it still names US. A ceiling pass that
+            # cancelled this one has already dropped both, and a later spawn
+            # must not have its latch stolen by our finally — the same
+            # identity check as the pending write above.
+            if self._compaction_pass_task is asyncio.current_task():
+                self._compaction_pass_task = None
+                self._compaction_pass_in_flight = False
 
     def _pending_is_applicable(self, pending: _PendingCompaction, live: list[Message]) -> bool:
         """Whether a finished pass still describes the conversation it planned against.

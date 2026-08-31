@@ -94,8 +94,11 @@ class Host(App[None]):
     def on_editor_paste_attached(self, message: EditorPasteAttached) -> None:
         self.attached_notices.append(message)
 
-    def show_clipboard_reading_notice(self, reading: bool) -> None:
+    def show_clipboard_reading_notice(
+        self, reading: bool, owner: object | None = None
+    ) -> object | None:
         self.reading_calls.append(reading)
+        return owner
 
 
 async def _paste(app: App[None], pilot, text: str) -> None:
@@ -1688,3 +1691,124 @@ async def test_the_reading_card_and_the_outcome_notice_do_not_share_an_owner() -
     assert (
         COMPOSER_READING_NOTICE is not COMPOSER_PASTE_NOTICE
     ), "the progress card's deferred retirement would reach the outcome notice"
+
+
+@pytest.mark.asyncio
+async def test_two_reading_cards_do_not_share_an_owner() -> None:
+    """The structural half of D15: each raise mints its own owner.
+
+    ``Toast.withdraw`` matches on owner and nothing else, so two pastes
+    sharing ``COMPOSER_READING_NOTICE`` is how paste 1's deferred timer
+    kills paste 2's card. Distinct tokens make that unrepresentable.
+    Mutation-tested: pinning both raises to ``COMPOSER_READING_NOTICE``
+    makes this fail.
+    """
+    from local_operator.tui.app import CLIPBOARD_READING_NOTICE, OperatorApp
+    from local_operator.tui.widgets.toast import Toast
+    from tests.unit.tui.test_app_pilot import FakeSession, _factory
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        first = app.show_clipboard_reading_notice(True)
+        second = app.show_clipboard_reading_notice(True)
+        assert first is not None and second is not None
+        assert first is not second, (
+            "two overlapping pastes minted the same owner — paste 1's "
+            "deferred retirement can name paste 2's card (D15 / #422)"
+        )
+        toast = app.query_one(Toast)
+        app.show_clipboard_reading_notice(False, owner=first)
+        assert toast.display, (
+            "withdrawing paste 1's owner dismissed paste 2's card — the "
+            "owners were not actually distinct at the toast"
+        )
+        assert toast.message == CLIPBOARD_READING_NOTICE
+
+
+@pytest.mark.asyncio
+async def test_a_deferred_retirement_does_not_kill_a_later_pastes_progress_card() -> None:
+    """THE D15 interleaving, constructed at the hook the editor calls.
+
+    The editor schedules ``show(False, owner=paste_1_token)`` after the
+    minimum-display floor. That is the late event. This test fires it
+    AFTER paste 2 has taken the slot, which is the exact order the
+    designer measured (~24 ms of paste-2 visibility, then blank). Driving
+    two real ``ctrl+v``s cannot produce that overlap under ``run_test``:
+    ``pilot.press`` waits for the awaited action, so paste 2 cannot start
+    until paste 1 has returned.
+
+    Mutation-tested: pinning both raises to ``COMPOSER_READING_NOTICE``
+    makes the withdraw below hide the card.
+    """
+    from local_operator.tui.app import CLIPBOARD_READING_NOTICE, OperatorApp
+    from local_operator.tui.widgets.toast import Toast
+    from tests.unit.tui.test_app_pilot import FakeSession, _factory
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        toast = app.query_one(Toast)
+        first = app.show_clipboard_reading_notice(True)
+        await pilot.pause()
+        second = app.show_clipboard_reading_notice(True)
+        await pilot.pause()
+        assert toast.display and toast.message == CLIPBOARD_READING_NOTICE
+
+        # Paste 1's deferred timer, arriving late.
+        app.show_clipboard_reading_notice(False, owner=first)
+        await pilot.pause()
+
+        assert toast.display, (
+            "paste 1's deferred retirement dismissed paste 2's progress card " "(D15 / issue #422)"
+        )
+        assert toast.message == CLIPBOARD_READING_NOTICE
+        # And paste 2's own retirement still works.
+        app.show_clipboard_reading_notice(False, owner=second)
+        await pilot.pause()
+        assert not toast.display or toast.message != CLIPBOARD_READING_NOTICE
+
+
+@pytest.mark.asyncio
+async def test_a_scoped_retirement_still_dismisses_its_own_progress_card(
+    monkeypatch,
+) -> None:
+    """The normal case of #422: a single paste's card still retires.
+
+    Scoping the timer to the operation that scheduled it must not leave the
+    progress card sitting over a completed paste (D7). One paste, empty
+    clipboard, well past the floor: the outcome is on screen and the
+    progress card is gone.
+    """
+    monkeypatch.setattr(editor_module, "PASTE_READING_NOTICE_DELAY_S", 0.15)
+    monkeypatch.setattr(editor_module, "PASTE_READING_NOTICE_MIN_S", 0.3)
+
+    def slow(*args, **kwargs):
+        time.sleep(0.2)
+        return ClipboardContents()
+
+    monkeypatch.setattr(editor_module, "read_clipboard", slow)
+
+    from local_operator.tui.app import CLIPBOARD_READING_NOTICE, OperatorApp
+    from local_operator.tui.widgets.toast import Toast
+    from tests.unit.tui.test_app_pilot import FakeSession, _factory
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app.query_one(Editor).focus()
+        await pilot.pause()
+        toast = app.query_one(Toast)
+
+        await _ctrl_v(app, pilot)
+        deadline = time.monotonic() + 0.6
+        while time.monotonic() < deadline:
+            await pilot.pause()
+            await asyncio.sleep(0.02)
+
+        assert toast.display, "the outcome notice was never raised"
+        assert toast.message != CLIPBOARD_READING_NOTICE, (
+            "the progress card outlived the paste that raised it — scoping "
+            "the retirement to the operation left the card stuck"
+        )
+        assert toast.message == "Nothing on the clipboard to paste."
