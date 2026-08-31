@@ -23,6 +23,7 @@ from local_operator.evaluation.evidence.models import (
     AbandonmentRecord,
     ActionBatchPayload,
     ArtifactRef,
+    BudgetCommitmentPayload,
     CleanupPayload,
     EnvironmentStepPayload,
     EventRecord,
@@ -35,6 +36,7 @@ from local_operator.evaluation.evidence.models import (
     ObservationPayload,
     OutcomeSeal,
     PreflightPayload,
+    ReconciliationPayload,
     ScoringResultPayload,
     ScoringStartPayload,
     StateMarker,
@@ -55,6 +57,12 @@ _ALLOWED_ROOT = {
     "state.json",
 }
 _DIGEST_LENGTH = 64
+MAX_JSON_RECORD_BYTES = 16 * 1024 * 1024
+MAX_JOURNAL_BYTES = 64 * 1024 * 1024
+MAX_EVENTS = 100_000
+MAX_ARTIFACT_BYTES = 256 * 1024 * 1024
+MAX_PARSED_MEDIA_BYTES = 32 * 1024 * 1024
+_READ_CHUNK = 1024 * 1024
 _READ_FLAGS = (
     os.O_RDONLY
     | getattr(os, "O_CLOEXEC", 0)
@@ -94,7 +102,12 @@ def _check_owner_mode(fd: int, location: str, issues: _Issues) -> None:
 
 
 def _read_file(
-    root_fd: int, name: str, issues: _Issues, unsafe_code: VerificationIssueCode
+    root_fd: int,
+    name: str,
+    issues: _Issues,
+    unsafe_code: VerificationIssueCode,
+    *,
+    max_bytes: int = MAX_JSON_RECORD_BYTES,
 ) -> bytes | None:
     try:
         fd = os.open(name, _READ_FLAGS, dir_fd=root_fd)
@@ -107,13 +120,19 @@ def _read_file(
         if not _safe_regular(fd):
             issues.error(unsafe_code, name)
             return None
+        info = os.fstat(fd)
         _check_owner_mode(fd, name, issues)
-        chunks: list[bytes] = []
-        while True:
-            chunk = os.read(fd, 1024 * 1024)
+        if info.st_size > max_bytes:
+            issues.error("resource_limit_exceeded", name)
+            return None
+        data = bytearray()
+        while len(data) <= max_bytes:
+            chunk = os.read(fd, min(_READ_CHUNK, max_bytes + 1 - len(data)))
             if not chunk:
-                return b"".join(chunks)
-            chunks.append(chunk)
+                return bytes(data)
+            data.extend(chunk)
+        issues.error("resource_limit_exceeded", name)
+        return None
     except OSError:
         issues.error(unsafe_code, name)
         return None
@@ -196,11 +215,27 @@ def _read_artifacts(
                 if not _safe_regular(fd):
                     issues.error("artifact_unsafe", f"artifacts/{name}")
                     continue
+                info = os.fstat(fd)
                 _check_owner_mode(fd, f"artifacts/{name}", issues)
-                chunks: list[bytes] = []
-                while chunk := os.read(fd, 1024 * 1024):
-                    chunks.append(chunk)
-                data = b"".join(chunks)
+                if info.st_size > MAX_ARTIFACT_BYTES:
+                    issues.error("resource_limit_exceeded", f"artifacts/{name}")
+                    continue
+                expected = references.get(name)
+                parse_media = (
+                    expected is not None and expected.media_type != "application/octet-stream"
+                )
+                if parse_media and info.st_size > MAX_PARSED_MEDIA_BYTES:
+                    issues.error("resource_limit_exceeded", f"artifacts/{name}")
+                    continue
+                digest = hashlib.sha256()
+                byte_count = 0
+                structured = bytearray() if parse_media else None
+                while chunk := os.read(fd, _READ_CHUNK):
+                    digest.update(chunk)
+                    byte_count += len(chunk)
+                    if structured is not None:
+                        structured.extend(chunk)
+                data = bytes(structured) if structured is not None else None
             except OSError:
                 issues.error("artifact_unsafe", f"artifacts/{name}")
                 continue
@@ -209,14 +244,14 @@ def _read_artifacts(
             expected = references.get(name)
             if expected is None:
                 issues.error("artifact_unreferenced", f"artifacts/{name}")
-            if hashlib.sha256(data).hexdigest() != name:
+            if digest.hexdigest() != name:
                 issues.error("artifact_hash_mismatch", f"artifacts/{name}")
                 continue
             if expected is None:
                 continue
-            if expected.byte_count != len(data):
+            if expected.byte_count != byte_count:
                 issues.error("artifact_count_mismatch", f"artifacts/{name}")
-            if not _media_matches(data, expected.media_type):
+            if data is not None and not _media_matches(data, expected.media_type):
                 issues.error("artifact_media_mismatch", f"artifacts/{name}")
             stored[name] = EvidenceArtifactRef.model_validate(
                 expected.model_dump(mode="json"), strict=True
@@ -229,55 +264,96 @@ def _read_artifacts(
 
 
 def _parse_journal(
-    raw: bytes | None, manifest: EvidenceManifest | None, issues: _Issues
+    root_fd: int, manifest: EvidenceManifest | None, issues: _Issues
 ) -> tuple[EventRecord, ...]:
-    if raw is None:
+    """Parse newline records incrementally so hostile recovery input stays bounded."""
+
+    try:
+        fd = os.open("events.jsonl", _READ_FLAGS, dir_fd=root_fd)
+    except FileNotFoundError:
         issues.error("journal_missing", "events.jsonl")
         return ()
-    if raw and not raw.endswith(b"\n"):
-        issues.error("journal_truncated", "events.jsonl")
+    except OSError:
+        issues.error("unsafe_path", "events.jsonl")
         return ()
     events: list[EventRecord] = []
     previous = manifest.manifest_digest if manifest is not None else "0" * 64
     last_monotonic = -1
     last_wall = -1
     seen_ids: set[str] = set()
-    for index, line in enumerate(raw.splitlines(), start=1):
-        location = f"events.jsonl:{index}"
-        try:
-            decoded = json.loads(line.decode("utf-8"))
-            if not isinstance(decoded, dict):
-                raise ValueError("event must be an object")
-            stored_id = decoded.get("event_id")
-            event = EventRecord.model_validate({**decoded, "event_id": "0" * 64}, strict=True)
-        except (UnicodeDecodeError, ValueError):
-            issues.error("event_invalid", location)
-            continue
-        canonical_stored = json.dumps(
-            decoded,
-            allow_nan=False,
-            ensure_ascii=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("utf-8")
-        if canonical_stored != line:
-            issues.error("journal_noncanonical", location)
-        if not isinstance(stored_id, str) or stored_id != event.event_id:
-            issues.error("event_hash_mismatch", location)
-        if event.sequence != index - 1 or stored_id in seen_ids:
-            issues.error("event_sequence_mismatch", location)
-        if event.previous_event_sha256 != previous:
-            issues.error("event_chain_mismatch", location)
-        if event.monotonic_ns < last_monotonic or event.wall_time_ms < last_wall:
-            issues.error("event_time_reversed", location)
-        if isinstance(stored_id, str):
-            seen_ids.add(stored_id)
-            previous = stored_id
-        else:
-            previous = event.event_id
-        last_monotonic = event.monotonic_ns
-        last_wall = event.wall_time_ms
-        events.append(event)
+    pending = bytearray()
+    total = 0
+    line_number = 0
+    stop = False
+    try:
+        if not _safe_regular(fd):
+            issues.error("unsafe_path", "events.jsonl")
+            return ()
+        info = os.fstat(fd)
+        _check_owner_mode(fd, "events.jsonl", issues)
+        if info.st_size > MAX_JOURNAL_BYTES:
+            issues.error("resource_limit_exceeded", "events.jsonl")
+            return ()
+        while not stop and (chunk := os.read(fd, _READ_CHUNK)):
+            total += len(chunk)
+            if total > MAX_JOURNAL_BYTES:
+                issues.error("resource_limit_exceeded", "events.jsonl")
+                break
+            pending.extend(chunk)
+            while (newline := pending.find(b"\n")) >= 0:
+                line = bytes(pending[:newline])
+                del pending[: newline + 1]
+                line_number += 1
+                if len(line) > MAX_JSON_RECORD_BYTES or line_number > MAX_EVENTS:
+                    issues.error("resource_limit_exceeded", f"events.jsonl:{line_number}")
+                    stop = True
+                    break
+                location = f"events.jsonl:{line_number}"
+                try:
+                    decoded = json.loads(line.decode("utf-8"))
+                    if not isinstance(decoded, dict):
+                        raise ValueError("event must be an object")
+                    stored_id = decoded.get("event_id")
+                    event = EventRecord.model_validate(
+                        {**decoded, "event_id": "0" * 64}, strict=True
+                    )
+                except (UnicodeDecodeError, ValueError):
+                    issues.error("event_invalid", location)
+                    continue
+                canonical_stored = json.dumps(
+                    decoded,
+                    allow_nan=False,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode("utf-8")
+                if canonical_stored != line:
+                    issues.error("journal_noncanonical", location)
+                if not isinstance(stored_id, str) or stored_id != event.event_id:
+                    issues.error("event_hash_mismatch", location)
+                if event.sequence != line_number - 1 or stored_id in seen_ids:
+                    issues.error("event_sequence_mismatch", location)
+                if event.previous_event_sha256 != previous:
+                    issues.error("event_chain_mismatch", location)
+                if event.monotonic_ns < last_monotonic or event.wall_time_ms < last_wall:
+                    issues.error("event_time_reversed", location)
+                if isinstance(stored_id, str):
+                    seen_ids.add(stored_id)
+                    previous = stored_id
+                else:
+                    previous = event.event_id
+                last_monotonic = event.monotonic_ns
+                last_wall = event.wall_time_ms
+                events.append(event)
+            if len(pending) > MAX_JSON_RECORD_BYTES:
+                issues.error("resource_limit_exceeded", f"events.jsonl:{line_number + 1}")
+                stop = True
+        if pending and not stop:
+            issues.error("journal_truncated", "events.jsonl")
+    except OSError:
+        issues.error("unsafe_path", "events.jsonl")
+    finally:
+        os.close(fd)
     return tuple(events)
 
 
@@ -313,6 +389,7 @@ def _counters(events: tuple[EventRecord, ...]) -> EvidenceCounters:
 
 def _verify_semantics(
     events: tuple[EventRecord, ...],
+    manifest: EvidenceManifest | None,
     marker: StateMarker | None,
     outcome: OutcomeSeal | None,
     issues: _Issues,
@@ -338,11 +415,26 @@ def _verify_semantics(
     last_state_id: str | None = None
     starts: list[ScoringStartPayload] = []
     results: list[ScoringResultPayload] = []
+    preflights: list[PreflightPayload] = []
+    commitments: list[BudgetCommitmentPayload] = []
+    reconciliations: list[ReconciliationPayload] = []
+    cleanups: list[CleanupPayload] = []
     seen_preflight_receipts: set[str] = set()
     seen_cleanup_receipts: set[str] = set()
     execution_closed = False
+    execution_started = False
+    execution_payload_types = (
+        ModelRequestPayload,
+        ModelResponsePayload,
+        UsageCostPayload,
+        ObservationPayload,
+        ActionBatchPayload,
+        EnvironmentStepPayload,
+        UserSimulatorExchangePayload,
+    )
     allowed_after_finalizing = {
         "scoring_result",
+        "reconciliation",
         "lifecycle_transition",
         "cleanup",
         "error",
@@ -354,6 +446,8 @@ def _verify_semantics(
         payload = event.payload
         if execution_closed and event.kind not in allowed_after_finalizing:
             issues.error("finalization_invalid", location)
+        if isinstance(payload, execution_payload_types):
+            execution_started = True
         if isinstance(payload, ModelRequestPayload):
             if payload.request_id in requests:
                 issues.error("receipt_binding_invalid", location)
@@ -443,13 +537,44 @@ def _verify_semantics(
                 execution_closed = True
         elif isinstance(payload, PreflightPayload):
             receipts = set(payload.receipt_ids)
-            if len(receipts) != len(payload.receipt_ids) or receipts & seen_preflight_receipts:
+            if (
+                preflights
+                or len(receipts) != len(payload.receipt_ids)
+                or receipts & seen_preflight_receipts
+                or (manifest is not None and payload.plan_id != manifest.dependency_plan_id)
+            ):
                 issues.error("receipt_binding_invalid", location)
+            preflights.append(payload)
             seen_preflight_receipts |= receipts
+        elif isinstance(payload, BudgetCommitmentPayload):
+            if (
+                execution_started
+                or commitments
+                or len(preflights) != 1
+                or not preflights[0].passed
+                or (manifest is not None and payload.budget_id != manifest.budget_id)
+            ):
+                issues.error("receipt_binding_invalid", location)
+            commitments.append(payload)
+        elif isinstance(payload, ReconciliationPayload):
+            if (
+                reconciliations
+                or not commitments
+                or payload.commitment_id != commitments[0].commitment_id
+                or (manifest is not None and payload.budget_id != manifest.budget_id)
+            ):
+                issues.error("receipt_binding_invalid", location)
+            reconciliations.append(payload)
         elif isinstance(payload, CleanupPayload):
             receipts = set(payload.receipt_ids)
-            if len(receipts) != len(payload.receipt_ids) or receipts & seen_cleanup_receipts:
+            if (
+                cleanups
+                or len(receipts) != len(payload.receipt_ids)
+                or receipts & seen_cleanup_receipts
+                or (manifest is not None and payload.cleanup_plan_id != manifest.cleanup_plan_id)
+            ):
                 issues.error("receipt_binding_invalid", location)
+            cleanups.append(payload)
             seen_cleanup_receipts |= receipts
         elif isinstance(payload, ScoringStartPayload):
             if starts or results:
@@ -508,6 +633,56 @@ def _verify_semantics(
         if terminal_output_observation is not None and not terminal_output_resolved:
             issues.error("receipt_binding_invalid", terminal_location)
     if outcome is not None:
+        terminal = completed[0] if len(completed) == 1 else None
+        if execution_started and (
+            len(preflights) != 1 or not preflights[0].passed or len(commitments) != 1
+        ):
+            issues.error("receipt_binding_invalid", "outcome.json")
+        post_running = outcome.result.reason != "preflight_failure"
+        provenance_complete = (
+            len(preflights) == 1
+            and len(commitments) == 1
+            and len(reconciliations) == 1
+            and len(cleanups) == 1
+        )
+        if post_running and not provenance_complete:
+            issues.error("receipt_binding_invalid", "outcome.json")
+        if outcome.result.reason == "preflight_failure" and (
+            len(preflights) != 1
+            or preflights[0].passed
+            or commitments
+            or reconciliations
+            or cleanups
+        ):
+            issues.error("receipt_binding_invalid", "outcome.json")
+        if terminal is not None:
+            expected_preflight = preflights[0].sealed_preflight_id if len(preflights) == 1 else None
+            expected_commitment = commitments[0].commitment_id if len(commitments) == 1 else None
+            expected_reconciliation = (
+                reconciliations[0].reconciliation_id if len(reconciliations) == 1 else None
+            )
+            expected_cleanup = cleanups[0].cleanup_result_id if len(cleanups) == 1 else None
+            bindings = (
+                (terminal.preflight_seal_id, expected_preflight),
+                (outcome.preflight_seal_id, expected_preflight),
+                (terminal.commitment_id, expected_commitment),
+                (outcome.commitment_id, expected_commitment),
+                (terminal.reconciliation_id, expected_reconciliation),
+                (outcome.reconciliation_id, expected_reconciliation),
+                (terminal.cleanup_result_id, expected_cleanup),
+                (outcome.cleanup_result_id, expected_cleanup),
+            )
+            if any(actual != expected for actual, expected in bindings[:2]):
+                issues.error("receipt_binding_invalid", "outcome.json")
+            if post_running and any(actual != expected for actual, expected in bindings[2:]):
+                issues.error("receipt_binding_invalid", "outcome.json")
+            if len(reconciliations) == 1 and (
+                terminal.reconciliation_reportable != reconciliations[0].reportable
+                or cleanups
+                and terminal.rescue_required != cleanups[0].rescue_required
+                or outcome.counters.cost_microusd != reconciliations[0].provider_cost_microusd
+            ):
+                issues.error("receipt_binding_invalid", "outcome.json")
         if outcome.event_count != len(events):
             issues.error("counter_mismatch", "outcome.json")
         final_hash = events[-1].event_id if events else outcome.manifest_digest
@@ -590,8 +765,7 @@ def verify_bundle(root: os.PathLike[str] | str) -> VerificationReport:
             location="manifest.json",
             issues=issues,
         )
-        journal_raw = _read_file(root_fd, "events.jsonl", issues, "unsafe_path")
-        events = _parse_journal(journal_raw, manifest, issues)
+        events = _parse_journal(root_fd, manifest, issues)
 
         outcome_raw = _read_file(root_fd, "outcome.json", issues, "unsafe_path")
         abandonment_raw = _read_file(root_fd, "abandonment.json", issues, "unsafe_path")
@@ -676,7 +850,7 @@ def verify_bundle(root: os.PathLike[str] | str) -> VerificationReport:
             terminal = "open"
         if marker is not None and marker.state != terminal:
             issues.warning("state_stale", "state.json")
-        _verify_semantics(events, marker, outcome, issues)
+        _verify_semantics(events, manifest, marker, outcome, issues)
         return VerificationReport(
             valid=not any(issue.severity == "error" for issue in issues.values),
             terminal_state=terminal,

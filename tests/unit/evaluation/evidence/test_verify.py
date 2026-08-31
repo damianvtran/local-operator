@@ -400,6 +400,51 @@ def test_state_is_diagnostic_and_terminal_files_win(tmp_path: Path) -> None:
     assert "state_stale" in {issue.code for issue in report.issues}
 
 
+def test_sparse_oversized_journal_and_artifact_are_bounded(tmp_path: Path) -> None:
+    import subprocess
+    import sys
+
+    script = r"""
+import json, os, resource, tempfile
+from pathlib import Path
+from local_operator.evaluation.evidence.store import EvidenceWriter
+from local_operator.evaluation.evidence.verify import verify_bundle
+from local_operator.evaluation.receipts import RedactionSet
+from tests.unit.evaluation.evidence.test_models import manifest
+root=Path(tempfile.mkdtemp())/'bundle'
+with EvidenceWriter.create(root,manifest(),RedactionSet.from_resolved_values(())):
+ pass
+with open(root/'events.jsonl','wb') as stream:
+ stream.truncate(128*1024*1024)
+before=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+journal=verify_bundle(root)
+after_journal=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+(root/'events.jsonl').write_bytes(b'')
+digest='f'*64
+with open(root/'artifacts'/digest,'wb') as stream:
+ stream.truncate(256*1024*1024+1)
+artifact=verify_bundle(root)
+after_artifact=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+scale=1 if __import__('sys').platform=='darwin' else 1024
+print(json.dumps({
+ 'journal':[i.code for i in journal.issues],
+ 'artifact':[i.code for i in artifact.issues],
+ 'rss_delta':(max(after_journal,after_artifact)-before)*scale,
+}))
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        text=True,
+        capture_output=True,
+        timeout=60,
+        check=True,
+    )
+    payload = json.loads(result.stdout)
+    assert "resource_limit_exceeded" in payload["journal"]
+    assert "resource_limit_exceeded" in payload["artifact"]
+    assert payload["rss_delta"] < 32 * 1024 * 1024
+
+
 def test_import_graph_remains_inert_in_fresh_subprocess(tmp_path: Path) -> None:
     import subprocess
     import sys
