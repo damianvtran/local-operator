@@ -393,6 +393,7 @@ def _verify_semantics(
     manifest: EvidenceManifest | None,
     marker: StateMarker | None,
     outcome: OutcomeSeal | None,
+    abandonment: AbandonmentRecord | None,
     issues: _Issues,
 ) -> None:
     requests: dict[str, ModelRequestPayload] = {}
@@ -414,6 +415,7 @@ def _verify_semantics(
     last_exchange: str | None = None
     lifecycle: dict[str, LifecycleTransitionPayload] = {}
     last_state_id: str | None = None
+    finalization_starts: list[FinalizationStartPayload] = []
     starts: list[ScoringStartPayload] = []
     results: list[ScoringResultPayload] = []
     preflights: list[PreflightPayload] = []
@@ -478,10 +480,20 @@ def _verify_semantics(
             len(commitments) != 1 or durable_finalizing or reconciled or cleaned
         ):
             issues.error("event_order_invalid", location)
-        elif event.kind == "finalization_start" and (
-            len(commitments) != 1 or durable_finalizing or reconciled or cleaned
-        ):
-            issues.error("event_order_invalid", location)
+        elif event.kind == "finalization_start":
+            early_preflight_failure = (
+                len(preflights) == 1
+                and not preflights[0].passed
+                and not commitments
+                and not execution_started
+            )
+            if (
+                (len(commitments) != 1 and not early_preflight_failure)
+                or durable_finalizing
+                or reconciled
+                or cleaned
+            ):
+                issues.error("event_order_invalid", location)
         elif event.kind == "scoring_start" and (
             len(commitments) != 1 or not durable_finalizing or starts or reconciled or cleaned
         ):
@@ -652,6 +664,9 @@ def _verify_semantics(
             cleanups.append(payload)
             seen_cleanup_receipts |= receipts
         elif isinstance(payload, FinalizationStartPayload):
+            if finalization_starts:
+                issues.error("finalization_invalid", location)
+            finalization_starts.append(payload)
             if (
                 marker is not None
                 and marker.state == "finalizing"
@@ -679,6 +694,40 @@ def _verify_semantics(
             results.append(payload)
 
     completed = [payload for payload in lifecycle.values() if payload.state == "completed"]
+    terminal_states = [
+        state for state in lifecycle.values() if state.state in {"completed", "failed", "cancelled"}
+    ]
+    finalization_required = (
+        (marker is not None and marker.state == "finalizing")
+        or outcome is not None
+        or (abandonment is not None and abandonment.finalization_id is not None)
+        or bool(terminal_states)
+        or bool(starts)
+        or bool(results)
+    )
+    if finalization_required and len(finalization_starts) != 1:
+        issues.error("finalization_invalid", "events.jsonl")
+    if len(finalization_starts) == 1:
+        authority = finalization_starts[0]
+        terminal = terminal_states[0] if len(terminal_states) == 1 else None
+        if terminal is not None and terminal.finalization_id != authority.finalization_id:
+            issues.error("finalization_invalid", "events.jsonl")
+        if outcome is not None and outcome.finalization_id != authority.finalization_id:
+            issues.error("finalization_invalid", "outcome.json")
+        if abandonment is not None and abandonment.finalization_id != authority.finalization_id:
+            issues.error("finalization_invalid", "abandonment.json")
+        if authority.intent == "score":
+            if (
+                len(starts) != 1
+                or starts[0].finalization_id != authority.finalization_id
+                or starts[0].scoring_operation_id != authority.scoring_operation_id
+                or starts[0].intent_digest != authority.intent_digest
+                or (results and results[0].finalization_id != authority.finalization_id)
+                or (results and results[0].scoring_operation_id != authority.scoring_operation_id)
+            ):
+                issues.error("finalization_invalid", "events.jsonl")
+        elif starts or results or (outcome is not None and outcome.result.status == "scored"):
+            issues.error("finalization_invalid", "events.jsonl")
     if marker is not None and marker.state == "finalizing":
         if marker.intent == "score":
             if len(starts) != 1:
@@ -691,9 +740,6 @@ def _verify_semantics(
                 issues.error("score_invalid", "state.json")
         elif starts or results:
             issues.error("score_invalid", "state.json")
-    terminal_states = [
-        state for state in lifecycle.values() if state.state in {"completed", "failed", "cancelled"}
-    ]
     terminal_location = "outcome.json" if outcome is not None else "events.jsonl"
     if terminal_output_observation is not None and not terminal_states:
         issues.error("finalization_invalid", terminal_location)
@@ -937,7 +983,7 @@ def verify_bundle(root: os.PathLike[str] | str) -> VerificationReport:
             terminal = "open"
         if marker is not None and marker.state != terminal:
             issues.warning("state_stale", "state.json")
-        _verify_semantics(events, manifest, marker, outcome, issues)
+        _verify_semantics(events, manifest, marker, outcome, abandonment, issues)
         return VerificationReport(
             valid=not any(issue.severity == "error" for issue in issues.values),
             terminal_state=terminal,

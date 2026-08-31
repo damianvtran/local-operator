@@ -315,6 +315,58 @@ def test_append_and_finalize_share_one_lock_order_without_corruption(tmp_path: P
     assert report.valid and report.terminal_state == "finalizing"
 
 
+def test_invalid_finalization_leaves_open_bytes_and_allows_retry(tmp_path: Path) -> None:
+    root = tmp_path / "bundle"
+    with EvidenceWriter.create(root, manifest(), redactions()) as writer:
+        before_state = (root / "state.json").read_bytes()
+        before_journal = (root / "events.jsonl").read_bytes()
+        before_head = (writer._sequence, writer._head)
+        with pytest.raises(EvidenceBundleInvalid, match="finalization start.*phase"):
+            writer.begin_finalization(
+                "final",
+                "score-op",
+                FinalizationIntent(kind="score", scorer_id="scorer", scorer_version="1"),
+                monotonic_ns=1,
+                wall_time_ms=1,
+            )
+        assert (root / "state.json").read_bytes() == before_state
+        assert (root / "events.jsonl").read_bytes() == before_journal
+        assert (writer._sequence, writer._head) == before_head
+        _append_authority(writer)
+        event = writer.begin_finalization(
+            "final",
+            "score-op",
+            FinalizationIntent(kind="score", scorer_id="scorer", scorer_version="1"),
+            monotonic_ns=1,
+            wall_time_ms=1,
+        )
+        assert event is not None and event.kind == "scoring_start"
+
+
+def test_invalid_intent_does_not_mutate_open_bundle(tmp_path: Path) -> None:
+    root = tmp_path / "bundle"
+    with EvidenceWriter.create(root, manifest(), redactions()) as writer:
+        _append_authority(writer)
+        before = (
+            (root / "state.json").read_bytes(),
+            (root / "events.jsonl").read_bytes(),
+            writer._sequence,
+            writer._head,
+        )
+        with pytest.raises(EvidenceBundleInvalid, match="operation ID"):
+            writer.begin_finalization(
+                "final",
+                None,
+                FinalizationIntent(kind="score", scorer_id="scorer", scorer_version="1"),
+            )
+        assert before == (
+            (root / "state.json").read_bytes(),
+            (root / "events.jsonl").read_bytes(),
+            writer._sequence,
+            writer._head,
+        )
+
+
 def test_finalizing_marker_precedes_scoring_start_and_closes_execution(tmp_path: Path) -> None:
     root = tmp_path / "bundle"
     with EvidenceWriter.create(root, manifest(), redactions()) as writer:

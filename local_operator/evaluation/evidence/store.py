@@ -66,7 +66,12 @@ _ABANDONMENT = "abandonment.json"
 _DIGEST_CHARS = frozenset("0123456789abcdef")
 # Only this exact semantic issue is expected when the finalizing marker reaches
 # disk before scoring_start. Integrity and confinement findings always block.
-_AMBIGUOUS_FINALIZATION_ISSUES = frozenset({("score_invalid", "state.json")})
+_AMBIGUOUS_FINALIZATION_ISSUES = frozenset(
+    {
+        ("score_invalid", "state.json"),
+        ("finalization_invalid", "events.jsonl"),
+    }
+)
 MAX_ARTIFACT_BYTES = 256 * 1024 * 1024
 MAX_PARSED_MEDIA_BYTES = 32 * 1024 * 1024
 _REDACTION_SCAN_BLOCK = 4 * 1024
@@ -770,7 +775,15 @@ class EvidenceWriter:
             if self._phase_commitment is None or self._phase_finalizing:
                 raise EvidenceBundleInvalid("execution evidence requires a prior commitment")
         elif event.kind == "finalization_start":
-            if self._phase_finalizing or self._phase_commitment is None:
+            early_preflight_failure = (
+                self._phase_preflight is not None
+                and not self._phase_preflight.passed
+                and self._phase_commitment is None
+                and not self._phase_execution
+            )
+            if self._phase_finalizing or (
+                self._phase_commitment is None and not early_preflight_failure
+            ):
                 raise EvidenceBundleInvalid("finalization start is out of evidence phase")
         elif event.kind == "scoring_start":
             if (
@@ -868,7 +881,7 @@ class EvidenceWriter:
                 wall_time_ms=wall_time_ms,
             )
 
-    def _append_locked(
+    def _build_event(
         self,
         kind: EventKind,
         payload: EventPayload | Mapping[str, Any],
@@ -876,6 +889,8 @@ class EvidenceWriter:
         monotonic_ns: int | None = None,
         wall_time_ms: int | None = None,
     ) -> EventRecord:
+        """Construct and phase-check the next record without mutating durable state."""
+
         now_monotonic = time.monotonic_ns() if monotonic_ns is None else monotonic_ns
         now_wall = int(time.time_ns() // 1_000_000) if wall_time_ms is None else wall_time_ms
         if now_monotonic < self._last_monotonic_ns or now_wall < self._last_wall_time_ms:
@@ -898,6 +913,11 @@ class EvidenceWriter:
             strict=True,
         )
         self._validate_event_phase(event)
+        return event
+
+    def _persist_prevalidated_event(self, event: EventRecord) -> EventRecord:
+        """Commit one already-validated record while the caller still holds the RLock."""
+
         encoded = event.to_canonical_json() + b"\n"
         try:
             _write_all(self._events_fd, encoded, self._calls)
@@ -909,10 +929,26 @@ class EvidenceWriter:
             raise
         self._sequence += 1
         self._head = event.event_id
-        self._last_monotonic_ns = now_monotonic
-        self._last_wall_time_ms = now_wall
+        self._last_monotonic_ns = event.monotonic_ns
+        self._last_wall_time_ms = event.wall_time_ms
         self._advance_event_phase(event)
         return event
+
+    def _append_locked(
+        self,
+        kind: EventKind,
+        payload: EventPayload | Mapping[str, Any],
+        *,
+        monotonic_ns: int | None = None,
+        wall_time_ms: int | None = None,
+    ) -> EventRecord:
+        event = self._build_event(
+            kind,
+            payload,
+            monotonic_ns=monotonic_ns,
+            wall_time_ms=wall_time_ms,
+        )
+        return self._persist_prevalidated_event(event)
 
     def _cleanup_artifact_temp(self, fd: int, temp: str) -> BaseException | None:
         """Attempt every temp cleanup step and return only the first failure.
@@ -1067,8 +1103,59 @@ class EvidenceWriter:
                 raise EvidenceTerminal("finalization has already begun")
             if (intent.kind == "score") != (scoring_operation_id is not None):
                 raise EvidenceBundleInvalid("scoring intent and operation ID disagree")
-            # Marker durability precedes scoring_start. If death lands between the
-            # two, recovery observes an ambiguous no-rescore boundary and abandons.
+            start = FinalizationStartPayload(
+                finalization_id=finalization_id,
+                intent=intent.kind,
+                scoring_operation_id=scoring_operation_id,
+            )
+            start_event = self._build_event(
+                "finalization_start",
+                start,
+                monotonic_ns=monotonic_ns,
+                wall_time_ms=wall_time_ms,
+            )
+            scoring_event: EventRecord | None = None
+            if intent.kind == "score":
+                assert scoring_operation_id is not None
+                assert intent.scorer_id is not None and intent.scorer_version is not None
+                # Simulate the fsynced start head only while validating the
+                # immediately-following scoring record; restore every assertion
+                # before the marker or journal is touched.
+                saved = (
+                    self._phase_finalizing,
+                    self._sequence,
+                    self._head,
+                    self._last_monotonic_ns,
+                    self._last_wall_time_ms,
+                )
+                self._phase_finalizing = True
+                self._sequence += 1
+                self._head = start_event.event_id
+                self._last_monotonic_ns = start_event.monotonic_ns
+                self._last_wall_time_ms = start_event.wall_time_ms
+                try:
+                    scoring_event = self._build_event(
+                        "scoring_start",
+                        ScoringStartPayload(
+                            finalization_id=finalization_id,
+                            scoring_operation_id=scoring_operation_id,
+                            scorer_id=intent.scorer_id,
+                            scorer_version=intent.scorer_version,
+                            intent_digest=start.intent_digest,
+                        ),
+                        monotonic_ns=monotonic_ns,
+                        wall_time_ms=wall_time_ms,
+                    )
+                finally:
+                    (
+                        self._phase_finalizing,
+                        self._sequence,
+                        self._head,
+                        self._last_monotonic_ns,
+                        self._last_wall_time_ms,
+                    ) = saved
+            # Marker durability follows complete semantic validation. From here
+            # onward any failure is genuine I/O ambiguity and forces recovery.
             try:
                 self._write_state(
                     self._root_fd,
@@ -1079,52 +1166,17 @@ class EvidenceWriter:
                         finalization_id=finalization_id,
                         scoring_operation_id=scoring_operation_id,
                         intent=intent.kind,
-                        intent_digest=intent.intent_digest,
+                        intent_digest=start.intent_digest,
                     ),
                     self._calls,
                 )
             except (OSError, EvidenceError):
                 self._poison()
                 raise
-            early_preflight_failure = (
-                self._phase_preflight is not None
-                and not self._phase_preflight.passed
-                and self._phase_commitment is None
-                and not self._phase_execution
-                and intent.kind == "unscored"
-            )
-            if early_preflight_failure:
-                # No budget or side-effect authority existed, so there is nothing
-                # to reconcile or clean and no scorer operation to make durable.
-                self._phase_finalizing = True
+            self._persist_prevalidated_event(start_event)
+            if scoring_event is None:
                 return None
-            self._append_locked(
-                "finalization_start",
-                FinalizationStartPayload(
-                    finalization_id=finalization_id,
-                    intent=intent.kind,
-                    scoring_operation_id=scoring_operation_id,
-                    intent_digest=intent.intent_digest,
-                ),
-                monotonic_ns=monotonic_ns,
-                wall_time_ms=wall_time_ms,
-            )
-            if intent.kind == "unscored":
-                return None
-            assert scoring_operation_id is not None
-            assert intent.scorer_id is not None and intent.scorer_version is not None
-            return self._append_locked(
-                "scoring_start",
-                ScoringStartPayload(
-                    finalization_id=finalization_id,
-                    scoring_operation_id=scoring_operation_id,
-                    scorer_id=intent.scorer_id,
-                    scorer_version=intent.scorer_version,
-                    intent_digest=intent.intent_digest,
-                ),
-                monotonic_ns=monotonic_ns,
-                wall_time_ms=wall_time_ms,
-            )
+            return self._persist_prevalidated_event(scoring_event)
 
     def _record_finalization_receipt(
         self,
@@ -1420,11 +1472,17 @@ class EvidenceWriter:
             ):
                 raise EvidenceBundleInvalid("bundle failed independent abandonment verification")
             events = report.events
+            starts = [
+                event.payload
+                for event in events
+                if isinstance(event.payload, FinalizationStartPayload)
+            ]
             record = AbandonmentRecord(
                 bundle_id=self.manifest.bundle_id,
                 manifest_digest=self.manifest.manifest_digest,
                 reason=reason,
                 diagnostic_code=diagnostic_code,
+                finalization_id=starts[0].finalization_id if len(starts) == 1 else None,
                 last_event_sequence=len(events) - 1 if events else None,
                 last_event_sha256=events[-1].event_id if events else self.manifest.manifest_digest,
                 event_count=len(events),

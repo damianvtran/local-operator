@@ -404,12 +404,19 @@ class FinalizationStartPayload(ProtocolModel):
     finalization_id: StrictIdentifier
     intent: Literal["score", "unscored"]
     scoring_operation_id: StrictIdentifier | None = None
-    intent_digest: Digest
+    intent_digest: Digest = ZERO_DIGEST
 
     @model_validator(mode="after")
     def _bind_operation(self) -> Self:
         if (self.intent == "score") != (self.scoring_operation_id is not None):
             raise ValueError("finalization intent and scoring operation disagree")
+        expected = canonical_digest(
+            "evidence-finalization-start-v1",
+            self.model_dump(mode="json", exclude={"intent_digest"}),
+        )
+        if self.intent_digest not in (ZERO_DIGEST, expected):
+            raise ValueError("finalization start identity does not match authority")
+        object.__setattr__(self, "intent_digest", expected)
         return self
 
 
@@ -653,6 +660,7 @@ class AbandonmentRecord(ProtocolModel):
     manifest_digest: Digest
     reason: AbandonmentReason
     diagnostic_code: StrictIdentifier
+    finalization_id: StrictIdentifier | None = None
     last_event_sequence: int | None = Field(default=None, ge=0, le=MAX_SAFE_JSON_INTEGER)
     last_event_sha256: Digest
     event_count: SafeCount
@@ -661,6 +669,8 @@ class AbandonmentRecord(ProtocolModel):
 
     @model_validator(mode="after")
     def _identify(self) -> Self:
+        if self.reason == "ambiguous_finalization" and self.finalization_id is None:
+            raise ValueError("ambiguous finalization abandonment requires finalization authority")
         expected = canonical_digest(
             "evidence-abandonment-v1",
             self.model_dump(mode="json", exclude={"abandonment_id"}),

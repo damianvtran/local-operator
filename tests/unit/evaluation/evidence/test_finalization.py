@@ -651,14 +651,18 @@ def test_early_preflight_failure_has_no_unused_authorities(tmp_path: Path) -> No
                 preflight_seal_id=DIGEST,
                 failure_kind="preflight",
             ),
-            monotonic_ns=1,
-            wall_time_ms=1,
+            monotonic_ns=3,
+            wall_time_ms=3,
         )
     finally:
         writer.close()
     report = verify_bundle(root)
     assert report.valid
-    assert [event.kind for event in report.events] == ["preflight", "lifecycle_transition"]
+    assert [event.kind for event in report.events] == [
+        "preflight",
+        "finalization_start",
+        "lifecycle_transition",
+    ]
 
 
 def test_infrastructure_failure_seals_unscored_not_binary_zero(tmp_path: Path) -> None:
@@ -708,6 +712,67 @@ def test_infrastructure_failure_seals_unscored_not_binary_zero(tmp_path: Path) -
     assert outcome.result.status == "unscored"
     assert outcome.result.binary is None
     assert verify_bundle(root).valid
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        {"finalization_id": "forged"},
+        {"intent": "unscored", "scoring_operation_id": None},
+        {"scoring_operation_id": "forged-op"},
+    ],
+)
+def test_sealed_verifier_rejects_forged_finalization_start(
+    tmp_path: Path, mutation: dict[str, Any]
+) -> None:
+    root = tmp_path / "bundle"
+    writer, score = _finalized(root)
+    try:
+        writer.seal(_draft(score))
+    finally:
+        writer.close()
+    lines = (root / "events.jsonl").read_bytes().splitlines()
+    records = [json.loads(line) for line in lines]
+    start_index = next(
+        index for index, record in enumerate(records) if record["kind"] == "finalization_start"
+    )
+    records[start_index]["payload"].update(mutation)
+    records[start_index]["payload"]["intent_digest"] = "0" * 64
+    previous = manifest().manifest_digest
+    rewritten = []
+    from local_operator.evaluation.evidence.models import EventRecord
+
+    for sequence, record in enumerate(records):
+        record.update(
+            {
+                "sequence": sequence,
+                "previous_event_sha256": previous,
+                "event_id": "0" * 64,
+            }
+        )
+        event = EventRecord.model_validate(record, strict=True)
+        rewritten.append(event.to_canonical_json())
+        previous = event.event_id
+    (root / "events.jsonl").write_bytes(b"\n".join(rewritten) + b"\n")
+    report = verify_bundle(root)
+    assert not report.valid
+    assert "finalization_invalid" in {issue.code for issue in report.issues}
+
+
+def test_sealed_verifier_rejects_invalid_finalization_start_digest(tmp_path: Path) -> None:
+    root = tmp_path / "bundle"
+    writer, score = _finalized(root)
+    try:
+        writer.seal(_draft(score))
+    finally:
+        writer.close()
+    lines = (root / "events.jsonl").read_bytes().splitlines()
+    start = next(json.loads(line) for line in lines if b'"kind":"finalization_start"' in line)
+    start["payload"]["intent_digest"] = "f" * 64
+    with pytest.raises(ValueError, match="finalization start identity"):
+        from local_operator.evaluation.evidence.models import FinalizationStartPayload
+
+        FinalizationStartPayload.model_validate(start["payload"], strict=True)
 
 
 def test_forged_outcome_artifact_cannot_bless_unreferenced_file(tmp_path: Path) -> None:

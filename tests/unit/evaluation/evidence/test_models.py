@@ -190,7 +190,6 @@ def test_manifest_golden_bytes_are_deterministic() -> None:
                 finalization_id="final",
                 intent="score",
                 scoring_operation_id="score-op",
-                intent_digest=DIGEST,
             ),
         ),
         (
