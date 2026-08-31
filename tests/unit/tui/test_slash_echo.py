@@ -583,17 +583,19 @@ async def test_session_adoption_catches_up_team_picker_and_name_highlight() -> N
         assert painted
 
 
-def _picker_geometry(app: OperatorApp, editor: Editor) -> dict[str, object]:
-    """The exact dock/screen coordinates a pending name row must preserve."""
-    return {
-        "composer": editor.region.y,
-        "picker": editor.picker.region.y,
-        "picker_height": editor.picker.region.height,
-        "status": app.query_one("#status-band").region.y,
-        "welcome": app.query_one(WelcomeView).region.y,
-        "screen": app.screen.size,
-        "virtual": app.screen.virtual_size,
-    }
+def _picker_geometry(
+    app: OperatorApp, editor: Editor
+) -> tuple[int, int, int, int, int, object, object]:
+    """Exact dock/screen coordinates for pending-name geometry assertions."""
+    return (
+        editor.region.y,
+        editor.picker.region.y,
+        editor.picker.region.height,
+        app.query_one("#status-band").region.y,
+        app.query_one(WelcomeView).region.y,
+        app.screen.size,
+        app.screen.virtual_size,
+    )
 
 
 @pytest.mark.asyncio
@@ -624,10 +626,11 @@ async def test_session_adoption_catches_up_agent_picker_without_geometry_change(
         # are intentionally not hard-coded here. Pin the exact dock geometry
         # and dimensions it must preserve across the three frames; the real
         # Session capture below supplies the absolute 24/25/26/1 coordinates.
-        assert pending["picker_height"] == 1
-        assert pending["picker"] - pending["composer"] == 1
-        assert pending["status"] - pending["composer"] == 2
-        assert pending["screen"] == pending["virtual"]
+        composer, picker_y, picker_h, status_y, _welcome_y, screen, virtual = pending
+        assert picker_h == 1
+        assert picker_y - composer == 1
+        assert status_y - composer == 2
+        assert screen == virtual
 
         release.set()
         await _boot(pilot, app)
@@ -640,11 +643,13 @@ async def test_session_adoption_catches_up_agent_picker_without_geometry_change(
         # the DOCK invariant pre/post and exact first/settled equality. The
         # real-Session capture has stable facts and asserts absolute equality.
         assert first == settled
-        assert pending["picker_height"] == first["picker_height"] == 1
-        assert pending["picker"] - pending["composer"] == 1
-        assert first["picker"] - first["composer"] == 1
-        assert pending["status"] - pending["composer"] == 2
-        assert first["status"] - first["composer"] == 2
+        pre_composer, pre_picker, pre_h, pre_status, *_ = pending
+        post_composer, post_picker, post_h, post_status, *_ = first
+        assert pre_h == post_h == 1
+        assert pre_picker - pre_composer == 1
+        assert post_picker - post_composer == 1
+        assert pre_status - pre_composer == 2
+        assert post_status - post_composer == 2
         assert editor.text == "/agent aud"
         assert editor.picker.is_loading() is False
         assert editor.picker.is_open()
@@ -759,7 +764,12 @@ async def test_pending_name_enter_is_noop_until_rows_arrive(command: str, query:
 @pytest.mark.parametrize(("command", "query"), [("team", "lop"), ("agent", "aud")])
 async def test_pending_name_placeholder_is_not_mouse_selectable(command: str, query: str) -> None:
     """U2-2: the loading reserve has no keyboard or mouse selection target."""
-    app = OperatorApp(lambda: asyncio.Event().wait())
+
+    async def never_adopts() -> FakeSession:
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    app = OperatorApp(never_adopts)
     async with app.run_test(size=(100, 30)) as pilot:
         editor = app.query_one(Editor)
         editor.focus()

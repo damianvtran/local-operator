@@ -724,7 +724,7 @@ class CommandPicker(Static):
         # than among them (see set_notice).
         self._notice = ""
         # True only while the one notice row is a TRANSIENT loading reserve —
-        # rows are expected to replace it (see set_loading). Kept as explicit
+        # rows are expected to replace it (see set_loading_reserve). Kept as explicit
         # state rather than inferred from the notice text, because the editor
         # must gate Tab/Enter on “this row will be replaced” — a notice like
         # `/logout`'s “no stored credentials” is a real answer that must keep
@@ -789,7 +789,7 @@ class CommandPicker(Static):
                     self._repaint()
                 self._report_highlight()
 
-    def set_loading(self, text: str) -> None:
+    def set_loading_reserve(self, text: str) -> None:
         """Reserve the notice row for rows that are still ARRIVING (U2-1).
 
         The team/agent name lists open before the session has adopted a
@@ -1004,7 +1004,7 @@ class CommandPicker(Static):
             self._chosen_by_hand = False
             self._notice = ""
             # The loading reserve goes with the notice it was riding: it
-            # described THAT list's transient window (see set_loading).
+            # described THAT list's transient window (see set_loading_reserve).
             self._loading = False
         self._query = query
         if query == self._dismissed_query:

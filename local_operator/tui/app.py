@@ -5460,7 +5460,7 @@ class OperatorApp(App[None]):
     def _fill_name_argument_list(self, editor: Any, command: str) -> None:
         """Fill one team/agent list and its O(1) highlighter snapshot together.
 
-        The pending notice goes through ``set_loading`` (not ``set_notice``)
+        The pending notice goes through ``set_loading_reserve`` (not ``set_notice``)
         so the picker records the row as a TRANSIENT reserve: the editor then
         consumes Tab/Enter until real rows land (U2-2), and every fill site
         — open, late adoption, empty-only refresh, slot crossing — routes
@@ -5478,15 +5478,15 @@ class OperatorApp(App[None]):
             # mode's notice/loading state; setting the reserve LAST makes it
             # belong to the new argument list (U2-1).
             picker.set_choices([])
-            picker.set_loading(pending)
+            picker.set_loading_reserve(pending)
             editor.set_name_choices(frozenset())
             return
 
         # Adoption/transition settled: withdraw the reserve before installing
-        # the authoritative rows. ``set_loading("")`` also closes the old
+        # the authoritative rows. ``set_loading_reserve("")`` also closes the old
         # informational surface, after which ``set_choices`` replaces it in
         # the same one-row geometry when a match exists (U2-1/U2-2).
-        picker.set_loading("")
+        picker.set_loading_reserve("")
         if command in ("team", "teams"):
             choices = self._team_argument_choices(editor)
             picker.set_choices(choices)
