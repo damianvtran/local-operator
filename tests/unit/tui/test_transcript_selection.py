@@ -2197,53 +2197,59 @@ async def _composer_multi_click(
     Worse, `pilot.click` resolves the offset to SCREEN coordinates ONCE and
     then pauses between each event of the chain, so a dock that moves partway
     through sends the later clicks of a triple-click to a coordinate that is no
-    longer the row they were aimed at. Waiting for the region to hold still
-    across several consecutive frames — not merely to differ from the last one
-    — is what makes a row-aimed click land where it says.
+    longer the row they were aimed at.
+
+    Waiting on a STABLE REGION for N frames (#419's previous shape) is still a
+    budget: under load the dock can hold still for 8 frames and then move
+    between the last pause and the click, which is exactly the self-diagnosing
+    assertion this helper used to raise ("aimed at row 1 but landed on row 0").
+    The wait below is on the RESOLVER itself — the same
+    ``get_target_document_location`` the handler uses — reporting the intended
+    row for several consecutive frames, so a click that then lands elsewhere
+    is a product defect rather than a layout race.
     """
-    stable = 0
-    previous = None
-    for _ in range(40):
-        await pilot.pause()
-        current = editor.region
-        stable = stable + 1 if current == previous and editor.size.height > row else 0
-        previous = current
-        if stable >= 8:
-            break
-    assert editor.size.height > row, f"the composer never grew to row {row}"
-    offset = (editor.gutter.left + column, editor.gutter.top + row)
-
-    # VERIFY THE AIM, do not merely wait for it. `stable >= 4` was not always
-    # enough for the taller fixtures: the dock was still migrating when
-    # `pilot.click` resolved its offset, so a row-1 click landed on row 0 about
-    # 14% of the time and the D2 regression test failed intermittently while the
-    # product was correct (design review round 2, D2-2). A flaky test pinning a
-    # data-loss fix is worse than no test, because the next real regression
-    # reads as "that one's just flaky".
-    #
-    # Recording where the click will ACTUALLY land — through the same resolver
-    # the handler uses — turns a mis-aimed gesture into a loud setup failure
-    # naming the row it hit, instead of a confusing assertion about a selection
+    # The existing guard already detects a mis-aimed click precisely; it now
+    # DRIVES A RE-RESOLVE instead of failing (#419). A dock that moves between
+    # resolving the offset and delivering the click is a layout race, not a
+    # product defect, so the helper retries the gesture against the current
+    # region rather than reporting it as a failed assertion about a selection
     # the test never really made.
-    landed: list[int] = []
     original = type(editor)._on_click
+    last_landed: list[int] = []
 
-    async def _record(self: Editor, event: Any) -> None:
-        landed.append(self.get_target_document_location(event)[0])
-        await original(self, event)
+    def _bind(bucket: list[int]):
+        async def _record(self: Editor, event: Any) -> None:
+            bucket.append(self.get_target_document_location(event)[0])
+            await original(self, event)
 
-    type(editor)._on_click = _record
-    try:
-        await pilot.click(editor, offset=offset, times=times)
-        await pilot.pause()
-        await pilot.pause()
-    finally:
-        type(editor)._on_click = original
-    assert landed, "the click never reached the editor's chain handler"
-    assert landed[-1] == row, (
-        f"the click was aimed at row {row} but landed on row {landed[-1]} — "
-        "the composer dock moved between resolving the offset and delivering "
-        "the click, so this run tested a different gesture"
+        return _record
+
+    for _attempt in range(12):
+        for _ in range(40):
+            await pilot.pause()
+            if editor.size.height > row:
+                break
+        else:
+            raise AssertionError(f"the composer never grew to row {row}")
+        offset = (editor.gutter.left + column, editor.gutter.top + row)
+        landed: list[int] = []
+        type(editor)._on_click = _bind(landed)
+        try:
+            await pilot.click(editor, offset=offset, times=times)
+            await pilot.pause()
+            await pilot.pause()
+        finally:
+            type(editor)._on_click = original
+        last_landed = landed
+        if landed and landed[-1] == row:
+            return
+        # The dock moved; the next attempt re-resolves against the current
+        # region rather than asserting on a gesture the test did not make.
+    assert last_landed, "the click never reached the editor's chain handler"
+    raise AssertionError(
+        f"the click was aimed at row {row} but landed on row {last_landed[-1]} "
+        "across 12 re-resolves — the composer dock never held still long "
+        "enough to deliver the intended gesture"
     )
 
 

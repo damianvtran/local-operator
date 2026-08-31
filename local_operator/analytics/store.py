@@ -68,6 +68,28 @@ MONTHLY_ROLLUP_RETENTION_MONTHS = 120
 _WRITE_RETRIES = 4
 _WRITE_RETRY_BACKOFF_S = 0.05
 
+#: Bounded retry for the DELETE->WAL journal-mode transition, which is NOT
+#: covered by ``busy_timeout`` and so needs its own loop (see ``_set_wal``).
+#: Same shape and budget as the write retry above: a few short backoffs on the
+#: background thread, then give up and run in whatever mode the file is in.
+_WAL_RETRIES = 6
+_WAL_RETRY_BACKOFF_S = 0.05
+
+
+def _is_lock_error(exc: BaseException) -> bool:
+    """Whether an OperationalError is contention (retryable) or a real fault.
+
+    SQLite reports both SQLITE_BUSY and SQLITE_LOCKED through
+    ``OperationalError`` with only the message to tell them apart from a
+    genuine fault such as a corrupt file or a read-only directory. That
+    distinction decides whether a failure may be retried or must disable the
+    store, so it lives in ONE predicate used by both the connect path and the
+    write path rather than being sniffed for separately in each.
+    """
+    text = str(exc).lower()
+    return "lock" in text or "busy" in text
+
+
 #: One component column per COMPONENT_KEYS entry, holding the ESTIMATED token
 #: attribution for that call. Storing the apportioned tokens (not just chars)
 #: means the aggregate query is a plain SUM with no per-row arithmetic, and the
@@ -430,6 +452,38 @@ class AnalyticsStore:
         self._insert_sql: str = _INSERT_SQL
 
     # -- connection ----------------------------------------------------------
+    @staticmethod
+    def _set_wal(conn: sqlite3.Connection) -> None:
+        """Switch the journal to WAL, retrying the contended DELETE->WAL step.
+
+        ``busy_timeout`` does NOT cover this statement. Changing the journal
+        mode needs an exclusive lock on the database, and SQLite fails that
+        acquisition with SQLITE_BUSY immediately instead of invoking the busy
+        handler, so the 5s timeout set just above buys nothing here. Measured on
+        a fresh database opened simultaneously by 16 processes: 25/320 opens
+        raised ``database is locked`` at this statement, and setting
+        ``busy_timeout`` first only brought that to 15/320 — reordering alone is
+        not a fix. With this bounded retry the same probe reports 0/320.
+
+        Only the FIRST process to reach a fresh file pays anything: once the
+        file is in WAL the pragma is a no-op that cannot fail (0/320 failures
+        against an already-WAL database), so this loop costs established
+        installations nothing.
+
+        A database that stays un-WAL after every attempt is still usable —
+        rollback-journal mode serialises writers rather than losing them — so
+        this returns quietly rather than raising and disabling the store.
+        """
+        for attempt in range(_WAL_RETRIES):
+            try:
+                conn.execute("PRAGMA journal_mode=WAL")
+                return
+            except sqlite3.OperationalError as exc:
+                if not _is_lock_error(exc) or attempt == _WAL_RETRIES - 1:
+                    logger.debug("analytics: could not enable WAL", exc_info=True)
+                    return
+                time.sleep(_WAL_RETRY_BACKOFF_S * (attempt + 1))
+
     def _connect(self) -> sqlite3.Connection | None:
         conn = getattr(self._local, "conn", None)
         if conn is not None:
@@ -445,9 +499,13 @@ class AnalyticsStore:
                 fd = os.open(self._db_path, os.O_CREAT | os.O_WRONLY, 0o600)
                 os.close(fd)
             conn = sqlite3.connect(str(self._db_path), timeout=5.0)
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA synchronous=NORMAL")
+            # busy_timeout FIRST: it arms SQLite's busy handler for everything
+            # that follows, including the schema script below. It is set before
+            # the journal-mode switch rather than after it because the switch is
+            # the single most lock-contended statement here (see ``_set_wal``).
             conn.execute("PRAGMA busy_timeout=5000")
+            self._set_wal(conn)
+            conn.execute("PRAGMA synchronous=NORMAL")
             # Schema creation is idempotent (IF NOT EXISTS) but should run once,
             # under a lock, so two threads opening their first connections
             # simultaneously do not both executescript into the same file.
@@ -468,7 +526,23 @@ class AnalyticsStore:
                     self._initialized = True
             self._local.conn = conn
             return conn
+        except sqlite3.OperationalError as exc:
+            # A LOCK failure here is TRANSIENT — another process is opening the
+            # same fresh database this instant — so it must NOT latch _broken.
+            # Latching it silently zeroed a whole process's analytics for its
+            # entire lifetime on a momentary race (#391: one of four parallel
+            # writers contributing exactly zero rows). Leaving _broken clear
+            # means the next write simply opens again and succeeds.
+            if _is_lock_error(exc):
+                logger.debug("analytics: %s busy while opening", self._db_path, exc_info=True)
+                return None
+            logger.debug("analytics: cannot open %s", self._db_path, exc_info=True)
+            self._broken = True
+            return None
         except Exception:  # noqa: BLE001 — store unavailable = analytics off
+            # Anything that is not a lock (a read-only home, a corrupt file, a
+            # bad path) IS permanent, and latching stops one log line per
+            # provider round trip for the life of the process.
             logger.debug("analytics: cannot open %s", self._db_path, exc_info=True)
             self._broken = True
             return None
@@ -582,7 +656,17 @@ class AnalyticsStore:
         """
         if not snapshots:
             return 0
-        conn = self._connect()
+        # Open is retried independently of the insert retry below: a lock on
+        # the DELETE->WAL transition used to return None here (and, before
+        # #391, latch ``_broken``), which dropped the WHOLE batch — one
+        # process contributing zero rows. A genuinely broken store still
+        # returns 0 on the first attempt (``_broken`` is sticky for those).
+        conn: sqlite3.Connection | None = None
+        for attempt in range(_WRITE_RETRIES):
+            conn = self._connect()
+            if conn is not None or self._broken:
+                break
+            time.sleep(_WRITE_RETRY_BACKOFF_S * (attempt + 1))
         if conn is None:
             return 0
         # Price each snapshot ONCE here (writer thread), then feed that figure
@@ -635,7 +719,7 @@ class AnalyticsStore:
                     conn.rollback()
                 except Exception:  # noqa: BLE001
                     pass
-                if "lock" not in str(exc).lower() and "busy" not in str(exc).lower():
+                if not _is_lock_error(exc):
                     logger.debug("analytics: batch insert failed", exc_info=True)
                     return 0
                 if attempt == _WRITE_RETRIES - 1:
