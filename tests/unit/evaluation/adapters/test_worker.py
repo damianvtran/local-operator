@@ -15,6 +15,7 @@ from local_operator.evaluation.adapters.api import (
     AdapterSelector,
     AdapterState,
     BeginRescueParams,
+    CleanupOutcome,
     CleanupParams,
     CleanupResult,
     Handshake,
@@ -24,6 +25,7 @@ from local_operator.evaluation.adapters.api import (
     PythonRuntime,
     RescueDescriptor,
 )
+from local_operator.evaluation.adapters.discovery import workspace_digest
 from local_operator.evaluation.adapters.rpc import (
     IncrementalReader,
     IncrementalWriter,
@@ -35,11 +37,7 @@ from local_operator.evaluation.adapters.rpc import (
 )
 from local_operator.evaluation.adapters.worker import Worker
 from local_operator.evaluation.evidence.models import canonical_digest
-from local_operator.evaluation.lifecycle import (
-    CleanupAction,
-    CleanupPlan,
-    record_cleanup,
-)
+from local_operator.evaluation.lifecycle import CleanupAction, CleanupPlan
 
 
 class CountingWorker(Worker):
@@ -255,10 +253,9 @@ class RescueAdapter:
         action_id = params.action_ids[0]
         self.cleanup_calls.append(action_id)
         return CleanupResult(
-            receipts=(
-                record_cleanup(
-                    params.cleanup_plan,
-                    action_id,
+            outcomes=(
+                CleanupOutcome(
+                    action_id=action_id,
                     status="succeeded",
                     evidence_code="released",
                     duration_ms=1,
@@ -270,6 +267,8 @@ class RescueAdapter:
 def rescue_selector(tmp_path: Path) -> AdapterSelector:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
+    release_digest = "b" * 64
+    (workspace / "adapter-release.json").write_text(f'{{"release_digest":"{release_digest}"}}')
     return AdapterSelector(
         schema_version="1.0",
         adapter_id="rescue",
@@ -277,9 +276,10 @@ def rescue_selector(tmp_path: Path) -> AdapterSelector:
         version="1.0",
         entry_point="rescue_adapter:create",
         package_digest="a" * 64,
-        release_digest="b" * 64,
+        release_digest=release_digest,
         python_executable=str(Path(sys.executable).resolve()),
         workspace=str(workspace),
+        workspace_digest=workspace_digest(str(workspace)),
         route_capability="computer",
     )
 
@@ -457,7 +457,7 @@ def test_rescue_cleanup_rejects_forged_episode_and_action_without_losing_pin(
         selector=selected,
         metadata=rescue_metadata(),
         python=PythonRuntime.current(),
-        workspace_digest="c" * 64,
+        workspace_digest=selected.workspace_digest,
         selected_route="computer",
     )
     descriptor = RescueDescriptor(

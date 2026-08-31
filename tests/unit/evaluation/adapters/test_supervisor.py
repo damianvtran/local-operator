@@ -19,12 +19,17 @@ from local_operator.evaluation.adapters.api import (
     AdapterSelector,
     AskUserExchangeParams,
     AskUserExchangeResult,
+    CleanupOutcome,
+    CleanupParams,
     CleanupResult,
     Handshake,
     ObservationResult,
     ObserveParams,
+    PrepareParams,
+    PrepareResult,
     PythonRuntime,
     RescueDescriptor,
+    ResetStartParams,
     ScoreParams,
     ScoreResult,
     observation_content_id,
@@ -43,11 +48,7 @@ from local_operator.evaluation.adapters.supervisor import (
     verify_artifact,
 )
 from local_operator.evaluation.evidence.models import EvidenceArtifactRef, ScoreArtifact
-from local_operator.evaluation.lifecycle import (
-    CleanupAction,
-    CleanupPlan,
-    record_cleanup,
-)
+from local_operator.evaluation.lifecycle import CleanupAction, CleanupPlan
 from local_operator.evaluation.protocol import ArtifactRef, Observation
 
 
@@ -64,6 +65,7 @@ def selector(tmp_path: Path) -> AdapterSelector:
         release_digest="b" * 64,
         python_executable=str(Path(sys.executable).resolve()),
         workspace=str(workspace),
+        workspace_digest="c" * 64,
         route_capability="computer",
     )
 
@@ -209,10 +211,19 @@ def test_ask_exchange_requires_expected_episode_and_preserves_pending_on_error(
 class RawSupervisor:
     def __init__(self, responses: list[Any]) -> None:
         self.responses = responses
+        self.terminated = False
+        self.calls: list[str] = []
+
+    async def terminate(self) -> None:
+        self.terminated = True
 
     async def _call_raw(self, *args: Any, **kwargs: Any) -> Any:
-        del args, kwargs
-        return self.responses.pop(0)
+        del kwargs
+        self.calls.append(args[0])
+        response = self.responses.pop(0)
+        if isinstance(response, BaseException):
+            raise response
+        return response
 
 
 def test_verified_session_rejects_bad_observe_without_mutation(tmp_path: Path) -> None:
@@ -247,6 +258,94 @@ def test_score_missing_artifact_can_retry_after_file_appears(tmp_path: Path) -> 
     verifier.accept_score(params, score)
     with pytest.raises(SupervisionError, match="duplicated"):
         verifier.accept_score(params, score)
+
+
+def test_changed_ask_prompt_is_rejected_without_dispatch(tmp_path: Path) -> None:
+    verifier = HostVerifier("task", "episode", tmp_path)
+    raw = RawSupervisor([AskUserExchangeResult(ask_id="ask", accepted=True)])
+    session = VerifiedAdapterSession(raw, verifier)  # type: ignore[arg-type]
+    begin = AskUserExchangeParams(
+        operation_id="begin", episode_id="episode", ask_id="ask", prompt="Original?"
+    )
+    session.begin_ask(begin)
+    changed = AskUserExchangeParams(
+        operation_id="finish",
+        episode_id="episode",
+        ask_id="ask",
+        prompt="Changed?",
+        answer="Answer",
+    )
+
+    async def run() -> None:
+        with pytest.raises(SupervisionError, match="mismatched"):
+            await session.finish_ask(changed, timeout=1)
+
+    import asyncio
+
+    asyncio.run(run())
+    assert raw.calls == [] and not raw.terminated
+
+
+def test_invalid_prepare_response_poisons_and_blocks_reset(tmp_path: Path) -> None:
+    verifier = HostVerifier("task", "episode", tmp_path)
+    wrong = PrepareResult(cleanup_plan=CleanupPlan(episode_id="other", actions=plan().actions))
+    raw = RawSupervisor([wrong])
+    rescue_required: list[bool] = []
+    session = VerifiedAdapterSession(
+        raw,  # pyright: ignore[reportArgumentType]
+        verifier,
+        rescue_required=lambda: rescue_required.append(True),
+    )
+    session.mark_rescue_persisted("d" * 64)
+    params = PrepareParams(
+        operation_id="prepare", episode_id="episode", secret_refs=(), infra_values=()
+    )
+
+    async def run() -> None:
+        with pytest.raises(SupervisionError, match="another episode"):
+            await session.prepare(params, timeout=1)
+        with pytest.raises(SupervisionError, match="poisoned"):
+            await session.reset_start(
+                ResetStartParams(operation_id="reset", task_id="task", episode_id="episode"),
+                timeout=1,
+            )
+
+    import asyncio
+
+    asyncio.run(run())
+    assert raw.calls == ["prepare"] and raw.terminated and rescue_required == [True]
+
+
+def test_ordinary_cleanup_rejects_forged_plan_before_dispatch(tmp_path: Path) -> None:
+    verifier = HostVerifier("task", "episode", tmp_path)
+    prepared = plan()
+    raw = RawSupervisor([])
+    session = VerifiedAdapterSession(raw, verifier)  # type: ignore[arg-type]
+    session._cleanup_plan = prepared
+    forged = CleanupPlan(
+        episode_id="episode",
+        actions=(
+            CleanupAction(
+                action_id=prepared.actions[0].action_id,
+                kind=prepared.actions[0].kind,
+                resource_ref="forged-resource",
+                timeout_ms=prepared.actions[0].timeout_ms,
+                max_attempts=prepared.actions[0].max_attempts,
+            ),
+        ),
+    )
+    params = CleanupParams(
+        operation_id="cleanup", cleanup_plan=forged, action_ids=(prepared.actions[0].action_id,)
+    )
+
+    async def run() -> None:
+        with pytest.raises(SupervisionError, match="prepared cleanup plan"):
+            await session.cleanup(params, timeout=1)
+
+    import asyncio
+
+    asyncio.run(run())
+    assert raw.calls == []
 
 
 def test_environment_is_constructed_without_parent_secrets() -> None:
@@ -379,15 +478,14 @@ class FakeSupervisor:
             return AckResult()
         assert method == "cleanup"
         action = self.expected.cleanup_plan.actions[0]
-        receipt = record_cleanup(
-            self.expected.cleanup_plan,
-            action.action_id,
+        outcome = CleanupOutcome(
+            action_id=action.action_id,
             status="succeeded",
             evidence_code="released",
             duration_ms=1,
         )
-        receipts = (receipt, receipt) if self.duplicate else (receipt,)
-        return CleanupResult(receipts=receipts)
+        outcomes = (outcome, outcome) if self.duplicate else (outcome,)
+        return CleanupResult(outcomes=outcomes)
 
     async def terminate(self) -> None:
         self.terminated = True

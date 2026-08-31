@@ -17,7 +17,7 @@ from typing import Any, Literal, Protocol, TypeAlias, runtime_checkable
 from pydantic import Field, field_validator, model_validator
 
 from local_operator.evaluation.evidence.models import ScoreArtifact, canonical_digest
-from local_operator.evaluation.lifecycle import CleanupPlan, CleanupReceipt
+from local_operator.evaluation.lifecycle import CleanupPlan
 from local_operator.evaluation.protocol import ActionBatch, Observation, ProtocolModel
 from local_operator.evaluation.receipts import (
     ZERO_DIGEST,
@@ -119,6 +119,7 @@ class AdapterSelector(ProtocolModel):
     release_digest: Digest
     python_executable: str = Field(min_length=1, max_length=4096)
     workspace: str = Field(min_length=1, max_length=4096)
+    workspace_digest: Digest
     route_capability: RouteCapability
 
     @field_validator("python_executable", "workspace")
@@ -216,6 +217,8 @@ class Handshake(ProtocolModel):
             raise ValueError("handshake does not repeat the exact adapter selection")
         if self.python.executable != selector.python_executable:
             raise ValueError("handshake resolved a different Python executable")
+        if self.workspace_digest != selector.workspace_digest:
+            raise ValueError("handshake workspace digest differs from selection")
         if self.selected_route != selector.route_capability:
             raise ValueError("handshake selected a different route")
         if self.selected_route not in metadata.capabilities.routes:
@@ -451,12 +454,21 @@ class CleanupParams(OperationParams):
         return self
 
 
-class CleanupResult(ProtocolModel):
-    receipts: tuple[CleanupReceipt, ...] = Field(max_length=MAX_RECEIPTS)
+class CleanupOutcome(ProtocolModel):
+    action_id: StrictIdentifier
+    status: Literal["not_needed", "attempted", "succeeded", "failed"]
+    evidence_code: StrictIdentifier
+    duration_ms: SafeCount
 
-    @field_validator("receipts", mode="before")
+
+class CleanupResult(ProtocolModel):
+    """Adapter evidence primitives; only the parent may mint receipts."""
+
+    outcomes: tuple[CleanupOutcome, ...] = Field(max_length=MAX_RECEIPTS)
+
+    @field_validator("outcomes", mode="before")
     @classmethod
-    def _freeze_receipts(cls, value: Any) -> Any:
+    def _freeze_outcomes(cls, value: Any) -> Any:
         return tuple(value) if isinstance(value, list) else value
 
 

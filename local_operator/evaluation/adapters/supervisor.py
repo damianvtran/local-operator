@@ -58,7 +58,12 @@ from local_operator.evaluation.evidence.media import (
     validate_media,
 )
 from local_operator.evaluation.evidence.models import canonical_digest
-from local_operator.evaluation.lifecycle import CleanupReceipt, aggregate_cleanup
+from local_operator.evaluation.lifecycle import (
+    CleanupPlan,
+    CleanupReceipt,
+    aggregate_cleanup,
+    record_cleanup,
+)
 from local_operator.evaluation.protocol import ArtifactRef, ProtocolModel
 from local_operator.evaluation.receipts import ZERO_DIGEST, Digest
 
@@ -492,7 +497,11 @@ class HostVerifier:
         request_digest = self._ask_request_digest(params)
         self._outstanding_ask = (params, request_digest)
 
-    def finish_ask(self, params: AskUserExchangeParams, result: AskUserExchangeResult) -> None:
+    def validate_ask_completion(
+        self,
+        params: AskUserExchangeParams,
+        result: AskUserExchangeResult | None = None,
+    ) -> None:
         outstanding = self._outstanding_ask
         request_digest = self._ask_request_digest(params)
         if (
@@ -500,10 +509,13 @@ class HostVerifier:
             or outstanding is None
             or outstanding[1] != request_digest
             or outstanding[0].ask_id != params.ask_id
-            or result.ask_id != params.ask_id
+            or (result is not None and result.ask_id != params.ask_id)
             or params.answer is None
         ):
             raise SupervisionError("ask-user response is stale, unsolicited, or mismatched")
+
+    def finish_ask(self, params: AskUserExchangeParams, result: AskUserExchangeResult) -> None:
+        self.validate_ask_completion(params, result)
         self._outstanding_ask = None
 
     @staticmethod
@@ -533,9 +545,51 @@ class HostVerifier:
 class VerifiedAdapterSession:
     """Typed application surface that cannot bypass parent-owned verification."""
 
-    def __init__(self, supervisor: AdapterSupervisor, verifier: HostVerifier) -> None:
+    def __init__(
+        self,
+        supervisor: AdapterSupervisor,
+        verifier: HostVerifier,
+        *,
+        rescue_required: Callable[[], None] | None = None,
+    ) -> None:
         self._supervisor = supervisor
         self.verifier = verifier
+        self._rescue_required = rescue_required or (lambda: None)
+        self._rescue_descriptor_id: Digest | None = None
+        self._cleanup_plan: CleanupPlan | None = None
+        self._poisoned = False
+
+    def mark_rescue_persisted(self, descriptor_id: Digest) -> None:
+        self._rescue_descriptor_id = descriptor_id
+
+    def _ensure_usable(self) -> None:
+        if self._poisoned:
+            raise SupervisionError("adapter session is poisoned; rescue is required")
+
+    async def _poison_after_ambiguous_mutation(self) -> None:
+        if self._poisoned:
+            return
+        self._poisoned = True
+        self._rescue_required()
+        await asyncio.shield(self._supervisor.terminate())
+
+    async def _mutating_call(
+        self,
+        method: Any,
+        params: ProtocolModel,
+        result_type: type[AdapterResult],
+        *,
+        timeout: float,
+        validate: Callable[[AdapterResult], None],
+    ) -> AdapterResult:
+        self._ensure_usable()
+        try:
+            result = await self._supervisor._call_raw(method, params, result_type, timeout=timeout)
+            validate(result)
+            return result
+        except BaseException:
+            await self._poison_after_ambiguous_mutation()
+            raise
 
     async def inspect_requirements(
         self, params: InspectRequirementsParams, *, timeout: float
@@ -549,10 +603,21 @@ class VerifiedAdapterSession:
     async def prepare(self, params: PrepareParams, *, timeout: float) -> PrepareResult:
         if params.episode_id != self.verifier.episode_id:
             raise SupervisionError("prepare belongs to another episode")
-        result = await self._supervisor._call_raw("prepare", params, PrepareResult, timeout=timeout)
+        self._ensure_usable()
+        if self._rescue_descriptor_id is None:
+            raise SupervisionError("prepare requires a persisted rescue descriptor")
+
+        def validate(result: AdapterResult) -> None:
+            if not isinstance(result, PrepareResult):
+                raise SupervisionError("prepare returned the wrong result")
+            if result.cleanup_plan.episode_id != self.verifier.episode_id:
+                raise SupervisionError("cleanup plan belongs to another episode")
+
+        result = await self._mutating_call(
+            "prepare", params, PrepareResult, timeout=timeout, validate=validate
+        )
         assert isinstance(result, PrepareResult)
-        if result.cleanup_plan.episode_id != self.verifier.episode_id:
-            raise SupervisionError("cleanup plan belongs to another episode")
+        self._cleanup_plan = result.cleanup_plan
         return result
 
     async def reset_start(self, params: ResetStartParams, *, timeout: float) -> ObservationResult:
@@ -561,7 +626,18 @@ class VerifiedAdapterSession:
             self.verifier.episode_id,
         ):
             raise SupervisionError("reset belongs to another task or episode")
-        ack = await self._supervisor._call_raw("reset_start", params, AckResult, timeout=timeout)
+        self._ensure_usable()
+        ack = await self._mutating_call(
+            "reset_start",
+            params,
+            AckResult,
+            timeout=timeout,
+            validate=lambda result: (
+                None
+                if isinstance(result, AckResult)
+                else (_ for _ in ()).throw(SupervisionError("reset returned the wrong result"))
+            ),
+        )
         assert isinstance(ack, AckResult)
         initial = await self._supervisor._call_raw(
             "observe",
@@ -574,13 +650,18 @@ class VerifiedAdapterSession:
         return initial
 
     async def observe(self, params: ObserveParams, *, timeout: float) -> ObservationResult:
+        self._ensure_usable()
         if params.episode_id != self.verifier.episode_id:
             raise SupervisionError("observe belongs to another episode")
-        result = await self._supervisor._call_raw(
-            "observe", params, ObservationResult, timeout=timeout
-        )
-        assert isinstance(result, ObservationResult)
-        self.verifier.verify_current_snapshot(result.observation)
+        try:
+            result = await self._supervisor._call_raw(
+                "observe", params, ObservationResult, timeout=timeout
+            )
+            assert isinstance(result, ObservationResult)
+            self.verifier.verify_current_snapshot(result.observation)
+        except BaseException:
+            await self._poison_after_ambiguous_mutation()
+            raise
         return result
 
     async def execute(self, params: ExecuteParams, *, timeout: float) -> ExecuteResult:
@@ -588,7 +669,18 @@ class VerifiedAdapterSession:
         if current is None:
             raise SupervisionError("execute has no current observation")
         params.action_batch.validate_for(current)
-        result = await self._supervisor._call_raw("execute", params, ExecuteResult, timeout=timeout)
+        self._ensure_usable()
+        result = await self._mutating_call(
+            "execute",
+            params,
+            ExecuteResult,
+            timeout=timeout,
+            validate=lambda value: (
+                self.verifier.validate_execution_result(params, value)
+                if isinstance(value, ExecuteResult)
+                else (_ for _ in ()).throw(SupervisionError("execute returned the wrong result"))
+            ),
+        )
         assert isinstance(result, ExecuteResult)
         self.verifier.accept_execution(params, result)
         return result
@@ -599,8 +691,19 @@ class VerifiedAdapterSession:
     async def finish_ask(
         self, params: AskUserExchangeParams, *, timeout: float
     ) -> AskUserExchangeResult:
-        result = await self._supervisor._call_raw(
-            "ask_user_exchange", params, AskUserExchangeResult, timeout=timeout
+        self._ensure_usable()
+        # This prospective check rejects changed prompts before an adapter call.
+        self.verifier.validate_ask_completion(params)
+        result = await self._mutating_call(
+            "ask_user_exchange",
+            params,
+            AskUserExchangeResult,
+            timeout=timeout,
+            validate=lambda value: (
+                self.verifier.validate_ask_completion(params, value)
+                if isinstance(value, AskUserExchangeResult)
+                else (_ for _ in ()).throw(SupervisionError("ask returned the wrong result"))
+            ),
         )
         assert isinstance(result, AskUserExchangeResult)
         self.verifier.finish_ask(params, result)
@@ -609,23 +712,62 @@ class VerifiedAdapterSession:
     async def score(self, params: ScoreParams, *, timeout: float) -> ScoreResult:
         if params.episode_id != self.verifier.episode_id:
             raise SupervisionError("score belongs to another episode")
-        result = await self._supervisor._call_raw("score", params, ScoreResult, timeout=timeout)
+        self._ensure_usable()
+        result = await self._mutating_call(
+            "score",
+            params,
+            ScoreResult,
+            timeout=timeout,
+            validate=lambda value: (
+                self.verifier.accept_score(params, value)
+                if isinstance(value, ScoreResult)
+                else (_ for _ in ()).throw(SupervisionError("score returned the wrong result"))
+            ),
+        )
         assert isinstance(result, ScoreResult)
-        self.verifier.accept_score(params, result)
         return result
 
-    async def cleanup(self, params: CleanupParams, *, timeout: float) -> CleanupResult:
-        if params.cleanup_plan.episode_id != self.verifier.episode_id:
-            raise SupervisionError("cleanup belongs to another episode")
-        result = await self._supervisor._call_raw("cleanup", params, CleanupResult, timeout=timeout)
-        assert isinstance(result, CleanupResult)
-        selected = set(params.action_ids)
+    async def cleanup(self, params: CleanupParams, *, timeout: float) -> tuple[CleanupReceipt, ...]:
+        self._ensure_usable()
+        plan = self._cleanup_plan
         if (
-            len(result.receipts) != len(selected)
-            or {receipt.action_id for receipt in result.receipts} != selected
+            plan is None
+            or params.cleanup_plan != plan
+            or params.cleanup_plan.episode_id != self.verifier.episode_id
         ):
-            raise SupervisionError("cleanup receipts differ from selected actions")
-        return result
+            raise SupervisionError("cleanup differs from the prepared cleanup plan")
+        selected = {
+            action.action_id: action
+            for action in plan.actions
+            if action.action_id in params.action_ids
+        }
+        if set(selected) != set(params.action_ids):
+            raise SupervisionError("cleanup selects an action outside the prepared plan")
+        receipts: tuple[CleanupReceipt, ...] = ()
+
+        def validate(value: AdapterResult) -> None:
+            nonlocal receipts
+            if not isinstance(value, CleanupResult):
+                raise SupervisionError("cleanup returned the wrong result")
+            if len(value.outcomes) != len(selected) or {
+                outcome.action_id for outcome in value.outcomes
+            } != set(selected):
+                raise SupervisionError("cleanup outcomes differ from selected actions")
+            receipts = tuple(
+                record_cleanup(
+                    plan,
+                    outcome.action_id,
+                    status=outcome.status,
+                    evidence_code=outcome.evidence_code,
+                    duration_ms=outcome.duration_ms,
+                )
+                for outcome in value.outcomes
+            )
+
+        await self._mutating_call(
+            "cleanup", params, CleanupResult, timeout=timeout, validate=validate
+        )
+        return receipts
 
     async def close(self, params: CloseParams, *, timeout: float) -> AckResult:
         if params.episode_id not in (None, self.verifier.episode_id):
@@ -796,15 +938,18 @@ async def run_rescue(
                 timeout=action.timeout_ms / 1000 * action.max_attempts,
             )
             assert isinstance(result, CleanupResult)
-            if len(result.receipts) != 1 or result.receipts[0].action_id != action.action_id:
-                raise SupervisionError("rescue cleanup returned missing or duplicate receipts")
-            receipt = result.receipts[0]
-            if (
-                receipt.cleanup_plan_id != descriptor.cleanup_plan.cleanup_plan_id
-                or receipt.action_digest != action.action_digest
-            ):
-                raise SupervisionError("rescue receipt differs from persisted cleanup action")
-            receipts.append(receipt)
+            if len(result.outcomes) != 1 or result.outcomes[0].action_id != action.action_id:
+                raise SupervisionError("rescue cleanup returned missing or duplicate outcomes")
+            outcome = result.outcomes[0]
+            receipts.append(
+                record_cleanup(
+                    descriptor.cleanup_plan,
+                    outcome.action_id,
+                    status=outcome.status,
+                    evidence_code=outcome.evidence_code,
+                    duration_ms=outcome.duration_ms,
+                )
+            )
         cleanup = aggregate_cleanup(descriptor.cleanup_plan, receipts)
         closed = await supervisor._call_raw(
             "close",
