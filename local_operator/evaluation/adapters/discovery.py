@@ -39,7 +39,6 @@ class ResolvedLaunch:
     executable_mode: int
     executable_size: int
     executable_sha256: str
-    executable_nlink: int
     workspace: str
     workspace_device: int
     workspace_inode: int
@@ -47,6 +46,9 @@ class ResolvedLaunch:
 
 
 def _symlink_free(path: Path) -> os.stat_result:
+    # The selector must name the resolved real interpreter and workspace, not a
+    # convenience alias: a symlink or lexical alias is exactly the substitution
+    # the dev/inode/content pins below are meant to detect.
     if not path.is_absolute() or os.path.normpath(str(path)) != str(path):
         raise AdapterDiscoveryError("adapter launch path must be normalized and absolute")
     try:
@@ -80,12 +82,12 @@ def resolve_launch(selector: AdapterSelector) -> ResolvedLaunch:
     workspace = Path(selector.workspace)
     executable_info = _symlink_free(executable)
     workspace_info = _symlink_free(workspace)
-    if (
-        not stat.S_ISREG(executable_info.st_mode)
-        or executable_info.st_nlink != 1
-        or not os.access(executable, os.X_OK)
-    ):
-        raise AdapterDiscoveryError("adapter Python must be one executable non-hardlinked file")
+    # A link count is a packaging detail, never an integrity property: CPython
+    # ships python/python3/python3.N as hardlinks to one inode, so requiring
+    # nlink==1 rejects every normal uv and system interpreter. Substitution is
+    # caught by the device/inode/mode/size/sha256 pins revalidated before spawn.
+    if not stat.S_ISREG(executable_info.st_mode) or not os.access(executable, os.X_OK):
+        raise AdapterDiscoveryError("adapter Python is not an executable regular file")
     executable_digest = _file_sha256(executable)
     if not stat.S_ISDIR(workspace_info.st_mode):
         raise AdapterDiscoveryError("adapter workspace is not a directory")
@@ -96,7 +98,6 @@ def resolve_launch(selector: AdapterSelector) -> ResolvedLaunch:
         executable_mode=executable_info.st_mode,
         executable_size=executable_info.st_size,
         executable_sha256=executable_digest,
-        executable_nlink=executable_info.st_nlink,
         workspace=str(workspace),
         workspace_device=workspace_info.st_dev,
         workspace_inode=workspace_info.st_ino,
@@ -107,7 +108,7 @@ def resolve_launch(selector: AdapterSelector) -> ResolvedLaunch:
 def validate_resolved_launch(launch: ResolvedLaunch) -> None:
     executable_info = _symlink_free(Path(launch.executable))
     workspace_info = _symlink_free(Path(launch.workspace))
-    if not stat.S_ISREG(executable_info.st_mode) or executable_info.st_nlink != 1:
+    if not stat.S_ISREG(executable_info.st_mode):
         raise AdapterDiscoveryError("adapter Python identity is unsafe")
     executable_digest = _file_sha256(Path(launch.executable))
     current = (
@@ -116,7 +117,6 @@ def validate_resolved_launch(launch: ResolvedLaunch) -> None:
         executable_info.st_mode,
         executable_info.st_size,
         executable_digest,
-        executable_info.st_nlink,
         workspace_info.st_dev,
         workspace_info.st_ino,
         workspace_info.st_mode,
@@ -127,7 +127,6 @@ def validate_resolved_launch(launch: ResolvedLaunch) -> None:
         launch.executable_mode,
         launch.executable_size,
         launch.executable_sha256,
-        launch.executable_nlink,
         launch.workspace_device,
         launch.workspace_inode,
         launch.workspace_mode,
@@ -137,7 +136,20 @@ def validate_resolved_launch(launch: ResolvedLaunch) -> None:
 
 
 def workspace_digest(path: str) -> str:
-    """Hash every immutable workspace file without following special entries."""
+    """Hash every immutable workspace file without following special entries.
+
+    The caps are a deliberate launch-time bound, not a performance target: at
+    the 4 GiB ceiling this streams for roughly four seconds once per launch and
+    per handshake, never during ordinary startup. A hardlinked workspace file
+    stays fatal here because a second name for adapter content is a mutation
+    channel the manifest cannot observe, unlike the interpreter, whose content
+    is pinned by digest.
+
+    The workspace is hashed at resolution and re-hashed by the worker during the
+    handshake, but it is not re-verified immediately before spawn the way the
+    executable identity is. That asymmetry is a known, deliberate gap for a
+    later round to close or accept explicitly.
+    """
 
     root = Path(path)
     root_info = _symlink_free(root)

@@ -7,6 +7,7 @@ import importlib.metadata
 import os
 import shutil
 import sys
+from io import StringIO
 from pathlib import Path
 
 import pytest
@@ -62,8 +63,6 @@ class FakeDistribution:
                     [relative, "" if unhashed else f"sha256={digest.decode()}", str(len(data))]
                 )
         rows.append(["tiny_adapter-1.0.dist-info/RECORD", "", ""])
-        from io import StringIO
-
         target = StringIO()
         csv.writer(target, lineterminator="\n").writerows(rows)
         self._record = target.getvalue()
@@ -129,13 +128,18 @@ def test_launch_identity_detects_swap(tmp_path: Path) -> None:
         validate_resolved_launch(resolved)
 
 
-def test_launch_rejects_hardlink_and_content_mutation(tmp_path: Path) -> None:
+def test_hardlinked_interpreter_is_accepted_and_content_mutation_detected(
+    tmp_path: Path,
+) -> None:
     base = selected(tmp_path, "a" * 64)
     executable = Path(base.python_executable)
+    # Stock CPython ships python/python3/python3.N as hardlinks to one inode, so
+    # a link count must never be the thing that rejects an interpreter.
     hardlink = tmp_path / "python-hardlink"
     os.link(executable, hardlink)
-    with pytest.raises(AdapterDiscoveryError, match="non-hardlinked"):
-        resolve_launch(base)
+    assert os.lstat(executable).st_nlink == 2
+    resolved = resolve_launch(base)
+    validate_resolved_launch(resolved)
     hardlink.unlink()
     resolved = resolve_launch(base)
     with executable.open("r+b") as stream:
