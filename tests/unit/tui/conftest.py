@@ -86,10 +86,11 @@ class StyledTranscriptApp(App[None]):
         yield TranscriptView()
 
 
-#: The composer's prompt marker. The pickers repeat the glyph — deliberately,
-#: so a highlighted row sits in the prompt's own column — but they mount BELOW
-#: the input row, so the FIRST match down the frame is always the composer's.
+#: Mirrored from ``local_operator.tui.app`` so this helper does not import
+#: the app module (conftest loads for every TUI test). The match is pinned
+#: by ``test_composer_markers_match_the_app``.
 PROMPT_CHEVRON = "❯"
+SHELL_CHEVRON = "$"
 
 
 def composer_cells(app: App[None]) -> list[tuple[str, str | None, str | None]]:
@@ -100,28 +101,29 @@ def composer_cells(app: App[None]) -> list[tuple[str, str | None, str | None]]:
     a colour the stylesheet resolved. Both are only answerable from what the
     terminal was SENT, which is what ``render_strips`` returns.
 
-    Located by the chevron rather than by the copy so the same reader works in
-    every mode the composer has words for — ``Read-only — press esc to reply``
-    and ``Aside — esc returns to the chat`` are composer rows too.
-
-    The FIRST match is the composer's even with a picker open. Both pickers
-    repeat the glyph, deliberately in the prompt's own column, but ``compose``
-    yields them AFTER ``#input-row`` in ``#input-shell``'s normal flow, so they
-    can only render below it. The ``/resume`` picker is a pushed Screen, so
-    while it is up the composer is genuinely off the frame and the raise is the
-    honest answer rather than a missed row.
+    Located by ``#prompt-chevron``'s laid-out row rather than by scanning
+    for a glyph. Bang-mode paints ``$`` instead of ``❯`` (#385), and ``$``
+    is ordinary prose — a scan would steal the first dollar in the
+    transcript. The widget's ``region.y`` is the compositor strip index
+    (measured); the ``/resume`` picker is a pushed Screen, so while it is
+    up the composer is genuinely off the frame and the raise is the honest
+    answer rather than a missed row.
     """
-    for strip in app.screen._compositor.render_strips():
-        if PROMPT_CHEVRON not in strip.text:
-            continue
-        cells = []
-        for segment in strip._segments:
-            style = segment.style
-            fg = style.color.get_truecolor().hex.lower() if style and style.color else None
-            bg = style.bgcolor.get_truecolor().hex.lower() if style and style.bgcolor else None
-            cells.append((segment.text, fg, bg))
-        return cells
-    raise AssertionError("the composer row is not on the frame at all")
+    try:
+        chevron = app.query_one("#prompt-chevron")
+    except Exception as exc:
+        raise AssertionError("the composer row is not on the frame at all") from exc
+    y = chevron.region.y
+    strips = list(app.screen._compositor.render_strips())
+    if y < 0 or y >= len(strips):
+        raise AssertionError("the composer row is not on the frame at all")
+    cells = []
+    for segment in strips[y]._segments:
+        style = segment.style
+        fg = style.color.get_truecolor().hex.lower() if style and style.color else None
+        bg = style.bgcolor.get_truecolor().hex.lower() if style and style.bgcolor else None
+        cells.append((segment.text, fg, bg))
+    return cells
 
 
 def caret_cells(cells: list[tuple[str, str | None, str | None]]) -> list[str]:
@@ -143,4 +145,7 @@ def chevron_colour(cells: list[tuple[str, str | None, str | None]]) -> str | Non
     the same neutral ramp, which is a 3.86x luminance move against `dim` where
     the accent was 2.15x.
     """
-    return next(fg for text, fg, _ in cells if PROMPT_CHEVRON in text)
+    markers = {PROMPT_CHEVRON, SHELL_CHEVRON}
+    # Exact cell, not a substring: `$` is ordinary prose, so a typed
+    # `$ ls` on the same strip must not steal the marker's ink.
+    return next(fg for text, fg, _ in cells if text.strip() in markers)

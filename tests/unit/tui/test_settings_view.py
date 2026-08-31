@@ -694,6 +694,133 @@ async def test_pane_sheds_on_a_narrow_terminal() -> None:
         assert "esc" in view.rendered_hints()
 
 
+def _settings_rows_on_frame(app: OperatorApp, view: SettingsView) -> int:
+    """How many of the view's painted list rows survived onto the frame.
+
+    ``_list_text`` is what the Static holds; the compositor is what the
+    terminal was sent. At 16 rows they used to disagree — the body's
+    parent resolved to zero content rows, so a painted row was clipped
+    away and the page showed chrome around a blank band (#431). Counting
+    compositor hits is the only honest measure of "the user can see a
+    setting".
+    """
+    lines = [strip.text for strip in app.screen._compositor.render_strips()]
+    on_frame = 0
+    for row in view._list_text.plain.split("\n"):
+        stripped = row.strip()
+        if not stripped:
+            continue
+        # Match a distinctive interior of the painted row, not a single
+        # token: "Model" is also in the title path on some machines, and
+        # a one-word match would count chrome as content.
+        needle = stripped.lstrip("› ").strip()
+        if len(needle) < 8:
+            continue
+        needle = needle[:18]
+        if any(needle in line for line in lines):
+            on_frame += 1
+    return on_frame
+
+
+@pytest.mark.asyncio
+async def test_settings_keeps_a_body_row_on_a_short_terminal() -> None:
+    """At 16 rows the page used to paint header, rule, detail, hints and
+    a blank band — honest about being a settings page, silent about
+    every setting (#431). Chrome pays for a body row, one row at a
+    time, so restoring a unit as the terminal grows never drops the
+    body.
+
+    Asserted against the compositor, not ``body.size``: at 16 rows the
+    body widget reported height 1 while painting zero rows onto the
+    frame, which is how a size assertion would have shipped the defect.
+    """
+    from local_operator.tui.widgets.settings_view import _TOO_SHORT
+
+    counts: dict[int, int] = {}
+    for height in (14, 15, 16, 17, 18, 20, 24):
+        app = OperatorApp(lambda: _factory(FakeSession()))
+        async with app.run_test(size=(100, height)) as pilot:
+            await pilot.pause()
+            app._open_settings_view()
+            view = app.query_one(SettingsView)
+            await pilot.pause()
+            await pilot.pause()
+            on_frame = _settings_rows_on_frame(app, view)
+            counts[height] = on_frame
+            painted = "\n".join(strip.text for strip in app.screen._compositor.render_strips())
+            if height >= 15:
+                assert on_frame >= 1, (
+                    f"at {height} rows the body painted {on_frame} setting "
+                    "rows onto the frame — chrome around a blank band (#431)"
+                )
+                assert not view._too_short
+                # A section header alone is not a setting. At 16 rows the
+                # one body row used to be `Model`; parking on the selected
+                # row is what makes the floor a setting the user can act on.
+                if height == 16:
+                    assert "Default provider" in painted, painted
+            else:
+                assert on_frame == 0
+                assert view._too_short
+                assert _TOO_SHORT in view._detail_text.plain
+                assert _TOO_SHORT in painted
+            assert "esc" in view.rendered_hints()
+            assert view._title.display
+
+    # Monotonic: growing the terminal never loses a body row. A 2-row
+    # shed (the detail line) at 16 would give the body 2 rows and
+    # restoring it at 17 would drop the body to 1 — the non-monotonic
+    # move the issue forbids.
+    heights = sorted(counts)
+    for earlier, later in zip(heights, heights[1:]):
+        assert counts[later] >= counts[earlier], (
+            f"body rows dropped from {counts[earlier]} at {earlier} to "
+            f"{counts[later]} at {later}: the page got worse as the "
+            f"terminal grew ({counts})"
+        )
+
+
+@pytest.mark.asyncio
+async def test_the_height_ladder_dies_when_the_body_floor_is_broken() -> None:
+    """Mutation test for the 16-row guard. A test keyed on today's
+    chrome flags would keep passing if `_BODY_MIN_ROWS` were raised
+    (or the ladder inverted) and 16 rows went back to a blank band.
+
+    Break the floor: force full chrome at 16 rows, the way the page
+    used to look, and confirm THIS test's sibling assertion would
+    die. Restored afterwards so the rest of the suite is unaffected.
+    """
+    from local_operator.tui.widgets import settings_view as sv
+
+    original = sv.SettingsView._apply_height_ladder
+
+    def full_chrome(self: SettingsView) -> None:
+        self._chrome_pad = True
+        self._chrome_rule = True
+        self._chrome_columns = True
+        self._too_short = False
+        self._rule.display = True
+        self._columns.display = True
+        self._columns.styles.padding = (1, 0, 0, 0)
+
+    sv.SettingsView._apply_height_ladder = full_chrome  # type: ignore[method-assign]
+    try:
+        app = OperatorApp(lambda: _factory(FakeSession()))
+        async with app.run_test(size=(100, 16)) as pilot:
+            await pilot.pause()
+            app._open_settings_view()
+            view = app.query_one(SettingsView)
+            await pilot.pause()
+            await pilot.pause()
+            on_frame = _settings_rows_on_frame(app, view)
+            assert on_frame == 0, (
+                "the mutation did not reproduce the blank band; this "
+                f"test is not guarding the 16-row floor (on_frame={on_frame})"
+            )
+    finally:
+        sv.SettingsView._apply_height_ladder = original  # type: ignore[method-assign]
+
+
 @pytest.mark.asyncio
 async def test_footer_sheds_but_always_names_esc() -> None:
     """The footer concatenates with no per-clause shedding downstream, so the
