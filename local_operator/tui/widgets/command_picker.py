@@ -49,6 +49,7 @@ from rich.style import Style
 from rich.text import Text
 from textual import events
 from textual.dom import NoScreen
+from textual.message import Message
 from textual.widgets import Static
 
 from local_operator.tui import theme as theme_mod
@@ -673,6 +674,28 @@ class CommandPicker(Static):
     never touches the buffer.
     """
 
+    class RowsResized(Message):
+        """The picker's pinned height changed, so the dock around it has moved.
+
+        The picker is a child of ``#input-dock``, and the boot composition
+        centres the splash against the dock's measured height
+        (``_sync_boot_composition``). That measurement is deliberately NOT a
+        self-rescheduling read of a laid-out frame — it is arithmetic run at
+        known moments — so when this widget's row count changes the app has no
+        other way to learn the dock got taller or shorter.
+
+        It went wrong exactly where the two disagreed (R7-3): a delayed session
+        adoption composed the dock while the picker still held its ONE-row
+        loading reserve, then replaced it with a two-row roster that nobody
+        re-measured. The dock kept the lift computed for the shorter list and
+        floated four rows above the bottom, with a visible gap under the status
+        band, while the identical non-delayed screen sat flush. Same class of
+        problem, and same remedy, as ``WelcomeView.BlockResized``.
+
+        Posted only when the height actually CHANGES, so an unchanged repaint
+        (the common case — every keystroke repaints) costs nothing.
+        """
+
     def __init__(
         self,
         on_choose: Callable[[str], None],
@@ -696,6 +719,10 @@ class CommandPicker(Static):
         #: Last name reported to ``_on_preview``, de-duplicated for the same
         #: reason as ``_reported_highlight``.
         self._reported_preview: str | None = None
+        #: Rows currently pinned by ``_pin_height``. Tracked here rather than
+        #: read back off ``styles.height`` so the change test is a plain int
+        #: comparison and cannot be confused by a Scalar's units (R7-3).
+        self._pinned_rows: int | None = None
         #: Observer for the row the user is CONSIDERING — the hover target when
         #: the mouse is over a row, else the keyboard highlight — called with
         #: ``None`` when an argument list stops showing rows. It exists for
@@ -1199,7 +1226,7 @@ class CommandPicker(Static):
         if not self._matches:
             # The informational row stands alone: one row, no window and no
             # overflow count, because there is nothing to count.
-            self.styles.height = 1
+            self._pin_height(1)
             self.update(self._notice_row(width))
             return
         rows = self.render_rows(width)
@@ -1208,8 +1235,32 @@ class CommandPicker(Static):
         # Pin the height: `auto` would measure content before layout knows the
         # real width and settle one row too tall per suggestion, exactly the
         # trap ToolCard documents.
-        self.styles.height = row_count
+        self._pin_height(row_count)
         self.update(self.render_text(width))
+
+    def _pin_height(self, rows: int) -> None:
+        """Pin the picker to ``rows`` and announce a CHANGE to the dock (R7-3).
+
+        The single place the height is written, so no path can resize the
+        picker without the boot composition hearing about it. The comparison is
+        against the last value THIS method wrote rather than ``styles.height``,
+        which is a Scalar and compares awkwardly, and the message is posted only
+        on a real change so the per-keystroke repaint stays free.
+        """
+        # The height is written UNCONDITIONALLY. Only the notification is
+        # gated: `styles.height` is also cleared/re-derived from outside this
+        # widget (a close hides it, a re-open re-applies the sheet), so an
+        # early return here would let a stale pin survive a reopen.
+        self.styles.height = rows
+        if rows == self._pinned_rows:
+            return
+        self._pinned_rows = rows
+        # Guarded: the widget repaints before it is on a screen during compose,
+        # and posting from there raises rather than reaching the app.
+        try:
+            self.post_message(self.RowsResized())
+        except NoScreen:  # pragma: no cover - pre-mount repaint
+            pass
 
     def _row(self, index: int, width: int) -> Text:
         """The row for suggestion ``index``, dispatched on what it stands for."""

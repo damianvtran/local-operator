@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Barrier, BrokenBarrierError, Thread
@@ -1734,3 +1735,170 @@ def test_concurrent_readers_never_see_mixed_row_during_repeated_updates(
     assert mixed == [], f"mixed revisions observed: {mixed[:5]}"
     final = TeamRegistry(tmp_path).get_team(team.id)
     assert (final.name, final.instructions, final.project) in revisions
+
+
+def _hold_lock_process(config_dir: Path, seconds: float) -> subprocess.Popen[str]:
+    """Hold the registry lock from ANOTHER process, as a peer `lop` does."""
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import fcntl, os, sys, time\n"
+                "fd = os.open(sys.argv[1], os.O_CREAT | os.O_RDWR, 0o600)\n"
+                "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+                "sys.stdout.write('held\\n'); sys.stdout.flush()\n"
+                "time.sleep(float(sys.argv[2]))\n"
+            ),
+            str(config_dir / ".teams.lock"),
+            str(seconds),
+        ],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    assert proc.stdout is not None
+    assert proc.stdout.readline().strip() == "held", "peer never took the lock"
+    return proc
+
+
+def test_read_never_waits_on_a_peer_holding_the_lock(tmp_path: Path) -> None:
+    """R7-1: a contended read serves the current view instead of blocking.
+
+    The reported freeze: `_team_choices` calls `list_teams` synchronously on the
+    TUI event loop, and a crash artifact made every read take the bounded 10s
+    WRITER wait. One `/team ` keystroke fans out into several reads, so a peer
+    mid-publish froze the whole app for a minute. The read path must try-acquire
+    and move on.
+    """
+    registry = TeamRegistry(tmp_path)
+    team = registry.create_team(TeamEditFields(name="visible"))
+    registry.list_teams()
+    _strand_backup(registry, team.id)
+
+    holder = _hold_lock_process(tmp_path, 30)
+    try:
+        started = time.monotonic()
+        for _ in range(6):  # one keystroke's fan-out
+            registry._last_refresh_time = 0.0
+            registry.list_teams()
+        elapsed = time.monotonic() - started
+    finally:
+        holder.kill()
+        holder.wait()
+
+    # Generous bound: the point is orders of magnitude, not a tight budget. The
+    # unfixed path took 6 x 10s here; anything near a second is a regression.
+    assert elapsed < 1.0, f"contended reads blocked for {elapsed:.2f}s"
+
+
+def test_contended_read_recovers_once_the_peer_releases(tmp_path: Path) -> None:
+    """R7-1: skipping recovery is a DEFERRAL, never a permanent give-up."""
+    registry = TeamRegistry(tmp_path)
+    team = registry.create_team(TeamEditFields(name="survivor", instructions="briefs"))
+    registry.list_teams()
+    _strand_backup(registry, team.id)
+
+    holder = _hold_lock_process(tmp_path, 30)
+    try:
+        registry._last_refresh_time = 0.0
+        # Contended: the row is not recoverable right now, and the reader says
+        # so by serving what it has rather than raising or hanging.
+        registry.list_teams()
+    finally:
+        holder.kill()
+        holder.wait()
+
+    # The cooldown bounds ATTEMPTS, so a read past it retries and heals.
+    registry._recovery_attempted_at = 0.0
+    registry._last_refresh_time = 0.0
+    names = [t.name for t in registry.list_teams()]
+    assert names == ["survivor"]
+    assert (registry.teams_dir / team.id).is_dir()
+
+
+def test_repeated_reads_make_at_most_one_recovery_attempt_per_cooldown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R7-1: many rapid reads must not each pay a recovery probe."""
+    registry = TeamRegistry(tmp_path)
+    team = registry.create_team(TeamEditFields(name="ops"))
+    registry.list_teams()
+    _strand_backup(registry, team.id)
+
+    attempts = 0
+    real_lock = TeamRegistry._persistence_lock
+
+    def counting_lock(self, *args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        return real_lock(self, *args, **kwargs)
+
+    monkeypatch.setattr(TeamRegistry, "_persistence_lock", counting_lock)
+    holder = _hold_lock_process(tmp_path, 20)
+    try:
+        for _ in range(24):  # four keystrokes' worth of reads
+            registry._last_refresh_time = 0.0
+            registry.list_teams()
+    finally:
+        holder.kill()
+        holder.wait()
+    assert attempts == 1, f"{attempts} recovery attempts for one unchanged artifact"
+
+
+def test_failed_restore_keeps_raising_rather_than_reporting_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R6-4 must survive R7-1: a real restore FAILURE is not softened.
+
+    The cooldown that bounds contended attempts must never turn an artifact
+    that genuinely cannot be restored into a silent "no teams" — that is the
+    U6-1 failure mode, and the row is still on disk.
+    """
+    registry = TeamRegistry(tmp_path)
+    team = registry.create_team(TeamEditFields(name="survivor"))
+    backup = _strand_backup(registry, team.id)
+    real_replace = teams_module.os.replace
+
+    def deny(src, dst, **kwargs):
+        if Path(src) == backup:
+            raise PermissionError("denied")
+        return real_replace(src, dst, **kwargs)
+
+    monkeypatch.setattr(teams_module.os, "replace", deny)
+    # EVERY read keeps raising, including ones inside the attempt cooldown.
+    for _ in range(5):
+        registry._last_refresh_time = 0.0
+        with pytest.raises(TeamRegistryRecoveryError, match="fix registry permissions"):
+            registry.list_teams()
+    assert backup.is_dir()
+
+
+def test_construction_never_raises_and_defers_the_error_to_first_use(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R7-2: a broken registry must not abort the session that constructs it.
+
+    `session_factory` builds the registry during boot, before the model, the
+    tools and the transcript exist, so a raise there took down the whole app
+    over a `teams/` directory the user may never have used.
+    """
+    registry = TeamRegistry(tmp_path)
+    team = registry.create_team(TeamEditFields(name="survivor"))
+    backup = _strand_backup(registry, team.id)
+    real_replace = teams_module.os.replace
+
+    def deny(src, dst, **kwargs):
+        if Path(src) == backup:
+            raise PermissionError("denied")
+        return real_replace(src, dst, **kwargs)
+
+    monkeypatch.setattr(teams_module.os, "replace", deny)
+    fresh = TeamRegistry(tmp_path)  # must not raise
+    assert isinstance(fresh.recovery_error, TeamRegistryRecoveryError)
+    # ...but the first real read still refuses to answer with a half-truth.
+    with pytest.raises(TeamRegistryRecoveryError):
+        fresh.list_teams()
+
+    monkeypatch.undo()
+    recovered = TeamRegistry(tmp_path).get_team_by_name("survivor")
+    assert recovered is not None

@@ -21,6 +21,7 @@ from pathlib import Path
 
 import pytest
 from rich.style import Style
+from textual.containers import Container
 
 from local_operator.session.goal import MAX_GOAL_CHARS, GoalState
 from local_operator.tui import theme as theme_mod
@@ -1385,3 +1386,205 @@ async def test_an_unknown_command_names_what_was_typed() -> None:
     assert "unknown command" in painted, painted
     assert rows == [], rows
     assert welcome is True
+
+
+def _dock_geometry(app: OperatorApp, editor: Editor) -> dict[str, int]:
+    """ABSOLUTE dock/composer/picker/status coordinates (R7-3).
+
+    Deliberately absolute rather than dock-relative. The reflow this guards
+    kept every relative offset intact — composer, picker and status band all
+    moved TOGETHER — while the whole dock floated four rows off the bottom of
+    the screen with a visible gap under it. The existing catch-up tests assert
+    relative geometry and single-match queries, and neither could see it.
+    """
+    dock = app.query_one("#input-dock", Container)
+    return {
+        "dock_y": dock.region.y,
+        "dock_h": dock.region.height,
+        "pad_b": int(dock.styles.padding.bottom),
+        "composer_y": editor.region.y,
+        "picker_y": editor.picker.region.y,
+        "picker_h": editor.picker.region.height,
+        "status_y": app.query_one("#status-band").region.y,
+    }
+
+
+async def _team_picker_geometry(match_count: int, *, delayed: bool) -> dict[str, int]:
+    """Settle `/team lop` against ``match_count`` matching rows and measure.
+
+    ``delayed`` selects the arm: False adopts the session BEFORE the query is
+    typed (the ordinary path), True types the query while the factory is still
+    blocked and releases it afterwards (the catch-up path this PR added).
+    """
+    from local_operator.teams import TeamEditFields, TeamRegistry
+
+    names = ["lopdev", "lopsec", "lopops", "lopqa"][:match_count]
+    session = FakeSession()
+    registry = TeamRegistry(Path(tempfile.mkdtemp()))
+    for name in (*names, "other"):  # `other` never matches `lop`
+        registry.create_team(TeamEditFields(name=name, manager="manager"))
+    session.team_registry = registry
+    release = asyncio.Event()
+
+    async def factory() -> FakeSession:
+        if delayed:
+            await release.wait()
+        return session
+
+    app = OperatorApp(factory)
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        if not delayed:
+            await _boot(pilot, app)
+        for char in "/team lop":
+            await pilot.press("slash" if char == "/" else ("space" if char == " " else char))
+        await pilot.pause()
+        if delayed:
+            release.set()
+            await _boot(pilot, app)
+        for _ in range(6):
+            await pilot.pause()
+        assert editor.picker.region.height == match_count, "query did not match as intended"
+        settled = _dock_geometry(app, editor)
+        # A settled frame must not move again: a second pass that differs is a
+        # reflow the user sees as motion (AGENTS.md "Animation and multi-frame").
+        await pilot.pause()
+        assert _dock_geometry(app, editor) == settled
+        assert app.screen.size == app.screen.virtual_size
+        assert app.screen.show_vertical_scrollbar is False
+        return settled
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("match_count", [1, 2, 3])
+async def test_delayed_and_direct_team_picker_settle_at_identical_geometry(
+    match_count: int,
+) -> None:
+    """R7-3: catch-up must land the dock exactly where the direct path does.
+
+    Parametrised past ONE match on purpose. With a single match the delayed
+    reserve and the real list are both one row, so the composition measured
+    against the reserve happens to stay correct and the bug is invisible; at
+    two rows the dock kept the shorter list's lift and floated `-5` rows with
+    an empty band under the status line.
+    """
+    direct = await _team_picker_geometry(match_count, delayed=False)
+    delayed = await _team_picker_geometry(match_count, delayed=True)
+    assert delayed == direct, f"delayed arm reflowed: {delayed} != {direct}"
+    # Pin the ABSOLUTE frame, not just the agreement between the two arms: two
+    # arms that agree on a WRONG geometry is exactly the regression this
+    # guards, and the numbers below are the ones the at-rest composition
+    # produces for this 100x30 host.
+    assert direct["picker_h"] == match_count
+    assert direct["composer_y"] == direct["dock_y"] + 1
+    assert direct["picker_y"] == direct["composer_y"] + 1
+    assert direct["status_y"] == direct["picker_y"] + match_count
+    # The lift is the ONE quantity that went wrong: it is the composition's
+    # reserve BELOW the dock, and the bug wrote a lift measured against the
+    # 1-row reserve while a taller list was showing. Whatever it is, both arms
+    # must have computed it from the same list.
+    assert delayed["pad_b"] == direct["pad_b"]
+
+
+@pytest.mark.asyncio
+async def test_team_picker_absolute_geometry_matches_at_rest_composition() -> None:
+    """R7-3: the picker must not shift the dock away from where boot put it.
+
+    The reflow was only visible against an ABSOLUTE reference, so this test
+    supplies one that does not come from the picker at all: the same app with
+    no picker open. Opening a list may change the dock's HEIGHT (it gains
+    rows), but the bottom of the composition — the status band — must stay put.
+    """
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        for _ in range(4):
+            await pilot.pause()
+        at_rest_status_y = app.query_one("#status-band").region.y
+
+    for match_count in (1, 2, 3):
+        for delayed in (False, True):
+            geometry = await _team_picker_geometry(match_count, delayed=delayed)
+            # One match still fits under the at-rest splash budget; more rows
+            # legitimately buy space from the composition's lift. Either way the
+            # band never falls BELOW where boot placed it, which is what a dock
+            # floating above the bottom of the screen looks like numerically.
+            assert geometry["status_y"] <= at_rest_status_y, (
+                f"{match_count} matches, delayed={delayed}: status band moved "
+                f"to {geometry['status_y']} against at-rest {at_rest_status_y}"
+            )
+
+
+@pytest.mark.asyncio
+async def test_failed_boot_retires_the_team_reserve_and_restores_enter() -> None:
+    """U7-1: after boot FAILS, `/team` must stop promising rows and take Enter.
+
+    The reserve is keyed to "no session adopted yet", which a failed boot makes
+    permanently true: the row read `loading teams…` forever and `is_loading()`
+    swallowed every Enter, so the user pressed into silence. A boot failure is
+    as authoritative as an empty roster — nothing is arriving.
+    """
+
+    async def failing_factory() -> FakeSession:
+        raise RuntimeError("registry exploded")
+
+    app = OperatorApp(failing_factory)
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        for _ in range(40):
+            await pilot.pause()
+            if app._boot_failed:
+                break
+        assert app._boot_failed is True
+        assert app._session is None
+
+        for char in "/team lop":
+            await pilot.press("slash" if char == "/" else ("space" if char == " " else char))
+        await pilot.pause()
+        await pilot.pause()
+        # No eternal placeholder, and no loading latch to eat accept keys.
+        assert editor.picker._notice == ""
+        assert editor.picker.is_loading() is False
+
+        await pilot.press("enter")
+        await pilot.pause()
+        # Enter reached the ordinary submit path: the draft was consumed and the
+        # app reported the session state, instead of the keypress vanishing.
+        assert editor.text == ""
+        rendered = " ".join(
+            str(getattr(block, "_text", "") or "") for block in app._transcript_view().children
+        )
+        assert "session is still starting" in rendered
+
+
+@pytest.mark.asyncio
+async def test_boot_failure_flag_clears_when_a_new_session_transition_starts() -> None:
+    """U7-1: a later `/resume`/`/login` re-opens the arriving window."""
+
+    async def failing_factory() -> FakeSession:
+        raise RuntimeError("registry exploded")
+
+    app = OperatorApp(failing_factory)
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(40):
+            await pilot.pause()
+            if app._boot_failed:
+                break
+        assert app._boot_failed is True
+
+        settled = asyncio.Event()
+
+        async def transition() -> None:
+            await settled.wait()
+
+        app._run_session_transition(transition())
+        await pilot.pause()
+        # A session is arriving again, so the reserve is allowed to promise
+        # rows: the failure no longer describes the app's state.
+        assert app._boot_failed is False
+        assert app._name_list_pending_notice("team") == "loading teams…"
+        settled.set()
+        await pilot.pause()

@@ -94,6 +94,34 @@ _ROW_SNAPSHOT_RETRY_S = 0.005
 _TEAM_LOCK_TIMEOUT_S = 10.0
 _TEAM_LOCK_RETRY_S = 0.01
 
+#: How long a READ may wait for the writer lock before serving the current
+#: on-disk view instead (R7-1).
+#:
+#: Reads run SYNCHRONOUSLY on the TUI event loop — ``_team_choices`` calls
+#: ``list_teams`` from a keystroke handler — and a `.<id>.backup.*` artifact is
+#: visible for the whole ``target -> backup -> staged -> target`` window of
+#: every healthy publish (measured at ~35% of wall time under continuous peer
+#: writes). Letting a reader take the bounded 10 s writer wait therefore turned
+#: one `/team ` keystroke, which fans out into several registry reads, into a
+#: 60 s frozen app. A reader never NEEDS the lock: recovery is an optimisation
+#: that heals a crashed peer's tree, and the current snapshot is a legitimate
+#: answer while another process is mid-publish.
+#:
+#: So the read path try-acquires. Zero means "one non-blocking attempt", which
+#: is what every UI-reachable read uses. A CLI/tool read — which owns its
+#: process and blocks no event loop — may pass a short bound so a one-shot
+#: `teams list` immediately after a crash still heals the tree rather than
+#: losing the race to a peer that happens to hold the lock (U6-1).
+_READ_RECOVERY_UI_WAIT_S = 0.0
+_READ_RECOVERY_CLI_WAIT_S = 2.0
+
+#: Minimum seconds between read-path recovery ATTEMPTS for an unchanged artifact
+#: set (R7-1). Without it, a failing or contended attempt is retried on every
+#: read, so a burst of keystrokes pays the probe repeatedly for one artifact
+#: that is not going anywhere. Recovery is still attempted IMMEDIATELY whenever
+#: the artifact set changes, so a genuinely new crash is never delayed by it.
+_READ_RECOVERY_COOLDOWN_S = 1.0
+
 
 #: How deep an org (a team whose members are themselves teams) may nest before
 #: the resolver stops descending. Eight levels is far past any real human org
@@ -460,10 +488,36 @@ class TeamRegistry:
         self._briefs_loaded: set[str] = set()
         self._last_refresh_time = 0.0
         self._refresh_interval = refresh_interval
+        # Which artifact set the last read-path recovery attempt was made
+        # against, and when — the bound that keeps a burst of keystrokes from
+        # re-probing one stranded backup on every read (R7-1).
+        self._recovery_attempted_for: frozenset[str] | None = None
+        self._recovery_attempted_at = 0.0
+        # The artifact set a restore was attempted against and FAILED. Distinct
+        # from the attempt latch above because the two get opposite treatment:
+        # a contended attempt serves the current view, a failed restore keeps
+        # raising while the artifact is on disk (R6-4). The exception itself is
+        # kept so the repeat carries the ORIGINAL cause and wording rather than
+        # a re-derived approximation of it.
+        self._recovery_failed_for: frozenset[str] | None = None
+        self._recovery_failure: TeamRegistryRecoveryError | None = None
         # Recovery is the sole startup read that may create a lock sidecar, and
         # only when a crash artifact proves work is required. Unused registries
         # remain side-effect free.
-        self._recover_for_read_if_needed()
+        #
+        # CONSTRUCTION MUST NOT RAISE (R7-2). Every interactive session builds a
+        # registry during boot, and `session_factory` builds this one before the
+        # model, the tools and the transcript exist. An unrecoverable `teams/`
+        # — a feature the user may never have touched — therefore used to take
+        # down the entire session. The recovery failure is REMEMBERED instead
+        # and re-raised by the first real read/mutation, so the teams feature
+        # degrades on its own while the session starts normally, and every
+        # caller that does touch teams still gets the concise guidance.
+        self.recovery_error: TeamRegistryRecoveryError | None = None
+        try:
+            self._recover_for_read_if_needed()
+        except TeamRegistryRecoveryError as exc:
+            self.recovery_error = exc
         self._load()
 
     def _load(self) -> None:
@@ -534,16 +588,59 @@ class TeamRegistry:
         self._briefs_loaded = set()
         self._last_refresh_time = time.time()
 
-    def _refresh_if_needed(self) -> None:
-        self._recover_for_read_if_needed()
+    def _refresh_if_needed(self, *, wait: float | None = None) -> None:
+        """Heal, then refresh the snapshot if the interval has elapsed.
+
+        ``wait`` is threaded to :meth:`_recover_for_read_if_needed` so a
+        process-owning caller (CLI, tool) can afford a short bounded acquisition
+        while a UI caller stays strictly non-blocking (R7-1).
+        """
+        self._raise_if_recovery_failed()
+        self._recover_for_read_if_needed(wait=wait)
         if time.time() - self._last_refresh_time > self._refresh_interval:
             self._load()
 
-    def _recover_for_read_if_needed(self) -> None:
-        """Recover hidden backups before a read can report a row as missing."""
+    def _raise_if_recovery_failed(self) -> None:
+        """Re-raise a construction-time recovery failure at the first real use.
+
+        Construction swallows it so a session can still start (R7-2), but a
+        caller that actually reads or mutates teams must not be told the
+        registry is merely empty — a hidden authoritative row invalidates
+        absence and uniqueness answers exactly as it does mid-session (R6-4).
+        Re-raised rather than latched forever: the next call re-attempts
+        recovery through the normal path, so fixing the permissions and
+        retrying works without restarting the session.
+        """
+        error, self.recovery_error = self.recovery_error, None
+        if error is not None:
+            raise error
+
+    def _recover_for_read_if_needed(self, *, wait: float | None = None) -> None:
+        """Recover hidden backups before a read can report a row as missing.
+
+        NEVER blocks on the writer lock by default (R7-1). ``wait`` is the
+        acquisition budget: the default :data:`_READ_RECOVERY_UI_WAIT_S` is 0,
+        i.e. ONE non-blocking attempt, because this runs synchronously on the
+        TUI event loop through ``_team_choices`` -> ``list_teams``. A crash
+        artifact is present for the whole publish window of every healthy peer
+        write, so a reader that waited turned an ordinary keystroke into a
+        multi-second freeze.
+
+        Failing to ACQUIRE and failing to RESTORE are deliberately different
+        outcomes (R6-4 must survive R7-1's fix):
+
+        * Lock unavailable — transient, and it means a compliant peer is
+          holding it, so the artifact is very likely that peer's own in-flight
+          publish rather than a crash. Serve the current on-disk view and try
+          again later. Raising here would make a healthy concurrent write look
+          like corruption.
+        * Restore attempted and FAILED — authoritative. ``_recover_interrupted
+          _swap_locked`` raises :class:`TeamRegistryRecoveryError` and it
+          propagates, so no read can present a durable row as missing.
+        """
         try:
-            needs_recovery = any(
-                _backup_row_id(child) is not None for child in self.teams_dir.iterdir()
+            artifacts = frozenset(
+                child.name for child in self.teams_dir.iterdir() if _backup_row_id(child)
             )
         except FileNotFoundError:
             return
@@ -551,15 +648,75 @@ class TeamRegistry:
             raise TeamRegistryRecoveryError(
                 "Could not inspect interrupted team saves; fix registry access and retry"
             ) from exc
-        if not needs_recovery:
+        if not artifacts:
+            # The tree is clean, so a later artifact is genuinely new and must
+            # not be held off by state this pass would otherwise leave set.
+            self._recovery_attempted_for = None
+            self._recovery_failed_for = None
+            self._recovery_failure = None
             return
-        with self._persistence_lock():
-            # The lock performs recovery before yielding. Reload while still
-            # serialized so the read adopts exactly the healed tree.
-            self._load()
+        # A set we have already PROVEN unrecoverable stays an error for as long
+        # as it is on disk (R6-4). This is the one case the cooldown must not
+        # soften into "serve the current view": the artifact is authoritative,
+        # restore actually failed, and reporting the row as missing would send
+        # the user off to re-create something that still exists. Cheap — it is
+        # a set comparison against the listing this method already did.
+        if artifacts == self._recovery_failed_for and self._recovery_failure is not None:
+            raise self._recovery_failure
+        # Bound the ATTEMPTS. An unchanged artifact set we tried to heal
+        # recently and could not even get the lock for is not worth re-probing
+        # on every keystroke; a CHANGED set is a new crash and is attempted
+        # immediately.
+        now = time.monotonic()
+        if (
+            artifacts == self._recovery_attempted_for
+            and now - self._recovery_attempted_at < _READ_RECOVERY_COOLDOWN_S
+        ):
+            return
+        self._recovery_attempted_for = artifacts
+        self._recovery_attempted_at = now
+        budget = _READ_RECOVERY_UI_WAIT_S if wait is None else wait
+        try:
+            with self._persistence_lock(wait=budget):
+                # The lock performs recovery before yielding. Reload while still
+                # serialized so the read adopts exactly the healed tree.
+                self._load()
+        except TeamRegistryLockTimeout:
+            # Transient contention only — see the docstring. The current
+            # snapshot stands and the next read past the cooldown retries.
+            return
+        except TeamRegistryRecoveryError as exc:
+            # Restore was attempted and genuinely failed. Latch the exact
+            # artifact set so the cooldown above cannot turn the next read into
+            # a silent empty answer, and let the caller see the guidance.
+            self._recovery_failed_for = artifacts
+            self._recovery_failure = exc
+            raise
+        # Recovery succeeded, so the artifacts it healed are gone. Clear the
+        # latches rather than leaving them pointing at names that no longer
+        # exist, which would suppress the immediate attempt a genuinely new
+        # crash carrying the SAME row id deserves.
+        self._recovery_attempted_for = None
+        self._recovery_failed_for = None
+        self._recovery_failure = None
 
-    def list_teams(self) -> list[Team]:
-        self._refresh_if_needed()
+    def list_teams(self, *, recovery_wait: float | None = None) -> list[Team]:
+        """Every team, metadata only, sorted by name.
+
+        ``recovery_wait`` is the read-path lock budget (R7-1). It defaults to a
+        strictly NON-BLOCKING attempt, which is what EVERY caller reachable from
+        an event loop must use: the TUI's `/team` picker calls this from a
+        keystroke handler, and the ``team`` tool is awaited on the session's
+        loop, so a bounded wait in either freezes the app.
+
+        Only the ``teams`` CLI passes :data:`_READ_RECOVERY_CLI_WAIT_S`. It owns
+        its process, blocks no UI, and is a ONE-SHOT: losing a lock race there
+        means the user's single command silently fails to heal the tree, with no
+        later read to retry. U6-1 itself does not depend on the wait — an
+        interrupted save with no peer contending is recovered by the
+        non-blocking attempt on the first try, on every path.
+        """
+        self._refresh_if_needed(wait=recovery_wait)
         return sorted(self._teams.values(), key=lambda team: team.name.lower())
 
     def _load_briefs(self, team: Team) -> Team:
@@ -710,9 +867,9 @@ class TeamRegistry:
                 os.close(directory_fd)
         return _read_optional(team_dir / "instructions.md"), _read_optional(team_dir / "project.md")
 
-    def get_team(self, team_id: str) -> Team:
+    def get_team(self, team_id: str, *, recovery_wait: float | None = None) -> Team:
         team_id = validate_team_id(team_id)
-        self._refresh_if_needed()
+        self._refresh_if_needed(wait=recovery_wait)
         team = self._teams.get(team_id)
         if team is None:
             raise KeyError(f"Team with id {team_id} not found")
@@ -730,13 +887,13 @@ class TeamRegistry:
             return None
         return next((team for team in self._teams.values() if team.name.casefold() == key), None)
 
-    def get_team_by_name(self, name: str) -> Team | None:
-        self._refresh_if_needed()
+    def get_team_by_name(self, name: str, *, recovery_wait: float | None = None) -> Team | None:
+        self._refresh_if_needed(wait=recovery_wait)
         team = self._find_cached_team_by_name(name)
         return self._load_briefs(team) if team is not None else None
 
     @contextmanager
-    def _persistence_lock(self) -> Iterator[None]:
+    def _persistence_lock(self, *, wait: float | None = None) -> Iterator[None]:
         """Serialize one registry mutation across processes.
 
         The sidecar lives at config level rather than inside ``teams/`` so it
@@ -750,11 +907,20 @@ class TeamRegistry:
         A timeout raises :class:`TeamRegistryLockTimeout` so the CLI/tool
         boundaries can present contention as a recoverable state instead of a
         crash traceback (U5-1).
+
+        ``wait`` overrides how long acquisition may take, for the READ path
+        only (R7-1). Mutations keep the full :data:`_TEAM_LOCK_TIMEOUT_S`
+        because a create/update/delete that gives up has failed to do the thing
+        the user asked for; a read that gives up simply serves the snapshot it
+        already has, which is always a truthful answer. ``wait=0`` makes exactly
+        one non-blocking attempt, which is what a caller on the UI event loop
+        must use — see :data:`_READ_RECOVERY_UI_WAIT_S`.
         """
         self.config_dir.mkdir(parents=True, exist_ok=True)
         fd = os.open(self.config_dir / ".teams.lock", os.O_CREAT | os.O_RDWR, 0o600)
         acquired = False
-        deadline = time.monotonic() + _TEAM_LOCK_TIMEOUT_S
+        budget = _TEAM_LOCK_TIMEOUT_S if wait is None else max(0.0, wait)
+        deadline = time.monotonic() + budget
         try:
             while not acquired:
                 acquired = _try_lock_exclusive(fd)

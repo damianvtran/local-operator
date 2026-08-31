@@ -1619,9 +1619,29 @@ def agents_create_command(name: str, agent_registry: "AgentRegistry") -> int:
     return 0
 
 
+def _cli_recovery_wait() -> float:
+    """Read-path recovery budget for the one-shot ``teams`` commands (R7-1).
+
+    Read from the registry module rather than restated so the two cannot
+    drift. The import is FUNCTION-LOCAL for the same reason every other
+    ``local_operator.teams`` reference in this module is: the module builds
+    pydantic models at import time and must stay off the CLI startup path
+    (pinned by ``test_import_graph``).
+    """
+    from local_operator.teams import _READ_RECOVERY_CLI_WAIT_S
+
+    return _READ_RECOVERY_CLI_WAIT_S
+
+
 def teams_list_command(team_registry: Any) -> int:
-    """List all teams."""
-    teams = team_registry.list_teams()
+    """List all teams.
+
+    Reads with the CLI recovery budget: this is a one-shot command that owns
+    its process and blocks no event loop, so it can afford to wait briefly for
+    a peer's publish to finish rather than lose the race and skip healing an
+    interrupted save (R7-1; the UI path stays strictly non-blocking).
+    """
+    teams = team_registry.list_teams(recovery_wait=_cli_recovery_wait())
     if not teams:
         print("\n\033[1;33mNo teams found.\033[0m")
         return 0
@@ -1667,8 +1687,11 @@ def teams_create_command(args: argparse.Namespace, team_registry: Any) -> int:
 
 
 def teams_show_command(name: str, team_registry: Any) -> int:
-    """Print a team's roster and briefs."""
-    team = team_registry.get_team_by_name(name)
+    """Print a team's roster and briefs.
+
+    Same one-shot recovery budget as ``teams_list_command`` (R7-1).
+    """
+    team = team_registry.get_team_by_name(name, recovery_wait=_cli_recovery_wait())
     if team is None:
         print(f"\n\033[1;31mError: No team found with name: {name}\033[0m")
         return 1
@@ -3164,7 +3187,6 @@ def main() -> int:
         } and isinstance(e, (TimeoutError, RuntimeError)):
             print(f"\n\033[1;31mError: {str(e)}\033[0m", file=sys.stderr)
             return 1
-        # STDERR, always. main() wraps the `exec` dispatch too, so this is the
         # STDERR, always. main() wraps the `exec` dispatch too, so this is the
         # error presenter for `exec --json` — printing decorated banners to
         # stdout put four unparseable lines on the event stream at exactly the

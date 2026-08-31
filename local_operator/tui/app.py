@@ -142,6 +142,7 @@ from local_operator.tui.widgets.approval import ApprovalBlock, ApprovalPrompt
 from local_operator.tui.widgets.aside_panel import ASIDE_PROMPT, AsidePanel
 from local_operator.tui.widgets.ask_picker import AskPickerScreen
 from local_operator.tui.widgets.assistant import AssistantBlock
+from local_operator.tui.widgets.command_picker import CommandPicker
 from local_operator.tui.widgets.editor import (
     ASIDE_PLACEHOLDER,
     READ_ONLY_PLACEHOLDER,
@@ -1749,6 +1750,17 @@ class OperatorApp(App[None]):
         # commands; ``None`` degrades /provider /usage /model-switch to
         # pointer notices when it is absent.
         self._providers = provider_controller
+        #: True once session construction has DEFINITIVELY failed and no
+        #: replacement is in flight (U7-1).
+        #:
+        #: `_session is None` alone cannot express this: it is equally true
+        #: while the boot worker is still running, and the `/team` picker keys
+        #: its "loading teams…" reserve on exactly that. Without this flag the
+        #: reserve outlived the boot it described, promising rows that were
+        #: never coming and swallowing Enter indefinitely. Set by
+        #: `_on_boot_failed`, cleared the moment another session transition
+        #: starts, so a `/login` or `/resume` re-opens the arriving window.
+        self._boot_failed = False
         #: True between a first-run "no hosting configured" boot failure and the
         #: `/login` that resolves it. While set, a successful login reloads the
         #: session (there is none yet) rather than only re-polling the splash.
@@ -4036,7 +4048,13 @@ class OperatorApp(App[None]):
                 model_missing_for=getattr(error, "hosting", None) if no_model else None,
             )
             return
+        # Nothing is arriving any more. The name-list reserve reads this to
+        # retire its "loading teams…" row instead of promising rows forever
+        # (U7-1); the picker is refreshed below so the change is visible
+        # without waiting for the next keystroke.
+        self._boot_failed = True
         self._system_notice(f"session failed to start: {error}", "error")
+        self._retire_name_list_reserve()
         assert self._status is not None
         # `model_name` goes with the label it belongs to. Leaving it set is not
         # cosmetic: the name is resolved against the label, and a name the
@@ -4963,6 +4981,10 @@ class OperatorApp(App[None]):
         cannot address the old session once the user has asked to leave it.
         """
         self._session_transition_pending = True
+        # A new session is arriving, so a previous boot failure no longer
+        # describes the app's state: the `/team` reserve must be allowed to
+        # promise rows again (U7-1).
+        self._boot_failed = False
         self.run_worker(
             self._finish_session_transition(operation),
             thread=False,
@@ -5448,7 +5470,18 @@ class OperatorApp(App[None]):
         read as a stuck list, so it gets no row. No timer drives any of this:
         the editor re-syncs the picker on every keystroke and the app refills
         at adoption, so the placeholder retires the moment a window closes.
+
+        A FAILED boot closes the window too (U7-1). ``self._session is None`` is
+        permanently true after ``_on_boot_failed``, so the reserve promised
+        "loading teams…" forever and — because ``is_loading()`` gates Tab/Enter
+        — swallowed every Enter with no feedback, where the same key on an
+        unfixed app at least answered "session is still starting…". A boot
+        failure is as AUTHORITATIVE as an empty roster: nothing is arriving any
+        more, so no row is reserved and Enter reaches the ordinary submit path
+        that reports the session state.
         """
+        if self._boot_failed and not self._session_transition_pending:
+            return ""
         if not self._session_transition_pending and self._session is not None:
             return ""
         # Same voice as every other picker notice (the `/effort` and `/logout`
@@ -5456,6 +5489,25 @@ class OperatorApp(App[None]):
         # in the text because `/team` and `/agent` share this row and the user
         # should not have to guess which registry is still loading.
         return f"loading {command} roster…" if command in ("agent", "agents") else "loading teams…"
+
+    def _retire_name_list_reserve(self) -> None:
+        """Re-derive an open `/team`/`/agent` list after the window it waited on closed.
+
+        The same refill ``_finish_session_transition`` performs when a
+        transition settles, reached from the boot-FAILURE path (U7-1). Without
+        it the reserve keeps its "loading…" row until the user happens to type
+        another character, which is precisely the state that made Enter look
+        broken. Guarded because it runs from an error handler: the editor may
+        not be mounted yet on an early failure, and a boot report must never be
+        lost to a secondary exception.
+        """
+        try:
+            editor = self._editor()
+        except Exception:  # pragma: no cover - screen torn down or not yet composed
+            return
+        command = getattr(editor, "argument_command", None)
+        if command in ("team", "teams", "agent", "agents"):
+            self._fill_name_argument_list(editor, command)
 
     def _fill_name_argument_list(self, editor: Any, command: str) -> None:
         """Fill one team/agent list and its O(1) highlighter snapshot together.
@@ -6881,6 +6933,22 @@ class OperatorApp(App[None]):
         it. Without this the boot composition would be centred for the block that
         was measured at startup and left there.
         """
+        self._sync_boot_layout()
+
+    def on_command_picker_rows_resized(self, message: CommandPicker.RowsResized) -> None:
+        """The picker changed height, so the dock it sits in has moved (R7-3).
+
+        The picker is a dock child, and the boot composition's lift is computed
+        from the dock's measured height. Every other way that height changes is
+        already followed by a sync; a picker whose row count changes after the
+        composition was written is the one path that was not, which is how a
+        delayed roster left the dock lifted four rows off the bottom while the
+        identical non-delayed screen sat flush.
+
+        Stopped here: the message exists for this reconciliation, and it is a
+        dock-geometry fact rather than something an ancestor should re-handle.
+        """
+        message.stop()
         self._sync_boot_layout()
 
     def _sync_boot_layout(self, *, size: Size | None = None) -> None:
