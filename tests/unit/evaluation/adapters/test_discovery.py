@@ -12,6 +12,7 @@ import shutil
 import sys
 from io import StringIO
 from pathlib import Path
+from types import ModuleType
 from typing import cast
 
 import pytest
@@ -22,6 +23,7 @@ from local_operator.evaluation.adapters.discovery import (
     _record_rows,
     _verified_entry_target,
     _verified_imports,
+    _VerifiedDistributionFinder,
     _verify_recorded_file,
     distribution_digest,
     load_selected_adapter,
@@ -480,6 +482,130 @@ def test_import_deferred_past_load_is_outside_the_finder_boundary(
         assert marker.exists()
     finally:
         _forget_package()
+
+
+def _write_sourceless_pyc(target: Path, source_code: str) -> None:
+    """Plant a ``.pyc`` with no ``.py`` beside it.
+
+    This needs no mtime/size forgery: ``SourcelessFileLoader`` runs whatever is
+    marshalled here, so a bare file write is the whole attack.
+    """
+
+    code = compile(source_code, str(target), "exec")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(
+        importlib.util.MAGIC_NUMBER
+        + (0).to_bytes(4, "little")
+        + (0).to_bytes(4, "little")
+        + (0).to_bytes(4, "little")
+        + marshal.dumps(code)
+    )
+
+
+@pytest.mark.parametrize(
+    "artifact, entry_body",
+    [
+        pytest.param(
+            "ghost.pyc",
+            "from . import ghost\n\n\ndef create():\n    return 'verified'\n",
+            id="sourceless-module",
+        ),
+        pytest.param(
+            "gpkg/__init__.pyc",
+            "from . import gpkg\n\n\ndef create():\n    return 'verified'\n",
+            id="sourceless-package",
+        ),
+    ],
+)
+def test_sourceless_bytecode_under_owned_root_never_executes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, artifact: str, entry_body: str
+) -> None:
+    """RECORD covers no bytecode, so nothing at an uncovered stem may import."""
+
+    marker = tmp_path / "attacker-ran.marker"
+    distribution = _multi_module_distribution(tmp_path, marker, entry_body)
+    _write_sourceless_pyc(
+        tmp_path / "advpkg" / artifact,
+        f"from pathlib import Path\nPath({str(marker)!r}).write_text('pwned')\n",
+    )
+    rows = {row[0]: row for row in _record_rows(distribution)}
+    assert f"advpkg/{artifact}" not in rows
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    # Prove the planted artifact really executes under a normal import first.
+    _forget_package()
+    try:
+        importlib.import_module("advpkg.entry")
+        assert marker.exists(), "sourceless bytecode did not execute on this host"
+    finally:
+        _forget_package()
+    marker.unlink()
+
+    try:
+        with pytest.raises(AdapterDiscoveryError, match="not RECORD-covered"):
+            with _verified_imports(cast(importlib.metadata.Distribution, distribution), rows):
+                importlib.import_module("advpkg.entry")
+        assert not marker.exists()
+    finally:
+        _forget_package()
+
+
+def _two_root_distribution(tmp_path: Path) -> FakeDistribution:
+    """A distribution owning two top-level roots, as many real wheels do."""
+
+    package = tmp_path / "advpkg"
+    package.mkdir()
+    (package / "__init__.py").write_text("")
+    (package / "entry.py").write_text(
+        "import sidelib\n\n\ndef create():\n    return sidelib.VALUE\n"
+    )
+    (tmp_path / "sidelib.py").write_text("VALUE = 'verified'\n")
+
+    def load() -> object:
+        raise AssertionError("entry point must not be imported by the import system")
+
+    entry_point = FakeEntryPoint(load)
+    entry_point.name = "adv"
+    entry_point.value = "advpkg.entry:create"
+    distribution = FakeDistribution(tmp_path, [entry_point])
+    distribution.make_record()
+    return distribution
+
+
+def test_stale_module_in_second_owned_root_is_purged_before_load(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Every root the finder claims must be purged, not just the entry's."""
+
+    distribution = _two_root_distribution(tmp_path)
+    rows = {row[0]: row for row in _record_rows(distribution)}
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.setattr(importlib.metadata, "distribution", lambda _: distribution)
+
+    finder = _VerifiedDistributionFinder(cast(importlib.metadata.Distribution, distribution), rows)
+    assert finder.owned_roots == frozenset({"advpkg", "sidelib"})
+
+    # A prior import in this worker leaves the second root in sys.modules;
+    # importlib short-circuits on it unless the purge spans every owned root.
+    poisoned = ModuleType("sidelib")
+    poisoned.VALUE = "attacker-preexisting"
+    monkeypatch.setitem(sys.modules, "sidelib", poisoned)
+    _forget_package()
+
+    selector = selected(tmp_path, distribution_digest(distribution)).model_copy(
+        update={"entry_point": "advpkg.entry:create", "adapter_id": "adv"}
+    )
+    try:
+        # The adapter is a plain string here, so the protocol check is what
+        # rejects it; the object it bound is the point of the assertion.
+        with pytest.raises(AdapterDiscoveryError, match="does not implement"):
+            load_selected_adapter(selector)
+        bound = sys.modules["advpkg.entry"]
+        assert bound.create() == "verified"
+        assert sys.modules["sidelib"].VALUE == "verified"
+    finally:
+        _forget_package()
+        sys.modules.pop("sidelib", None)
 
 
 def test_record_rejects_absolute_and_traversal_paths(tmp_path: Path) -> None:
