@@ -256,11 +256,10 @@ def _backend_meta(backend: EmbeddingBackend) -> Mapping[str, object]:
 def render_block(skills: list[Skill]) -> str:
     """Render selected guides and skills without rendering private hints.
 
-    Skill-only output remains byte-compatible. The stable base prompt still
-    owns the ``guide://`` protocol rule in full; the one-line imperative here
-    is the local reminder that a selected guide is meant to be READ, which the
-    guides section previously left implicit while the skills section stated it
-    outright.
+    The stable base prompt still owns the ``guide://`` protocol rule in full;
+    the one-line imperative here is the local reminder that a selected guide is
+    meant to be READ. Selected skills use concrete protocol URLs rather than a
+    placeholder because the router has already established which ones match.
     """
     guides = [item for item in skills if item.resource_type == "guide"]
     user_skills = [item for item in skills if item.resource_type == "skill"]
@@ -282,11 +281,14 @@ def render_block(skills: list[Skill]) -> str:
         lines.append("</guides>")
         sections.append("\n".join(lines))
     if user_skills:
+        # Naming the already-selected resources removes the inference step that
+        # led models to search the filesystem for SKILL.md instead of using the
+        # virtual resource protocol. This cost stays local to selected skills.
+        selected_urls = ", ".join(f"`skill://{skill.name}`" for skill in user_skills)
         lines = [
-            "Skills are specialized knowledge. If one matches your task, you MUST read "
-            "`skill://<name>` before proceeding. The skill body ends with its "
-            "reference files; read those with `skill://<name>/<path>`, never a "
-            "raw filesystem path.",
+            f"Read these selected skills before proceeding: {selected_urls}. The skill "
+            "body ends with its reference files; read those with "
+            "`skill://<name>/<path>`, never a raw filesystem path.",
             "<skills>",
         ]
         lines.extend(f"- {skill.name}: {skill.description}" for skill in user_skills)
