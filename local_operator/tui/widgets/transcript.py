@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import os
 import time
+import unicodedata
 from contextlib import contextmanager
 from typing import Callable, ClassVar, Iterator, Literal, Sequence
 
@@ -1547,24 +1548,51 @@ class WakeBlock(ExpandableActionBlock):
         return self._row_count > 1
 
 
+#: Cell cap on one advisory sender field. The header is an identity label, and
+#: no honest conversation name, model label or directory basename approaches
+#: this — but the field crosses the wire, so its length is the peer's choice
+#: rather than ours. Uncapped, a 50,000-character name wrapped to a block 865
+#: rows tall that pushed the entire conversation off screen. Generous enough
+#: that a real name is never clipped, small enough that a hostile one cannot
+#: own the viewport.
+_SENDER_FIELD_MAX_CHARS = 120
+
+
 def _sanitize_sender_field(value: object) -> str:
-    """One line of plain text from an advisory sender field.
+    """One line of bounded, plain text from an advisory sender field.
 
     The sender identity crosses the wire from another process, so these strings
     are the least trusted data this widget renders: a conversation name is
-    free text the peer chose. A newline in one split the header into rows the
-    block never counted (its height is PINNED to the row count it computed, so
-    the extra row is painted outside the reserved space and laps the block
-    below), and an escape sequence would re-ink the transcript from inside a
-    label. Control characters are dropped rather than escaped because the
-    header is an identity label, not a place to display what an odd name
-    contained.
+    free text the peer chose. Three separate hazards, all of which have to be
+    closed here because this is the only place the value is touched before it
+    is painted:
+
+    - **Shape.** A newline split the header into rows the block never counted
+      (its height is PINNED to the row count it computed, so the extra row
+      painted outside the reserved space and lapped the block below).
+    - **Rendering.** An escape sequence would re-ink the transcript from inside
+      a label, and a format character (Unicode ``Cf`` — RTL override, ZWSP,
+      BOM) reorders the glyphs AROUND it: an unterminated ``U+202E`` visibly
+      scrambled the pid, which is the one field a reader uses to address the
+      peer back. A label that misreports the address is worse than no label.
+    - **Size.** Length is bounded so the block cannot own the viewport.
+
+    Offending characters are dropped rather than escaped because the header is
+    an identity label, not a place to display what an odd name contained.
     """
     text = str(value or "")
     # Whitespace runs (newlines and tabs included) collapse to single spaces so
-    # the header stays exactly one paragraph; remaining C0/C1 controls go.
+    # the header stays exactly one paragraph.
     text = " ".join(text.split())
-    return "".join(char for char in text if ord(char) >= 32 and not 0x7F <= ord(char) <= 0x9F)
+    # C0/C1 controls AND Unicode format characters. `unicodedata.category` is
+    # what makes the Cf class exhaustive — an explicit codepoint list would
+    # miss the next bidi control someone finds.
+    text = "".join(
+        char
+        for char in text
+        if ord(char) >= 32 and not 0x7F <= ord(char) <= 0x9F and unicodedata.category(char) != "Cf"
+    )
+    return text[:_SENDER_FIELD_MAX_CHARS]
 
 
 class PeerMessageBlock(TranscriptBlock):
@@ -1607,10 +1635,13 @@ class PeerMessageBlock(TranscriptBlock):
     HEADER_TOKEN = "muted"
     TEXT_TOKEN = "fg"
     MIN_BODY = 8
-    #: Below this width the header drops the model label (see ``_header``). 72
-    #: is where an ordinary sender name stops fitting on one row with the model
-    #: attached, which is the width a half-screen split produces.
-    MODEL_LABEL_MIN_COLS = 72
+    #: The model label is attached only when the WHOLE header still fits on one
+    #: row with it (see ``_header``). A fixed column threshold cannot express
+    #: that: it was calibrated against a 14-cell name, and at 22-26 cells — the
+    #: ordinary length here — crossing it re-attached a ~23-cell label that
+    #: cost more than the columns just gained, so widening a pane from 70 to 80
+    #: made the card TALLER. The rule is now about fit rather than width, which
+    #: is what makes wrapping monotonic: more columns never yields more rows.
 
     def __init__(self, body: str, sender: dict[str, object] | None = None) -> None:
         super().__init__()
@@ -1668,22 +1699,31 @@ class PeerMessageBlock(TranscriptBlock):
         bits: list[str] = []
         if pid is not None:
             bits.append(f"pid {pid}")
+
+        def _compose(parts: list[str]) -> str:
+            detail = f" ({', '.join(parts)})" if parts else ""
+            if name:
+                label = f'"{name}"' if quoted else name
+                return f"peer message from {label}{detail}"
+            if parts:
+                return f"peer message from{detail}"
+            return "peer message from another session"
+
+        header = _compose(bits)
+        if not model:
+            return header
+
         # The model is context, not an address: it is the least useful field for
-        # "which session reached in, so I can go and talk to it", and at ~23
-        # cells it is what pushed an ordinary sender's header onto a second row
-        # at half-screen widths. It sheds first, and only where the row is
-        # actually tight — the information order (name, pid, model) is also the
-        # order it should give way in.
-        width = self.size.width or 80
-        if model and width >= self.MODEL_LABEL_MIN_COLS:
-            bits.append(model)
-        detail = f" ({', '.join(bits)})" if bits else ""
-        if name:
-            label = f'"{name}"' if quoted else name
-            return f"peer message from {label}{detail}"
-        if bits:
-            return f"peer message from{detail}"
-        return "peer message from another session"
+        # "which session reached in, so I can go and talk to it", so it is the
+        # first thing to give way (the information order name -> pid -> model is
+        # also the shed order). It is attached only when the result still fits
+        # on ONE row, measured against the same body width ``_build`` wraps at.
+        # Testing the terminal width instead made the behaviour non-monotonic:
+        # a wider pane could re-attach a label that cost more than the extra
+        # columns and push the header onto a second row.
+        body = max((self.size.width or 80) - self.RULE_COLS, self.MIN_BODY)
+        with_model = _compose(bits + [model])
+        return with_model if cell_len(with_model) <= body else header
 
     def copy_gutter(self, index: int) -> int:
         """The rule occupies the gutter on every row (same as UserBlock)."""

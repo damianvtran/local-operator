@@ -234,3 +234,101 @@ async def test_a_control_character_in_a_sender_name_cannot_break_the_row() -> No
         # The pinned height matches what the block actually painted.
         assert block.styles.height is not None
         assert block.styles.height.value == block._header_rows + 1
+
+
+def test_a_giant_sender_name_cannot_own_the_viewport() -> None:
+    """Sanitization fixed the SHAPE of an advisory field; this bounds its SIZE.
+
+    The name crosses the wire, so its length is the peer's choice. Uncapped, a
+    50,000-character name wrapped to a block hundreds of rows tall that pushed
+    the whole conversation off screen (round 3, MINOR-9).
+    """
+    block = PeerMessageBlock("body", {"pid": 7, "conversation_name": "x" * 50_000})
+    header = block._header()
+    assert len(header) < 200, len(header)
+    # Geometry holds: a handful of rows, and the pin still matches the build.
+    assert block._header_rows <= 4
+    assert block.styles.height is not None
+    assert block.styles.height.value == block._header_rows + 1
+
+    # Every advisory field is bounded, not just the name.
+    wide = PeerMessageBlock(
+        "body",
+        {
+            "pid": 7,
+            "conversation_name": "y" * 9000,
+            "model_label": "m" * 9000,
+            "cwd": "/" + "d" * 9000,
+            "session_id": "s" * 9000,
+        },
+    )
+    assert len(wide._header()) < 400
+
+
+def test_a_bidi_override_cannot_scramble_the_pid() -> None:
+    """Unicode format characters (category Cf) reorder the glyphs AROUND them.
+
+    An unterminated U+202E visibly scrambled the pid — the one field a reader
+    uses to address the peer back — so the label misreported the address. C0/C1
+    stripping did not touch these (round 3, D15).
+    """
+    import unicodedata
+
+    payloads = {
+        "rtl-override": "evil\u202ename",
+        "rtl-embedding": "evil\u202bname",
+        "zwsp": "a\u200bb",
+        "zwj": "a\u200db",
+        "bom": "\ufeffname",
+        "lro": "\u202dname",
+        "isolate": "a\u2066b",
+    }
+    for label, name in payloads.items():
+        header = PeerMessageBlock("body", {"pid": 48213, "conversation_name": name})._header()
+        assert not [c for c in header if unicodedata.category(c) == "Cf"], label
+        # The addressing field survives intact and in order.
+        assert "(pid 48213)" in header, label
+
+
+@pytest.mark.asyncio
+async def test_a_wider_pane_never_makes_the_peer_header_taller() -> None:
+    """Wrapping must be monotonic in the right direction (round 3, D14).
+
+    The model label used to attach at a fixed column threshold calibrated on a
+    14-cell name. Real conversation names here run 22-57 cells, and for those,
+    crossing the threshold re-attached a ~23-cell label that cost more than the
+    columns just gained — so dragging a pane from 70 to 80 columns made the
+    card TALLER. Attaching the label only when the whole header still fits on
+    one row is what makes "more columns never means more rows" true.
+    """
+    names = [
+        "release cutter",  # 14
+        "minerva-user-dashboard",  # 22
+        "01JQ9ZK4W7X2M8N3PVQ6TYRB5H",  # 26 (a session id)
+        "minerva-user-dashboard-release-cutter",  # 37
+        "minerva-user-dashboard-release-cutter-standby",  # 45
+        "minerva-user-dashboard-release-cutter-standby-secondary",  # 57
+    ]
+    widths = (60, 70, 80, 100, 120)
+
+    for name in names:
+        rows: list[int] = []
+        for width in widths:
+            app = OperatorApp(lambda: _factory(FakeSession()))
+            async with app.run_test(size=(width, 14)) as pilot:
+                await pilot.pause()
+                block = PeerMessageBlock(
+                    "body",
+                    {
+                        "pid": 48213,
+                        "conversation_name": name,
+                        "model_label": "anthropic/claude-opus-5",
+                    },
+                )
+                app._append_block(block)
+                await pilot.pause()
+                rows.append(block._header_rows)
+
+        assert all(
+            rows[i] >= rows[i + 1] for i in range(len(rows) - 1)
+        ), f"{len(name)}-cell name wraps non-monotonically across {widths}: {rows}"
