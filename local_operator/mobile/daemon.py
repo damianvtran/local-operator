@@ -201,6 +201,10 @@ class SessionTable:
         # generations. Entries route watch commands but never own these queues.
         self.session_subscribers: dict[str, set[asyncio.Queue[dict[str, Any]]]] = {}
         self.provisional_active: set[str] = set()
+        # Injected by MobileDaemon: the persisted per-session seen state the
+        # "unseen" verdict reads. None keeps a bare SessionTable (unit tests)
+        # reporting every session seen.
+        self.seen_store: Any = None
         # The durable half of summaries() is a directory scan; cache it behind a
         # short TTL (SUMMARIES_CACHE_TTL_S) with single-flight refresh so N
         # concurrent list consumers pay one scan, not N. The merged summary list
@@ -339,10 +343,13 @@ class SessionTable:
                         if todo.status in ("pending", "blocked")
                     ),
                     "mtime": row.mtime if row else entry.record.started_at if entry else 0,
-                    # Placeholder shape: the seen-store (a later step of this
-                    # change) computes the real value; the web layer receives a
-                    # stable key from the first release of the endpoint.
-                    "unseen": False,
+                    # Unread verdict (see :mod:`.seen`): activity newer than the
+                    # phone's last view. The activity clock is the transcript
+                    # mtime for durable rows — already statted by the listing
+                    # scan, no extra syscall — and the record heartbeat for
+                    # live rows. First observation records a baseline so an
+                    # upgrade never lights up the whole store.
+                    "unseen": self._is_unseen(session_id, row, entry),
                 }
             )
         out.sort(
@@ -366,6 +373,21 @@ class SessionTable:
                 queue.put_nowait(None)
             except asyncio.QueueFull:
                 pass
+
+    def _is_unseen(self, session_id: str, row: Any, entry: SessionEntry | None) -> bool:
+        """The seen-store verdict for one summary row.
+
+        ``seen_store`` is injected by ``MobileDaemon`` (it owns the persisted
+        store). Cheap: dict lookups only, no disk access — the store is fully
+        in memory and persists itself.
+        """
+        store = self.seen_store
+        if store is None:
+            return False
+        activity = row.mtime if row is not None else entry.record.heartbeat_at if entry else 0.0
+        if not activity:
+            return False
+        return store.is_unseen(session_id, activity)
 
 
 def _entry_for_session(daemon: "MobileDaemon", session_id: str) -> SessionEntry | None:
@@ -867,6 +889,11 @@ class MobileDaemon:
         self.port = port
         self.password = password
         self.table = SessionTable()
+        # Per-session "last seen by phone" state, persisted across daemon
+        # restarts (see :mod:`.seen`). The merge reads it for every summary
+        # row; it persists itself on change.
+        self._seen_store: Any = None
+        self.table.seen_store = self.seen_store
         # The session repaint carries only roster summaries. Full child state is
         # retained separately and fetched for the active route, otherwise one
         # busy descendant makes every root token repaint resend every transcript.
@@ -897,6 +924,16 @@ class MobileDaemon:
             entry.record.session_id == session_id and not entry.ended
             for entry in self.table.entries.values()
         )
+
+    @property
+    def seen_store(self):
+        """The persisted seen-state store, created on first use."""
+        if self._seen_store is None:
+            from local_operator.mobile.seen import SEEN_STORE_NAME, SeenStore
+            from local_operator.paths import config_dir
+
+            self._seen_store = SeenStore(config_dir() / SEEN_STORE_NAME)
+        return self._seen_store
 
     def _prune_projection_generation(self, session_id: str) -> None:
         """Retire ordering only when no durable in-memory route can emit again."""
@@ -1568,6 +1605,27 @@ def build_app(daemon: MobileDaemon):
             headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"},
         )
 
+    async def api_session_seen(request: Request) -> Response:
+        """The phone marks a session seen; the unread verdict clears.
+
+        Auth-gated like every /api route. The verdict is durable (see
+        :mod:`.seen`), so it survives a daemon restart. Unknown ids 404 the
+        same way the history route does — a live generation OR a durable user
+        session — so the endpoint cannot be used to probe arbitrary paths.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        session_id = str(request.path_params["session_id"])
+        entry = _entry_for_session(daemon, session_id)
+        if entry is None and _durable_user_session_dir(session_id) is None:
+            return JSONResponse({"error": "unknown session"}, status_code=404)
+        daemon.seen_store.mark_seen(session_id)
+        # The next list paint must already show the cleared verdict.
+        daemon.table.invalidate_summaries_cache()
+        daemon.table.notify_list_changed()
+        return JSONResponse({"ok": True})
+
     async def api_subagent_detail(request: Request) -> Response:
         """Full state for the one descendant named by the active phone route."""
         denied = gate(request)
@@ -1958,6 +2016,7 @@ def build_app(daemon: MobileDaemon):
         Route("/api/sessions/resume", api_resume_session, methods=["POST"]),
         Route("/api/sessions/search", api_search_sessions),
         Route("/api/sessions/{session_id:str}/events", api_session_events),
+        Route("/api/sessions/{session_id:str}/seen", api_session_seen, methods=["POST"]),
         Route("/api/sessions/{session_id:str}/agents/{job_id:str}", api_subagent_detail),
         Route(
             "/api/sessions/{session_id:str}/agents/{job_id:str}/history",
