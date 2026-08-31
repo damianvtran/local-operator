@@ -175,6 +175,7 @@ from local_operator.tui.widgets.session_picker import (
 )
 from local_operator.tui.widgets.settings_view import (
     SettingsChanged,
+    SettingsPreview,
     SettingsView,
     SettingsViewDismissed,
 )
@@ -10798,6 +10799,19 @@ class OperatorApp(App[None]):
         if view is None:
             return False
         self._settings_view = None
+        # A theme PREVIEW is applied to the running app and never stored
+        # (#440 §3), so it has to be undone before the page that owns it goes
+        # away. Done here rather than only in the page's own `esc` handler
+        # because the mode is also torn down from paths the page never sees — a
+        # session swap, a `/clear` — and a preview that outlived one of those
+        # would leave the app wearing a theme config.yml disagrees with, with
+        # the surface that could put it back already unmounted. Synchronous,
+        # not a posted message: `view.remove()` is one line below, and a
+        # message from a removed widget is never delivered.
+        try:
+            view.revert_preview_for_teardown()
+        except Exception:  # noqa: BLE001 — the mode must close either way
+            logger.debug("settings: preview revert on close failed", exc_info=True)
         view.remove()
         self.screen.remove_class(SETTINGS_LAYOUT_CLASS)
         self._transcript_view().display = True
@@ -10820,6 +10834,32 @@ class OperatorApp(App[None]):
         """The page's ``esc`` hint was clicked — same exit as the key itself."""
         message.stop()
         self._close_settings_view()
+
+    def on_settings_preview(self, message: SettingsPreview) -> None:
+        """Paint a setting the user is TRYING ON. Nothing has been stored.
+
+        The counterpart to :meth:`on_settings_changed`, and deliberately a
+        separate handler for a separate message (#440 §3): that one means "the
+        file changed, bring the live surfaces into line with it", this one means
+        "paint as if, and expect to be told to put it back". One handler serving
+        both is how a preview eventually becomes permanent — the first edit that
+        made it cache a value or notify another subsystem would apply to both
+        callers, and only one of them has a value worth remembering.
+
+        ``preview=True`` bounds the repaint to the rows actually on screen,
+        which is the same cost control the `/theme` argument-highlight browse
+        uses: this runs on every arrow key, and a full sweep is linear in
+        transcript length. A revert does NOT come through here: `_revert_preview`
+        calls `_apply_theme` directly with the default full sweep, because a
+        cancel is a settle (review round 1, C4) and because the page's own
+        `_repaint` has to run AFTER `current_theme()` is restored (D1).
+        """
+        message.stop()
+        try:
+            if message.key == "tui.theme" and message.value:
+                self._apply_theme(str(message.value), preview=True)
+        except Exception:  # noqa: BLE001 — a preview is a bonus, never a failure
+            logger.debug("settings: preview failed for %s", message.key, exc_info=True)
 
     def on_settings_changed(self, message: SettingsChanged) -> None:
         """Apply a written setting to the surfaces already on screen.
