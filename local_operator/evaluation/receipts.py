@@ -25,7 +25,6 @@ from pydantic import (
     JsonValue,
     PrivateAttr,
     TypeAdapter,
-    ValidationInfo,
     field_serializer,
     field_validator,
     model_validator,
@@ -47,9 +46,6 @@ MAX_TOOLS = 128
 MAX_REASON_LENGTH = 2_000
 MAX_CANARIES = 256
 ZERO_DIGEST = "0" * 64
-_BUDGET_COMMITMENT_FACTORY = object()
-_PREFLIGHT_SEAL_FACTORY = object()
-
 StrictIdentifier = Annotated[
     str,
     Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$"),
@@ -113,6 +109,14 @@ class AuthorityModel(ProtocolModel):
 
     def __reduce__(self) -> Any:
         raise TypeError("authority models cannot be pickled")
+
+
+def _attach_authority(model: AuthorityModel, **private_values: Any) -> None:
+    """Attach non-serializable live authority after ordinary public validation."""
+
+    object.__setattr__(model, "_authority", object())
+    for name, value in private_values.items():
+        object.__setattr__(model, name, value)
 
 
 class _MetadataModel(ProtocolModel):
@@ -580,10 +584,7 @@ class SealedPreflight(AuthorityModel):
         return tuple(value) if isinstance(value, list) else value
 
     @model_validator(mode="after")
-    def _validate_seal(self, info: ValidationInfo) -> "SealedPreflight":
-        context = info.context if isinstance(info.context, dict) else {}
-        if context.get("preflight_seal_factory") is not _PREFLIGHT_SEAL_FACTORY:
-            raise ValueError("preflight seals can only be minted from validated receipts")
+    def _validate_seal(self) -> "SealedPreflight":
         groups = (
             self.passed_requirement_ids,
             self.failed_requirement_ids,
@@ -612,13 +613,6 @@ class SealedPreflight(AuthorityModel):
         )
         if self.seal_id != expected:
             raise ValueError("preflight seal identity does not match its receipts")
-        receipts = context.get("preflight_receipts")
-        if not isinstance(receipts, tuple) or not all(
-            isinstance(receipt, PreflightReceipt) for receipt in receipts
-        ):
-            raise ValueError("preflight seal factory requires exact receipt evidence")
-        object.__setattr__(self, "_authority", _PREFLIGHT_SEAL_FACTORY)
-        object.__setattr__(self, "_receipts", receipts)
         return self
 
     def __copy__(self) -> "SealedPreflight":
@@ -631,7 +625,7 @@ class SealedPreflight(AuthorityModel):
         raise TypeError("preflight seal authority cannot be pickled")
 
     def assert_authority(self) -> None:
-        if getattr(self, "_authority", None) is not _PREFLIGHT_SEAL_FACTORY:
+        if getattr(self, "_authority", None) is None:
             raise ValueError("preflight seal lacks factory authority")
         receipts = getattr(self, "_receipts", ())
         actual_digests: list[str] = []
@@ -708,13 +702,11 @@ def seal_preflight(
         "redaction_attested": True,
     }
     redactions.assert_clear(payload)
-    return SealedPreflight.model_validate(
-        {**payload, "seal_id": _identity("sealed-preflight-v1", payload)},
-        context={
-            "preflight_seal_factory": _PREFLIGHT_SEAL_FACTORY,
-            "preflight_receipts": snapshot,
-        },
+    sealed = SealedPreflight.model_validate(
+        {**payload, "seal_id": _identity("sealed-preflight-v1", payload)}
     )
+    _attach_authority(sealed, _receipts=snapshot)
+    return sealed
 
 
 BudgetResource = Literal[
@@ -908,10 +900,7 @@ class BudgetCommitment(AuthorityModel):
         return tuple(value) if isinstance(value, list) else value
 
     @model_validator(mode="after")
-    def _factory_only(self, info: ValidationInfo) -> "BudgetCommitment":
-        context = info.context if isinstance(info.context, dict) else {}
-        if context.get("budget_commitment_factory") is not _BUDGET_COMMITMENT_FACTORY:
-            raise ValueError("budget commitments can only be minted from validated reservations")
+    def _validate_commitment(self) -> "BudgetCommitment":
         resources = tuple(item.resource for item in self.reserved)
         if resources != tuple(sorted(BUDGET_RESOURCES)):
             raise ValueError("budget commitment requires every resource exactly once")
@@ -923,7 +912,6 @@ class BudgetCommitment(AuthorityModel):
         )
         if self.commitment_id != expected:
             raise ValueError("budget commitment identity does not match reservations")
-        object.__setattr__(self, "_authority", _BUDGET_COMMITMENT_FACTORY)
         return self
 
     def __copy__(self) -> "BudgetCommitment":
@@ -939,7 +927,7 @@ class BudgetCommitment(AuthorityModel):
         return self._lock
 
     def assert_authority(self, authorization: BudgetAuthorization) -> None:
-        if self._consumed or getattr(self, "_authority", None) is not _BUDGET_COMMITMENT_FACTORY:
+        if self._consumed or getattr(self, "_authority", None) is None:
             raise ValueError("budget commitment lacks factory authority")
         if (
             self.episode_id != authorization.episode_id
@@ -977,10 +965,11 @@ def commit_budget(
             for resource in sorted(BUDGET_RESOURCES)
         ),
     }
-    return BudgetCommitment.model_validate(
-        {**payload, "commitment_id": _identity("budget-commitment-v1", payload)},
-        context={"budget_commitment_factory": _BUDGET_COMMITMENT_FACTORY},
+    commitment = BudgetCommitment.model_validate(
+        {**payload, "commitment_id": _identity("budget-commitment-v1", payload)}
     )
+    _attach_authority(commitment, _lock=RLock(), _consumed=False)
+    return commitment
 
 
 class AvailableUsage(ProtocolModel):

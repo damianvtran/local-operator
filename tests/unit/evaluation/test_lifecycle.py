@@ -255,8 +255,9 @@ def test_cleanup_requires_exactly_one_receipt_and_attempted_is_not_clean() -> No
     attempted = _cleanup(plan, session="attempted")
     assert attempted.rescue_required
     assert attempted.incomplete_action_ids == ("session",)
-    with pytest.raises(ValidationError, match="validated receipts"):
-        CleanupResult.from_canonical_json(attempted.to_canonical_json())
+    parsed = CleanupResult.from_canonical_json(attempted.to_canonical_json())
+    with pytest.raises(ValueError, match="lacks factory authority"):
+        parsed.assert_authority()
     clean = _cleanup(plan)
     assert not clean.rescue_required
 
@@ -264,10 +265,12 @@ def test_cleanup_requires_exactly_one_receipt_and_attempted_is_not_clean() -> No
 def test_permit_cannot_be_constructed_or_deserialized_by_callers() -> None:
     plan, budget, _cleanup_plan_value, _episode, permit = _authorized()
     payload = permit.model_dump()
-    with pytest.raises(ValidationError, match="only be minted"):
-        SideEffectPermit.model_validate(payload)
-    with pytest.raises(ValidationError, match="only be minted"):
-        SideEffectPermit.from_canonical_json(permit.to_canonical_json())
+    for parsed in (
+        SideEffectPermit.model_validate(payload),
+        SideEffectPermit.from_canonical_json(permit.to_canonical_json()),
+    ):
+        with pytest.raises(ValueError, match="lacks factory authority"):
+            parsed.assert_authority()
     with pytest.raises(ValidationError):
         SideEffectPermit(
             episode_id="episode-1",
@@ -307,8 +310,9 @@ def test_legal_happy_path_requires_cost_score_and_clean_result() -> None:
     assert completed.reconciliation_id == reconciliation.reconciliation_id
     assert completed.score_id is not None
     assert completed.rescue_required is False
-    with pytest.raises(ValidationError, match="factory minted"):
-        EpisodeLifecycle.from_canonical_json(completed.to_canonical_json())
+    parsed = EpisodeLifecycle.from_canonical_json(completed.to_canonical_json())
+    with pytest.raises(ValueError, match="lacks transition authority"):
+        parsed.begin_finalization()
 
 
 def test_unreportable_usage_or_incomplete_cleanup_cannot_complete() -> None:
@@ -561,12 +565,13 @@ def test_lifecycle_authority_rejects_every_public_construction_and_mutation_path
 
     plan, budget, cleanup, authorized, _permit = _authorized()
     payload = authorized.model_dump()
-    with pytest.raises(ValidationError, match="factory minted"):
-        EpisodeLifecycle.model_validate(payload)
-    with pytest.raises(ValidationError, match="factory minted"):
-        EpisodeLifecycle.model_validate_json(authorized.to_canonical_json())
-    with pytest.raises(ValidationError, match="factory minted"):
-        EpisodeLifecycle.from_canonical_json(authorized.to_canonical_json())
+    for parsed in (
+        EpisodeLifecycle.model_validate(payload),
+        EpisodeLifecycle.model_validate_json(authorized.to_canonical_json()),
+        EpisodeLifecycle.from_canonical_json(authorized.to_canonical_json()),
+    ):
+        with pytest.raises(ValueError, match="lacks transition authority"):
+            parsed.begin_finalization()
     forged = EpisodeLifecycle.model_construct(**payload)
     with pytest.raises(ValueError, match="lacks transition authority"):
         forged.begin_finalization()
@@ -1227,3 +1232,125 @@ def test_constructed_authority_clones_cannot_consume_originals() -> None:
     with pytest.raises(ValueError, match="lacks factory authority"):
         cleaning.finish_cleanup(cloned_result)
     assert cleaning.finish_cleanup(result).state == "completed"
+
+
+def test_validation_context_never_mints_authority_for_any_model() -> None:
+    from pydantic import TypeAdapter
+
+    plan, budget, cleanup, authorized, permit = _authorized()
+    reservation = _reservation(budget)
+    live_models = (
+        _seal(plan),
+        _commitment(budget, reservation),
+        _cleanup(cleanup),
+        permit,
+        authorized,
+    )
+    hostile_context = {
+        "preflight_seal_factory": object(),
+        "preflight_receipts": object(),
+        "budget_commitment_factory": object(),
+        "cleanup_result_factory": object(),
+        "cleanup_receipts": object(),
+        "permit_factory": object(),
+        "lifecycle_factory": object(),
+        "episode_lineage": object(),
+        "_FACTORY_TOKEN": object(),
+        "_LIFECYCLE_TOKEN": object(),
+    }
+    for live in live_models:
+        adapter = TypeAdapter(type(live))
+        payload = live.model_dump(mode="json")
+        encoded = live.to_canonical_json()
+        parsed_values = (
+            type(live).model_validate(payload, context=hostile_context),
+            type(live).model_validate_json(encoded, context=hostile_context),
+            adapter.validate_python(payload, context=hostile_context),
+            adapter.validate_json(encoded, context=hostile_context),
+        )
+        for parsed in parsed_values:
+            assert getattr(parsed, "_authority", None) is None
+            if isinstance(parsed, EpisodeLifecycle):
+                with pytest.raises(ValueError, match="lacks transition authority"):
+                    parsed.begin_finalization()
+            elif isinstance(parsed, BudgetCommitment):
+                with pytest.raises(ValueError, match="lacks factory authority"):
+                    parsed.assert_authority(budget)
+            else:
+                with pytest.raises(ValueError, match="lacks factory authority"):
+                    parsed.assert_authority()
+
+
+def test_authority_validators_do_not_read_context_or_factory_tokens() -> None:
+    import inspect
+
+    from local_operator.evaluation import lifecycle as lifecycle_module
+    from local_operator.evaluation import receipts as receipts_module
+
+    source = inspect.getsource(receipts_module) + inspect.getsource(lifecycle_module)
+    assert "ValidationInfo" not in source
+    assert ".context" not in source
+    assert "_FACTORY_TOKEN" not in source
+    assert "_LIFECYCLE_TOKEN" not in source
+    assert "context=" not in source
+
+
+def test_factory_objects_retain_live_receipts_lineage_and_authority() -> None:
+    plan, budget, cleanup, authorized, permit = _authorized()
+    reservation = _reservation(budget)
+    seal = _seal(plan)
+    commitment = _commitment(budget, reservation)
+    result = _cleanup(cleanup)
+    for live in (seal, commitment, result, permit, authorized):
+        assert getattr(live, "_authority", None) is not None
+    assert seal._receipts
+    assert result._receipts
+    assert authorized._lineage.episode_id == authorized.episode_id
+
+
+def test_authorized_failure_revokes_permit_and_wrong_permit_is_retryable() -> None:
+    plan, budget, _cleanup_value, authorized, permit = _authorized()
+    _other_plan, _other_budget, _other_cleanup, _other_authorized, wrong = _authorized()
+    with pytest.raises(ValueError, match="does not match this episode"):
+        authorized.fail_before_running(
+            kind="infrastructure", reason="allocator unavailable", permit=wrong
+        )
+    permit.assert_authority()
+    failed = authorized.fail_before_running(
+        kind="infrastructure", reason="allocator unavailable", permit=permit
+    )
+    assert failed.state == "failed"
+    with pytest.raises(ValueError, match="lacks factory authority"):
+        permit.assert_authority()
+    assert failed.score_id is None
+    assert plan.plan_id == failed.plan_id
+
+
+def test_authorized_fail_and_start_race_has_exactly_one_child() -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    _plan_value, budget, _cleanup_value, authorized, permit = _authorized()
+    reservation = _reservation(budget)
+    commitment = _commitment(budget, reservation)
+    barrier = Barrier(2)
+
+    def attempt(operation: str) -> object:
+        barrier.wait()
+        try:
+            if operation == "start":
+                return authorized.start(permit, budget, commitment)
+            return authorized.fail_before_running(
+                kind="infrastructure", reason="allocator unavailable", permit=permit
+            )
+        except ValueError as error:
+            return error
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = tuple(executor.map(attempt, ("start", "fail")))
+    children = [item for item in outcomes if isinstance(item, EpisodeLifecycle)]
+    errors = [item for item in outcomes if isinstance(item, ValueError)]
+    assert len(children) == 1
+    assert len(errors) == 1
+    assert children[0].state in ("running", "failed")
+    assert "authority" in str(errors[0])

@@ -15,13 +15,7 @@ from threading import RLock
 from typing import Any, Literal, Self, cast
 from weakref import WeakValueDictionary
 
-from pydantic import (
-    Field,
-    PrivateAttr,
-    ValidationInfo,
-    field_validator,
-    model_validator,
-)
+from pydantic import Field, PrivateAttr, field_validator, model_validator
 
 from local_operator.evaluation.protocol import ArtifactRef, ProtocolModel
 from local_operator.evaluation.receipts import (
@@ -41,9 +35,6 @@ from local_operator.evaluation.receipts import (
 MAX_CLEANUP_ATTEMPTS = 32
 MAX_CLEANUP_TIMEOUT_MS = 3_600_000
 MAX_FAILURE_LENGTH = 2_000
-_PERMIT_FACTORY = object()
-_CLEANUP_RESULT_FACTORY = object()
-_LIFECYCLE_FACTORY = object()
 
 
 class _EpisodeLineage:
@@ -63,6 +54,14 @@ class _EpisodeLineage:
 
 _LINEAGE_REGISTRY_LOCK = RLock()
 _LIVE_LINEAGES: WeakValueDictionary[str, _EpisodeLineage] = WeakValueDictionary()
+
+
+def _attach_lifecycle_authority(model: AuthorityModel, **private_values: Any) -> None:
+    """Attach fresh process-local authority after ordinary model validation."""
+
+    object.__setattr__(model, "_authority", object())
+    for name, value in private_values.items():
+        object.__setattr__(model, name, value)
 
 
 def _identity(kind: str, payload: Any) -> str:
@@ -241,10 +240,7 @@ class CleanupResult(AuthorityModel):
         return tuple(value) if isinstance(value, list) else value
 
     @model_validator(mode="after")
-    def _validate_result(self, info: ValidationInfo) -> Self:
-        context = info.context if isinstance(info.context, dict) else {}
-        if context.get("cleanup_result_factory") is not _CLEANUP_RESULT_FACTORY:
-            raise ValueError("cleanup results can only be minted from validated receipts")
+    def _validate_result(self) -> Self:
         groups = (
             self.succeeded_action_ids,
             self.not_needed_action_ids,
@@ -265,13 +261,6 @@ class CleanupResult(AuthorityModel):
         )
         if self.cleanup_result_id != expected:
             raise ValueError("cleanup result identity does not match its receipts")
-        receipts = context.get("cleanup_receipts")
-        if not isinstance(receipts, tuple) or not all(
-            isinstance(receipt, CleanupReceipt) for receipt in receipts
-        ):
-            raise ValueError("cleanup result factory requires exact receipt evidence")
-        object.__setattr__(self, "_authority", _CLEANUP_RESULT_FACTORY)
-        object.__setattr__(self, "_receipts", receipts)
         return self
 
     def __copy__(self) -> Self:
@@ -287,7 +276,7 @@ class CleanupResult(AuthorityModel):
         return self._lock
 
     def assert_authority(self) -> None:
-        if self._consumed or getattr(self, "_authority", None) is not _CLEANUP_RESULT_FACTORY:
+        if self._consumed or getattr(self, "_authority", None) is None:
             raise ValueError("cleanup result lacks factory authority")
         actual: list[str] = []
         for receipt in getattr(self, "_receipts", ()):
@@ -349,13 +338,16 @@ def aggregate_cleanup(
         "receipt_digests": tuple(sorted(item.receipt_id for item in snapshot)),
         "rescue_required": bool(incomplete),
     }
-    return CleanupResult.model_validate(
-        {**payload, "cleanup_result_id": _identity("cleanup-result-v1", payload)},
-        context={
-            "cleanup_result_factory": _CLEANUP_RESULT_FACTORY,
-            "cleanup_receipts": snapshot,
-        },
+    result = CleanupResult.model_validate(
+        {**payload, "cleanup_result_id": _identity("cleanup-result-v1", payload)}
     )
+    _attach_lifecycle_authority(
+        result,
+        _receipts=snapshot,
+        _lock=RLock(),
+        _consumed=False,
+    )
+    return result
 
 
 class SideEffectPermit(AuthorityModel):
@@ -372,17 +364,13 @@ class SideEffectPermit(AuthorityModel):
     permit_id: Digest
 
     @model_validator(mode="after")
-    def _factory_only(self, info: ValidationInfo) -> Self:
-        context = info.context if isinstance(info.context, dict) else {}
-        if context.get("permit_factory") is not _PERMIT_FACTORY:
-            raise ValueError("side-effect permits can only be minted from validated authorities")
+    def _validate_permit(self) -> Self:
         expected = _identity(
             "side-effect-permit-v1",
             self.model_dump(mode="json", exclude={"permit_id"}),
         )
         if self.permit_id != expected:
             raise ValueError("side-effect permit identity does not match its authorities")
-        object.__setattr__(self, "_authority", _PERMIT_FACTORY)
         return self
 
     def __copy__(self) -> Self:
@@ -398,7 +386,7 @@ class SideEffectPermit(AuthorityModel):
         return self._lock
 
     def assert_authority(self) -> None:
-        if self._consumed or getattr(self, "_authority", None) is not _PERMIT_FACTORY:
+        if self._consumed or getattr(self, "_authority", None) is None:
             raise ValueError("side-effect permit lacks factory authority")
         expected = _identity(
             "side-effect-permit-v1",
@@ -434,10 +422,11 @@ def mint_side_effect_permit(
         "preflight_seal_id": preflight.seal_id,
         "budget_id": budget.budget_id,
     }
-    return SideEffectPermit.model_validate(
-        {**payload, "permit_id": _identity("side-effect-permit-v1", payload)},
-        context={"permit_factory": _PERMIT_FACTORY},
+    permit = SideEffectPermit.model_validate(
+        {**payload, "permit_id": _identity("side-effect-permit-v1", payload)}
     )
+    _attach_lifecycle_authority(permit, _lock=RLock(), _consumed=False)
+    return permit
 
 
 class ScoreReceipt(ProtocolModel):
@@ -522,13 +511,7 @@ class EpisodeLifecycle(AuthorityModel):
         return tuple(value) if isinstance(value, list) else value
 
     @model_validator(mode="after")
-    def _validate_state_evidence(self, info: ValidationInfo) -> Self:
-        context = info.context if isinstance(info.context, dict) else {}
-        if context.get("lifecycle_factory") is not _LIFECYCLE_FACTORY:
-            raise ValueError("episode lifecycle authority can only be factory minted")
-        lineage = context.get("episode_lineage")
-        if not isinstance(lineage, _EpisodeLineage) or lineage.episode_id != self.episode_id:
-            raise ValueError("episode lifecycle requires its process-live lineage lease")
+    def _validate_state_evidence(self) -> Self:
         if len(self.reservation_ids) != len(set(self.reservation_ids)):
             raise ValueError("episode contains duplicate reservations")
         if tuple(sorted(self.reservation_ids)) != self.reservation_ids:
@@ -594,8 +577,6 @@ class EpisodeLifecycle(AuthorityModel):
         expected = _state_identity(self.model_dump(mode="json", exclude={"state_id"}))
         if self.state_id != expected:
             raise ValueError("episode lifecycle state identity does not match its evidence")
-        object.__setattr__(self, "_authority", _LIFECYCLE_FACTORY)
-        object.__setattr__(self, "_lineage", lineage)
         return self
 
     @classmethod
@@ -627,7 +608,7 @@ class EpisodeLifecycle(AuthorityModel):
         raise TypeError("episode lifecycle authority cannot be copied")
 
     def _assert_authority(self) -> None:
-        if self._consumed or getattr(self, "_authority", None) is not _LIFECYCLE_FACTORY:
+        if self._consumed or getattr(self, "_authority", None) is None:
             raise ValueError("episode lifecycle lacks transition authority")
         expected = _state_identity(self.model_dump(mode="json", exclude={"state_id"}))
         if self.state_id != expected:
@@ -647,13 +628,14 @@ class EpisodeLifecycle(AuthorityModel):
         payload = self.model_dump(mode="python", exclude={"state_id"})
         payload.update(previous_state_id=self.state_id, operation=operation, **updates)
         payload["state_id"] = _state_identity(payload)
-        return type(self).model_validate(
-            payload,
-            context={
-                "lifecycle_factory": _LIFECYCLE_FACTORY,
-                "episode_lineage": self._lineage,
-            },
+        child = type(self).model_validate(payload)
+        _attach_lifecycle_authority(
+            child,
+            _lineage=self._lineage,
+            _lock=RLock(),
+            _consumed=False,
         )
+        return child
 
     def _consume_source(self) -> None:
         self._consumed = True
@@ -807,16 +789,43 @@ class EpisodeLifecycle(AuthorityModel):
         *,
         kind: Literal["preflight", "infrastructure"],
         reason: str,
+        permit: SideEffectPermit | None = None,
     ) -> Self:
         if self.state not in ("planned", "preflighted", "authorized"):
             raise ValueError("post-start failure must enter cleaning first")
-        return self._consume_transition(
-            self.state,
-            "fail-before-running",
-            state="failed",
-            failure_kind=kind,
-            failure_reason=reason,
-        )
+        if self.state != "authorized":
+            if permit is not None:
+                raise ValueError("pre-authorization failure cannot consume a permit")
+            return self._consume_transition(
+                self.state,
+                "fail-before-running",
+                state="failed",
+                failure_kind=kind,
+                failure_reason=reason,
+            )
+        if permit is None:
+            raise ValueError("authorized failure requires its side-effect permit")
+        with _authority_locks(self._lock, permit.authority_lock()):
+            self._assert_authority()
+            permit.assert_authority()
+            if (
+                permit.episode_id != self.episode_id
+                or permit.plan_id != self.plan_id
+                or permit.budget_id != self.budget_id
+                or permit.preflight_seal_id != self.preflight_seal_id
+                or permit.permit_id != self.permit_id
+            ):
+                raise ValueError("side-effect permit does not match this episode")
+            failed = self._transition(
+                "authorized",
+                "fail-before-running",
+                state="failed",
+                failure_kind=kind,
+                failure_reason=reason,
+            )
+            self._consume_source()
+            permit.consume_authority()
+            return failed
 
     def finish_cleanup(self, result: CleanupResult) -> Self:
         with _authority_locks(self._lock, result.authority_lock()):
@@ -891,10 +900,11 @@ def plan_episode(
         payload["state_id"] = _state_identity(
             {key: value for key, value in payload.items() if key != "state_id"}
         )
-        return EpisodeLifecycle.model_validate(
-            payload,
-            context={
-                "lifecycle_factory": _LIFECYCLE_FACTORY,
-                "episode_lineage": lineage,
-            },
+        root = EpisodeLifecycle.model_validate(payload)
+        _attach_lifecycle_authority(
+            root,
+            _lineage=lineage,
+            _lock=RLock(),
+            _consumed=False,
         )
+        return root

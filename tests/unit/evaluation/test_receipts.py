@@ -218,8 +218,9 @@ def test_preflight_requires_exactly_one_receipt_and_blocks_required_failure() ->
     redactions = RedactionSet.from_resolved_values(("definitely-not-present",))
     sealed = seal_preflight(plan, receipts, redactions)
     assert sealed.successful
-    with pytest.raises(ValidationError, match="validated receipts"):
-        SealedPreflight.from_canonical_json(sealed.to_canonical_json())
+    parsed = SealedPreflight.from_canonical_json(sealed.to_canonical_json())
+    with pytest.raises(ValueError, match="lacks factory authority"):
+        parsed.assert_authority()
     with pytest.raises(ValueError, match="exactly one"):
         seal_preflight(plan, receipts[:-1], redactions)
     with pytest.raises(ValueError, match="duplicate"):
