@@ -621,3 +621,122 @@ def _days(n):
     from datetime import timedelta
 
     return timedelta(days=n)
+
+
+# ---------------------------------------------------------------------------
+# Opening the database under cross-process contention (#391).
+#
+# The failure these guard is DATA LOSS, not an exception: a momentary lock on
+# the very first open latched ``_broken``, and every write for the rest of that
+# process then returned 0 silently. With four parallel writers that surfaces as
+# exactly one of them contributing zero rows.
+#
+# Both tests inject the failure rather than racing for it, so they are
+# deterministic; the real contended measurement is in the PR's evidence.
+# ---------------------------------------------------------------------------
+
+
+def test_a_locked_first_open_does_not_disable_the_store(tmp_path, monkeypatch):
+    """A BUSY at open is transient: the next write must still land.
+
+    This is the #391 defect itself. ``_connect`` caught every exception and set
+    ``_broken``, which is correct for a read-only directory and catastrophic for
+    a lock another process releases microseconds later.
+    """
+    import sqlite3
+
+    from local_operator.analytics import store as store_mod
+
+    store = AnalyticsStore(tmp_path / "a.db")
+    real_connect = sqlite3.connect
+    calls = {"n": 0}
+
+    def flaky_connect(*args, **kwargs):
+        # Fail ONLY the first open, the way a real lock race does.
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(store_mod.sqlite3, "connect", flaky_connect)
+
+    # The open is retried, so a single lock does not drop the batch — and
+    # ``_broken`` stays clear so a later write would also succeed.
+    assert store.record_batch([_snap()]) == 1
+    assert not store._broken
+
+    monkeypatch.undo()
+    assert store.record_batch([_snap(), _snap()]) == 2
+    assert store.aggregate().calls == 3
+    store.close()
+
+
+def test_a_real_open_fault_still_disables_the_store(tmp_path, monkeypatch):
+    """The complement: a NON-lock fault must still latch ``_broken``.
+
+    Without this, the #391 fix would turn one log line into one per provider
+    round trip for the life of the process against a genuinely unusable path.
+    """
+    import sqlite3
+
+    from local_operator.analytics import store as store_mod
+
+    store = AnalyticsStore(tmp_path / "a.db")
+
+    def broken_connect(*args, **kwargs):
+        raise sqlite3.OperationalError("unable to open database file")
+
+    monkeypatch.setattr(store_mod.sqlite3, "connect", broken_connect)
+    assert store.record_batch([_snap()]) == 0
+    assert store._broken
+    store.close()
+
+
+def test_wal_is_enabled_despite_a_busy_journal_transition(tmp_path, monkeypatch):
+    """The DELETE->WAL switch is retried, because busy_timeout does not cover it.
+
+    Changing the journal mode needs an exclusive lock, and SQLite fails that
+    acquisition with SQLITE_BUSY immediately instead of calling the busy
+    handler — so the 5s ``busy_timeout`` set beside it buys nothing. Measured on
+    a fresh database opened by 16 processes at once: 25/320 opens raised here.
+    """
+    import sqlite3
+
+    from local_operator.analytics import store as store_mod
+
+    store = AnalyticsStore(tmp_path / "a.db")
+    real_connect = sqlite3.connect
+    busied = {"n": 0}
+
+    class _FlakyConn:
+        """Wraps a real connection because ``sqlite3.Connection`` is immutable
+        (its ``execute`` cannot be monkeypatched), so the injection has to
+        happen at the ``connect`` boundary instead."""
+
+        def __init__(self, conn):
+            self._conn = conn
+
+        def execute(self, sql, *args, **kwargs):
+            # Fail the journal switch twice, which the bounded retry must absorb.
+            if "journal_mode=WAL" in sql and busied["n"] < 2:
+                busied["n"] += 1
+                raise sqlite3.OperationalError("database is locked")
+            return self._conn.execute(sql, *args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self._conn, name)
+
+    monkeypatch.setattr(
+        store_mod.sqlite3, "connect", lambda *a, **kw: _FlakyConn(real_connect(*a, **kw))
+    )
+    assert store.record_batch([_snap()]) == 1
+    monkeypatch.undo()
+    store.close()
+
+    # The REAL property first: the database ended up in WAL despite the busy
+    # transition. Asserting the injection count before this would let the test
+    # die on its own proxy rather than on the behaviour it guards.
+    conn = sqlite3.connect(str(tmp_path / "a.db"))
+    assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+    conn.close()
+    assert busied["n"] == 2  # and the retry was genuinely exercised, not skipped

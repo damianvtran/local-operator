@@ -249,9 +249,15 @@ async def test_live_continuation_preserves_prior_accounting_across_restart(tmp_p
     new_id, error = resumed.subagent_comms.resume(old_id, "continue")
     assert error is None and new_id is not None
     await hanging.started.wait()
+    # Wait on the ACCOUNTING itself, not on the identity bind that precedes
+    # it. ``bind_logical_identity`` sets ``logical_id`` and then folds the
+    # predecessor's usage into ``prior_attempt_usage``; asserting on the
+    # second after waiting on the first is wait-on-a-proxy-then-assert-on-
+    # the-real-thing, and under load the fold has not landed when the
+    # identity has (#463: ``assert 0 == 4`` on an otherwise-green commit).
     await wait_for(
-        lambda: resumed.jobs.get(new_id) is not None
-        and resumed.jobs.get(new_id).logical_id is not None  # type: ignore[union-attr]
+        lambda: sum(item.input_tokens for item in resumed.jobs.accounting_components()) == 4,
+        timeout=30.0,
     )
     assert sum(item.input_tokens for item in resumed.jobs.accounting_components()) == 4
     await resumed._persist_subagent_roster()

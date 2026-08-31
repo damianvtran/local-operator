@@ -678,10 +678,22 @@ def test_fold_survives_junk_without_raising() -> None:
 
 
 async def _open(pilot: Any, app: OperatorApp, job: Any) -> SubagentView:
-    for _ in range(80):
-        await pilot.pause()
-        if app._session is not None:
-            break
+    """Open the child page once the boot worker has adopted a session.
+
+    Waits on the WORKER, not on a frame budget. ``on_mount`` hands
+    ``_boot_session`` to ``run_worker(group="session")`` so first paint does
+    not wait on the factory; every assertion below reads through that session,
+    so an unbooted app is a different test. The previous 80-pause loop was a
+    bet that 80 frames outlast the factory, the same class #461 converted
+    everywhere else in this file.
+    """
+    workers = [w for w in app.workers if w.group == "session"]
+    if workers:
+        await app.workers.wait_for_complete(workers)
+    assert app._session is not None, (
+        "no session worker is pending and no session was adopted — the "
+        "boot worker never ran, so waiting here would have waited on nothing"
+    )
     app._append_block(UserBlock("audit the ingest path"))
     app._refresh_band()
     await pilot.pause()
@@ -1403,10 +1415,12 @@ async def test_history_unavailable_and_error_retry_keep_trajectory_fallback(
         await _wait_history(pilot, view)
         assert HISTORY_ERROR_NOTE in view._history_state_text()
         failed_attempts = attempts
-        # Repaints and the top-edge watcher may run freely, but the advertised
-        # retry must remain a user decision rather than an implicit hot loop.
-        for _ in range(50):
-            await asyncio.sleep(0.005)
+        # The advertised retry must remain a user decision rather than an
+        # implicit hot loop. After the worker has settled, a handful of extra
+        # loop turns is enough for a hot-looping retry to have fired; a 250 ms
+        # wall-clock window was the previous discriminator and is what went
+        # red under swap thrashing (#403).
+        for _ in range(8):
             await pilot.pause()
         assert attempts == failed_attempts == 1
 
@@ -1414,11 +1428,17 @@ async def test_history_unavailable_and_error_retry_keep_trajectory_fallback(
         await pilot.pause()
         assert app.focused is view._body
         await pilot.press("home")
-        for _ in range(100):
-            await asyncio.sleep(0.005)
-            await pilot.pause()
-            if attempts == 2 and not view._history_loading:
+        # Wait on the retry actually happening (``attempts`` advancing), not
+        # on a 500 ms budget and not on a worker that may not have been
+        # spawned yet. Bounded by loop turns: contention stretches how long
+        # a turn takes, not how many the key-press needs.
+        for _ in range(200):
+            if attempts == 2:
                 break
+            await pilot.pause()
+        else:
+            raise AssertionError("the explicit Home retry never ran")
+        await _wait_history(pilot, view)
         assert attempts == 2
         assert view._history_unavailable
 
