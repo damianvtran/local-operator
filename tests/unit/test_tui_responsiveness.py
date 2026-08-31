@@ -71,8 +71,6 @@ class StallRecorder:
 
     Call-site ceilings are site-appropriate, not global. The reconnect and
     connect tests use the strict 50 ms CPU bar (healthy sample 0 ms,
-    Call-site ceilings are site-appropriate, not global. The reconnect and
-    connect tests use the strict 50 ms CPU bar (healthy sample 0 ms,
     regression 90-130 ms). The loaded default is 500 ms of CPU, because the
     sites that use it drive real app work with legitimate loop CPU. The
     FULL CI dataset (every run that has flaked a lower ceiling on a green
@@ -86,7 +84,6 @@ class StallRecorder:
     precedent.) The wall ceiling is 2000 ms everywhere: 3× the worst
     observed scheduler-noise gap, and still well below the multi-second
     regressions.
-    """
     """
 
     def __init__(self, stall_ms: float = STALL_MS) -> None:
@@ -164,7 +161,6 @@ class StallRecorder:
         green tree exceeds it. (The historical 549 ms layout-pass figure is
         WALL-CLOCK, from the pre-#486 probe — an upper bound on the class of
         work, not a CPU precedent.)
-
 
         The wall ceiling is the same catastrophic backstop as
         :meth:`assert_no_stall`: a pure blocking sleep is invisible to the
@@ -1073,9 +1069,9 @@ async def test_s1_boot_paints_and_stays_responsive_over_the_first_seconds() -> N
     MCP" report was made of. The boot session is a fake (the real factory's
     loop work is covered by the unit tests above); what this test measures
     is the app's own boot composition — paint, adoption, timers. The loaded
-    bar (200 ms CPU / 2 s wall) is the right one here: boot has legitimate
-    loop CPU from Textual layout, and the reconnect/connect tests are the
-    ones that assert the strict 50 ms CPU bar against the parse regression.
+    bar (500 ms CPU / 2 s wall) is the right one here: boot recorded 321 ms
+    of healthy Textual-layout CPU on CI, and the reconnect/connect tests are
+    the ones that assert the strict 50 ms CPU bar against the parse regression.
     """
     from local_operator.tui.app import OperatorApp
     from tests.unit.tui.test_app_pilot import FakeSession, _factory
@@ -1167,10 +1163,11 @@ async def test_s2_send_to_agent_end_keeps_the_loop_under_the_bar() -> None:
             await asyncio.sleep(0.02)
         discovery.available_models = original  # type: ignore[assignment]
         configure.invalidate_model_info_cache()
-        # Loaded bar (200 ms CPU / 2 s wall): this path has legitimate loop
-        # CPU from Textual layout, and the reconnect/connect tests are the
-        # ones that assert the strict 50 ms CPU bar against the parse
-        # regression. Bench numbers live in bench/before.json vs after.json.
+        # Loaded bar (500 ms CPU / 2 s wall): this path has legitimate loop
+        # CPU from Textual layout (413 ms recorded on CI), and the
+        # reconnect/connect tests are the ones that assert the strict 50 ms
+        # CPU bar against the parse regression. Bench numbers live in
+        # bench/before.json vs after.json.
         recorder.assert_no_stall_loaded()
 
 
