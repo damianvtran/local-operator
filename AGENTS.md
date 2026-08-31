@@ -362,8 +362,8 @@ load. On an idle dev box the budget is 20-50x more than the work needs, so it
 looks solid; under `-n auto` contention on a 4-vCPU CI runner the work
 stretches, the budget does not, and the suite goes red for reasons that have
 nothing to do with the code under test. This repo has paid for that lesson
-repeatedly (#122, #373, #461, #486, #496, #498), so the rules below are not
-style preferences.
+repeatedly (#122, #373, #461, #486, #496, #498, #499), so the rules below are
+not style preferences.
 
 ### Wait on the event, never on the clock
 
@@ -509,7 +509,7 @@ Then check the other direction: run the file several times under load
 ### When a test is already flaking
 
 Reproduce and classify before touching a threshold. A single failure out of
-~9000 on a different timing-sensitive test each run is a flake, not a
+~9900 on a different timing-sensitive test each run is a flake, not a
 regression; the same test failing on several branches at once — check `main` —
 is repo-wide and not yours. Re-run to confirm, then fix the measurement rather
 than widening the bound. Do not merge a red head on the assumption that it is
@@ -527,7 +527,13 @@ behind it — which is the other half of why `wait_for` carries
 **A deadlock defeats every technique above.** If the failure mode is the event
 loop freezing at the C level rather than running slowly, a Python-level probe
 reports nothing — the coroutine that would record the sample never gets
-scheduled either. That class is covered by `tests/e2e/watchdog.py`, whose
+scheduled either. Nor do the obvious fallbacks: `watchdog.py` documents, with a
+measurement, that a `threading.Thread` watchdog needs a GIL the wedged thread
+never releases, and `pytest-timeout`'s default `signal` method never fires
+because a Python signal handler only runs between bytecodes. The pre-fix code
+ignored a 20 s thread watchdog and had to be `kill -9`'d.
+
+That class is covered by `tests/e2e/watchdog.py`, whose
 `faulthandler.dump_traceback_later(exit=True)` is armed in C and fires from a
 separate OS thread, so it survives a wedged interpreter and takes the process
 down with a full thread dump. It runs as its own CI stage (`tui-e2e`, both
