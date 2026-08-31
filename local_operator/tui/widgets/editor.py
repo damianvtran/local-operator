@@ -828,9 +828,16 @@ class RefreshArgumentChoices(Message):
     character typed.
     """
 
-    def __init__(self, command: str) -> None:
+    def __init__(self, command: str, caret: int) -> None:
         super().__init__()
         self.command = command
+        #: Whole-buffer offset the editor parsed at when it posted this. The
+        #: app's refill builder re-parses at the LIVE caret, so a message that
+        #: sat queued across a caret-only move (``home`` then ``end`` on an
+        #: open ``/mcp `` list) would refill against a position that no longer
+        #: has an argument — and close the list the later key just reopened
+        #: (#393). The handler drops a message whose caret no longer matches.
+        self.caret = caret
 
 
 class ArgumentHighlightChanged(Message):
@@ -1200,6 +1207,11 @@ class Editor(TextArea):
         # BEFORE ``super().__init__`` because TextArea's constructor loads the
         # initial document through ``load_text`` → ``_sync_picker``.
         self._suspend_picker_sync = False
+        # Last parse phase `_sync_picker` settled. Compared by
+        # `_sync_picker_if_phase_changed` so a caret move that stays inside
+        # one phase does not re-open an Esc-dismissed list. Set BEFORE
+        # ``super().__init__`` because that constructor already syncs.
+        self._picker_phase_at_last_sync: str | None = None
         # The escape action held for one pump turn, or ``None`` when no escape
         # is in flight (the resting state). See the escape-coalescing block
         # below :meth:`_on_key` for why an escape is ever held at all.
@@ -3808,8 +3820,27 @@ class Editor(TextArea):
         # `getattr` for the same reason as above — a reactive watcher can fire
         # during base-class construction, before this subclass's attributes
         # exist, and `_ghost_completion` reads several of them.
-        if hasattr(self, "_picker"):
-            self._sync_ghost()
+        #
+        # Re-derive the PICKER here, not just the ghost — but ONLY when the
+        # caret has crossed a parse PHASE. `_on_key` syncs BEFORE the
+        # caret-moving binding runs, so a round trip of `home` then `end`
+        # used to close an ARGUMENT list at the start of the line and never
+        # ask again once the caret was back in the argument (#393). Asking
+        # at the settled caret is the reopen path that cannot depend on
+        # which key got you here.
+        #
+        # Unconditional `_sync_picker` here is the wrong answer: that helper
+        # re-opens a list whose query still matches, so an Esc-dismissed
+        # model/command list came back on the next caret move (`shift+up`
+        # in the model picker, CI 3.12/3.13). The phase check is what
+        # keeps a dismissal a dismissal: `home` on `/mcp ` leaves the
+        # argument, `end` re-enters it, and a motion that stays inside
+        # the same phase (or outside every list) is a no-op for the
+        # picker. Skipped while `_set_text_and_caret` is parking the caret
+        # so that helper's one-sync-at-the-final-position contract (D5)
+        # holds.
+        if hasattr(self, "_picker") and not getattr(self, "_suspend_picker_sync", False):
+            self._sync_picker_if_phase_changed()
 
     # -- paste ----------------------------------------------------------------
     async def _on_paste(self, event: events.Paste) -> None:
@@ -3905,7 +3936,7 @@ class Editor(TextArea):
                 return
             event.prevent_default()
             event.stop()
-            self.insert(attached)
+            self._replace_selection(attached)
             return
         attached = await self._attach_pasted_images(event.text)
         if attached is None:
@@ -3918,7 +3949,7 @@ class Editor(TextArea):
         # down ("paste a file path instead"), so without this the card that
         # gave the instruction reappears to deny it worked (round 2, D8/D3).
         self.post_message(EditorPasteAttached())
-        self.insert(attached)
+        self._replace_selection(attached)
 
     async def _attach_clipboard_image(self, *, allow_text: bool = False) -> str | None:
         """Read the clipboard and attach (or insert) whatever is on it.
@@ -4184,10 +4215,26 @@ class Editor(TextArea):
             # posted the notice that says so, and inserting nothing is the
             # honest outcome.
             return
-        # `move_cursor` to the edit's end mirrors `TextArea._on_paste`: without
-        # it `maintain_selection_offset=False` leaves the caret where the
-        # replaced range began, so the next keystroke types BEFORE the text
-        # just pasted.
+        self._replace_selection(pasted)
+
+    def _replace_selection(self, pasted: str) -> None:
+        """Put ``pasted`` at the caret, replacing a live selection if there is one.
+
+        THE one insertion point for every paste that this widget owns — the
+        empty-paste clipboard branch, the path/cmux branch, and
+        :meth:`action_system_paste`. ``insert`` is the branch that does NOT
+        replace, so a path that called it while a range was live stuffed the
+        marker into the selection instead of swapping it (#424 U7, the same
+        defect #402 U2 already fixed on the ``ctrl+v`` route). Sharing the
+        helper is what keeps the three from drifting apart again.
+
+        ``_replace_via_keyboard`` is the exact call the base class's own paste
+        makes, so an empty selection degenerates to an insert at the caret.
+        ``move_cursor`` to the edit's end mirrors ``TextArea._on_paste``:
+        without it ``maintain_selection_offset=False`` leaves the caret where
+        the replaced range began, so the next keystroke types BEFORE the text
+        just pasted.
+        """
         result = self._replace_via_keyboard(pasted, *self.selection)
         if result is not None:
             self.move_cursor(result.end_location)
@@ -4598,6 +4645,42 @@ class Editor(TextArea):
         self.text = f"{text[:start]}{text[end:]}"
         self.move_cursor(self._location_at_offset(start))
 
+    def _picker_phase(self) -> str | None:
+        """Which list the caret is currently inside, or ``None``.
+
+        ``"argument"`` while :func:`slash_argument` matches, ``"command"``
+        while :func:`slash_context` matches, ``None`` otherwise. The three
+        answers are mutually exclusive by construction (the space that
+        opens an argument closes the command word). Used by
+        :meth:`_sync_picker_if_phase_changed` so a caret move that stays
+        inside one phase does not re-open an Esc-dismissed list.
+        """
+        cursor = self._caret_offset()
+        if (
+            slash_argument(self.text, self._argument_commands, cursor, self._command_names)
+            is not None
+        ):
+            return "argument"
+        if slash_context(self.text, cursor, self._command_names) is not None:
+            return "command"
+        return None
+
+    def _sync_picker_if_phase_changed(self) -> None:
+        """Re-sync the picker only when the caret crossed a parse phase.
+
+        The #393 reopen (`end` after `home` on `/mcp `) is a phase change:
+        column 0 is outside the argument, the end of the line is inside
+        it. A motion that stays in the same phase — arrows inside a word,
+        `shift+up` with a model list dismissed — must not call
+        :meth:`_sync_picker`, because that helper treats a matching query
+        as "show the list" and would undo Esc.
+        """
+        phase = self._picker_phase()
+        if phase == getattr(self, "_picker_phase_at_last_sync", None):
+            self._sync_ghost()
+            return
+        self._sync_picker()
+
     def _sync_picker(self) -> None:
         """Re-derive EVERY list from the buffer.
 
@@ -4702,9 +4785,18 @@ class Editor(TextArea):
                     # `verb + sep` so both edges cross: entering the server slot
                     # and backspacing out of it.
                     subcommand = f"{first_tok.lower()}{sep}" if list_argument else ""
-                    if subcommand != self._argument_subcommand:
+                    # ``None`` (never tracked, the state after ArgumentQueryOpened
+                    # resets the slot) and ``""`` (first slot, no verb) are the
+                    # same list. Treating them as different posted a refresh on
+                    # the first caret-only key after `/mcp ` — `home` — and the
+                    # handler then rebuilt the rows at the NEW caret, which for
+                    # `home` is the `/` where `slash_argument` is None, so the
+                    # verb list closed under the user's fingers (#393). Same
+                    # None/"" normalisation the `/team` branch below already
+                    # does for the chart slot.
+                    if subcommand != (self._argument_subcommand or ""):
                         self._argument_subcommand = subcommand
-                        self.post_message(RefreshArgumentChoices(command))
+                        self.post_message(RefreshArgumentChoices(command, cursor))
                 else:
                     # `/team` has exactly ONE thing that changes its choice set:
                     # crossing into or out of the `chart ` SECOND slot (first
@@ -4733,7 +4825,7 @@ class Editor(TextArea):
                     is_chart_slot = chart_second_slot == "chart"
                     self._argument_subcommand = chart_second_slot
                     if was_chart_slot != is_chart_slot:
-                        self.post_message(RefreshArgumentChoices(command))
+                        self.post_message(RefreshArgumentChoices(command, cursor))
             self._picker.sync_argument(list_argument)
             # U1/U2 discoverability hint. The moment a NAME+message name is
             # autofilled (or hand-typed) to `/<cmd> <name> ` with an empty tail,
@@ -4772,6 +4864,7 @@ class Editor(TextArea):
         if argument is None:
             if self._model_picker.is_open():
                 self._model_picker.close()
+            self._picker_phase_at_last_sync = self._picker_phase()
             return
         if self._model_picker.is_open():
             self._model_picker.set_query(argument)
@@ -4780,6 +4873,10 @@ class Editor(TextArea):
             # Transition only. Posting per keystroke would re-fetch every provider
             # for each character the user types into the query.
             self.post_message(ModelQueryOpened())
+        # Recorded after both list branches so a later caret-only move can
+        # tell whether the parse PHASE changed (#393 reopen vs. an
+        # Esc-dismissed list that must stay closed).
+        self._picker_phase_at_last_sync = self._picker_phase()
 
     def _on_picker_highlight(self, name: str | None) -> None:
         """Relay the picker's highlight to the app (see ArgumentHighlightChanged).
