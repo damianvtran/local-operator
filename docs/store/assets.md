@@ -184,10 +184,10 @@ variable-font loading is what sets the floor).
 | `screenshot-1-connected.png` | 1280 × 800 | Connected / driving (hero) | `popup-connected.png` |
 | `screenshot-2-allow-site.png` | 1280 × 800 | Per-site allow prompt | `popup-origin-prompt.png` |
 | `screenshot-3-pairing.png` | 1280 × 800 | Pairing (no account) | `popup-pairing.png` |
-| `screenshot-4-agent-driving.png` | 1280 × 800 | Agent drives one tab | `action-screenshot-page2.png` + `popup-connected.png` |
+| `screenshot-4-agent-driving.png` | 1280 × 800 | Agent drives one tab | `_demo_page()` (drawn) + `popup-connected.png` |
 | `screenshot-5-options.png` | 1280 × 800 | Options / allowed sites | `options-populated.png` |
 | `promo-small-440x280.png` | 440 × 280 | Small promo tile | brand chip + wordline |
-| `promo-marquee-1400x560.png` | 1400 × 560 | Marquee promo tile | `action-screenshot-page2.png` + `popup-connected.png` |
+| `promo-marquee-1400x560.png` | 1400 × 560 | Marquee promo tile | `_demo_page()` (drawn) + `popup-connected.png` |
 
 **Production facts (for reproducible store updates):**
 
@@ -214,12 +214,31 @@ variable-font loading is what sets the floor).
 - Captions are drawn from `listing.md`'s own section headings; none promise
   multi-tab, active-tab takeover, downloads/uploads, Firefox/Safari, or remote
   access.
+- The reached page in screenshot 4 and the marquee is **typeset by the script**
+  (`_demo_page()` in `build_assets.py`), not a pasted capture. The real bridge
+  test page is bare default-serif HTML on stark white, which read as an
+  unstyled file inside an otherwise site-themed composition; `_demo_page()`
+  renders the same connection-check content in the site's own type and palette.
+  It is fixed at 620 × 346 and named `lop-testpage.html` in the drawn browser
+  chrome, matching the "Bridge test page" URL in the adjacent popup capture, so
+  both frames name one page. No capture file feeds those two assets any more —
+  changing what that page says means editing `_demo_page()`.
 
-**Known caveat — Chrome debugger banner (checklist §"debugger notice"):** the
-supplied `action-screenshot-page2.png` capture is the page content only and
-does not include Chrome's "…is debugging this browser" info bar. Screenshot 4
-therefore conveys the agent-owns-this-tab fact through the popup's `Driving:
-Page Two` line and the connected state rather than the browser banner. Before
-final upload, re-capture the agent-driving frame with the debugger banner
-visible (design §9.5 attaches CDP to the delegated tab) and drop it in as the
-new source — `build_assets.py` will recomposite it unchanged.
+**Known caveat — Chrome debugger banner (checklist §"debugger notice"):**
+neither screenshot 4 nor the marquee shows Chrome's "…is debugging this
+browser" info bar. The reached page in both is typeset by `_demo_page()`
+rather than captured, and the drawn browser chrome is a minimal traffic-light
++ URL bar that deliberately carries no Chrome UI beyond it. Both assets
+therefore convey the agent-owns-this-tab fact through the composited
+`popup-connected.png` frame (its "Connected." state over the
+`BRIDGE TEST PAGE` label and that page's `127.0.0.1` URL, naming the same page
+the browser frame reached) and the demo page's own "This tab — OPENED BY AGENT"
+status row.
+
+If a future reviewer requires the literal banner, note that **dropping a new
+capture into `docs/evidence/browser-extension/` will not change these assets** —
+no code path reads one for either file. It would mean re-capturing the
+agent-driving frame with the banner visible (design §9.5 attaches CDP to the
+delegated tab) *and* changing `build_screenshot_action()` / the marquee builder
+to paste that capture instead of calling `_demo_page()`, which trades the
+site-themed page back for the bare-HTML look this treatment replaced.
