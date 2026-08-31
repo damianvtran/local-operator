@@ -113,6 +113,22 @@ export function PastSessionsScreen() {
 						>
 							<div className="min-w-0 flex-1">
 								<span className="block truncate text-body">
+									{/* A PREFIX, dim, ahead of the name — the same
+									   mark and the same position the TUI's /resume
+									   picker uses, because it is one fact on two
+									   surfaces. Ahead of the name specifically so
+									   `truncate` eats the tail of a long inherited
+									   title rather than the tag: a fresh fork and its
+									   parent are otherwise identical rows, and the
+									   long descriptive titles are exactly the ones a
+									   suffix would lose the mark on. The inherited
+									   title is kept beside it because it is the only
+									   thing saying what this branched from. */}
+									{s.forked ? (
+										<span className="mr-1.5 text-meta text-ink-dim">
+											[fork]
+										</span>
+									) : null}
 									{s.name || "untitled"}
 									{s.body_match ? (
 										<span className="ml-1.5 text-meta text-info">

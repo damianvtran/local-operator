@@ -243,6 +243,11 @@ export interface PastSession {
 	/** True when this row matched only on what was SAID in the conversation,
 	    not its name/id — the UI marks these so the hit doesn't look arbitrary. */
 	body_match?: boolean;
+	/** True while this session is a FORK still wearing the title it inherited
+	    from its parent. Such a row is otherwise byte-identical to the parent's
+	    — same name, same age — so the list tags it, exactly as the TUI's
+	    /resume picker does. Clears the moment the fork names itself. */
+	forked?: boolean;
 }
 
 export interface Directories {

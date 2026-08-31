@@ -2563,6 +2563,14 @@ class OperatorApp(App[None]):
             team=str(getattr(session, "active_team_name", "") or ""),
             context_window=_context_window(session),
             conversation_name=session.conversation_name,
+            # A fork that has not named itself yet wears the PARENT's identity
+            # on every surface that names a conversation, because its own
+            # `conversation_name` is deliberately empty — so the tab would
+            # otherwise read identically to the parent's in a window switcher.
+            # `getattr` because a reduced facade (embedded SDK, RemoteSession,
+            # a pilot double) need not expose the property, and "not a fork" is
+            # the answer that leaves such a host exactly as it was.
+            forked=bool(getattr(session, "wears_inherited_title", False)),
         )
         self._wire_mcp_status(session)
         self._report_mcp_startup(session)
@@ -2666,6 +2674,15 @@ class OperatorApp(App[None]):
                 self._spend_text(cost) if cost is not None else ("$—" if billed_unknown else None)
             ),
             conversation_name=str(getattr(state, "conversation_title", "") or ""),
+            # The fork tag follows the name, not the band's memory: a snapshot
+            # arrives with EVERY name change, and `StatusLine.update` treats a
+            # missing `forked=` as leave-alone — so a rename that cleared the
+            # session flag could not heal the tab here without this push, and
+            # the live window would keep saying `[fork]` after `/resume`'s
+            # picker had already stopped (review round 1, R1). Read defensively:
+            # an older owner's snapshot may predate the field, and "not a fork"
+            # is the answer that leaves such a host exactly as it was.
+            forked=bool(getattr(state, "conversation_title_forked", False)),
             streaming=bool(getattr(state, "streaming", False)),
             subagents=sum(1 for j in task_jobs if j.status == "running" and not j.queued),
             jobs=sum(1 for j in bash_jobs if j.status == "running" and not j.queued),
@@ -2752,6 +2769,9 @@ class OperatorApp(App[None]):
             team=str(getattr(session, "active_team_name", "") or ""),
             context_window=_context_window(session),
             conversation_name=session.conversation_name,
+            # As in `_adopt_session`: the replacement session may itself be an
+            # unnamed fork (`/resume` onto one), and the tab has to say so.
+            forked=bool(getattr(session, "wears_inherited_title", False)),
             streaming=False,
         )
         self._wire_mcp_status(session)
@@ -4064,6 +4084,10 @@ class OperatorApp(App[None]):
             streaming=False,
             effort="",
             conversation_name="",
+            # Cleared with the name it qualifies: the dead session's fork tag
+            # must not describe the conversation replacing it.
+            forked=False,
+            fork_pending=False,
             mcp=McpStatus(),
             context_tokens=0,
             context_is_estimate=False,
@@ -4688,7 +4712,40 @@ class OperatorApp(App[None]):
                 "note",
             )
             return
-        notice("forking at the next safe boundary…")
+        # The escape hatch is named IN the acknowledgement, because this is the
+        # only moment the user is looking for it. `action_interrupt` has always
+        # withdrawn a pending fork, but nothing ever said so — and a mistyped
+        # `/fork rewrite everythign` costs a billed model call in a window the
+        # user is not watching, so "this is revocable" has to be discoverable
+        # before it fires rather than in the docs afterwards.
+        notice("forking at the next safe boundary… (esc to cancel)")
+        # A STANDING indication that the fork is still coming. The line above
+        # scrolls away behind a long tool run, and without this the user is left
+        # with nothing on screen saying anything is armed — then a window opens
+        # minutes later with no visible cause. Cleared by `_sync_fork_pending`
+        # at the receipt and by `action_interrupt`'s cancel.
+        self._sync_fork_pending()
+
+    def _sync_fork_pending(self) -> None:
+        """Push ``session.has_pending_fork()`` at the band's fork indicator.
+
+        Read from the session rather than tracked here, so the band can never
+        disagree with the fact that actually governs the drain. Called at the
+        three moments the answer can change — the request, the receipt, and a
+        cancel — rather than polled, because the band repaints at 12.5 Hz during
+        a turn and a poll would be doing this work eighty times a second to
+        observe a flag that changes twice a session.
+
+        Defensive on both sides: a host whose session has no ``has_pending_fork``
+        (the lightweight facades, ``RemoteSession``) simply never lights the
+        segment, which is the same behaviour it had before the indicator
+        existed.
+        """
+        if self._status is None:
+            return
+        session = self._session
+        probe = getattr(session, "has_pending_fork", None) if session is not None else None
+        self._status.update(fork_pending=bool(probe()) if callable(probe) else False)
 
     def _schedule_fork_report(self, fork_id: str, error: str) -> None:
         """Run the fork's receipt-and-spawn off the caller's stack.
@@ -4696,6 +4753,12 @@ class OperatorApp(App[None]):
         The session's drain calls this synchronously at a turn boundary, so the
         work it starts must not run there.
         """
+        # The drain has already cleared the request by the time it calls back,
+        # so the indicator comes down here rather than waiting for the window
+        # to open — the spawn can spend seconds in a bounded subprocess, and a
+        # band still saying "forking" after the fork exists is a lie about a
+        # state the user can no longer cancel.
+        self._sync_fork_pending()
         self.run_worker(self._on_fork_complete(fork_id, error), exclusive=False)
 
     async def _fork_now(self, config_dir_path: "Path", session_id: str, message: str) -> None:
@@ -4799,7 +4862,26 @@ class OperatorApp(App[None]):
             # at the right level of the UI. `getattr` so a third-party backend
             # that predates the field still produces a sensible receipt.
             place = getattr(backend, "opened_place", None) or f"a new {backend.name} window"
-            self._notice(f"forked to {fork_id} — opened in {place}", "note")
+            # WHERE it went, that it did not steal focus, and how to reach it
+            # from here — all three, on one line. The success receipt used to
+            # name only the place, which made it strictly LESS actionable than
+            # the failure receipt beside it (`fallback_receipt` already hands
+            # the user a `lop --resume` command). The fork is deliberately
+            # never focused, so without `(not focused)` the receipt reads as
+            # "something happened somewhere" and the user's next thought is
+            # "why did nothing open"; with it, the same frame says it opened on
+            # purpose, over there. The id stays reachable in the same sentence
+            # because the window may be closed, lost in a sidebar, or on another
+            # workspace, and the id is the durable handle.
+            #
+            # One line and not two: this is a BACKGROUND event announced while
+            # the user is working in the parent, and a two-line receipt for it
+            # is louder than the event.
+            self._notice(
+                f"forked to {fork_id} — opened in {place} (not focused); "
+                f"`lop --resume {fork_id}` reaches it",
+                "note",
+            )
         else:
             self._notice(fallback_receipt(fork_id, failed=True), "note")
 
@@ -7133,6 +7215,9 @@ class OperatorApp(App[None]):
             self._session.abort("interrupted")
             if fork_was_pending:
                 self._notice("fork cancelled", "note")
+                # The band's standing indicator must come down with the
+                # request; the notice above scrolls away, the segment does not.
+                self._sync_fork_pending()
         # A bang-mode command is not a turn, so aborting the session does
         # not reach it. Same key, same meaning: stop the work in front of
         # the user. After the session abort so a live turn and a live
@@ -9947,7 +10032,15 @@ class OperatorApp(App[None]):
             # The band's setter also pushes the terminal title (see
             # `StatusLine._sync_terminal_title`), so both surfaces follow from
             # this one call and neither can lag the other by a frame.
-            self._status.update(conversation_name=stored)
+            #
+            # The fork tag is re-read from the session in the SAME call, because
+            # `set_conversation_name` above has just cleared it: the fork now
+            # has a name of its own, so the tab must stop announcing a borrowed
+            # one on the very frame the real name lands.
+            self._status.update(
+                conversation_name=stored,
+                forked=bool(getattr(session, "wears_inherited_title", False)),
+            )
         # The title lands on a detached worker AFTER the last turn event, so
         # the mobile fold never re-reads it on its own. Push now so the
         # phone's header and list update the same moment the band does.
@@ -9999,7 +10092,19 @@ class OperatorApp(App[None]):
             # One call paints the band AND pushes the terminal title (see
             # `StatusLine._sync_terminal_title`), so neither surface can lag the
             # other by a frame.
-            self._status.update(conversation_name=stored)
+            #
+            # The fork tag is re-read from the session in the SAME call, for the
+            # reason `_store_title` does: `set_conversation_name` above has just
+            # cleared it, and `StatusLine.update` treats a missing `forked=` as
+            # leave-alone — so without this push the tab would keep prefixing
+            # `[fork]` onto the name the user just typed, and the live window and
+            # the `/resume` picker (which clears from disk) would disagree about
+            # the same session (review round 1, R1). `getattr` because a reduced
+            # facade need not expose the property, same as `_adopt_session`.
+            self._status.update(
+                conversation_name=stored,
+                forked=bool(getattr(session, "wears_inherited_title", False)),
+            )
         self._notify_mobile_title(stored)
         # `stored`, not `arg`: the store collapses whitespace and caps the length
         # (`MAX_TITLE_CHARS`), and the receipt's whole job is to show the title

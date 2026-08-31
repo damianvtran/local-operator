@@ -133,6 +133,40 @@ ICON_MCP = "⊙"
 #: warning glyph so it reads the same as a warning notice in the transcript.
 ICON_APPROVALS = "!"
 
+#: Fork tag for the WINDOW/TAB title of a fork that has not named itself yet.
+#: The same word, brackets and case the /resume picker's row marker uses
+#: (``session_picker.FORK_MARKER``) — one mark for one fact across both
+#: surfaces, which is this band's standing rule for a vocabulary shared with
+#: another view. Plain ASCII rather than a glyph because a window switcher's
+#: font is not this terminal's.
+FORK_TITLE_PREFIX = "[fork] "
+
+#: Pending-fork indicator. ``⎇`` (U+2387 ALTERNATIVE KEY SYMBOL) reads as a
+#: branch and is ONE cell in ``cell_len``, which the band's arithmetic requires.
+#:
+#: It sits OUTSIDE the U+25xx geometric block every reading icon above lives in,
+#: and that is deliberate rather than an oversight of the rule stated at
+#: :data:`ICON_JOBS`: like ``ICON_APPROVALS`` this is a transient STATE, not a
+#: figure, so it should not read as another value in the numbers run. Checked in
+#: a real terminal for tofu before it was chosen — which that rule asks for,
+#: because ``cell_len`` cannot see a missing glyph.
+ICON_FORK_PENDING = "⎇"
+
+#: What the pending-fork segment says. Spelled out rather than left as a bare
+#: glyph: unlike the one-cell approval alarm this state is temporary and
+#: unfamiliar, and a lone unexplained mark appearing mid-turn is a question
+#: rather than an answer. "forking" is the same verb the receipt used.
+#:
+#: The `· esc` suffix is the receipt's affordance made durable (UX round 1,
+#: U10): the dim acknowledgement scrolls away behind a long tool run, and
+#: after it goes the band was the ONLY thing still saying a fork is armed —
+#: naming the state without naming the way out. A user who armed this ten
+#: minutes ago should not have to remember a parenthetical that is no longer
+#: on screen, or discover Ctrl+C by reflex and abort the turn they still
+#: want. Four cells, spent on a rung the ladder sheds late (the segment
+#: survives at 60 cols), same vocabulary as the receipt.
+FORK_PENDING_TEXT = "forking \u00b7 esc"
+
 #: The name's cell BUDGET: the most the trailing segment may take, and the
 #: narrowest it is worth showing at when the row is too tight for all of it.
 #: The budget is a CAP, not a reservation: the segment spends only the cells
@@ -321,6 +355,24 @@ _DROP_LADDER: tuple[str, ...] = (
     # these the other way round, which contradicted this very ladder's rationale.
     "cwd",
     "context",
+    # A PENDING fork, and it outlives every reading above for the reason the
+    # approval alarm does: it is a transient STATE the user can still act on
+    # (esc withdraws it), not a figure they can re-derive. It exists at all only
+    # while a `/fork` is armed — an ordinary band never pays for this rung — and
+    # while it exists it is the only thing on screen saying a fork is still
+    # coming, since the acknowledgement scrolled away with the tool output. It
+    # is BOUNDED (a glyph plus a fixed word), so it is a legal tail neighbour
+    # under :data:`_UNBOUNDED_RUNGS`.
+    #
+    # Authored between `context` and `mcp`, so in the ALARM ladder it sheds
+    # ahead of both remaining rungs: a failed-MCP lamp and the disarmed-gate `!`
+    # are standing warnings about the session's configuration that nothing else
+    # in the UI carries, while a pending fork resolves itself within a turn. In
+    # the QUIET ladder `mcp` is demoted ahead of `cwd` (see `_mcp_before_cwd`),
+    # so a healthy count sheds first and this rung outlives it — which is the
+    # right way round for the same reason that demotion exists: a healthy count
+    # is a courtesy and an armed fork is a thing the user can still cancel.
+    "fork",
     # Second-to-last. Its failure branch is an ALARM: the danger-tinted glyph is
     # the only place the band admits the agent is missing tools it was
     # configured to have, and a cramped terminal is exactly where a user would
@@ -923,6 +975,17 @@ class StatusLine:
         self._streaming: bool = False
         self._cost: str = ""
         self._conversation_name: str = ""
+        # True while this session is a FORK still wearing the title it inherited
+        # from its parent. Only the terminal title reads it, and it is pushed by
+        # the app rather than read off the session for the same reason every
+        # other segment is: the band never reaches into a session.
+        self._forked: bool = False
+        # True while a `/fork` is armed and waiting for a turn boundary. The
+        # request is acknowledged once and then scrolls away, so without a
+        # standing indicator a fork requested during a ten-minute tool run
+        # leaves nothing on screen saying it is still coming — and it arrives as
+        # a window opening minutes later with no visible cause.
+        self._fork_pending: bool = False
         self._mcp: McpStatus = McpStatus()
         # Which segments the drop ladder shed on the LAST render. Every segment
         # is dropped until something has been rendered, which is the honest
@@ -1034,7 +1097,29 @@ class StatusLine:
         # "thanks"), which `naming.is_low_signal` refuses to label. A sidebar row
         # reading `lo ›` five times over is the exact failure this feature exists
         # to fix, and the directory is what the user opened the session for.
-        title.set_label(label or cwd_label(self._cwd))
+        resolved = label or cwd_label(self._cwd)
+        # A FORK that has not named itself gets the tag in its LEFTMOST cells.
+        # Its `conversation_name` is empty by design, so the label resolved
+        # above is either an excerpt of the PARENT's opening message (the fork
+        # replays the parent's history) or the working directory — which makes
+        # the fork's sidebar row read identically to the parent's, on the one
+        # surface a user scans to find the window that just opened.
+        #
+        # The same `[fork]` vocabulary as the /resume picker, deliberately: one
+        # mark, two surfaces, per this module's own "the glyph vocabulary is the
+        # band's, not a second one" rule. And a PREFIX because of this module's
+        # width argument — a cmux sidebar shows ~24 cells, so state that is not
+        # in the leftmost cells is the first thing lost. It costs 7 of those 24,
+        # which is real and worth it: "which of these two identical rows is the
+        # fork" is unanswerable without it, and the truncated title alone
+        # answers nothing.
+        #
+        # Never applied to a SUBAGENT label: that names a child, not this
+        # conversation, so tagging it would attribute the fork to the wrong
+        # thing.
+        if self._forked and self._subagent is None:
+            resolved = f"{FORK_TITLE_PREFIX}{resolved}" if resolved else FORK_TITLE_PREFIX.strip()
+        title.set_label(resolved)
         title.set_state(self._title_state())
         title.set_frame(self._spinner_index)
 
@@ -1081,6 +1166,8 @@ class StatusLine:
         streaming: bool | None = None,
         cost: str | None = None,
         conversation_name: str | None = None,
+        forked: bool | None = None,
+        fork_pending: bool | None = None,
         mcp: McpStatus | None = None,
         approvals_auto: bool | None = None,
         approvals_always: bool | None = None,
@@ -1122,6 +1209,10 @@ class StatusLine:
             self._cost = cost
         if conversation_name is not None:
             self._conversation_name = conversation_name
+        if forked is not None:
+            self._forked = forked
+        if fork_pending is not None:
+            self._fork_pending = fork_pending
         if streaming is not None and streaming != self._streaming:
             self._streaming = streaming
             self._mark_turn_boundary(streaming)
@@ -1733,6 +1824,20 @@ class StatusLine:
             # 0s task. Any real turn banks at least a few ms.
             if elapsed > 0:
                 parts.append((ICON_DURATION, format_duration(elapsed), dim))
+        if self._fork_pending and "fork" not in dropped:
+            # `note`-weight ink rather than an alarm's: a pending fork is
+            # something the user asked for and is going to get, not something
+            # wrong. It takes `label` — the same violet the counters use —
+            # because that is what this band's other "a thing is in flight"
+            # readings take, and reserving `danger`/`warning` for the two real
+            # alarms is what keeps them legible as alarms.
+            parts.append(
+                (
+                    ICON_FORK_PENDING,
+                    FORK_PENDING_TEXT,
+                    Style(color=theme_mod.semantic_color("label")),
+                )
+            )
         if self._approvals_auto and "approvals" not in dropped:
             # A BARE GLYPH, and second-to-last rather than last. It used to spell
             # out `! auto-approve always` and own the band's right edge, on the
