@@ -124,7 +124,13 @@ def extract_blocks(text: str) -> list[MessageBlock]:
       does not have it.
     """
     blocks: list[MessageBlock] = []
-    lines = text.split("\n")
+    # Line endings normalised BEFORE the split. The reference splits on ``\n``
+    # alone, which leaves a ``\r`` riding on the end of every line of a pasted
+    # Windows transcript — including the fence closer, so the block is found
+    # and then copied with an invisible ``\r`` on each line. That is faithful
+    # and still wrong at the clipboard: it is invisible in a diff and it breaks
+    # a shell script pasted out of the picker.
+    lines = text.replace("\r\n", "\n").split("\n")
     quote: list[str] = []
 
     def flush_quote() -> None:
@@ -182,8 +188,27 @@ def _find_close_fence(lines: list[str], start: int, fence_char: str) -> int | No
 
 
 def plural_lines(text: str) -> str:
-    """``"1 line"`` / ``"2 lines"``; empty text is ``"0 lines"``."""
-    count = 0 if not text else len(text.split("\n"))
+    """``"1 line"`` / ``"2 lines"``; empty text is ``"0 lines"``.
+
+    ``splitlines()``, not ``split("\\n")``: the latter reads a TRAILING newline
+    as a whole further line, so an answer ending in ``\\n`` — which is most of
+    them — was hinted one line longer than the receipt reported when the same
+    text reached the clipboard. ``_put_on_clipboard`` already settled this for
+    the toast (``app.py``, review round 1, F3); the picker was reintroducing
+    the bug the receipt had retired, so this adopts the existing house rule
+    rather than inventing a second count.
+
+    The alternative considered and rejected was trimming the text before
+    counting. It swaps one contradiction for another (``"\\nHi\\n\\n"`` would
+    hint ``1 line`` against a ``copied 3 lines`` receipt) and discards real
+    interior structure that genuinely reaches the clipboard. Measured against
+    the receipt across eight shapes: this rule disagrees on none, trimming on
+    two, the old rule on four.
+
+    ``splitlines()`` returns ``[]`` for ``""``, so no empty-string guard is
+    needed. The text itself is never trimmed — only counted.
+    """
+    count = len(text.splitlines())
     return f"{count} line" if count == 1 else f"{count} lines"
 
 
@@ -318,6 +343,43 @@ def _message_target(text: str, rank: int, truncated: bool) -> CopyTarget:
     )
 
 
+def _call_guarded(block: object, name: str) -> object:
+    """Call ``block.name()``, or return ``None`` if it cannot be called.
+
+    Every read of a transcript block goes through here because the walk runs
+    inside a user-typed command: a widget that raises while being inspected
+    must cost that block its row, not take the whole turn down.
+    """
+    try:
+        method = getattr(block, name)
+    except Exception:
+        return None
+    if not callable(method):
+        return None
+    try:
+        return method()
+    except Exception:
+        return None
+
+
+def _is_assistant_answer(block: object) -> bool:
+    """Whether ``block`` is an assistant answer this picker may list.
+
+    ``isinstance`` against the structural protocol is the primary test, and it
+    is what keeps this module free of any widget import. But a
+    ``runtime_checkable`` protocol only checks that the NAMES exist, so the
+    three methods are additionally confirmed callable — that gap is the one
+    plausible window for the ``AttributeError`` seen once on the live path.
+    """
+    if not isinstance(block, AssistantMessage):
+        return False
+    return all(callable(getattr(block, name, None)) for name in _ANSWER_METHODS)
+
+
+#: The methods an assistant answer must actually provide, not merely name.
+_ANSWER_METHODS = ("text", "is_finalized", "is_truncated")
+
+
 def build_copy_targets(blocks: Sequence[object]) -> list[CopyTarget]:
     """The `/copy` tree over ``blocks``, most recent assistant answer first.
 
@@ -353,15 +415,32 @@ def build_copy_targets(blocks: Sequence[object]) -> list[CopyTarget]:
     for block in reversed(list(blocks)):
         if rank >= MAX_MESSAGES:
             break
-        if not isinstance(block, AssistantMessage):
+        if not _is_assistant_answer(block):
             continue
-        if not block.is_finalized():
+        # Bound through `getattr` rather than called off the protocol type: a
+        # `runtime_checkable` protocol tests attribute PRESENCE only, so an
+        # object can satisfy `isinstance` and still raise on the call — a
+        # property whose getter raises `AttributeError` passes the check and
+        # then fails when invoked (verified). A designer saw exactly that
+        # shape once, `'UserBlock' object has no attribute 'is_truncated'`
+        # raised out of this walk into a live `/copy`, and it never
+        # reproduced. Whatever transient produced it, a clipboard command must
+        # not take a turn down: an object that cannot answer is not an
+        # assistant answer, so it is skipped rather than raising.
+        finalized = _call_guarded(block, "is_finalized")
+        if finalized is not True:
             continue
-        text = block.text()
+        text = _call_guarded(block, "text")
+        if not isinstance(text, str):
+            continue
         if not text.strip():
             continue
         rank += 1
-        targets.append(_message_target(text, rank, block.is_truncated()))
+        # A block that cannot answer "were you cut off?" is listed as complete
+        # rather than dropped: the answer is on screen and the user asked for
+        # it. The marker is a qualification of the payload, not a precondition
+        # for offering it.
+        targets.append(_message_target(text, rank, _call_guarded(block, "is_truncated") is True))
     return targets
 
 

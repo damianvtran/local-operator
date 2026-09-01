@@ -55,10 +55,26 @@ CARD_HEIGHT_FRACTION = 0.9
 GUTTER_CELLS = 3
 #: Cells the `❯ ` cursor column costs on every row, selected or not.
 CURSOR_CELLS = 2
-#: Cap on preview lines wrapped before the overflow marker is computed. A
-#: 500-line answer would otherwise wrap thousands of rows to show fifteen; the
-#: marker counts SOURCE lines, so the number stays honest without the work.
+#: Cap on source lines wrapped for the preview. A 500-line answer would
+#: otherwise fold thousands of rows to display about fifteen. The overflow
+#: marker is computed from the SOURCE line count, never from the wrapped rows,
+#: so budgeting the wrap cannot change the number the user is shown.
 PREVIEW_WRAP_BUDGET = 200
+#: Footer hints, widest first, paired with the order they are SHED in. The
+#: footer is the only statement of how to leave, so a narrow card drops the
+#: movement hints rather than the whole row — `esc quit` is eight cells and
+#: fits terminals the full thirty-one-cell footer does not. This mirrors
+#: `session_picker._shed_to_width`, which drops hints in a fixed order for the
+#: same reason; hiding the card over a footer that merely needed shortening
+#: would blank a modal the user is looking at.
+FOOTER_HINTS = ("↑↓ move", "enter copy", "esc quit")
+#: Never shed: without it the card cannot say how to leave.
+FOOTER_ESSENTIAL = "esc quit"
+#: Rows the card cannot do without: title, rule, one tree row, rule, the
+#: preview's header, rule, footer. Below this the card draws NOTHING rather
+#: than laying out rows the box cannot hold — `overflow: hidden` clips from
+#: the bottom, so a card one row too tall loses the footer specifically.
+MIN_CARD_INNER_ROWS = 7
 
 
 class CopyPickerScreen(ModalScreen[CopyTarget | None]):
@@ -140,6 +156,73 @@ class CopyPickerScreen(ModalScreen[CopyTarget | None]):
         width, _ = self._screen_size()
         return max(20, min(100, width - 4) - CARD_PADDING_CELLS)
 
+    def _card_rows(self) -> int:
+        """Rows the card's box actually gives its content.
+
+        ``CARD_HEIGHT_FRACTION`` mirrors the stylesheet's ``height: 90%``; the
+        padding comes back off because Textual sizes border-box.
+        """
+        _, height = self._screen_size()
+        return int(height * CARD_HEIGHT_FRACTION) - CARD_PADDING_ROWS
+
+    @property
+    def is_drawable(self) -> bool:
+        """Whether the box can hold the card's irreducible chrome.
+
+        False on a terminal too short or too NARROW to paint the whole card,
+        where it draws nothing rather than laying out rows the screen will
+        clip. Both axes are one failure: ``overflow: hidden`` clips from the
+        bottom, so a card that asks for one row more than it has loses the
+        footer — the only statement of how to leave — and says nothing.
+
+        The height limb was measured at 8-11 rows, where the fixed chrome
+        (:data:`MIN_CARD_INNER_ROWS`) exceeds the box however the row budget is
+        divided; the tree and preview already floor at one row each, so the
+        split cannot recover it.
+
+        The width limb is the same clip reached differently: a hint is never
+        truncated (it carries the counts and the ``truncated`` marker), so on a
+        narrow pane a row whose hint alone overruns the width WRAPS in the real
+        paint, and each wrapped row pushes the footer further off the bottom. A
+        row is only laid out flat when the cursor, the deepest gutter, one cell
+        of label and the widest hint fit together, so that is what is measured
+        — the composed-string helpers cannot see this, because wrap happens in
+        the compositor and not in the ``Text`` they build.
+        """
+        if self._card_rows() < MIN_CARD_INNER_ROWS:
+            return False
+        return self._card_width() >= self._min_flat_width()
+
+    def _footer_text(self, width: int) -> str:
+        """The footer, shed to ``width`` — never dropped entirely.
+
+        Hints come off the front (movement first, then Enter) because the last
+        one standing has to be ``esc quit``: a card that cannot say how to
+        leave is the defect the whole drawability check exists to prevent.
+        """
+        hints = list(FOOTER_HINTS)
+        while len(hints) > 1 and cell_len(" · ".join(hints)) > width:
+            hints.pop(0)
+        return " · ".join(hints)
+
+    def _min_flat_width(self) -> int:
+        """Cells the widest row needs to paint on ONE line.
+
+        The footer contributes only its IRREDUCIBLE form, because it sheds
+        (:meth:`_footer_text`) where a tree row cannot: a hint is never
+        truncated, so a row whose hint overruns the pane wraps in the real
+        paint and pushes the footer off the bottom.
+        """
+        widest = 0
+        for node in self._flat:
+            hint = node.target.hint
+            # One cell of label, plus the two-cell gap a hint always keeps.
+            need = CURSOR_CELLS + GUTTER_CELLS * node.depth + 1
+            if hint:
+                need += cell_len(hint) + 2
+            widest = max(widest, need)
+        return max(widest, cell_len(FOOTER_ESSENTIAL))
+
     def _row_budget(self) -> int:
         """Rows the tree and the preview divide between them.
 
@@ -147,17 +230,20 @@ class CopyPickerScreen(ModalScreen[CopyTarget | None]):
         reference's shape, and applying the constant to the tree instead gives
         a visibly different widget on every short tree.
 
-        The floor is then capped by the room that actually exists. Applying it
-        unconditionally is what the reference does, and it overflowed the card
-        by one row at a 14-row terminal: the composed text was 11 rows against
-        10 drawn, and Textual clipped the difference off the bottom SILENTLY,
-        taking the footer — the only statement of how to leave — with it.
-        Measured across heights 14-60; see `test_copy_picker`.
+        The floor is then capped by the room that actually exists, because the
+        reference's unconditional version overflowed the card by one row at a
+        14-row terminal and Textual clipped the footer off the bottom
+        SILENTLY. Below :data:`MIN_CARD_INNER_ROWS` no division of the budget
+        helps and :attr:`is_drawable` hides the card instead.
         """
-        _, height = self._screen_size()
-        inner = int(height * CARD_HEIGHT_FRACTION) - CARD_PADDING_ROWS - HEADER_ROWS
-        room = inner - CHROME_ROWS_BELOW_TOP
-        return max(1, min(MIN_TREE_ROWS + 1, room)) if room < MIN_TREE_ROWS + 1 else room
+        room = self._card_rows() - HEADER_ROWS - CHROME_ROWS_BELOW_TOP
+        # `max(1, room)`, written plainly: the floor above is what the
+        # reference applies unconditionally, and capping it to the room that
+        # exists removes it entirely on a short card. An earlier revision kept
+        # a `min(MIN_TREE_ROWS + 1, room)` conditional here that computed the
+        # identical value for every input while reading as though the floor
+        # survived.
+        return max(1, room)
 
     def _split_rows(self) -> tuple[int, int]:
         """``(tree_rows, preview_rows)`` for the current size.
@@ -211,13 +297,20 @@ class CopyPickerScreen(ModalScreen[CopyTarget | None]):
     def action_choose(self) -> None:
         """Copy the highlighted node.
 
-        A node with no ``content`` refuses rather than dismissing with a target
-        the caller cannot copy. No node this app builds is in that state today;
-        the guard is the seam the unported command targets would arrive
-        through, and it costs one branch.
+        A node with nothing to copy refuses rather than dismissing with a
+        payload the caller cannot write. FALSY, not just ``None``: an empty
+        fence (```` ```py ```` closed on the next line) builds a child whose
+        content is ``""``, and dismissing on it wrote nothing to the clipboard
+        with no toast and no notice — silence is right for a zero-width drag
+        and wrong for a command the user typed deliberately, which is the
+        position ``_cmd_copy``'s docstring already argues.
+
+        Refusing here rather than dropping the empty child from the tree: the
+        block IS in the message, and a `Block 2` that vanishes from the list
+        makes the remaining numbers disagree with what the user is reading.
         """
         target = self.selected_target()
-        if target is None or target.content is None:
+        if target is None or not target.content:
             return
         self.dismiss(target)
 
@@ -238,20 +331,51 @@ class CopyPickerScreen(ModalScreen[CopyTarget | None]):
         body = getattr(self, "_body", None)
         if body is None or not body.is_mounted:
             return
-        body.update(self._card_text())
+        drawable = self.is_drawable
+        body.update(self._card_text() if drawable else Text())
+        # Hidden, not merely emptied. A card with no drawable line still claims
+        # its two padding rows, and at these sizes that pushed the screen's
+        # virtual height past its own size — a scrollable screen, which
+        # AGENTS.md calls always a bug here — around a card painting nothing.
+        # `ask_picker._repaint` hides its card for the same reason. The next
+        # resize brings it back; Esc works throughout, which is what keeps this
+        # a degraded frame rather than a trap.
+        card = body.parent
+        if card is not None:
+            card.display = drawable
 
     def render_lines_for_test(self) -> list[str]:
         """The card as plain strings — what a user reads.
 
-        Empty when the card is not actually drawn, following `ask_picker`: this
-        method re-derives the text rather than reading back what was painted,
-        so on a screen too short to draw the card it would otherwise report
-        lines that never reached the terminal and let a test assert them.
+        Empty when the card is not drawn. This method re-derives the text
+        rather than reading back what was painted, so without these guards it
+        reports rows that never reached the terminal — measured at 80x10,
+        where it claimed the footer against a frame that had clipped it, and a
+        test asserting on it therefore could not see the defect.
+
+        Three guards, following `ask_picker.render_lines_for_test`: the body
+        must be mounted, the card must not be HIDDEN (``display`` is the
+        answer to "is this drawn", so this defers to it rather than keeping a
+        second opinion), and the composed text must be non-empty, because
+        ``Text`` splits an empty card into one empty line.
+
+        It still cannot see WRAP — the compositor folds a too-narrow row, this
+        builds strings — which is why the narrow case is gated by
+        :attr:`is_drawable` above rather than detected here, and why a test
+        about wrapping has to read the painted frame.
         """
         body = getattr(self, "_body", None)
         if body is None or not body.is_mounted:
             return []
-        return [line.plain for line in self._card_text().split("\n")]
+        card = body.parent
+        if card is not None and card.is_mounted and not card.display:
+            return []
+        if not self.is_drawable:
+            return []
+        text = self._card_text()
+        if not text.plain:
+            return []
+        return [line.plain for line in text.split("\n")]
 
     def _window_start(self, tree_rows: int) -> int:
         """First visible row: the cursor centred, clamped to the ends."""
@@ -289,7 +413,7 @@ class CopyPickerScreen(ModalScreen[CopyTarget | None]):
 
         out.append("─" * width, style=rule)
         out.append("\n")
-        out.append("↑↓ move · enter copy · esc quit", style=dim)
+        out.append(self._footer_text(width), style=dim)
         return out
 
     def _tree_lines(self, width: int, rows: int) -> list[Text]:
@@ -357,9 +481,27 @@ class CopyPickerScreen(ModalScreen[CopyTarget | None]):
                 lines.append(Text())
             return lines
 
-        wrapped = self._wrap_preview(target, max(1, width - 2))
-        has_more = len(wrapped) > content_rows
+        wrapped, rows_per_source = self._wrap_preview(target, max(1, width - 2))
+        source_total = len(target.preview.split("\n"))
+        has_more = len(wrapped) > content_rows or len(rows_per_source) < source_total
         shown = content_rows - 1 if has_more else min(len(wrapped), content_rows)
+
+        # Counted in SOURCE lines, not wrapped rows. The header beside it
+        # reports the source line count, so a marker counting rows contradicted
+        # it in the same pane — at 100 cols a 79-line answer claimed "144 more
+        # lines", more than the document has. It also saturated: the wrap
+        # budget capped the rows, so a 600-line and a 1000-line answer both
+        # reported the same 183. Both numbers now measure the same thing, and
+        # the budget stays an optimisation the user cannot observe.
+        consumed = 0
+        source_shown = 0
+        for count in rows_per_source:
+            if consumed + count > shown:
+                break
+            consumed += count
+            source_shown += 1
+        remaining = max(0, source_total - source_shown)
+
         for row in range(content_rows):
             if row < shown:
                 line = wrapped[row]
@@ -367,19 +509,27 @@ class CopyPickerScreen(ModalScreen[CopyTarget | None]):
                 # tree above stays the brighter surface.
                 lines.append(line if target.language else Text(line.plain, style=muted))
             elif row == shown and has_more:
-                lines.append(Text(f"… {len(wrapped) - shown} more lines", style=dim))
+                plural = "line" if remaining == 1 else "lines"
+                lines.append(Text(f"… {remaining} more {plural}", style=dim))
             else:
                 lines.append(Text())
         return lines
 
-    def _wrap_preview(self, target: CopyTarget, width: int) -> list[Text]:
-        """``target.preview`` wrapped to ``width``, syntax-highlighted for code.
+    def _wrap_preview(self, target: CopyTarget, width: int) -> tuple[list[Text], list[int]]:
+        """``(wrapped rows, rows each source line produced)``.
+
+        The second list is what lets the overflow marker be quoted in SOURCE
+        lines: it maps a row cutoff back to the line the user would count. It
+        is measured by rendering each source line separately, which produces
+        exactly the same total as rendering the block whole — verified across
+        widths 20-100 for prose, long words, unicode and highlighted code
+        before this was relied on.
 
         Only the first :data:`PREVIEW_WRAP_BUDGET` source lines are wrapped: a
         long answer would otherwise fold thousands of rows to display about
-        fifteen of them. The overflow marker counts wrapped rows, so a budgeted
-        source still reports "more lines" — it just stops counting how many
-        beyond a bound the user cannot page through anyway.
+        fifteen. The caller compares the budgeted map against the true source
+        length, so budgeting changes how much is WRAPPED and never the number
+        the user is shown.
 
         No per-target cache. The reference caches because it re-renders on
         every frame; Textual repaints on state change, so a cache here would
@@ -411,4 +561,12 @@ class CopyPickerScreen(ModalScreen[CopyTarget | None]):
             for segment in segments:
                 line.append(segment.text, style=segment.style)
             lines.append(line)
-        return lines
+
+        # Plain `Text` per source line even for code: only the ROW COUNT is
+        # wanted here, and the highlighted rows above are what actually gets
+        # painted. Measuring the same wrap twice with two renderables would be
+        # two chances to disagree.
+        rows_per_source = [
+            len(console.render_lines(Text(entry), options, pad=False)) for entry in budgeted
+        ]
+        return lines, rows_per_source

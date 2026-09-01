@@ -103,24 +103,104 @@ async def test_the_minimum_floors_the_budget_not_the_tree_share() -> None:
         assert screen._split_rows()[0] == 1
 
 
+def _painted(app) -> str:
+    """What the COMPOSITOR actually put on screen.
+
+    The only way to see WRAP: `render_lines_for_test` composes strings and a
+    row that wraps in the real paint still reports as one line there. NBSP is
+    normalised because the footer's spacing paints as `\\u00a0`.
+    """
+    return "\n".join(
+        "".join(segment.text for segment in strip)
+        for strip in app.screen._compositor.render_strips()
+    ).replace("\u00a0", " ")
+
+
 @pytest.mark.asyncio
 async def test_the_card_never_overflows_its_box_at_any_height() -> None:
     """The failure this pins: at 14 rows the composed card was 11 rows against
     10 drawn, and Textual clipped the difference off the bottom SILENTLY —
     taking the footer, the only statement of how to leave, with it. A
     scrollbar appearing is the other half of the same bug: it costs two cells
-    of width and reflows the transcript behind the overlay."""
-    for height in (14, 16, 18, 20, 24, 30, 40, 60):
+    of width and reflows the transcript behind the overlay.
+
+    The sweep starts at 6, not 14. An earlier revision of this test swept
+    14-60 and was written to prevent exactly this defect, but the band where
+    the card actually clipped its footer (8-11) sat below its floor, so it
+    passed throughout — a guard whose range excluded the failure it named.
+    """
+    for height in (6, 8, 10, 11, 12, 14, 16, 18, 20, 24, 30, 40, 60):
         app = _real_app()
         async with app.run_test(size=(100, height)) as pilot:
             await pilot.pause()
             targets = _targets(*[CODE_ANSWER for _ in range(20)])
             screen = await _open(app, targets, pilot)
-            drawn = screen.query_one(".copy-picker").region.height
-            composed = len(screen.render_lines_for_test()) + CARD_PADDING_ROWS
-            assert composed <= drawn, (height, composed, drawn)
+            card = screen.query_one(".copy-picker")
+            lines = screen.render_lines_for_test()
+            # A hidden card is the correct answer below the chrome floor, and
+            # it claims no padding either — that is the point of hiding rather
+            # than emptying it.
+            composed = len(lines) + CARD_PADDING_ROWS if lines else 0
+            assert composed <= card.region.height, (height, composed, card.region.height)
             assert app.screen.virtual_size.height <= app.screen.size.height, height
             assert not app.screen.show_vertical_scrollbar, height
+
+
+@pytest.mark.asyncio
+async def test_the_footer_is_painted_or_the_card_is_not_drawn_at_all() -> None:
+    """Asserted against the PAINTED frame, across both axes.
+
+    `render_lines_for_test` cannot see this: it builds strings, and a row too
+    wide for the pane wraps in the compositor. At 36 columns the helper
+    reported the footer while the frame had pushed it off the card, so a test
+    reading the helper could not catch it.
+
+    The contract is two-sided — either the footer is on screen, or the card
+    drew nothing. A half-card with no way out advertised is the defect; an
+    absent card on a terminal that cannot hold one is a degraded frame, and
+    Esc still leaves it.
+    """
+    for width, height in (
+        (100, 8),
+        (100, 10),
+        (100, 11),
+        (100, 12),
+        (100, 30),
+        (32, 24),
+        (36, 24),
+        (38, 24),
+        (40, 24),
+        (60, 24),
+        (80, 14),
+    ):
+        app = _real_app()
+        async with app.run_test(size=(width, height)) as pilot:
+            await pilot.pause()
+            screen = await _open(app, _targets(CODE_ANSWER), pilot)
+            frame = _painted(app)
+            card = screen.query_one(".copy-picker")
+            if card.display:
+                assert "esc quit" in frame, (width, height, frame)
+            else:
+                assert "Copy to clipboard" not in frame, (width, height, frame)
+            assert screen.render_lines_for_test() == [] or card.display
+
+
+@pytest.mark.asyncio
+async def test_esc_still_leaves_a_card_too_small_to_draw() -> None:
+    """Hiding the card must not strand the user: the screen is still a modal
+    over their conversation, and Esc is the only way off it."""
+    chosen: list[CopyTarget | None] = []
+    app = _real_app()
+    async with app.run_test(size=(100, 9)) as pilot:
+        await pilot.pause()
+        screen = CopyPickerScreen(_targets(CODE_ANSWER))
+        app.push_screen(screen, chosen.append)
+        await pilot.pause()
+        assert not screen.is_drawable
+        await pilot.press("escape")
+        await pilot.pause()
+    assert chosen == [None]
 
 
 @pytest.mark.asyncio
@@ -132,6 +212,48 @@ async def test_the_footer_is_always_the_last_drawn_row() -> None:
             await pilot.pause()
             screen = await _open(app, _targets(CODE_ANSWER), pilot)
             assert screen.render_lines_for_test()[-1] == "↑↓ move · enter copy · esc quit"
+
+
+@pytest.mark.asyncio
+async def test_the_test_helper_reports_nothing_when_the_card_is_hidden() -> None:
+    """The helper's own docstring promises it will not report lines that never
+    reached the terminal. It only checked `is_mounted`, so at 80x10 the body
+    was mounted with `display=True` and it happily reported the footer against
+    a frame that had clipped it — a comment asserting a guarantee the code did
+    not implement, and the guard that would have caught the clipping."""
+    app = _real_app()
+    async with app.run_test(size=(80, 10)) as pilot:
+        await pilot.pause()
+        screen = await _open(app, _targets(CODE_ANSWER), pilot)
+        assert not screen.is_drawable
+        assert screen.render_lines_for_test() == []
+        assert "esc quit" not in _painted(app)
+
+
+@pytest.mark.asyncio
+async def test_enter_on_an_empty_block_refuses_rather_than_copying_nothing() -> None:
+    """An empty fence builds a child whose content is `""`. The guard tested
+    `content is None`, so Enter dismissed the picker and wrote nothing — no
+    toast, no notice. `_cmd_copy`'s docstring argues that silence is right for
+    a zero-width drag and wrong for a command typed deliberately."""
+    chosen: list[CopyTarget | None] = []
+    app = _real_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        screen = CopyPickerScreen(_targets("Here:\n\n```py\n```\n"))
+        app.push_screen(screen, chosen.append)
+        await pilot.pause()
+        await pilot.press("down")
+        await pilot.pause()
+        target = screen.selected_target()
+        assert target is not None and target.content == ""
+        await pilot.press("enter")
+        await pilot.pause()
+        # Still open: the refusal is visible as the picker not going away.
+        assert chosen == []
+        await pilot.press("escape")
+        await pilot.pause()
+    assert chosen == [None]
 
 
 @pytest.mark.asyncio
@@ -364,6 +486,50 @@ async def test_a_long_preview_reports_how_much_it_is_not_showing() -> None:
         lines = screen.render_lines_for_test()
         marker = [line for line in lines if line.startswith("… ") and "more lines" in line]
         assert len(marker) == 1
+
+
+@pytest.mark.asyncio
+async def test_the_overflow_marker_agrees_with_the_header_at_every_width() -> None:
+    """Both numbers must measure the same thing. The marker counted WRAPPED
+    ROWS while the header counts SOURCE LINES, so at 100 columns a 79-line
+    answer claimed `… 144 more lines` — more than the document contains — and
+    the contradiction was visible in one pane."""
+    body = "\n".join(f"line {index} of an answer long enough to wrap here" for index in range(79))
+    checked = 0
+    for width in (60, 70, 100):
+        app = _real_app()
+        async with app.run_test(size=(width, 30)) as pilot:
+            await pilot.pause()
+            screen = await _open(app, _targets(body), pilot)
+            lines = screen.render_lines_for_test()
+            header = next(line for line in lines if line.startswith("Preview · "))
+            total = int(header.split("·")[1].strip().split()[0])
+            marker = next(line for line in lines if "more lines" in line)
+            claimed = int(marker.strip().split()[1])
+            shown = sum(1 for line in lines if line.startswith("line "))
+            # Exactly the lines not on screen — not merely a smaller number.
+            assert claimed == total - shown, (width, claimed, total, shown)
+            checked += 1
+    assert checked == 3
+
+
+@pytest.mark.asyncio
+async def test_the_overflow_marker_does_not_saturate_on_a_budgeted_answer() -> None:
+    """`PREVIEW_WRAP_BUDGET` caps the WRAP, not the count. While the marker
+    counted wrapped rows the budget capped it too, so a 600-line and a
+    1000-line answer both reported the same 183 — a precise-looking constant,
+    which is worse than no number."""
+    claims = []
+    for length in (600, 1000):
+        app = _real_app()
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            body = "\n".join(f"line {index}" for index in range(length))
+            screen = await _open(app, _targets(body), pilot)
+            marker = next(line for line in screen.render_lines_for_test() if "more lines" in line)
+            claims.append(int(marker.strip().split()[1]))
+    assert claims[0] != claims[1], claims
+    assert claims[1] - claims[0] == 400, claims
 
 
 @pytest.mark.asyncio

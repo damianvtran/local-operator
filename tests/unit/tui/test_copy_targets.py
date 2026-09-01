@@ -333,3 +333,67 @@ def test_every_target_is_copyable_today() -> None:
     Enter guard is written against the type, so this pins what it guards."""
     targets = build_copy_targets([_Assistant("a\n```\nb\n```\n\n```\nc\n```\n\n> q")])
     assert all(node.target.content is not None for node in flatten_targets(targets))
+
+
+# --- robustness of the walk -------------------------------------------------
+
+
+def test_a_crlf_answer_is_normalised_before_the_split() -> None:
+    """A pasted Windows transcript arrives as `\r\n`. Splitting on `\n` alone
+    leaves a `\r` on every line — invisible in a diff, and it breaks a shell
+    script pasted out of the picker."""
+    targets = build_copy_targets([_Assistant("Intro\r\n```py\r\nx = 1\r\n```\r\n")])
+    assert targets[0].children[0].content == "x = 1"
+    assert "\r" not in targets[0].children[0].content
+
+
+def test_line_counts_agree_with_the_clipboard_receipt() -> None:
+    """`splitlines()`, not `split("\n")`: the latter reads a trailing newline
+    as a whole further line, so an answer ending in `\n` — most of them — was
+    hinted one line longer than `_put_on_clipboard` reported for the same
+    text. That receipt already settled this (app.py, review round 1, F3)."""
+    shapes = (
+        "Here is the answer.\n",
+        "\nHi\n\n",
+        "answer body\n\n\n   \n",
+        "a\nb\n",
+        "x\n\n\n",
+    )
+    for text in shapes:
+        hint = plural_lines(text)
+        assert int(hint.split()[0]) == len(text.splitlines()), (text, hint)
+
+
+def test_a_block_that_raises_while_inspected_costs_only_its_own_row() -> None:
+    """A `runtime_checkable` protocol tests attribute PRESENCE, not that the
+    call works: a property whose getter raises satisfies `isinstance` and then
+    raises when invoked. A designer saw that shape once as
+    `'UserBlock' object has no attribute 'is_truncated'` raised out of this
+    walk into a live `/copy`. Whatever the transient was, a clipboard command
+    must not take the turn down with it."""
+
+    class _Raises:
+        def text(self) -> str:
+            return "should never be listed"
+
+        def is_finalized(self) -> bool:
+            return True
+
+        @property
+        def is_truncated(self):  # type: ignore[no-untyped-def]
+            raise AttributeError("half-built widget")
+
+    targets = build_copy_targets([_Assistant("a real answer"), _Raises()])
+    assert [target.label for target in targets] == ["a real answer"]
+
+
+def test_a_block_whose_methods_are_not_callable_is_skipped() -> None:
+    """The other half of the same gap: the names exist, so `isinstance`
+    passes, but they are attributes rather than methods."""
+
+    class _NotCallable:
+        text = "not a method"
+        is_finalized = True
+        is_truncated = False
+
+    assert build_copy_targets([_NotCallable()]) == []
