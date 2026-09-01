@@ -91,6 +91,15 @@ def build_adapter_wheel(out_dir: Path) -> Path:
 
     The wheel is built once and reused: the tests assert the SHIPPED artifact
     loads, not a recompiled one per test.
+
+    Built with THIS interpreter's ``pip``, deliberately not with ``uv``. The
+    developer workflow uses ``uv`` (see the adapter README and
+    ``make adapter-osworld``), but ``uv`` is not on a stock GitHub runner's
+    PATH, and a test that silently depends on the developer's toolchain is a
+    test that only runs where it was written -- these four errored at setup on
+    CI for exactly that reason. ``pip`` ships with every interpreter that can
+    run the suite, and produces the same PEP 517 artifact from the same
+    ``pyproject.toml``, so the thing under test is unchanged.
     """
 
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -98,32 +107,47 @@ def build_adapter_wheel(out_dir: Path) -> Path:
     if wheel.exists():
         return wheel
     subprocess.run(
-        ["uv", "build", "--wheel", "--out-dir", str(out_dir)],
-        cwd=ADAPTER_SRC,
+        [sys.executable, "-m", "pip", "wheel", "--no-deps", "-w", str(out_dir), str(ADAPTER_SRC)],
         check=True,
         capture_output=True,
     )
     if not wheel.exists():
-        raise AssertionError(f"uv build did not produce {WHEEL_NAME}")
+        built = sorted(item.name for item in out_dir.glob("*.whl"))
+        raise AssertionError(f"pip wheel did not produce {WHEEL_NAME}; built {built}")
     return wheel
 
 
 def install_adapter_into_site(site: Path, wheel: Path) -> str:
     """Install the real wheel into a venv's site-packages; return package_digest.
 
-    Uses uv pip install so the RECORD is written by a real installer (hashed
-    rows), which is what ``distribution_digest`` verifies. A hand-written
-    RECORD would test a fixture, not the real artifact.
+    A real installer writes the RECORD with hashed rows, which is exactly what
+    ``distribution_digest`` verifies -- a hand-written RECORD would test a
+    fixture rather than the shipped artifact.
+
+    ``pip --target`` rather than ``uv pip --python``: the copied venv is built
+    ``--without-pip`` (it only has to run the worker), so it cannot install
+    into itself, and ``uv`` is unavailable on CI. Installing with this
+    interpreter's pip into the target site-packages produces the same installed
+    layout and the same hashed RECORD.
+
+    ``--no-compile`` is REQUIRED, not a speed knob. Byte-compiling on install
+    appends ``__pycache__/*.pyc`` rows to RECORD with NO hash, and
+    ``discovery._record_rows`` refuses any unhashed row as an editable or
+    tampered install -- so a compiled install fails the handshake with
+    "editable or unhashed adapter distributions are forbidden". It also matches
+    what discovery wants: it never loads bytecode, deliberately.
     """
 
     subprocess.run(
         [
-            "uv",
+            sys.executable,
+            "-m",
             "pip",
             "install",
-            "--python",
-            str(_venv_python_from_site(site)),
             "--no-deps",
+            "--no-compile",
+            "--target",
+            str(site),
             str(wheel),
         ],
         check=True,
@@ -135,15 +159,6 @@ def install_adapter_into_site(site: Path, wheel: Path) -> str:
 
     info = site / "lop_osworld_v2_adapter-0.1.0.dist-info"
     return distribution_digest(PathDistribution(info))
-
-
-def _venv_python_from_site(site: Path) -> Path:
-    # site is <venv>/lib/python3.N/site-packages, so the venv root is three
-    # parents up: site-packages -> python3.N -> lib -> <venv>.
-    venv = site.parent.parent.parent
-    return (
-        venv / "bin" / next(p.name for p in (venv / "bin").glob("python3.*") if not p.is_symlink())
-    )
 
 
 def write_workspace(
