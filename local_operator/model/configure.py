@@ -40,6 +40,7 @@ from local_operator.harness.types import (
 from local_operator.model.catalogue import DEFAULT_TTL_S
 from local_operator.model.defaults import DEFAULT_MODEL_NAMES as _DEFAULT_MODEL_NAMES
 from local_operator.model.effort import default_effort, supported_efforts
+from local_operator.model.ids import normalised_id as _normalised_id
 from local_operator.model.registry import (
     ModelInfo,
     anthropic_default_model_info,
@@ -61,6 +62,7 @@ if TYPE_CHECKING:
     from local_operator.clients.radient import RadientListModelsResponse
     from local_operator.credentials import CredentialManager
     from local_operator.env import EnvConfig
+    from local_operator.model.discovery import DiscoveredModel
     from local_operator.providers.auth_store import AuthStore
     from local_operator.providers.clients import WireClient
     from local_operator.providers.usage import UsageReport
@@ -865,24 +867,6 @@ def _oauth_listing_token(provider: str) -> tuple[str, bool, str | None]:
     return "", False, None
 
 
-def _normalised_id(model_id: str) -> str:
-    """A model id in the one spelling both sides of a match can agree on.
-
-    Discovery NORMALISES ids on ingest — ``_row_from_gemini_entry`` strips
-    Google's ``models/`` resource prefix so the rest of the system sees a bare id
-    — while the user types whatever the provider's own documentation shows, which
-    for Gemini is ``models/gemini-2.5-pro``. An exact-match-only lookup therefore
-    missed the spelling Google itself publishes and handed that session the 128k
-    unknown default. Case is folded for the same reason: an id is a wire
-    identifier, not prose, and no provider ships two models differing only in case.
-    """
-    trimmed = model_id.strip()
-    prefix = "models/"
-    if trimmed.startswith(prefix):
-        trimmed = trimmed[len(prefix) :]
-    return trimmed.casefold()
-
-
 def _info_from_discovery(
     provider: str, model_name: str, fallback: ModelInfo, *, timeout: float | None = None
 ) -> ModelInfo:
@@ -907,6 +891,12 @@ def _info_from_discovery(
     stale-but-correct number, not the frame. That second call is reachable from a
     repaint, where ten seconds is a frozen keyboard rather than a slow start.
 
+    ``model_name`` is passed through as discovery's ``want_id``: a stored
+    document old enough to predate the model is refetched once, inside this
+    same ``timeout``, before the lookup below is allowed to miss. That is what
+    prices a model released this morning on its FIRST resolution rather than
+    after the memo bucket rolls over at midnight.
+
     Imported lazily. The discovery module pulls httpx and the provider registry,
     and this branch is only reached for a model the registry does not describe;
     putting that on the import path would cost every CLI invocation.
@@ -921,6 +911,7 @@ def _info_from_discovery(
             is_oauth=is_oauth,
             account_id=account_id,
             timeout=DEFAULT_TIMEOUT_S if timeout is None else timeout,
+            want_id=model_name,
         )
     except Exception as exc:  # noqa: BLE001 — metadata is never worth a failed start
         logger.debug("%s discovery unavailable for %s: %s", provider, model_name, exc)
@@ -951,11 +942,15 @@ def _info_from_discovery(
         info.output_price = row.output_price
     if row.cache_read_price > 0:
         info.cache_reads_price = row.cache_read_price
-        # A quoted cache-READ price is the only signal some providers give that
-        # prompt caching exists at all; the write price is often absent because the
-        # caching is implicit. Falling back to the input price keeps cost estimates
-        # from reading as free rather than inventing a number.
-        if not info.cache_writes_price:
+        if row.cache_write_price > 0:
+            info.cache_writes_price = row.cache_write_price
+        elif not info.cache_writes_price:
+            # A quoted cache-READ price is the only signal some providers give
+            # that prompt caching exists at all; a listing that quotes no write
+            # price usually caches implicitly. Falling back to the input price
+            # keeps cost estimates from reading as free rather than inventing a
+            # number — it under-states an Anthropic 5m write by 20%, which is
+            # why a quoted write price above takes precedence.
             info.cache_writes_price = info.input_price
     if row.supports_images is not None:
         # The provider's own statement, including a ``false``: ``DiscoveredModel``
@@ -968,53 +963,15 @@ def _info_from_discovery(
     return info
 
 
-#: The catalogue consulted for a direct provider's prices. OpenRouter rather than
-#: Radient because it is the one whose listing is a PUBLIC document — no key, no
-#: account — so this leg works on an install that has only, say, an Anthropic
-#: OAuth login. See :data:`local_operator.model.discovery.PUBLIC_LISTING_PROVIDERS`.
-_AGGREGATOR_CATALOGUE = "openrouter"
-
-#: Seconds this leg may block. Well under ``discovery.DEFAULT_TIMEOUT_S`` (10.0)
-#: because it runs BEHIND the provider's own listing on the same synchronous
-#: call — two default ceilings would be a 20s session start for one unresolvable
-#: model — and because it is reachable from the TUI's 1 Hz poll. Enrichment that
-#: cannot be had in three seconds is worth skipping until the next TTL bucket;
-#: the row degrades to "cost unavailable", which is the honest pre-existing state.
+#: Seconds the price-catalogue leg and the aggregator leg may each block. Well
+#: under ``discovery.DEFAULT_TIMEOUT_S`` (10.0) because they run BEHIND the
+#: provider's own listing on the same synchronous call — two default ceilings
+#: would be a 20s session start for one unresolvable model — and because they
+#: are reachable from the TUI's 1 Hz poll. Enrichment that cannot be had in
+#: three seconds is worth skipping until the next TTL bucket; the row degrades
+#: to "cost unavailable", which is the honest pre-existing state.
 _AGGREGATOR_TIMEOUT_S = 3.0
-
-#: A direct provider's id, mapped to the namespace the same models are published
-#: under in the OpenRouter catalogue. Only providers whose OWN listing quotes no
-#: prices need an entry, which is every direct provider in this tree: Anthropic's
-#: `/v1/models` has no pricing object, OpenAI's `/v1/models` is bare ids, and
-#: Gemini's listing carries token limits only. The aggregators (`openrouter`,
-#: `radient`) are deliberately absent — their own listing IS the priced one.
-#:
-#: Spelled out rather than derived because three of the namespaces are renames
-#: (`x-ai`, `qwen`, `moonshotai`), verified against
-#: `GET https://openrouter.ai/api/v1/models` on 2026-08-10; a derived guess would
-#: silently price a model from whatever else happened to match.
-_AGGREGATOR_NAMESPACE: dict[str, str] = {
-    "anthropic": "anthropic",
-    "openai": "openai",
-    "google": "google",
-    "deepseek": "deepseek",
-    "mistral": "mistralai",
-    "xai": "x-ai",
-    "alibaba": "qwen",
-    "kimi": "moonshotai",
-    # Z.AI's own listing quotes no prices, and GLM is resold on OpenRouter under
-    # the `z-ai/` namespace (verified against GET https://openrouter.ai/api/v1/models
-    # on 2026-08-17). Newer ids not yet carried there fall back to the static rows.
-    "zai": "z-ai",
-}
-
-#: A trailing Anthropic-style release stamp: `claude-opus-4-5-20251101`.
-_DATE_SUFFIX_RE = re.compile(r"-\d{8}$")
-
-#: A version separated by a dash between two digits: the `4-5` of `claude-opus-4-5`.
-#: Anchored on digits BOTH sides so `qwen2.5-coder-1.5b` and `gpt-4o-mini` are left
-#: alone — only a dash that is standing in for a decimal point is rewritten.
-_DOTTED_VERSION_RE = re.compile(r"(?<=\d)-(?=\d)")
+_PRICE_CATALOGUE_TIMEOUT_S = _AGGREGATOR_TIMEOUT_S
 
 #: Seconds a NON-BLOCKING listing refresh may take — the case where the registry
 #: already has a usable answer and is only checking whether the provider has since
@@ -1028,12 +985,13 @@ _REFRESH_TIMEOUT_S = 2.0
 def _remaining_budget(started: float) -> float:
     """What is left of one resolution's total listing budget, in seconds.
 
-    Resolution can consult two listings — the provider's own, then the public
-    aggregator catalogue. Given a ceiling each, they compose into their SUM, so a
-    model neither can describe blocks for both. One deadline across the pair keeps
-    the second leg free in the common case (the first answers in tens of
-    milliseconds) and bounds the pathological one at the single ceiling every
-    caller of this module already budgets for.
+    Resolution can consult up to three listings — the provider's own, the neutral
+    price catalogue, and (for an aggregator's own ids) the aggregator's listing.
+    Given a ceiling each, they compose into their SUM, so a model none can
+    describe blocks for all of them. One deadline across the legs keeps the later
+    ones free in the common case (the first answers in tens of milliseconds) and
+    bounds the pathological one at the single ceiling every caller of this module
+    already budgets for.
 
     Which leg gets STARVED by that is a deliberate priority, not an accident of
     ordering, and inverting it would be a real regression. On a degraded network
@@ -1053,108 +1011,20 @@ def _remaining_budget(started: float) -> float:
     return max(0.01, DEFAULT_TIMEOUT_S - (time.monotonic() - started))
 
 
-def _aggregator_spellings(model_id: str) -> list[str]:
-    """``model_id`` as the aggregator might spell it, most literal first.
+def _fill_from_row(info: ModelInfo, row: "DiscoveredModel") -> ModelInfo:
+    """``info`` with its HOLES filled from a second-hand catalogue row.
 
-    Providers and aggregators disagree about punctuation for the SAME model, and
-    the disagreement is systematic rather than per-model: Anthropic ships
-    `claude-opus-4-5-20251101` while OpenRouter lists `anthropic/claude-opus-4.5`.
-    Trying only the literal id would leave every dated Claude snapshot unpriced,
-    which is precisely the population this fallback exists for.
-
-    Both rewrites are conservative — a date stamp is eight digits at the end, and a
-    dash becomes a dot only between two digits — and every candidate must still be
-    found in the catalogue before it is believed. A miss costs one dict lookup.
-
-    Order is most-literal-first, and the DOTTED-WITH-DATE form comes before either
-    date-stripped one on purpose: OpenRouter publishes dated snapshots under their
-    own dated ids alongside the undated alias (`anthropic/claude-3.5-sonnet-20240620`
-    as well as `anthropic/claude-3.5-sonnet`), so stripping the date first would
-    answer a question about one snapshot with the alias's price. Harmless while
-    snapshots of a family share a rate, wrong the day one does not.
-    """
-    stripped = _DATE_SUFFIX_RE.sub("", model_id)
-    candidates = [model_id]
-    for candidate in (
-        _DOTTED_VERSION_RE.sub(".", model_id),
-        stripped,
-        _DOTTED_VERSION_RE.sub(".", stripped),
-    ):
-        if candidate and candidate not in candidates:
-            candidates.append(candidate)
-    return candidates
-
-
-def _from_aggregator_catalogue(
-    provider: str, model_id: str, info: ModelInfo, *, timeout: float | None = None
-) -> ModelInfo:
-    """Describe a DIRECT provider's model from the public aggregator catalogue.
-
-    The last leg of resolution, reached only when neither the registry nor the
-    provider's own listing could finish the job. It exists because those two
-    sources CANNOT close the gap between them: a direct provider's listing quotes
-    no money at all, and for a model the registry has not been taught about it
-    frequently carries no limits either. That is not a hypothetical —
-    `openai/gpt-5.4` is a shipping model with no registry row, and on a
-    fully-credentialled install it resolved to `input_price=0.0` AND no context
-    window, so the status band read "cost unavailable" and `311.0k/—` for the
-    whole session.
-
-    Structurally this is the same trick the aggregator models already get for free:
-    OpenRouter's listing describes the very same upstream models, and it is fetched
-    with NO credential — ``available_models`` treats it as keyless because it is in
-    :data:`~local_operator.model.discovery.PUBLIC_LISTING_PROVIDERS`, so the request
-    simply goes out without an ``Authorization`` header — and cached on disk for a
-    TTL. So the self-healing property is the point: a row added tomorrow with a 0.0
-    placeholder starts costing correctly instead of silently reading as free until
-    someone notices.
-
-    Every field is taken ONLY where the direct sources left a hole. The provider's
-    own answer is authoritative where it exists and can legitimately differ from
-    what the aggregator's routing exposes — OpenRouter advertises the largest
+    Shared by the price-catalogue and aggregator legs, which have the same
+    contract: every field is taken ONLY where the direct sources left one. The
+    provider's own answer is authoritative where it exists and can legitimately
+    differ from what a catalogue exposes — OpenRouter advertises the largest
     window across its routes, which is the wrong number for a specific upstream
     endpoint. ``supports_images`` is not taken at all: it carries a three-valued
-    contract (see :func:`_info_from_discovery`) in which a stated ``false`` is the
-    PROVIDER's denial, and a second-hand listing has no standing to issue one.
-    ``supports_prompt_cache`` is inferred from a quoted cache-read price, which is
-    the same inference :func:`_info_from_discovery` makes and is only ever
-    widening.
-
-    Never raises and never returns worse data than it was given.
+    contract (see :func:`_info_from_discovery`) in which a stated ``false`` is
+    the PROVIDER's denial, and a second-hand listing has no standing to issue
+    one. ``supports_prompt_cache`` is inferred from a quoted cache-read price,
+    the same inference :func:`_info_from_discovery` makes and only ever widening.
     """
-    namespace = _AGGREGATOR_NAMESPACE.get(provider)
-    if namespace is None:
-        return info
-    try:
-        from local_operator.model.discovery import available_models
-
-        # Two ceilings, whichever is smaller. `_AGGREGATOR_TIMEOUT_S` is this leg's
-        # own cap: it is pure enrichment stacked BEHIND the provider's listing, and
-        # it is reachable from the TUI's 1 Hz poll (`_harvest_subagent_costs` →
-        # `job_cost` → here, for a child on a model not yet in the memo), where a
-        # 10s synchronous stall is input lag rather than a slow start. `timeout` is
-        # what the CALLER has left of the whole resolution's budget, so the two
-        # legs together can never cost more than the single ceiling every caller of
-        # this module already assumes.
-        budget = _AGGREGATOR_TIMEOUT_S if timeout is None else min(_AGGREGATOR_TIMEOUT_S, timeout)
-        rows, _status = available_models(_AGGREGATOR_CATALOGUE, api_key=None, timeout=budget)
-    except Exception as exc:  # noqa: BLE001 — metadata is never worth a failed start
-        logger.debug("aggregator catalogue unavailable for %s/%s: %s", provider, model_id, exc)
-        return info
-
-    # Priced rows only. An unpriced aggregator row is a routing stub that can
-    # answer neither of the two questions this leg is here for, and matching one
-    # would shadow a better-spelled sibling further down the candidate list.
-    priced = {row.id: row for row in rows if row.input_price > 0 or row.output_price > 0}
-    row = None
-    for spelling in _aggregator_spellings(model_id):
-        row = priced.get(f"{namespace}/{spelling}")
-        if row is not None:
-            break
-    if row is None:
-        logger.debug("aggregator catalogue has no priced entry for %s/%s", provider, model_id)
-        return info
-
     info = info.model_copy(deep=True)
     if not (info.input_price or info.output_price):
         info.input_price = row.input_price
@@ -1162,12 +1032,13 @@ def _from_aggregator_catalogue(
         if row.cache_read_price > 0:
             info.cache_reads_price = row.cache_read_price
             info.supports_prompt_cache = True
-            # Same convention as `_info_from_discovery`: `DiscoveredModel` carries
-            # no write price, and the input price is the closest defensible
-            # stand-in. It under-states an Anthropic 5m write by 20% (1.25x base) —
-            # which is why the shipped rows in the registry carry the real number
-            # and this is only the floor for an id nobody has written down yet.
-            if not info.cache_writes_price:
+            if row.cache_write_price > 0:
+                info.cache_writes_price = row.cache_write_price
+            elif not info.cache_writes_price:
+                # A catalogue that quotes a read price and no write price. The
+                # input price is the closest defensible stand-in — it under-states
+                # an Anthropic 5m write by 20% (1.25x base), which is why a quoted
+                # write price above wins and this is only the floor.
                 info.cache_writes_price = info.input_price
     if not _has_real_window(info) and row.context_window > 0:
         # A missing window is not cosmetic and not merely a rendering gap: the
@@ -1182,6 +1053,104 @@ def _from_aggregator_catalogue(
     if not (info.max_tokens and info.max_tokens > 0) and row.max_tokens > 0:
         info.max_tokens = row.max_tokens
     return info
+
+
+def _from_price_catalogue(
+    provider: str, model_id: str, info: ModelInfo, *, timeout: float | None = None
+) -> ModelInfo:
+    """Fill a model's price and limit holes from the neutral models.dev catalogue.
+
+    The second leg of resolution, reached when the registry and the provider's
+    own listing together could not finish the job — which for every DIRECT
+    provider is the normal outcome rather than a failure: none of them quote money
+    in their listing. Until this leg existed the only price source for such an id
+    was the OpenRouter listing looked up under a per-provider namespace, which
+    tied an Anthropic-only user's cost display to one aggregator's document and
+    its id spellings; the day ``claude-fable-5-1`` shipped that document was six
+    hours old and predated the row, so the session ran at $0.00. See
+    :mod:`local_operator.model.prices` for what the catalogue is and why it is
+    trusted for prices and limits but not capabilities.
+
+    Never raises and never returns worse data than it was given. ``timeout`` is
+    what the CALLER has left of the whole resolution's budget, capped at this
+    leg's own ceiling: it is pure enrichment stacked BEHIND the provider's
+    listing and is reachable from the TUI's 1 Hz poll (via
+    ``refresh_model_info_background``'s executor thread), where a 10s stall on
+    a 4.4 MB cold download is input lag rather than a slow start.
+    """
+    try:
+        from local_operator.model.prices import price_catalogue_row
+
+        budget = (
+            _PRICE_CATALOGUE_TIMEOUT_S
+            if timeout is None
+            else min(_PRICE_CATALOGUE_TIMEOUT_S, timeout)
+        )
+        row = price_catalogue_row(provider, model_id, timeout=budget)
+    except Exception as exc:  # noqa: BLE001 — metadata is never worth a failed start
+        logger.debug("price catalogue unavailable for %s/%s: %s", provider, model_id, exc)
+        return info
+    if row is None:
+        logger.debug("price catalogue has no entry for %s/%s", provider, model_id)
+        return info
+    if not (row.input_price > 0 or row.output_price > 0 or row.context_window > 0):
+        # A key with no cost and no limit answers neither question this leg is
+        # here for; models.dev carries such stubs for plan catalogues.
+        return info
+    return _fill_from_row(info, row)
+
+
+def _from_aggregator_catalogue(
+    provider: str, model_id: str, info: ModelInfo, *, timeout: float | None = None
+) -> ModelInfo:
+    """Describe an AGGREGATOR's own model from its public listing, as a last resort.
+
+    Only for ``provider in AGGREGATOR_PROVIDERS`` — the ``openrouter/*`` and
+    ``radient/*`` ids, whose own listing IS the priced one. Leg 1 has normally
+    already priced them from it; this leg survives for the case where leg 1 was
+    unavailable (a credential lookup that raised, a listing behind a login)
+    and the public OpenRouter document can still answer.
+
+    It used to be the price source for DIRECT providers too, through a
+    per-provider namespace map (``anthropic`` → ``anthropic/``, ``xai`` →
+    ``x-ai/``, ...). That coupling is gone: :func:`_from_price_catalogue` is the
+    provider-neutral leg now, and a direct-provider id this function is handed
+    is returned untouched.
+
+    Every field is taken ONLY where the direct sources left a hole
+    (:func:`_fill_from_row`). Never raises and never returns worse data than it
+    was given.
+    """
+    from local_operator.providers.registry import AGGREGATOR_PROVIDERS
+
+    if provider not in AGGREGATOR_PROVIDERS:
+        return info
+    try:
+        from local_operator.model.discovery import (
+            PUBLIC_LISTING_PROVIDERS,
+            available_models,
+        )
+
+        # Radient's listing needs a key; only a PUBLIC listing can be read here
+        # with no credential at all.
+        if provider not in PUBLIC_LISTING_PROVIDERS:
+            return info
+        # Two ceilings, whichever is smaller — see `_from_price_catalogue`.
+        budget = _AGGREGATOR_TIMEOUT_S if timeout is None else min(_AGGREGATOR_TIMEOUT_S, timeout)
+        rows, _status = available_models(provider, api_key=None, timeout=budget, want_id=model_id)
+    except Exception as exc:  # noqa: BLE001 — metadata is never worth a failed start
+        logger.debug("aggregator catalogue unavailable for %s/%s: %s", provider, model_id, exc)
+        return info
+
+    # Priced rows only. An unpriced aggregator row is a routing stub that can
+    # answer neither of the two questions this leg is here for.
+    row = next(
+        (r for r in rows if r.id == model_id and (r.input_price > 0 or r.output_price > 0)), None
+    )
+    if row is None:
+        logger.debug("aggregator catalogue has no priced entry for %s/%s", provider, model_id)
+        return info
+    return _fill_from_row(info, row)
 
 
 def _registry_fallback(provider: str, model_id: str) -> ModelInfo:
@@ -1297,14 +1266,19 @@ def _resolve_model_info_cached(provider: str, model_id: str, _bucket: int) -> Mo
         # source fully described must not pay for a second catalogue read.
         #
         # Budgeted against ONE deadline for the whole resolution, not its own fresh
-        # ceiling. Two independent budgets compose into their SUM, so adding this
+        # ceiling. Two independent budgets compose into their SUM, so adding a
         # leg silently took an unresolvable model's worst case from 10s to 13s —
         # and that model is not the exotic case for the subagent panel, it is the
         # motivating one (a child launched on a `model_spec` override the shipped
         # registry has never heard of). Spending what leg 1 left keeps this leg
         # free for the common case, where leg 1 answers in tens of milliseconds,
-        # while guaranteeing the pair can never cost more than the one ceiling
+        # while guaranteeing the legs can never cost more than the one ceiling
         # callers already budget for.
+        info = _from_price_catalogue(canonical, model_id, info, timeout=_remaining_budget(started))
+    if _needs_enrichment(info):
+        # Leg 3, for an AGGREGATOR's own ids only (the function refuses direct
+        # providers). Normally leg 1 already priced these from the same listing;
+        # this is the fallback for when leg 1 could not run. Same shared deadline.
         info = _from_aggregator_catalogue(
             canonical, model_id, info, timeout=_remaining_budget(started)
         )

@@ -370,12 +370,30 @@ def test_an_overflowing_list_says_how_much_it_is_hiding() -> None:
 
 
 def test_the_status_line_surfaces_what_the_catalogue_does_not_know() -> None:
-    """A cached or failed provider is exactly when a user hunting for a model
-    released last week needs telling, rather than concluding it is not real."""
+    """A failed provider is exactly when a user hunting for a model released
+    this morning needs telling, rather than concluding it is not real."""
     picker = ModelPicker(lambda row: None)
-    picker.set_rows(_rows(), status="cached: anthropic")
+    picker.set_rows(_rows(), status="live list unavailable: anthropic — showing cached")
     picker.open("")
-    assert "cached: anthropic" in picker.render_text(90).plain
+    assert "live list unavailable: anthropic" in picker.render_text(90).plain
+
+
+def test_the_footer_names_stale_providers_and_stays_silent_for_cached_ones() -> None:
+    """`stale` is a failed refresh; `cached` is "listed within the picker's
+    fifteen-minute TTL", which is not worth a line nobody would read."""
+    from local_operator.tui.app import _catalogue_status
+
+    assert _catalogue_status({"anthropic": "cached", "openrouter": "ok"}) == ""
+    assert (
+        _catalogue_status({"xai": "stale", "anthropic": "stale", "openrouter": "cached"})
+        == "live list unavailable: anthropic, xai — showing cached"
+    )
+    assert (
+        _catalogue_status({"anthropic": "stale", "radient": "empty"})
+        == "live list unavailable: anthropic — showing cached · no live list: radient"
+    )
+    # Unauthenticated is counted by the access note, not here.
+    assert _catalogue_status({"google": "unauthenticated"}) == ""
 
 
 def test_an_empty_result_says_so_rather_than_rendering_nothing() -> None:

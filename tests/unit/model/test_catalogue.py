@@ -1379,3 +1379,231 @@ def test_a_lease_from_a_dead_holder_is_stolen_after_expiry(tmp_path) -> None:
     assert lease._held is True
     lease.release()
     assert not stale.exists(), "release must remove this holder's lease file"
+
+
+# -- stale-while-revalidate --------------------------------------------------
+#
+# The incident these guard: a 22h-old `anthropic.listing.json` — inside the 24h
+# hard TTL, so never refetched — hid a model published that morning from
+# `/model` and from the cost band for a whole working day. `read_listing` now
+# serves a document past the SOFT TTL immediately and refreshes it off the
+# calling path, so the NEXT call sees the new document at zero on-path cost.
+# Threads are JOINED via `catalogue._revalidation_threads()`, never slept on
+# (AGENTS.md "Timing").
+
+
+def _plant(tmp_path, key: str, payload: dict[str, Any], *, age_s: float) -> None:
+    (tmp_path / f"{key}.json").write_text(
+        json.dumps({"fetched_at": time.time() - age_s, "payload": payload}), encoding="utf-8"
+    )
+
+
+def _join_revalidations() -> None:
+    for thread in catalogue._revalidation_threads():
+        thread.join(timeout=5.0)
+
+
+@pytest.fixture
+def _no_backoff_state():
+    """Each test starts with no in-flight or recently-attempted keys."""
+    with catalogue._revalidate_lock:
+        catalogue._revalidating.clear()
+        catalogue._last_attempt.clear()
+        catalogue._threads.clear()
+    yield
+    _join_revalidations()
+
+
+def test_a_document_between_soft_and_hard_ttl_is_served_and_revalidated_in_the_background(
+    tmp_path, _no_backoff_state
+) -> None:
+    _plant(tmp_path, "anthropic.listing", _payload(window=1), age_s=2 * 3600)
+    calls: list[int] = []
+
+    def fetch():
+        calls.append(1)
+        return _payload(window=2)
+
+    listing = catalogue.read_listing("anthropic.listing", fetch, cache_dir=tmp_path)
+
+    # Served the OLD document, synchronously, with no fetch on this path...
+    assert listing.payload == _payload(window=1)
+    assert listing.fetched is False
+    assert listing.refreshing is True
+    assert 2 * 3600 <= listing.age_s < 3 * 3600
+    # ...and the background thread rewrote it.
+    _join_revalidations()
+    assert calls == [1]
+    raw = json.loads((tmp_path / "anthropic.listing.json").read_text(encoding="utf-8"))
+    assert raw["payload"] == _payload(window=2)
+    assert time.time() - raw["fetched_at"] < 60
+    assert not list(tmp_path.glob("*.fetching")), "the background fetch must release its lease"
+
+
+def test_a_document_under_the_soft_ttl_schedules_nothing(tmp_path, _no_backoff_state) -> None:
+    _plant(tmp_path, "anthropic.listing", _payload(), age_s=30 * 60)
+    listing = catalogue.read_listing(
+        "anthropic.listing", lambda: pytest.fail("no fetch expected"), cache_dir=tmp_path
+    )
+    assert listing.refreshing is False
+    assert listing.fetched is False
+    assert catalogue._revalidation_threads() == []
+
+
+def test_a_document_past_the_hard_ttl_still_fetches_synchronously(
+    tmp_path, _no_backoff_state
+) -> None:
+    """The offline/cold contract: beyond the hard TTL the CALLER gets the fresh
+    document, not a promise of one."""
+    _plant(tmp_path, "anthropic.listing", _payload(window=1), age_s=25 * 3600)
+    listing = catalogue.read_listing(
+        "anthropic.listing", lambda: _payload(window=2), cache_dir=tmp_path
+    )
+    assert listing.payload == _payload(window=2)
+    assert listing.fetched is True
+    assert listing.refreshing is False
+    assert catalogue._revalidation_threads() == []
+
+
+def test_a_background_revalidation_that_loses_the_lease_exits_without_fetching(
+    tmp_path, _no_backoff_state
+) -> None:
+    """A peer process is already fetching; unlike the sync path there is nothing
+    to wait for, because the caller already has its answer."""
+    _plant(tmp_path, "anthropic.listing", _payload(window=1), age_s=2 * 3600)
+    (tmp_path / "anthropic.listing.json.fetching").write_text(
+        json.dumps({"holder": "peer:1234", "expires_at": time.time() + 30.0})
+    )
+    calls: list[int] = []
+
+    def fetch():
+        calls.append(1)
+        return _payload(window=2)
+
+    listing = catalogue.read_listing("anthropic.listing", fetch, cache_dir=tmp_path)
+    assert listing.refreshing is True
+    _join_revalidations()
+    assert calls == []
+    raw = json.loads((tmp_path / "anthropic.listing.json").read_text(encoding="utf-8"))
+    assert raw["payload"] == _payload(window=1)
+
+
+def test_a_failed_background_revalidation_keeps_the_stale_document_and_backs_off(
+    tmp_path, _no_backoff_state
+) -> None:
+    _plant(tmp_path, "anthropic.listing", _payload(window=1), age_s=2 * 3600)
+    calls: list[int] = []
+
+    def boom():
+        calls.append(1)
+        raise RuntimeError("offline")
+
+    first = catalogue.read_listing("anthropic.listing", boom, cache_dir=tmp_path)
+    assert first.refreshing is True
+    _join_revalidations()
+    assert calls == [1]
+    raw = json.loads((tmp_path / "anthropic.listing.json").read_text(encoding="utf-8"))
+    assert raw["payload"] == _payload(window=1), "a failed refresh must not touch the document"
+    assert not list(tmp_path.glob("*.fetching"))
+
+    # Within the backoff: served again, no second thread — an offline machine
+    # must not spawn a thread per repaint.
+    second = catalogue.read_listing("anthropic.listing", boom, cache_dir=tmp_path)
+    assert second.payload == _payload(window=1)
+    assert second.refreshing is False
+    assert catalogue._revalidation_threads() == []
+    assert calls == [1]
+
+
+def test_two_reads_in_one_process_spawn_one_revalidation(tmp_path, _no_backoff_state) -> None:
+    _plant(tmp_path, "anthropic.listing", _payload(window=1), age_s=2 * 3600)
+    gate = __import__("threading").Event()
+    calls: list[int] = []
+
+    def slow_fetch():
+        calls.append(1)
+        gate.wait(timeout=5.0)
+        return _payload(window=2)
+
+    try:
+        first = catalogue.read_listing("anthropic.listing", slow_fetch, cache_dir=tmp_path)
+        second = catalogue.read_listing("anthropic.listing", slow_fetch, cache_dir=tmp_path)
+    finally:
+        gate.set()
+    _join_revalidations()
+    assert (first.refreshing, second.refreshing) == (True, False)
+    assert calls == [1]
+
+
+def test_cached_listing_never_schedules_a_thread(tmp_path, _no_backoff_state) -> None:
+    """The compatibility wrapper pins soft TTL to hard TTL: three states, no threads."""
+    _plant(tmp_path, "anthropic.listing", _payload(window=1), age_s=2 * 3600)
+    got = cached_listing(
+        "anthropic.listing", lambda: pytest.fail("no fetch expected"), cache_dir=tmp_path
+    )
+    assert got == _payload(window=1)
+    assert catalogue._revalidation_threads() == []
+
+
+def test_peek_listing_reads_without_sweeping_or_fetching(tmp_path) -> None:
+    orphan = tmp_path / "openrouter.models.json"
+    orphan.write_text("{}", encoding="utf-8")
+    _plant(tmp_path, "models-dev.listing", {"etag": '"abc"'}, age_s=10)
+
+    peeked = catalogue.peek_listing("models-dev.listing", cache_dir=tmp_path)
+    assert peeked.payload == {"etag": '"abc"'}
+    assert 10 <= peeked.age_s < 60
+    assert peeked.fetched is False and peeked.refreshing is False
+    assert orphan.exists(), "peek must not sweep; only read_listing owns the purge"
+    absent = catalogue.peek_listing("nothing.listing", cache_dir=tmp_path)
+    assert absent.payload is None and absent.age_s == float("inf")
+
+
+def test_a_background_thread_runs_off_the_calling_thread(tmp_path, _no_backoff_state) -> None:
+    """Structural, not timed (AGENTS.md): the fetch runs on a thread that is not
+    the caller's, which is the whole point of the soft TTL."""
+    import threading
+
+    _plant(tmp_path, "anthropic.listing", _payload(window=1), age_s=2 * 3600)
+    seen: list[int] = []
+
+    def fetch():
+        seen.append(threading.get_ident())
+        return _payload(window=2)
+
+    catalogue.read_listing("anthropic.listing", fetch, cache_dir=tmp_path)
+    _join_revalidations()
+    assert seen and seen[0] != threading.get_ident()
+
+
+def test_a_readers_predicate_can_expire_a_document_inside_the_ttl(
+    tmp_path, _no_backoff_state
+) -> None:
+    """`refetch_if` is how discovery's `want_id` miss becomes ONE synchronous fetch
+    on the calling thread, rather than a race against the background refresh."""
+    _plant(tmp_path, "anthropic.listing", _payload(window=1), age_s=2 * 3600)
+    asked: list[tuple[dict[str, Any], float]] = []
+
+    def lacks(document, age_s):
+        asked.append((document, age_s))
+        return True
+
+    listing = catalogue.read_listing(
+        "anthropic.listing", lambda: _payload(window=2), cache_dir=tmp_path, refetch_if=lacks
+    )
+    assert listing.fetched is True
+    assert listing.payload == _payload(window=2)
+    assert listing.refreshing is False
+    assert catalogue._revalidation_threads() == []
+    assert asked[0][0] == _payload(window=1) and asked[0][1] >= 2 * 3600
+
+
+def test_a_failed_sync_fetch_reports_failed_with_the_stale_document(tmp_path) -> None:
+    _plant(tmp_path, "anthropic.listing", _payload(window=1), age_s=25 * 3600)
+
+    def boom():
+        raise RuntimeError("offline")
+
+    listing = catalogue.read_listing("anthropic.listing", boom, cache_dir=tmp_path)
+    assert listing.payload == _payload(window=1)
+    assert (listing.fetched, listing.failed) == (False, True)

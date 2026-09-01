@@ -13927,11 +13927,20 @@ class OperatorApp(App[None]):
             self.run_worker(self._refresh_catalogue(), thread=False, group="catalogue")
 
     async def _refresh_catalogue(self) -> None:
-        """Worker: replace the picker's rows with the live catalogue."""
+        """Worker: replace the picker's rows with the live catalogue.
+
+        Asks for a FIFTEEN-MINUTE listing rather than discovery's 24h default.
+        The user opening `/model` is the one moment a fresh list is worth a
+        request: the rows are already painted from the registry and the fetch
+        runs off-loop, so the cost is invisible, and a 24h document is exactly
+        how a model published this morning failed to appear here all day.
+        """
         if self._providers is None:
             return
+        from local_operator.providers.controller import PICKER_TTL_S
+
         try:
-            entries, statuses = await self._providers.live_catalogue()
+            entries, statuses = await self._providers.live_catalogue(ttl_s=PICKER_TTL_S)
         except Exception as error:  # noqa: BLE001 — a picker must not take the app down
             rows, note = self._catalogue_rows(self._providers.static_catalogue())
             self._editor().model_picker.set_rows(
@@ -20402,20 +20411,28 @@ def _catalogue_status(statuses: dict[str, str]) -> str:
     Silence when every provider answered, because a footer that always says
     something is a footer nobody reads. The interesting cases are the ones where a
     user hunting for a model released last week would otherwise conclude it does
-    not exist: a cached list, or a provider whose live fetch failed.
+    not exist: a provider whose live fetch FAILED and is showing an old list, or
+    one that listed nothing.
+
+    ``cached`` is silent too. The picker asks for a fifteen-minute listing
+    (``PICKER_TTL_S``), so "cached" means "listed within the last quarter hour",
+    which is not something the user needs to read; it used to be reported when
+    it could also mean "a day old", and it could not be told from a failed
+    refresh at all (both were ``cached``). ``stale`` is the new status for that
+    failure, and it is the one worth a line.
 
     An ``unauthenticated`` provider is deliberately NOT reported here. Its models
     are the ones the picker now hides, and `_catalogue_rows` already counts them
     — two footers counting one fact ("3 provider(s) need a login · 42 hidden")
     reads as two separate problems.
     """
-    cached = sorted(p for p, s in statuses.items() if s == "cached")
-    stale = sorted(p for p, s in statuses.items() if s in ("unavailable", "empty"))
+    stale = sorted(p for p, s in statuses.items() if s == "stale")
+    empty = sorted(p for p, s in statuses.items() if s == "empty")
     bits: list[str] = []
-    if cached:
-        bits.append(f"cached: {', '.join(cached)}")
     if stale:
-        bits.append(f"no live list: {', '.join(stale)}")
+        bits.append(f"live list unavailable: {', '.join(stale)} — showing cached")
+    if empty:
+        bits.append(f"no live list: {', '.join(empty)}")
     return " · ".join(bits)
 
 

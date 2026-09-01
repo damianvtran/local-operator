@@ -136,6 +136,8 @@ _OPENROUTER_BODY = {
                 "prompt": "0.000003",
                 "completion": "0.000015",
                 "input_cache_read": "0.0000003",
+                "input_cache_write": "0.00000375",
+                "input_cache_write_1h": "0.000006",
             },
             "top_provider": {"context_length": 200_000, "max_completion_tokens": 64_000},
             "architecture": {"input_modalities": ["text", "image"], "modality": "text+image->text"},
@@ -166,10 +168,14 @@ def test_openai_compat_parses_a_captured_openrouter_payload() -> None:
     assert sonnet.input_price == pytest.approx(3.0)
     assert sonnet.output_price == pytest.approx(15.0)
     assert sonnet.cache_read_price == pytest.approx(0.3)
+    # The five-minute write rate, scaled the same way; the `_1h` tier is ignored
+    # because every write is billed at the 5m rate unless a caller asks otherwise.
+    assert sonnet.cache_write_price == pytest.approx(3.75)
     assert sonnet.supports_images is True
     assert sonnet.supports_prompt_cache is True
     assert rows[1].supports_images is False
     assert rows[1].supports_prompt_cache is False
+    assert rows[1].cache_write_price == 0.0
 
 
 def test_openai_compat_reads_the_legacy_modality_string() -> None:
@@ -928,6 +934,82 @@ def test_merge_prefers_live_prices_when_they_are_present() -> None:
     assert merged[0].cache_read_price == pytest.approx(0.3)
 
 
+def test_merge_prefers_a_live_cache_write_price() -> None:
+    static = {"m": _info("m", cache_reads_price=1.5, cache_writes_price=18.75)}
+    live = [DiscoveredModel(id="m", cache_read_price=0.3, cache_write_price=3.75)]
+    merged = merge_models(static, live)
+
+    assert merged[0].cache_write_price == pytest.approx(3.75)
+
+
+def test_merge_keeps_the_static_cache_write_price_when_live_is_zero() -> None:
+    """Same rule as the read price: a zero is "not quoted", never "free"."""
+    static = {"m": _info("m", cache_reads_price=1.5, cache_writes_price=18.75)}
+    merged = merge_models(static, [DiscoveredModel(id="m", cache_read_price=0.3)])
+
+    assert merged[0].cache_write_price == pytest.approx(18.75)
+
+
+def test_a_cache_write_price_survives_the_disk_round_trip(tmp_path) -> None:
+    """The document is `asdict` of the row; the reader must pick the field back up."""
+    body = {
+        "data": [
+            {
+                "id": "anthropic/claude-fable-5.1",
+                "pricing": {
+                    "prompt": "0.00001",
+                    "completion": "0.00005",
+                    "input_cache_read": "0.00000025",
+                    "input_cache_write": "0.0000125",
+                },
+            }
+        ]
+    }
+    client = _StubClient([_Response(200, body)])
+    available_models("openrouter", api_key="k", client=client, cache_dir=tmp_path)
+    models, status = available_models("openrouter", api_key="k", client=client, cache_dir=tmp_path)
+
+    assert status == "cached"
+    assert models[0].cache_write_price == pytest.approx(12.5)
+
+
+def test_an_openrouter_document_from_capture_one_is_refetched_once(tmp_path) -> None:
+    """A version-1 OpenRouter document has no write price; it must not be served for a day.
+
+    Mirrors the Anthropic capture-two guard: the shape is fine and every field
+    maps, so nothing but the stamp can notice the writer left a field at zero.
+    """
+    stale = tmp_path / "openrouter.listing.json"
+    stale.write_text(
+        json.dumps(
+            {
+                "fetched_at": time.time(),
+                "payload": {
+                    "capture": 1,
+                    "models": [{"id": "anthropic/claude-fable-5.1", "input_price": 10.0}],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    body = {
+        "data": [
+            {
+                "id": "anthropic/claude-fable-5.1",
+                "pricing": {"prompt": "0.00001", "input_cache_write": "0.0000125"},
+            }
+        ]
+    }
+    client = _StubClient([_Response(200, body)])
+
+    models, status = available_models("openrouter", api_key="k", client=client, cache_dir=tmp_path)
+
+    assert status == "ok"
+    assert len(client.calls) == 1
+    assert models[0].cache_write_price == pytest.approx(12.5)
+    assert json.loads(stale.read_text())["payload"]["capture"] == 2
+
+
 def test_an_unstated_capability_defers_to_the_registry() -> None:
     """Silence is not a denial. Every lean OpenAI-compatible gateway sends an id
     and nothing else, and reading that as "no images, no caching" would downgrade
@@ -1233,18 +1315,117 @@ def test_available_models_serves_a_fresh_cache_without_a_request(tmp_path) -> No
     assert [row.id for row in second_models] == [row.id for row in first_models]
 
 
-def test_available_models_reports_cached_when_a_stale_refetch_fails(tmp_path) -> None:
+def test_available_models_reports_stale_when_a_refetch_fails(tmp_path) -> None:
     client = _StubClient([_Response(200, _ANTHROPIC_BODY), httpx.ConnectError("offline")])
     available_models("anthropic", api_key="sk-ant", client=client, cache_dir=tmp_path)
     models, status = available_models(
         "anthropic", api_key="sk-ant", client=client, cache_dir=tmp_path, ttl_s=-1
     )
 
-    assert status == "cached"
+    # "stale", not "cached": a fetch was ATTEMPTED and failed, which is the one
+    # thing a user hunting for this morning's model needs the footer to say.
+    # The two were one status before, so the picker could not tell "fresh
+    # enough" from "offline".
+    assert status == "stale"
     # Stale beats absent: the numbers are days old at worst, and losing the
     # window because the network blipped is the regression this guards.
     by_id = {row.id: row for row in models}
     assert by_id["claude-opus-5"].context_window == 1_000_000
+
+
+def _plant_anthropic_document(tmp_path, *, age_s: float, ids: Sequence[str]) -> None:
+    """A capture-2 Anthropic document of the given age, listing exactly ``ids``."""
+    (tmp_path / "anthropic.listing.json").write_text(
+        json.dumps(
+            {
+                "fetched_at": time.time() - age_s,
+                "payload": {
+                    "capture": discovery.listing_capture_version("anthropic"),
+                    "models": [{"id": model_id, "context_window": 1_000_000} for model_id in ids],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_a_missing_want_id_refetches_a_document_old_enough_to_be_wrong(tmp_path) -> None:
+    """The incident: a 22h document (inside the hard TTL) without this morning's model.
+
+    Without this trigger the id the user asked for stays unresolvable until the
+    document expires, and the memo pins the answer for the day. One refetch,
+    inside the caller's budget, for exactly the id being resolved.
+    """
+    _plant_anthropic_document(tmp_path, age_s=22 * 3600, ids=["claude-opus-5"])
+    fresh = {
+        "data": [
+            {"id": "claude-fable-5-1", "display_name": "Claude Fable 5.1", "type": "model"},
+            {"id": "claude-opus-5", "display_name": "Claude Opus 5", "type": "model"},
+        ],
+        "has_more": False,
+    }
+    client = _StubClient([_Response(200, fresh)])
+
+    models, status = available_models(
+        "anthropic",
+        api_key="sk-ant",
+        client=client,
+        cache_dir=tmp_path,
+        want_id="claude-fable-5-1",
+    )
+
+    assert status == "ok"
+    assert len(client.calls) == 1
+    assert "claude-fable-5-1" in {row.id for row in models}
+
+
+def test_a_missing_want_id_is_believed_when_the_document_is_young(tmp_path) -> None:
+    """A typo must not refetch on every resolution: a minute-old miss is a miss."""
+    _plant_anthropic_document(tmp_path, age_s=60, ids=["claude-opus-5"])
+    client = _StubClient([])
+
+    models, status = available_models(
+        "anthropic", api_key="sk-ant", client=client, cache_dir=tmp_path, want_id="claude-typo"
+    )
+
+    assert status == "cached"
+    assert client.calls == []
+
+
+def test_a_want_id_that_is_present_makes_no_request(tmp_path) -> None:
+    # Past the miss floor (so a miss WOULD refetch) but inside the soft TTL, so
+    # the only request this could make is the miss-triggered one.
+    _plant_anthropic_document(tmp_path, age_s=20 * 60, ids=["claude-opus-5"])
+    client = _StubClient([])
+
+    _models, status = available_models(
+        "anthropic",
+        api_key="sk-ant",
+        client=client,
+        cache_dir=tmp_path,
+        # Google's `models/` spelling and case count as present too — the same
+        # normalisation the lookup applies, so a hit there is not a miss here.
+        want_id="models/Claude-Opus-5",
+    )
+
+    assert status == "cached"
+    assert client.calls == []
+
+
+def test_a_failed_want_id_refetch_keeps_the_document_and_reports_stale(tmp_path) -> None:
+    _plant_anthropic_document(tmp_path, age_s=22 * 3600, ids=["claude-opus-5"])
+    client = _StubClient([httpx.ConnectError("offline")])
+
+    models, status = available_models(
+        "anthropic",
+        api_key="sk-ant",
+        client=client,
+        cache_dir=tmp_path,
+        want_id="claude-fable-5-1",
+    )
+
+    assert status == "stale"
+    assert "claude-opus-5" in {row.id for row in models}
 
 
 def test_available_models_reports_static_when_a_cold_fetch_fails(tmp_path) -> None:
@@ -1324,7 +1505,7 @@ def test_available_models_survives_a_broken_cache_layer(tmp_path, monkeypatch) -
     def explode(*args: object, **kwargs: object) -> dict[str, Any]:
         raise OSError("cache is on fire")
 
-    monkeypatch.setattr(discovery, "cached_listing", explode)
+    monkeypatch.setattr(discovery, "read_listing", explode)
     models, status = available_models(
         "anthropic", api_key="sk-ant", client=_StubClient([]), cache_dir=tmp_path
     )
@@ -1415,16 +1596,19 @@ def test_only_the_transport_that_changed_invalidates_its_cache(tmp_path) -> None
     needing a field its writer had not recorded, so only Anthropic's stamp moved.
     """
     assert discovery.listing_capture_version("anthropic") == 2
-    assert discovery.listing_capture_version("openrouter") == discovery.LISTING_CAPTURE_DEFAULT
+    assert discovery.listing_capture_version("openrouter") == 2
+    # Ollama's reader never changed: an OpenAI-compatible document with no
+    # pricing object has nothing new to capture, so its stamp stays at 1.
+    assert discovery.listing_capture_version("ollama") == discovery.LISTING_CAPTURE_DEFAULT
 
-    cached = tmp_path / "openrouter.listing.json"
+    cached = tmp_path / "ollama.listing.json"
     cached.write_text(
         json.dumps(
             {
                 "fetched_at": time.time(),
                 "payload": {
                     "capture": discovery.LISTING_CAPTURE_DEFAULT,
-                    "models": [{"id": "vendor/model", "context_window": 1_000}],
+                    "models": [{"id": "qwen3:8b", "context_window": 1_000}],
                 },
             }
         ),
@@ -1432,11 +1616,11 @@ def test_only_the_transport_that_changed_invalidates_its_cache(tmp_path) -> None
     )
     client = _StubClient([])
 
-    models, status = available_models("openrouter", api_key="k", client=client, cache_dir=tmp_path)
+    models, status = available_models("ollama", api_key=None, client=client, cache_dir=tmp_path)
     # Served from the cache, no fetch, rows intact — the upgrade did not touch it.
     assert status == "cached"
     assert not client.calls
-    assert "vendor/model" in {row.id for row in models}
+    assert "qwen3:8b" in {row.id for row in models}
 
 
 def test_an_unstamped_document_is_the_original_shape_not_a_stale_one(tmp_path) -> None:
@@ -1447,21 +1631,23 @@ def test_an_unstamped_document_is_the_original_shape_not_a_stale_one(tmp_path) -
     per-transport map exists to spare, whose registry has no static rows to answer
     with. Measured before the fix: `static` with 0 models on any failed fetch.
     """
-    cached = tmp_path / "openrouter.listing.json"
+    # Ollama is a transport whose stamp is still version 1, so an unstamped
+    # document is exactly its current shape.
+    cached = tmp_path / "ollama.listing.json"
     cached.write_text(
         json.dumps(
             {
                 "fetched_at": time.time(),
                 # Exactly what the pre-stamp writer produced: no `capture`.
-                "payload": {"models": [{"id": "vendor/model", "context_window": 1_000}]},
+                "payload": {"models": [{"id": "qwen3:8b", "context_window": 1_000}]},
             }
         ),
         encoding="utf-8",
     )
     client = _StubClient([])
 
-    models, status = available_models("openrouter", api_key="k", client=client, cache_dir=tmp_path)
+    models, status = available_models("ollama", api_key=None, client=client, cache_dir=tmp_path)
 
     assert status == "cached"
     assert not client.calls
-    assert "vendor/model" in {row.id for row in models}
+    assert "qwen3:8b" in {row.id for row in models}
