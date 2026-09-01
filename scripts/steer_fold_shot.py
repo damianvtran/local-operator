@@ -31,7 +31,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -144,11 +146,42 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("output", type=Path)
     parser.add_argument("size", nargs="?", default="100x30")
-    parser.add_argument("--workdir", type=Path, default=Path("/tmp/steer-fold-shot"))
+    parser.add_argument(
+        "--workdir",
+        type=Path,
+        default=None,
+        help=(
+            "Transcript directory to seed into. Emptied before seeding. "
+            "Omit to use a private temporary directory that is removed on exit."
+        ),
+    )
     args = parser.parse_args()
     width, height = (int(part) for part in args.size.lower().split("x", 1))
-    args.workdir.mkdir(parents=True, exist_ok=True)
-    asyncio.run(capture(args.output, (width, height), args.workdir))
+
+    # This script exists to produce trustworthy visual evidence, so each
+    # invocation MUST seed a transcript that contains only what `seed` writes.
+    # An earlier version reused one fixed workdir and appended to whatever was
+    # already there: a second run rendered two stacked generations of the same
+    # conversation, and the fold's counts across the generation boundary were
+    # wrong. That silently corrupted evidence twice -- it hid a real fold defect
+    # in one capture and invented a phantom 18-entry frame in another. A shot
+    # tool that lies is worse than no shot tool, so isolation is not optional:
+    # a temp dir per run by default, and an explicit --workdir is cleared rather
+    # than appended to, which keeps repeated runs byte-for-byte reproducible.
+    if args.workdir is None:
+        workdir = Path(tempfile.mkdtemp(prefix="steer-fold-shot-"))
+        cleanup = True
+    else:
+        workdir = args.workdir
+        shutil.rmtree(workdir, ignore_errors=True)
+        workdir.mkdir(parents=True)
+        cleanup = False
+
+    try:
+        asyncio.run(capture(args.output, (width, height), workdir))
+    finally:
+        if cleanup:
+            shutil.rmtree(workdir, ignore_errors=True)
 
 
 if __name__ == "__main__":
