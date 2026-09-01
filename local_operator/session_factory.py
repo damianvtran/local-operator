@@ -1510,7 +1510,35 @@ async def _prepare(
     variable_store = _build_variable_store(effective_cwd, config_manager)
     from local_operator.teams import TeamRegistry
 
-    team_registry = TeamRegistry(config_dir)
+    # R7-2: the session must start even when `teams/` cannot be read.
+    #
+    # `TeamRegistry.__init__` performs crash recovery, and that can fail for
+    # reasons that have nothing to do with the session being built — a stranded
+    # `.<id>.backup.*` under a directory whose permissions changed, a full
+    # filesystem. Constructing it unguarded made a subdirectory the user may
+    # never have touched abort the whole boot: no model, no tools, no
+    # transcript, and an error naming only the teams registry as the remedy.
+    #
+    # So the failure degrades ONE feature instead of the session. The context
+    # gets no registry, which is exactly the state `build_team_tool`'s createIf
+    # and the TUI's `_team_registry()` already handle (the `team` tool is not
+    # offered, `/team` says teams are unavailable). The reason is surfaced in
+    # the same warning channel as the knowledge-discovery failures above rather
+    # than swallowed, so the user is told what to fix.
+    #
+    # The registry ITSELF still refuses to answer with a half-truth: a
+    # construction-time recovery failure is remembered and re-raised by the
+    # first real read (see `TeamRegistry._raise_if_recovery_failed`), so the
+    # CLI and tool guards keep reporting it rather than showing an empty list.
+    team_registry: TeamRegistry | None
+    try:
+        team_registry = TeamRegistry(config_dir)
+    except Exception as exc:  # noqa: BLE001 — one feature must not fail boot
+        team_registry = None
+        print(
+            f"\033[1;33mWarning: teams are unavailable this session: {exc}\033[0m",
+            file=sys.stderr,
+        )
     tool_context = ToolContext(
         cwd=effective_cwd,
         session_id=transcript_dir.name,

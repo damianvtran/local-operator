@@ -449,3 +449,33 @@ class Schedule(BaseModel):
             if v <= values["start_time_utc"]:
                 raise ValueError("end_time_utc must be after start_time_utc")
         return v
+
+
+class TeamRegistryRecoveryError(RuntimeError):
+    """An interrupted team-row transaction could not be recovered safely.
+
+    Readers and writers must stop rather than report a hidden durable row as
+    absent or publish a duplicate name. The CLI/tool boundaries present this as
+    concise corrective guidance, while the chained storage error remains
+    available to diagnostics.
+    """
+
+
+class TeamRegistryLockTimeout(TimeoutError):
+    """The bounded wait for the cross-process teams registry lock expired.
+
+    WHY it lives in THIS module and not ``local_operator.teams``: the CLI
+    boundary needs a narrow ``except`` clause, but ``teams`` is deliberately
+    off the startup import path (the ``teams`` subcommand imports it lazily,
+    and ``teams`` pulls ``yaml`` plus the whole team model). Declaring the
+    exception here lets ``cli`` catch it at zero startup cost;
+    ``local_operator.teams`` imports the SAME class and raises it, so both
+    sides reference one identity and ``except`` clauses match.
+    """
+
+    def __init__(self, message: str = "") -> None:
+        super().__init__(
+            message
+            or "Timed out waiting for the teams registry lock; "
+            "retry after the other lop process finishes"
+        )

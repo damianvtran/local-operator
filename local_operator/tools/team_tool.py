@@ -34,6 +34,8 @@ from local_operator.teams import (
     MAX_TEAM_INSTRUCTIONS_CHARS,
     TeamEditFields,
     TeamRegistry,
+    TeamRegistryLockTimeout,
+    TeamRegistryRecoveryError,
     parse_members,
 )
 from local_operator.tools.builtin import (
@@ -114,7 +116,10 @@ async def _op_list(context: ToolContext | None, tool_call_id: str) -> ToolResult
     registry = _registry(context)
     if registry is None:
         return _error(tool_call_id, "team", "no team registry attached to this session.")
-    teams = registry.list_teams()
+    try:
+        teams = registry.list_teams()
+    except (TeamRegistryLockTimeout, TeamRegistryRecoveryError) as exc:
+        return _error(tool_call_id, "team", str(exc))
     if not teams:
         body = (
             "no teams registered. Create one with op='create' after agreeing "
@@ -132,7 +137,10 @@ async def _op_show(context: ToolContext | None, tool_call_id: str, name: str) ->
     registry = _registry(context)
     if registry is None:
         return _error(tool_call_id, "team", "no team registry attached to this session.")
-    team = registry.get_team_by_name(name)
+    try:
+        team = registry.get_team_by_name(name)
+    except (TeamRegistryLockTimeout, TeamRegistryRecoveryError) as exc:
+        return _error(tool_call_id, "team", str(exc))
     if team is None:
         return _error(tool_call_id, "team", f"no team named {name!r} (try op='list')")
     header = [
@@ -179,7 +187,10 @@ async def _op_write(
             tool_call_id, "team", "no team registry attached to this session; cannot save teams."
         )
     name = (params.name or "").strip()
-    existing = registry.get_team_by_name(name)
+    try:
+        existing = registry.get_team_by_name(name)
+    except (TeamRegistryLockTimeout, TeamRegistryRecoveryError) as exc:
+        return _error(tool_call_id, "team", str(exc))
     if creating and existing is not None:
         return _error(
             tool_call_id,
@@ -213,6 +224,10 @@ async def _op_write(
             assert existing is not None  # guarded above
             team = registry.update_team(existing.id, fields)
             verb = "updated"
+    except TeamRegistryLockTimeout as exc:
+        # U5-1: contention is recoverable, so the model gets the same concise
+        # guidance the CLI prints rather than a generic "could not save".
+        return _error(tool_call_id, "team", str(exc))
     except ValueError as exc:
         return _error(tool_call_id, "team", str(exc))
     except Exception as exc:  # noqa: BLE001
@@ -229,7 +244,10 @@ async def _op_delete(context: ToolContext | None, tool_call_id: str, name: str) 
     registry = _registry(context)
     if registry is None:
         return _error(tool_call_id, "team_delete", "no team registry attached to this session.")
-    team = registry.get_team_by_name(name)
+    try:
+        team = registry.get_team_by_name(name)
+    except (TeamRegistryLockTimeout, TeamRegistryRecoveryError) as exc:
+        return _error(tool_call_id, "team_delete", str(exc))
     if team is None:
         return _error(tool_call_id, "team_delete", f"no team named {name!r} to delete.")
     try:

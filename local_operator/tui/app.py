@@ -142,6 +142,7 @@ from local_operator.tui.widgets.approval import ApprovalBlock, ApprovalPrompt
 from local_operator.tui.widgets.aside_panel import ASIDE_PROMPT, AsidePanel
 from local_operator.tui.widgets.ask_picker import AskPickerScreen
 from local_operator.tui.widgets.assistant import AssistantBlock
+from local_operator.tui.widgets.command_picker import CommandPicker
 from local_operator.tui.widgets.editor import (
     ASIDE_PLACEHOLDER,
     READ_ONLY_PLACEHOLDER,
@@ -1749,6 +1750,17 @@ class OperatorApp(App[None]):
         # commands; ``None`` degrades /provider /usage /model-switch to
         # pointer notices when it is absent.
         self._providers = provider_controller
+        #: True once session construction has DEFINITIVELY failed and no
+        #: replacement is in flight (U7-1).
+        #:
+        #: `_session is None` alone cannot express this: it is equally true
+        #: while the boot worker is still running, and the `/team` picker keys
+        #: its "loading teams…" reserve on exactly that. Without this flag the
+        #: reserve outlived the boot it described, promising rows that were
+        #: never coming and swallowing Enter indefinitely. Set by
+        #: `_on_boot_failed`, cleared the moment another session transition
+        #: starts, so a `/login` or `/resume` re-opens the arriving window.
+        self._boot_failed = False
         #: True between a first-run "no hosting configured" boot failure and the
         #: `/login` that resolves it. While set, a successful login reloads the
         #: session (there is none yet) rather than only re-polling the splash.
@@ -2644,6 +2656,13 @@ class OperatorApp(App[None]):
         """
         self._invalidate_pending_frontend_state()
         self._session = session
+        # The user can type `/team lop` while the boot worker is still building
+        # the session. Its one opening fill then sees no registry, so adoption is
+        # the second authoritative edge that must refill the CURRENT query and
+        # publish the name snapshot without asking for a backspace.
+        editor = self._editor()
+        if editor.argument_command in ("team", "teams", "agent", "agents"):
+            self._fill_name_argument_list(editor, editor.argument_command)
         self._mobile_adopted(session)
         # Every production session supplies the same frontend contract. Install
         # it before reading status/panel fields so owner and follower take one
@@ -4035,7 +4054,13 @@ class OperatorApp(App[None]):
                 model_missing_for=getattr(error, "hosting", None) if no_model else None,
             )
             return
+        # Nothing is arriving any more. The name-list reserve reads this to
+        # retire its "loading teams…" row instead of promising rows forever
+        # (U7-1); the picker is refreshed below so the change is visible
+        # without waiting for the next keystroke.
+        self._boot_failed = True
         self._system_notice(f"session failed to start: {error}", "error")
+        self._retire_name_list_reserve()
         assert self._status is not None
         # `model_name` goes with the label it belongs to. Leaving it set is not
         # cosmetic: the name is resolved against the label, and a name the
@@ -4958,6 +4983,10 @@ class OperatorApp(App[None]):
         cannot address the old session once the user has asked to leave it.
         """
         self._session_transition_pending = True
+        # A new session is arriving, so a previous boot failure no longer
+        # describes the app's state: the `/team` reserve must be allowed to
+        # promise rows again (U7-1).
+        self._boot_failed = False
         self.run_worker(
             self._finish_session_transition(operation),
             thread=False,
@@ -4971,6 +5000,14 @@ class OperatorApp(App[None]):
             # Both success and refusal/failure reopen the same ordinary composer:
             # either the new session is now authoritative or the old one remains.
             self._session_transition_pending = False
+            # If the settled session has an authoritative EMPTY roster, retire
+            # the one-row transition reserve now. Waiting for another keystroke
+            # would leave a blank/loading hole indefinitely after a refused
+            # attach or an empty replacement session. A filled roster is cheap
+            # to re-derive and stays in the same reserved geometry.
+            editor = self._editor()
+            if editor.argument_command in ("team", "teams", "agent", "agents"):
+                self._fill_name_argument_list(editor, editor.argument_command)
 
     def composer_submission_blocked(self) -> bool:
         """Whether Editor must retain rather than submit its current draft."""
@@ -5404,6 +5441,147 @@ class OperatorApp(App[None]):
             )
         return choices
 
+    def _name_list_pending_notice(self, command: str) -> str:
+        """The one-row placeholder a name list shows while adoption is pending.
+
+        D1 (design round 1): the catch-up fills `/team <query>` the moment a
+        delayed registry arrives, and without a reserved row that fill PUSHES
+        the dock up by one line — the composer, the welcome splash, everything
+        above the band jumped a full row exactly when the user was mid-type.
+        Reserving the row for the whole pending window makes the empty and
+        filled frames geometrically identical: the placeholder is REPLACED
+        in place by the first real row, so nothing moves.
+
+        Scoped to the windows where the roster is genuinely still ARRIVING, on
+        purpose (the reviewer's constraint, not a guess):
+
+        * ``_session_transition_pending`` — a resume/attach the user just asked
+          for. Set by ``_run_session_transition`` and cleared on BOTH success
+          and refusal, so the placeholder cannot outlive the transition.
+        * ``self._session is None`` — no session has been adopted yet. That is
+          the original reported boot race: ``/team lop`` typed while the boot
+          worker was still constructing. The transition flag is False during
+          initial boot, so without this explicit readiness check the race this
+          PR fixes would reserve nothing. This is deliberately NOT keyed to the
+          welcome/boot LAYOUT: an adopted but empty session keeps the welcome
+          visible, while its empty roster is already authoritative and must not
+          leave an eternal placeholder hole.
+
+        An ADOPTED session past both windows with an empty roster is a real
+        answer ("no teams yet"), and holding a blank hole there forever would
+        read as a stuck list, so it gets no row. No timer drives any of this:
+        the editor re-syncs the picker on every keystroke and the app refills
+        at adoption, so the placeholder retires the moment a window closes.
+
+        A FAILED boot closes the window too (U7-1). ``self._session is None`` is
+        permanently true after ``_on_boot_failed``, so the reserve promised
+        "loading teams…" forever and — because ``is_loading()`` gates Tab/Enter
+        — swallowed every Enter with no feedback, where the same key on an
+        unfixed app at least answered "session is still starting…". A boot
+        failure is as AUTHORITATIVE as an empty roster: nothing is arriving any
+        more, so no row is reserved and Enter reaches the ordinary submit path
+        that reports the session state.
+        """
+        if self._boot_failed and not self._session_transition_pending:
+            return ""
+        if not self._session_transition_pending and self._session is not None:
+            return ""
+        # Same voice as every other picker notice (the `/effort` and `/logout`
+        # rows): lowercase, no period, says why the list is empty. The registry
+        # is named in the text because `/team` and `/agent` share this row and
+        # the user should not have to guess which one is still loading.
+        #
+        # ONE CONSTANT PER FAMILY, never the typed word (U8-1). Interpolating
+        # `command` here rendered the plural alias as "loading agents roster…",
+        # copy the product would never write, in the row whose whole job is to
+        # reassure the user the roster is coming. Both spellings of each family
+        # are the same list and must read identically.
+        return "loading agent roster…" if command in ("agent", "agents") else "loading teams…"
+
+    def _no_session_notice(self) -> tuple[str, NoticeKind]:
+        """The (text, style) a command answers with when there is no session yet.
+
+        Two DIFFERENT states share ``self._session is None`` and must not share
+        one answer (U8-2). While the boot worker is running, "still starting" is
+        true and telling the user to wait is the right advice. After
+        ``_on_boot_failed``, the app has just printed ``✗ session failed to
+        start: <error>`` one row above, and answering "still starting" beneath
+        it contradicts that line and sends the user off to wait for something
+        that is never arriving — so the failed state names itself and points at
+        the lever that re-opens a session.
+
+        Scoped to the two commands this PR routes into the guard (``/team``,
+        ``/agent``), not applied to the ~15 other sites that share the string:
+        the wording there is pre-existing and app-wide, and rewording all of it
+        is a change to many unrelated commands rather than to this flow. The
+        helper exists so those sites can adopt it later without re-deriving the
+        distinction.
+        """
+        failed: NoticeKind = "error"
+        starting: NoticeKind = "warning"
+        if self._boot_failed:
+            return ("session failed to start — /login to reconfigure or restart lop", failed)
+        return ("session is still starting…", starting)
+
+    def _retire_name_list_reserve(self) -> None:
+        """Re-derive an open `/team`/`/agent` list after the window it waited on closed.
+
+        The same refill ``_finish_session_transition`` performs when a
+        transition settles, reached from the boot-FAILURE path (U7-1). Without
+        it the reserve keeps its "loading…" row until the user happens to type
+        another character, which is precisely the state that made Enter look
+        broken. Guarded because it runs from an error handler: the editor may
+        not be mounted yet on an early failure, and a boot report must never be
+        lost to a secondary exception.
+        """
+        try:
+            editor = self._editor()
+        except Exception:  # pragma: no cover - screen torn down or not yet composed
+            return
+        command = getattr(editor, "argument_command", None)
+        if command in ("team", "teams", "agent", "agents"):
+            self._fill_name_argument_list(editor, command)
+
+    def _fill_name_argument_list(self, editor: Any, command: str) -> None:
+        """Fill one team/agent list and its O(1) highlighter snapshot together.
+
+        The pending notice goes through ``set_loading_reserve`` (not ``set_notice``)
+        so the picker records the row as a TRANSIENT reserve: the editor then
+        consumes Tab/Enter until real rows land (U2-2), and every fill site
+        — open, late adoption, empty-only refresh, slot crossing — routes
+        through here so the flag can never outlive the window it describes.
+        """
+        picker = editor.picker
+        pending = self._name_list_pending_notice(command)
+        if pending:
+            # Withhold EVERY row until the session is authoritative. Agent
+            # packaged seeds resolve without a registry, but showing those
+            # before adoption would make ``/agent aud`` look authoritatively
+            # empty (and collapse the reserved row) even though the arriving
+            # registry may contain ``auditor``. Set choices first because its
+            # initial COMMAND→ARGUMENT transition intentionally clears the old
+            # mode's notice/loading state; setting the reserve LAST makes it
+            # belong to the new argument list (U2-1).
+            picker.set_choices([])
+            picker.set_loading_reserve(pending)
+            editor.set_name_choices(frozenset())
+            return
+
+        # Adoption/transition settled: withdraw the reserve before installing
+        # the authoritative rows. ``set_loading_reserve("")`` also closes the old
+        # informational surface, after which ``set_choices`` replaces it in
+        # the same one-row geometry when a match exists (U2-1/U2-2).
+        picker.set_loading_reserve("")
+        if command in ("team", "teams"):
+            choices = self._team_argument_choices(editor)
+            picker.set_choices(choices)
+            editor.set_name_choices(frozenset(c.name.lower() for c in self._team_choices()))
+            return
+        if command in ("agent", "agents"):
+            choices = self._agent_choices()
+            picker.set_choices(choices)
+            editor.set_name_choices(frozenset(c.name.lower() for c in choices))
+
     def _team_argument_choices(self, editor: Any) -> list[ArgumentChoice]:
         """Rows for the ``/team <…>`` list: team NAMES first, then `chart`.
 
@@ -5433,6 +5611,14 @@ class OperatorApp(App[None]):
         argument = slash_argument(editor.text, editor._argument_commands)
         first, space, _rest = (argument or "").partition(" ")
         teams = self._team_choices()
+        # A synthetic `chart` row must not make a real-but-empty registry look
+        # filled: the editor's empty-only catch-up is keyed to `_choices`, so an
+        # empty TeamRegistry keeps retrying cheaply. A reduced adopted session
+        # with no registry still gets the historical chart-only fallback (its
+        # handler explains that no team is attached), while pre-adoption has no
+        # source of truth yet and must remain empty for the adoption refill.
+        if not teams and (self._session is None or self._team_registry() is not None):
+            return []
         if first.lower() == "chart" and space:
             # Second slot: `chart <query>` → team names feeding the chart.
             return [
@@ -5552,7 +5738,8 @@ class OperatorApp(App[None]):
         """
         session = self._session
         if session is None:
-            self._system_notice("session is still starting…", "warning")
+            # U8-2: a DEFINITIVE boot failure must not be reported as "starting".
+            self._system_notice(*self._no_session_notice())
             return
         registry = self._team_registry()
         if registry is None or not hasattr(registry, "list_teams"):
@@ -5856,7 +6043,8 @@ class OperatorApp(App[None]):
         """
         session = self._session
         if session is None:
-            self._system_notice("session is still starting…", "warning")
+            # U8-2: a DEFINITIVE boot failure must not be reported as "starting".
+            self._system_notice(*self._no_session_notice())
             return
         if not arg:
             rows = self._agent_profile_rows()
@@ -6780,6 +6968,22 @@ class OperatorApp(App[None]):
         it. Without this the boot composition would be centred for the block that
         was measured at startup and left there.
         """
+        self._sync_boot_layout()
+
+    def on_command_picker_rows_resized(self, message: CommandPicker.RowsResized) -> None:
+        """The picker changed height, so the dock it sits in has moved (R7-3).
+
+        The picker is a dock child, and the boot composition's lift is computed
+        from the dock's measured height. Every other way that height changes is
+        already followed by a sync; a picker whose row count changes after the
+        composition was written is the one path that was not, which is how a
+        delayed roster left the dock lifted four rows off the bottom while the
+        identical non-delayed screen sat flush.
+
+        Stopped here: the message exists for this reconciliation, and it is a
+        dock-geometry fact rather than something an ancestor should re-handle.
+        """
+        message.stop()
         self._sync_boot_layout()
 
     def _sync_boot_layout(self, *, size: Size | None = None) -> None:
@@ -15407,24 +15611,10 @@ class OperatorApp(App[None]):
             picker.set_choices(self._credential_choices())
             picker.set_notice("")
             return
-        if message.command in ("team", "teams"):
-            picker.set_notice("")
-            choices = self._team_argument_choices(editor)
-            picker.set_choices(choices)
-            # Hand the editor a cheap immutable snapshot of the names so its
-            # syntax highlighter can recognize the typed team name without
-            # walking the registry on every render frame (see
-            # ``Editor.set_name_choices``). Only the plain team names are
-            # highlightable as names — the `chart` subcommand row is not a team
-            # name, and the `chart <name>` compound rows are not typed as bare
-            # names — so the snapshot is the team names alone.
-            editor.set_name_choices(frozenset(c.name.lower() for c in self._team_choices()))
-            return
-        if message.command in ("agent", "agents"):
-            choices = self._agent_choices()
-            picker.set_choices(choices)
-            picker.set_notice("")
-            editor.set_name_choices(frozenset(c.name.lower() for c in choices))
+        if message.command in ("team", "teams", "agent", "agents"):
+            # Rows and the render-time name snapshot are one fill operation. The
+            # open, late-adoption, and empty-only refresh edges must not diverge.
+            self._fill_name_argument_list(editor, message.command)
             return
         if message.command == "effort":
             levels = self._effort_levels()
@@ -15503,15 +15693,11 @@ class OperatorApp(App[None]):
             # a notice of its own that must survive the refill.
             picker.set_notice("")
             picker.set_choices(self._mcp_argument_choices(editor))
-        elif message.command in ("team", "teams"):
-            # `/team chart ` just gained its space: the first-slot rows (the
-            # `chart` subcommand + team names) must give way to the second-slot
-            # team list that FEEDS the chart. Refilled through the same builder
-            # the opening used, so the two levels stay one implementation.
-            picker = editor.picker
-            picker.set_notice("")
-            picker.set_choices(self._team_argument_choices(editor))
-            editor.set_name_choices(frozenset(c.name.lower() for c in self._team_choices()))
+        elif message.command in ("team", "teams", "agent", "agents"):
+            # This is both `/team chart ` crossing slots and the empty-only
+            # catch-up used when a team/agent registry appears after the list
+            # opened. Reuse the opening fill so rows and snapshots stay paired.
+            self._fill_name_argument_list(editor, message.command)
 
     def _credential_choices(self) -> list[ArgumentChoice]:
         """The verbs ``/credential`` offers, plus each stored key to forget.

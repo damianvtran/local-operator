@@ -1534,9 +1534,29 @@ def agents_create_command(name: str, agent_registry: "AgentRegistry") -> int:
     return 0
 
 
+def _cli_recovery_wait() -> float:
+    """Read-path recovery budget for the one-shot ``teams`` commands (R7-1).
+
+    Read from the registry module rather than restated so the two cannot
+    drift. The import is FUNCTION-LOCAL for the same reason every other
+    ``local_operator.teams`` reference in this module is: the module builds
+    pydantic models at import time and must stay off the CLI startup path
+    (pinned by ``test_import_graph``).
+    """
+    from local_operator.teams import _READ_RECOVERY_CLI_WAIT_S
+
+    return _READ_RECOVERY_CLI_WAIT_S
+
+
 def teams_list_command(team_registry: Any) -> int:
-    """List all teams."""
-    teams = team_registry.list_teams()
+    """List all teams.
+
+    Reads with the CLI recovery budget: this is a one-shot command that owns
+    its process and blocks no event loop, so it can afford to wait briefly for
+    a peer's publish to finish rather than lose the race and skip healing an
+    interrupted save (R7-1; the UI path stays strictly non-blocking).
+    """
+    teams = team_registry.list_teams(recovery_wait=_cli_recovery_wait())
     if not teams:
         print("\n\033[1;33mNo teams found.\033[0m")
         return 0
@@ -1582,8 +1602,11 @@ def teams_create_command(args: argparse.Namespace, team_registry: Any) -> int:
 
 
 def teams_show_command(name: str, team_registry: Any) -> int:
-    """Print a team's roster and briefs."""
-    team = team_registry.get_team_by_name(name)
+    """Print a team's roster and briefs.
+
+    Same one-shot recovery budget as ``teams_list_command`` (R7-1).
+    """
+    team = team_registry.get_team_by_name(name, recovery_wait=_cli_recovery_wait())
     if team is None:
         print(f"\n\033[1;31mError: No team found with name: {name}\033[0m")
         return 1
@@ -2662,19 +2685,34 @@ def main() -> int:
             else:
                 parser.error(f"Invalid agents command: {args.agents_command}")
         elif args.subcommand == "teams":
-            from local_operator.teams import TeamRegistry
+            # U5-1: every teams subcommand can hit the registry lock, and lock
+            # contention is a recoverable state — print one concise line here
+            # instead of letting the generic handler below render a traceback
+            # panel that reads as a crash. The import is function-local for the
+            # same reason the teams module is: ``local_operator.types`` builds
+            # pydantic models at import time and must stay off the startup path
+            # (pinned by test_import_graph).
+            from local_operator.teams import (
+                TeamRegistry,
+                TeamRegistryLockTimeout,
+                TeamRegistryRecoveryError,
+            )
 
-            team_registry = TeamRegistry(base_dir)
-            if args.teams_command == "list":
-                return teams_list_command(team_registry)
-            elif args.teams_command == "create":
-                return teams_create_command(args, team_registry)
-            elif args.teams_command == "show":
-                return teams_show_command(args.name, team_registry)
-            elif args.teams_command == "delete":
-                return teams_delete_command(args.name, team_registry)
-            else:
-                parser.error(f"Invalid teams command: {args.teams_command}")
+            try:
+                team_registry = TeamRegistry(base_dir)
+                if args.teams_command == "list":
+                    return teams_list_command(team_registry)
+                elif args.teams_command == "create":
+                    return teams_create_command(args, team_registry)
+                elif args.teams_command == "show":
+                    return teams_show_command(args.name, team_registry)
+                elif args.teams_command == "delete":
+                    return teams_delete_command(args.name, team_registry)
+                else:
+                    parser.error(f"Invalid teams command: {args.teams_command}")
+            except (TeamRegistryLockTimeout, TeamRegistryRecoveryError) as e:
+                print(f"\n\033[1;31mError: {str(e)}\033[0m", file=sys.stderr)
+                return 1
         elif args.subcommand == "serve":
             # Use the provided host, port, and reload options for serving the API.
             return serve_command(args.host, args.port, args.reload)
@@ -3050,6 +3088,20 @@ def main() -> int:
             )
         )
     except Exception as e:
+        # U5-1 (narrow re-check): if the failure is teams-registry lock
+        # contention — an expected recoverable state, not a defect — present
+        # one concise line instead of the traceback panel below, which reads
+        # as a crash and asks the user to "correct" something only the peer
+        # process can resolve. Matched by TYPE NAME so no eager import is
+        # needed (``local_operator.types`` must stay off the startup path,
+        # pinned by test_import_graph); every other exception falls through
+        # to the full presenter unchanged.
+        if type(e).__name__ in {
+            "TeamRegistryLockTimeout",
+            "TeamRegistryRecoveryError",
+        } and isinstance(e, (TimeoutError, RuntimeError)):
+            print(f"\n\033[1;31mError: {str(e)}\033[0m", file=sys.stderr)
+            return 1
         # STDERR, always. main() wraps the `exec` dispatch too, so this is the
         # error presenter for `exec --json` — printing decorated banners to
         # stdout put four unparseable lines on the event stream at exactly the

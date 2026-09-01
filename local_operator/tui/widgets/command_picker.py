@@ -49,6 +49,7 @@ from rich.style import Style
 from rich.text import Text
 from textual import events
 from textual.dom import NoScreen
+from textual.message import Message
 from textual.widgets import Static
 
 from local_operator.tui import theme as theme_mod
@@ -673,6 +674,28 @@ class CommandPicker(Static):
     never touches the buffer.
     """
 
+    class RowsResized(Message):
+        """The picker's pinned height changed, so the dock around it has moved.
+
+        The picker is a child of ``#input-dock``, and the boot composition
+        centres the splash against the dock's measured height
+        (``_sync_boot_composition``). That measurement is deliberately NOT a
+        self-rescheduling read of a laid-out frame — it is arithmetic run at
+        known moments — so when this widget's row count changes the app has no
+        other way to learn the dock got taller or shorter.
+
+        It went wrong exactly where the two disagreed (R7-3): a delayed session
+        adoption composed the dock while the picker still held its ONE-row
+        loading reserve, then replaced it with a two-row roster that nobody
+        re-measured. The dock kept the lift computed for the shorter list and
+        floated four rows above the bottom, with a visible gap under the status
+        band, while the identical non-delayed screen sat flush. Same class of
+        problem, and same remedy, as ``WelcomeView.BlockResized``.
+
+        Posted only when the height actually CHANGES, so an unchanged repaint
+        (the common case — every keystroke repaints) costs nothing.
+        """
+
     def __init__(
         self,
         on_choose: Callable[[str], None],
@@ -696,6 +719,10 @@ class CommandPicker(Static):
         #: Last name reported to ``_on_preview``, de-duplicated for the same
         #: reason as ``_reported_highlight``.
         self._reported_preview: str | None = None
+        #: Rows currently pinned by ``_pin_height``. Tracked here rather than
+        #: read back off ``styles.height`` so the change test is a plain int
+        #: comparison and cannot be confused by a Scalar's units (R7-3).
+        self._pinned_rows: int | None = None
         #: Observer for the row the user is CONSIDERING — the hover target when
         #: the mouse is over a row, else the keyboard highlight — called with
         #: ``None`` when an argument list stops showing rows. It exists for
@@ -723,6 +750,14 @@ class CommandPicker(Static):
         # Not a match: it is never selectable, so it lives beside the rows rather
         # than among them (see set_notice).
         self._notice = ""
+        # True only while the one notice row is a TRANSIENT loading reserve —
+        # rows are expected to replace it (see set_loading_reserve). Kept as explicit
+        # state rather than inferred from the notice text, because the editor
+        # must gate Tab/Enter on “this row will be replaced” — a notice like
+        # `/logout`'s “no stored credentials” is a real answer that must keep
+        # normal keys (U2-2), and a text match would couple key routing to
+        # copy (U2-1's fix originally tried exactly that and drifted).
+        self._loading = False
         # Set by an arrow press, cleared whenever the candidate set changes: the
         # difference between "the matcher put the highlight here" and "I moved it
         # here", which is what the editor's Enter gate needs to know.
@@ -780,6 +815,47 @@ class CommandPicker(Static):
                     self._scroll_to_selection()
                     self._repaint()
                 self._report_highlight()
+
+    def set_loading_reserve(self, text: str) -> None:
+        """Reserve the notice row for rows that are still ARRIVING (U2-1).
+
+        The team/agent name lists open before the session has adopted a
+        registry: without a reserved row the picker is hidden, and the first
+        real row then PUSHES the dock up by one line exactly while the user
+        is mid-type. This shows the same one dim row ``set_notice`` paints —
+        non-selectable, never a match — but marks it TRANSIENT so the editor
+        can consume Tab/Enter until real rows land (U2-2): both keys act on
+        a highlighted row, and with no rows yet they would append spaces to
+        the buffer or submit and discard the query the catch-up exists to
+        protect.
+
+        Passing "" clears the reserve (adoption landed, or the roster is
+        authoritatively empty). The flag is dropped by ``_apply`` on a mode
+        change and by ``_close`` for the same reason the notice is: it
+        described a list that is no longer showing.
+        """
+        text = text.strip()
+        if text and self._query == self._dismissed_query:
+            # A queued refresh can land after Esc. The dismissal belongs to
+            # this exact query, so a late loading reserve must not resurrect
+            # the row the user just collapsed; adoption's real rows are
+            # checked against the same latch by ``_apply`` (U2-2).
+            self._loading = False
+            self.set_notice("")
+            return
+        self._loading = bool(text)
+        self.set_notice(text)
+
+    def is_loading(self) -> bool:
+        """True while the notice row is a transient loading reserve.
+
+        Deliberately NARROWER than :meth:`is_pending`: ``is_pending`` covers
+        the one message-loop tick before any fill lands and must stay
+        permissive (other argument lists rely on keys passing through),
+        while this marks only the app-authored “rows are coming” window
+        where Tab/Enter are known to have nothing to act on.
+        """
+        return self._loading
 
     def set_notice(self, text: str) -> None:
         """Say why an ARGUMENT list is empty, IN THE LIST'S OWN PLACE.
@@ -916,7 +992,24 @@ class CommandPicker(Static):
         command whose argument drives a list, so the two can never both be
         showing: which list is up is a property of the buffer parse, not of two
         widgets agreeing to take turns.
+
+        A transient loading reserve is different from an ordinary empty list:
+        its rows are intentionally withheld until adoption. Re-applying an
+        empty match set must keep that reserve (and its Tab/Enter gate) alive;
+        otherwise the key-routing pre-sync clears ``_loading`` immediately
+        before asking whether it is loading — exactly the U2-2 race.
         """
+        if self._loading:
+            self._query = query
+            if query == self._dismissed_query:
+                self._close()
+                return
+            self._dismissed_query = None
+            self._reset_rows()
+            self.display = True
+            self._repaint()
+            self._report_highlight()
+            return
         self._apply(PickerMode.ARGUMENT, query, argument_suggestions(query, self._choices))
 
     def _apply(self, mode: PickerMode, query: str, matches: Sequence[_Suggestion]) -> None:
@@ -937,6 +1030,9 @@ class CommandPicker(Static):
             self._window_start = 0
             self._chosen_by_hand = False
             self._notice = ""
+            # The loading reserve goes with the notice it was riding: it
+            # described THAT list's transient window (see set_loading_reserve).
+            self._loading = False
         self._query = query
         if query == self._dismissed_query:
             self._close()
@@ -980,6 +1076,14 @@ class CommandPicker(Static):
             self._chosen_by_hand = False
         self._matches = list(matches)
         self.display = True
+        # Real rows landed, so the transient loading reserve is over wherever
+        # it was set from: Tab/Enter have a highlighted row to act on again
+        # (U2-2). The notice itself is already superseded — rows answer the
+        # question it was asking — but `_notice` is only withdrawn by an
+        # explicit ``set_notice("")``/close, so clear the FLAG here rather
+        # than the text: `_repaint` never paints the notice once matches
+        # exist, and the app's next fill resets both together.
+        self._loading = False
         self._scroll_to_selection()
         self._repaint()
         self._report_highlight()
@@ -1122,7 +1226,7 @@ class CommandPicker(Static):
         if not self._matches:
             # The informational row stands alone: one row, no window and no
             # overflow count, because there is nothing to count.
-            self.styles.height = 1
+            self._pin_height(1)
             self.update(self._notice_row(width))
             return
         rows = self.render_rows(width)
@@ -1131,8 +1235,32 @@ class CommandPicker(Static):
         # Pin the height: `auto` would measure content before layout knows the
         # real width and settle one row too tall per suggestion, exactly the
         # trap ToolCard documents.
-        self.styles.height = row_count
+        self._pin_height(row_count)
         self.update(self.render_text(width))
+
+    def _pin_height(self, rows: int) -> None:
+        """Pin the picker to ``rows`` and announce a CHANGE to the dock (R7-3).
+
+        The single place the height is written, so no path can resize the
+        picker without the boot composition hearing about it. The comparison is
+        against the last value THIS method wrote rather than ``styles.height``,
+        which is a Scalar and compares awkwardly, and the message is posted only
+        on a real change so the per-keystroke repaint stays free.
+        """
+        # The height is written UNCONDITIONALLY. Only the notification is
+        # gated: `styles.height` is also cleared/re-derived from outside this
+        # widget (a close hides it, a re-open re-applies the sheet), so an
+        # early return here would let a stale pin survive a reopen.
+        self.styles.height = rows
+        if rows == self._pinned_rows:
+            return
+        self._pinned_rows = rows
+        # Guarded: the widget repaints before it is on a screen during compose,
+        # and posting from there raises rather than reaching the app.
+        try:
+            self.post_message(self.RowsResized())
+        except NoScreen:  # pragma: no cover - pre-mount repaint
+            pass
 
     def _row(self, index: int, width: int) -> Text:
         """The row for suggestion ``index``, dispatched on what it stands for."""
@@ -1547,5 +1675,6 @@ class CommandPicker(Static):
         # The notice belonged to the list that is now gone. Esc, a completion and a
         # submission all arrive here, and each one is the user done with it.
         self._notice = ""
+        self._loading = False
         self.display = False
         self._report_highlight()
