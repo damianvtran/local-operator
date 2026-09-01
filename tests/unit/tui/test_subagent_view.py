@@ -1082,17 +1082,37 @@ async def _wait_landing_settled(
     a timing assumption: a slow machine costs nothing, and a landing that
     never resolves fails naming both flags instead of hanging.
     """
+    body = view._body
+    stable = 0
+    last: tuple[int, float] | None = None
     for _ in range(limit):
         await pilot.pause()
-        if not view._landing_snap_pending and not view._initial_tail_pending:
-            break
-    else:
-        raise AssertionError(
-            "the landing snap never resolved "
-            f"(snap_pending={view._landing_snap_pending}, "
-            f"tail_pending={view._initial_tail_pending})"
-        )
-    await _wait_geometry_settled(pilot, view._body, cycles=cycles, limit=limit)
+        current = (body.virtual_size.height, body.scroll_y)
+        decided = not view._landing_snap_pending and not view._initial_tail_pending
+        # BOTH, and on the same frame. The flag alone is not enough: the snap
+        # is called several times (measured: three on this fixture, the first
+        # two returning early while the body is still short), and the call
+        # that runs against a still-growing layout can find the current offset
+        # already sitting on a head, take ``target == offset``, and clear the
+        # one-shot without scrolling or releasing the anchor. A later pass
+        # then grows the extent, sticky-follow moves to the new tail, and the
+        # landing is a wrap fragment again with the flag long since spent —
+        # observed here as the precondition failing at ``offset=28,
+        # owner_top=25``, the same numbers CI reported.
+        #
+        # Requiring the extent to have held still for ``cycles`` frames while
+        # the flag is clear is what makes "decided" mean decided against the
+        # FINAL layout rather than against whichever one the one-shot met.
+        stable = stable + 1 if decided and current == last else 0
+        last = current
+        if stable >= cycles:
+            return
+    raise AssertionError(
+        "the landing never settled: "
+        f"snap_pending={view._landing_snap_pending}, "
+        f"tail_pending={view._initial_tail_pending}, "
+        f"virtual_height={body.virtual_size.height}, scroll_y={body.scroll_y}"
+    )
 
 
 async def _wait_geometry_settled(

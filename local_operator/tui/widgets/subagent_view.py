@@ -2619,14 +2619,28 @@ class SubagentView(Vertical):
         if target != offset:
             with body._tail_anchor.programmatic_scroll():
                 body.scroll_to(y=target, animate=False, immediate=True)
-            # A snap that pulled back from the tail is a landing, not a
-            # follow. Leaving following armed lets `_size_updated` on the
-            # next extent change `_scroll_to_tail` onto the wrap fragment
-            # this just left (review round 1, F1). Released AFTER the
-            # programmatic context: ``note_user_scroll`` is a no-op while
-            # that depth is non-zero.
-            if target < body.max_scroll_y:
-                body._tail_anchor.release()
+        # Release whenever the landing is NOT the tail — including the case
+        # where no scroll was needed because the offset already sat on a head.
+        #
+        # This release used to live inside the ``target != offset`` branch, so
+        # a snap that found the offset already on a head spent the one-shot
+        # while leaving sticky-follow armed. That is not a rare path: this
+        # method runs several times during an open (measured: three on the
+        # narrow fixture, the first two returning early against a body that is
+        # still short), and any growth after the deciding call then sends
+        # ``_size_updated`` -> ``_scroll_to_tail`` to the new tail. On a short
+        # viewport that tail is three rows inside the wrapping notice — issue
+        # #407 exactly, reached after the guard had declared the landing done.
+        #
+        # Measured as ``offset=28, owner_top=25, max=28`` on CI (four
+        # identical failures) and reproduced locally at 1-in-8 under load.
+        # Keyed on the POSITION rather than on whether a scroll happened,
+        # because the invariant the anchor encodes is "the viewport is not at
+        # the end", and that is equally true in both branches. Released AFTER
+        # the programmatic context above: ``note_user_scroll`` is a no-op
+        # while that depth is non-zero.
+        if target < body.max_scroll_y:
+            body._tail_anchor.release()
         self._landing_snap_pending = False
 
     def _empty_state(self) -> str:
