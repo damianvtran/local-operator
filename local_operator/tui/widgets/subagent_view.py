@@ -2605,13 +2605,34 @@ class SubagentView(Vertical):
             return
         offset = body.scroll_offset.y
         blocks = body.blocks()
-        # Nothing may be decided from a layout the offset has outrun. The
-        # container republishes ``virtual_size`` (and so ``max_scroll_y``, and
-        # so the followed offset) before every child's ``virtual_region`` has
-        # been reassigned, so there is a window where the offset addresses a
-        # row that no block claims yet. Searching in that window matches
-        # nothing, falls through to ``target == offset``, and spends the
-        # one-shot on a landing it never actually inspected.
+        # Only decide when a block actually OWNS the current offset.
+        #
+        # The container republishes ``virtual_size`` (and so ``max_scroll_y``,
+        # and so the followed offset) before every child's ``virtual_region``
+        # has been reassigned, so there is a window where the offset addresses
+        # a row no block claims yet. Searching in that window matches nothing,
+        # falls through to ``target == offset``, and spends the one-shot on a
+        # landing it never actually inspected.
+        #
+        # An unowned offset does NOT prove the layout is stale, and this test
+        # is deliberately not written as if it did: the gap margin
+        # (``.gap-above``) and the list's own vertical padding are real rows
+        # that no block's region covers, so unowned offsets exist at steady
+        # state too (measured: sets like ``[6, 8]`` in every configuration
+        # tried). The condition being tested is narrower and is the one that
+        # matters here — "is there a block whose head I could snap to?" With
+        # no owner there is nothing to snap to, so there is no decision to
+        # make and no reason to retire the guard.
+        #
+        # The cost of that is a one-shot which may never be spent on a
+        # completed child that sends no further refresh. That is deliberate
+        # and safe rather than merely tolerable: a surviving one-shot can only
+        # ever snap to the head of the block that owns the CURRENT offset, so
+        # firing it late is a no-op or a correction upward inside the block
+        # the reader is already looking at — never a jump somewhere else.
+        # Verified against the alternative during review: a reader parked
+        # mid-block and then repainted is yanked in MORE configurations
+        # without this guard than with it.
         #
         # Observed on CI four times with identical numbers — ``offset=28,
         # owner_top=25, max=28`` — and reproduced locally under xdist with the

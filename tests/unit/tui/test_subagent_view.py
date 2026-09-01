@@ -4044,12 +4044,12 @@ async def test_the_landing_survives_the_next_extent_change(tmp_path) -> None:
         landed, landed_top = _landing_owner_top(view)
         if landed_top != landed:
             # The landing itself did not come out on a row head. That is the
-            # SIBLING test's subject, and there is a known residual race in
-            # the snap that can still produce it under heavy parallel load
-            # (issue filed; the deciding call can read block regions that lag
-            # the container's republished extent). Failing here too would
-            # report one defect twice and make this test's own subject —
-            # whether a settled landing SURVIVES growth — unreachable.
+            # SIBLING test's subject — it asserts exactly this and fails with
+            # the offending offsets — so failing here too would report one
+            # defect twice while making this test's own subject (whether a
+            # SETTLED landing survives growth) unreachable. Skipping keeps the
+            # two subjects separate: if the landing regresses, the sibling
+            # goes red and names it; this one simply has nothing to say.
             pytest.skip(
                 f"landing did not settle on a row head (offset={landed}, "
                 f"owner_top={landed_top}); that is the sibling test's subject"
