@@ -99,11 +99,13 @@ class ScriptedStream:
         usage: Usage | None = None,
         stop_reason: str = "stop",
         chunk: int = 7,
+        provider_payload: dict[str, Any] | None = None,
     ) -> None:
         self.text = text
         self.usage = usage
         self.stop_reason = stop_reason
         self.chunk = chunk
+        self.provider_payload = provider_payload
         self.requests: list[Any] = []
 
     def __call__(self, request: Any, signal: Any) -> AsyncIterator[Any]:
@@ -118,7 +120,11 @@ class ScriptedStream:
             yield StreamTextDelta(delta=self.text[start : start + self.chunk])
         if self.usage is not None:
             yield StreamUsageEvent(usage=self.usage)
-        yield StreamEndEvent(stop_reason=self.stop_reason, usage=self.usage)
+        yield StreamEndEvent(
+            stop_reason=self.stop_reason,
+            usage=self.usage,
+            provider_payload=self.provider_payload,
+        )
 
 
 def _client(stream: ScriptedStream) -> ProviderModelClient:
@@ -316,3 +322,27 @@ async def test_client_raises_on_an_unparseable_reply() -> None:
 
     with pytest.raises(DecisionParseError):
         await _client(stream).decide(current, [current])
+
+
+@pytest.mark.asyncio
+async def test_client_carries_the_provider_request_id() -> None:
+    """The only handle tying a bundle's model_response to the provider's records."""
+
+    current = observation()
+    stream = ScriptedStream(finish_payload(current), provider_payload={"id": "chatcmpl-ABC123"})
+
+    decision = await _client(stream).decide(current, [current])
+
+    assert decision.provider_request_id == "chatcmpl-ABC123"
+
+
+@pytest.mark.asyncio
+async def test_an_unusable_provider_id_degrades_instead_of_failing() -> None:
+    """StrictIdentifier forbids spaces; provenance must not break the episode."""
+
+    current = observation()
+    stream = ScriptedStream(finish_payload(current), provider_payload={"id": "not a valid id!"})
+
+    decision = await _client(stream).decide(current, [current])
+
+    assert decision.provider_request_id == "unknown"

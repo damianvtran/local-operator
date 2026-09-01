@@ -13,6 +13,7 @@ and the provider that produced them stay in the same module.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Mapping, Sequence, get_args
 
 from local_operator.evaluation.evidence.models import RouteIdentity
@@ -22,6 +23,9 @@ from local_operator.evaluation.runner.model import ModelDecision, ModelUsage
 # The batch wire version this harness speaks; pinned here rather than taken
 # from a model reply.
 PROTOCOL_VERSION = "1.0"
+
+# Mirrors receipts.StrictIdentifier, which every evidence identifier must match.
+_IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]*")
 
 
 def _action_schema_lines() -> list[str]:
@@ -207,6 +211,7 @@ class ProviderModelClient:
         usage = ModelUsage()
         cost_micros = 0
         stop_reason = "stop"
+        provider_request_id = "unknown"
         async for event in self._stream_fn(request, None):
             if event.type == "text_delta":
                 text += event.delta
@@ -216,6 +221,10 @@ class ProviderModelClient:
                 stop_reason = event.stop_reason or "stop"
                 if event.usage is not None:
                     usage, cost_micros = _usage_from(event.usage)
+                # The provider's own request id is the only handle that ties a
+                # bundle's model_response back to the provider's records, so it
+                # is worth carrying when the wire client reports one.
+                provider_request_id = _provider_request_id(event.provider_payload)
         return parse_decision(
             text.strip(),
             observation,
@@ -223,6 +232,7 @@ class ProviderModelClient:
             usage=usage,
             cost_micros=cost_micros,
             stop_reason=stop_reason,
+            provider_request_id=provider_request_id,
         )
 
 
@@ -262,6 +272,24 @@ def _render(observation: Observation, transcript: Sequence[Observation]) -> str:
         lines.append("")
         lines.append(f"You have seen {len(transcript)} observations so far.")
     return "\n".join(lines)
+
+
+def _provider_request_id(provider_payload: Any) -> str:
+    """Extract the provider's request id, falling back to a valid placeholder.
+
+    ``StrictIdentifier`` forbids most punctuation, so a provider id that does
+    not fit the pattern is dropped rather than allowed to fail validation on a
+    path that is only recording provenance.
+    """
+
+    if not isinstance(provider_payload, Mapping):
+        return "unknown"
+    raw = provider_payload.get("id")
+    if not isinstance(raw, str) or not raw:
+        return "unknown"
+    if not _IDENTIFIER.fullmatch(raw):
+        return "unknown"
+    return raw[:128]
 
 
 def _usage_from(usage: Any) -> tuple[ModelUsage, int]:
