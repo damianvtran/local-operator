@@ -29,6 +29,7 @@ from local_operator.evaluation.protocol import (
 from local_operator.evaluation.runner.provider_client import (
     DecisionParseError,
     ProviderModelClient,
+    build_system_prompt,
     parse_decision,
 )
 from local_operator.harness.types import (
@@ -266,6 +267,45 @@ async def test_system_prompt_states_the_schema_the_protocol_enforces() -> None:
     # Derived from the protocol models, so a new action kind cannot drift out.
     for kind in ("click", "type", "key", "scroll", "wait", "finish", "ask_user"):
         assert kind in prompt
+    # A sequence field must read as an array. Told only "value", a model emits
+    # "ctrl+c" for KeyAction.keys, which is a hard non-retryable parse failure.
+    assert "keys: [str, ...]" in prompt
+
+
+def test_prompt_does_not_restate_literals_it_already_derives() -> None:
+    """Hand-written literals drift from the derived block and contradict it."""
+
+    prompt = build_system_prompt()
+
+    # The derived schema line owns the finish literals; the prose below must
+    # explain what the actions MEAN without re-listing their values.
+    assert prompt.count("done|failed|infeasible") == 1
+    assert "must be one of done, failed, or infeasible" not in prompt
+
+
+def test_key_action_array_parses_where_a_joined_string_does_not() -> None:
+    """The distinction the prompt now states is real and load-bearing."""
+
+    current = observation()
+
+    def payload(keys: Any) -> str:
+        return json.dumps(
+            {
+                "actions": [
+                    {
+                        "kind": "key",
+                        "observation_id": current.observation_id,
+                        "keys": keys,
+                    }
+                ]
+            }
+        )
+
+    decision = parse_decision(payload(["ctrl", "c"]), current, route=ROUTE)
+    decision.action_batch.validate_for(current)
+
+    with pytest.raises(DecisionParseError):
+        parse_decision(payload("ctrl+c"), current, route=ROUTE)
 
 
 @pytest.mark.asyncio
@@ -334,6 +374,18 @@ async def test_client_carries_the_provider_request_id() -> None:
     decision = await _client(stream).decide(current, [current])
 
     assert decision.provider_request_id == "chatcmpl-ABC123"
+
+
+@pytest.mark.asyncio
+async def test_an_over_length_provider_id_degrades_rather_than_truncating() -> None:
+    """A truncated id is a valid identifier that matches nothing upstream."""
+
+    current = observation()
+    stream = ScriptedStream(finish_payload(current), provider_payload={"id": "a" * 200})
+
+    decision = await _client(stream).decide(current, [current])
+
+    assert decision.provider_request_id == "unknown"
 
 
 @pytest.mark.asyncio

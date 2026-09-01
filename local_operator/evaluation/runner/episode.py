@@ -118,6 +118,11 @@ EpisodeStatus = Literal[
     "failed",
     "cancelled",
     "abandoned",
+    # The writer failed AND its abandonment could not be recorded, so the bundle
+    # on disk is still "open" with no terminal. This is deliberately distinct
+    # from "abandoned": claiming a terminal that is not on disk is the exact
+    # false report this slice exists to prevent. See _abandon_for_evidence.
+    "abandonment_failed",
     "failed_pre_bundle",
 ]
 
@@ -1155,15 +1160,26 @@ class EpisodeRunner:
         await self._emergency_teardown()
         writer = self._writer
         root = Path(writer.root) if writer is not None else None
+        status: EpisodeStatus = "abandoned"
         if writer is not None:
             try:
                 writer.abandon("infrastructure_failure", "evidence-write-failed")
-            except EvidenceError:
-                # A writer this broken may not even be able to record its own
-                # abandonment; the bundle stays unsealed and recoverable.
-                pass
+            except EvidenceError as error:
+                # NEVER swallow this. `abandon()` independently re-verifies the
+                # bundle and refuses on any error-severity issue, so a terminal
+                # is not always recordable -- most commonly when an `append`
+                # failed AFTER its artifact was already published, leaving an
+                # `artifact_unreferenced` orphan that the gate rejects.
+                #
+                # Reporting "abandoned" over a bundle whose terminal_state is
+                # still "open" is precisely the false claim this slice exists to
+                # prevent, so the returned status now matches the disk and names
+                # the reason. The bundle stays unsealed and recoverable, which
+                # is a real state an operator can act on.
+                status = "abandonment_failed"
+                detail = f"{detail}; abandonment refused: {_diagnostic(error)}"
         return EpisodeOutcome(
-            status="abandoned",
+            status=status,
             episode_id=self._spec.episode_id,
             bundle_root=root,
             rescue_required=True,

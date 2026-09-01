@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Mapping, Sequence, get_args
+from typing import Any, Mapping, Sequence, get_args, get_origin
 
 from local_operator.evaluation.evidence.models import RouteIdentity
 from local_operator.evaluation.protocol import ActionBatch, ComputerAction, Observation
@@ -58,9 +58,22 @@ def _action_schema_lines() -> list[str]:
 
 
 def _type_name(annotation: Any) -> str:
+    """Name a field's JSON shape well enough for a model to emit it correctly.
+
+    Sequences must render as arrays rather than the generic placeholder: told
+    only "value", a model emits ``"ctrl+c"`` for ``KeyAction.keys`` where the
+    protocol requires ``["ctrl", "c"]``, and that is a hard parse failure with
+    no retry -- the same terminal-failure class B2 addressed, just narrower.
+    """
+
     name = getattr(annotation, "__name__", None)
     if name in ("int", "str", "bool", "float"):
         return name
+    origin = get_origin(annotation)
+    if origin in (tuple, list, set, frozenset):
+        args = [arg for arg in get_args(annotation) if arg is not Ellipsis]
+        inner = _type_name(args[0]) if args else "value"
+        return f"[{inner}, ...]"
     args = [arg for arg in get_args(annotation) if arg is not type(None)]
     if len(args) == 1:
         return _type_name(args[0])
@@ -87,11 +100,10 @@ Where a field lists alternatives separated by "|", you must use exactly one of
 those literal values.
 
 Two actions end your turn in a special way, and each must be the ONLY action in
-its batch:
+its batch. Their fields are listed above; what the list cannot tell you is what
+they MEAN:
 
-* "finish" -- you believe the task is done. The episode is then scored. Its
-  "status" must be one of done, failed, or infeasible, and a "reason" is
-  required.
+* "finish" -- you believe the task is done. The episode is then scored.
 * "ask_user" -- you need a human answer. THE EPISODE PAUSES: a person answers
   your question, and the next observation you see is the state after that
   answer was delivered. Do not ask a question you can resolve by acting.
@@ -287,9 +299,13 @@ def _provider_request_id(provider_payload: Any) -> str:
     raw = provider_payload.get("id")
     if not isinstance(raw, str) or not raw:
         return "unknown"
-    if not _IDENTIFIER.fullmatch(raw):
+    # An over-length id is NOT truncated: a shortened id is still a valid
+    # StrictIdentifier, so it would be recorded as provenance while matching
+    # nothing in the provider's records -- a silently wrong handle is worse than
+    # an honestly absent one, which is this function's whole philosophy.
+    if len(raw) > 128 or not _IDENTIFIER.fullmatch(raw):
         return "unknown"
-    return raw[:128]
+    return raw
 
 
 def _usage_from(usage: Any) -> tuple[ModelUsage, int]:

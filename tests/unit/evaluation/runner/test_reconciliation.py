@@ -239,3 +239,62 @@ async def test_evidence_errors_surface_as_abandonment_not_a_crash(
     report = verify_bundle(root)
     assert report.abandonment is not None
     assert report.terminal_state == "abandoned"
+
+
+@pytest.mark.parametrize("kind", ["observation", "action_batch"])
+@pytest.mark.asyncio
+async def test_append_failure_after_a_successful_publish_reports_the_disk_truth(
+    tmp_path: Path, episode_id: str, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    """An orphaned artifact makes the bundle unabandonable; say so honestly.
+
+    ``observation`` and ``action_batch`` are written publish-then-append, so an
+    append failure after a successful publish leaves an artifact nothing
+    references. ``EvidenceWriter.abandon`` independently re-verifies and refuses
+    on that ``artifact_unreferenced`` error, so NO terminal can be recorded.
+
+    The runner must not answer that by claiming ``abandoned`` over a bundle
+    whose ``terminal_state`` is still ``open`` -- that false report is the exact
+    failure this slice exists to prevent. The returned status has to match what
+    is actually on disk.
+    """
+
+    from local_operator.evaluation.evidence.store import EvidenceWriter
+
+    adapter = FakeAdapter(tmp_path, episode_id)
+    original = EvidenceWriter.append
+
+    def poisoned(self: Any, event_kind: Any, payload: Any, **kwargs: Any) -> Any:
+        if event_kind == kind:
+            raise EvidenceError(f"simulated {kind} journal failure")
+        return original(self, event_kind, payload, **kwargs)
+
+    # Patched on the CLASS so the real writer is exercised, not a runner shim.
+    monkeypatch.setattr(EvidenceWriter, "append", poisoned)
+
+    runner = EpisodeRunner(
+        build_spec(episode_id),
+        build_config(tmp_path),
+        selector=selector(tmp_path),
+        model=ScriptedModel(["step", "finish"]),
+        launch=lambda _: adapter,
+        rescue=_rescue_ok,
+    )
+
+    outcome = await runner.run()
+
+    root = outcome.bundle_root
+    assert root is not None
+    report = verify_bundle(root)
+    if report.abandonment is not None:
+        # If a terminal WAS recordable, it must be coherent and claimed as such.
+        assert outcome.status == "abandoned"
+        assert report.terminal_state == "abandoned"
+    else:
+        # No terminal on disk, so the runner must not claim one.
+        assert outcome.status == "abandonment_failed"
+        assert report.terminal_state == "open"
+        assert outcome.diagnostic is not None
+        assert "abandonment refused" in outcome.diagnostic
+    # Either way the returned status agrees with the bundle on disk.
+    assert (outcome.status == "abandoned") == (report.abandonment is not None)
