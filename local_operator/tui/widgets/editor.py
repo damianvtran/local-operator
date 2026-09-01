@@ -145,6 +145,7 @@ from local_operator.tui.widgets.command_picker import (
     PickerMode,
     completion_for,
     ghost_for,
+    skill_token,
     slash_argument,
     slash_argument_context,
     slash_context,
@@ -812,6 +813,19 @@ class ArgumentQueryOpened(Message):
         self.command = command
 
 
+class SkillQueryOpened(Message):
+    """Posted when the buffer enters a ``$skill`` token, so the app fills rows.
+
+    Carries nothing: there is exactly one skill vocabulary per session, unlike
+    the per-command argument sets :class:`ArgumentQueryOpened` has to name.
+
+    Transition-only, for the same economy: discovery walks the filesystem, so
+    it happens once per token rather than once per keystroke. Leaving the token
+    re-arms it (``Editor._skill_choices_requested``), which is what lets the
+    app re-answer with a fresh set on the next ``$``.
+    """
+
+
 class RefreshArgumentChoices(Message):
     """Posted when the rows an open argument list should offer have changed
     UNDER the same command word — which :class:`ArgumentQueryOpened` can never
@@ -1151,6 +1165,12 @@ class Editor(TextArea):
         #: The first argument SLOT of a two-level command (``/mcp login``)
         #: whose choice set depends on it; ``None`` for one-level commands.
         self._argument_subcommand: str | None = None
+        #: True while a :class:`SkillQueryOpened` has been posted for the token
+        #: the caret is in. The transition latch for the skill list, mirroring
+        #: ``_argument_command``'s role for argument lists; cleared on leaving
+        #: the token so the next ``$`` asks again. Assigned here because
+        #: ``_sync_picker`` reads it during ``super().__init__()``.
+        self._skill_choices_requested: bool = False
         # Command words (primaries AND aliases) whose argument opens the value
         # list, and the subset of those the bare command cannot stand without.
         # DERIVED from the registry in :meth:`set_commands` rather than listed
@@ -2069,7 +2089,17 @@ class Editor(TextArea):
                     # afterwards would measure the completed word (always one
                     # exact match) and submit unconditionally.
                     unambiguous = self._picker_choice_is_unambiguous(name)
-                    if self._picker.mode is PickerMode.ARGUMENT:
+                    if self._picker.mode is PickerMode.SKILL:
+                        # NEITHER key ever submits here, ambiguous or not. A
+                        # completed `$skill ` is not a runnable thing the way
+                        # `/logout anthropic` is — it is the opening of a
+                        # prompt the user is still writing, so Enter fills the
+                        # name and waits, exactly as it does for a NAME+message
+                        # command. Submitting on the one-match case would send
+                        # a bare invocation the moment the name resolved,
+                        # discarding the request the user was about to type.
+                        self._complete_skill(name)
+                    elif self._picker.mode is PickerMode.ARGUMENT:
                         self._resolve_argument(name, key, unambiguous)
                     elif unambiguous:
                         self._apply_command(name)
@@ -4672,6 +4702,12 @@ class Editor(TextArea):
         inside one phase does not re-open an Esc-dismissed list.
         """
         cursor = self._caret_offset()
+        # Checked FIRST and short-circuiting: a `$` token is anchored at offset
+        # 0, so it cannot overlap a slash construct, and answering it here
+        # keeps the three phases mutually exclusive without the slash parsers
+        # having to know the sigil exists.
+        if skill_token(self.text, cursor) is not None:
+            return "skill"
         if (
             slash_argument(self.text, self._argument_commands, cursor, self._command_names)
             is not None
@@ -4713,6 +4749,22 @@ class Editor(TextArea):
         the caret sits, not just what the buffer contains.
         """
         cursor = self._caret_offset()
+        # The `$skill` list is derived before either slash list for the reason
+        # given in `_picker_phase`: the token owns offset 0 exclusively, so
+        # there is no arbitration to do and the slash parsers stay unaware of
+        # it. The rows themselves are pushed by the app (SkillQueryOpened),
+        # exactly as an argument list's are.
+        if skill_token(self.text, cursor) is not None:
+            if not self._skill_choices_requested:
+                self._skill_choices_requested = True
+                self.post_message(SkillQueryOpened())
+            self._picker.sync_skills(self.text, cursor)
+            self._picker_phase_at_last_sync = self._picker_phase()
+            self._sync_ghost()
+            return
+        # Left the token: the next `$` asks for rows again, so a skill added
+        # between two invocations is not invisible for the rest of the session.
+        self._skill_choices_requested = False
         list_argument = slash_argument(
             self.text, self._argument_commands, cursor, self._command_names
         )
@@ -5131,6 +5183,8 @@ class Editor(TextArea):
         """
         if not self._picker.is_open():
             return None
+        if self._picker.mode is PickerMode.SKILL:
+            return CompletionMode.SKILL
         if self._picker.mode is not PickerMode.ARGUMENT:
             return CompletionMode.COMMAND
         if self._is_name_argument_command(self._argument_command):
@@ -5383,6 +5437,21 @@ class Editor(TextArea):
             self._complete_argument(name)
             return
         self._run_argument(name)
+
+    def _complete_skill(self, name: str) -> None:
+        """Put ``$name `` in the buffer, leaving the caret in the request.
+
+        The trailing space is deliberate and is what the picker's close depends
+        on: it terminates the token, so the list drops away on the same
+        keystroke that chose from it and the caret lands where the request is
+        typed. Same contract as :meth:`_complete_name_argument`, minus the
+        inline reassembly — a ``$`` token is anchored at the buffer start, so
+        there is never a preceding draft to move it in front of.
+        """
+        completed = self._completion_for(CompletionMode.SKILL, name)
+        if completed is None:
+            return
+        self._set_text_and_caret(*completed)
 
     def _complete_argument(self, name: str) -> None:
         """Put ``name`` in the argument slot without acting on it.
