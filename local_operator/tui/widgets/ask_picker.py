@@ -43,7 +43,7 @@ Two things it does that no other picker in this app does:
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from rich.cells import cell_len
 from rich.style import Style
@@ -231,6 +231,19 @@ RECOMMENDED_TAG = "recommended"
 #: answers painting the same text.
 LABEL_MIN_CELLS = 6
 
+#: The most lines one description may ever take, however much room there is.
+#:
+#: Six, not unbounded: the cap is what stops ONE verbose option from pushing
+#: every other option's prose off the card. Measured on the repro
+#: (``scripts/ask_long_shot.py``) at 24 columns, the four descriptions want 34,
+#: 25, 19 and 18 lines — an uncapped grant would spend a 13-row budget on a
+#: third of one option's prose and show nothing about the other three. Six lines
+#: is about 140 words at 100 columns, which is longer than any description in
+#: this repo (the approval gate's are one line at every width down to 44
+#: columns) and long enough that hitting the cap means the model wrote an essay
+#: rather than a consequence.
+DESC_MAX_ROWS = 6
+
 
 @dataclass
 class _QuestionState:
@@ -266,7 +279,16 @@ class _CardLayout:
     show_title: bool
     space_above: bool
     space_below: bool
-    show_descriptions: bool
+    #: Lines each DRAWN row's description may use, by row index. Absent or 0
+    #: means the row draws no description at all.
+    #:
+    #: Replaces an all-or-nothing bool for lines BEYOND the first. The first
+    #: line is still all-or-none across the window (C5, :meth:`_allocate` step
+    #: 9), because a list where only some rows have any prose reads as broken.
+    #: Beyond that a row is allowed to be taller than its siblings: the
+    #: continuation lines are indented under the row they belong to, so they
+    #: read as one paragraph rather than as a second row.
+    description_rows: dict[int, int]
     #: Option ROWS the window may draw, whatever each of them costs in lines.
     #: Zero when the body is too short to say anything about the question.
     page: int
@@ -277,6 +299,18 @@ class _CardLayout:
     #: False only when the body has no drawable line at all. Everywhere else the
     #: footer is the first row bought, so it is the last thing that can go.
     show_footer: bool
+
+    #: Whether step 9 bought the descriptions' first lines for the whole window.
+    #:
+    #: Stored rather than derived from ``description_rows``, because the two are
+    #: not the same question. An option with an EMPTY description wraps to no
+    #: lines and so is granted none, which would make a derived flag False for a
+    #: window whose other rows are drawing prose — measured: a three-option
+    #: question where only the middle option had a description lost that
+    #: description entirely. What the renderer needs to know here is whether the
+    #: description COLUMN was paid for, which is a property of the plan, not of
+    #: whichever row happens to have text.
+    show_descriptions: bool
 
 
 class AskPickerScreen(Container):
@@ -424,6 +458,15 @@ class AskPickerScreen(Container):
         #: question wrapped; a click resolved by arithmetic landed on the row
         #: below whenever a description wrapped or the question did not.
         self._line_rows: list[int | None] = []
+        #: ``(row index, card width)`` -> that description's wrapped lines.
+        #:
+        #: ``_layout`` is called three times per paint and ``_repaint`` runs on
+        #: every keystroke, so wrapping every description on the paint path is
+        #: work the card does not need to repeat while nothing it depends on has
+        #: moved. Width is part of the key, so a resize serves nothing stale;
+        #: the question advancing is not visible in the key at all, so that path
+        #: clears it (:meth:`_invalidate_description_wraps`).
+        self._description_wraps: dict[tuple[int, int], list[str]] = {}
         #: Called once with the answers when the card settles. The app resolves
         #: the waiting tool call from it.
         self._on_settle = on_settle
@@ -655,6 +698,7 @@ class AskPickerScreen(Container):
         self._index += 1
         self._offset = 0
         self._hovered = None
+        self._invalidate_description_wraps()
         self._repaint()
         # Tell the host the card moved to a new question so the phone follows
         # the terminal to it (U8). Posted AFTER _index advances so the handler
@@ -703,6 +747,7 @@ class AskPickerScreen(Container):
         self._offset = 0
         self._hovered = None
         self._rejected = False
+        self._invalidate_description_wraps()
         self._repaint()
         # Same re-projection seam as the terminal Enter path: the phone that
         # DIDN'T drive this advance (or reconnects mid-ask) must still be
@@ -1090,6 +1135,80 @@ class AskPickerScreen(Container):
         """
         return wrap_cells(self.question.question, width) or [""]
 
+    def _description_indent(self) -> int:
+        """Cells a description line is inset by, so it sits under the LABEL.
+
+        One definition for the wrap and for the paint: measuring the room in
+        one place and indenting by another is how a continuation line comes out
+        one cell wider than the card it is drawn in.
+        """
+        return GUTTER_CELLS + NUMBER_CELLS + (cell_len(CHECK_ON) if self.question.multi else 0)
+
+    def _description_lines(self, index: int, width: int) -> list[str]:
+        """One row's description, wrapped into the card's own cell model, capped.
+
+        ``wrap_cells`` and NOT a wrappable ``Text``: ``Content.from_rich_text``
+        discards ``no_wrap``/``overflow`` when a ``Text`` crosses into a widget
+        (command_picker.py:31-39, and the reason :func:`_cut_row` exists), so
+        handing Textual a wrappable Text would let the card choose its own
+        width — the one condition AGENTS.md calls always a bug here. Wrapping in
+        the same width model the rest of the card measures in is what keeps
+        every line inside the column :func:`_fit_row` then pads it to.
+
+        Capped at :data:`DESC_MAX_ROWS`, and memoised, because ``_layout`` runs
+        three times per paint and ``_repaint`` runs on every keystroke.
+
+        Returns the PROSE only. The recommendation tag is charged to the FIRST
+        line, and this reserves its cells there by wrapping with a hanging
+        indent — so the tag introduces the paragraph without narrowing the rest
+        of it. Billed against every line instead, the same paragraph would wrap
+        into a column fourteen cells short of the one it is drawn in, and the
+        promoted option would be the one row on the card with a ragged edge.
+        """
+        cached = self._description_wraps.get((index, width))
+        if cached is not None:
+            return cached
+        room = max(1, width - self._description_indent())
+        description = self._row_description(index)
+        tag_cells = 0
+        if self.question.recommended == index:
+            # The tag plus its ` · ` separator, exactly as `_description_text`
+            # spends them, so what is reserved here is what is drawn there.
+            tag_cells = cell_len(RECOMMENDED_TAG) + 3
+            if not description or room - tag_cells <= 0:
+                # No room beside the tag for prose, or no prose to put there.
+                # The tag still earns its line: it is the only thing marking the
+                # row the model is pointing at once the badge has moved off the
+                # label (D6).
+                self._description_wraps[(index, width)] = [""]
+                return [""]
+        if not description:
+            self._description_wraps[(index, width)] = []
+            return []
+        if tag_cells:
+            # Wrapped through a placeholder word rather than by wrapping the
+            # first line narrow and the rest wide: `wrap_cells` owns the
+            # word-breaking for over-long words (URLs, paths), and a second
+            # wrapper here would be a drifting copy of it. One space of the
+            # placeholder is the separator `wrap_cells` splits on.
+            filler = "\u00b7" * (tag_cells - 1)
+            lines = wrap_cells(f"{filler} {description}", room)
+            lines[0] = lines[0][len(filler) + 1 :]
+        else:
+            lines = wrap_cells(description, room)
+        wrapped = lines[:DESC_MAX_ROWS]
+        self._description_wraps[(index, width)] = wrapped
+        return wrapped
+
+    def _invalidate_description_wraps(self) -> None:
+        """Drop the wrap cache: its inputs (the question's text, the width) moved.
+
+        Keyed by ``(index, width)``, so a resize alone cannot serve a stale
+        entry — but the INDEX means a different row once the card advances to
+        the next question, and that is the one input the key cannot see.
+        """
+        self._description_wraps.clear()
+
     def _body_rows(self, question_lines: int) -> int:
         """Lines the card's BODY may draw, with the transcript's share reserved.
 
@@ -1182,11 +1301,30 @@ class AskPickerScreen(Container):
         # and the card silently lost every second line: measured as options
         # drawn with no consequences under them, and a list that windowed at 13
         # options on a terminal with room for all of them.
+        # A description is now worth as many lines as it WRAPS to, capped, so
+        # the natural height counts those lines rather than one per row. Left at
+        # one, this cap sits below what `_allocate` can now spend and the
+        # allocator is handed a budget that can never buy a continuation line:
+        # the same failure recorded above, one step further in — every
+        # description would silently stay a single ellipsised line however much
+        # room the terminal had.
+        # At least ONE line per row, because step 9 buys the description column
+        # for the whole window all-or-nothing and a row with no description
+        # still draws (and still pays for) its blank line. Counted as its true
+        # zero, a question where some options carry no description asked for a
+        # budget below what step 9 then needs, so the column was never bought at
+        # all and the options that DID have prose lost it (measured on a
+        # three-option question where only the middle one was described).
+        described = sum(
+            max(1, len(self._description_lines(index, self._card_width())))
+            for index in range(self.row_count)
+        )
         wanted = (
             2  # title and its rule
             + question_lines
             + 2  # the spacer above the list and below it
-            + self.row_count * 2  # each option, plus its description line
+            + self.row_count  # each option's label row
+            + described  # and every line its description wraps to
             + 1  # the windowing line, where the list turns out to need one
             + 1  # the footer
         )
@@ -1217,7 +1355,13 @@ class AskPickerScreen(Container):
            is a caption, a rule under nothing is the edge of a box;
         7. the rest of the option rows;
         8. the blank spacers, which are rhythm and nothing else;
-        9. the descriptions, all of them or none.
+        9. the descriptions' FIRST lines, all of them or none;
+        10. continuation lines for the SELECTED row, up to what it wraps to;
+        11. continuation lines for the remaining drawn rows, in window order.
+
+        Steps 10 and 11 spend only what steps 1-9 left over, which is what makes
+        wrapping free at the sizes where the card is already tight: there the
+        pool is empty and the frame is unchanged.
 
         **The question outranks the options, and that ordering is a safety
         property rather than a preference.** It used to sit below them, which
@@ -1251,10 +1395,8 @@ class AskPickerScreen(Container):
         plan = self._allocate(width, question, budget, position=False)
         if 0 < plan.page < self.row_count:
             # The list windows after all, so the line saying how much is hidden
-            # has to be bought. Taking a row back can only shrink the page, so
-            # this settles in one step rather than looping — and this branch is
-            # the only place the row can be bought, which is the only place the
-            # renderer will draw it from.
+            # has to be bought. This branch is the only place the row can be
+            # bought, which is the only place the renderer will draw it from.
             windowed = self._allocate(width, question, budget, position=True)
             # ...unless paying for it costs the QUESTION. The count is a
             # refinement of the answers on offer; the question is what the card
@@ -1266,6 +1408,29 @@ class AskPickerScreen(Container):
             # means: the option rows it did draw are still numbered.
             if windowed.question or not plan.question:
                 plan = windowed
+            if plan.show_position and plan.page >= self.row_count:
+                # Taking a row back does not merely shrink the page, so the
+                # retry cannot be assumed to still be windowing. The title is a
+                # step-6 purchase of TWO rows: charging one row for the count
+                # can put it out of reach, and the two rows it gives back buy
+                # MORE option rows than the count cost. The retry then draws the
+                # WHOLE list while still carrying `showing 1–2 of 2` — a card
+                # claiming to hide answers it is drawing, the R11 defect
+                # inverted. Measured at 100x12 on a two-option question with no
+                # free-text row, which is the APPROVAL gate's own configuration
+                # and the only one where this is reachable (with the free-text
+                # row `row_count` is one larger, so the count stays honest).
+                #
+                # The FLAG is cleared rather than the plan discarded. Falling
+                # back to the un-windowed plan was measured at that same size to
+                # draw one option of two with no count beside it — trading a
+                # false count for a silently hidden answer, which this file's
+                # order ranks strictly worse (an option row outranks the
+                # windowing line, D1). Keeping the retry draws both answers; all
+                # that is wrong with it is the claim, so the claim is what goes.
+                # The row it paid for goes unspent, and a card one row shorter
+                # than its budget is the one direction that is always safe.
+                plan = replace(plan, show_position=False)
         return plan
 
     def _allocate(
@@ -1321,6 +1486,7 @@ class AskPickerScreen(Container):
                 space_above=False,
                 space_below=False,
                 show_descriptions=False,
+                description_rows={},
                 page=0,
                 show_position=False,
                 show_footer=budget >= 2,
@@ -1358,10 +1524,43 @@ class AskPickerScreen(Container):
         if space_below:
             remaining -= 1
         rows = 1 + extra
-        # Descriptions are bought last and all at once: they cost one line per
-        # row, and a list where only some entries have their second line reads
-        # as broken rather than as abbreviated.
+        # The descriptions' FIRST lines are bought last and all at once: a list
+        # where only some entries have any prose under them reads as broken
+        # rather than as abbreviated.
         descriptions = rows >= self.row_count and remaining >= self.row_count
+        page = self.row_count if descriptions else rows
+        grants: dict[int, int] = {}
+        if descriptions:
+            remaining -= self.row_count
+            # The window READ, not `_window()`: that clamps and writes back
+            # `_offset`, and this runs inside a TRIAL division that may be
+            # thrown away. A trial with a smaller page would leave the offset
+            # scrolled for the plan that actually gets drawn.
+            offset = max(0, min(self._offset, max(0, self.row_count - page)))
+            window = list(range(offset, min(self.row_count, offset + page)))
+            grants = {index: 1 for index in window}
+            # Then the CONTINUATION lines, out of whatever the steps above left.
+            # They are the last thing bought and the first thing lost: they can
+            # take no row, spacer, title, question line or footer, because all of
+            # those are already paid for. Where the budget is tight `remaining`
+            # is zero here and the frame is exactly what it was before wrapping
+            # existed.
+            #
+            # The SELECTED row is served before the rest rather than round-robin
+            # with them. Where the pool covers everything the two agree; where it
+            # is short, the row under the cursor is the one being read, and
+            # spreading the shortfall evenly finishes none of them.
+            selected = self.state.selected
+            order = [selected] + [index for index in window if index != selected]
+            for index in order:
+                if index not in grants:
+                    continue
+                extra_lines = len(self._description_lines(index, width)) - 1
+                for _ in range(max(0, extra_lines)):
+                    if remaining < 1:
+                        break
+                    remaining -= 1
+                    grants[index] += 1
         return _CardLayout(
             width=width,
             question=tuple(kept),
@@ -1369,7 +1568,8 @@ class AskPickerScreen(Container):
             space_above=space_above,
             space_below=space_below,
             show_descriptions=descriptions,
-            page=self.row_count if descriptions else rows,
+            description_rows=grants,
+            page=page,
             show_position=position,
             show_footer=True,
         )
@@ -1740,9 +1940,16 @@ class AskPickerScreen(Container):
             ground = self._row_ground(index)
             newline(index)
             out.append_text(self._row_text(index, width, ground, fg, dim, faint, layout))
-            if layout.show_descriptions:
-                newline(index)
-                out.append_text(self._description_text(index, width, ground, muted, muted))
+            granted = layout.description_rows.get(index, 0)
+            if granted:
+                # One `newline(index)` per line, so `_line_rows` maps every one
+                # of them back to the row it belongs to. That map is what the
+                # hit-test reads (`_index_at`), and it is recorded here rather
+                # than derived as arithmetic precisely because rows are no
+                # longer a fixed number of lines tall.
+                for line in self._description_text(index, width, ground, muted, muted, granted):
+                    newline(index)
+                    out.append_text(line)
         if layout.space_below:
             newline(None)
 
@@ -2001,9 +2208,9 @@ class AskPickerScreen(Container):
         return _fit_row(row, width, ground)
 
     def _description_text(
-        self, index: int, width: int, ground: Style, tag_ink: Style, ink: Style
-    ) -> Text:
-        """The row's second line: the recommendation tag, then the consequence.
+        self, index: int, width: int, ground: Style, tag_ink: Style, ink: Style, granted: int
+    ) -> list[Text]:
+        """The row's description lines: the recommendation tag, then the consequence.
 
         Drawn at ``muted``, which measures 6.51:1 on this card's ``overlay``
         ground. It has been walked up this ramp twice for the same reason: the
@@ -2028,23 +2235,56 @@ class AskPickerScreen(Container):
         model is pointing at carried the shortest text on the card (D6). At
         ``muted`` it is the loudest thing on a line of ``dim`` prose and still
         quieter than the label above it, which is the ranking a hint wants.
+
+        ``granted`` lines, not one. Where the wrap is longer than the grant the
+        LAST KEPT line is marked ``…`` — the same "say that it continues"
+        discipline the question uses when its own tail is cut. Marking every
+        line would say each of them was cut when only the last one is, which is
+        the reading a wrapped paragraph must not invite.
         """
-        indent = GUTTER_CELLS + NUMBER_CELLS + (cell_len(CHECK_ON) if self.question.multi else 0)
-        body = Text(no_wrap=True, overflow="ellipsis")
-        body.append(" " * indent, style=ground)
-        description = self._row_description(index)
-        room = max(1, width - indent)
-        if self.question.recommended == index:
-            body.append(RECOMMENDED_TAG, style=ground + tag_ink)
-            room -= cell_len(RECOMMENDED_TAG)
-            if description and room > 3:
-                body.append(" · ", style=ground + ink)
-                room -= 3
-            else:
-                description = ""
-        if description:
-            body.append(truncate_cells(description, room), style=ground + ink)
-        return _fit_row(body, width, ground)
+        indent = self._description_indent()
+        wrapped = self._description_lines(index, width)
+        # An option with NO description still draws the blank line step 9 bought
+        # for it, exactly as it did before wrapping existed. The description
+        # column is all-or-nothing across the window (C5), so a row opting out
+        # of it would pull every row under it up by one and break the
+        # label/prose alternation the list is scanned by.
+        kept = wrapped[:granted] or [""]
+        rows: list[Text] = []
+        for position, text in enumerate(kept):
+            body = Text(no_wrap=True, overflow="ellipsis")
+            body.append(" " * indent, style=ground)
+            room = max(1, width - indent)
+            if position == 0 and self.question.recommended == index:
+                body.append(RECOMMENDED_TAG, style=ground + tag_ink)
+                room -= cell_len(RECOMMENDED_TAG)
+                if text and room > 3:
+                    body.append(" · ", style=ground + ink)
+                    room -= 3
+                else:
+                    text = ""
+            if text:
+                if position == len(kept) - 1 and len(wrapped) > len(kept):
+                    # The last kept line of a paragraph that continues is filled
+                    # from the REST of the prose rather than from its own
+                    # wrapped line, and `truncate_cells` marks the cut it makes.
+                    #
+                    # Filling rather than marking the wrapped line matters where
+                    # the grant is one, which is every description the approval
+                    # gate draws on a narrow terminal: a wrapped line stops at a
+                    # word boundary, so marking it would end the consequence
+                    # several cells earlier than today's single truncated line
+                    # does. That is the authorisation frame getting WORSE, which
+                    # this change is not allowed to do. Filled, the line carries
+                    # at least as much of the consequence as it carries today
+                    # and says that there is more.
+                    body.append(
+                        truncate_cells(" ".join(wrapped[position:]), room), style=ground + ink
+                    )
+                else:
+                    body.append(truncate_cells(text, room), style=ground + ink)
+            rows.append(_fit_row(body, width, ground))
+        return rows
 
     def _footer_hints(self, width: int) -> list[tuple[str, str]]:
         """The key hints that fit, shedding WORDS before it sheds KEYS.
