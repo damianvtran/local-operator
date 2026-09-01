@@ -1,3 +1,7 @@
 node_modules/
 dist/
 *.tsbuildinfo
+# pnpm's content-addressed install cache when a build runs inside the tree;
+# it is a local artifact, never source (A16: 6,955 files / 125 MB leaked into
+# the relay branch and had to be rewritten out).
+.pnpm-store/

@@ -1,0 +1,96 @@
+{
+ "python": "3.14.3",
+ "list_summaries_cold_s": 0.3238,
+ "list_summaries_warm_s": 0.001419,
+ "list_rows": 100,
+ "sessions": [
+  {
+   "session_id": "bda7b76d34e0",
+   "transcript_mb": 54.6,
+   "durable_projection_first_s": 2.77,
+   "durable_projection_warm_s": 0.006,
+   "history_page_first_s": 0.0,
+   "history_page_warm_s": 0.0,
+   "transcript_parse_first_s": 1.955,
+   "transcript_parse_warm_s": 0.843,
+   "entries": 11248
+  },
+  {
+   "session_id": "e2ad0e43382d",
+   "transcript_mb": 53.6,
+   "durable_projection_first_s": 1.333,
+   "durable_projection_warm_s": 0.005,
+   "history_page_first_s": 0.0,
+   "history_page_warm_s": 0.0,
+   "transcript_parse_first_s": 1.424,
+   "transcript_parse_warm_s": 1.354,
+   "entries": 11284
+  },
+  {
+   "session_id": "4140ee201ce1",
+   "transcript_mb": 32.0,
+   "durable_projection_first_s": 0.554,
+   "durable_projection_warm_s": 0.001,
+   "history_page_first_s": 0.0,
+   "history_page_warm_s": 0.0,
+   "transcript_parse_first_s": 0.262,
+   "transcript_parse_warm_s": 0.21,
+   "entries": 6090
+  },
+  {
+   "session_id": "20bfa91bc753",
+   "transcript_mb": 29.3,
+   "durable_projection_first_s": 0.773,
+   "durable_projection_warm_s": 0.109,
+   "history_page_first_s": 0.0,
+   "history_page_warm_s": 0.0,
+   "transcript_parse_first_s": 0.565,
+   "transcript_parse_warm_s": 0.637,
+   "entries": 2219
+  },
+  {
+   "session_id": "919a7d265526",
+   "transcript_mb": 27.9,
+   "durable_projection_first_s": 0.889,
+   "durable_projection_warm_s": 0.028,
+   "history_page_first_s": 0.0,
+   "history_page_warm_s": 0.0,
+   "transcript_parse_first_s": 0.853,
+   "transcript_parse_warm_s": 0.202,
+   "entries": 9327
+  },
+  {
+   "session_id": "fe9b3869d50f",
+   "transcript_mb": 20.2,
+   "durable_projection_first_s": 0.415,
+   "durable_projection_warm_s": 0.008,
+   "history_page_first_s": 0.0,
+   "history_page_warm_s": 0.0,
+   "transcript_parse_first_s": 0.475,
+   "transcript_parse_warm_s": 0.283,
+   "entries": 3622
+  },
+  {
+   "session_id": "0a20ea15dbc7",
+   "transcript_mb": 17.8,
+   "durable_projection_first_s": 0.252,
+   "durable_projection_warm_s": 0.127,
+   "history_page_first_s": 0.0,
+   "history_page_warm_s": 0.0,
+   "transcript_parse_first_s": 0.659,
+   "transcript_parse_warm_s": 0.668,
+   "entries": 987
+  },
+  {
+   "session_id": "e8d019573ae2",
+   "transcript_mb": 17.5,
+   "durable_projection_first_s": 0.382,
+   "durable_projection_warm_s": 0.024,
+   "history_page_first_s": 0.0,
+   "history_page_warm_s": 0.0,
+   "transcript_parse_first_s": 0.47,
+   "transcript_parse_warm_s": 0.141,
+   "entries": 777
+  }
+ ]
+}

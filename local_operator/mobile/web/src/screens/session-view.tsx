@@ -19,8 +19,13 @@ import { TodosPanel } from "../components/todos-panel";
 import { Transcript } from "../components/transcript";
 import { WorkingLine } from "../components/working-line";
 import { navigate } from "../router";
+import { markSessionSeen } from "../api";
 import { AgentScreen } from "./agent-view";
-import { retainProjectionStream, useProjection } from "../store";
+import {
+	clearSessionUnseen,
+	retainProjectionStream,
+	useProjection,
+} from "../store";
 import type { SessionProjection } from "../types";
 
 function Header({
@@ -58,6 +63,19 @@ export function SessionScreen({
 	const rootRef = useRef<HTMLDivElement>(null);
 
 	useEffect(() => retainProjectionStream(sessionId), [sessionId]);
+
+	/* Seen handshake (spec §3): opening this session — root OR agent route,
+	   both render through this component — IS viewing it. Clear `unseen`
+	   optimistically in the store so back-navigation never flashes a stale
+	   `new` mark, and tell the daemon fire-and-forget. A failed POST is not
+	   an error state: the daemon's next list repaint simply restores the
+	   mark, which is the honest outcome. */
+	useEffect(() => {
+		clearSessionUnseen(sessionId);
+		markSessionSeen(sessionId).catch(() => {
+			/* No UI to surface this on; the repaint reconciles. */
+		});
+	}, [sessionId]);
 
 	/* Keep the composer above the iOS keyboard: pin the layout column to
 	   the visual viewport's height and offset while the keyboard is open. */

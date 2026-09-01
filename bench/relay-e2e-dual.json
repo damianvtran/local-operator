@@ -1,0 +1,144 @@
+--- old-4098 ---
+list /api/sessions ms: [1082.5, 625.6, 623.4]
+LIVE 720772cc779c: sse=22.7ms hist=6.5ms
+LIVE b6d4fc528557: sse=11.0ms hist=12.4ms
+DURABLE 2e4a863a3a41: sse=18.9ms hist=10.5ms
+DURABLE e386029c175a: sse=5.9ms hist=5.2ms
+DURABLE e9aeb38fa6af: sse=2.0ms hist=2.0ms
+DURABLE dccdd2348af8: sse=69.8ms hist=25.9ms
+--- new-4198 ---
+list /api/sessions ms: [72.0, 1.6, 1.0]
+LIVE e2ad0e43382d: sse=965.0ms hist=4.2ms
+LIVE 720772cc779c: sse=40.4ms hist=3.5ms
+DURABLE 2e4a863a3a41: sse=7.4ms hist=4.2ms
+DURABLE e386029c175a: sse=5.2ms hist=2.7ms
+DURABLE 4787cd11f841: sse=43.7ms hist=3.0ms
+DURABLE e9aeb38fa6af: sse=1.9ms hist=1.9ms
+{
+ "old-4098": {
+  "list_ms": [
+   1082.5,
+   625.6,
+   623.4
+  ],
+  "rows": [
+   {
+    "group": "LIVE",
+    "session_id": "720772cc779c",
+    "name": "Investigate Qwen Session Naming",
+    "sse_first_frame_ms": 22.7,
+    "sse_frame_kb": 96.5,
+    "history_ms": 6.5,
+    "history_kb": 105.7
+   },
+   {
+    "group": "LIVE",
+    "session_id": "b6d4fc528557",
+    "name": "Debug work queue creation error in KOHO ",
+    "sse_first_frame_ms": 11.0,
+    "sse_frame_kb": 117.0,
+    "history_ms": 12.4,
+    "history_kb": 139.9
+   },
+   {
+    "group": "DURABLE",
+    "session_id": "2e4a863a3a41",
+    "name": "Improve Skill Protocol Recommendations",
+    "sse_first_frame_ms": 18.9,
+    "sse_frame_kb": 187.9,
+    "history_ms": 10.5,
+    "history_kb": 191.4
+   },
+   {
+    "group": "DURABLE",
+    "session_id": "e386029c175a",
+    "name": "Has qwen cloud /alibaba released any end",
+    "sse_first_frame_ms": 5.9,
+    "sse_frame_kb": 122.8,
+    "history_ms": 5.2,
+    "history_kb": 120.5
+   },
+   {
+    "group": "DURABLE",
+    "session_id": "e9aeb38fa6af",
+    "name": "",
+    "sse_first_frame_ms": 2.0,
+    "sse_frame_kb": 0.9,
+    "history_ms": 2.0,
+    "history_kb": 0.0
+   },
+   {
+    "group": "DURABLE",
+    "session_id": "dccdd2348af8",
+    "name": "TUI Long Session Performance",
+    "sse_first_frame_ms": 69.8,
+    "sse_frame_kb": 122.2,
+    "history_ms": 25.9,
+    "history_kb": 88.3
+   }
+  ]
+ },
+ "new-4198": {
+  "list_ms": [
+   72.0,
+   1.6,
+   1.0
+  ],
+  "rows": [
+   {
+    "group": "LIVE",
+    "session_id": "e2ad0e43382d",
+    "name": "Cancel Session Wakes Robustly",
+    "sse_first_frame_ms": 965.0,
+    "sse_frame_kb": 301.7,
+    "history_ms": 4.2,
+    "history_kb": 237.8
+   },
+   {
+    "group": "LIVE",
+    "session_id": "720772cc779c",
+    "name": "Investigate Qwen Session Naming",
+    "sse_first_frame_ms": 40.4,
+    "sse_frame_kb": 110.4,
+    "history_ms": 3.5,
+    "history_kb": 105.7
+   },
+   {
+    "group": "DURABLE",
+    "session_id": "2e4a863a3a41",
+    "name": "Improve Skill Protocol Recommendations",
+    "sse_first_frame_ms": 7.4,
+    "sse_frame_kb": 187.9,
+    "history_ms": 4.2,
+    "history_kb": 191.4
+   },
+   {
+    "group": "DURABLE",
+    "session_id": "e386029c175a",
+    "name": "Has qwen cloud /alibaba released any end",
+    "sse_first_frame_ms": 5.2,
+    "sse_frame_kb": 122.8,
+    "history_ms": 2.7,
+    "history_kb": 120.5
+   },
+   {
+    "group": "DURABLE",
+    "session_id": "4787cd11f841",
+    "name": "Take over forgotten PR 459",
+    "sse_first_frame_ms": 43.7,
+    "sse_frame_kb": 60.2,
+    "history_ms": 3.0,
+    "history_kb": 56.7
+   },
+   {
+    "group": "DURABLE",
+    "session_id": "e9aeb38fa6af",
+    "name": "",
+    "sse_first_frame_ms": 1.9,
+    "sse_frame_kb": 0.4,
+    "history_ms": 1.9,
+    "history_kb": 0.0
+   }
+  ]
+ }
+}

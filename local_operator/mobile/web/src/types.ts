@@ -216,6 +216,12 @@ export interface SessionSummary {
 	model_label: string;
 	streaming: boolean;
 	needs_attention: boolean;
+	/** A turn finished while no relay client was viewing the session, and it
+	    has not been opened since. Renders the calm accent "new" mark (never
+	    danger, never a pulse — those are reserved for decisions); cleared by
+	    POST /api/sessions/{id}/seen when the session is opened. Older daemons
+	    omit the field entirely, so readers must treat absence as false. */
+	unseen?: boolean;
 	pending_kind: "approval" | "ask" | "" | null;
 	subagents_running: number;
 	todos_open: number;

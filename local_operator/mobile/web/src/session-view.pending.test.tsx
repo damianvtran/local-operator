@@ -22,6 +22,7 @@ vi.mock("./api", () => ({
 	getCommands: vi.fn(async () => ({ commands: [] })),
 	getModels: vi.fn(async () => ({ models: [] })),
 	sendCommand: vi.fn(async () => ({ ok: true, detail: "answer accepted" })),
+	markSessionSeen: vi.fn(async () => ({ ok: true })),
 }));
 
 /* SessionScreen subscribes to the projection store; the test is the store.

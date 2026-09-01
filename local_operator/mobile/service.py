@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import signal
 
 from local_operator.mobile.auth import load_password
@@ -30,7 +31,15 @@ async def amain(port: int = DEFAULT_PORT) -> int:
         )
         return 2
 
-    daemon = MobileDaemon(port=port, password=password)
+    # A SECOND daemon on the same machine must never dial registrants: each
+    # admits at most one daemon connection, so a secondary dial would evict
+    # the production daemon's live bridge mid-session. LO_MOBILE_NO_DIAL=1
+    # runs this instance as a read-only observer (list + durable routes only)
+    # — the mode benchmark and diagnostic daemons use.
+    dial = os.environ.get("LO_MOBILE_NO_DIAL", "").strip().lower() not in ("1", "true", "yes")
+    daemon = MobileDaemon(port=port, password=password, dial_registrants=dial)
+    if not dial:
+        logger.warning("mobile daemon running in no-dial observer mode")
     app = build_app(daemon)
 
     import uvicorn

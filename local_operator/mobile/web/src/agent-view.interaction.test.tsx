@@ -13,6 +13,7 @@ vi.mock("./api", () => ({
 	getSubagentDetail: vi.fn(),
 	imageUrl: vi.fn(() => ""),
 	sendCommand: vi.fn(async () => ({ ok: true, detail: "steering queued" })),
+	markSessionSeen: vi.fn(async () => ({ ok: true })),
 }));
 
 function entry(id: string, kind: TranscriptEntry["kind"], text: string): TranscriptEntry {

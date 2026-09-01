@@ -258,6 +258,47 @@ export function retainProjectionStream(sessionId: string): () => void {
 }
 
 /* ------------------------------------------------------------------ */
+/* Seen handshake, optimistic half                                     */
+/* ------------------------------------------------------------------ */
+
+/** Optimistic half of the seen handshake (the POST is `markSessionSeen` in
+    api.ts): opening a session IS viewing it, so clear `unseen` locally at
+    once — back-navigation must never flash a stale `new` mark while the POST
+    is in flight. The daemon's next list repaint confirms the clear; if the
+    POST fails, that repaint simply restores the mark, which is the honest
+    state. */
+export function clearSessionUnseen(sessionId: string): void {
+	const target = sessions.find((s) => s.session_id === sessionId);
+	if (!target || !target.unseen) return;
+	sessions = sessions.map((s) =>
+		s.session_id === sessionId ? { ...s, unseen: false } : s,
+	);
+	emit();
+}
+
+/* ------------------------------------------------------------------ */
+/* Tab title aggregate                                                 */
+/* ------------------------------------------------------------------ */
+
+/* The browser tab title is the one attention signal visible from the
+   phone's app switcher, so it must track the list even while a session
+   view (which renders nothing of the list) is on screen. A permanent
+   module subscription instead of a hook: a number in the chrome must not
+   re-render any component. n = sessions with unseen || needs_attention —
+   finished reading matter plus decisions, the two states that want the
+   user (spec §4). */
+function syncTabTitle(): void {
+	/* The store also loads in non-DOM contexts (the node-env unit suite). */
+	if (typeof document === "undefined") return;
+	const n = sessions.filter((s) => s.unseen || s.needs_attention).length;
+	const title = n > 0 ? `(${n}) local operator` : "local operator";
+	if (document.title !== title) document.title = title;
+}
+
+subscribe(syncTabTitle);
+syncTabTitle();
+
+/* ------------------------------------------------------------------ */
 /* Composer drafts, per pid, in localStorage                           */
 /* ------------------------------------------------------------------ */
 
