@@ -197,6 +197,19 @@ TAB_HINT_KEY = "⇥"
 #: is not on the list unreachable by any key (D13).
 OTHER_JUMP_KEY = "0"
 
+#: The key that reveals the selected row's description in full, as the footer
+#: names it. ``^e`` and not ``enter``: Enter ANSWERS here, and on the approval
+#: gate it authorises a tool call, so it is not available to overload. Not hover
+#: either — the text this uncovers is what decides an authorisation, and gating
+#: it behind a mouse loses it for a keyboard user, an ssh session with no mouse
+#: reporting, and every screen reader.
+#:
+#: Free, audited against the running app rather than against the binding tables:
+#: no node from this card up to the app resolves ``ctrl+e`` to anything, and
+#: :meth:`on_key` only swallows PRINTABLE single characters, which ``\x05`` is
+#: not — so the free-text row does not eat it either.
+REVEAL_HINT_KEY = "^e"
+
 #: The multi-select checkbox, including its trailing space. ``[x]``/``[ ]`` and
 #: not a filled glyph pair: this app already says "done/not done" that way in
 #: the todo panel, and a box reads as toggleable where ``◉`` reads as decoration.
@@ -257,6 +270,15 @@ class _QuestionState:
     selected: int = 0
     checked: set[int] = field(default_factory=set)
     typed: str = ""
+    #: Whether ``ctrl+e`` has traded this question's one-line-per-row list for
+    #: the selected row's description in full.
+    #:
+    #: Per QUESTION and not per card, for the same reason the selection is: a
+    #: multi-question ask that carried the mode forward would change how the
+    #: NEXT question is drawn on the strength of a key pressed against the
+    #: previous one, and coming back to a question would show it differently
+    #: from how it was left.
+    revealed: bool = False
 
 
 @dataclass(frozen=True)
@@ -299,6 +321,18 @@ class _CardLayout:
     #: False only when the body has no drawable line at all. Everywhere else the
     #: footer is the first row bought, so it is the last thing that can go.
     show_footer: bool
+
+    #: Lines the REVEAL reserved for the selected row's description, blank
+    #: padding included. Zero whenever ``ctrl+e`` is off or bought nothing.
+    #:
+    #: The tallest capped description in the LIST rather than the selected
+    #: row's, which is the whole safety argument: the block is the same height
+    #: whichever row the cursor is on, so the footer and the dock behind it do
+    #: not move on an arrow press. A block sized to the selected row measured
+    #: three different card heights at 190x50 as the cursor walked the list.
+    #: This is :meth:`settings_view.SettingsView._paint_detail`'s rule applied
+    #: to a block instead of a line.
+    reveal_rows: int
 
     #: Whether step 9 bought the descriptions' first lines for the whole window.
     #:
@@ -388,6 +422,7 @@ class AskPickerScreen(Container):
         # signature — the shadowing class that breaks a widget from the inside
         # and reports the traceback somewhere else entirely.
         Binding("space", "toggle_row", "Toggle", show=False),
+        Binding("ctrl+e", "toggle_reveal", "Reveal", show=False),
         Binding("backspace", "backspace", "Edit answer", show=False),
         *[Binding(str(digit), f"jump({digit})", "Jump", show=False) for digit in range(1, 10)],
         # ``0`` is not an ordinal: it reaches the free-text row, which is the
@@ -634,6 +669,41 @@ class AskPickerScreen(Container):
         """
         if self._allow_free_text:
             self._move_to(self.other_row)
+
+    def action_toggle_reveal(self) -> None:
+        """``ctrl+e``: show the selected row's description in full, or stop.
+
+        The list's one line per row is what the card can afford to draw for
+        EVERY option; this trades it for one option's whole paragraph. An
+        explicit, reversible keypress, so a card that windows its answers to
+        buy the prose (measured at 130x30 and below) does so because the user
+        asked, never on its own — and the count row it buys says how many
+        answers went off screen.
+
+        Reset here rather than in :meth:`_move_to`: the whole point of the
+        reveal is to read one row and then the next, so movement RETARGETS the
+        block instead of closing it. It stays the same height either way.
+
+        Turning it ON is refused wherever the footer is not OFFERING it, which
+        is a stronger rule than "would it show anything new" and is why it is
+        asked of the footer rather than of :meth:`_reveal_is_useful` directly.
+        The hint is dropped on a narrow card to keep `esc deny` whole, and a key
+        that still fired there would be an unadvertised gesture that trades two
+        of an authorisation's three consequences for one — measured on the
+        approval card at 24-40 columns. The card must not do anything by a key
+        it is not willing to name.
+
+        Turning it OFF is always allowed: the terminal can grow under a revealed
+        card until the list draws every description on its own, and a mode that
+        could only be left while it was still needed would be a trap.
+        """
+        if not self.state.revealed and not self._offers_reveal():
+            return
+        self.state.revealed = not self.state.revealed
+        # A new frame is a new state, so a refused Enter stops describing the
+        # one before it — the same rule every other key here follows.
+        self._rejected = False
+        self._repaint()
 
     def action_toggle_row(self) -> None:
         """Space toggles a multi-select row; on a single-select it does nothing.
@@ -1200,6 +1270,28 @@ class AskPickerScreen(Container):
         self._description_wraps[(index, width)] = wrapped
         return wrapped
 
+    def _reveal_wrap(self, index: int, width: int) -> list[str]:
+        """The lines ``ctrl+e`` may uncover for row ``index`` — none for a FIELD.
+
+        The reveal exists for the prose that decides the answer: an option's
+        consequence, which the model wrote and the user is comparing. The
+        free-text and secret rows' "descriptions" are neither — they are chrome
+        this app wrote to explain a paste box (``OTHER_HINT``, ``SECRET_HINT``),
+        and a card that spent rows elaborating on `type it here` would be
+        padding a text field. Measured on a two-option question with no
+        descriptions at all: the free-text hint alone made the footer offer
+        `^e` at 32 columns, so the key was advertised on a card whose answers
+        carry no consequences.
+
+        Blank wraps are dropped for the same reason. A row with no description
+        still wraps to one EMPTY line where it is the recommended one, because
+        the tag reserves its line there (:meth:`_description_lines`).
+        """
+        if index == self.other_row:
+            return []
+        wrap = self._description_lines(index, width)
+        return wrap if any(wrap) else []
+
     def _invalidate_description_wraps(self) -> None:
         """Drop the wrap cache: its inputs (the question's text, the width) moved.
 
@@ -1319,18 +1411,37 @@ class AskPickerScreen(Container):
             max(1, len(self._description_lines(index, self._card_width())))
             for index in range(self.row_count)
         )
+        # And the reveal block while `ctrl+e` is on. Left out, this cap sits
+        # below what step 7a can spend on exactly the terminals with room for
+        # it, and the key would draw nothing on the sizes it exists to serve —
+        # the same failure the two paragraphs above record, at a third step.
+        revealed = 0
+        if self.state.revealed:
+            # Through the same reader step 7a spends by, or this cap asks for a
+            # row the allocator will never buy.
+            revealed = min(
+                DESC_MAX_ROWS,
+                max(
+                    (
+                        len(self._reveal_wrap(index, self._card_width()))
+                        for index in range(self.row_count)
+                    ),
+                    default=0,
+                ),
+            )
         wanted = (
             2  # title and its rule
             + question_lines
             + 2  # the spacer above the list and below it
             + self.row_count  # each option's label row
             + described  # and every line its description wraps to
+            + revealed  # the reveal block, while it is on
             + 1  # the windowing line, where the list turns out to need one
             + 1  # the footer
         )
         return min(room, wanted)
 
-    def _layout(self) -> _CardLayout:
+    def _layout(self, *, reveal: bool | None = None) -> _CardLayout:
         """Divide the body's rows BEFORE anything is drawn into them.
 
         The old arithmetic reserved chrome and then handed the options
@@ -1354,6 +1465,8 @@ class AskPickerScreen(Container):
         6. the title and its rule, which travel together — a rule under a title
            is a caption, a rule under nothing is the edge of a box;
         7. the rest of the option rows;
+           7a. the reveal block, while ``ctrl+e`` is on — after the rows, so
+           uncovering one option's prose can never take another option's LABEL;
         8. the blank spacers, which are rhythm and nothing else;
         9. the descriptions' FIRST lines, all of them or none;
         10. continuation lines for the SELECTED row, up to what it wraps to;
@@ -1388,16 +1501,23 @@ class AskPickerScreen(Container):
         is every terminal four rows tall and under, to nothing at all. Laying
         out a card the screen cannot paint is how the keys went missing in the
         first place.
+
+        ``reveal`` overrides the question's own ``ctrl+e`` state, for asking
+        what the OTHER state would draw. A parameter rather than a temporary
+        write to ``_QuestionState``: this runs on the paint path, and a trial
+        that mutates the state it is trialling leaves the card one exception
+        away from being stuck in a mode nobody selected.
         """
         width = self._card_width()
         question = self._question_lines(width)
         budget = self._body_rows(len(question))
-        plan = self._allocate(width, question, budget, position=False)
+        revealed = self.state.revealed if reveal is None else reveal
+        plan = self._allocate(width, question, budget, position=False, reveal=revealed)
         if 0 < plan.page < self.row_count:
             # The list windows after all, so the line saying how much is hidden
             # has to be bought. This branch is the only place the row can be
             # bought, which is the only place the renderer will draw it from.
-            windowed = self._allocate(width, question, budget, position=True)
+            windowed = self._allocate(width, question, budget, position=True, reveal=revealed)
             # ...unless paying for it costs the QUESTION. The count is a
             # refinement of the answers on offer; the question is what the card
             # is for. Measured at 60x16 with a 3-row budget: buying the count
@@ -1440,6 +1560,7 @@ class AskPickerScreen(Container):
         budget: int,
         *,
         position: bool,
+        reveal: bool,
     ) -> _CardLayout:
         """One trial division of ``budget`` body rows, in the order above.
 
@@ -1487,6 +1608,7 @@ class AskPickerScreen(Container):
                 space_below=False,
                 show_descriptions=False,
                 description_rows={},
+                reveal_rows=0,
                 page=0,
                 show_position=False,
                 show_footer=budget >= 2,
@@ -1517,6 +1639,25 @@ class AskPickerScreen(Container):
             remaining -= 2
         extra = max(0, min(self.row_count - 1, remaining))
         remaining -= extra
+        # 7a. The reveal block, out of what the option ROWS left and never out
+        # of the rows themselves. Buying it at step 6a instead was measured at
+        # 130x30 to collapse the list from five rows to one: revealing one
+        # option's prose would have taken four other options' LABELS off the
+        # card, which inverts the priority order this file is built on and is a
+        # safety property on the approval gate.
+        #
+        # A CONSTANT reservation: the tallest capped description in the whole
+        # list, so the block does not change height as the cursor moves. The
+        # selected row draws into it and the remainder is padded blank
+        # (:meth:`_reveal_text`).
+        reveal_rows = 0
+        if reveal:
+            tallest = max(
+                (len(self._reveal_wrap(index, width)) for index in range(self.row_count)),
+                default=0,
+            )
+            reveal_rows = max(0, min(DESC_MAX_ROWS, tallest, remaining))
+            remaining -= reveal_rows
         space_above = remaining >= 1
         if space_above:
             remaining -= 1
@@ -1569,6 +1710,7 @@ class AskPickerScreen(Container):
             space_below=space_below,
             show_descriptions=descriptions,
             description_rows=grants,
+            reveal_rows=reveal_rows,
             page=page,
             show_position=position,
             show_footer=True,
@@ -1746,6 +1888,9 @@ class AskPickerScreen(Container):
             self.state.selected,
             tuple(sorted(self.state.checked)),
             self.state.typed,
+            # `^e more` becomes `^e less` and back, and the hint disappears
+            # entirely once the reveal has drawn everything there was.
+            self.state.revealed,
         )
 
     def repaint_if_stale(self) -> None:
@@ -1949,6 +2094,29 @@ class AskPickerScreen(Container):
                 # longer a fixed number of lines tall.
                 for line in self._description_text(index, width, ground, muted, muted, granted):
                     newline(index)
+                    out.append_text(line)
+            if index == self.state.selected:
+                # The reveal block goes under the row it is ABOUT, not after the
+                # list. Drawn at the tail it was measured to read as the LAST
+                # row's prose — at 150x40 the paragraph explaining option 1 sat
+                # directly under `Other (type your own)`, indented exactly like
+                # that row's own description would be. On the approval gate that
+                # is a user reading one option's consequence while Enter is on
+                # another, which is the same misattribution hover was rejected
+                # for (:meth:`_reveal_text`).
+                #
+                # Free of the §4.2 height property: the block is the same number
+                # of lines wherever it is placed, so moving the cursor re-orders
+                # rows WITHIN a card of unchanged height. The footer, the card's
+                # edge and the conversation behind it do not move, which is what
+                # that property is protecting.
+                for line in self._reveal_text(layout, muted):
+                    # ``None``, not the row: these lines are chrome about a row
+                    # rather than the row itself. Mapped to it, the block's
+                    # BLANK padding would become click target for it — and a
+                    # click on a single-select row ANSWERS, so empty space would
+                    # authorise a tool call on the approval gate.
+                    newline(None)
                     out.append_text(line)
         if layout.space_below:
             newline(None)
@@ -2286,6 +2454,62 @@ class AskPickerScreen(Container):
             rows.append(_fit_row(body, width, ground))
         return rows
 
+    def _reveal_text(self, layout: _CardLayout, ink: Style) -> list[Text]:
+        """The ``ctrl+e`` block: the selected row's description, padded to height.
+
+        Exactly ``layout.reveal_rows`` lines whatever the selected row has to
+        say — a short description leaves blank rows rather than a shorter card.
+        That is the property the whole gesture rests on: the block is sized to
+        the TALLEST description in the list (:attr:`_CardLayout.reveal_rows`),
+        so walking the cursor down the list re-fills these rows instead of
+        moving the footer, the card's edge and the conversation behind it. The
+        alternative was measured at three different card heights at 190x50 for
+        one question. ``settings_view._paint_detail`` keeps its row for the same
+        reason, and AGENTS.md states it as "rows are load-bearing".
+
+        Indented to the same column as the list's own prose, so the block reads
+        as the selected row's paragraph pulled out in full rather than as a
+        second, differently-shaped region.
+
+        The SELECTED row and not the hovered one, which is a rejected feature
+        rather than an oversight. Retargeting this block on hover costs one line
+        (``on_mouse_move`` already repaints), but nothing in the block names the
+        row it belongs to: the caret would point at one row while the prose
+        underneath explained another. On the approval gate that is a user
+        reading "stop asking for this session" with Enter still on "Allow" — an
+        authorisation decided against the wrong consequence, and the mouse never
+        touched the selection. The block follows the caret, which is the thing
+        that answers.
+        """
+        if layout.reveal_rows < 1:
+            return []
+        width = layout.width
+        # The card's ordinary ground, NOT `_row_ground`: the block is chrome
+        # about a row rather than a row, and under the cursor's tint its blank
+        # padding would read as several more selected rows below the list.
+        ground = Style()
+        indent = self._description_indent()
+        wrapped = self._reveal_wrap(self.state.selected, width)
+        kept = wrapped[: layout.reveal_rows]
+        rows: list[Text] = []
+        for position in range(layout.reveal_rows):
+            body = Text(no_wrap=True, overflow="ellipsis")
+            body.append(" " * indent, style=ground)
+            room = max(1, width - indent)
+            if position < len(kept):
+                text = kept[position]
+                if position == len(kept) - 1 and len(wrapped) > len(kept):
+                    # The grant falls short of the wrap only where `remaining`
+                    # ran out below `DESC_MAX_ROWS`. Filled from the REST of the
+                    # prose and marked by `truncate_cells`, exactly as a granted
+                    # description line is: a wrapped line stops at a word
+                    # boundary, so marking it in place would end the text
+                    # earlier than that row's single list line already does.
+                    text = " ".join(wrapped[position:])
+                body.append(truncate_cells(text, room), style=ground + ink)
+            rows.append(_fit_row(body, width, ground))
+        return rows
+
     def _footer_hints(self, width: int) -> list[tuple[str, str]]:
         """The key hints that fit, shedding WORDS before it sheds KEYS.
 
@@ -2402,9 +2626,137 @@ class AskPickerScreen(Container):
             if drawn < 2:
                 hints = [pair for pair in hints if pair[0] != jump]
                 ladder = [key for key in ladder if key != jump]
+        reveal = self._reveal_hint()
+        if reveal is not None:
+            hints.append(reveal)
+            # Immediately BEFORE the exit in the ladder, never after it. The
+            # ladder is ordered LEAST DEFENDED FIRST, and `_shed_to_fit` also
+            # refuses to drop its last entry outright — so appending `^e` past
+            # `esc` makes the exit the cheaper of the two. Measured on the
+            # approval card at 30 columns, exactly that: the frame read
+            # `↑↓ · enter · ^e more · esc`, spending cells on a reading aid
+            # while the word for REFUSING an authorisation had been shed. The
+            # exit's word is the one this row defends hardest (D3/D16/D19), and
+            # "deny" is not guessable from "skip".
+            #
+            # Located by the exit's KEY rather than by position: the ladders
+            # differ in what they defend hardest, and the multi-select's ends
+            # with `space` (the only key that can answer it) BEYOND the exit —
+            # so "one from the end" would put `^e` on the wrong side of `esc`
+            # there while looking right on the single-select.
+            exit_key = self._exit_hint[0]
+            cut = ladder.index(exit_key) if exit_key in ladder else len(ladder)
+            ladder = [*ladder[:cut], REVEAL_HINT_KEY, *ladder[cut:]]
+            # ...and shed OUTRIGHT before the second pass reaches the exit.
+            # `_shed_to_fit` keeps the ladder's last entry whatever happens, so
+            # on the ask card (`esc` last) `^e` is already safe — but the
+            # approval card and the multi-select rank other keys past the exit,
+            # and there `^e` survived while `deny`/`skip` had been shed.
+            # Measured at 18-23 columns: `^e · esc`, a card spending its last
+            # cells on a reading aid instead of the word for refusing.
+            #
+            # Dropped here rather than by reordering the ladder, because the
+            # ladder's tail is a genuine ranking those two surfaces own (`space`
+            # is the only key that can answer a multi-select) and `^e` outranks
+            # nothing on this row.
+            #
+            # Measured against the row WITH the exit on it, which is not yet in
+            # `hints` here: the exit is what the check is protecting, so leaving
+            # it out would ask whether the row fits without the thing that has
+            # to fit.
+            if _hint_cells([*hints, self._exit_hint]) > width:
+                hints = [pair for pair in hints if pair[0] != REVEAL_HINT_KEY]
+                ladder = [key for key in ladder if key != REVEAL_HINT_KEY]
         hints.append(self._exit_hint)
 
         return self._shed_to_fit(hints, ladder, width)
+
+    def _reveal_hint(self) -> tuple[str, str] | None:
+        """``^e more`` / ``^e less``, or nothing where the key does nothing.
+
+        This row already refuses to advertise dead keys — the digits on a
+        one-row window, the whole keymap while the composer holds the caret —
+        and on a roomy terminal the reveal IS dead: (A)'s continuation lines
+        have already drawn every description in full, so the key would toggle
+        a mode that changes nothing. Offered anyway it is the same lie, one
+        surface further along.
+
+        So: only where some DRAWN row has more prose than the lines it was
+        granted, or where the reveal is already on and the user needs to be told
+        how to leave it. Answered against the plan the card is actually drawing
+        rather than against the descriptions alone, because "is there more" is a
+        question about the grant, not about the text.
+
+        Below the sizes where the reveal can buy a line at all (measured: budget
+        8 and under, at 100x24 and below) it stays hidden — the plan grants
+        nothing in either state, so neither branch fires.
+        """
+        if self.state.revealed:
+            # `less` only while the block is actually drawn. A revealed card
+            # whose block bought no line is byte-identical to the default one,
+            # so naming a key to undo it would point at a change nothing on
+            # screen shows.
+            return (REVEAL_HINT_KEY, "less") if self._layout().reveal_rows >= 1 else None
+        return (REVEAL_HINT_KEY, "more") if self._reveal_is_useful() else None
+
+    def _offers_reveal(self) -> bool:
+        """Is ``^e`` actually ON the footer as the card is drawn right now?
+
+        The footer is the card's whole statement of what its keys do, and this
+        asks it rather than re-deriving the answer: the hint can be dropped for
+        reasons the predicate below knows nothing about — the shed ladder taking
+        it to keep the exit whole, the composer holding focus, the card drawing
+        no options at all. Re-derived, the key would work in states the card
+        does not advertise it in, which is the same defect as advertising a key
+        that does not work, inverted.
+        """
+        plan = self._layout()
+        if not plan.show_footer or not plan.page:
+            # No footer, or no option row under the cursor to reveal anything
+            # about. `_footer_row` draws only the exit on a card with no options
+            # drawn (`drawn=False`), so the hints below are not what is on
+            # screen there.
+            return False
+        return any(key == REVEAL_HINT_KEY for key, _ in self._footer_hints(plan.width))
+
+    def _reveal_is_useful(self) -> bool:
+        """Would turning ``ctrl+e`` on put prose on screen that is not there?
+
+        Two conditions, and both are needed. Either alone offers a key that
+        does nothing, which is the lie this footer already refuses to tell
+        about the digits and about ``enter``:
+
+        - the SELECTED row's description must be longer than the lines the list
+          granted it. On a roomy terminal the continuation lines have already
+          drawn it in full, so the block would be a second copy of text the user
+          is looking at — measured at 190x50, where it added three rows and no
+          words.
+
+          The selected row and not "any drawn row", which is the difference
+          between a trade and a pure loss. The block only ever shows the row
+          under the cursor, but it is bought out of the pool the OTHER rows'
+          prose is drawn from: asked the loose way, the approval card at 44x30
+          offered `^e` because *Deny*'s consequence was cut, and pressing it
+          replaced three consequences with one that was already complete. The
+          authorisation frame got strictly worse for a key the card had
+          advertised. Where the cursor's own row is cut the trade is honest and
+          the user made it deliberately;
+        - and the plan must be able to AFFORD a reveal line. Step 7a buys from
+          what the option rows left, so below roughly a 13-row budget there is
+          nothing left to buy with (measured at 130x30 and every size under it)
+          and the revealed frame equals the default one.
+
+        Answered against the plan the card is drawing rather than against the
+        descriptions alone: "is there more" is a question about the grant.
+        """
+        plan = self._layout(reveal=False)
+        selected = self.state.selected
+        if selected not in self._window(plan.page):
+            # The cursor's row is not even drawn (a card windowed below it).
+            # Nothing on screen would change in a way the user can attribute.
+            return False
+        cut = len(self._reveal_wrap(selected, plan.width)) > plan.description_rows.get(selected, 0)
+        return cut and self._layout(reveal=True).reveal_rows >= 1
 
     def _shed_to_fit(
         self, hints: list[tuple[str, str]], ladder: list[str], width: int
@@ -2417,11 +2769,7 @@ class AskPickerScreen(Container):
         survives to the narrowest card.
         """
 
-        def cells(pairs: list[tuple[str, str]]) -> int:
-            return sum(cell_len(f"{key} {what}".strip()) for key, what in pairs) + 3 * max(
-                0, len(pairs) - 1
-            )
-
+        cells = _hint_cells
         shown = list(hints)
         if cells(shown) <= width:
             return shown
@@ -2437,6 +2785,18 @@ class AskPickerScreen(Container):
         # ladder defends hardest, and :func:`_cut_row` keeps even that inside
         # the card rather than letting it widen the screen.
         return shown
+
+
+def _hint_cells(pairs: list[tuple[str, str]]) -> int:
+    """Cells a footer row of ``key word`` hints takes, separators included.
+
+    One definition, because two callers ask the same question and a drifting
+    copy of it would let a hint be kept by one measure and shed by another — on
+    the row where the disagreement costs the card its only stated way out.
+    """
+    return sum(cell_len(f"{key} {what}".strip()) for key, what in pairs) + 3 * max(
+        0, len(pairs) - 1
+    )
 
 
 def _cut_row(row: Text, width: int) -> Text:
