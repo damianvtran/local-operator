@@ -15,6 +15,7 @@ import pytest
 from lop_osworld_v2_adapter import cleanup
 
 from local_operator.evaluation.adapters.api import (
+    ADAPTER_SCHEMA_VERSION,
     AdapterCapabilities,
     AdapterMetadata,
     AdapterSelector,
@@ -75,7 +76,7 @@ def test_refs_round_trip_through_a_descriptor() -> None:
 
     executable = str(Path(sys.executable).resolve())
     selector = AdapterSelector(
-        schema_version="1.0",
+        schema_version=ADAPTER_SCHEMA_VERSION,
         adapter_id="osworld-v2",
         distribution="lop-osworld-v2-adapter",
         version="0.1.0",
@@ -96,7 +97,7 @@ def test_refs_round_trip_through_a_descriptor() -> None:
             entry_point="lop_osworld_v2_adapter:create",
             package_digest="a" * 64,
             release_digest="b" * 64,
-            schema_version="1.0",
+            schema_version=ADAPTER_SCHEMA_VERSION,
             capabilities=AdapterCapabilities(routes=("computer",), ask_user=True, scoring=True),
         ),
         python=PythonRuntime.current(),
@@ -104,7 +105,7 @@ def test_refs_round_trip_through_a_descriptor() -> None:
         selected_route="computer",
     )
     descriptor = RescueDescriptor(
-        schema_version="1.0",
+        schema_version=ADAPTER_SCHEMA_VERSION,
         selector=selector,
         handshake=handshake,
         episode_id=episode_id,

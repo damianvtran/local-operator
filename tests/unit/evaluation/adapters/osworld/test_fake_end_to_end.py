@@ -1,28 +1,25 @@
-"""End-to-end: the REAL adapter over FakeProvider drives a REAL EpisodeRunner.
+"""In-process episodes: the REAL adapter over FakeProvider through a runner.
 
-This is the headline evidence for PR 1. Only the model is scripted; the
-adapter, the protocol, the lifecycle authorities, the cleanup receipts, the
-evidence writer, and the independent ``verify_bundle`` are all real. The
-provider is the in-process fake, injected through the adapter's
-``provider_factory`` seam — the same factory the production AWS provider fills
-in PR 2.
+The headline evidence for this adapter is ``test_spawn.py``, which runs the
+same chain in a genuinely spawned worker. These tests keep their place for a
+different reason: they are FAST and they can inject failures the spawned path
+cannot reach cheaply.
 
-The episode is driven IN-PROCESS (the adapter is called through a thin
-``_call_raw`` shim) rather than through a spawned worker for one precise,
-documented reason: the worker never learns ``artifact_root``. The runner
-passes it only inside ``BeginRescueParams.descriptor`` (api.py:259) and the
-parent's ``verify_artifact`` reads frames from it (episode.py:495), but no
-RPC param on the prepare/reset path carries it to the worker, and the worker's
-environment is stripped (supervisor._ENV_ALLOW). A spawned worker therefore
-cannot write frame bytes where the parent reads them. Closing that gap is a
-HARNESS change (add artifact_root to Prepare/ResetStart params), explicitly
-out of scope for PR 1 — it is reported to the manager, not routed around.
+The adapter is called through a thin ``_call_raw`` shim, so everything the
+PARENT is responsible for is still real — ``VerifiedAdapterSession``, the
+``HostVerifier``, the lifecycle authorities, ``verify_artifact``, the evidence
+writer, and the independent ``verify_bundle``. What the shim removes is the
+process boundary and the RPC serialization, which is exactly what the spawned
+tests exist to cover.
 
-What this test DOES prove, in-process but with zero faking of the contract:
-the real adapter's prepare→reset_start→execute→score→cleanup chain satisfies
-the real VerifiedAdapterSession verifier, and the resulting bundle seals and
-verifies. The real-spawn + handshake of the shipped wheel is covered
-separately in test_spawn.py.
+That division is deliberate. An episode per failure mode (evaluator raising,
+an unanswered ask, a partial score) costs a venv build and two interpreter
+spawns out-of-process; in-process it costs milliseconds. The failure modes
+here are adapter-internal and provider-driven, so nothing about them depends
+on the boundary — they would prove the same thing more slowly. The claims that
+DO depend on the boundary (frames reaching the parent's artifact root, the
+schema-1.1 field arriving over RPC, the shipped wheel loading at all) are
+asserted only in ``test_spawn.py``, and none of them are asserted here.
 """
 
 from __future__ import annotations
@@ -35,6 +32,7 @@ from lop_osworld_v2_adapter.adapter import OSWorldV2Adapter
 from lop_osworld_v2_adapter.providers.fake import FakeProvider
 
 from local_operator.evaluation.adapters.api import (
+    ADAPTER_SCHEMA_VERSION,
     AdapterSelector,
     Handshake,
     PythonRuntime,
@@ -92,7 +90,7 @@ def _selector(tmp_path: Path, workspace: Path, adapter: OSWorldV2Adapter) -> Ada
     # the workspace's release digest), not fixture placeholders.
     metadata = adapter.metadata
     return AdapterSelector(
-        schema_version="1.0",
+        schema_version=ADAPTER_SCHEMA_VERSION,
         adapter_id="osworld-v2",
         distribution="lop-osworld-v2-adapter",
         version="0.1.0",
@@ -111,11 +109,11 @@ def _adapter(tmp_path: Path, provider: FakeProvider) -> OSWorldV2Adapter:
     tasks = workspace / "tasks"
     tasks.mkdir(parents=True, exist_ok=True)
     (tasks / "task_plain.py").write_text(fixtures.PLAIN)
-    artifact_root = tmp_path / "artifacts"
-    artifact_root.mkdir(parents=True, exist_ok=True)
+    # No artifact root is handed to the constructor: the adapter learns it from
+    # ``ResetStartParams.artifact_root`` like any worker, so even in-process the
+    # root travels the same path it does out-of-process.
     return OSWorldV2Adapter(
         provider_factory=lambda: provider,
-        artifact_root=artifact_root,
         workspace_root=workspace,
     )
 

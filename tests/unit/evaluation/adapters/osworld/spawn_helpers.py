@@ -22,8 +22,14 @@ import os
 import shutil
 import subprocess
 import sys
+import sysconfig
 from pathlib import Path
+from typing import Any
 
+from local_operator.evaluation.adapters.api import (
+    ADAPTER_SCHEMA_VERSION,
+    AdapterSelector,
+)
 from local_operator.evaluation.adapters.discovery import workspace_digest
 
 # tests/unit/evaluation/adapters/osworld/spawn_helpers.py -> repo root is 5
@@ -140,23 +146,117 @@ def _venv_python_from_site(site: Path) -> Path:
     )
 
 
-def write_workspace(workspace: Path, tasks: dict[str, str], release_digest: str) -> str:
+def write_workspace(
+    workspace: Path,
+    tasks: dict[str, str],
+    release_digest: str,
+    *,
+    provider: dict[str, object] | None = None,
+) -> str:
     """Materialise a workspace: adapter-release.json + tasks/, then digest it.
 
     The workspace must contain no symlinks/hardlinks and exactly the canonical
     manifest bytes. Tasks are written (never linked) so ``workspace_digest``
     pins their exact bytes.
+
+    ``provider`` writes the adapter-owned ``adapter-provider.json`` that selects
+    the backend. This is how a SPAWNED worker is told to run the fake: the
+    supervisor builds the child environment from a closed allowlist, so an env
+    var could not reach it, and the selection has to be part of the
+    digest-pinned workspace anyway or it would be invisible to the attestation
+    that says which code produced the run.
     """
 
     workspace.mkdir(parents=True, exist_ok=True)
     (workspace / "adapter-release.json").write_text(
         json.dumps({"release_digest": release_digest}, separators=(",", ":"), sort_keys=True)
     )
+    if provider is not None:
+        (workspace / "adapter-provider.json").write_text(
+            json.dumps(provider, separators=(",", ":"), sort_keys=True)
+        )
     tasks_dir = workspace / "tasks"
     tasks_dir.mkdir(exist_ok=True)
     for task_id, source in tasks.items():
         (tasks_dir / f"{task_id}.py").write_text(source)
     return workspace_digest(str(workspace))
+
+
+def build_spawnable_adapter(
+    tmp_path: Path,
+    wheel: Path,
+    tasks: dict[str, str],
+    *,
+    provider: dict[str, object] | None = None,
+) -> AdapterSelector:
+    """Install the real wheel into a real interpreter and pin a real workspace.
+
+    Returns the selector ``AdapterSupervisor.launch`` needs. Every digest is
+    computed from the artifact actually on disk, so a selector built here fails
+    the handshake if the wheel or the workspace differs by one byte — which is
+    the property that makes the spawned tests evidence rather than decoration.
+    """
+
+    executable = real_interpreter(tmp_path / "venv")
+    site = next(executable.parent.parent.glob("lib/python*/site-packages"))
+
+    # The copied venv has neither local_operator nor pydantic, and the worker
+    # imports both before it can answer a handshake. A .pth pointing at this
+    # interpreter's real roots is the mechanism test_launch.py established.
+    repo_root = Path(__file__).resolve().parents[5]
+    import pydantic
+
+    purelib = sysconfig.get_paths().get("purelib")
+    roots = [str(repo_root), str(Path(pydantic.__file__).resolve().parent.parent)]
+    if purelib:
+        roots.append(purelib)
+    (site / "_local_operator_repo.pth").write_text("\n".join(roots) + "\n")
+
+    package_digest = install_adapter_into_site(site, wheel)
+    release_digest = release_digest_for(package_digest, tasks)
+    workspace = tmp_path / "workspace"
+    workspace_digest_value = write_workspace(workspace, tasks, release_digest, provider=provider)
+
+    return AdapterSelector(
+        # Tracked from the harness constant so a protocol bump fails loudly
+        # here rather than as an opaque selector mismatch at handshake.
+        schema_version=ADAPTER_SCHEMA_VERSION,
+        adapter_id="osworld-v2",
+        distribution="lop-osworld-v2-adapter",
+        version="0.1.0",
+        entry_point="lop_osworld_v2_adapter:create",
+        package_digest=package_digest,
+        release_digest=release_digest,
+        python_executable=str(executable.resolve()),
+        workspace=str(workspace),
+        workspace_digest=workspace_digest_value,
+        route_capability="computer",
+    )
+
+
+def spawn_config(tmp_path: Path) -> Any:
+    """Episode config with timeouts sized for a REAL interpreter spawn.
+
+    The in-process default of 5s is ample for a shared-memory adapter but
+    marginal here: a real worker must start CPython and import pydantic and
+    local_operator before it can answer the handshake. Under the parallel load
+    this machine actually runs, that can exceed 5s, and the episode then fails
+    at prepare — turning a genuine assertion into a flake about machine speed
+    rather than about the adapter. Same reasoning, same numbers as
+    ``runner/test_episode_subprocess._subprocess_config``.
+    """
+
+    from tests.unit.evaluation.runner.conftest import build_config
+
+    return build_config(
+        tmp_path,
+        handshake_timeout=60.0,
+        prepare_timeout=60.0,
+        reset_timeout=60.0,
+        step_timeout=60.0,
+        score_timeout=60.0,
+        cleanup_timeout=60.0,
+    )
 
 
 def release_digest_for(package_digest: str, tasks: dict[str, str]) -> str:

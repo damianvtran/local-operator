@@ -14,7 +14,10 @@ from pathlib import Path
 
 import pytest
 
-from local_operator.evaluation.adapters.api import AdapterSelector
+from local_operator.evaluation.adapters.api import (
+    ADAPTER_SCHEMA_VERSION,
+    AdapterSelector,
+)
 from local_operator.evaluation.adapters.discovery import (
     AdapterDiscoveryError,
     verify_release_manifest,
@@ -32,7 +35,7 @@ def _selector(
     workspace: Path, package_digest: str, release_digest: str, executable: Path
 ) -> AdapterSelector:
     return AdapterSelector(
-        schema_version="1.0",
+        schema_version=ADAPTER_SCHEMA_VERSION,
         adapter_id="osworld-v2",
         distribution="lop-osworld-v2-adapter",
         version="0.1.0",
