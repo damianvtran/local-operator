@@ -1069,12 +1069,18 @@ async def _wait_landing_settled(
     (``_tail_anchor.acquire()`` then ``_scroll_to_tail()``).
 
     So wait on the two observables the assertions actually depend on: the
-    one-shot being spent (``_landing_snap_pending`` false, which is set false
-    on every path out of the snap, including the ones that decide no snap is
-    needed) and the geometry then holding still, since the snap can be
-    followed by a further layout pass. The ceiling is a deadlock guard, not a
-    timing assumption: a slow machine costs nothing and a landing that never
-    settles still fails with what it was waiting for.
+    one-shot being spent (``_landing_snap_pending`` false) and the geometry
+    then holding still, since the snap can be followed by a further layout
+    pass.
+
+    ``_snap_landing_to_row_head`` does NOT clear the flag on every path out
+    of it — it returns with the one-shot still armed when the body is not yet
+    mounted or laid out, and when the history page is still pending. Those
+    are exactly the states this helper must keep waiting through, so the
+    flag's meaning here is "the landing has been decided", not "the snap
+    function has run". The ceiling is therefore a deadlock guard rather than
+    a timing assumption: a slow machine costs nothing, and a landing that
+    never resolves fails naming both flags instead of hanging.
     """
     for _ in range(limit):
         await pilot.pause()
