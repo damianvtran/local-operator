@@ -913,12 +913,48 @@ class Editor(TextArea):
     #:
     #: This half only covers terminals that encode option+arrow as a CSI
     #: sequence with modifier 3 (``\x1b[1;3D``), which Textual's parser resolves
-    #: to the ``alt+left`` key name. The other two encodings are handled
-    #: elsewhere: ``\x1bb``/``\x1bf`` (readline meta) already parse to
-    #: ``ctrl+left``/``ctrl+right`` and hit the inherited bindings, and the
-    #: ``Esc``-prefixed form arrives as two separate events and is coalesced in
-    #: :meth:`_on_key`. All three are pinned in
-    #: ``tests/unit/tui/test_word_caret.py``.
+    #: to the ``alt+left`` key name. The other encodings are handled elsewhere:
+    #: the ``Esc``-prefixed form arrives as two separate events and is coalesced
+    #: in :meth:`_on_key`, and the readline meta form is bound below. All four
+    #: are pinned in ``tests/unit/tui/test_word_caret.py``.
+    #:
+    #: ``alt+b``/``alt+f`` are the readline word-motion chords, and they are
+    #: bound because a terminal may REWRITE the arrow away before this app ever
+    #: sees a key. Ghostty ships exactly that as a factory default (verified
+    #: with ``ghostty +show-config --default``, which ignores user config, on
+    #: 1.3.1)::
+    #:
+    #:     keybind = alt+arrow_left=esc:b
+    #:     keybind = alt+arrow_right=esc:f
+    #:
+    #: so ``⌥←`` is turned into meta-b upstream and the fact that it was an
+    #: arrow is destroyed. What reaches Textual then depends on the keyboard
+    #: protocol, and ONLY the legacy row was covered before:
+    #:
+    #: ==================  ================  ==============  =============
+    #: terminal state      bytes             Textual key     bound by
+    #: ==================  ================  ==============  =============
+    #: legacy encoding     ``\x1bb``         ``ctrl+left``   ``TextArea``
+    #: kitty protocol      ``\x1b[98;3u``    ``alt+b``       this table
+    #: ==================  ================  ==============  =============
+    #:
+    #: Textual negotiates the kitty protocol, so the second row is the one a
+    #: default Ghostty actually lands on; the first is why the bug hides so
+    #: well, since the same corrupted bytes happen to decode to a bound key
+    #: once the protocol is off. Nothing about the chord differs to the user —
+    #: only the protocol state — which is why this looked like it worked in a
+    #: plain terminal and failed under a multiplexer speaking kitty.
+    #:
+    #: This is NOT multiplexer-specific: a multiplexer that re-encodes
+    #: faithfully still forwards ``alt+b``, because ``alt+b`` is genuinely what
+    #: the terminal handed it. The same keys are also what iTerm2 and
+    #: Terminal.app send with "Use Option as Meta" enabled, so binding them is
+    #: correct on its own terms rather than a workaround for one terminal.
+    #:
+    #: There is no shift variant to add: Ghostty has no ``alt+shift+arrow``
+    #: default, so ``⌥⇧←`` survives intact as ``\x1b[1;4D``. That asymmetry —
+    #: selection-by-word working while movement-by-word did not — is the
+    #: signature of this bug (see #518).
     #:
     #: ``show=False`` to match every other binding in this app — the footer is
     #: not a key reference here (see ``OperatorApp.BINDINGS``).
@@ -1002,6 +1038,8 @@ class Editor(TextArea):
         Binding("alt+right", "cursor_word_right", "Cursor word right", show=False),
         Binding("alt+shift+left", "cursor_word_left(True)", "Select word left", show=False),
         Binding("alt+shift+right", "cursor_word_right(True)", "Select word right", show=False),
+        Binding("alt+b", "cursor_word_left", "Cursor word left", show=False),
+        Binding("alt+f", "cursor_word_right", "Cursor word right", show=False),
         Binding("ctrl+v,super+v", "system_paste", "Paste from the system clipboard", show=False),
     ]
 
