@@ -100,14 +100,54 @@ def unraceable_answer_hold(monkeypatch: pytest.MonkeyPatch) -> None:
     pilot round trip, which makes "the second keystroke arrived first" true by
     construction rather than by timing luck.
 
-    It does not weaken what those tests check. The hold still exists, the key
-    is still parked, and the assertions are unchanged: the sentence lands
-    whole and nothing is authorised. What the stretch removes is the ability
-    of a slow runner to decide the outcome. Tests that assert the hold COMMITS
-    (a deliberate single keypress) do not use this fixture — they press with
-    the CARD focused, which bypasses the composer routing entirely.
+    It does not weaken the STRUCTURAL guard: the hold still exists, the key
+    is still parked, and the assertions are unchanged, so reintroducing the F3
+    defect (route the key immediately, no hold at all) still turns these tests
+    red. What the stretch does remove is their sensitivity to the hold's
+    DURATION — with it applied, any value from 1 ms to 30 s passes, and a 1 ms
+    hold is no protection at all for a real user. That is a real hole and it
+    is why :func:`test_the_answer_key_hold_is_long_enough_to_be_a_hold` exists:
+    the constant is pinned by its own test, against the human-typing facts it
+    was derived from, so this fixture cannot hide a regression in it.
+
+    Not every test here can take the stretch. The ones that assert the hold
+    COMMITS — a deliberate single keypress answering the question — need the
+    real timer to fire and deliberately do not use this fixture. The four that
+    do use it either type a word (the second keystroke cancels the hold) or
+    end it explicitly with Enter/Escape/an external settle, so in every case
+    the hold is resolved by an EVENT rather than by the clock running out.
     """
     monkeypatch.setattr(app_module, "ANSWER_KEY_HOLD_S", 30.0)
+
+
+def test_the_answer_key_hold_is_long_enough_to_be_a_hold() -> None:
+    """The hold's DURATION is a safety property, so pin it here.
+
+    ``unraceable_answer_hold`` stretches this constant to take the wall clock
+    out of four pilot tests, which necessarily makes those tests blind to its
+    value: with the fixture applied, a 1 ms hold passes them just as happily
+    as 180 ms. A 1 ms hold is not a hold — no keystroke pair arrives that
+    close — so it silently reopens the F3 hazard where the first character of
+    ``yes do it`` authorises a pending ``rm -rf``.
+
+    The bounds are the ones the constant was derived from, and each end is a
+    real failure rather than a preference:
+
+    * Too SHORT and the hold cannot span a human's inter-key interval, so a
+      typed word commits its first character as an answer. 60 wpm is ~200 ms
+      per character and the burst inside a word is far shorter; 100 ms is
+      below any of that.
+    * Too LONG and a deliberate single keypress feels unanswered — the user
+      presses ``y`` and watches the question sit there. 400 ms is the outer
+      edge of "immediate".
+
+    A unit test rather than a pilot one on purpose: it asserts a fact about
+    the constant, needs no app, and cannot itself flake.
+    """
+    assert 0.100 <= app_module.ANSWER_KEY_HOLD_S <= 0.400, (
+        f"ANSWER_KEY_HOLD_S is {app_module.ANSWER_KEY_HOLD_S}s: outside the range where it is "
+        "both long enough to span typing and short enough to feel immediate"
+    )
 
 
 async def _focus_composer(pilot: Any, app: OperatorApp) -> None:
