@@ -233,10 +233,26 @@ SECRET_HINT = "hidden as you type — enter stores, esc skips"
 #: Same glyph the login key prompt uses, so a secret paste looks like one.
 SECRET_MASK = "•"
 
-#: The tag marking the option the model recommends. Words, not a glyph: this is
-#: the one row the user is being nudged toward, and a nudge nobody can read is
-#: just an unexplained difference in colour.
-RECOMMENDED_TAG = "recommended"
+#: The tag marking the option the model recommends.
+#:
+#: Uppercase behind a marker glyph, and drawn at ``fg`` + bold where it heads a
+#: description (:meth:`_description_text`) — three signals that are not hue,
+#: because hue is not available here. Contrast was measured
+#: for every candidate against BOTH themes and both of this card's grounds
+#: (``overlay`` for a normal row, ``raised`` for the selected one): amber
+#: (3.97:1), label violet (3.62:1) and signal blue (3.54:1) all fall under the
+#: 4.5:1 AA floor on the light theme, whose chromatic ramp is tuned against
+#: ``surface`` rather than against a card. ``$lo-accent`` is unavailable for a
+#: second reason — local_operator.tcss spends it on an exhaustive list of four
+#: sites and site 4 is already on this card ("what ENTER will take"), so a green
+#: badge would make the accent say two things on one frame.
+#:
+#: Words and not a bare glyph: this is the one row the user is being nudged
+#: toward, and a nudge nobody can read is just an unexplained difference in
+#: colour. It was `recommended` at ``muted`` for a release — the identical style
+#: to the prose it sits in, with no weight — and the designer reported being
+#: unable to find the word in the rendered frame without searching for it (D4).
+RECOMMENDED_TAG = "▸ RECOMMENDED"
 
 #: Cells a label must keep for its row to say anything. Below this the row is
 #: more honest showing its number alone than a one-character stub, which names a
@@ -256,6 +272,36 @@ LABEL_MIN_CELLS = 6
 #: columns) and long enough that hitting the cap means the model wrote an essay
 #: rather than a consequence.
 DESC_MAX_ROWS = 6
+
+#: The most description lines the DEFAULT list draws for any one row.
+#:
+#: A different number for a different job than :data:`DESC_MAX_ROWS`: 2 is how
+#: much prose the LIST shows per row, 6 is how much the REVEAL shows for one
+#: row. Uncapped, the pool spent every spare row of a roomy terminal on prose
+#: and the card stopped being a list: measured on
+#: ``scripts/ask_user_repro.py`` at 190x50, 24 body rows of which ~19 were
+#: prose, options drawn 8/5/4 rows tall with no blank line between one option's
+#: paragraph and the next option's label. The labels are ``fg`` bold against
+#: ``muted`` prose, so the contrast ranking was intact and the list was still
+#: uncountable — a bold line every seven lines does not separate anything at
+#: that density.
+#:
+#: Two, not three. The label/prose pair still reads as one unit at 2 lines and
+#: stops being perceptible from 3. And 3 is unaffordable where it matters: at
+#: 150x40 a 3-cap wants 4 rows x 4 options = 16 of a 20-row budget, leaving one
+#: row for the reveal block — back on the boundary where ``ctrl+e`` is refused
+#: for having nothing to buy with, which is the defect this cap exists to clear.
+#:
+#: The cap is what makes the reveal reachable at all. The two halves of the
+#: previous round fought each other: the pool spent the budget step 7a needed,
+#: so at 190x50 ``ctrl+e`` produced a byte-identical frame and the footer never
+#: offered it, and at 150x40 all three descriptions were ellipsised with no way
+#: to read them — the ORIGINAL truncation bug, at the size it was reported from
+#: (D2). Fixing the hierarchy with SPACE is also the only move left: prose is
+#: ``muted`` 6.51:1 and the next step down is ``dim`` 3.43:1, under the AA floor
+#: the description was deliberately walked UP to, and on the approval gate that
+#: text authorises a tool call.
+DEFAULT_DESC_CAP = 2
 
 
 @dataclass
@@ -1435,8 +1481,12 @@ class AskPickerScreen(Container):
         # budget below what step 9 then needs, so the column was never bought at
         # all and the options that DID have prose lost it (measured on a
         # three-option question where only the middle one was described).
+        # Capped by `DEFAULT_DESC_CAP`, through the same reader step 11 spends
+        # by: the pool will never grant a row more than the cap, so a natural
+        # height counting the full wrap asks for rows the card cannot spend and
+        # the frame comes out taller than the content it draws.
         described = sum(
-            max(1, len(self._description_lines(index, self._card_width())))
+            max(1, min(DEFAULT_DESC_CAP, len(self._description_lines(index, self._card_width()))))
             for index in range(self.row_count)
         )
         # And the reveal block while `ctrl+e` is on. Left out, this cap sits
@@ -1724,7 +1774,13 @@ class AskPickerScreen(Container):
             for index in order:
                 if index not in grants:
                     continue
-                extra_lines = len(self._description_lines(index, width)) - 1
+                # Capped: the DEFAULT view shows at most `DEFAULT_DESC_CAP`
+                # lines per row and the remainder goes behind `ctrl+e`. The cap
+                # REDUCES what this rung may spend; it does not reorder the
+                # rungs above it (C2) and it does not touch step 9's
+                # all-or-nothing first line (C5). Every line it does buy is
+                # still charged to `remaining` one at a time, so C1 holds.
+                extra_lines = min(len(self._description_lines(index, width)), DEFAULT_DESC_CAP) - 1
                 for _ in range(max(0, extra_lines)):
                     if remaining < 1:
                         break
@@ -2120,7 +2176,12 @@ class AskPickerScreen(Container):
                 # hit-test reads (`_index_at`), and it is recorded here rather
                 # than derived as arithmetic precisely because rows are no
                 # longer a fixed number of lines tall.
-                for line in self._description_text(index, width, ground, muted, muted, granted):
+                # `fg` for the TAG and `muted` for the separator and the prose.
+                # Passed `muted` for both, the badge was the identical style to
+                # the text beside it and had neither weight nor hue to win on
+                # (D4); the tag carries the label's own ink and the prose keeps
+                # the ramp step it was walked up to.
+                for line in self._description_text(index, width, ground, fg, muted, granted):
                     newline(index)
                     out.append_text(line)
             if index == self.state.selected:
@@ -2428,9 +2489,20 @@ class AskPickerScreen(Container):
 
         The tag lives HERE, ahead of the prose, rather than after the label: on
         the label line it was paid for out of the label, so the one row the
-        model is pointing at carried the shortest text on the card (D6). At
-        ``muted`` it is the loudest thing on a line of ``dim`` prose and still
-        quieter than the label above it, which is the ranking a hint wants.
+        model is pointing at carried the shortest text on the card (D6).
+
+        It is drawn at ``tag_ink`` — ``fg`` + bold, the label's own ink — and
+        NOT at the ``ink`` its prose uses. It sat at ``muted`` for a release,
+        which is the same style as the prose it introduces: the docstring here
+        claimed it was "the loudest thing on a line of ``dim`` prose", and that
+        stopped being true the moment prose itself was walked up to ``muted``
+        (D7, round 1). The frame that resulted had a badge nobody could find
+        (D4). Ranking now: label (``fg`` bold, line N) > badge (``fg`` bold,
+        line N+1, indented) > prose (``muted``). The badge matches the label's
+        weight rather than exceeding it and loses on POSITION, which is the
+        right ordering for a hint that qualifies a label. Its salience comes
+        from weight, case and a glyph rather than from hue — see
+        :data:`RECOMMENDED_TAG` for why colour is not available here.
 
         ``granted`` lines, not one. Where the wrap is longer than the grant the
         LAST KEPT line is marked ``…`` — the same "say that it continues"
@@ -2452,7 +2524,7 @@ class AskPickerScreen(Container):
             body.append(" " * indent, style=ground)
             room = max(1, width - indent)
             if position == 0 and self.question.recommended == index:
-                body.append(RECOMMENDED_TAG, style=ground + tag_ink)
+                body.append(RECOMMENDED_TAG, style=ground + tag_ink + Style(bold=True))
                 room -= cell_len(RECOMMENDED_TAG)
                 if text and room > 3:
                     body.append(" · ", style=ground + ink)
