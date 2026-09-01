@@ -1744,12 +1744,21 @@ class OperatorApp(App[None]):
         # composer keeps every editing key it had and nothing upstream of the
         # App eats the chord.
         #
-        # NOT `priority=True`, and the reason is the same one Esc's comment
-        # gives: a priority binding is matched BEFORE the focused widget sees
-        # the key, which would take it from an open picker. Bubbling is the
-        # precedence wanted — `Editor._on_key` has no branch for this chord, so
-        # with nothing open the key arrives here anyway (verified in a pilot
-        # with the composer focused, which is where it is pressed).
+        # NOT `priority=True`, for the same house rule Esc follows: a priority
+        # binding is dispatched ahead of the focused widget, and this app keeps
+        # composer-adjacent chords bubbling so a widget that wants one CAN
+        # claim it first.
+        #
+        # In practice nothing claims this one, and the honest statement of the
+        # behaviour is that the key fires wherever it is pressed. Driven, not
+        # assumed: with the command picker open on `/c`, `ctrl+o` copies, the
+        # picker stays open and the buffer is untouched — bubbling is not
+        # protecting the picker here, because `Editor._on_key` has no branch
+        # for this chord and the picker only intercepts the keys it routes
+        # (up/down/tab/enter/esc). That is the wanted behaviour — copying the
+        # last answer is meaningful mid-draft — and it is pinned by
+        # `test_ctrl_o_copies_without_disturbing_an_open_picker` so a future
+        # `_on_key` branch cannot silently swallow the chord.
         Binding("ctrl+o", "copy_last_message", "Copy the last agent message", show=False),
     ]
 
@@ -6929,8 +6938,8 @@ class OperatorApp(App[None]):
             message = f"copied {lines} lines"
         self.query_one(Toast).show(message, yield_to_actionable=True, owner=owner)
 
-    def _last_settled_assistant_text(self) -> str | None:
-        """The markdown source of the last SETTLED agent message, if any.
+    def _last_settled_assistant_message(self) -> tuple[str, bool] | None:
+        """The last settled agent message as ``(markdown source, truncated)``.
 
         Walks the main transcript backwards, which is what makes "last" mean
         the one the reader is looking at rather than the one the model sent
@@ -6950,11 +6959,31 @@ class OperatorApp(App[None]):
         outright, so a copy during a long turn still answers with the previous
         completed answer rather than nothing.
 
-        An empty block does not stop the walk. One is mounted for a turn that
-        streamed nothing (an abort before the first delta leaves the block
-        behind), and it is not a message — treating it as one would make
-        ``/copy`` report "nothing to copy" with a real answer sitting two rows
-        above it.
+        **A TRUNCATED message is returned, flagged, not skipped** (review round
+        1, MAJOR-1). ``is_finalized`` means IMMUTABLE, not COMPLETE — the abort
+        path freezes a half-streamed answer exactly as a clean end freezes a
+        whole one — so the two were conflated and an aborted partial was copied
+        as though it were a finished reply.
+
+        Returning it with a flag rather than skipping to the previous complete
+        message is the deliberate choice, and the reason is WHICH ONE THE USER
+        MEANT. Someone who stops a long answer and copies usually wants the
+        part they stopped — it is on screen, it is the last thing they read,
+        and it is often why they hit esc. Silently handing them an older
+        message instead would be a different document from the one they were
+        looking at, with nothing on screen saying so; that trades a payload the
+        caller can warn about for a substitution it cannot. The caller says the
+        message was cut off, so the clipboard and the user agree about what it
+        is.
+
+        An empty block does not stop the walk. This is a DEFENSIVE guard, not a
+        response to an observed mount: a block with no text is not a message, so
+        letting one terminate the walk would report "nothing to copy" with a
+        real answer sitting above it. (An abort before the first delta was
+        checked and does NOT leave a block behind — ``on_assistant_delta``
+        refuses to mount for an empty delta, and the block count is 1 before and
+        after. The guard costs one ``strip`` and removes a whole class of
+        edge case, so it stays.)
 
         The payload is ``AssistantBlock.text()``, the block's own markdown
         SOURCE. Not the flattened frame: the rendered rows carry the wrap of
@@ -6963,6 +6992,10 @@ class OperatorApp(App[None]):
         reason ``_copy_markdown`` exists for partial selections; a whole-message
         copy needs no alignment because the source IS the answer.
         """
+        # Local import ONLY to name the element type in the annotation below;
+        # `app.py` already imports this module at the top, so there is no
+        # circularity to dodge — it is kept local to match the sibling walk in
+        # `_retheme_blocks`, which imports it the same way.
         from local_operator.tui.widgets.transcript import TranscriptBlock
 
         blocks: list[TranscriptBlock] = self._transcript_view().blocks()
@@ -6973,7 +7006,7 @@ class OperatorApp(App[None]):
                 continue
             text = block.text()
             if text.strip():
-                return text
+                return (text, block.is_truncated())
         return None
 
     def _cmd_copy(self, notice: NoticeFn) -> None:
@@ -6999,15 +7032,28 @@ class OperatorApp(App[None]):
         that does not help them. ``_turn_is_live`` is still the authority on
         whether a turn is running, so the two answers cannot disagree about the
         state — only about the noun.
+
+        A TRUNCATED message (aborted, or cut off by the provider) is copied and
+        ANNOUNCED. The toast is the shared receipt and stays exactly as it is —
+        it reports the clipboard write, which really did happen and really is
+        that many lines — so the caveat goes in a notice beside it rather than
+        by rewording the one string three gestures share. Silence was the actual
+        defect: the user got a half sentence that reads as a complete short
+        answer (review round 1, MAJOR-1).
         """
-        text = self._last_settled_assistant_text()
-        if text is None:
+        found = self._last_settled_assistant_message()
+        if found is None:
             if self._turn_is_live():
                 notice("nothing to copy yet — the first answer is still coming", "warning")
             else:
                 notice("nothing to copy — no agent message in this conversation", "warning")
             return
+        text, truncated = found
         self._put_on_clipboard(text)
+        if truncated:
+            # AFTER the write, so the ordering matches what happened: the copy
+            # succeeded, and this qualifies what is now on the clipboard.
+            notice("copied — note that answer was cut off before it finished", "warning")
 
     def action_copy_last_message(self) -> None:
         """``ctrl+o`` — :meth:`_cmd_copy` without opening the command menu.
@@ -16814,6 +16860,15 @@ class OperatorApp(App[None]):
         lines.append(_key_row("option+up/down", "same as up/down (history, lists)"))
         lines.append(_key_row("shift+tab", "cycle reasoning effort"))
         lines.append(_key_row("ctrl+l", "clear the transcript (history stays)"))
+        # BOTH surfaces, which is the `shift+tab`/`/effort` pattern followed
+        # whole rather than by halves: the chord is named in `/copy`'s
+        # description AND has its own row here. A user scanning the chord block
+        # for what the keyboard can do never reads the command table's
+        # parentheticals, so advertising it only there left it undiscoverable
+        # for exactly the reader this block exists for (design round 1).
+        # Beside `ctrl+l` because both act on the transcript rather than on the
+        # composer. 64 cells composed, inside the 74 ceiling.
+        lines.append(_key_row("ctrl+o", "copy the last agent message to the clipboard"))
         lines.append(_key_row("ctrl+t", "expand or collapse the todo panel"))
         lines.append(_key_row("ctrl+g", "expand or collapse the subagent panel"))
         lines.append(_key_row("ctrl+b", "open an aside; ctrl+f forks it in"))
@@ -18975,6 +19030,16 @@ class OperatorApp(App[None]):
             block = self._streaming_block
             self._streaming_block = None
             if block is not None:
+                # MARKED before it is frozen: this branch is reached when the
+                # turn produced no authoritative text — an abort, or a provider
+                # that stopped mid-sentence — so whatever streamed is a
+                # TRUNCATED message, not a short complete one. `finalize_text`
+                # only freezes the block, and `is_finalized` therefore answers
+                # "immutable", not "the model finished". Consumers that
+                # reproduce the message away from the frame (`/copy`) need the
+                # second question, and conflating the two handed a user a half
+                # sentence indistinguishable from a whole answer.
+                block.mark_truncated()
                 block.finalize_text()
             self._refresh_working_activity()
             return

@@ -300,6 +300,16 @@ class AssistantBlock(TranscriptBlock):
         super().__init__()
         self.add_class("assistant-block")
         self._full_text: str = ""
+        #: Whether the message ENDED EARLY — the turn was aborted or the
+        #: provider stopped mid-sentence — as opposed to running to a normal
+        #: stop. Distinct from ``_finalized``, which is the FINALIZED-BLOCK
+        #: protocol's "this block is immutable" and says nothing about whether
+        #: the model finished talking: the abort path finalizes a truncated
+        #: message exactly as the clean path finalizes a whole one, so the two
+        #: questions have to be asked separately. Consumers that reproduce the
+        #: message elsewhere (``/copy``) need "is it COMPLETE", not "is it
+        #: frozen".
+        self._truncated: bool = False
         self._frozen_text: str = ""
         self._frozen_rendered: Markdown | None = None
         #: The frozen prefix's FLATTENED rows, and the width they were built
@@ -540,6 +550,26 @@ class AssistantBlock(TranscriptBlock):
         self._full_text = self._full_text or ""
         self._apply_rows(self._flat_whole())
         self.finalize()
+
+    def mark_truncated(self) -> None:
+        """This message ended early — aborted, or cut off by the provider.
+
+        Named and shaped after ``ToolCard.mark_interrupted``, which answers the
+        same question for the other kind of live row: the turn ended before the
+        thing finished, and the record has to say so rather than looking like a
+        completed one. One vocabulary for "ended early" across both block types.
+
+        The TEXT is deliberately untouched. What streamed is what the user
+        read, and rewriting or annotating it here would put words in the
+        model's row; the flag is metadata for consumers that reproduce the
+        message somewhere the frame's context is missing (``/copy``), where a
+        half sentence is indistinguishable from a short complete answer.
+        """
+        self._truncated = True
+
+    def is_truncated(self) -> bool:
+        """Whether this message ended early (see :meth:`mark_truncated`)."""
+        return self._truncated
 
     def _flat_whole(self) -> Text:
         """The whole message as one flatten, at the block's current width."""

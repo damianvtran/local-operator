@@ -31,6 +31,7 @@ from local_operator.tui.events import (
     AssistantMessageEnd,
     AssistantMessageStart,
 )
+from local_operator.tui.widgets.assistant import AssistantBlock
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.toast import Toast
 from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView, UserBlock
@@ -378,3 +379,583 @@ async def test_ctrl_o_and_the_typed_command_answer_identically_when_empty() -> N
 
     assert from_chord == from_command
     assert from_chord, "the fixture proved nothing if neither path said anything"
+
+
+# -- the write itself ---------------------------------------------------------
+#
+# Everything above reads ``app._clipboard``, the attribute Textual sets BEFORE
+# it emits anything. That attribute is true of a copy that never left the
+# process: `copy_to_clipboard` assigns it and then returns early when
+# ``_driver`` is None. So the assertions above cannot distinguish "the answer
+# reached the user's clipboard" from "the app remembered the answer", and OSC 52
+# is the whole reason this survives ssh and a multiplexer. These tests read the
+# escape sequence off the DRIVER instead, which is the byte the terminal sees.
+
+
+def _tap_driver(app: OperatorApp) -> list[str]:
+    """Record every raw driver write, so OSC 52 can be counted and decoded."""
+    sink: list[str] = []
+    driver = app._driver
+    assert driver is not None, "no driver: the pilot would prove nothing about the write"
+    original = driver.write
+
+    def write(data: str) -> None:
+        sink.append(data)
+        return original(data)
+
+    driver.write = write  # type: ignore[method-assign]
+    return sink
+
+
+def _osc52_payloads(sink: list[str]) -> list[str]:
+    """The clipboard payloads decoded back out of the OSC 52 sequences."""
+    import base64
+    import re
+
+    pattern = re.compile(r"\x1b]52;c;([A-Za-z0-9+/=]*)\a")
+    return [
+        base64.b64decode(match.group(1)).decode("utf-8")
+        for chunk in sink
+        for match in pattern.finditer(chunk)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_the_osc52_write_happens_once_and_carries_the_source() -> None:
+    """The escape sequence the terminal actually receives, decoded back.
+
+    Asserted on the DRIVER rather than on ``app._clipboard`` because that
+    attribute is set before the write and survives its absence — it is equally
+    true of a copy that never left the process.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(80, 24)) as pilot:
+        sink = _tap_driver(app)
+        await _boot(pilot, app)
+        await _stream(pilot, app, ANSWER)
+        await _submit(pilot, app, "/copy")
+        payloads = _osc52_payloads(sink)
+
+    assert payloads == [ANSWER], "one write, byte-identical to the block's source"
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_writes_no_escape_sequence_at_all() -> None:
+    """The silent half of the refusal. A notice plus an empty OSC 52 write
+    would still clobber whatever the user had on their clipboard — the copy
+    they took before asking for one that does not exist."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(80, 24)) as pilot:
+        sink = _tap_driver(app)
+        await _boot(pilot, app)
+        await _submit(pilot, app, "/copy")
+        payloads = _osc52_payloads(sink)
+
+    assert payloads == [], "nothing to copy must not overwrite the real clipboard"
+
+
+@pytest.mark.asyncio
+async def test_each_copy_writes_again_rather_than_deduplicating() -> None:
+    """A second ``/copy`` is a second write. Users re-copy after clobbering the
+    clipboard elsewhere, so an implementation that skipped the repeat because
+    the payload was unchanged would leave them with the other application's
+    text and a toast claiming otherwise."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(80, 24)) as pilot:
+        sink = _tap_driver(app)
+        await _boot(pilot, app)
+        await _stream(pilot, app, "the answer")
+        await _submit(pilot, app, "/copy")
+        await _submit(pilot, app, "/copy")
+        payloads = _osc52_payloads(sink)
+
+    assert payloads == ["the answer", "the answer"]
+
+
+# -- payload shapes the renderer would destroy --------------------------------
+
+
+@pytest.mark.asyncio
+async def test_every_markdown_construct_survives_verbatim() -> None:
+    """The frame is a lossy projection of the source, and each construct here
+    is lost in a DIFFERENT way: headings lose their ``#``, list markers are
+    repainted as bullets, table pipes become box-drawing, the blockquote bar
+    replaces ``>``. ``ANSWER`` covers bold and a fence; this covers the rest,
+    so a regression that reached for the flattened rows fails on whichever
+    construct it mangles first rather than only on the two already pinned.
+    """
+    source = (
+        "# Heading\n\n"
+        "Body with **bold**, *emphasis* and `inline code`.\n\n"
+        "- first item\n"
+        "- second item\n\n"
+        "1. numbered one\n"
+        "2. numbered two\n\n"
+        "> a blockquote line\n\n"
+        "| a | b |\n|---|---|\n| 1 | 2 |\n\n"
+        "A [link](https://example.com).\n"
+    )
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _boot(pilot, app)
+        await _stream(pilot, app, source)
+        await _submit(pilot, app, "/copy")
+        copied = app._clipboard
+
+    assert copied == source
+    for marker in ("# Heading", "- first item", "1. numbered one", "> a blockquote line"):
+        assert marker in copied, marker
+    assert "| a | b |" in copied
+    assert "[link](https://example.com)" in copied
+    # None of the furniture Rich draws for those constructs may be in the paste.
+    for glyph in "\u2500\u2502\u250c\u2510\u2514\u2518\u258c\u256d\u256f":
+        assert glyph not in copied, glyph
+
+
+@pytest.mark.asyncio
+async def test_a_message_that_is_only_a_code_fence_keeps_its_fences() -> None:
+    """The worst case for the frame: ``IslandCodeBlock`` renders a bare
+    ``Syntax``, so the fence lines are not merely restyled, they are DROPPED.
+    A message that is nothing but a fence would therefore paste as naked code
+    the receiving markdown renders as prose."""
+    source = "```python\nprint('hi')\n```\n"
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _boot(pilot, app)
+        await _stream(pilot, app, source)
+        await _submit(pilot, app, "/copy")
+        copied = app._clipboard
+
+    assert copied == source
+    assert copied.startswith("```python")
+    assert copied.rstrip("\n").endswith("```")
+
+
+@pytest.mark.asyncio
+async def test_trailing_blank_lines_reach_the_clipboard_unchanged() -> None:
+    """No stripping. The walk uses ``strip()`` only to DECIDE whether a block
+    counts as a message; a version that also copied the stripped value would
+    silently reshape a payload whose trailing structure the user may rely on
+    when pasting into a document."""
+    source = "answer body\n\n\n   \n"
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _boot(pilot, app)
+        await _stream(pilot, app, source)
+        await _submit(pilot, app, "/copy")
+        copied = app._clipboard
+        message = app.query_one(Toast).message
+
+    assert copied == source, "the payload must not be stripped on the way out"
+    assert message == f"copied {len(source.splitlines())} lines"
+
+
+@pytest.mark.asyncio
+async def test_a_very_long_answer_is_copied_whole_in_one_write() -> None:
+    """Multi-screen answers are the case the command exists for — dragging one
+    from its first row to its last is the gesture it replaces. Asserted on the
+    escape sequence so a chunked or truncated write fails here."""
+    source = "\n\n".join(f"Paragraph {index} with **bold** text." for index in range(500))
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(80, 24)) as pilot:
+        sink = _tap_driver(app)
+        await _boot(pilot, app)
+        await _stream(pilot, app, source)
+        await _submit(pilot, app, "/copy")
+        payloads = _osc52_payloads(sink)
+        message = app.query_one(Toast).message
+
+    assert payloads == [source]
+    assert message == f"copied {len(source.splitlines())} lines"
+
+
+@pytest.mark.asyncio
+async def test_unicode_and_tabs_survive_the_base64_round_trip() -> None:
+    """OSC 52 is base64 of UTF-8, so a payload that is not pure ASCII exercises
+    an encode/decode the ASCII fixtures never reach."""
+    source = "emoji \U0001f389 and CJK \u65e5\u672c\u8a9e and \u00e9 plus a tab\there\n"
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(80, 24)) as pilot:
+        sink = _tap_driver(app)
+        await _boot(pilot, app)
+        await _stream(pilot, app, source)
+        await _submit(pilot, app, "/copy")
+        payloads = _osc52_payloads(sink)
+
+    assert payloads == [source]
+
+
+# -- which block the walk lands on --------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_user_row_below_the_answer_does_not_become_the_payload() -> None:
+    """The most recent BLOCK is routinely not the most recent agent message:
+    the user speaks last every time they ask something. Copying their own
+    prompt back to them is the failure this pins."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _boot(pilot, app)
+        await _stream(pilot, app, "the agent answer")
+        await _submit(pilot, app, "a plain user prompt")
+        await _submit(pilot, app, "/copy")
+        copied = app._clipboard
+
+    assert copied == "the agent answer"
+    assert "user prompt" not in copied
+
+
+@pytest.mark.asyncio
+async def test_a_tool_card_below_the_answer_does_not_stop_the_walk() -> None:
+    """A tool card is the most recent block for the whole of any turn that
+    ends in tool work, which is most of them. It is not an ``AssistantBlock``,
+    so the walk must pass over it rather than treat it as the message."""
+    from local_operator.tui.widgets.tool_card import ToolCard
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _boot(pilot, app)
+        await _stream(pilot, app, "the agent answer before the tool")
+        app._append_block(ToolCard("call-1", "bash", {"command": "ls -la"}))
+        await pilot.pause()
+        await _submit(pilot, app, "/copy")
+        copied = app._clipboard
+
+    assert copied == "the agent answer before the tool"
+
+
+@pytest.mark.asyncio
+async def test_an_empty_block_above_the_answer_does_not_stop_the_walk() -> None:
+    """An abort before the first delta leaves a mounted block that is not a
+    message. Stopping on it would report "nothing to copy" with a real answer
+    sitting two rows up — the case the walk's ``strip()`` guard is for."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _boot(pilot, app)
+        await _stream(pilot, app, "the real answer")
+        await _stream(pilot, app, "   \n\n  \n")
+        await _submit(pilot, app, "/copy")
+        copied = app._clipboard
+
+    assert copied == "the real answer"
+
+
+@pytest.mark.asyncio
+async def test_copy_after_clear_declines_rather_than_copying_a_wiped_answer() -> None:
+    """``/clear`` empties the SCREEN, and the transcript is what this command
+    reads. So the answer that was on it is gone for copying purposes, and the
+    refusal must be the not-found one — the user is looking at an empty
+    surface, so a receipt claiming a copy would describe nothing they can see.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(80, 24)) as pilot:
+        sink = _tap_driver(app)
+        await _boot(pilot, app)
+        await _stream(pilot, app, "the answer before the clear")
+        await _submit(pilot, app, "/clear")
+        await _submit(pilot, app, "/copy")
+        payloads = _osc52_payloads(sink)
+        notices = _notices(app)
+
+    assert payloads == [], "a cleared transcript has nothing to put on the clipboard"
+    assert any("nothing to copy" in text for text in notices), notices
+    assert not any("still coming" in text for text in notices), notices
+
+
+# -- the mid-stream contract, held across a growing partial -------------------
+
+
+@pytest.mark.asyncio
+async def test_the_partial_never_reaches_the_clipboard_as_it_grows() -> None:
+    """The failure mode the guard exists for, exercised over TIME rather than
+    at a single instant: the coder's fixture copies once mid-stream, which a
+    naive implementation could pass by luck of when the delta landed. Here the
+    partial grows between two copies and the answer must not move."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(80, 24)) as pilot:
+        sink = _tap_driver(app)
+        await _boot(pilot, app)
+        await _stream(pilot, app, "the settled answer")
+        await _stream(pilot, app, "the partial so far", finish=False)
+        assert app._turn_is_live(), "the fixture must actually stage a live turn"
+        await _submit(pilot, app, "/copy")
+        app.post_message(AssistantDelta("the partial so far, now longer"))
+        await pilot.pause()
+        await _submit(pilot, app, "/copy")
+        payloads = _osc52_payloads(sink)
+
+    assert payloads == ["the settled answer", "the settled answer"]
+    assert not any("partial" in payload for payload in payloads)
+
+
+@pytest.mark.asyncio
+async def test_the_chord_refuses_mid_stream_in_the_same_words() -> None:
+    """The chord's mid-stream refusal, which the typed command's fixture pins
+    but the chord's does not: the existing parity test compares the two on an
+    IDLE empty session, so both take the not-found branch and the mid-stream
+    wording is never exercised through ``ctrl+o`` at all."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(80, 24)) as pilot:
+        sink = _tap_driver(app)
+        await _boot(pilot, app)
+        await _stream(pilot, app, "the first answer, still arriving", finish=False)
+        await pilot.press("ctrl+o")
+        await pilot.pause()
+        from_chord = _notices(app)
+        payloads = _osc52_payloads(sink)
+
+    assert payloads == []
+    assert any("nothing to copy yet" in text for text in from_chord), from_chord
+
+
+# -- the chord and the composer ----------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_ctrl_o_leaves_a_half_typed_draft_alone() -> None:
+    """The realistic press: the user is mid-sentence, wants the answer above,
+    and expects to keep typing. The existing fixture presses the chord against
+    an EMPTY composer, where a binding that cleared or replaced the draft would
+    look identical to one that did not."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _boot(pilot, app)
+        await _stream(pilot, app, "the agent answer")
+        editor = app.query_one(Editor)
+        editor.focus()
+        draft = "a half-typed thought"
+        editor.text = draft
+        editor.move_cursor(editor._end_of_buffer())
+        await pilot.pause()
+        assert app.focused is editor
+        await pilot.press("ctrl+o")
+        await pilot.pause()
+        copied = app._clipboard
+        after = editor.text
+        rows = _user_rows(app)
+
+    assert copied == "the agent answer"
+    assert after == draft, "the chord must not edit, clear or submit the draft"
+    assert rows == [], "and it must not submit it either"
+
+
+@pytest.mark.asyncio
+async def test_ctrl_o_copies_without_disturbing_an_open_picker() -> None:
+    """Why the binding is deliberately NOT ``priority=True``. A priority
+    binding is matched before the focused widget sees the key; the comment on
+    the binding claims bubbling keeps an open picker intact, and this drives
+    that claim rather than trusting it."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _boot(pilot, app)
+        await _stream(pilot, app, "the agent answer")
+        editor = app.query_one(Editor)
+        editor.focus()
+        editor.text = "/"
+        editor.move_cursor(editor._end_of_buffer())
+        editor._sync_picker()
+        await pilot.pause()
+        assert editor._picker.is_open(), "the fixture must open the picker"
+        await pilot.press("ctrl+o")
+        await pilot.pause()
+        copied = app._clipboard
+        still_open = editor._picker.is_open()
+        draft = editor.text
+
+    assert copied == "the agent answer"
+    assert still_open, "the chord must not close a picker it did not open"
+    assert draft == "/"
+
+
+# -- the follower ------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_follower_copies_locally_instead_of_routing_to_the_owner() -> None:
+    """The scope claim in ``_FRONTEND_LOCAL_SLASHES``, driven end to end.
+
+    The existing coverage for that entry is a set-membership assertion, which
+    proves the name was added and not that the routing seam honours it. Both
+    halves of this command are local — the transcript is painted here and the
+    OSC 52 goes out THIS terminal — so a routed ``/copy`` would put the answer
+    on a clipboard belonging to a host nobody is sitting at, and would emit no
+    escape sequence to the user who typed it.
+    """
+    from local_operator.session.frontend_state import (
+        FrontendSessionState,
+        _slash_capabilities,
+    )
+
+    routed: list[tuple[str, str]] = []
+
+    class RoutedSession(FakeSession):
+        frontend_state: FrontendSessionState
+
+        async def route_shared_slash(self, command: str, args: str, images=()):  # noqa: ANN001
+            routed.append((command, args))
+            return "routed"
+
+    session = RoutedSession()
+    # The owner's capability list is built by the production helper rather than
+    # hand-written, so this cannot drift from what a real owner advertises.
+    session.frontend_state = FrontendSessionState(
+        session_id=session.session_id,
+        epoch="owner",
+        slash_capabilities=_slash_capabilities(),
+    )
+
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(80, 24)) as pilot:
+        sink = _tap_driver(app)
+        await _boot(pilot, app)
+        await _stream(pilot, app, "the answer on the follower")
+        await _submit(pilot, app, "/copy")
+        payloads = _osc52_payloads(sink)
+
+    assert routed == [], "a frontend-local command must not reach the owner"
+    assert payloads == ["the answer on the follower"], "and it must write to THIS terminal"
+
+
+# -- an aborted answer is not a complete one ---------------------------------
+#
+# Review round 1, MAJOR-1. `is_finalized()` is the FINALIZED-BLOCK protocol's
+# "this block is immutable" and says nothing about whether the model finished
+# talking: `on_assistant_message_end` with empty authoritative text — the abort
+# path — calls `finalize_text()` on whatever had streamed, so a TRUNCATED answer
+# was indistinguishable from a settled one and `/copy` handed the user a half
+# sentence that reads as a short complete reply.
+#
+# The fix marks the block at the source (`AssistantBlock.mark_truncated`, set on
+# that branch) rather than pattern-matching the text downstream. These pin BOTH
+# directions, because a flag that is never cleared would silently condemn every
+# clean answer and the happy-path tests above would still pass.
+
+
+async def _abort(pilot, app: OperatorApp, partial: str) -> None:
+    """Stream ``partial``, then end the turn with no authoritative text.
+
+    That empty end IS the abort signal on this path: the controller falls back
+    to its own buffer only when the text is ``None``, so a user interrupt and a
+    provider that stops mid-sentence both arrive here as ``""``.
+    """
+    app.post_message(AssistantMessageStart())
+    await pilot.pause()
+    app.post_message(AssistantDelta(partial))
+    await pilot.pause()
+    app.post_message(AssistantMessageEnd(""))
+    await pilot.pause()
+    await pilot.pause()
+
+
+@pytest.mark.asyncio
+async def test_an_aborted_answer_is_copied_but_announced_as_cut_off() -> None:
+    """The user gets the text they were looking at AND is told it is partial.
+
+    Copying it rather than skipping back to the previous complete message is
+    deliberate: someone who stops a long answer and copies usually wants the
+    part they stopped, which is what is on screen. Substituting an older message
+    would hand them a different document with nothing saying so — the caller can
+    warn about a truncated payload, but it cannot warn about a silent swap.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _boot(pilot, app)
+        await _stream(pilot, app, "an older complete answer")
+        await _abort(pilot, app, "a partial answer still arri")
+        before = len(_notices(app))
+        await _submit(pilot, app, "/copy")
+        copied = app._clipboard
+        new_notices = _notices(app)[before:]
+
+    assert copied == "a partial answer still arri", "the user's own screen is what they meant"
+    assert any("cut off" in text for text in new_notices), new_notices
+
+
+@pytest.mark.asyncio
+async def test_the_abort_marks_the_block_rather_than_the_command_guessing() -> None:
+    """The flag is set where the abort is KNOWN, not inferred later.
+
+    Asserted on the widget because that is the contract the fix rests on: a
+    downstream heuristic (short text, no trailing period) would be a guess that
+    misfires on a genuinely terse answer, and `/copy` is only one of the
+    consumers that needs "did the model finish".
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _boot(pilot, app)
+        await _abort(pilot, app, "cut off here")
+        blocks = [
+            block
+            for block in app.query_one(TranscriptView).blocks()
+            if isinstance(block, AssistantBlock)
+        ]
+        finalized = blocks[-1].is_finalized()
+        truncated = blocks[-1].is_truncated()
+
+    # BOTH, and that is the point: the block is frozen (immutable) AND
+    # incomplete. Conflating the two is what the defect was.
+    assert finalized is True
+    assert truncated is True
+
+
+@pytest.mark.asyncio
+async def test_a_completed_answer_is_never_flagged_as_cut_off() -> None:
+    """The other direction. A flag that is set for everything is not a flag,
+    and it would put a false caveat on every ordinary copy."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _boot(pilot, app)
+        await _stream(pilot, app, ANSWER)
+        blocks = [
+            block
+            for block in app.query_one(TranscriptView).blocks()
+            if isinstance(block, AssistantBlock)
+        ]
+        truncated = blocks[-1].is_truncated()
+        before = len(_notices(app))
+        await _submit(pilot, app, "/copy")
+        new_notices = _notices(app)[before:]
+
+    assert truncated is False
+    assert new_notices == [], new_notices
+
+
+@pytest.mark.asyncio
+async def test_a_completed_answer_after_an_aborted_one_copies_clean() -> None:
+    """The recovery path a user actually walks: abort, ask again, copy.
+
+    The second answer is a different block, so the first one's flag must not
+    reach it — a per-block flag read off the wrong block would put a permanent
+    caveat on the rest of the session.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _boot(pilot, app)
+        await _abort(pilot, app, "the abandoned attempt")
+        await _stream(pilot, app, "the answer that finished")
+        before = len(_notices(app))
+        await _submit(pilot, app, "/copy")
+        copied = app._clipboard
+        new_notices = _notices(app)[before:]
+
+    assert copied == "the answer that finished"
+    assert new_notices == [], new_notices
+
+
+@pytest.mark.asyncio
+async def test_ctrl_o_reports_a_cut_off_answer_too() -> None:
+    """The chord routes to the same handler, so it inherits the caveat. Pinned
+    because a second implementation of the notice is exactly the drift the
+    shared handler exists to prevent."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _boot(pilot, app)
+        await _abort(pilot, app, "stopped part way")
+        before = len(_notices(app))
+        await pilot.press("ctrl+o")
+        await pilot.pause()
+        copied = app._clipboard
+        new_notices = _notices(app)[before:]
+
+    assert copied == "stopped part way"
+    assert any("cut off" in text for text in new_notices), new_notices
