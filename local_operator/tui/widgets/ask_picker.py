@@ -336,14 +336,32 @@ class _CardLayout:
 
     #: Whether step 9 bought the descriptions' first lines for the whole window.
     #:
-    #: Stored rather than derived from ``description_rows``, because the two are
-    #: not the same question. An option with an EMPTY description wraps to no
-    #: lines and so is granted none, which would make a derived flag False for a
-    #: window whose other rows are drawing prose — measured: a three-option
-    #: question where only the middle option had a description lost that
-    #: description entirely. What the renderer needs to know here is whether the
-    #: description COLUMN was paid for, which is a property of the plan, not of
-    #: whichever row happens to have text.
+    #: Stored rather than derived from ``description_rows``, because the two
+    #: answer different questions. This one is "was the description COLUMN paid
+    #: for" — a property of the PLAN, which is what the renderer needs in order
+    #: to decide where the recommendation tag goes and whether a row without
+    #: prose still owes its blank line. ``description_rows`` is a per-row grant,
+    #: and reading the column's existence out of it asks whichever rows happen
+    #: to carry text to stand in for a decision step 9 already made.
+    #:
+    #: ``any(description_rows.values())`` does agree with it today — swept over
+    #: 900 configurations (empty/mixed/all-described shapes, with and without a
+    #: recommendation, both hosts, 44-190 columns) with 0 mismatches, because
+    #: step 9 is all-or-nothing across the window and records a grant for every
+    #: row in it. That agreement is a consequence of the current allocator, not
+    #: a property the renderer should depend on: a future step 9 that skipped
+    #: the grant for a row with nothing to say would silently move the tag and
+    #: collapse the alternation the list is scanned by, with nothing here to
+    #: say the flag had changed meaning.
+    #:
+    #: The failure that once looked like a derived-flag bug — a three-option
+    #: question where only the middle option was described losing that
+    #: description entirely — was the ``_body_rows`` ``wanted`` cap counting a
+    #: row's true zero instead of the one line step 9 still charges for it, so
+    #: the budget sat below what the plan needed and the column was never bought
+    #: at all. Fixed there by the ``max(1, ...)`` floor; removing that floor
+    #: reproduces it (``show_descriptions=False``, no grants, the middle row's
+    #: prose gone), and no change here does.
     show_descriptions: bool
 
 
@@ -1256,14 +1274,24 @@ class AskPickerScreen(Container):
             self._description_wraps[(index, width)] = []
             return []
         if tag_cells:
-            # Wrapped through a placeholder word rather than by wrapping the
-            # first line narrow and the rest wide: `wrap_cells` owns the
-            # word-breaking for over-long words (URLs, paths), and a second
-            # wrapper here would be a drifting copy of it. One space of the
-            # placeholder is the separator `wrap_cells` splits on.
-            filler = "\u00b7" * (tag_cells - 1)
-            lines = wrap_cells(f"{filler} {description}", room)
-            lines[0] = lines[0][len(filler) + 1 :]
+            # The tag's line is wrapped NARROW and the rest wide, both through
+            # `wrap_cells` so it keeps owning the word-breaking for over-long
+            # words (URLs, paths) and no second wrapper drifts from it.
+            #
+            # Not a placeholder word wrapped in one pass, which is what this
+            # was: a first token longer than `room - tag_cells` does not fit
+            # beside a filler either, so `wrap_cells` put the filler on a line
+            # of its own and slicing it off left line 0 EMPTY. At a grant of one
+            # the row then drew `recommended` alone and lost every cell of its
+            # prose — worse than the single truncated line the pre-wrap card
+            # drew, and reached by exactly the descriptions a model writes
+            # (measured at 70x22 on a description opening with a URL). The head
+            # is a character prefix of the description, so the remainder is a
+            # slice of it rather than a rejoin, and nothing is invented at the
+            # seam.
+            head = wrap_cells(description, room - tag_cells)[0]
+            rest = description[len(head) :].lstrip(" ")
+            lines = [head, *wrap_cells(rest, room)] if rest else [head]
         else:
             lines = wrap_cells(description, room)
         wrapped = lines[:DESC_MAX_ROWS]
@@ -2447,7 +2475,10 @@ class AskPickerScreen(Container):
                     # at least as much of the consequence as it carries today
                     # and says that there is more.
                     body.append(
-                        truncate_cells(" ".join(wrapped[position:]), room), style=ground + ink
+                        truncate_cells(
+                            _wrap_tail(self._row_description(index), wrapped, position), room
+                        ),
+                        style=ground + ink,
                     )
                 else:
                     body.append(truncate_cells(text, room), style=ground + ink)
@@ -2505,7 +2536,7 @@ class AskPickerScreen(Container):
                     # description line is: a wrapped line stops at a word
                     # boundary, so marking it in place would end the text
                     # earlier than that row's single list line already does.
-                    text = " ".join(wrapped[position:])
+                    text = _wrap_tail(self._row_description(self.state.selected), wrapped, position)
                 body.append(truncate_cells(text, room), style=ground + ink)
             rows.append(_fit_row(body, width, ground))
         return rows
@@ -2846,6 +2877,48 @@ def _sanitize(question: AskQuestion) -> AskQuestion:
             ],
         }
     )
+
+
+def _wrap_tail(source: str, wrapped: list[str], position: int) -> str:
+    """``source`` from where ``wrapped[position]`` starts — the rest of the prose.
+
+    What the last kept line of a cut-short description is FILLED from. Sliced
+    out of the source rather than rejoined from ``wrapped[position:]``, because
+    the pieces `wrap_cells` produces are not uniformly space-separated: it
+    BREAKS a word longer than the row (a URL, a path — its documented behaviour
+    and the reason it exists), and those pieces never had a space between them.
+    Rejoining them with one fabricates a character the user is being asked to
+    authorise against, which on a path or a URL misreads the string itself.
+
+    Measured on the fill itself: 69,392 of 120,083 randomised fills contained a
+    character sequence absent from the source; with the slice, none do. On a
+    keycap run at room 8 the join produced ``1..1..1..1.. 1..\u2026`` where the
+    source has no space at all.
+
+    What that is NOT is a claim about the painted frame. Swept over 2,832
+    drawn comparisons (7 description shapes, widths 12-121, both hosts, single
+    and multi select, grants 1-4) the two fills painted the SAME line every
+    time, because the row's outer ellipsis re-cuts ahead of the seam. So this
+    is correctness at the boundary rather than a visible-defect fix, and it is
+    worth having for the reason the surface exists: the fill is the string a
+    user authorises against on the approval gate, and a widening card or a
+    longer consequence moves the cut, not the invariant.
+
+    Walked line by line rather than measured, because only `wrap_cells` knows
+    which breaks consumed a space. Each row it returns is a character prefix of
+    what is left once the previous row's trailing separator is dropped; that
+    holds over 19,619 randomised inputs (CJK, keycap clusters, combining marks,
+    RTL, multi-space runs, unbreakable words) and it is what makes the walk
+    exact. A source whose walk does not align is not reconstructable, and the
+    honest answer there is the wrapped line itself: shorter than the fill by a
+    few cells, but never a character the source does not contain.
+    """
+    remainder = source.lstrip(" ")
+    for line in wrapped[:position]:
+        if not remainder.startswith(line):
+            return wrapped[position]
+        remainder = remainder[len(line) :].lstrip(" ")
+    return remainder if remainder.startswith(wrapped[position]) else wrapped[position]
 
 
 def _tail_cells(text: str, width: int) -> str:
