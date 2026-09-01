@@ -53,6 +53,7 @@ from lop_osworld_v2_adapter.observation import ObservationBuilder
 from lop_osworld_v2_adapter.providers.base import EnvironmentProvider
 
 from local_operator.evaluation.adapters.api import (
+    ADAPTER_SCHEMA_VERSION,
     AckResult,
     AdapterCapabilities,
     AdapterMetadata,
@@ -105,14 +106,12 @@ class OSWorldV2Adapter:
         self,
         *,
         provider_factory: ProviderFactory | None = None,
-        artifact_root: Path | None = None,
         workspace_root: Path | None = None,
     ) -> None:
         # ``provider_factory`` is injectable so tests drive the real adapter
         # against FakeProvider in-process. When None — the production path —
         # PR 2's AWS factory is used; PR 1 raises if reached without one.
         self._provider_factory = provider_factory
-        self._artifact_root_override = artifact_root
         # The workspace root is where task modules live (``tasks/<id>.py``).
         # Defaulted to the worker's cwd, which the supervisor sets to the
         # workspace (supervisor.py:270).
@@ -124,7 +123,12 @@ class OSWorldV2Adapter:
             entry_point=_ENTRY_POINT,
             package_digest=self._package_digest(),
             release_digest=self._release_digest(),
-            schema_version="1.0",
+            # Tracked from the harness constant, never restated as a literal: a
+            # literal here would keep validating against an older wire shape
+            # after a protocol bump, and the handshake's exact-pin check would
+            # then fail as an opaque selector mismatch rather than naming the
+            # version drift.
+            schema_version=ADAPTER_SCHEMA_VERSION,
             capabilities=AdapterCapabilities(
                 routes=("computer",),
                 ask_user=True,  # honest ONLY because V2 has user_simulator
@@ -277,7 +281,14 @@ class OSWorldV2Adapter:
 
         # Capture observation 0 eagerly so the runner's immediately-following
         # observe is free and the sequence counter starts from a known state.
-        self._observation_builder = ObservationBuilder(self._artifact_root())
+        #
+        # The root arrives as a validated RPC field (schema 1.1), which is the
+        # worker's ONLY way to learn it: the supervisor builds the child
+        # environment from a closed allowlist (locale and temp), so nothing
+        # ambient carries it. The parent creates the directory and refuses a
+        # reset whose root differs from the one its verifier reads, so writing
+        # exactly here is what makes a frame verifiable rather than a guess.
+        self._observation_builder = ObservationBuilder(Path(params.artifact_root))
         raw = await provider.observe()
         self._sequence = 0
         self._current_observation = self._observation_builder.build(
@@ -321,16 +332,6 @@ class OSWorldV2Adapter:
                 "workspace-declared fake provider"
             )
         raise AdapterStateError(f"unknown provider selection {kind!r}")
-
-    def _artifact_root(self) -> Path:
-        if self._artifact_root_override is not None:
-            return self._artifact_root_override
-        # The worker's artifact root: the host makes it available as an env
-        # var on the RPC path; in-process tests inject it via the constructor.
-        env = os.environ.get("LO_ADAPTER_ARTIFACT_ROOT")
-        if env:
-            return Path(env)
-        return self._workspace_root / "artifacts"
 
     # ------------------------------------------------------------------
     # observe / execute
