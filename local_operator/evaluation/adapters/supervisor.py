@@ -627,6 +627,15 @@ class VerifiedAdapterSession:
             self.verifier.episode_id,
         ):
             raise SupervisionError("reset belongs to another task or episode")
+        # The root announced to the worker and the root the verifier reads from
+        # are the same authorization, so they are checked against each other
+        # rather than trusted to have been populated consistently. A caller that
+        # points the adapter at one directory while verifying another would get
+        # silent "artifact path is unsafe" failures at the first frame; worse, a
+        # root that merely resolves to the verifier's would make the mismatch
+        # depend on symlink state at call time.
+        if params.artifact_root != str(self.verifier.artifact_root):
+            raise SupervisionError("reset artifact root differs from the verified root")
         self._ensure_usable()
         ack = await self._mutating_call(
             "reset_start",
@@ -785,7 +794,23 @@ def verify_artifact(root: Path, reference: ArtifactRef) -> bytes:
     """Read one content-addressed artifact without following attacker links."""
 
     name = reference.sha256
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    # O_NONBLOCK is a LIVENESS guard, not a performance hint. The S_ISREG check
+    # below sits BEHIND this open, so without it a worker that publishes a FIFO
+    # under an honest-looking digest name blocks the caller inside the kernel
+    # until a writer appears -- which never happens. That wedges the parent
+    # permanently: verify_artifact runs synchronously on the event-loop thread
+    # (episode._record_observation, HostVerifier._validate_observation_content)
+    # and AFTER the mutating call's wait_for has already closed, so no timeout,
+    # poison, rescue, or process-group teardown can fire. On a regular file
+    # O_NONBLOCK is a POSIX no-op -- same S_ISREG, size, and bytes -- so the
+    # FIFO simply returns immediately and falls into the existing
+    # "artifact is not a matching regular file" refusal.
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
     root_fd = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     try:
         fd = os.open(name, flags, dir_fd=root_fd)
