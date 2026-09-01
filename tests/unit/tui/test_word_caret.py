@@ -20,12 +20,27 @@ bytes            parses to                  terminals
 ``\\x1b\\x1b[D``   ``escape`` THEN ``left``   iTerm2 "Esc+", Terminal.app "Esc+",
                                             and any terminal once
                                             ``TEXTUAL_DISABLE_KITTY_KEY`` is set
+``\\x1b[98;3u``   ``alt+b``                  Ghostty on its DEFAULT settings,
+                                            once the kitty keyboard protocol
+                                            is negotiated
 ===============  =========================  =====================================
 
-The third row is the defect this change fixes: the composer used to run its
+The third row is the defect #370/#375 fixed: the composer used to run its
 escape action (post ``StopRequested`` — abort the agent's turn) and then move
 the caret one character, so ⌥← to fix a typo killed the running turn. The
 regression guard is ``stop_requested`` staying empty on those rows.
+
+The fourth row is issue #518, and it is not a terminal preference like the
+others — it is Ghostty's factory default. Ghostty ships
+``keybind = alt+arrow_left=esc:b``, rewriting ⌥← into readline's meta-b and
+DESTROYING the fact that it was an arrow before any application sees the key.
+Under the legacy encoding that damage is invisible here, because the resulting
+``\\x1bb`` happens to parse to ``ctrl+left``, which ``TextArea`` binds (row 2).
+Textual negotiates the kitty protocol, though, and the same chord then arrives
+as ``\\x1b[98;3u`` → ``alt+b``, which nothing bound — so word motion silently
+did nothing on a stock Ghostty. Note ⌥⇧← was unaffected (Ghostty has no
+``alt+shift+arrow`` default to corrupt), which is why selection-by-word worked
+while movement-by-word did not.
 """
 
 from __future__ import annotations
@@ -129,8 +144,9 @@ def _watch_stops(app: OperatorApp) -> list[StopRequested]:
         ("\x1b[1;3D", DELTA_START, "Ghostty / kitty / WezTerm / iTerm2 CSI mode"),
         ("\x1bb", DELTA_START, "iTerm2 default preset / Terminal.app Option-as-Meta"),
         ("\x1b\x1b[D", DELTA_START, "iTerm2 Esc+ / Terminal.app Esc+"),
+        ("\x1b[98;3u", DELTA_START, "Ghostty default esc:b under the kitty protocol"),
     ],
-    ids=["csi-modifier-3", "readline-meta", "escape-prefixed"],
+    ids=["csi-modifier-3", "readline-meta", "escape-prefixed", "kitty-csi-u-meta"],
 )
 @pytest.mark.asyncio
 async def test_option_left_moves_one_word_on_every_encoding(
@@ -160,8 +176,9 @@ async def test_option_left_moves_one_word_on_every_encoding(
         ("\x1b[1;3C", "Ghostty / kitty / WezTerm / iTerm2 CSI mode"),
         ("\x1bf", "iTerm2 default preset / Terminal.app Option-as-Meta"),
         ("\x1b\x1b[C", "iTerm2 Esc+ / Terminal.app Esc+"),
+        ("\x1b[102;3u", "Ghostty default esc:f under the kitty protocol"),
     ],
-    ids=["csi-modifier-3", "readline-meta", "escape-prefixed"],
+    ids=["csi-modifier-3", "readline-meta", "escape-prefixed", "kitty-csi-u-meta"],
 )
 @pytest.mark.asyncio
 async def test_option_right_moves_one_word_on_every_encoding(raw: str, terminals: str) -> None:
