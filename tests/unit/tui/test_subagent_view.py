@@ -1220,13 +1220,21 @@ async def test_history_arriving_at_the_top_loads_one_page_then_stops(tmp_path) -
     # lands, so the ID set cannot see it. Peak tracking supplies the travel
     # audit: the highest offset observed since the previous read is how far
     # the reader actually went between pages.
-    reads = {"n": 0, "no_travel": 0, "first": True, "peak": 0.0}
+    # The verdict is evaluated AFTER the drag, not at read time: a page that
+    # mounts displaces the reader DOWN only once its insert settles, which can
+    # land a frame after the read that caused it. Judging "no travel" at read
+    # time therefore called a legitimate mount-displacement "no travel" — a
+    # measurement race, not a cascade (verified by logging: y=101 was observed
+    # between two reads the audit had flagged). Each read records the peak
+    # since the PREVIOUS read, extended forward to the next observation, and
+    # the assertion judges the completed timeline.
+    reads = {"n": 0, "first": True, "peaks": [], "peak": 0.0}
     original_read = subagent_view.read_transcript_page
     real_scroll = SubagentView._scroll_changed
 
     def counting_read(*args: Any, **kwargs: Any) -> Any:
-        if not reads["first"] and reads["peak"] <= 1:
-            reads["no_travel"] += 1
+        if not reads["first"]:
+            reads["peaks"].append(reads["peak"])
         reads["first"] = False
         reads["n"] += 1
         reads["peak"] = 0.0
@@ -1236,6 +1244,11 @@ async def test_history_arriving_at_the_top_loads_one_page_then_stops(tmp_path) -
         reads["peak"] = max(reads["peak"], self._body.scroll_y)
         real_scroll(self, *args)
 
+    # BOTH patches are restored in the finally below. A module-attribute
+    # swap that leaks contaminates every later test in the same xdist worker:
+    # `read_transcript_page` is module state, not instance state, so a leaked
+    # counter keeps wrapping (and keeps mutating the shared `reads` dict) for
+    # the rest of the worker's lifetime (review round 2, M5).
     subagent_view.read_transcript_page = counting_read
     SubagentView._scroll_changed = auditing_scroll  # type: ignore[method-assign]
     try:
@@ -1288,16 +1301,29 @@ async def test_history_arriving_at_the_top_loads_one_page_then_stops(tmp_path) -
                             delta_y=-2,
                         )
                     )
+                # The audit must sample the hold too: a page mounted during
+                # the hold displaces the reader DOWN, and that displacement is
+                # exactly the travel that legitimises the next page. Sampling
+                # only the burst made a mount-during-hold look like no travel
+                # at all — a measurement gap, not a cascade.
+                reads["peak"] = max(reads["peak"], view._body.scroll_y)
                 await pilot.pause()
             await _wait_history(pilot, view)
             await _wait_geometry_settled(pilot, view._body)
+            # The interval of the LAST read extends forward to here: its
+            # mount's displacement is observed by the settle, not by the drag.
+            reads["peaks"].append(reads["peak"])
 
             # The contract: pages may load during a long drag (each genuine
             # re-arrival at the top earns one), but NEVER without the reader
             # having travelled away from the top since the previous page.
-            assert reads["no_travel"] == 0, (
-                f"{reads['no_travel']} of {reads['n']} pages loaded with no "
-                "travel away from the top rows — the level-trigger cascade"
+            # `peaks[i]` is the highest offset observed between read i and
+            # read i+1 (the first entry is the pre-first-read interval).
+            no_travel = sum(1 for peak in reads["peaks"] if peak <= 1)
+            assert no_travel == 0, (
+                f"{no_travel} of {reads['n']} pages loaded with no travel "
+                "away from the top rows — the level-trigger cascade; "
+                f"peaks={reads['peaks']}"
             )
             assert reads["n"] >= 1, "the drag reached the top and loaded a page"
 
@@ -1320,6 +1346,7 @@ async def test_history_arriving_at_the_top_loads_one_page_then_stops(tmp_path) -
                 assert len(view._history_ids) > before
     finally:
         SubagentView._scroll_changed = real_scroll  # type: ignore[method-assign]
+        subagent_view.read_transcript_page = original_read
 
 
 @pytest.mark.asyncio

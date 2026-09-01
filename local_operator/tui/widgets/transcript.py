@@ -32,7 +32,7 @@ import os
 import time
 import unicodedata
 from contextlib import contextmanager
-from typing import Callable, ClassVar, Iterator, Literal, Sequence
+from typing import Any, Callable, ClassVar, Iterator, Literal, Protocol, Sequence
 
 from rich.cells import cell_len
 from rich.console import Console, RenderableType
@@ -62,6 +62,14 @@ SPINE_INDENT = 2
 #: `offset == max_scroll_y` false at a place the reader cannot tell apart from
 #: the end. Two rows is the smallest tolerance that survives both.
 TAIL_TOLERANCE_ROWS = 2
+
+
+#: The signature ``set_on_user_scroll`` installs. A Protocol rather than
+#: ``Callable[..., None]`` so the ``continuous`` keyword is CHECKED: the
+#: ellipsis form erased the parameter contract entirely, which is how a
+#: docstring came to name a parameter that did not exist (review round 2, N2).
+class UserScrollHook(Protocol):
+    def __call__(self, *_args: Any, continuous: bool = False) -> None: ...
 
 
 class TailAnchor:
@@ -2206,10 +2214,12 @@ class TranscriptView(ScrollableContainer):
         #: watch on the offset would miss the one gesture that most clearly
         #: means "show me the start". The hook is the same shape as
         #: ``on_clear``: optional, app-owned, never required for the widget.
-        #: It receives ``discrete`` — True for a keystroke, False for a
-        #: continuous gesture — because the page-back latch re-arms on a
-        #: deliberate keypress at the top but not on a clamped wheel notch.
-        self._on_user_scroll: Callable[..., None] | None = None
+        #: It receives ``continuous`` — True for a free-running gesture
+        #: (wheel, scrollbar drag), False for a discrete act (keystroke,
+        #: affordance click, explicit caller) — because the page-back latch
+        #: re-arms on a deliberate act at the top but not on a wheel notch
+        #: clamped against it.
+        self._on_user_scroll: UserScrollHook | None = None
         # The ledger's shared name column, recomputed lazily. Cached because it
         # is read once per card per repaint and only changes when the set of tool
         # names on screen does.
@@ -2263,7 +2273,7 @@ class TranscriptView(ScrollableContainer):
         """Install the hook fired after every :meth:`clear_blocks`."""
         self._on_clear = hook
 
-    def set_on_user_scroll(self, hook: Callable[..., None] | None) -> None:
+    def set_on_user_scroll(self, hook: UserScrollHook | None) -> None:
         """Install the hook fired from every user-initiated scroll.
 
         Distinct from watching ``scroll_y``: a Home press while already at the
@@ -2853,7 +2863,13 @@ class TranscriptView(ScrollableContainer):
             # gate open — see `OperatorApp._check_resume_page`), so the many
             # firings of one animated gesture collapse into ONE page (M1/U1).
             if self._on_user_scroll is not None:
-                self._on_user_scroll()
+                # NOT the re-arm: the watch reports OFFSET MOTION, which is
+                # travel evidence rather than a gesture, and it fires for the
+                # clamped 1->0 step of a wheel already pinned at the top.
+                # Passing continuous=True keeps the page-back latch's re-arm
+                # rule intact (a clamped notch earns nothing) while still
+                # scheduling the at-rest check that lands the gesture.
+                self._on_user_scroll(continuous=True)
 
     def _resync_tail_anchor(self) -> None:
         # Not while the viewport is still travelling: an animated page-up is

@@ -200,3 +200,59 @@ async def test_resume_latch_ignores_watch_firings_while_parked_in_zone() -> None
         for _ in range(10):
             app._check_resume_page()
         assert len(app._resume_pending_head) == before - 2 * RESUME_PAGE_MESSAGES
+
+
+@pytest.mark.asyncio
+async def test_finish_history_mount_refuses_a_stale_generation(tmp_path) -> None:
+    """A settle callback landing after a retarget must not touch the new job.
+
+    Review round 2, M4: `_finish_history_mount` was the only history
+    completion callback without a generation guard. A page's insert-settle can
+    land after `show()` has retargeted the page to another job (the generation
+    bumped, that job's own initial read in flight); an unguarded clear took
+    down the NEW job's `_history_loading` mid-read — hint stuck on
+    "loading earlier…", latch un-suppressed. Every sibling completion path
+    (`_apply_history_page`, `_finish_history_error`,
+    `_finish_history_unavailable`) guards the same way; this pins the fourth.
+    """
+    transcript = Transcript(tmp_path / "child")
+    for index in range(230):
+        await transcript.append_message(Message.assistant(f"durable {index}"))
+    job = _job_with([], status="completed")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    session._subagent_comms = type(
+        "Comms", (), {"session_dir_of": lambda self, _job_id: transcript.directory}
+    )()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(90, 28)) as pilot:
+        view = await _open(pilot, app, job)
+        await _wait_history(pilot, view)
+        stale = view._history_generation
+        # Retarget to a different job: bumps the generation and starts that
+        # job's own initial read, so `_history_loading` is legitimately True.
+        other = Transcript(tmp_path / "other")
+        for index in range(230):
+            await other.append_message(Message.assistant(f"other {index}"))
+        view.show(
+            job_id="job-other",
+            label="other",
+            status="running",
+            queued=False,
+            elapsed="1s",
+            outcome="",
+            events=[],
+            transcript_directory=str(other.directory),
+        )
+        await _wait_history(pilot, view)
+        assert view._history_generation != stale
+        # Represent the mid-read state the guard exists to protect. The real
+        # window is thread-scheduling-wide and completes in microseconds, so
+        # the test holds the flag open exactly as a slow disk read would (the
+        # same technique the in-flight latch test above uses).
+        view._history_loading = True
+        # The stale settle lands NOW, after the retarget.
+        view._finish_history_mount(stale)
+        await pilot.pause()
+        assert view._history_loading, "a stale settle must not clear the new job's in-flight read"
+        assert "loading earlier" in view._history_state_text()

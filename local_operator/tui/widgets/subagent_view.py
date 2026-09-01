@@ -2143,6 +2143,10 @@ class SubagentView(Vertical):
             # prepend-only fast path would leave stale blocks mounted beside
             # the replacement even though the model is already canonical.
             prepend=not initial and not page.reconciled and bool(added_rows),
+            # Only the prepend path schedules the settle callback; carrying the
+            # generation lets that callback refuse to act on a page that has
+            # since been retargeted away (see `_finish_history_mount`).
+            generation=generation,
         )
         if initial:
             self._settle_initial_landing()
@@ -2190,7 +2194,11 @@ class SubagentView(Vertical):
         ]
 
     def _reconcile_current_body(
-        self, *, anchor: float | None = None, prepend: bool = False
+        self,
+        *,
+        anchor: float | None = None,
+        prepend: bool = False,
+        generation: int | None = None,
     ) -> None:
         entries = _mark_consecutive_notices(self._chronological_entries())
         tail = self._tail_entry(self._status == "gone", "")
@@ -2248,7 +2256,25 @@ class SubagentView(Vertical):
                     prefix,
                     new_blocks,
                     anchor_offset=anchor,
-                    on_settled=self._finish_history_mount,
+                    # Bound to the generation that scheduled it: a settle
+                    # callback can land after the page has been RETARGETED to
+                    # another job, and an unguarded clear would take down the
+                    # NEW job's `_history_loading` mid-read (every sibling
+                    # completion path guards the same way).
+                    # `generation` is threaded down from `_apply_history_page`
+                    # (None on every non-prepend caller, which never schedule
+                    # this callback). Late-binding is deliberate: the settle
+                    # can land after a retarget, and the guard inside
+                    # `_finish_history_mount` must compare against the
+                    # generation that SCHEDULED the insert, not whatever the
+                    # page is showing by then.
+                    on_settled=(
+                        lambda: (
+                            self._finish_history_mount(generation)
+                            if generation is not None
+                            else None
+                        )
+                    ),
                 )
                 # Re-raised for the duration of the insert: see the comment
                 # above. Cleared again by `_finish_history_mount`.
@@ -2271,7 +2297,7 @@ class SubagentView(Vertical):
         self._pending = entries
         self._sync_body(entries, self._pending_head)
 
-    def _finish_history_mount(self) -> None:
+    def _finish_history_mount(self, generation: int) -> None:
         """The prepend path's settle callback: the page is fully mounted.
 
         `_apply_history_page` clears `_history_loading` synchronously, which
@@ -2291,7 +2317,16 @@ class SubagentView(Vertical):
         in flight, so a reader (and a test asserting the rendered page) saw a
         walk that never finished. Painting here makes the settled text the
         last word regardless of repaint order.
+
+        Generation-guarded like every other history completion path: this is
+        a deferred callback, so it can land after `show()` has retargeted the
+        page to a DIFFERENT job (`_reset_history` bumped the generation and
+        started that job's own initial read). Clearing unguarded would take
+        the new job's `_history_loading` down mid-read, leaving its hint on
+        "loading earlier…" forever and its latch un-suppressed.
         """
+        if generation != self._history_generation:
+            return
         self._history_loading = False
         self._paint_history_state()
 
