@@ -13,28 +13,88 @@ and the provider that produced them stay in the same module.
 from __future__ import annotations
 
 import json
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Sequence, get_args
 
 from local_operator.evaluation.evidence.models import RouteIdentity
-from local_operator.evaluation.protocol import ActionBatch, Observation
+from local_operator.evaluation.protocol import ActionBatch, ComputerAction, Observation
 from local_operator.evaluation.runner.model import ModelDecision, ModelUsage
 
-_SYSTEM_PROMPT = """You are operating a computer to complete one task.
+# The batch wire version this harness speaks; pinned here rather than taken
+# from a model reply.
+PROTOCOL_VERSION = "1.0"
 
-Reply with a single JSON object and nothing else:
 
-  {"actions": [ ... ]}
+def _action_schema_lines() -> list[str]:
+    """Describe every action kind by reading the protocol models themselves.
 
-Each action is one of the protocol's action objects and must carry the
-`observation_id` of the observation you are looking at right now.
+    A parse failure is TERMINAL for an episode -- there is no retry and no
+    repair -- so a prompt that under-specifies the wire shape is a correctness
+    defect, not prompt polish. Deriving the text from ``ComputerAction`` means a
+    new action kind or a changed literal cannot silently drift out of the
+    instructions the model is given.
+    """
 
-Two actions end your turn in a special way:
+    lines: list[str] = []
+    for action in get_args(get_args(ComputerAction)[0]):
+        fields: list[str] = []
+        for name, field in action.model_fields.items():
+            if name in ("kind", "observation_id"):
+                continue
+            choices = get_args(field.annotation)
+            if choices and all(isinstance(choice, str) for choice in choices):
+                rendered = "|".join(str(choice) for choice in choices)
+            else:
+                rendered = _type_name(field.annotation)
+            optional = "" if field.is_required() else " (optional)"
+            fields.append(f"{name}: {rendered}{optional}")
+        kind = action.model_fields["kind"].default
+        detail = ", ".join(fields) if fields else "no further fields"
+        lines.append(f'  {{"kind": "{kind}", "observation_id": "<id>", {detail}}}')
+    return lines
 
-* `finish` -- you believe the task is complete. The episode is scored.
-* `ask_user` -- you need a human answer. THE EPISODE PAUSES: a person answers
+
+def _type_name(annotation: Any) -> str:
+    name = getattr(annotation, "__name__", None)
+    if name in ("int", "str", "bool", "float"):
+        return name
+    args = [arg for arg in get_args(annotation) if arg is not type(None)]
+    if len(args) == 1:
+        return _type_name(args[0])
+    return "value"
+
+
+def build_system_prompt() -> str:
+    """Compose the episode system prompt around the live protocol schema."""
+
+    return f"""You are operating a computer to complete one task.
+
+Reply with a single JSON object and nothing else, with no prose and no code
+fence:
+
+  {{"actions": [ ... ]}}
+
+Every action is an object whose type is given by the key "kind" (NOT "type"),
+and every action must carry the "observation_id" of the observation you are
+looking at right now. These are the only permitted shapes:
+
+{chr(10).join(_action_schema_lines())}
+
+Where a field lists alternatives separated by "|", you must use exactly one of
+those literal values.
+
+Two actions end your turn in a special way, and each must be the ONLY action in
+its batch:
+
+* "finish" -- you believe the task is done. The episode is then scored. Its
+  "status" must be one of done, failed, or infeasible, and a "reason" is
+  required.
+* "ask_user" -- you need a human answer. THE EPISODE PAUSES: a person answers
   your question, and the next observation you see is the state after that
   answer was delivered. Do not ask a question you can resolve by acting.
 """
+
+
+_SYSTEM_PROMPT = build_system_prompt()
 
 
 class DecisionParseError(ValueError):
@@ -73,10 +133,12 @@ def parse_decision(
     try:
         batch = ActionBatch.model_validate(
             {
+                # The wire version is pinned by the harness, never by the model:
+                # a reply cannot select which protocol it is validated against.
+                "protocol_version": PROTOCOL_VERSION,
                 "task_id": observation.task_id,
                 "episode_id": observation.episode_id,
                 "observation_id": observation.observation_id,
-                "observation_sequence": observation.sequence,
                 "actions": actions,
             },
             strict=True,
@@ -143,21 +205,23 @@ class ProviderModelClient:
         )
         text = ""
         usage = ModelUsage()
+        cost_micros = 0
         stop_reason = "stop"
         async for event in self._stream_fn(request, None):
             if event.type == "text_delta":
                 text += event.delta
             elif event.type == "usage":
-                usage = _usage_from(event.usage)
+                usage, cost_micros = _usage_from(event.usage)
             elif event.type == "end":
                 stop_reason = event.stop_reason or "stop"
                 if event.usage is not None:
-                    usage = _usage_from(event.usage)
+                    usage, cost_micros = _usage_from(event.usage)
         return parse_decision(
             text.strip(),
             observation,
             route=self._route,
             usage=usage,
+            cost_micros=cost_micros,
             stop_reason=stop_reason,
         )
 
@@ -200,18 +264,28 @@ def _render(observation: Observation, transcript: Sequence[Observation]) -> str:
     return "\n".join(lines)
 
 
-def _usage_from(usage: Any) -> ModelUsage:
-    """Copy provider counts, clamped to the non-negative evidence range.
+def _usage_from(usage: Any) -> tuple[ModelUsage, int]:
+    """Copy provider counts and cost, clamped to the non-negative evidence range.
 
     ``reasoning_tokens`` is a SUBSET of ``output_tokens`` in the harness's
     accounting, and the evidence payloads treat it the same way, so it is
     carried across unchanged rather than added on top.
+
+    ``usd_cost`` is the provider's OWN billing figure, which the harness treats
+    as ground truth over any token-times-rate reconstruction. Dropping it made
+    every reconciliation report a free episode. An unreported cost stays 0 here
+    because the evidence payload has no "unknown" encoding -- the distinction
+    upstream between ``None`` and a real ``0.0`` cannot be represented, and
+    inventing a number would be worse than under-reporting one.
     """
 
-    return ModelUsage(
+    model_usage = ModelUsage(
         input_tokens=max(0, int(usage.input_tokens or 0)),
         output_tokens=max(0, int(usage.output_tokens or 0)),
         reasoning_tokens=max(0, int(usage.reasoning_tokens or 0)),
         cache_read_tokens=max(0, int(usage.cache_read_tokens or 0)),
         cache_write_tokens=max(0, int(usage.cache_write_tokens or 0)),
     )
+    cost = getattr(usage, "usd_cost", None)
+    cost_micros = 0 if cost is None else max(0, round(float(cost) * 1_000_000))
+    return model_usage, cost_micros
