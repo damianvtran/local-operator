@@ -74,7 +74,7 @@ def create():
             entry_point="tiny_e2e_adapter:create",
             package_digest=distribution_digest(installed),
             release_digest="%s",
-            schema_version="1.0",
+            schema_version="1.1",
             capabilities=AdapterCapabilities(
                 routes=("computer",), ask_user=False, scoring=False
             ),
@@ -194,7 +194,7 @@ async def test_supervisor_launch_completes_real_handshake_and_reaps(
         json.dumps({"release_digest": RELEASE_DIGEST}, separators=(",", ":"), sort_keys=True)
     )
     selector = AdapterSelector(
-        schema_version="1.0",
+        schema_version="1.1",
         adapter_id="tiny-e2e",
         distribution="tiny-e2e-adapter",
         version="1.0",

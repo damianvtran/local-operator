@@ -627,6 +627,15 @@ class VerifiedAdapterSession:
             self.verifier.episode_id,
         ):
             raise SupervisionError("reset belongs to another task or episode")
+        # The root announced to the worker and the root the verifier reads from
+        # are the same authorization, so they are checked against each other
+        # rather than trusted to have been populated consistently. A caller that
+        # points the adapter at one directory while verifying another would get
+        # silent "artifact path is unsafe" failures at the first frame; worse, a
+        # root that merely resolves to the verifier's would make the mismatch
+        # depend on symlink state at call time.
+        if params.artifact_root != str(self.verifier.artifact_root):
+            raise SupervisionError("reset artifact root differs from the verified root")
         self._ensure_usable()
         ack = await self._mutating_call(
             "reset_start",
