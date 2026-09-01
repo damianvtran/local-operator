@@ -36,12 +36,12 @@ from local_operator.harness.types import (
 )
 from local_operator.paths import CONFIG_DIR_ENV
 from local_operator.resume import TRANSCRIPT_NAME
+from local_operator.tui import app as app_module
 from local_operator.tui.app import (
     DOUBLE_INTERRUPT_WINDOW_S,
     DOUBLE_STOP_WINDOW_S,
     OperatorApp,
 )
-from local_operator.tui import app as app_module
 from local_operator.tui.events import (
     AssistantDelta,
     AssistantMessageEnd,
