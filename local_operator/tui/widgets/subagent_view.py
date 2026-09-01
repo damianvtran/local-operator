@@ -2604,8 +2604,32 @@ class SubagentView(Vertical):
                 self._landing_snap_pending = False
             return
         offset = body.scroll_offset.y
+        blocks = body.blocks()
+        # Nothing may be decided from a layout the offset has outrun. The
+        # container republishes ``virtual_size`` (and so ``max_scroll_y``, and
+        # so the followed offset) before every child's ``virtual_region`` has
+        # been reassigned, so there is a window where the offset addresses a
+        # row that no block claims yet. Searching in that window matches
+        # nothing, falls through to ``target == offset``, and spends the
+        # one-shot on a landing it never actually inspected.
+        #
+        # Observed on CI four times with identical numbers — ``offset=28,
+        # owner_top=25, max=28`` — and reproduced locally under xdist with the
+        # trace ``snap-post 28 28 37 following=True pending=False``: the
+        # deciding call saw the FINAL extent (37) and still found no owner,
+        # because the notice's region had not been republished yet.
+        #
+        # Returning WITHOUT clearing the flag is the point: the one-shot
+        # survives to the next refresh, which is what a one-shot is for. The
+        # user-visible alternative is issue #407 itself — a narrow page
+        # opening on a hanging-indented red continuation line instead of the
+        # notice's first row.
+        if not any(
+            block.virtual_region.y <= offset < block.virtual_region.bottom for block in blocks
+        ):
+            return
         target = offset
-        for block in body.blocks():
+        for block in blocks:
             top = block.virtual_region.y
             bottom = block.virtual_region.bottom
             if top < offset < bottom:
