@@ -134,11 +134,33 @@ def test_launch_rejects_symlink_and_lexical_aliases(tmp_path: Path) -> None:
 
 
 def test_launch_identity_detects_swap(tmp_path: Path) -> None:
+    """A directory substituted at the pinned path must fail revalidation.
+
+    The swap moves the original aside instead of deleting it, and that detail is
+    load-bearing rather than stylistic. Deleting frees the inode, and ext4 hands
+    the very next mkdir the same inode number back, so a delete-and-recreate
+    swap is invisible to a dev/ino pin on Linux while APFS allocates a fresh one
+    and makes the same test look green. Keeping the original alive holds its
+    inode allocated, so the replacement must get a different one on every
+    filesystem. The precondition assert below fails loudly if some future
+    platform reuses it anyway, rather than letting this pass vacuously again.
+    """
+
     base = selected(tmp_path, "a" * 64)
     resolved = resolve_launch(base)
     workspace = Path(base.workspace)
-    shutil.rmtree(workspace)
-    workspace.mkdir()
+    before = os.lstat(workspace)
+
+    replacement = tmp_path / "replacement-workspace"
+    replacement.mkdir()
+    os.rename(workspace, tmp_path / "stashed-workspace")
+    os.rename(replacement, workspace)
+
+    after = os.lstat(workspace)
+    assert (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino), (
+        "the swap reused the original identity, so this test would pass without"
+        " exercising the guard at all"
+    )
     with pytest.raises(AdapterDiscoveryError, match="identity changed"):
         validate_resolved_launch(resolved)
 
@@ -652,9 +674,19 @@ def test_record_covered_extension_loads_and_is_hash_verified(
 
     # Same size, different bytes: only a hash comparison catches this, so it
     # proves the extension is verified rather than merely located.
+    #
+    # The mutated bytes are staged in a new file and renamed into place rather
+    # than written over the original. The extension was dlopened above and its
+    # file stays mapped for the life of the process, so writing through the
+    # existing inode corrupts the live mapping and glibc faults during
+    # interpreter shutdown -- pytest reports every test passing and then exits
+    # 139, which reads as a green run with a crashed process. A rename swaps the
+    # directory entry and leaves the mapped inode untouched.
     mutated = bytearray(extension.read_bytes())
     mutated[-1] ^= 0xFF
-    extension.write_bytes(bytes(mutated))
+    staged = extension.with_name(extension.name + ".mutated")
+    staged.write_bytes(bytes(mutated))
+    staged.replace(extension)
     try:
         with pytest.raises(AdapterDiscoveryError, match="RECORD hash differs"):
             with _verified_imports(cast(importlib.metadata.Distribution, distribution), rows):
