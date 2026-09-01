@@ -730,9 +730,7 @@ async def test_real_worker_publishes_a_frame_the_parent_verifies_and_bundles(
     assert observations, "no observation events were recorded"
     assert all(event["payload"]["artifacts"] for event in observations)
     assert {
-        artifact["sha256"]
-        for event in observations
-        for artifact in event["payload"]["artifacts"]
+        artifact["sha256"] for event in observations for artifact in event["payload"]["artifacts"]
     } == {hashlib.sha256(payload).hexdigest()}
     assert all(
         artifact["media_type"] == "image/png" and artifact["byte_count"] == len(payload)
