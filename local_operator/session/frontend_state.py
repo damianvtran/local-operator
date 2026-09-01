@@ -63,6 +63,13 @@ _FRONTEND_LOCAL_SLASHES = {
     "help",
     "exit",
     "clear",
+    # The clipboard is the machine the USER IS SITTING AT, and every part of
+    # this command is already here: the transcript it reads is painted by this
+    # frontend, the picker it opens is painted by this frontend, and the OSC 52
+    # write goes out this terminal. Routed to the owner it would draw a chooser
+    # on a screen nobody is looking at and copy onto a host nobody is at, which
+    # is the same argument `/theme` and `/settings` make about config.yml.
+    "copy",
     "new",
     "reload",
     "update",

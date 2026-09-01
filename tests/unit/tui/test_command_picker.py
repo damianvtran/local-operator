@@ -841,7 +841,15 @@ async def test_click_on_the_overflow_row_does_nothing() -> None:
         # ranked ahead of their neighbours because a prefix match on a longer
         # word still beats one that starts later in the name.
         ("s", ["settings", "search", "skills"]),
-        ("c", ["clear", "config", "context", "compact", "credential"]),
+        # Every one of these is a flat 900 prefix match (verified, not assumed:
+        # `score_command_text_match("/c", …)` returns 900 for all six), so
+        # `match_commands` sorts them on `(-score, registry_index)` and the
+        # order here IS registration order. `copy` is second because its
+        # registry entry sits directly after `clear`, not because it is
+        # shorter — there is no length tiebreak to appeal to, and inventing one
+        # would send the next person editing this list when the real cause is
+        # a registry move.
+        ("c", ["clear", "copy", "config", "context", "compact", "credential"]),
         ("lo", ["loop", "login", "logout"]),
         ("mo", ["model"]),
     ],

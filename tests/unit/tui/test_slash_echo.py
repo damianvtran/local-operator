@@ -44,6 +44,11 @@ ECHO_POLICY = {
     "help": False,
     "exit": False,
     "clear": False,
+    # Opens a picker, and nothing here reaches the model. The receipt is
+    # whatever that interaction produces — a clipboard toast naming how much
+    # landed there, or nothing at all when the user cancels — and both are
+    # strictly more informative than echoing the typed word. `/approvals`' rule.
+    "copy": False,
     "new": False,
     "reload": False,
     "update": False,
@@ -113,6 +118,11 @@ PROMPT_POLICY = {
     "help": False,
     "exit": False,
     "clear": False,
+    # Takes no argument at all: WHICH message is chosen in the picker the
+    # command opens, so there is nothing typed for an inline engage to consume.
+    # (`/copy me` and `/copy <n>` are deliberately not built — the picker is the
+    # answer to "which message", and a typed selector would be a second one.)
+    "copy": False,
     "new": False,
     "reload": False,
     "update": False,
