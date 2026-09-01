@@ -93,6 +93,46 @@ class AdapterStateError(RuntimeError):
     """A method was called out of order or without the state it needs."""
 
 
+class InfeasibleTaskExcluded(RuntimeError):
+    """The task grades a refusal this adapter cannot report honestly.
+
+    Raised from ``reset_start`` so the episode fails BEFORE any resource is
+    allocated. See ``TaskDescriptor.is_infeasible``: the runner never hands the
+    adapter the terminal action, so OSWorld's ``action_history`` never receives
+    ``FAIL``, and a correct refusal would grade 0. Refusing the run is honest;
+    fabricating the ``FAIL`` would not be.
+    """
+
+
+def _terminate_status(code: str) -> str:
+    """Map a teardown evidence code to a cleanup status that cannot over-claim.
+
+    This is the orphaned-instance safety net, and the mapping is asymmetric on
+    purpose. ``aggregate_cleanup`` sets ``rescue_required`` only for
+    ``attempted``/``failed``; it treats ``not_needed`` as CLEAN. So the two
+    statuses that retire the rescue obligation must be reachable ONLY by
+    positive evidence:
+
+    * ``succeeded`` -- ``terminate_instances`` returned AND a follow-up
+      ``describe_instances`` confirmed ``shutting-down``/``terminated``. A 200
+      from the terminate call alone is not proof.
+    * ``not_needed`` -- the tag matched no instance, i.e. we looked and there
+      was nothing there.
+
+    Everything else, including any code this build does not recognise, is
+    ``attempted``: cleanup was reached but not confirmed, which correctly
+    leaves ``rescue_required`` set. Defaulting the unknown case to ``attempted``
+    rather than ``not_needed`` means a future provider that invents a new code
+    fails safe -- toward a redundant rescue, never toward a silent leak.
+    """
+
+    if code == cleanup_mod.EVIDENCE_INSTANCE_TERMINATED:
+        return "succeeded"
+    if code == cleanup_mod.EVIDENCE_INSTANCE_ABSENT:
+        return "not_needed"
+    return "attempted"
+
+
 # A provider factory takes no argument and returns a backend. Injectable so
 # PR 1's tests (and the whole cloud-free slice) drive the real adapter against
 # FakeProvider; PR 2 installs the AWS factory for production.
@@ -202,14 +242,14 @@ class OSWorldV2Adapter:
         digest is used; the handshake pin is then the test's own fixture.
         """
 
-        for candidate in (Path(os.getcwd()) / "adapter-release.json",):
-            try:
-                payload = json.loads(candidate.read_bytes())
-                digest = payload.get("release_digest", "")
-                if isinstance(digest, str) and len(digest) == 64:
-                    return digest
-            except OSError:
-                continue
+        manifest = Path(os.getcwd()) / "adapter-release.json"
+        try:
+            payload = json.loads(manifest.read_bytes())
+        except OSError:
+            return "0" * 64
+        digest = payload.get("release_digest", "")
+        if isinstance(digest, str) and len(digest) == 64:
+            return digest
         return "0" * 64
 
     # ------------------------------------------------------------------
@@ -269,6 +309,18 @@ class OSWorldV2Adapter:
         if self._task is None:
             source = self._load_task_source(params.task_id)
             self._task = taskfile.load_static(source, module_name=self._task_path(params.task_id))
+        if self._task.is_infeasible():
+            # Refused BEFORE anything is allocated, so the exclusion costs
+            # nothing and cannot half-run. Documentation alone would not stop
+            # an operator-built workspace from including such a task and
+            # scoring an agent's correct refusal as a failure; see
+            # TaskDescriptor.is_infeasible for why we will not fake the FAIL.
+            raise InfeasibleTaskExcluded(
+                f"task {params.task_id!r} grades a refusal via evaluator "
+                "func='infeasible', which this adapter cannot score honestly: "
+                "the runner never delivers the terminal action, so OSWorld's "
+                "action_history never receives FAIL"
+            )
         self._plan = provisioning.resolve(
             self._task,
             episode_id=params.episode_id,
@@ -449,23 +501,29 @@ class OSWorldV2Adapter:
         provider = self._provider
         if kind == "release_instance":
             if provider is None:
-                # Nothing was ever allocated (cleanup from PREPARED, or a
-                # rescue worker whose provider could not be built).
-                return "not_needed", cleanup_mod.EVIDENCE_INSTANCE_ABSENT, elapsed()
+                # NOT not_needed. "not_needed" asserts the instance is gone;
+                # having no provider means we could not LOOK. aggregate_cleanup
+                # treats not_needed as clean and clears rescue_required, so
+                # claiming it here would retire the rescue obligation for a
+                # resource nobody checked -- an orphaned instance billing
+                # forever. "attempted" is the honest report: cleanup was
+                # reached, cleanup was not confirmed, so a human or a rescue
+                # worker must still look.
+                return "attempted", cleanup_mod.EVIDENCE_TERMINATE_UNCONFIRMED, elapsed()
             code = await provider.terminate(resource_ref)
-            # succeeded ONLY on confirmed termination; anything else is
-            # not_needed (absent) and leaves rescue_required correctly set on
-            # an unconfirmed terminate in the AWS path.
-            status = (
-                "succeeded" if code == cleanup_mod.EVIDENCE_INSTANCE_TERMINATED else "not_needed"
-            )
-            return status, code, elapsed()
+            return _terminate_status(code), code, elapsed()
         if kind == "revoke_lease":
             if provider is None:
-                return "not_needed", cleanup_mod.EVIDENCE_SCHEDULE_ABSENT, elapsed()
+                return "attempted", cleanup_mod.EVIDENCE_SCHEDULE_ABSENT, elapsed()
             code = await provider.delete_schedule(resource_ref)
-            status = "succeeded" if code == cleanup_mod.EVIDENCE_SCHEDULE_DELETED else "not_needed"
-            return status, code, elapsed()
+            # A TTL schedule that is genuinely absent needs no deletion, and
+            # unlike an instance its absence is directly observed rather than
+            # assumed, so not_needed is the accurate status here.
+            if code == cleanup_mod.EVIDENCE_SCHEDULE_DELETED:
+                return "succeeded", code, elapsed()
+            if code == cleanup_mod.EVIDENCE_SCHEDULE_ABSENT:
+                return "not_needed", code, elapsed()
+            return "attempted", code, elapsed()
         if kind == "close_session":
             # The provider reference must SURVIVE cleanup: the canonical plan
             # orders close-session before release-instance, and terminating the
