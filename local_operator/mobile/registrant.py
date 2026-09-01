@@ -244,6 +244,10 @@ class Registrant:
         self._unsubscribe: Callable[[], None] | None = None
         self._closed = threading.Event()
         self._push_scheduled = False
+        # One warning per contiguous run of oversized frames, not one per
+        # frame: a busy session repaints ~30x/s and a per-frame warning is the
+        # log flood the cap exists to prevent. Reset when a frame fits again.
+        self._frame_cap_warned = False
         # The delayed repaint must be owned like the heartbeat. A bare task can
         # still be sleeping when close tears down the registrant loop, producing
         # an orphan warning and proving teardown returned before its work ended.
@@ -1001,13 +1005,38 @@ class Registrant:
         attach clients; only event subscribers get the overlaid copy. This is
         the protocol-v4 promise that phone frames remain byte-identical.
         """
-        ordinary = {"op": "projection", "data": self._fold.projection.to_json()}
+        ordinary = self._projection_payload()
         await asyncio.gather(
             *(
                 self._send_to(conn, self._projection_frame(conn, ordinary))
                 for conn in list(self._clients.values())
             )
         )
+
+    def _projection_payload(self) -> dict[str, Any]:
+        """The broadcast frame, capped to the soft size limit.
+
+        The daemon's control reader drops any line past 1 MB, so an oversized
+        projection is a silently lost repaint — and a flood of them starves
+        the daemon loop for every other session. ``cap_projection_frame``
+        degrades optional payload tiers (subagent text previews, transcript
+        expand details, then the transcript tail) until the frame fits, so a
+        busy deep-roster session degrades gracefully instead of wedging the
+        whole relay. The projection itself is never mutated.
+        """
+        from local_operator.mobile.projection import cap_projection_frame
+
+        data, degraded = cap_projection_frame(self._fold.projection)
+        if degraded and not self._frame_cap_warned:
+            self._frame_cap_warned = True
+            logger.warning(
+                "mobile registrant: projection frame for session %s exceeded the "
+                "soft cap; degrading optional payload tiers to fit",
+                self._record.session_id,
+            )
+        elif not degraded:
+            self._frame_cap_warned = False
+        return {"op": "projection", "data": data}
 
     def _projection_frame(self, conn: _ClientConn, ordinary: dict[str, Any]) -> dict[str, Any]:
         # Projection is exclusively the mobile renderer. Full terminal clients
@@ -1016,8 +1045,7 @@ class Registrant:
 
     async def _push_to(self, conn: _ClientConn) -> None:
         """The welcome form of a push: one full projection to one connection."""
-        ordinary = {"op": "projection", "data": self._fold.projection.to_json()}
-        await self._send_to(conn, self._projection_frame(conn, ordinary))
+        await self._send_to(conn, self._projection_frame(conn, self._projection_payload()))
 
     async def _broadcast(self, frame: dict[str, Any]) -> None:
         # Copy the registry: a send failure drops its own entry, and mutating

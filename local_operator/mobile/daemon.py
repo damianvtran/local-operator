@@ -75,6 +75,51 @@ DEFAULT_PORT = 4098
 #: evicting detail alone leaves a retained projection advertising dead routes.
 MAX_RETAINED_SESSION_PROJECTIONS = 64
 
+#: TTL for the summaries cache. The durable half of a listing is a 100-directory
+#: scan plus bounded head reads (300 ms to several seconds under loop
+#: contention, measured on the operator's 3,925-session store), and a live
+#: session repaints the list ~30x/s — without a TTL every repaint re-ran that
+#: scan and starved every other request on the single daemon loop. The TTL is
+#: the staleness bound for the DURABLE half only (a new terminal session
+#: appears within it); live-projection fields are merged fresh on every call,
+#: so streaming/pending state never ages. Structural changes (registration,
+#: heartbeat, wake, session death) invalidate the cache outright via
+#: ``notify_list_changed``, so the TTL is only what a quiet machine pays.
+SUMMARIES_CACHE_TTL_S = 1.0
+
+
+def _durable_fold_cache():
+    """The daemon-wide cache of incremental durable folds (see
+    :mod:`.durable`). Created lazily so importing the daemon never pays for
+    the fold machinery, and so tests that patch ``config_dir`` before first
+    use get a cache keyed by THEIR directories."""
+    global _DURABLE_FOLD_CACHE
+    if _DURABLE_FOLD_CACHE is None:
+        from local_operator.mobile.durable import DurableFoldCache
+
+        _DURABLE_FOLD_CACHE = DurableFoldCache()
+    return _DURABLE_FOLD_CACHE
+
+
+_DURABLE_FOLD_CACHE: Any = None
+
+
+def _custom_snapshot_cache():
+    """The daemon-wide newest-wins custom-snapshot cache (see
+    :class:`.durable.CustomSnapshotCache`). Deliberately separate from the
+    fold cache: a deep roster asks every child transcript for its todo
+    snapshot, and routing those reads through the bounded fold cache would
+    evict the ROOT's fold — re-folding a 50 MB transcript on the next open."""
+    global _CUSTOM_SNAPSHOT_CACHE
+    if _CUSTOM_SNAPSHOT_CACHE is None:
+        from local_operator.mobile.durable import CustomSnapshotCache
+
+        _CUSTOM_SNAPSHOT_CACHE = CustomSnapshotCache()
+    return _CUSTOM_SNAPSHOT_CACHE
+
+
+_CUSTOM_SNAPSHOT_CACHE: Any = None
+
 
 class _StaleProjection(Exception):
     """A fenced owner frame with no retained payload to republish."""
@@ -156,13 +201,114 @@ class SessionTable:
         # generations. Entries route watch commands but never own these queues.
         self.session_subscribers: dict[str, set[asyncio.Queue[dict[str, Any]]]] = {}
         self.provisional_active: set[str] = set()
+        # Per-session seen state the "unseen" verdict reads. Owned by the table
+        # (the merge reads it per row) and created LAZILY on first verdict (see
+        # the property), so a test that patches config_dir AFTER construction
+        # still gets ITS directory, and a bare SessionTable never touches disk
+        # until a verdict actually runs. The daemon's own seen_store property
+        # delegates here so the /seen endpoint and the verdict share ONE
+        # instance.
+        self._seen_store: Any = None
+        # The durable half of summaries() is a directory scan; cache it behind a
+        # short TTL (SUMMARIES_CACHE_TTL_S) with single-flight refresh so N
+        # concurrent list consumers pay one scan, not N. The merged summary list
+        # is cached separately because the merge itself walks every live entry.
+        self._durable_rows_cache: dict[str, Any] | None = None
+        self._durable_rows_at = 0.0
+        self._durable_rows_task: asyncio.Task[dict[str, Any]] | None = None
+        self._summaries_cache: list[dict[str, Any]] | None = None
+        self._summaries_at = 0.0
+        self._summaries_task: asyncio.Task[list[dict[str, Any]]] | None = None
 
-    def summaries(self) -> list[dict[str, Any]]:
-        """Reconcile live generations with durable conversations by session id."""
+    def invalidate_summaries_cache(self) -> None:
+        """Drop both summaries caches so the next read rescans.
+
+        Called on every structural change (registration, heartbeat, wake,
+        session death — all funnel through ``notify_list_changed``) and when
+        the phone marks a session seen. The TTL alone would heal the same
+        facts within a second; outright invalidation makes the next repaint
+        correct instead of merely eventually correct.
+        """
+        self._durable_rows_cache = None
+        self._durable_rows_at = 0.0
+        self._summaries_cache = None
+        self._summaries_at = 0.0
+
+    async def _refresh_durable_rows(self) -> dict[str, Any]:
+        """Single-flight TTL refresh of the durable listing rows.
+
+        Runs ``recent_session_rows`` OFF the event loop: it stats and reads a
+        hundred session directories, which measured 300 ms to several seconds
+        under contention — blocking work that froze every SSE stream on this
+        loop while it ran. A concurrent caller joins the in-flight task
+        instead of starting a second scan.
+        """
         from local_operator.paths import config_dir
         from local_operator.resume import recent_session_rows
 
-        durable = {row.id: row for row in recent_session_rows(config_dir(), limit=100)}
+        task = self._durable_rows_task
+        if task is not None and not task.done():
+            return await task
+
+        async def _load() -> dict[str, Any]:
+            rows = await asyncio.to_thread(recent_session_rows, config_dir(), 100)
+            return {row.id: row for row in rows}
+
+        task = asyncio.ensure_future(_load())
+        self._durable_rows_task = task
+        try:
+            rows = await task
+        except BaseException:
+            # A failed scan must not poison the shared task: the next caller
+            # retries instead of awaiting a raised future forever.
+            if self._durable_rows_task is task:
+                self._durable_rows_task = None
+            raise
+        self._durable_rows_cache = rows
+        self._durable_rows_at = time.monotonic()
+        return rows
+
+    async def summaries(self) -> list[dict[str, Any]]:
+        """Reconcile live generations with durable conversations by session id.
+
+        Async because its durable half is blocking disk work (see
+        ``_refresh_durable_rows``); every call site awaits it off the loop.
+        The result is cached for ``SUMMARIES_CACHE_TTL_S`` — live-projection
+        fields are merged fresh on every build, so only the durable rows can
+        age, and structural changes invalidate the cache outright.
+        """
+        now = time.monotonic()
+        cached = self._summaries_cache
+        if cached is not None and now - self._summaries_at < SUMMARIES_CACHE_TTL_S:
+            return cached
+        task = self._summaries_task
+        if task is not None and not task.done():
+            return await task
+
+        async def _build() -> list[dict[str, Any]]:
+            rows = self._durable_rows_cache
+            if rows is None or time.monotonic() - self._durable_rows_at >= SUMMARIES_CACHE_TTL_S:
+                rows = await self._refresh_durable_rows()
+            return self._merge_summaries(rows)
+
+        task = asyncio.ensure_future(_build())
+        self._summaries_task = task
+        try:
+            out = await task
+        except BaseException:
+            if self._summaries_task is task:
+                self._summaries_task = None
+            raise
+        self._summaries_cache = out
+        self._summaries_at = time.monotonic()
+        return out
+
+    def _merge_summaries(self, durable: dict[str, Any]) -> list[dict[str, Any]]:
+        """Merge cached durable rows with fresh live state into summary rows.
+
+        Pure in-memory work (safe on the loop); split out of ``summaries`` so
+        the cache layer and the row shape are separately testable.
+        """
         active: dict[str, SessionEntry] = {}
         for entry in self.entries.values():
             if entry.ended:
@@ -201,13 +347,32 @@ class SessionTable:
                         if todo.status in ("pending", "blocked")
                     ),
                     "mtime": row.mtime if row else entry.record.started_at if entry else 0,
+                    # Unread verdict (see :mod:`.seen`): activity newer than the
+                    # phone's last view. The activity clock is the transcript
+                    # mtime for durable rows — already statted by the listing
+                    # scan, no extra syscall — and the record heartbeat for
+                    # live rows. First observation records a baseline so an
+                    # upgrade never lights up the whole store.
+                    "unseen": self._is_unseen(session_id, row, entry),
                 }
             )
         out.sort(
             key=lambda summary: (
                 summary["section"] != "active",
                 not summary["needs_attention"],
+                # ONE ladder serves the sort and the render: NEEDS DECISION >
+                # WORKING > UNREAD > IDLE (see the client's SessionCard, which
+                # states the same order). Unread outranks recency — burying the
+                # mark under plain mtime order is what made it decorative — but
+                # sits BELOW streaming, because the client renders "new" only
+                # for COMPLETED unviewed activity and suppresses it on an
+                # in-flight row. Ranking unseen above streaming here hoisted a
+                # streaming+unseen row over newer rows while it rendered no
+                # mark to explain the position: a sort the surface contradicts.
+                # And below needs_attention, because a pending ask blocks a
+                # turn outright while unread only means unlooked-at.
                 not summary["streaming"],
+                not summary["unseen"],
                 -summary["mtime"],
                 summary["session_id"],
             )
@@ -215,11 +380,79 @@ class SessionTable:
         return out
 
     def notify_list_changed(self) -> None:
+        """Wake the list SSE subscribers for a repaint.
+
+        Deliberately does NOT invalidate the summaries cache. Every projection
+        push from a live registrant calls this (~30x/s while streaming), and
+        invalidating here re-ran the full durable directory scan on each one —
+        which defeated the TTL cache in exactly the busy case it was built for
+        (measured: 30 repaints produced 30 scans at 42-92 ms each). A push
+        changes only LIVE fields, and ``_merge_summaries`` recomputes those
+        from ``self.entries`` on every build, so the cached durable rows stay
+        correct across it. Callers that genuinely change the DURABLE set
+        (registration, death, wake, seen) call
+        :meth:`invalidate_summaries_cache` themselves.
+        """
         for queue in self.list_subscribers:
             try:
                 queue.put_nowait(None)
             except asyncio.QueueFull:
                 pass
+
+    @property
+    def seen_store(self):
+        """The persisted seen-state store, created on first use.
+
+        Lazy so the store resolves ``config_dir()`` at verdict time — tests
+        patch it after building the table, and a bare SessionTable pays
+        nothing until a verdict runs.
+        """
+        if self._seen_store is None:
+            from local_operator.mobile.seen import SEEN_STORE_NAME, SeenStore
+            from local_operator.paths import config_dir
+
+            self._seen_store = SeenStore(config_dir() / SEEN_STORE_NAME)
+        return self._seen_store
+
+    def _is_unseen(self, session_id: str, row: Any, entry: SessionEntry | None) -> bool:
+        """The seen-store verdict for one summary row.
+
+        Cheap: dict lookups only, no disk access — the store is fully in
+        memory and persists itself on ``mark_seen``.
+
+        Two rules the naive version got wrong:
+
+        - **Holding the projection SSE stream IS viewing** (spec §3). A user
+          watching a turn finish must never come back to that session marked
+          new, so an open subscriber re-stamps ``last_seen`` here rather than
+          relying on the client to POST /seen again after every repaint.
+        - **The activity clock is never ``heartbeat_at``.** That is rewritten
+          unconditionally every HEARTBEAT_INTERVAL_S whether or not anything
+          happened, so using it re-lit a just-cleared session every 15 s
+          forever. Only the transcript mtime dates real activity; without a
+          durable row there is nothing to date against, and the session's own
+          ``started_at`` is a fixed instant that cannot creep.
+        """
+        store = self.seen_store
+        if self.session_subscribers.get(session_id):
+            # Viewing now: keep the stamp at the current instant so activity
+            # arriving during the watch is already covered when it lands. The
+            # disk write is debounced inside the store — this runs on every
+            # repaint of a watched session.
+            store.touch_watched(session_id)
+            return False
+        if row is not None:
+            activity = row.mtime
+        elif entry is not None:
+            # A live session with no durable row yet (younger than its first
+            # transcript write, or outside the 100-row window). started_at is
+            # a birth instant, not a liveness clock.
+            activity = entry.record.started_at
+        else:
+            activity = 0.0
+        if not activity:
+            return False
+        return store.is_unseen(session_id, activity)
 
 
 def _entry_for_session(daemon: "MobileDaemon", session_id: str) -> SessionEntry | None:
@@ -251,7 +484,14 @@ def _durable_user_session_dir(session_id: str) -> Path | None:
 
 
 def _durable_projection(session_id: str) -> SessionProjection | None:
-    """Fold a user conversation and its routable child lineage from disk."""
+    """Fold a user conversation and its routable child lineage from disk.
+
+    Reads through the daemon's incremental fold cache (:mod:`.durable`): the
+    first open of a session pays one full fold, every later open reads only
+    the bytes appended since. The projection object itself is rebuilt on
+    every call (callers mutate and fence it), so what is cached is the fold,
+    not the projection.
+    """
     from local_operator.mobile.projection import (
         SUBAGENT_ERROR_CHARS,
         SUBAGENT_OUTCOME_CHARS,
@@ -261,12 +501,17 @@ def _durable_projection(session_id: str) -> SessionProjection | None:
         _compact_multiline,
     )
     from local_operator.resume import stored_session_title
-    from local_operator.session.session import SUBAGENT_ROSTER_CUSTOM_TYPE
-    from local_operator.session.transcript import Transcript
     from local_operator.tools.builtin import todo_snapshot
 
     directory = _durable_user_session_dir(session_id)
     if directory is None:
+        return None
+    try:
+        state = _durable_fold_cache().load(directory)
+    except FileNotFoundError:
+        return None
+    except Exception:  # noqa: BLE001 — an odd transcript yields no projection, not a 500
+        logger.exception("durable fold failed for session %s", session_id)
         return None
     projection = SessionProjection(
         session_id=session_id,
@@ -276,14 +521,15 @@ def _durable_projection(session_id: str) -> SessionProjection | None:
         cwd="",
         model_label="",
     )
-    transcript = Transcript(directory)
     fold = ProjectionFold(projection)
-    fold.fold_history(transcript.build_llm_history())
+    # fold_history reads messages without mutating them, so the cached list
+    # can be shared; the fold builds its own TranscriptEntry rows.
+    fold.fold_history(state.history)
 
     # The persisted roster is the restart-safe ownership record for child
     # routes. Rebuilding from it keeps old session projections useful without
     # retaining every child's unbounded transcript in daemon memory forever.
-    snapshot = transcript.latest_custom(SUBAGENT_ROSTER_CUSTOM_TYPE) or {}
+    snapshot = state.latest_customs.get("subagent_roster") or {}
     jobs = {str(row.get("id") or ""): row for row in snapshot.get("jobs") or []}
     records = [row for row in snapshot.get("records") or [] if row.get("job_id")]
     by_parent: dict[str | None, list[str]] = {}
@@ -295,7 +541,6 @@ def _durable_projection(session_id: str) -> SessionProjection | None:
         job = jobs.get(job_id, {})
         raw_dir = record.get("session_dir")
         child_dir = Path(str(raw_dir)) if raw_dir else None
-        child_transcript = Transcript(child_dir) if child_dir and child_dir.is_dir() else None
         status = str(record.get("outcome") or job.get("status") or "cancelled")
         if status in ("queued", "starting", "running"):
             status = "cancelled"
@@ -315,8 +560,14 @@ def _durable_projection(session_id: str) -> SessionProjection | None:
             ancestors.insert(0, str(ancestor.get("label") or cursor))
             cursor = str(ancestor["parent_job_id"]) if ancestor.get("parent_job_id") else None
         raw_todos = todo_snapshot(child_dir.name) if child_dir else []
-        if not raw_todos and child_transcript is not None:
-            raw_todos = (child_transcript.latest_custom("todo_snapshot") or {}).get("items") or []
+        if not raw_todos and child_dir is not None and child_dir.is_dir():
+            # The child's todo snapshot through the dedicated snapshot cache:
+            # a deep roster used to full-parse every child transcript on every
+            # durable projection, once per child. Routed around the fold cache
+            # so an 80-child roster cannot evict the root's fold.
+            raw_todos = (_custom_snapshot_cache().load(child_dir, "todo_snapshot") or {}).get(
+                "items"
+            ) or []
         row = SubagentRow(
             job_id=job_id,
             label=str(record.get("label") or job_id),
@@ -440,7 +691,15 @@ async def _dial(daemon: "MobileDaemon", entry: SessionEntry) -> None:
                     # was evicted. Its identity remains fenced by the epoch ledger.
                     continue
                 entry.projection = captured
-                daemon.table.provisional_active.discard(entry.record.session_id)
+                # Only the FIRST push after a wake changes the durable picture:
+                # it retires the provisional-active marker, which moves the row
+                # between sections. Invalidating on EVERY push is what defeated
+                # the summaries cache — a streaming session pushes ~30x/s and
+                # each one re-ran the full directory scan.
+                session_id = entry.record.session_id
+                if session_id in daemon.table.provisional_active:
+                    daemon.table.provisional_active.discard(session_id)
+                    daemon.table.invalidate_summaries_cache()
                 daemon.table.notify_list_changed()
                 _fan_out(entry, daemon)
             # acks/errors are matched by req id in _request's future map.
@@ -548,19 +807,40 @@ def _transcript_entry_json(entry: Any) -> dict[str, Any]:
     return entry.to_json()
 
 
+def _projection_frame(projection: SessionProjection) -> dict[str, Any]:
+    """The daemon's serialization boundary: one capped frame dict.
+
+    Both wire paths must agree on size. The registrant caps before broadcast
+    (see ``Registrant._projection_payload``); the daemon serves the SAME
+    projection shape over SSE and republishes durable rebuilds, so it caps at
+    every serialization site too — a durable fold of a long session can embed
+    80 rows x 8 KB tool outputs, which no socket or phone renderer wants
+    whole. Degradation is tiered and lossless for the collapsed view (see
+    ``cap_projection_frame``); the retained projection object is untouched.
+    """
+    from local_operator.mobile.projection import cap_projection_frame
+
+    data, degraded = cap_projection_frame(projection)
+    if degraded:
+        logger.debug(
+            "mobile daemon: capped oversized projection frame for session %s",
+            projection.session_id,
+        )
+    return data
+
+
 def _history_page(
     session_id: str, before: str | None, limit: int, *, durable_only: bool = True
 ) -> tuple[list[Any], bool]:
-    """Fold the session's full on-disk transcript and return the page of
-    entries immediately OLDER than ``before`` (chronological within the page)
-    plus whether more history exists beyond it.
+    """Return the page of folded entries immediately OLDER than ``before``
+    (chronological within the page) plus whether more history exists beyond it.
 
-    Runs off the event loop (``asyncio.to_thread`` at the call site): folding
-    a long transcript rehydrates every message and is not loop-safe work.
+    Reads through the daemon's incremental fold cache (:mod:`.durable`), so a
+    page costs one fold per session per daemon lifetime plus the appended
+    tail since — not the whole-file re-parse every page used to pay. Runs off
+    the event loop (``asyncio.to_thread`` at the call site): even the cached
+    path touches disk and the fold is not loop-safe work.
     """
-    from local_operator.mobile.projection import fold_messages_to_entries
-    from local_operator.session.transcript import Transcript
-
     if durable_only:
         directory = _durable_user_session_dir(session_id)
     else:
@@ -577,9 +857,10 @@ def _history_page(
     if directory is None or not (directory / "transcript.jsonl").is_file():
         return [], False
     try:
-        transcript = Transcript(directory)
-        history = transcript.build_llm_history()
-        entries = fold_messages_to_entries(history)
+        state = _durable_fold_cache().load(directory)
+        entries = state.render
+    except FileNotFoundError:
+        return [], False
     except Exception:  # noqa: BLE001 — an odd transcript yields no history, not a 500
         logger.exception("history fold failed for session %s", session_id)
         return [], False
@@ -653,7 +934,7 @@ def _fan_out(entry: SessionEntry, daemon: "MobileDaemon | None" = None) -> None:
     """Push a repaint to durable session viewers, never one pid generation."""
     if entry.projection is None:
         return
-    frame = entry.projection.to_json()
+    frame = _projection_frame(entry.projection)
     queues = (
         daemon.table.session_subscribers.get(entry.record.session_id, set())
         if daemon is not None
@@ -677,10 +958,28 @@ def _fan_out(entry: SessionEntry, daemon: "MobileDaemon | None" = None) -> None:
 
 
 class MobileDaemon:
-    def __init__(self, *, port: int = DEFAULT_PORT, password: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        port: int = DEFAULT_PORT,
+        password: str | None = None,
+        dial_registrants: bool = True,
+    ) -> None:
         self.port = port
         self.password = password
         self.table = SessionTable()
+        # False makes this daemon a READ-ONLY observer of the record directory:
+        # it lists sessions and serves durable folds, but never dials a
+        # registrant's control socket and never reaps a stale claim. A second
+        # daemon on the same machine MUST run this way: a registrant admits at
+        # most ONE daemon connection, so a secondary dial would evict the
+        # production daemon's live bridge mid-session. Set via
+        # ``LO_MOBILE_NO_DIAL=1`` (see ``service.amain``).
+        self.dial_registrants = dial_registrants
+        # Per-session "last seen by phone" state lives on the table (the merge
+        # reads it per row); the daemon's ``seen_store`` property delegates to
+        # it so the /seen endpoint and the verdict share one lazily-created
+        # store.
         # The session repaint carries only roster summaries. Full child state is
         # retained separately and fetched for the active route, otherwise one
         # busy descendant makes every root token repaint resend every transcript.
@@ -711,6 +1010,12 @@ class MobileDaemon:
             entry.record.session_id == session_id and not entry.ended
             for entry in self.table.entries.values()
         )
+
+    @property
+    def seen_store(self):
+        """The persisted seen-state store — delegates to the table so the
+        /seen endpoint and the summaries verdict share one instance."""
+        return self.table.seen_store
 
     def _prune_projection_generation(self, session_id: str) -> None:
         """Retire ordering only when no durable in-memory route can emit again."""
@@ -952,14 +1257,20 @@ class MobileDaemon:
                 # record pid dead; the lease helper revalidates generation and
                 # process identity under the recovery lock before removing only
                 # that claim and its pid mirror. Transcript data is untouched.
-                from local_operator.paths import config_dir
-                from local_operator.session_lease import reap_proven_dead_session_claim
+                # A no-dial daemon is an observer: lease reaping belongs to the
+                # production daemon that owns the session, and two reapers on
+                # one store is a claim race.
+                if self.dial_registrants:
+                    from local_operator.paths import config_dir
+                    from local_operator.session_lease import (
+                        reap_proven_dead_session_claim,
+                    )
 
-                await asyncio.to_thread(
-                    reap_proven_dead_session_claim,
-                    config_dir() / "sessions" / record.session_id,
-                    record.pid,
-                )
+                    await asyncio.to_thread(
+                        reap_proven_dead_session_claim,
+                        config_dir() / "sessions" / record.session_id,
+                        record.pid,
+                    )
                 self.table.provisional_active.discard(record.session_id)
                 projection = await asyncio.to_thread(_durable_projection, record.session_id)
                 if projection is not None:
@@ -967,12 +1278,15 @@ class MobileDaemon:
                         projection, record=record, terminal=True
                     )
                     for queue in self.table.session_subscribers.get(record.session_id, set()):
+                        # Serialize ONCE per repaint: the QueueFull retry below
+                        # re-puts the same frame, and capping is a json.dumps.
+                        frame = _projection_frame(projection)
                         try:
-                            queue.put_nowait(projection.to_json())
+                            queue.put_nowait(frame)
                         except asyncio.QueueFull:
                             try:
                                 queue.get_nowait()
-                                queue.put_nowait(projection.to_json())
+                                queue.put_nowait(frame)
                             except asyncio.QueueEmpty:
                                 pass
                 self._prune_projection_generation(record.session_id)
@@ -981,8 +1295,10 @@ class MobileDaemon:
             # Degraded is precisely "we owe this session a redial" — the only
             # gates are ended, an open socket, and the backoff clock. Excluding
             # degraded entries here was the starvation bug: one refused dial
-            # meant never trying again.
-            if not entry.ended and entry.writer is None:
+            # meant never trying again. A no-dial daemon owes no dial at all:
+            # its entries exist so the list and durable routes work, and the
+            # production daemon owns every control socket.
+            if self.dial_registrants and not entry.ended and entry.writer is None:
                 if time.monotonic() >= entry.next_dial_at and (
                     record.pid not in self._dial_tasks or self._dial_tasks[record.pid].done()
                 ):
@@ -1002,16 +1318,20 @@ class MobileDaemon:
                             projection, record=entry.record, terminal=True
                         )
                         for queue in self.table.session_subscribers.get(session_id, set()):
+                            frame = _projection_frame(projection)
                             try:
-                                queue.put_nowait(projection.to_json())
+                                queue.put_nowait(frame)
                             except asyncio.QueueFull:
                                 try:
                                     queue.get_nowait()
-                                    queue.put_nowait(projection.to_json())
+                                    queue.put_nowait(frame)
                                 except asyncio.QueueEmpty:
                                     pass
                     self._prune_projection_generation(session_id)
         if changed:
+            # Structural: a session registered, was replaced, or died, so the
+            # durable listing itself may have moved.
+            self.table.invalidate_summaries_cache()
             self.table.notify_list_changed()
 
     def retain_provisional_active(self, session_id: str) -> None:
@@ -1031,9 +1351,12 @@ class MobileDaemon:
                         projection = self.capture_subagent_details(projection, terminal=True)
                         for queue in self.table.session_subscribers.get(session_id, set()):
                             try:
-                                queue.put_nowait(projection.to_json())
+                                queue.put_nowait(_projection_frame(projection))
                             except asyncio.QueueFull:
                                 pass
+                    # Structural: the wake settled into a durable (or dead)
+                    # session, which changes what the listing scan returns.
+                    self.table.invalidate_summaries_cache()
                     self.table.notify_list_changed()
             finally:
                 self._wake_settle_tasks.pop(session_id, None)
@@ -1108,6 +1431,10 @@ class MobileDaemon:
         local_operator.mobile.child``), so the record + control socket path is
         literally the same code the TUI uses.
         """
+        if not self.dial_registrants:
+            # An observer daemon cannot adopt what it spawns (it never dials),
+            # so a spawned child would be orphaned from its own control plane.
+            raise RuntimeError("observer daemon cannot start sessions")
         import sys
 
         env = dict(os.environ)
@@ -1284,7 +1611,7 @@ def build_app(daemon: MobileDaemon):
         denied = gate(request)
         if denied is not None:
             return denied
-        return JSONResponse({"sessions": daemon.table.summaries()})
+        return JSONResponse({"sessions": await daemon.table.summaries()})
 
     async def api_session_events(request: Request) -> Response:
         """SSE repaint stream for one session — the phone's only realtime
@@ -1323,7 +1650,7 @@ def build_app(daemon: MobileDaemon):
                             # keepalive carries the view.
                             projection = None
                 if projection is not None:
-                    yield _sse("projection", projection.to_json())
+                    yield _sse("projection", _projection_frame(projection))
                 while True:
                     try:
                         frame = await asyncio.wait_for(queue.get(), timeout=SSE_KEEPALIVE_S)
@@ -1362,11 +1689,11 @@ def build_app(daemon: MobileDaemon):
 
         async def stream():
             try:
-                yield _sse("sessions", {"sessions": daemon.table.summaries()})
+                yield _sse("sessions", {"sessions": await daemon.table.summaries()})
                 while True:
                     try:
                         await asyncio.wait_for(queue.get(), timeout=SSE_KEEPALIVE_S)
-                        yield _sse("sessions", {"sessions": daemon.table.summaries()})
+                        yield _sse("sessions", {"sessions": await daemon.table.summaries()})
                     except TimeoutError:
                         yield ": keepalive\n\n"
             finally:
@@ -1377,6 +1704,27 @@ def build_app(daemon: MobileDaemon):
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"},
         )
+
+    async def api_session_seen(request: Request) -> Response:
+        """The phone marks a session seen; the unread verdict clears.
+
+        Auth-gated like every /api route. The verdict is durable (see
+        :mod:`.seen`), so it survives a daemon restart. Unknown ids 404 the
+        same way the history route does — a live generation OR a durable user
+        session — so the endpoint cannot be used to probe arbitrary paths.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        session_id = str(request.path_params["session_id"])
+        entry = _entry_for_session(daemon, session_id)
+        if entry is None and _durable_user_session_dir(session_id) is None:
+            return JSONResponse({"error": "unknown session"}, status_code=404)
+        daemon.seen_store.mark_seen(session_id)
+        # The next list paint must already show the cleared verdict.
+        daemon.table.invalidate_summaries_cache()
+        daemon.table.notify_list_changed()
+        return JSONResponse({"ok": True})
 
     async def api_subagent_detail(request: Request) -> Response:
         """Full state for the one descendant named by the active phone route."""
@@ -1557,6 +1905,10 @@ def build_app(daemon: MobileDaemon):
                 # from spawning a child that can never own a transcript.
                 if _durable_user_session_dir(session_id) is None:
                     raise KeyError(session_id)
+                if not daemon.dial_registrants:
+                    # Waking starts a host process the observer could never
+                    # dial; the production daemon owns wake transitions.
+                    raise RuntimeError("observer daemon cannot wake sessions")
                 from local_operator.mobile.attach_client import continue_command
 
                 command = ContinuationCommand.from_json(
@@ -1568,6 +1920,8 @@ def build_app(daemon: MobileDaemon):
                 # remains authoritative until a live projection arrives or the
                 # attempt fails, so even a 50 ms worker is observable in list SSE.
                 daemon.table.provisional_active.add(session_id)
+                # Structural: the session moves to the active section.
+                daemon.table.invalidate_summaries_cache()
                 daemon.table.notify_list_changed()
                 projection = daemon.session_projections.get(session_id) or _durable_projection(
                     session_id
@@ -1584,11 +1938,13 @@ def build_app(daemon: MobileDaemon):
                         projection = None
                     if projection is not None:
                         for target in daemon.table.session_subscribers.get(session_id, set()):
-                            target.put_nowait(projection.to_json())
+                            target.put_nowait(_projection_frame(projection))
                 try:
                     client, detail = await continue_command(config_dir(), command)
                 except BaseException:
                     daemon.table.provisional_active.discard(session_id)
+                    # Structural: the failed wake moves it back to previous.
+                    daemon.table.invalidate_summaries_cache()
                     daemon.table.notify_list_changed()
                     raise
                 client.close()
@@ -1768,6 +2124,7 @@ def build_app(daemon: MobileDaemon):
         Route("/api/sessions/resume", api_resume_session, methods=["POST"]),
         Route("/api/sessions/search", api_search_sessions),
         Route("/api/sessions/{session_id:str}/events", api_session_events),
+        Route("/api/sessions/{session_id:str}/seen", api_session_seen, methods=["POST"]),
         Route("/api/sessions/{session_id:str}/agents/{job_id:str}", api_subagent_detail),
         Route(
             "/api/sessions/{session_id:str}/agents/{job_id:str}/history",
