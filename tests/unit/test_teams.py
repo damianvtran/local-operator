@@ -1695,6 +1695,7 @@ def test_concurrent_readers_never_see_mixed_row_during_repeated_updates(
     mixed: list[tuple[str, str, str]] = []
     observations = [0]
     gaps = [0]
+    unhydrated = [0]
     complete = [0]
 
     def reader_loop() -> None:
@@ -1730,7 +1731,11 @@ def test_concurrent_readers_never_see_mixed_row_during_repeated_updates(
                 # that disagree with the metadata) is still a real defect and
                 # still fails below.
                 if full.instructions == "" and full.project == "":
-                    gaps[0] += 1
+                    # Counted separately from the KeyError gap: that is the
+                    # row-name window, this is the hydration window, and the
+                    # split is what makes a regression in either one visible
+                    # in the failure message instead of merged away.
+                    unhydrated[0] += 1
                     continue
                 mixed.append(triple)
 
@@ -1753,12 +1758,22 @@ def test_concurrent_readers_never_see_mixed_row_during_repeated_updates(
     assert observations[0] > 0, "readers never observed the registry"
     assert mixed == [], f"mixed revisions observed: {mixed[:5]}"
     # The empty-brief exemption above must stay a rare transient, not a way
-    # for a hydration regression to pass by returning nothing forever: the
-    # overwhelming majority of hydrations must still yield a COMPLETE
-    # revision. Measured on a loaded box the transient is ~1 in 10k reads.
-    assert complete[0] > observations[0] * 0.5, (
-        f"only {complete[0]} of {observations[0]} observations hydrated a "
-        f"complete revision; hydration is failing, not racing"
+    # for a hydration regression to pass by dropping briefs on a FRACTION of
+    # reads: at a 30% drop rate the original >50% floor still passed 4 runs in
+    # 5 (review R10-1), because "mostly hydrated" looks like "healthy" to a
+    # majority test. Reliability is measured ONLY over hydration outcomes:
+    # KeyError is the legitimate row-name publish gap and says nothing about
+    # whether a row that WAS found hydrated correctly. Mixing those gaps into
+    # the denominator made a healthy run look only 0.90-0.95 reliable. The
+    # direct ratio below is ~1.0 when healthy (the real unhydrated transient is
+    # ~1 in 10k) and fails the reviewer's 30% and 40% drop mutations.
+    hydration_observations = complete[0] + unhydrated[0]
+    assert hydration_observations > 0, "readers never attempted hydration"
+    hydration_reliability = complete[0] / hydration_observations
+    assert hydration_reliability > 0.95, (
+        f"only {complete[0]} of {hydration_observations} hydration outcomes "
+        f"were complete ({unhydrated[0]} returned unhydrated; "
+        f"reliability={hydration_reliability:.3f})"
     )
     final = TeamRegistry(tmp_path).get_team(team.id)
     assert (final.name, final.instructions, final.project) in revisions
