@@ -1047,6 +1047,74 @@ async def _wait_history(pilot: Any, view: SubagentView) -> None:
     await pilot.pause()
 
 
+async def _wait_landing_settled(
+    pilot: Any, view: SubagentView, *, cycles: int = 4, limit: int = 200
+) -> None:
+    """Block until the initial landing has been DECIDED, then settled.
+
+    The landing is the end of a deferred chain, not a state that exists when
+    the history worker returns: ``_settle_initial_landing`` re-arms the
+    one-shot inside a ``call_after_refresh``, ``_reconcile_current_body``
+    schedules ``_schedule_landing_snap`` through another, and that schedules
+    ``_snap_landing_to_row_head`` through a third. Until the last of those
+    runs, the body is wherever sticky-tail following left it — which on a
+    short viewport is the raw tail, three rows into the wrapping notice.
+
+    A fixed pause budget is a bet that the chain drains inside it. The bet
+    holds on an idle box (the snap lands before the first pause here) and
+    loses on a contended CI runner, where it failed four times with the
+    identical signature ``offset=28, owner_top=25, max=28`` — offset equal to
+    ``max_scroll_y``, i.e. the untouched tail, the snap never having run.
+    That reproduces exactly by forcing the state the numbers describe
+    (``_tail_anchor.acquire()`` then ``_scroll_to_tail()``).
+
+    So wait on the two observables the assertions actually depend on: the
+    one-shot being spent (``_landing_snap_pending`` false) and the geometry
+    then holding still, since the snap can be followed by a further layout
+    pass.
+
+    ``_snap_landing_to_row_head`` does NOT clear the flag on every path out
+    of it — it returns with the one-shot still armed when the body is not yet
+    mounted or laid out, and when the history page is still pending. Those
+    are exactly the states this helper must keep waiting through, so the
+    flag's meaning here is "the landing has been decided", not "the snap
+    function has run". The ceiling is therefore a deadlock guard rather than
+    a timing assumption: a slow machine costs nothing, and a landing that
+    never resolves fails naming both flags instead of hanging.
+    """
+    body = view._body
+    stable = 0
+    last: tuple[int, float] | None = None
+    for _ in range(limit):
+        await pilot.pause()
+        current = (body.virtual_size.height, body.scroll_y)
+        decided = not view._landing_snap_pending and not view._initial_tail_pending
+        # BOTH, and on the same frame. The flag alone is not enough: the snap
+        # is called several times (measured: three on this fixture, the first
+        # two returning early while the body is still short), and the call
+        # that runs against a still-growing layout can find the current offset
+        # already sitting on a head, take ``target == offset``, and clear the
+        # one-shot without scrolling or releasing the anchor. A later pass
+        # then grows the extent, sticky-follow moves to the new tail, and the
+        # landing is a wrap fragment again with the flag long since spent —
+        # observed here as the precondition failing at ``offset=28,
+        # owner_top=25``, the same numbers CI reported.
+        #
+        # Requiring the extent to have held still for ``cycles`` frames while
+        # the flag is clear is what makes "decided" mean decided against the
+        # FINAL layout rather than against whichever one the one-shot met.
+        stable = stable + 1 if decided and current == last else 0
+        last = current
+        if stable >= cycles:
+            return
+    raise AssertionError(
+        "the landing never settled: "
+        f"snap_pending={view._landing_snap_pending}, "
+        f"tail_pending={view._initial_tail_pending}, "
+        f"virtual_height={body.virtual_size.height}, scroll_y={body.scroll_y}"
+    )
+
+
 async def _wait_geometry_settled(
     pilot: Any, body: Any, *, cycles: int = 4, limit: int = 200
 ) -> None:
@@ -3897,8 +3965,7 @@ async def test_a_narrow_viewport_opens_on_a_row_head_not_a_wrap_fragment(
     async with app.run_test(size=(62, 24)) as pilot:
         view = await _open(pilot, app, job)
         await _wait_history(pilot, view)
-        for _ in range(12):
-            await pilot.pause()
+        await _wait_landing_settled(pilot, view)
         offset, owner_top = _landing_owner_top(view)
         assert owner_top is not None, (
             f"no block owns the landing offset {offset}; "
@@ -3921,4 +3988,104 @@ async def test_a_narrow_viewport_opens_on_a_row_head_not_a_wrap_fragment(
         assert notice.virtual_region.y == offset, (
             f"landed on {type(view._body.blocks()[0]).__name__} at {offset}, "
             f"not the wrapping notice at {notice.virtual_region.y}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_the_landing_survives_the_next_extent_change(tmp_path) -> None:
+    """A row that arrives after the landing must not drag it back onto a wrap.
+
+    The snap pulls the offset back to a row head, which leaves the viewport
+    ABOVE the tail — so sticky-tail following has to be released, or the very
+    next extent change calls ``_scroll_to_tail`` and puts the fragment straight
+    back. ``_snap_landing_to_row_head`` does release it, and the comment there
+    names this exact regression (F1, review round 1), but nothing exercised it:
+    removing the ``_tail_anchor.release()`` call leaves the whole file green on
+    ``main``, because the sibling test above asserts the landing and then stops
+    looking.
+
+    This is that missing half. It opens the same 62x24 page, waits for the same
+    landing, then appends one live row — the ordinary thing a running child
+    does — and requires the first visible line to still be a row head.
+
+    Mutation: delete the ``release()`` call and this fails with the offset
+    three rows inside the notice, which is the shape issue #407 reported.
+    """
+    transcript = Transcript(tmp_path / "child")
+    for index in range(20):
+        await transcript.append_message(
+            Message.assistant(f"durable {index}: applying the review fixes to the widget.")
+        )
+    events: list[dict[str, Any]] = []
+    for index in range(2):
+        events.extend(_text(f"m{index}", f"Step {index}: applying the review fixes to the widget."))
+    events.append(_call("c1", "edit", path="local_operator/tui/widgets/subagent_view.py"))
+    events.append(
+        _result(
+            "c1",
+            "edit",
+            "Invalid arguments: argument 'edits' does not match type array",
+            is_error=True,
+        )
+    )
+    events.append(_long_error_notice())
+    job = _job_with(events, status="running")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    session._subagent_comms = type(
+        "Comms", (), {"session_dir_of": lambda self, _job_id: transcript.directory}
+    )()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(62, 24)) as pilot:
+        view = await _open(pilot, app, job)
+        await _wait_history(pilot, view)
+        await _wait_landing_settled(pilot, view)
+
+        landed, landed_top = _landing_owner_top(view)
+        if landed_top != landed:
+            # The landing itself did not come out on a row head. That is the
+            # SIBLING test's subject — it asserts exactly this and fails with
+            # the offending offsets — so failing here too would report one
+            # defect twice while making this test's own subject (whether a
+            # SETTLED landing survives growth) unreachable. Skipping keeps the
+            # two subjects separate: if the landing regresses, the sibling
+            # goes red and names it; this one simply has nothing to say.
+            pytest.skip(
+                f"landing did not settle on a row head (offset={landed}, "
+                f"owner_top={landed_top}); that is the sibling test's subject"
+            )
+        # Following must be off after a snap that has landed above the tail.
+        # Asserted as the STATE, not inferred from the offset, so a failure
+        # here names the cause rather than its symptom. This is the assertion
+        # that kills the F1 mutant, and it does not depend on the timing
+        # above: once the landing IS on a head short of the tail, the anchor
+        # must be released or the growth below will drag it back.
+        assert not view._body._tail_anchor.following, (
+            "the landing snap left sticky-tail following armed; the next "
+            "extent change will scroll back onto the wrap fragment"
+        )
+
+        # One more live row: the ordinary growth a running child produces,
+        # published the way the jobs coalescer publishes it rather than by
+        # poking the view, so this exercises the real repaint path.
+        from local_operator.session.frontend_state import FrontendSessionState, JobState
+
+        job.trajectory.extend(_text("m9", "Step 9: still working through the widget rewrite."))
+        app._apply_frontend_state(
+            FrontendSessionState(
+                session_id="sess",
+                epoch="owner",
+                jobs=[JobState.from_job(job)],
+            )
+        )
+        await _wait_geometry_settled(pilot, view._body)
+
+        offset, owner_top = _landing_owner_top(view)
+        assert owner_top is not None, (
+            f"no block owns the offset {offset} after growth; "
+            f"starts={[b.virtual_region.y for b in view._body.blocks()[:12]]}"
+        )
+        assert owner_top == offset, (
+            f"growth dragged the viewport {offset - owner_top} rows into a block "
+            f"(offset={offset}, owner_top={owner_top}, max={view._body.max_scroll_y})"
         )

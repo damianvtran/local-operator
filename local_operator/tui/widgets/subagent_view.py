@@ -2604,8 +2604,53 @@ class SubagentView(Vertical):
                 self._landing_snap_pending = False
             return
         offset = body.scroll_offset.y
+        blocks = body.blocks()
+        # Only decide when a block actually OWNS the current offset.
+        #
+        # The container republishes ``virtual_size`` (and so ``max_scroll_y``,
+        # and so the followed offset) before every child's ``virtual_region``
+        # has been reassigned, so there is a window where the offset addresses
+        # a row no block claims yet. Searching in that window matches nothing,
+        # falls through to ``target == offset``, and spends the one-shot on a
+        # landing it never actually inspected.
+        #
+        # An unowned offset does NOT prove the layout is stale, and this test
+        # is deliberately not written as if it did: the gap margin
+        # (``.gap-above``) and the list's own vertical padding are real rows
+        # that no block's region covers, so unowned offsets exist at steady
+        # state too (measured: sets like ``[6, 8]`` in every configuration
+        # tried). The condition being tested is narrower and is the one that
+        # matters here — "is there a block whose head I could snap to?" With
+        # no owner there is nothing to snap to, so there is no decision to
+        # make and no reason to retire the guard.
+        #
+        # The cost of that is a one-shot which may never be spent on a
+        # completed child that sends no further refresh. That is deliberate
+        # and safe rather than merely tolerable: a surviving one-shot can only
+        # ever snap to the head of the block that owns the CURRENT offset, so
+        # firing it late is a no-op or a correction upward inside the block
+        # the reader is already looking at — never a jump somewhere else.
+        # Verified against the alternative during review: a reader parked
+        # mid-block and then repainted is yanked in MORE configurations
+        # without this guard than with it.
+        #
+        # Observed on CI four times with identical numbers — ``offset=28,
+        # owner_top=25, max=28`` — and reproduced locally under xdist with the
+        # trace ``snap-post 28 28 37 following=True pending=False``: the
+        # deciding call saw the FINAL extent (37) and still found no owner,
+        # because the notice's region had not been republished yet.
+        #
+        # Returning WITHOUT clearing the flag is the point: the one-shot
+        # survives to the next refresh, which is what a one-shot is for. The
+        # user-visible alternative is issue #407 itself — a narrow page
+        # opening on a hanging-indented red continuation line instead of the
+        # notice's first row.
+        if not any(
+            block.virtual_region.y <= offset < block.virtual_region.bottom for block in blocks
+        ):
+            return
         target = offset
-        for block in body.blocks():
+        for block in blocks:
             top = block.virtual_region.y
             bottom = block.virtual_region.bottom
             if top < offset < bottom:
@@ -2619,14 +2664,28 @@ class SubagentView(Vertical):
         if target != offset:
             with body._tail_anchor.programmatic_scroll():
                 body.scroll_to(y=target, animate=False, immediate=True)
-            # A snap that pulled back from the tail is a landing, not a
-            # follow. Leaving following armed lets `_size_updated` on the
-            # next extent change `_scroll_to_tail` onto the wrap fragment
-            # this just left (review round 1, F1). Released AFTER the
-            # programmatic context: ``note_user_scroll`` is a no-op while
-            # that depth is non-zero.
-            if target < body.max_scroll_y:
-                body._tail_anchor.release()
+        # Release whenever the landing is NOT the tail — including the case
+        # where no scroll was needed because the offset already sat on a head.
+        #
+        # This release used to live inside the ``target != offset`` branch, so
+        # a snap that found the offset already on a head spent the one-shot
+        # while leaving sticky-follow armed. That is not a rare path: this
+        # method runs several times during an open (measured: three on the
+        # narrow fixture, the first two returning early against a body that is
+        # still short), and any growth after the deciding call then sends
+        # ``_size_updated`` -> ``_scroll_to_tail`` to the new tail. On a short
+        # viewport that tail is three rows inside the wrapping notice — issue
+        # #407 exactly, reached after the guard had declared the landing done.
+        #
+        # Measured as ``offset=28, owner_top=25, max=28`` on CI (four
+        # identical failures) and reproduced locally at 1-in-8 under load.
+        # Keyed on the POSITION rather than on whether a scroll happened,
+        # because the invariant the anchor encodes is "the viewport is not at
+        # the end", and that is equally true in both branches. Released AFTER
+        # the programmatic context above: ``note_user_scroll`` is a no-op
+        # while that depth is non-zero.
+        if target < body.max_scroll_y:
+            body._tail_anchor.release()
         self._landing_snap_pending = False
 
     def _empty_state(self) -> str:
