@@ -18,6 +18,7 @@ routes messages internally.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -112,10 +113,17 @@ def unraceable_answer_hold(monkeypatch: pytest.MonkeyPatch) -> None:
 
     Not every test here can take the stretch. The ones that assert the hold
     COMMITS — a deliberate single keypress answering the question — need the
-    real timer to fire and deliberately do not use this fixture. The four that
-    do use it either type a word (the second keystroke cancels the hold) or
-    end it explicitly with Enter/Escape/an external settle, so in every case
-    the hold is resolved by an EVENT rather than by the clock running out.
+    real timer to fire and deliberately do not use this fixture. The three that
+    do use it either type a word (the second keystroke cancels the hold) or end
+    it explicitly with Enter/Escape/an external settle, so in every case the
+    hold is resolved by an EVENT rather than by the clock running out.
+
+    It is deliberately NOT applied to
+    ``test_a_prompt_arriving_mid_sentence_does_not_take_the_caret``, which
+    types ``please `` before the question arrives: a non-empty composer stands
+    the routing down entirely, so no hold is ever created and the fixture would
+    be inert. Attaching it there would advertise a dependency the test does not
+    have (review round 2).
     """
     monkeypatch.setattr(app_module, "ANSWER_KEY_HOLD_S", 30.0)
 
@@ -143,10 +151,24 @@ def test_the_answer_key_hold_is_long_enough_to_be_a_hold() -> None:
 
     A unit test rather than a pilot one on purpose: it asserts a fact about
     the constant, needs no app, and cannot itself flake.
+
+    It pins the VALUE; the assertion below pins the WIRING, because a correct
+    constant nobody reads is worth nothing (review round 2, F2-1). Together
+    they mean the hold cannot be shortened either by retuning the number or by
+    bypassing it at the call site.
     """
     assert 0.100 <= app_module.ANSWER_KEY_HOLD_S <= 0.400, (
         f"ANSWER_KEY_HOLD_S is {app_module.ANSWER_KEY_HOLD_S}s: outside the range where it is "
         "both long enough to span typing and short enough to feel immediate"
+    )
+    # The timer must be armed FROM the constant, not from a literal that has
+    # drifted away from it. Read the source of the one call site rather than
+    # mocking ``set_timer``: the wiring is a static fact, so a static check
+    # cannot race and needs no app.
+    hold_source = inspect.getsource(app_module.OperatorApp._hold_answer_key)
+    assert "set_timer(ANSWER_KEY_HOLD_S" in hold_source, (
+        "_hold_answer_key no longer arms its timer from ANSWER_KEY_HOLD_S, so the bound "
+        f"asserted above guards nothing:\n{hold_source}"
     )
 
 
@@ -2099,9 +2121,7 @@ async def test_a_held_key_never_answers_a_question_it_was_not_meant_for(
 
 
 @pytest.mark.asyncio
-async def test_a_prompt_arriving_mid_sentence_does_not_take_the_caret(
-    unraceable_answer_hold: None,
-) -> None:
+async def test_a_prompt_arriving_mid_sentence_does_not_take_the_caret() -> None:
     """A question can land while the user is typing, and must not hijack it.
 
     This is the mount-time twin of the routing hazard. A prompt is raised by
