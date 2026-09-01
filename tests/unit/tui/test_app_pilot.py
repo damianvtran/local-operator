@@ -9662,7 +9662,6 @@ async def test_help_documents_shell_mode_and_the_composer_chords() -> None:
         padding = cast(Padding, app._help_block().renderable)
         group = cast(Group, padding.renderable)
         rows = [cast(Text, row).plain for row in group.renderables]
-        text = "\n".join(rows)
 
         # Bang-mode's marker is named because the glyph is the
         # colour-independent signal. A row that names ``!`` without
@@ -9685,7 +9684,15 @@ async def test_help_documents_shell_mode_and_the_composer_chords() -> None:
             "esc",
             "ctrl+d",
         )
-        missing = [key for key in required if key not in text]
+        # Matched against the KEY GUTTER, not against the whole help text. A
+        # substring test over everything passes on a mention anywhere: the
+        # command table below names chords inside descriptions, so a bare
+        # `"<key>" in text` stayed true with the chord's own row deleted (caught
+        # by mutating a row away and watching this test stay green). These rows
+        # are the block's contract; a guard that cannot see the row go missing
+        # is not guarding it.
+        gutters = {row[:20].strip() for row in rows}
+        missing = [key for key in required if key not in gutters]
         assert not missing, f"/help is missing key rows: {missing}"
 
         # Same wrap ceiling as the copy/paste rows. A hanging tail at

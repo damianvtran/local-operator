@@ -1636,6 +1636,43 @@ Screen.settings #input-dock #prompt-chevron {
 }
 
 
+/* ── /copy picker ──────────────────────────────────────────────────────── *
+ *
+ * The same centred card over a dimmed transcript as `/resume` and
+ * `/analytics`, because it is the same kind of surface: an overlay the user
+ * opened, navigates with a cursor, and leaves with Esc.
+ *
+ * It differs in pinning its own HEIGHT rather than sizing to content. The
+ * widget divides a fixed row budget between the tree and the preview and
+ * computes its own `… N more lines` overflow from it, so the card has to be
+ * the height the widget measured — an `auto` height would let a long preview
+ * grow the card past the screen and clip the footer, which is the only
+ * statement of how to leave. `overflow: hidden` for the reason `Screen`
+ * carries it: a card taller than its box must not introduce a scrollbar,
+ * which silently costs two cells of width and reflows the transcript behind
+ * the overlay. */
+CopyPickerScreen {
+    align: center middle;
+    background: $lo-sunken;
+}
+
+CopyPickerScreen .copy-picker {
+    width: 100%;
+    max-width: 100;
+    height: 90%;
+    background: $lo-overlay;
+    padding: 1 2;
+    overflow: hidden;
+}
+
+#copy-picker-body {
+    width: 100%;
+    height: 100%;
+    color: $lo-fg;
+    overflow: hidden;
+}
+
+
 /* ── /resume session picker ────────────────────────────────────────────── *
  *
  * A floating read surface (overlay ramp, borderless, content-sized, Esc to

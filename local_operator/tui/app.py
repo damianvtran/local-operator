@@ -96,6 +96,7 @@ from local_operator.session.protocol import SessionProtocol
 from local_operator.tui import images as images_mod
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.autocomplete import ArgumentChoice, ArgumentMode, SlashCommand
+from local_operator.tui.copy_targets import CopyTarget, build_copy_targets
 from local_operator.tui.costs import job_cost, turn_cost
 from local_operator.tui.events import (
     AssistantDelta,
@@ -143,6 +144,7 @@ from local_operator.tui.widgets.aside_panel import ASIDE_PROMPT, AsidePanel
 from local_operator.tui.widgets.ask_picker import AskPickerScreen
 from local_operator.tui.widgets.assistant import AssistantBlock
 from local_operator.tui.widgets.command_picker import CommandPicker
+from local_operator.tui.widgets.copy_picker import CopyPickerScreen
 from local_operator.tui.widgets.editor import (
     ASIDE_PLACEHOLDER,
     READ_ONLY_PLACEHOLDER,
@@ -468,6 +470,25 @@ SLASH_COMMANDS: list[SlashCommand] = [
     SlashCommand("exit", "Quit the app", aliases=("quit",)),
     # Empties the surface the echo would land on — it was wiped a line later.
     SlashCommand("clear", "Clear the transcript (history is untouched)"),
+    # Beside `/clear` because they are the two commands that act on the
+    # TRANSCRIPT AS A DOCUMENT rather than on the conversation: one empties the
+    # surface, the other takes a message out of it. Deliberately NOT beside
+    # `/compact`, which shares its first three letters and nothing else —
+    # compaction rewrites history for the model, this reads the frame for the
+    # human.
+    #
+    # NOT an echo. The clipboard receipt names how much landed there, which is
+    # strictly more than the typed word, and nothing here reaches the model —
+    # `/approvals`' rule exactly.
+    #
+    # The description names WHAT CAN BE PICKED, not one message, because the
+    # command opens a chooser: a whole answer, or a single code block or quote
+    # out of it. "the last agent message" described the pre-picker behaviour and
+    # would now send a user looking for the one thing the command no longer
+    # does. 35 cells, inside the ~55 the description column wraps past (see
+    # `/model` and `/theme`, where a wrapping row renders a phantom command name
+    # in `/help`).
+    SlashCommand("copy", "Copy an agent message or code block"),
     # Replaces the transcript; a row describing the old one would not survive.
     SlashCommand("new", "Start a new conversation"),
     # In-process reboot cannot load a replaced wheel; this command exists so
@@ -6893,6 +6914,82 @@ class OperatorApp(App[None]):
             message = f"copied {lines} lines"
         self.query_one(Toast).show(message, yield_to_actionable=True, owner=owner)
 
+    def _cmd_copy(self, notice: NoticeFn) -> None:
+        """``/copy`` — pick an agent message, or a block out of one, and copy it.
+
+        Opens :class:`CopyPickerScreen` over a tree of the settled answers, each
+        drilling into its own code blocks and quotes. It replaces a command that
+        took the last message and nothing else: the common ask is "that code
+        block", and the only way to get one was to drag it row by row.
+
+        The write goes through :meth:`_put_on_clipboard`, the single clipboard
+        write the transcript drag and the composer already share, so this third
+        gesture cannot drift from them in what it writes or what it claims. A
+        bespoke toast here would make the receipt evidence about WHICH gesture
+        was used, which is exactly what ``on_editor_copied`` exists to prevent —
+        so the reference's per-target status is carried on ``CopyTarget`` and
+        deliberately not displayed.
+
+        That helper is SILENT on an empty payload — right for a zero-width drag,
+        wrong for a command the user typed deliberately, since an unexplained
+        no-op reads as a broken command. So the two cases where there is nothing
+        to take speak through ``notice`` instead of reaching the helper at all,
+        and they stay TWO cases: "the first answer is still coming" and "there
+        is no answer here" are different states with different fixes, and the
+        reference's single string conflates them.
+
+        The refusal does NOT reuse ``_live_turn_refuse_copy``. That string says
+        "esc first" because ``/update`` and ``/reload`` cannot proceed until the
+        turn ends — they would tear the process down over it. Nothing here needs
+        the turn stopped: a copy during a live turn lists what has SETTLED and
+        succeeds, which is also why mid-stream does not refuse. Refusing would
+        regress behaviour this command already shipped. The only failing case is
+        "no settled message exists yet", and telling that user to press esc
+        would demand an action that does not help them. ``_turn_is_live`` is
+        still the authority on whether a turn is running, so the two answers
+        cannot disagree about the state — only about the noun.
+
+        The tree is a SNAPSHOT, taken here and never rebuilt while the picker is
+        open. Messages insert at the TOP of a most-recent-first list, so a turn
+        settling under an open picker would shift every row below it — including
+        the one the user is already aiming at. ``CopyTarget`` is frozen for this
+        reason. The cost is that an answer arriving while the picker is up is not
+        listed; the user reopens.
+
+        A TRUNCATED message (aborted, or cut off by the provider) is copied and
+        ANNOUNCED. The toast is the shared receipt and stays exactly as it is —
+        it reports the clipboard write, which really did happen and really is
+        that many lines — so the caveat goes in a notice beside it rather than
+        by rewording the one string three gestures share. Silence was the actual
+        defect: the user got a half sentence that reads as a complete short
+        answer (review round 1, MAJOR-1). Only MESSAGE nodes carry the flag; a
+        closed fence inside a cut-off answer is itself complete, so a code-block
+        target never raises it.
+        """
+        targets = build_copy_targets(self._transcript_view().blocks())
+        if not targets:
+            if self._turn_is_live():
+                notice("nothing to copy yet — the first answer is still coming", "warning")
+            else:
+                notice("nothing to copy — no agent message in this conversation", "warning")
+            return
+
+        def _copy_choice(target: CopyTarget | None) -> None:
+            # Dismissed with Esc — nothing said. A cancelled picker is not an
+            # event worth a notice, the same silence `_resume_choice` keeps.
+            if target is None or target.content is None:
+                return
+            self._put_on_clipboard(target.content)
+            if target.truncated:
+                # AFTER the write, so the ordering matches what happened: the
+                # copy succeeded, and this qualifies what is now on the
+                # clipboard. Fired from the dismiss callback, so the modal is
+                # already gone and the notice lands on the normal screen rather
+                # than painting under an overlay.
+                notice("copied — note that answer was cut off before it finished", "warning")
+
+        self.push_screen(CopyPickerScreen(targets), _copy_choice)
+
     # -- resize (TUI-017 / D5) ----------------------------------------------
     def on_resize(self, event) -> None:  # type: ignore[no-untyped-def]
         """Re-fit size-sensitive chrome after a terminal resize.
@@ -12497,6 +12594,8 @@ class OperatorApp(App[None]):
             self._cmd_btw(arg, text)
         elif command == "/compact":
             self._cmd_compact()
+        elif command == "/copy":
+            self._cmd_copy(notice)
         elif command == "/approvals":
             self._cmd_approvals(arg, notice)
         elif command == "/skills":
@@ -18834,6 +18933,16 @@ class OperatorApp(App[None]):
             block = self._streaming_block
             self._streaming_block = None
             if block is not None:
+                # MARKED before it is frozen: this branch is reached when the
+                # turn produced no authoritative text — an abort, or a provider
+                # that stopped mid-sentence — so whatever streamed is a
+                # TRUNCATED message, not a short complete one. `finalize_text`
+                # only freezes the block, and `is_finalized` therefore answers
+                # "immutable", not "the model finished". Consumers that
+                # reproduce the message away from the frame (`/copy`) need the
+                # second question, and conflating the two handed a user a half
+                # sentence indistinguishable from a whole answer.
+                block.mark_truncated()
                 block.finalize_text()
             self._refresh_working_activity()
             return
