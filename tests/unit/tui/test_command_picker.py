@@ -35,6 +35,7 @@ from local_operator.tui.widgets.editor import (
     Editor,
     EditorSubmitted,
     InlineCommandRequested,
+    RefreshArgumentChoices,
 )
 from tests.unit.tui.conftest import TCSS_PATH
 
@@ -108,6 +109,7 @@ class PickerHarnessApp(App[None]):
         #: ``InlineCommandRequested`` path), captured to prove a mid-text run
         #: dispatches without submitting the surviving draft.
         self.inline_commands: list[str] = []
+        self.argument_refreshes: list[str] = []
 
     def set_editor_text(self, text: str) -> None:
         """Set the buffer AND park the caret at the end, as typing would.
@@ -145,6 +147,10 @@ class PickerHarnessApp(App[None]):
 
     def on_inline_command_requested(self, message: InlineCommandRequested) -> None:
         self.inline_commands.append(message.command_text)
+
+    def on_refresh_argument_choices(self, message: RefreshArgumentChoices) -> None:
+        message.stop()
+        self.argument_refreshes.append(message.command)
 
     def on_argument_query_opened(self, message: ArgumentQueryOpened) -> None:
         # Stands in for the app's controller-backed answer. The harness keeps the
@@ -2147,6 +2153,56 @@ async def test_command_word_is_not_flagged_unknown_while_the_picker_is_open() ->
 
 
 @pytest.mark.asyncio
+async def test_empty_name_list_catches_up_against_the_current_query() -> None:
+    """A late roster reopens `/team lop` without deleting or retyping the word."""
+    app = PickerHarnessApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.editor.focus()
+        await pilot.pause()
+        app.set_editor_text("/team ")
+        await pilot.pause()
+        # Reproduce the boot race after the one transition fill: the session did
+        # not exist yet, so the picker entered ARGUMENT mode with no rows.
+        app.editor.picker.set_choices([])
+        app.argument_refreshes.clear()
+        app.set_editor_text("/team lop")
+        await pilot.pause()
+        assert app.editor.picker._query == "lop"
+        assert app.editor.picker.is_pending()
+        # `set_editor_text` mirrors the text setter and the final caret-resync a
+        # real keystroke performs; both see the same still-empty list and retry.
+        assert app.argument_refreshes and set(app.argument_refreshes) == {"team"}
+
+        # The session/registry arrives later. `set_choices` must rank against the
+        # live query it already holds, not reset to the opening empty string.
+        choices = [ArgumentChoice("lopdev", "Build Local Operator", detail="3 roles")]
+        app.editor.picker.set_choices(choices)
+        app.editor.set_name_choices(frozenset({"lopdev"}))
+        await pilot.pause()
+        assert app.editor.text == "/team lop"
+        assert app.editor.picker.is_open()
+        assert app.editor.picker.highlighted_name() == "lopdev"
+
+
+@pytest.mark.asyncio
+async def test_empty_name_list_does_not_refresh_after_completed_name() -> None:
+    """The parked switch/send state is past catch-up even if rows are absent."""
+    app = PickerHarnessApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.editor.focus()
+        await pilot.pause()
+        app.set_editor_text("/team frontend-guild ")
+        await pilot.pause()
+        app.editor.picker.set_choices([])
+        app.argument_refreshes.clear()
+        app.editor._sync_picker()
+        await pilot.pause()
+        assert app.argument_refreshes == []
+        assert "switch" in app.editor.picker._notice
+        assert "send" in app.editor.picker._notice
+
+
+@pytest.mark.asyncio
 async def test_recognized_team_name_gets_the_argument_style() -> None:
     app = PickerHarnessApp()
     async with app.run_test(size=(100, 30)) as pilot:
@@ -2382,6 +2438,30 @@ async def test_name_token_soft_wraps_across_rows_on_a_multiline_body() -> None:
                 if fg == green:
                     painted += text
         assert painted == long_name
+
+
+@pytest.mark.asyncio
+async def test_inline_team_reassembly_keeps_name_highlight_with_multiline_draft() -> None:
+    """Choosing a late inline `/team` keeps the roster snapshot after reassembly."""
+    app = PickerHarnessApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.editor.focus()
+        await pilot.pause()
+        app.set_editor_text("review\nthis /team ")
+        await pilot.pause()
+        app.set_editor_text("review\nthis /team front")
+        await pilot.pause()
+        await pilot.press("tab")
+        await pilot.pause()
+        assert app.editor.text == "/team frontend-guild review\nthis"
+        signal = theme_mod.semantic_color("signal").lower()
+        green = theme_mod.semantic_color("string").lower()
+        fg = theme_mod.semantic_color("fg").lower()
+        row0 = _slash_ink(app.editor)
+        assert _ink_of(row0, "/team") == signal
+        assert _ink_of(row0, "frontend-guild") == green
+        assert _ink_of(row0, " review ") == fg
+        assert all(color not in (signal, green) for _, color in _slash_ink(app.editor, 1))
 
 
 @pytest.mark.asyncio

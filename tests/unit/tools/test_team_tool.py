@@ -105,3 +105,41 @@ async def test_create_refuses_a_duplicate(context) -> None:
 @pytest.mark.asyncio
 async def test_create_needs_a_name(context) -> None:
     assert "needs 'name'" in await call(context, op="create")
+
+
+@pytest.mark.asyncio
+async def test_lock_timeout_returns_structured_error_without_traceback(
+    tmp_path, monkeypatch
+) -> None:
+    """U5-1: contention through the tool path is a recoverable error result.
+
+    A peer holds the registry lock past the bounded wait; the model must get
+    the retry guidance as a structured error, not a raised exception (the
+    loop never raises into the model) and not a generic could-not-save.
+    """
+    import fcntl
+    import os
+
+    import local_operator.teams as teams_module
+    from local_operator.teams import TeamEditFields, TeamRegistry
+
+    cfg = tmp_path
+    holder = TeamRegistry(cfg)
+    holder.create_team(TeamEditFields(name="seed"))
+    monkeypatch.setattr(teams_module, "_TEAM_LOCK_TIMEOUT_S", 0.2)
+
+    registry = TeamRegistry(cfg)
+    context = ToolContext(cwd=".", team_registry=registry)
+    fd = os.open(cfg / ".teams.lock", os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        result = await execute_team("tc", {"op": "create", "name": "blocked"}, None, None, context)
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+    assert result.is_error
+    text = result.text
+    assert "Timed out waiting for the teams registry lock" in text
+    assert "retry after the other lop process finishes" in text
+    assert "could not save team" not in text

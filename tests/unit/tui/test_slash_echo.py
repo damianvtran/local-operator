@@ -21,8 +21,10 @@ from pathlib import Path
 
 import pytest
 from rich.style import Style
+from textual.containers import Container
 
 from local_operator.session.goal import MAX_GOAL_CHARS, GoalState
+from local_operator.tui import theme as theme_mod
 from local_operator.tui.app import SLASH_COMMANDS, OperatorApp, slash_command_for
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView, UserBlock
@@ -470,6 +472,401 @@ async def test_completing_a_team_name_keeps_the_parked_hint_in_the_real_app() ->
         assert (
             "switch" in editor.picker._notice and "send" in editor.picker._notice
         ), editor.picker._notice
+
+
+@pytest.mark.asyncio
+async def test_session_adoption_catches_up_team_picker_and_name_highlight() -> None:
+    """Typing `/team lop` before boot must recover when the registry appears."""
+    from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
+
+    session = FakeSession()
+    registry = TeamRegistry(Path(tempfile.mkdtemp()))
+    registry.create_team(
+        TeamEditFields(
+            name="lopdev",
+            manager="manager",
+            members=[TeamMember(role="coder")],
+        )
+    )
+    session.team_registry = registry
+    release = asyncio.Event()
+
+    async def delayed_factory() -> FakeSession:
+        await release.wait()
+        return session
+
+    app = OperatorApp(delayed_factory)
+    # The committed real-app evidence uses the product's standard 100x30 frame;
+    # pin the regression to that same viewport so these cell coordinates map
+    # directly to the SVG y positions cited in the PR body.
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        for char in "/team lop":
+            await pilot.press("slash" if char == "/" else ("space" if char == " " else char))
+        await pilot.pause()
+        assert app._session is None
+        assert editor.picker.is_pending()
+        assert editor.picker._query == "lop"
+
+        # D1 (design review round 1): while the registry is genuinely still
+        # arriving, the picker reserves exactly one NON-SELECTABLE notice row.
+        # The real row must replace it in place — not expand the dock and jump
+        # the composer/welcome/status geometry under a mid-keystroke user.
+        empty_geometry = {
+            "composer": editor.region.y,
+            "welcome": app.query_one(WelcomeView).region.y,
+            "status": app.query_one("#status-band").region.y,
+            "picker": editor.picker.region.y,
+            "picker_height": editor.picker.region.height,
+            "screen": app.screen.size,
+            "virtual": app.screen.virtual_size,
+        }
+        assert editor.picker.display is True
+        assert editor.picker.is_open() is False  # the reserve is not selectable
+        assert editor.picker._notice == "loading teams…"
+        assert empty_geometry["picker_height"] == 1
+
+        release.set()
+        await _boot(pilot, app)
+        # Consecutive post-adoption frames must be settled at the same geometry.
+        await pilot.pause()
+        filled_geometry = {
+            "composer": editor.region.y,
+            "welcome": app.query_one(WelcomeView).region.y,
+            "status": app.query_one("#status-band").region.y,
+            "picker": editor.picker.region.y,
+            "picker_height": editor.picker.region.height,
+            "screen": app.screen.size,
+            "virtual": app.screen.virtual_size,
+        }
+        await pilot.pause()
+        settled_geometry = {
+            "composer": editor.region.y,
+            "welcome": app.query_one(WelcomeView).region.y,
+            "status": app.query_one("#status-band").region.y,
+            "picker": editor.picker.region.y,
+            "picker_height": editor.picker.region.height,
+            "screen": app.screen.size,
+            "virtual": app.screen.virtual_size,
+        }
+        # The picker itself may not ADD geometry: its one pending row is
+        # replaced by the one real row. FakeSession adoption also changes
+        # unrelated welcome/status content (model label + status segments), so
+        # compare the picker's invariant as relative geometry and pin the two
+        # consecutive post-adoption frames exactly. The committed real-Session
+        # evidence carries the absolute pre/post coordinates with stable facts.
+        assert empty_geometry["picker_height"] == filled_geometry["picker_height"] == 1
+        assert empty_geometry["status"] - empty_geometry["composer"] == 2
+        assert filled_geometry["status"] - filled_geometry["composer"] == 2
+        assert empty_geometry["picker"] - empty_geometry["composer"] == 1
+        assert filled_geometry["picker"] - filled_geometry["composer"] == 1
+        # FakeSession's welcome/status facts can settle one tick after the
+        # registry row (the same unrelated recentering excluded above), so
+        # compare the dock invariant again rather than claiming absolute
+        # frame equality from this synthetic host. The committed real-Session
+        # triplet pins absolute first/settled equality at 24/25/26/1.
+        assert settled_geometry["picker_height"] == 1
+        assert settled_geometry["status"] - settled_geometry["composer"] == 2
+        assert settled_geometry["picker"] - settled_geometry["composer"] == 1
+        assert filled_geometry["screen"] == settled_geometry["screen"]
+        assert filled_geometry["virtual"] == settled_geometry["virtual"]
+        assert editor.text == "/team lop"
+        assert editor.picker.is_open()
+        assert editor.picker.highlighted_name() == "lopdev"
+        assert editor._name_choices == frozenset({"lopdev"})
+
+        # Complete the exact name by hand and type a message; the snapshot
+        # delivered during adoption must paint it without another list-opening.
+        editor.text = "/team lopdev fix it"
+        editor.move_cursor(editor._end_of_buffer())
+        editor._sync_picker()
+        await pilot.pause()
+        green = Style.parse(theme_mod.semantic_color("string")).color
+        assert green is not None
+        line = editor.render_line(0)
+        painted = [
+            segment
+            for segment in line._segments
+            if segment.text == "lopdev" and segment.style and segment.style.color == green
+        ]
+        assert painted
+
+
+def _picker_geometry(
+    app: OperatorApp, editor: Editor
+) -> tuple[int, int, int, int, int, object, object]:
+    """Exact dock/screen coordinates for pending-name geometry assertions."""
+    return (
+        editor.region.y,
+        editor.picker.region.y,
+        editor.picker.region.height,
+        app.query_one("#status-band").region.y,
+        app.query_one(WelcomeView).region.y,
+        app.screen.size,
+        app.screen.virtual_size,
+    )
+
+
+@pytest.mark.asyncio
+async def test_session_adoption_catches_up_agent_picker_without_geometry_change() -> None:
+    """U2-1: `/agent aud` reserves one row until the registry arrives."""
+    session = FakeSession()
+    session.agent_registry = _agent_registry(tempfile.mkdtemp())
+    release = asyncio.Event()
+
+    async def delayed_factory() -> FakeSession:
+        await release.wait()
+        return session
+
+    app = OperatorApp(delayed_factory)
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        for char in "/agent aud":
+            await pilot.press("slash" if char == "/" else ("space" if char == " " else char))
+        await pilot.pause()
+
+        pending = _picker_geometry(app, editor)
+        assert editor.picker.is_loading()
+        assert editor.picker.is_open() is False
+        assert editor.picker._notice == "loading agent roster…"
+        # FakeSession carries different welcome/status facts from the real
+        # Session used by committed evidence, so its absolute y coordinates
+        # are intentionally not hard-coded here. Pin the exact dock geometry
+        # and dimensions it must preserve across the three frames; the real
+        # Session capture below supplies the absolute 24/25/26/1 coordinates.
+        composer, picker_y, picker_h, status_y, _welcome_y, screen, virtual = pending
+        assert picker_h == 1
+        assert picker_y - composer == 1
+        assert status_y - composer == 2
+        assert screen == virtual
+
+        release.set()
+        await _boot(pilot, app)
+        await pilot.pause()
+        first = _picker_geometry(app, editor)
+        await pilot.pause()
+        settled = _picker_geometry(app, editor)
+        # Session adoption replaces FakeSession's welcome/status facts and may
+        # recenter that content one tick after the row. Pin the DOCK invariant
+        # in all three synthetic frames rather than claiming absolute frame
+        # equality from this host; the committed real-Session triplet has stable
+        # facts and asserts absolute first/settled equality at 24/25/26/1.
+        for geometry in (pending, first, settled):
+            frame_composer, frame_picker, frame_h, frame_status, *_ = geometry
+            assert frame_h == 1
+            assert frame_picker - frame_composer == 1
+            assert frame_status - frame_composer == 2
+        assert first[-2:] == settled[-2:]
+        assert editor.text == "/agent aud"
+        assert editor.picker.is_loading() is False
+        assert editor.picker.is_open()
+        assert editor.picker.highlighted_name() == "auditor"
+        assert editor._name_choices == frozenset(
+            {
+                "architect",
+                "auditor",
+                "coder",
+                "dashboard-sme",
+                "designer",
+                "hollow-role",
+                "manager",
+                "reviewer",
+                "scout",
+            }
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("command", "query", "expected"),
+    [("team", "lop", "lopdev"), ("agent", "aud", "auditor")],
+)
+async def test_pending_name_tab_is_noop_then_completes_after_adoption(
+    command: str, query: str, expected: str
+) -> None:
+    """U2-2: pending Tab preserves exact text/caret; real rows restore Tab."""
+    from local_operator.teams import TeamEditFields, TeamRegistry
+
+    session = FakeSession()
+    teams = TeamRegistry(Path(tempfile.mkdtemp()))
+    teams.create_team(TeamEditFields(name="lopdev", manager="manager"))
+    session.team_registry = teams
+    session.agent_registry = _agent_registry(tempfile.mkdtemp())
+    release = asyncio.Event()
+
+    async def delayed_factory() -> FakeSession:
+        await release.wait()
+        return session
+
+    app = OperatorApp(delayed_factory)
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        original = f"/{command} {query}"
+        for char in original:
+            await pilot.press("slash" if char == "/" else ("space" if char == " " else char))
+        await pilot.pause()
+        caret = editor._caret_offset()
+        assert editor.picker.is_loading()
+        assert editor.picker.suggestions() == []
+
+        await pilot.press("tab")
+        await pilot.pause()
+        assert editor.text == original
+        assert editor._caret_offset() == caret
+        assert editor.picker.is_loading()
+
+        release.set()
+        await _boot(pilot, app)
+        await pilot.pause()
+        assert editor.picker.highlighted_name() == expected
+        await pilot.press("tab")
+        await pilot.pause()
+        assert editor.text == f"/{command} {expected} "
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("command", "query"), [("team", "lop"), ("agent", "aud")])
+async def test_pending_name_enter_is_noop_until_rows_arrive(command: str, query: str) -> None:
+    """U2-2: pending Enter never submits or clears the delayed query."""
+    from local_operator.teams import TeamEditFields, TeamRegistry
+
+    session = FakeSession()
+    teams = TeamRegistry(Path(tempfile.mkdtemp()))
+    teams.create_team(TeamEditFields(name="lopdev", manager="manager"))
+    session.team_registry = teams
+    session.agent_registry = _agent_registry(tempfile.mkdtemp())
+    release = asyncio.Event()
+
+    async def delayed_factory() -> FakeSession:
+        await release.wait()
+        return session
+
+    app = OperatorApp(delayed_factory)
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        original = f"/{command} {query}"
+        for char in original:
+            await pilot.press("slash" if char == "/" else ("space" if char == " " else char))
+        await pilot.pause()
+        caret = editor._caret_offset()
+        assert editor.picker.is_loading()
+
+        await pilot.press("enter")
+        await pilot.pause()
+        assert editor.text == original
+        assert editor._caret_offset() == caret
+        assert getattr(session, "attached_teams", []) == []
+        assert getattr(session, "active_agent", "") == ""
+
+        release.set()
+        await _boot(pilot, app)
+        await pilot.pause()
+        assert editor.text == original
+        assert editor.picker.is_open()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("command", "query"), [("team", "lop"), ("agent", "aud")])
+async def test_pending_name_placeholder_is_not_mouse_selectable(command: str, query: str) -> None:
+    """U2-2: the loading reserve has no keyboard or mouse selection target."""
+
+    async def never_adopts() -> FakeSession:
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    app = OperatorApp(never_adopts)
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        original = f"/{command} {query}"
+        for char in original:
+            await pilot.press("slash" if char == "/" else ("space" if char == " " else char))
+        await pilot.pause()
+        assert editor.picker.is_loading()
+        assert editor.picker.is_open() is False
+        assert editor.picker.highlighted_name() is None
+        assert editor.picker.suggestions() == []
+
+        await pilot.click(type(editor.picker), offset=(4, 0))
+        await pilot.pause()
+        assert editor.text == original
+        assert editor.picker.is_loading()
+        assert editor.picker.highlighted_name() is None
+
+
+@pytest.mark.asyncio
+async def test_pending_name_row_collapses_on_escape_and_stays_dismissed_after_adoption() -> None:
+    """Esc releases D1's reserve; the late registry must not resurrect it."""
+    from local_operator.teams import TeamEditFields, TeamRegistry
+
+    session = FakeSession()
+    registry = TeamRegistry(Path(tempfile.mkdtemp()))
+    registry.create_team(TeamEditFields(name="lopdev", manager="manager"))
+    session.team_registry = registry
+    release = asyncio.Event()
+
+    async def delayed_factory() -> FakeSession:
+        await release.wait()
+        return session
+
+    app = OperatorApp(delayed_factory)
+    async with app.run_test(size=(120, 40)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        for char in "/team lop":
+            await pilot.press("slash" if char == "/" else ("space" if char == " " else char))
+        await pilot.pause()
+        assert editor.picker.is_pending()
+        assert editor.picker.display is True
+        assert editor.picker.region.height == 1
+        reserved_y = editor.region.y
+
+        await pilot.press("escape")
+        await pilot.pause()
+        assert editor.text == "/team lop"
+        assert editor.picker.display is False
+        assert editor.picker._dismissed_query == "lop"
+        assert editor.region.y == reserved_y + 1  # the reserved row collapsed
+
+        release.set()
+        await _boot(pilot, app)
+        await pilot.pause()
+        assert editor.text == "/team lop"
+        assert editor.picker.display is False
+        assert editor.picker.is_open() is False
+        assert editor.picker._dismissed_query == "lop"
+        # Adoption may change unrelated status/welcome rows in FakeSession;
+        # dismissal's invariant is that no picker row is reintroduced.
+        assert editor.picker.region.height == 0
+        assert app.query_one("#status-band").region.y - editor.region.y == 1
+
+
+@pytest.mark.asyncio
+async def test_adopted_empty_roster_does_not_leave_a_pending_name_row() -> None:
+    """A genuinely empty adopted roster is final, not an eternal blank hole."""
+    from local_operator.teams import TeamRegistry
+
+    session = FakeSession()
+    session.team_registry = TeamRegistry(Path(tempfile.mkdtemp()))
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        editor = app.query_one(Editor)
+        editor.focus()
+        for char in "/team lop":
+            await pilot.press("slash" if char == "/" else ("space" if char == " " else char))
+        await pilot.pause()
+        assert app._session is session
+        assert editor.picker.is_pending()
+        # Pending is the input state (an argument list with no matches), not a
+        # promise that more rows are coming; adopted-empty must take no space.
+        assert editor.picker.display is False
+        assert editor.picker._notice == ""
+        assert editor.picker.region.height == 0
 
 
 @pytest.mark.asyncio
@@ -989,3 +1386,319 @@ async def test_an_unknown_command_names_what_was_typed() -> None:
     assert "unknown command" in painted, painted
     assert rows == [], rows
     assert welcome is True
+
+
+def _dock_geometry(app: OperatorApp, editor: Editor) -> dict[str, int]:
+    """ABSOLUTE dock/composer/picker/status coordinates (R7-3).
+
+    Deliberately absolute rather than dock-relative. The reflow this guards
+    kept every relative offset intact — composer, picker and status band all
+    moved TOGETHER — while the whole dock floated four rows off the bottom of
+    the screen with a visible gap under it. The existing catch-up tests assert
+    relative geometry and single-match queries, and neither could see it.
+    """
+    dock = app.query_one("#input-dock", Container)
+    return {
+        "dock_y": dock.region.y,
+        "dock_h": dock.region.height,
+        "pad_b": int(dock.styles.padding.bottom),
+        "composer_y": editor.region.y,
+        "picker_y": editor.picker.region.y,
+        "picker_h": editor.picker.region.height,
+        "status_y": app.query_one("#status-band").region.y,
+    }
+
+
+async def _team_picker_geometry(match_count: int, *, delayed: bool) -> dict[str, int]:
+    """Settle `/team lop` against ``match_count`` matching rows and measure.
+
+    ``delayed`` selects the arm: False adopts the session BEFORE the query is
+    typed (the ordinary path), True types the query while the factory is still
+    blocked and releases it afterwards (the catch-up path this PR added).
+    """
+    from local_operator.teams import TeamEditFields, TeamRegistry
+
+    names = ["lopdev", "lopsec", "lopops", "lopqa"][:match_count]
+    session = FakeSession()
+    registry = TeamRegistry(Path(tempfile.mkdtemp()))
+    for name in (*names, "other"):  # `other` never matches `lop`
+        registry.create_team(TeamEditFields(name=name, manager="manager"))
+    session.team_registry = registry
+    release = asyncio.Event()
+
+    async def factory() -> FakeSession:
+        if delayed:
+            await release.wait()
+        return session
+
+    app = OperatorApp(factory)
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        if not delayed:
+            await _boot(pilot, app)
+        for char in "/team lop":
+            await pilot.press("slash" if char == "/" else ("space" if char == " " else char))
+        await pilot.pause()
+        if delayed:
+            release.set()
+            await _boot(pilot, app)
+        for _ in range(6):
+            await pilot.pause()
+        assert editor.picker.region.height == match_count, "query did not match as intended"
+        settled = _dock_geometry(app, editor)
+        # A settled frame must not move again: a second pass that differs is a
+        # reflow the user sees as motion (AGENTS.md "Animation and multi-frame").
+        await pilot.pause()
+        assert _dock_geometry(app, editor) == settled
+        assert app.screen.size == app.screen.virtual_size
+        assert app.screen.show_vertical_scrollbar is False
+        return settled
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("match_count", [1, 2, 3])
+async def test_delayed_and_direct_team_picker_settle_at_identical_geometry(
+    match_count: int,
+) -> None:
+    """R7-3: catch-up must land the dock exactly where the direct path does.
+
+    Parametrised past ONE match on purpose. With a single match the delayed
+    reserve and the real list are both one row, so the composition measured
+    against the reserve happens to stay correct and the bug is invisible; at
+    two rows the dock kept the shorter list's lift and floated `-5` rows with
+    an empty band under the status line.
+    """
+    direct = await _team_picker_geometry(match_count, delayed=False)
+    delayed = await _team_picker_geometry(match_count, delayed=True)
+    assert delayed == direct, f"delayed arm reflowed: {delayed} != {direct}"
+    # Pin the ABSOLUTE frame, not just the agreement between the two arms: two
+    # arms that agree on a WRONG geometry is exactly the regression this
+    # guards, and the numbers below are the ones the at-rest composition
+    # produces for this 100x30 host.
+    assert direct["picker_h"] == match_count
+    assert direct["composer_y"] == direct["dock_y"] + 1
+    assert direct["picker_y"] == direct["composer_y"] + 1
+    assert direct["status_y"] == direct["picker_y"] + match_count
+    # The lift is the ONE quantity that went wrong: it is the composition's
+    # reserve BELOW the dock, and the bug wrote a lift measured against the
+    # 1-row reserve while a taller list was showing. Whatever it is, both arms
+    # must have computed it from the same list.
+    assert delayed["pad_b"] == direct["pad_b"]
+
+
+@pytest.mark.asyncio
+async def test_team_picker_absolute_geometry_matches_at_rest_composition() -> None:
+    """R7-3: the picker must not shift the dock away from where boot put it.
+
+    The reflow was only visible against an ABSOLUTE reference, so this test
+    supplies one that does not come from the picker at all: the same app with
+    no picker open. Opening a list may change the dock's HEIGHT (it gains
+    rows), but the bottom of the composition — the status band — must stay put.
+    """
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        for _ in range(4):
+            await pilot.pause()
+        at_rest_status_y = app.query_one("#status-band").region.y
+
+    for match_count in (1, 2, 3):
+        for delayed in (False, True):
+            geometry = await _team_picker_geometry(match_count, delayed=delayed)
+            # One match still fits under the at-rest splash budget; more rows
+            # legitimately buy space from the composition's lift. Either way the
+            # band never falls BELOW where boot placed it, which is what a dock
+            # floating above the bottom of the screen looks like numerically.
+            assert geometry["status_y"] <= at_rest_status_y, (
+                f"{match_count} matches, delayed={delayed}: status band moved "
+                f"to {geometry['status_y']} against at-rest {at_rest_status_y}"
+            )
+
+
+@pytest.mark.asyncio
+async def test_failed_boot_retires_the_team_reserve_and_restores_enter() -> None:
+    """U7-1: after boot FAILS, `/team` must stop promising rows and take Enter.
+
+    The reserve is keyed to "no session adopted yet", which a failed boot makes
+    permanently true: the row read `loading teams…` forever and `is_loading()`
+    swallowed every Enter, so the user pressed into silence. A boot failure is
+    as authoritative as an empty roster — nothing is arriving.
+    """
+
+    async def failing_factory() -> FakeSession:
+        raise RuntimeError("registry exploded")
+
+    app = OperatorApp(failing_factory)
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        for _ in range(40):
+            await pilot.pause()
+            if app._boot_failed:
+                break
+        assert app._boot_failed is True
+        assert app._session is None
+
+        for char in "/team lop":
+            await pilot.press("slash" if char == "/" else ("space" if char == " " else char))
+        await pilot.pause()
+        await pilot.pause()
+        # No eternal placeholder, and no loading latch to eat accept keys.
+        assert editor.picker._notice == ""
+        assert editor.picker.is_loading() is False
+
+        await pilot.press("enter")
+        await pilot.pause()
+        # Enter reached the ordinary submit path: the draft was consumed and the
+        # app reported the session state, instead of the keypress vanishing.
+        assert editor.text == ""
+        rendered = " ".join(
+            str(getattr(block, "_text", "") or "") for block in app._transcript_view().children
+        )
+        # U8-2: that report names the FAILURE. It used to say "still starting"
+        # one row under "✗ session failed to start", which contradicted it; the
+        # property this test guards is that Enter is answered at all, and the
+        # wording assertion moved with the fix rather than pinning the old lie.
+        assert "session failed to start — /login" in rendered
+
+
+@pytest.mark.asyncio
+async def test_boot_failure_flag_clears_when_a_new_session_transition_starts() -> None:
+    """U7-1: a later `/resume`/`/login` re-opens the arriving window."""
+
+    async def failing_factory() -> FakeSession:
+        raise RuntimeError("registry exploded")
+
+    app = OperatorApp(failing_factory)
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(40):
+            await pilot.pause()
+            if app._boot_failed:
+                break
+        assert app._boot_failed is True
+
+        settled = asyncio.Event()
+
+        async def transition() -> None:
+            await settled.wait()
+
+        app._run_session_transition(transition())
+        await pilot.pause()
+        # A session is arriving again, so the reserve is allowed to promise
+        # rows: the failure no longer describes the app's state.
+        assert app._boot_failed is False
+        assert app._name_list_pending_notice("team") == "loading teams…"
+        settled.set()
+        await pilot.pause()
+
+
+@pytest.mark.asyncio
+async def test_pending_notice_reads_the_same_for_canonical_and_alias_spellings() -> None:
+    """U8-1: `/agents` must not render "loading agents roster…".
+
+    The notice interpolated the typed command word, so the plural alias leaked
+    into copy the product would never write, in the one row whose job is to say
+    the roster is coming. Both spellings of each family open the SAME list, so
+    they must read identically — one constant per family, the way the team
+    branch already did it. No test asserted either ALIAS, which is how this
+    survived seven rounds.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        # Hold the window the notice describes open, so the branch is reached.
+        app._session_transition_pending = True
+        assert app._name_list_pending_notice("team") == "loading teams…"
+        assert app._name_list_pending_notice("teams") == "loading teams…"
+        assert app._name_list_pending_notice("agent") == "loading agent roster…"
+        assert app._name_list_pending_notice("agents") == "loading agent roster…"
+        app._session_transition_pending = False
+
+
+@pytest.mark.asyncio
+async def test_alias_spellings_paint_the_same_pending_row_in_the_picker() -> None:
+    """U8-1 through the real surface: type the alias and read the rendered row."""
+    for typed, expected in (("/teams x", "loading teams…"), ("/agents a", "loading agent roster…")):
+        release = asyncio.Event()
+
+        async def delayed_factory() -> FakeSession:
+            await release.wait()
+            return FakeSession()
+
+        app = OperatorApp(delayed_factory)
+        async with app.run_test(size=(100, 30)) as pilot:
+            editor = app.query_one(Editor)
+            editor.focus()
+            for char in typed:
+                await pilot.press("slash" if char == "/" else ("space" if char == " " else char))
+            await pilot.pause()
+            assert editor.picker._notice == expected, typed
+            release.set()
+            await pilot.pause()
+
+
+@pytest.mark.asyncio
+async def test_failed_boot_enter_reports_the_failure_not_a_pending_start() -> None:
+    """U8-2: Enter after a DEFINITIVE boot failure must not say "still starting".
+
+    U7-1 routes `/team` back into the ordinary submit path, whose no-session
+    guard answered "session is still starting…" — directly beneath the app's own
+    `✗ session failed to start: …`. The two cannot both be true, and the second
+    is the one that tells the user what to do next, so it sent them off to wait
+    for something that was never arriving.
+    """
+
+    async def failing_factory() -> FakeSession:
+        raise RuntimeError("registry exploded")
+
+    app = OperatorApp(failing_factory)
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        for _ in range(40):
+            await pilot.pause()
+            if app._boot_failed:
+                break
+        assert app._boot_failed is True
+
+        for probe in ("/team lop", "/agent aud"):
+            for char in probe:
+                await pilot.press("slash" if char == "/" else ("space" if char == " " else char))
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause()
+            await pilot.pause()
+
+        rendered = " ".join(
+            str(getattr(block, "_text", "") or "") for block in app._transcript_view().children
+        )
+        # The draft is still consumed by the ordinary path (U7-1 holds)...
+        assert editor.text == ""
+        # ...but nothing tells the user to wait for a session that failed.
+        assert "still starting" not in rendered, rendered
+        assert rendered.count("session failed to start — /login") == 2, rendered
+
+
+@pytest.mark.asyncio
+async def test_genuine_still_starting_keeps_its_wording() -> None:
+    """U8-2 must not regress the case the string was written for.
+
+    While the boot worker is genuinely running, "still starting" is true and
+    telling the user to wait is the right advice; only the FAILED state gets the
+    other answer.
+    """
+    release = asyncio.Event()
+
+    async def delayed_factory() -> FakeSession:
+        await release.wait()
+        return FakeSession()
+
+    app = OperatorApp(delayed_factory)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        assert app._boot_failed is False
+        assert app._no_session_notice() == ("session is still starting…", "warning")
+        release.set()
+        await pilot.pause()
