@@ -12,9 +12,9 @@ import platform
 import sys
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Literal, Protocol, TypeAlias, runtime_checkable
+from typing import Annotated, Any, Literal, Protocol, TypeAlias, runtime_checkable
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import AfterValidator, Field, field_validator, model_validator
 
 from local_operator.evaluation.evidence.models import ScoreArtifact, canonical_digest
 from local_operator.evaluation.lifecycle import CleanupPlan
@@ -26,7 +26,17 @@ from local_operator.evaluation.receipts import (
     StrictIdentifier,
 )
 
-ADAPTER_SCHEMA_VERSION = "1.0"
+# 1.1 adds the parent-chosen ``artifact_root`` to ``ResetStartParams``. It is a
+# REQUIRED field on a model whose config is ``extra="forbid"`` and ``strict``,
+# so the change is wire-breaking in both directions: a 1.0 worker rejects the
+# new key as an unknown extra, and a 1.1 worker cannot serve a parent that omits
+# it. This boundary deliberately pins exact versions rather than accepting
+# ranges (see ``AdapterSelector``), so the bump is what locks a 1.0 adapter out
+# instead of letting it fail later as an opaque invalid_request.
+ADAPTER_SCHEMA_VERSION = "1.1"
+# One alias for the three models that pin the version, so a future bump cannot
+# move the constant while leaving a model silently accepting the older literal.
+SchemaVersion: TypeAlias = Literal["1.1"]
 ADAPTER_ENTRY_POINT_GROUP = "local_operator.evaluation_adapters.v1"
 MAX_RESCUE_REFS = 256
 MAX_REQUIREMENTS = 256
@@ -110,7 +120,7 @@ def canonical_params_digest(method: AdapterMethod, params: ProtocolModel) -> Dig
 class AdapterSelector(ProtocolModel):
     """Exact wheel and interpreter selection; ranges and fallback are absent."""
 
-    schema_version: Literal["1.0"]
+    schema_version: SchemaVersion
     adapter_id: StrictIdentifier
     distribution: StrictIdentifier
     version: StrictIdentifier
@@ -154,7 +164,7 @@ class AdapterMetadata(ProtocolModel):
     entry_point: StrictIdentifier
     package_digest: Digest
     release_digest: Digest
-    schema_version: Literal["1.0"]
+    schema_version: SchemaVersion
     capabilities: AdapterCapabilities
 
 
@@ -248,28 +258,42 @@ class ScopedInfraValue(ProtocolModel):
     value: str = Field(min_length=1, max_length=4096)
 
 
+def _normalized_absolute_root(value: str) -> str:
+    # Normalized AND absolute, not merely absolute: the parent opens this
+    # directory with O_DIRECTORY and then resolves artifact names against that
+    # descriptor, so a path containing ".." would let the root itself denote a
+    # different directory than the one the parent believes it authorized.
+    if not os.path.isabs(value) or os.path.normpath(value) != value:
+        raise ValueError("artifact root must be normalized and absolute")
+    return value
+
+
+# The single definition of a parent-authorized artifact directory. Both the
+# rescue descriptor and the live episode's reset carry one, and they must agree
+# on what makes a root acceptable -- a second, slightly different validator is
+# exactly how a confinement boundary develops a gap.
+ArtifactRoot: TypeAlias = Annotated[
+    str,
+    Field(min_length=1, max_length=4096),
+    AfterValidator(_normalized_absolute_root),
+]
+
+
 class RescueDescriptor(ProtocolModel):
-    schema_version: Literal["1.0"]
+    schema_version: SchemaVersion
     selector: AdapterSelector
     handshake: Handshake
     episode_id: StrictIdentifier
     cleanup_plan: CleanupPlan
     secret_refs: tuple[SecretRef, ...] = Field(max_length=MAX_RESCUE_REFS)
     infra_values: tuple[ScopedInfraValue, ...] = Field(max_length=MAX_RESCUE_REFS)
-    artifact_root: str = Field(min_length=1, max_length=4096)
+    artifact_root: ArtifactRoot
     descriptor_id: Digest = ZERO_DIGEST
 
     @field_validator("secret_refs", "infra_values", mode="before")
     @classmethod
     def _freeze_refs(cls, value: Any) -> Any:
         return tuple(value) if isinstance(value, list) else value
-
-    @field_validator("artifact_root")
-    @classmethod
-    def _absolute_artifact_root(cls, value: str) -> str:
-        if not os.path.isabs(value) or os.path.normpath(value) != value:
-            raise ValueError("artifact root must be normalized and absolute")
-        return value
 
     @model_validator(mode="after")
     def _content_bind(self) -> "RescueDescriptor":
@@ -364,8 +388,38 @@ class PrepareResult(ProtocolModel):
 
 
 class ResetStartParams(OperationParams):
+    """Begin the episode, and tell the worker where its frame bytes may go.
+
+    WHY ``reset_start`` AND NOT ``prepare``. The worker's environment is built
+    from a closed allowlist (``supervisor._ENV_ALLOW`` is locale and temp only),
+    so a genuinely out-of-process adapter has no ambient way to learn the
+    directory the parent will read frames from. The path therefore has to arrive
+    as validated RPC input, and this is the call it belongs on:
+
+    * ``prepare`` is contractually ALLOCATION-FREE -- it creates nothing, so it
+      produces no observation and has no bytes to publish. Handing it a writable
+      root would invite exactly the allocation the two-stage rescue persistence
+      depends on it not doing, and would widen the window in which a resource
+      exists that no persisted descriptor names.
+    * ``reset_start`` is the side-effect boundary AND the first call that yields
+      an observation: the parent calls ``observe`` immediately after it, and
+      every later ``observe``/``execute`` runs in ``RUNNING``, which only
+      ``reset_start`` can enter. So it is the single point that precedes every
+      frame-producing call while still being the first one that needs the root.
+    * ``RescueDescriptor`` keeps its own copy because rescue runs in a NEW
+      process against a persisted file, with no live session to have been told.
+
+    Confinement is not established by this field. The parent treats the root as
+    the only directory it will ever open, and resolves each artifact by its
+    content digest relative to that directory descriptor with ``O_NOFOLLOW``
+    (``supervisor.verify_artifact``); the worker names bytes by digest and never
+    supplies a path. Sending the root is what makes the worker able to write
+    where the parent already looks -- it grants no new read authority.
+    """
+
     task_id: StrictIdentifier
     episode_id: StrictIdentifier
+    artifact_root: ArtifactRoot
 
 
 class ObserveParams(ProtocolModel):

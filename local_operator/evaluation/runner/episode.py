@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any, Literal, Mapping
 
 from local_operator.evaluation.adapters.api import (
+    ADAPTER_SCHEMA_VERSION,
     AskUserExchangeParams,
     CleanupParams,
     CloseParams,
@@ -357,7 +358,10 @@ class EpisodeRunner:
 
     def _persist_descriptor(self, handshake: Handshake, plan: CleanupPlan) -> None:
         descriptor = RescueDescriptor(
-            schema_version="1.0",
+            # Tracked from the constant rather than restated: a literal here
+            # silently disagrees with the models on the next protocol bump, and
+            # the failure surfaces as an unrelated pre-bundle validation error.
+            schema_version=ADAPTER_SCHEMA_VERSION,
             selector=self._selector,
             handshake=handshake,
             episode_id=self._spec.episode_id,
@@ -472,11 +476,22 @@ class EpisodeRunner:
 
     async def _reset_and_observe(self) -> None:
         session = self._require_session()
+        # The parent owns this directory, so the parent creates it. An adapter
+        # told to publish into a missing root would otherwise have to create it
+        # itself, which hands the worker a say in the mode and ownership of the
+        # one directory the parent later opens and reads.
+        self._config.artifact_root.mkdir(mode=0o700, parents=True, exist_ok=True)
         result = await session.reset_start(
             ResetStartParams(
                 operation_id=f"reset-{self._spec.episode_id}",
                 task_id=self._spec.task_id,
                 episode_id=self._spec.episode_id,
+                # The worker is spawned with a stripped environment, so this RPC
+                # field is its ONLY way to learn where published frame bytes are
+                # read from. It is the same directory ``_record_observation``
+                # verifies against, which is what keeps "where the adapter wrote"
+                # and "where the parent reads" a single parent-chosen value.
+                artifact_root=str(self._config.artifact_root),
             ),
             timeout=self._config.reset_timeout,
         )

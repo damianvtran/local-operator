@@ -67,7 +67,55 @@ from local_operator.evaluation.adapters.api import (
 from local_operator.evaluation.adapters.discovery import distribution_digest
 from local_operator.evaluation.evidence.models import ScoreArtifact
 from local_operator.evaluation.lifecycle import CleanupAction, CleanupPlan
-from local_operator.evaluation.protocol import Observation
+from local_operator.evaluation.protocol import (
+    ArtifactRef,
+    FrameGeometry,
+    FrameRef,
+    FrameSize,
+    Observation,
+)
+
+
+# A genuinely valid 1x1 PNG, constructed rather than pasted so its CRCs are
+# right: the parent runs the real media validator over these bytes, and a
+# hand-mangled blob would be refused for the wrong reason.
+def _png_bytes():
+    import struct
+    import zlib
+
+    def chunk(kind, payload):
+        return (
+            struct.pack(">I", len(payload))
+            + kind
+            + payload
+            + struct.pack(">I", zlib.crc32(kind + payload) & 0xFFFFFFFF)
+        )
+
+    return (
+        b"\\x89PNG\\r\\n\\x1a\\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(b"\\x00\\x00\\x00\\x00"))
+        + chunk(b"IEND", b"")
+    )
+
+
+# Write frame bytes into the PARENT-SUPPLIED root, named by digest.
+#
+# This is the point of the artifact_root field: this process's environment was
+# stripped by the supervisor, so `root` arrived on ResetStartParams and is the
+# only way the worker knows where the parent will look. Content addressing is
+# the adapter's half of confinement -- it publishes under a name it cannot
+# choose, so it cannot aim the parent at anything but these bytes. `name` exists
+# only so the escape tests can publish under a WRONG name.
+def _publish(root, payload, name=None):
+    import hashlib
+    import os
+
+    digest = hashlib.sha256(payload).hexdigest()
+    path = os.path.join(root, name or digest)
+    with open(path, "wb") as handle:
+        handle.write(payload)
+    return digest
 
 # The supervisor builds the worker environment from a closed allowlist, so a
 # cutpoint cannot ride in as an env var. The adapter reads it from a file beside
@@ -84,13 +132,90 @@ def _cutpoint():
         return ""
 
 
-def _observation(task_id, episode_id, sequence):
+# Which frame behaviour this run exercises, read the same adapter-owned way as
+# the cutpoint. "" means the original no-frame adapter, so every pre-existing
+# test in this module keeps its exact previous behaviour.
+def _frame_mode():
+    import os
+
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tiny_frame_mode")
+    try:
+        with open(path) as handle:
+            return handle.read().strip()
+    except OSError:
+        return ""
+
+
+# Build the frame list for one observation, publishing real bytes into the root
+# the PARENT supplied on reset_start. The dishonest modes each break exactly one
+# clause of the parent's verification so the refusals cannot pass for each other.
+def _frames(root, sequence):
+    import hashlib
+    import os
+
+    mode = _frame_mode()
+    if not mode or root is None:
+        return ()
+    payload = _png_bytes()
+    digest = hashlib.sha256(payload).hexdigest()
+    byte_count = len(payload)
+    if mode == "honest":
+        _publish(root, payload)
+    elif mode == "outside_root":
+        # Publish into a sibling directory and name it by its true digest. The
+        # parent only ever opens `root`, so the bytes are simply not there.
+        outside = os.path.join(os.path.dirname(root), "outside")
+        os.makedirs(outside, exist_ok=True)
+        _publish(outside, payload)
+    elif mode == "symlink_escape":
+        # Real bytes outside the root, with an in-root symlink pointing at them.
+        # Only O_NOFOLLOW distinguishes this from the honest case.
+        outside = os.path.join(os.path.dirname(root), "outside")
+        os.makedirs(outside, exist_ok=True)
+        target = os.path.join(outside, digest)
+        with open(target, "wb") as handle:
+            handle.write(payload)
+        link = os.path.join(root, digest)
+        if not os.path.lexists(link):
+            os.symlink(target, link)
+    elif mode == "digest_mismatch":
+        # Different bytes of the SAME length under the honest digest's name.
+        # Length-changing tampering would be caught by the size check first,
+        # leaving the digest comparison itself unexercised.
+        tampered = payload[:-1] + bytes([payload[-1] ^ 0xFF])
+        _publish(root, tampered, name=digest)
+    elif mode == "byte_count_mismatch":
+        _publish(root, payload)
+        byte_count = byte_count + 1
+    elif mode == "fifo":
+        # A FIFO under an honest-looking digest name. Nothing ever writes to it,
+        # so a parent that opens it without O_NONBLOCK blocks in the kernel
+        # forever -- the liveness attack, not a content one.
+        path = os.path.join(root, digest)
+        if not os.path.lexists(path):
+            os.mkfifo(path)
+    return (
+        FrameRef(
+            frame_id="frame-%%d" %% sequence,
+            artifact=ArtifactRef(
+                sha256=digest, media_type="image/png", byte_count=byte_count
+            ),
+            geometry=FrameGeometry(
+                native=FrameSize(width=1, height=1),
+                model_visible=FrameSize(width=1, height=1),
+            ),
+        ),
+    )
+
+
+def _observation(task_id, episode_id, sequence, root=None):
     provisional = Observation(
         task_id=task_id,
         episode_id=episode_id,
         sequence=sequence,
         observation_id="provisional",
         text="state-%%d" %% sequence,
+        frames=_frames(root, sequence),
     )
     return provisional.model_copy(
         update={"observation_id": observation_content_id(provisional)}
@@ -104,6 +229,9 @@ class TinyAdapter:
         self.episode_id = None
         self.sequence = 0
         self.current = None
+        # Learned ONLY from reset_start; the stripped environment offers no
+        # other route to it, which is exactly what this fixture proves.
+        self.artifact_root = None
 
     def _maybe_die(self, name):
         if _cutpoint() == name:
@@ -135,8 +263,11 @@ class TinyAdapter:
         self._maybe_die("reset_start")
         self.task_id = params.task_id
         self.episode_id = params.episode_id
+        self.artifact_root = params.artifact_root
         self.sequence = 0
-        self.current = _observation(self.task_id, self.episode_id, 0)
+        self.current = _observation(
+            self.task_id, self.episode_id, 0, self.artifact_root
+        )
         return AckResult()
 
     async def observe(self, params):
@@ -145,7 +276,9 @@ class TinyAdapter:
     async def execute(self, params):
         self._maybe_die("execute")
         self.sequence += 1
-        output = _observation(self.task_id, self.episode_id, self.sequence)
+        output = _observation(
+            self.task_id, self.episode_id, self.sequence, self.artifact_root
+        )
         receipt = ExecutionReceipt(
             operation_id=params.operation_id,
             action_batch_id=params.action_batch_id,
@@ -191,7 +324,7 @@ def create():
             entry_point="tiny_runner_adapter:create",
             package_digest=distribution_digest(installed),
             release_digest="%s",
-            schema_version="1.0",
+            schema_version="1.1",
             capabilities=AdapterCapabilities(
                 routes=("computer",), ask_user=False, scoring=True
             ),
@@ -320,7 +453,7 @@ def real_selector(tmp_path: Path, adapter_site: Path) -> AdapterSelector:
         json.dumps({"release_digest": RELEASE_DIGEST}, separators=(",", ":"), sort_keys=True)
     )
     return AdapterSelector(
-        schema_version="1.0",
+        schema_version="1.1",
         adapter_id="tiny-runner",
         distribution="tiny-runner-adapter",
         version="1.0",
@@ -364,6 +497,39 @@ def _arm_cutpoint(site: Path, cutpoint: str | None) -> None:
         marker.unlink(missing_ok=True)
     else:
         marker.write_text(cutpoint)
+
+
+async def _accepting_rescue(descriptor: Any, **kwargs: Any) -> Any:
+    """Stand in for a real rescue so a refusal is not misread as a leak.
+
+    A refused frame poisons the session, which legitimately demands rescue. The
+    tests using this are about confinement, not about reclamation, so rescue is
+    reported complete and the assertions stay on the refusal itself.
+    """
+
+    del kwargs
+
+    class _Aggregate:
+        complete = True
+        descriptor_id = descriptor.descriptor_id
+
+    return _Aggregate()
+
+
+def _arm_frames(site: Path, mode: str | None) -> None:
+    """Tell the installed adapter how to publish observation frames.
+
+    Armed through a file beside the adapter module for the same reason the
+    cutpoint is: the worker's environment is built from a closed allowlist, so a
+    test cannot hand it a mode any other way without weakening the policy under
+    test. ``None`` restores the frameless adapter the other tests here expect.
+    """
+
+    marker = site / "tiny_frame_mode"
+    if mode is None:
+        marker.unlink(missing_ok=True)
+    else:
+        marker.write_text(mode)
 
 
 @pytest.mark.asyncio
@@ -508,3 +674,155 @@ async def test_killed_worker_process_group_is_reaped(
     assert await asyncio.to_thread(supervisor.process.poll) is not None
     with pytest.raises(ProcessLookupError):
         os.killpg(supervisor.pgid, 0)
+
+
+@pytest.mark.asyncio
+async def test_real_worker_publishes_a_frame_the_parent_verifies_and_bundles(
+    tmp_path: Path,
+    episode_id: str,
+    real_selector: AdapterSelector,
+    adapter_site: Path,
+) -> None:
+    """A genuinely spawned adapter delivers observation frames end to end.
+
+    This is the regression guard for the gap that ``artifact_root`` on
+    ``ResetStartParams`` closes. The worker is a real process whose environment
+    was built from the supervisor's closed allowlist, so the ONLY way it can
+    know where to write frame bytes is the field the parent sent it. Before that
+    field existed an out-of-process adapter could not publish a frame at all,
+    and the in-process fakes hid it because they shared the parent's memory.
+
+    The assertion chain is deliberately the full one: the parent read the bytes
+    (``verify_artifact``), accepted them (digest, size, media), copied them into
+    the bundle, and the sealed bundle still verifies. A test that stopped at
+    "the episode completed" would pass against an adapter that published no
+    frames whatsoever, which is precisely the broken state.
+    """
+
+    _arm_cutpoint(adapter_site, None)
+    _arm_frames(adapter_site, "honest")
+    config = _subprocess_config(tmp_path)
+    runner = EpisodeRunner(
+        build_spec(episode_id),
+        config,
+        selector=real_selector,
+        model=ScriptedModel(["step", "finish"]),
+        launch=AdapterSupervisor.launch,
+    )
+
+    outcome = await runner.run()
+
+    assert outcome.status == "completed", outcome.diagnostic
+    root = outcome.bundle_root
+    assert root is not None
+    report = verify_bundle(root)
+    assert report.valid, [issue.code for issue in report.issues]
+
+    # The worker really wrote into the parent-chosen directory, and the bytes
+    # there are the exact PNG the parent then admitted into the bundle.
+    published = [item for item in config.artifact_root.iterdir() if item.is_file()]
+    assert published, "the spawned worker published nothing into the parent's root"
+    payload = published[0].read_bytes()
+    assert payload.startswith(b"\x89PNG\r\n\x1a\n")
+    assert published[0].name == hashlib.sha256(payload).hexdigest()
+
+    # Every observation carried a frame, and the frame's bytes are in the
+    # bundle: an episode that silently dropped frames would fail here.
+    events = [
+        json.loads(line)
+        for line in (root / "events.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    observations = [item for item in events if item.get("kind") == "observation"]
+    assert observations, "no observation events were recorded"
+    assert all(event["payload"]["artifacts"] for event in observations)
+    assert {
+        artifact["sha256"] for event in observations for artifact in event["payload"]["artifacts"]
+    } == {hashlib.sha256(payload).hexdigest()}
+    assert all(
+        artifact["media_type"] == "image/png" and artifact["byte_count"] == len(payload)
+        for event in observations
+        for artifact in event["payload"]["artifacts"]
+    )
+    # The bundle stores artifacts content-addressed, so the frame's digest being
+    # present is proof the parent ingested these exact bytes rather than
+    # recording a reference to something it never read.
+    assert (root / "artifacts" / hashlib.sha256(payload).hexdigest()).read_bytes() == payload
+
+
+@pytest.mark.parametrize(
+    ("mode", "refusal"),
+    [
+        # Bytes exist, but only outside the one directory the parent opens.
+        ("outside_root", "artifact path is unsafe or unavailable"),
+        # An in-root name that resolves outside it; O_NOFOLLOW is the guard.
+        ("symlink_escape", "artifact path is unsafe or unavailable"),
+        # In-root bytes of the declared length whose content is not the digest.
+        ("digest_mismatch", "artifact digest differs"),
+        # In-root bytes of the right content but a lied-about length.
+        ("byte_count_mismatch", "artifact is not a matching regular file"),
+        # A FIFO nobody writes to: the LIVENESS case. The S_ISREG check sits
+        # behind the open, so only O_NONBLOCK stops this wedging the parent
+        # forever -- and it is refused by that same existing clause.
+        ("fifo", "artifact is not a matching regular file"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_worker_cannot_deliver_frames_from_outside_the_root(
+    tmp_path: Path,
+    episode_id: str,
+    real_selector: AdapterSelector,
+    adapter_site: Path,
+    mode: str,
+    refusal: str,
+) -> None:
+    """Being told the root grants no authority to read outside it, or to lie.
+
+    Sending the worker a writable path is only safe because the parent keeps
+    resolving artifacts by content, inside that one directory descriptor, with
+    ``O_NOFOLLOW``. Each mode here breaks a different clause of that check, so a
+    weakened ``verify_artifact`` cannot be masked by another clause still
+    holding -- verified by reintroducing the weakness: dropping ``O_NOFOLLOW``
+    let ``symlink_escape`` reach ``completed``, and removing the digest
+    comparison turned ``digest_mismatch`` red.
+
+    ``fifo`` is the odd one out and belongs here anyway: it attacks LIVENESS
+    rather than content. The refusal it lands on is shared with
+    ``byte_count_mismatch``, so the assertion that matters is that the episode
+    TERMINATES at all -- without ``O_NONBLOCK`` the open never returns, and
+    because ``verify_artifact`` runs on the event-loop thread after the mutating
+    call's ``wait_for`` has closed, nothing upstream can time it out.
+
+    The episode must not report success, and it must never seal a bundle that
+    claims frames it could not verify.
+    """
+
+    _arm_cutpoint(adapter_site, None)
+    _arm_frames(adapter_site, mode)
+    runner = EpisodeRunner(
+        build_spec(episode_id),
+        _subprocess_config(tmp_path),
+        selector=real_selector,
+        model=ScriptedModel(["step", "finish"]),
+        launch=AdapterSupervisor.launch,
+        rescue=_accepting_rescue,
+    )
+
+    outcome = await runner.run()
+
+    assert outcome.status != "completed"
+    # Pinning the exact refusal keeps each mode honest about WHICH clause caught
+    # it. Without this, length-changing tampering is rejected by the size check
+    # and the digest comparison goes untested while the suite stays green.
+    assert outcome.diagnostic is not None and refusal in outcome.diagnostic
+    assert outcome.score is None or outcome.score.status == "unscored"
+    root = outcome.bundle_root
+    if root is None:
+        return
+    report = verify_bundle(root)
+    # Whatever terminal it reached must be coherent: a refused frame may not
+    # leave a bundle that both verifies and reports a reportable success.
+    if report.abandonment is None:
+        assert report.valid, [issue.code for issue in report.issues]
+        assert report.outcome is not None
+        assert report.outcome.reportable is False
