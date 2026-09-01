@@ -321,7 +321,17 @@ async def test_jobs_says_wait_for_a_job_that_has_not_been_admitted(tmp_path):
     rows = {line.split()[0]: line for line in result.text.splitlines()}
     row = rows[parked_id]
 
-    assert "215.0s" in row, row
+    # The formatter computes ``now - start_time`` at RENDER time, so the exact
+    # string is a bet on how long the call took: under load it renders 215.2s
+    # and an ``== "215.0s"`` assertion fails on an unmodified tree. Bounded on
+    # BOTH sides rather than relaxed to ``>=``: the point of the row is that it
+    # reports the parked job's real wait, and a one-sided bound passes just as
+    # happily for 3815.0s as for 215.0s — which is the misreport this test was
+    # filed to catch, wearing a different number. One second of slack is orders
+    # of magnitude more than the render path can consume and far less than any
+    # plausible unit error.
+    age = float(row.split()[2].rstrip("s"))
+    assert 215.0 <= age < 216.0, row
     assert row.split()[3] == "wait", row
     # ``wait`` is four cells where every other sense is at most three. The
     # field must budget for the widest vocabulary entry or the one parked row

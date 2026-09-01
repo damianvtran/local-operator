@@ -2562,7 +2562,17 @@ async def test_esc_aborts_a_running_shell_command() -> None:
     session = FakeSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(80, 24)) as pilot:
-        await pilot.pause()
+        # The bang path captures ``self._session`` at submit time and persists
+        # through it; submitting before adoption lands makes ``persist`` a
+        # silent no-op, so the record the test asserts never exists. A single
+        # pause bets adoption takes one tick — it is the first app's
+        # import-and-construct cost on a fresh interpreter. Wait on the
+        # condition instead.
+        for _ in range(200):
+            if app._session is not None:
+                break
+            await pilot.pause(0.02)
+        assert app._session is not None, "the session was never adopted"
         editor = app.query_one(Editor)
         editor.focus()
         await pilot.pause()
@@ -2596,8 +2606,18 @@ async def test_esc_aborts_a_running_shell_command() -> None:
         assert card._state == "interrupted"
         # The card stays owned until execute_bash has reaped the process and
         # persisted its interrupted result. Clearing it on the key press made
-        # the receipt disappear on resume.
-        assert app._shell_card is card
+        # the receipt disappear on resume — so the invariant is that ownership
+        # is never cleared WITHOUT the record: if the reaper has already run
+        # by the time we look (it can, under load, inside the press's own
+        # yield), the persisted record must already be there. A bare
+        # ``_shell_card is card`` asserted that the reaper had NOT run, which
+        # is a bet on how fast the kill lands rather than on the contract.
+        if app._shell_card is None:
+            assert (
+                session.shell_records
+            ), "ownership was cleared without persisting the interrupted result"
+        else:
+            assert app._shell_card is card
         for _ in range(200):
             await pilot.pause()
             if app._shell_card is None:
