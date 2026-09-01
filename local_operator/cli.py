@@ -1227,8 +1227,8 @@ def sessions_command(args: argparse.Namespace) -> int:
     eyeballed against reality."""
     import json as _json
 
-    from local_operator.mobile import registry
     from local_operator.mobile.resources import session_resource_usage
+    from local_operator.session.runtime import registry
 
     scanned = registry.scan(config_dir())
     now = time.time()

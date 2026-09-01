@@ -13,17 +13,21 @@ from typing import Any, cast
 
 import pytest
 
-from local_operator.mobile import registry
 from local_operator.mobile.peer_client import send_peer_message
-from local_operator.mobile.registrant import Registrant
 from local_operator.mobile.types import TranscriptEntry
-from tests.unit.mobile.test_registrant import FakeHandle, NoPeerHandle, _wait_record
+from local_operator.session.runtime import registry
+from local_operator.session.runtime.server import RuntimeServer
+from tests.unit.session.runtime.test_server import (
+    FakeHandle,
+    NoPeerHandle,
+    _wait_record,
+)
 
 
 @pytest.mark.asyncio
 async def test_send_returns_ack_detail_and_passes_args() -> None:
     handle = FakeHandle()
-    registrant = Registrant(handle, kind="tui")
+    registrant = RuntimeServer(handle, kind="tui")
     registrant.start()
     try:
         record = await _wait_record()
@@ -64,7 +68,7 @@ async def test_send_survives_an_oversized_welcome_projection() -> None:
     handle._projection.transcript = [
         TranscriptEntry(id=f"row-{i}", kind="assistant", text="x" * 20000) for i in range(80)
     ]
-    registrant = Registrant(handle, kind="tui")
+    registrant = RuntimeServer(handle, kind="tui")
     registrant.start()
     try:
         record = await _wait_record()
@@ -89,7 +93,7 @@ async def test_send_raises_on_error_frame() -> None:
     # A handle without the capability makes the registrant answer with an error
     # frame; the sender must raise RuntimeError, not hang or swallow it.
     handle = NoPeerHandle()
-    registrant = Registrant(handle, kind="tui")
+    registrant = RuntimeServer(handle, kind="tui")
     registrant.start()
     try:
         record = await _wait_record()

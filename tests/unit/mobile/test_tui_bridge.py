@@ -161,7 +161,7 @@ async def test_tui_auto_registers_and_answers_control() -> None:
             await pilot.pause(0.1)
         assert app._mobile_registrant is not None, "mobile registrant never started"
 
-        from local_operator.mobile import registry
+        from local_operator.session.runtime import registry
 
         records = registry.scan()
         assert records, "no discovery record published"

@@ -69,7 +69,7 @@ catches a live pid whose owner wedged. Publication is staged-write + rename.
 
 ### The control socket
 
-Each registrant hosts a length-delimited JSON-lines socket on a random
+Each session runtime hosts a length-delimited JSON-lines socket on a random
 loopback port. The daemon dials it with the record's key. Auth is a single
 `hello` frame carrying the key (constant-time compare); the session answers
 with a `welcome` snapshot and then streams events. One connection, both
@@ -85,7 +85,7 @@ directions:
 
 The daemon folds each session's stream into a bounded projection (transcript
 tail, todos, subagent roster, pending requests) and re-serves it to phones.
-When a registrant's socket is unreachable but its record is fresh the daemon
+When a session runtime's socket is unreachable but its record is fresh the daemon
 shows it as *degraded*; when the pid dies the record is reaped and the
 session is shown as ended (its history stays resumable).
 
@@ -98,8 +98,8 @@ session is shown as ended (its history stays resumable).
 - **Registry watcher**: scans the record directory, dials new sessions,
   reaps dead ones.
 - **Owned sessions**: sessions started from the phone run as supervised
-  CHILD PROCESSES (`python -m local_operator.mobile.child`), each with its
-  own pid and its own registrant — so a daemon restart costs the phone its
+  CHILD PROCESSES (`python -m local_operator.session.runtime.process`), each with
+  its own pid and its own runtime — so a daemon restart costs the phone its
   view, never the session its work, and every phone-visible session (owned
   or terminal) has exactly one shape: record + control socket.
 - **Auth**: signed cookie (`hmac-sha256(password, expiry)`) via

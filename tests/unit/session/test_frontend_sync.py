@@ -8,12 +8,12 @@ from pathlib import Path
 
 import pytest
 
-from local_operator.mobile import registry
 from local_operator.mobile.attach_client import AttachClient
-from local_operator.mobile.registrant import Registrant
 from local_operator.session.frontend_state import FRONTEND_CAPABILITY
 from local_operator.session.remote import RemoteSession
-from tests.unit.mobile.test_registrant import FakeHandle
+from local_operator.session.runtime import registry
+from local_operator.session.runtime.server import RuntimeServer
+from tests.unit.session.runtime.test_server import FakeHandle
 
 
 async def _record(root: Path):  # noqa: ANN202
@@ -36,7 +36,7 @@ async def test_owner_two_followers_share_full_1m_state_and_live_updates(
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     (tmp_path / "sessions" / "s1").mkdir(parents=True)
     handle = FakeHandle()
-    registrant = Registrant(handle, kind="tui")
+    registrant = RuntimeServer(handle, kind="tui")
     registrant.start()
     first = second = None
     try:
@@ -75,7 +75,7 @@ async def test_owner_two_followers_share_full_1m_state_and_live_updates(
 async def test_real_socket_follower_consumes_immutable_subagent_progress_and_settlement(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """Registrant → RemoteSession keeps the follower's full child ledger usable."""
+    """RuntimeServer → RemoteSession keeps the follower's full child ledger usable."""
     import time
 
     from local_operator.session.frontend_state import JobState
@@ -106,7 +106,7 @@ async def test_real_socket_follower_consumes_immutable_subagent_progress_and_set
         ],
     )
     handle._frontend.mutate(jobs=[running])
-    registrant = Registrant(handle, kind="tui")
+    registrant = RuntimeServer(handle, kind="tui")
     registrant.start()
     remote = None
     try:
@@ -171,7 +171,7 @@ async def test_real_socket_follower_consumes_immutable_subagent_progress_and_set
 async def test_daemon_never_receives_frontend_frames(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     handle = FakeHandle()
-    registrant = Registrant(handle, kind="tui")
+    registrant = RuntimeServer(handle, kind="tui")
     registrant.start()
     writer = None
     try:
@@ -197,7 +197,7 @@ async def test_wrong_key_wrong_session_and_old_protocol_are_rejected(
 ) -> None:
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     handle = FakeHandle()
-    registrant = Registrant(handle, kind="tui")
+    registrant = RuntimeServer(handle, kind="tui")
     registrant.start()
     try:
         record = await _record(tmp_path)
@@ -294,7 +294,7 @@ async def test_headless_turn_preserves_a_rich_frontend_checkpoint(tmp_path: Path
 async def test_real_session_streams_through_registrant_to_two_followers(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """Flagship realism: real Session → real Registrant → two socket followers.
+    """Flagship realism: real Session → real RuntimeServer → two socket followers.
 
     The canonical seed/updates come from the SESSION's own store (not a test
     double), the turn is a real streamed prompt, and both followers must end
@@ -308,8 +308,8 @@ async def test_real_session_streams_through_registrant_to_two_followers(
         StreamTextDelta,
         Usage,
     )
-    from local_operator.mobile.registrant import SessionHandle
     from local_operator.mobile.types import SessionProjection
+    from local_operator.session.runtime.server import SessionHandle
     from local_operator.session.session import Session
     from local_operator.session.transcript import Transcript
 
@@ -398,7 +398,7 @@ async def test_real_session_streams_through_registrant_to_two_followers(
         async def refresh(self) -> None:
             return None
 
-    registrant = Registrant(_RealSessionHandle(), kind="tui")
+    registrant = RuntimeServer(_RealSessionHandle(), kind="tui")
     registrant.start()
     first = second = None
     try:

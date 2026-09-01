@@ -19,7 +19,7 @@ moving parts:
   session. No delta protocol means no drift; caps in the fold keep repaints
   cheap.
 
-Threading: one asyncio loop. Registrants run their own loops in their own
+Threading: one asyncio loop. Session hosts run their own loops in their own
 processes; this loop only dials them. Blocking work (session construction,
 which reads provider catalogues) goes through ``asyncio.to_thread`` so a
 phone starting a session never stalls the SSE streams of the others.
@@ -38,7 +38,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from local_operator.mobile import registry
 from local_operator.mobile.auth import (
     COOKIE_NAME,
     check_password,
@@ -51,6 +50,7 @@ from local_operator.mobile.types import (
     SessionRecord,
     SubagentRow,
 )
+from local_operator.session.runtime import registry
 
 logger = logging.getLogger(__name__)
 
@@ -618,7 +618,7 @@ def _durable_projection(session_id: str) -> SessionProjection | None:
 
 
 # ---------------------------------------------------------------------------
-# Registrant connections
+# Session host connections
 # ---------------------------------------------------------------------------
 
 
@@ -811,7 +811,7 @@ def _projection_frame(projection: SessionProjection) -> dict[str, Any]:
     """The daemon's serialization boundary: one capped frame dict.
 
     Both wire paths must agree on size. The registrant caps before broadcast
-    (see ``Registrant._projection_payload``); the daemon serves the SAME
+    (see ``RuntimeServer._projection_payload``); the daemon serves the SAME
     projection shape over SSE and republishes durable rebuilds, so it caps at
     every serialization site too — a durable fold of a long session can embed
     80 rows x 8 KB tool outputs, which no socket or phone renderer wants
@@ -1428,7 +1428,7 @@ class MobileDaemon:
         its own pid gets the same lifetime as a terminal session: the daemon
         going away costs the phone its view, never the session its work. The
         child runs the registrant standalone (``python -m
-        local_operator.mobile.child``), so the record + control socket path is
+        local_operator.session.runtime.process``), so the record + control socket path is
         literally the same code the TUI uses.
         """
         if not self.dial_registrants:
@@ -1448,7 +1448,7 @@ class MobileDaemon:
         process = await asyncio.create_subprocess_exec(
             sys.executable,
             "-m",
-            "local_operator.mobile.child",
+            "local_operator.session.runtime.process",
             env=env,
             # Detached stdio: the child speaks through its record and socket;
             # a pipe back to the daemon would die with the daemon and take

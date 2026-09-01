@@ -2405,7 +2405,7 @@ class OperatorApp(App[None]):
         self._mobile_handle: Any = None
         # Separate from user inactivity: this watches the OS-backed terminal
         # reader. A mounted but untouched TUI remains alive indefinitely.
-        from local_operator.mobile.child import _grace_seconds
+        from local_operator.session.runtime.process import _grace_seconds
 
         self._terminal_frontend_reaper = _TerminalFrontendReaper(_grace_seconds())
         # What a NEW session opens in, read from config at mount and rewritten
@@ -10100,11 +10100,11 @@ class OperatorApp(App[None]):
             return
         if self._mobile_handle is None:
             try:
-                from local_operator.mobile.registrant import Registrant
                 from local_operator.mobile.tui_handle import TuiSessionHandle
+                from local_operator.session.runtime.server import RuntimeServer
 
                 self._mobile_handle = TuiSessionHandle(self)
-                self._mobile_registrant = Registrant(self._mobile_handle, kind="tui")
+                self._mobile_registrant = RuntimeServer(self._mobile_handle, kind="tui")
                 self._mobile_registrant.start()
             except Exception:
                 logger.debug("mobile registrant failed to start", exc_info=True)

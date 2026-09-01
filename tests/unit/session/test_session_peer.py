@@ -314,7 +314,7 @@ async def test_a_pid_only_sender_is_named_from_the_local_registry(tmp_path, monk
     envelope read it.
     """
     from local_operator.mobile import peer_send as peer_send_mod
-    from local_operator.mobile import registry
+    from local_operator.session.runtime import registry
 
     class _Rec:
         pid = 4321

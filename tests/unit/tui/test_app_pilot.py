@@ -2019,9 +2019,9 @@ async def test_resume_owned_session_adopts_remote_in_standard_app(monkeypatch, t
     There is no pushed screen or attach vocabulary: the standard transcript and
     composer remain the only surface, and the old local writer is disposed.
     """
-    from local_operator.mobile import registry as mobile_registry
     from local_operator.mobile.types import PROTOCOL_VERSION, SessionRecord
     from local_operator.session.remote import RemoteSession
+    from local_operator.session.runtime import registry as mobile_registry
     from local_operator.tui.widgets.transcript import NoticeBlock
 
     session = FakeSession()
@@ -2090,9 +2090,9 @@ async def test_live_resume_atomically_gates_submission_then_recovers_success_and
     monkeypatch, tmp_path
 ) -> None:
     """Pending live resume never routes a draft to the session being left."""
-    from local_operator.mobile import registry as mobile_registry
     from local_operator.mobile.types import PROTOCOL_VERSION, SessionRecord
     from local_operator.session.remote import RemoteSession
+    from local_operator.session.runtime import registry as mobile_registry
 
     old = FakeSession()
     replacement = FakeSession()

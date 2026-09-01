@@ -1,7 +1,7 @@
 """The TUI's side of the mobile bridge.
 
 :class:`TuiSessionHandle` adapts a running :class:`~local_operator.tui.app.OperatorApp`
-to the registrant's :class:`~local_operator.mobile.registrant.SessionHandle`
+to the host server's :class:`~local_operator.session.runtime.server.SessionHandle`
 contract, so a phone can drive the same session the terminal is showing.
 
 Two rules shape everything here:
@@ -43,12 +43,12 @@ from typing import TYPE_CHECKING, Any, Callable, cast
 
 from local_operator.mobile.command_reservation import CommandReservations
 from local_operator.mobile.projection import ProjectionFold
-from local_operator.mobile.registrant import SessionHandle, image_blocks
 from local_operator.mobile.types import (
     PendingRequest,
     SessionProjection,
     ask_pending_request,
 )
+from local_operator.session.runtime.server import SessionHandle, image_blocks
 
 if TYPE_CHECKING:
     from local_operator.tui.app import OperatorApp
@@ -241,7 +241,7 @@ class TuiSessionHandle(SessionHandle):
         """Feed serialized AgentEvents to the registrant's v4 relay.
 
         Serialization happens on the Textual/session loop where the event is
-        emitted. The callback itself is thread-safe (Registrant._relay_event
+        emitted. The callback itself is thread-safe (RuntimeServer._relay_event
         only schedules onto its own loop), so this preserves producer order
         without moving pydantic objects across threads.
         """
