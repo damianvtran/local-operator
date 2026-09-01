@@ -29,7 +29,7 @@ import time
 from collections.abc import Mapping
 from typing import Any
 
-from local_operator.harness.comms import HUB_MESSAGE_TYPE
+from local_operator.harness.comms import HUB_MESSAGE_TYPE, extract_parent_message
 from local_operator.harness.types import (
     AgentEndEvent,
     AgentEvent,
@@ -615,6 +615,18 @@ def fold_messages_to_entries(history: list[AgentMessage]) -> list[TranscriptEntr
                 )
             continue
         if message.role == "user":
+            parent_message = extract_parent_message(message.text)
+            if parent_message is not None:
+                # A persisted hub steer: model-facing XML around the parent's
+                # own words. The phone shows the body the parent authored,
+                # never the envelope. Unlike the TUI, this fold sees only
+                # LLM-visible messages — the journaled communication fact is a
+                # custom row that never replays — so body extraction is the
+                # phone's only path to a human-facing rendering.
+                entries.append(
+                    TranscriptEntry(id=message.id, kind="parent_message", text=parent_message.body)
+                )
+                continue
             # Carry image attachments as references so an image-only prompt
             # (the composer allows "" text + images) renders its thumbnails on
             # replay instead of round-tripping as an empty bubble — the same
@@ -749,6 +761,19 @@ class ProjectionFold:
                     )
                 continue
             if message.role == "user":
+                parent_message = extract_parent_message(message.text)
+                if parent_message is not None:
+                    # A persisted hub steer renders as the parent's own words,
+                    # never the model-facing envelope — the same rule as
+                    # ``fold_messages_to_entries``; the two folds must not
+                    # diverge or an attaching phone and a lazy-loaded page
+                    # would disagree about the same row.
+                    entries.append(
+                        TranscriptEntry(
+                            id=message.id, kind="parent_message", text=parent_message.body
+                        )
+                    )
+                    continue
                 entries.append(
                     TranscriptEntry(
                         id=message.id,
@@ -1069,6 +1094,14 @@ class ProjectionFold:
             return False
         text = message.text
         refs = _image_refs(message)
+        # Echo reconciliation runs BEFORE the envelope branch, not after. A
+        # message whose text matches the envelope shape can still be one the
+        # phone sent (a user quoting the wrapper, or a phone-issued steer);
+        # taking the envelope branch first left that echo unreconciled, so the
+        # row double-rendered under one id — and the surviving echo displayed
+        # the raw XML this whole path exists to suppress. Resolving the echo
+        # once, here, also keeps the two arms from growing separate copies of
+        # the registry/tail-scan rules.
         entry = self._pending_user_echoes.pop(message.id, None)
         if entry is None:
             # No registered echo: either this message came from ANOTHER surface
@@ -1086,14 +1119,33 @@ class ProjectionFold:
                 ):
                     entry = candidate
                     break
+        parent_message = extract_parent_message(text)
         if entry is not None:
             # Adopt the persisted identity either way: the row was keyed by the
             # command id (or a synthetic one), and the message id is what later
             # history folds and the web client's list reconciliation agree on.
             entry.id = message.id
+            if parent_message is not None:
+                # The echo captured the model-facing envelope verbatim. Rewrite
+                # it in place to the parent's own words so the reconciled row
+                # matches what the durable folds will render for it later.
+                entry.kind = "parent_message"
+                entry.text = parent_message.body
             if refs and not entry.images:
                 entry.images = refs
             return False
+        if parent_message is not None:
+            # A hub steer delivered mid-turn announces itself as a user
+            # MessageStartEvent whose text is the model-facing envelope. The
+            # phone renders the parent's own words, never the XML — the same
+            # rule the durable folds apply, so a live delivery and its later
+            # history page agree about the row.
+            self._append(
+                TranscriptEntry(
+                    id=message.id, kind="parent_message", text=parent_message.body, final=True
+                )
+            )
+            return True
         self._append(
             TranscriptEntry(id=message.id, kind="user", text=text, images=refs, final=True)
         )

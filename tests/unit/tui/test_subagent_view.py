@@ -1514,6 +1514,320 @@ async def test_durable_communications_are_human_facing_and_correlated(tmp_path) 
         assert "<parent-message>" not in " ".join(view.rendered_rows())
 
 
+def _steer_envelope(body: str) -> str:
+    """The model-facing wrapper ``SubagentComms._format_to_child`` builds for a
+    steer, restated here so the view tests pin the render contract against the
+    exact shape a persisted steer row carries."""
+    return (
+        "<parent-message>\n"
+        "This changes your instructions. Apply it from now on, and drop work it "
+        "makes pointless.\n\n"
+        f"{body}\n"
+        "</parent-message>"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("correlated", [True, False])
+async def test_a_persisted_steer_never_renders_the_model_facing_envelope(
+    tmp_path, correlated: bool
+) -> None:
+    """A hub steer persists as a plain user Message carrying the model-facing
+    ``<parent-message>`` XML. The human-facing fact supersedes it, so the page
+    shows exactly one ``Parent · redirected`` row and never the XML.
+
+    ``correlated`` covers both transcript generations: a steer persisted after
+    the id fix carries its fact's id (the primary correlation), while a LEGACY
+    steer carries a fresh id that can only match by body text. Both must render
+    one fact row and no envelope.
+    """
+    transcript = Transcript(tmp_path / "child")
+    await transcript.append_custom(
+        HUB_COMMUNICATION_CUSTOM_TYPE,
+        {
+            "direction": "to_child",
+            "body": "Focus on retries",
+            "kind": "steer",
+            "communication_id": "s1",
+        },
+    )
+    steer_id = "s1" if correlated else "legacy-uuid"
+    await transcript.append_message(Message.user(_steer_envelope("Focus on retries"), id=steer_id))
+
+    job = _job_with([], status="completed")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    session._subagent_comms = type(
+        "Comms", (), {"session_dir_of": lambda self, _job_id: transcript.directory}
+    )()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(90, 28)) as pilot:
+        view = await _open(pilot, app, job)
+        await _wait_history(pilot, view)
+
+        redirected = [
+            entry.text
+            for entry in view._history_entries
+            if entry.text == "Parent · redirected\nFocus on retries"
+        ]
+        assert redirected == ["Parent · redirected\nFocus on retries"]
+        assert "<parent-message>" not in " ".join(view.rendered_rows())
+
+
+@pytest.mark.asyncio
+async def test_two_identical_legacy_steers_render_two_rows(tmp_path) -> None:
+    """Steering the same words twice must render TWO rows.
+
+    The legacy (body-text) correlation arm used a set with a membership-only
+    check, so a second steer of identical text matched the FIRST steer's fact
+    and was dropped: two redirections delivered, one shown. The fact multiset
+    is consumed one count per matched row, which keeps the rendered count equal
+    to the delivered count. Legacy ids throughout, since that is the only
+    generation where body text does the matching.
+    """
+    transcript = Transcript(tmp_path / "child")
+    # ONE fact for TWO envelope rows: the page-boundary shape the fallback arm
+    # exists for (the second steer's fact sits on an unloaded page). This is
+    # what exposes the collapse — with a fact per row the set and the multiset
+    # agree, because the fact rows alone already make up the count.
+    await transcript.append_custom(
+        HUB_COMMUNICATION_CUSTOM_TYPE,
+        {
+            "direction": "to_child",
+            "body": "Focus on retries",
+            "kind": "steer",
+            "communication_id": "s-unmatched",
+        },
+    )
+    for index in range(2):
+        await transcript.append_message(
+            Message.user(_steer_envelope("Focus on retries"), id=f"legacy-{index}")
+        )
+
+    job = _job_with([], status="completed")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    session._subagent_comms = type(
+        "Comms", (), {"session_dir_of": lambda self, _job_id: transcript.directory}
+    )()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(90, 28)) as pilot:
+        view = await _open(pilot, app, job)
+        await _wait_history(pilot, view)
+
+        redirected = [
+            entry.text
+            for entry in view._history_entries
+            if entry.text == "Parent · redirected\nFocus on retries"
+        ]
+        assert redirected == [
+            "Parent · redirected\nFocus on retries",
+            "Parent · redirected\nFocus on retries",
+        ]
+        assert "<parent-message>" not in " ".join(view.rendered_rows())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("legacy_first", [True, False])
+async def test_a_mixed_vintage_pair_of_identical_steers_renders_two_rows(
+    tmp_path, legacy_first: bool
+) -> None:
+    """A child steered identically BEFORE and AFTER the id fix shows two rows.
+
+    ``communication_bodies`` is a budget of facts available to supersede a row,
+    and a fact must be spent at most once and only by ITS OWN row. Having both
+    correlation arms decrement that budget during the ordered walk broke the
+    second half of that invariant: whichever row the walk reached first spent
+    the other's fact. So the fix is order-dependent unless the id matches are
+    resolved in the pre-pass, which is why this case is parametrised on the row
+    order rather than seeded in one.
+
+    ``legacy_first`` is the ordering that actually occurs on disk and the one
+    that stayed broken after the first attempt: the legacy row is OLDER — it
+    was persisted before steers carried their fact's id — so it is reached
+    first, consumes the id-correlated row's fact by body text, and the id row is
+    then suppressed on identity anyway. Two redirections delivered, one
+    rendered. Durable page boundaries are arbitrary, so neither order may be
+    assumed.
+
+    This is the mixed-vintage shape specifically: one fact carries a
+    ``communication_id`` matching its own row, while the legacy row's own fact
+    sits on an unloaded page (the page boundary the fallback arm exists for).
+    """
+    transcript = Transcript(tmp_path / "child")
+    await transcript.append_custom(
+        HUB_COMMUNICATION_CUSTOM_TYPE,
+        {
+            "direction": "to_child",
+            "body": "Focus on retries",
+            "kind": "steer",
+            "communication_id": "m1",
+        },
+    )
+    # Post-upgrade: the envelope carries its fact's id, so it correlates by id.
+    # Pre-upgrade: same words, unrelated id, and no fact of its own in the
+    # window. It must fall through to the labelled fallback, not be eaten by
+    # the id-matched row's fact.
+    order = ["legacy", "m1"] if legacy_first else ["m1", "legacy"]
+    for message_id in order:
+        await transcript.append_message(
+            Message.user(_steer_envelope("Focus on retries"), id=message_id)
+        )
+
+    job = _job_with([], status="completed")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    session._subagent_comms = type(
+        "Comms", (), {"session_dir_of": lambda self, _job_id: transcript.directory}
+    )()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(90, 28)) as pilot:
+        view = await _open(pilot, app, job)
+        await _wait_history(pilot, view)
+
+        redirected = [
+            entry.text
+            for entry in view._history_entries
+            if entry.text == "Parent · redirected\nFocus on retries"
+        ]
+        assert redirected == [
+            "Parent · redirected\nFocus on retries",
+            "Parent · redirected\nFocus on retries",
+        ]
+        assert "<parent-message>" not in " ".join(view.rendered_rows())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("legacy_first", [True, False])
+async def test_two_facts_for_an_id_row_and_a_legacy_row_render_two_rows(
+    tmp_path, legacy_first: bool
+) -> None:
+    """Each of two identical steers has its OWN fact loaded: still two rows.
+
+    This is the case that rules out the cheap repair of finding 11 — withholding
+    from the legacy budget every fact whose ``communication_id`` names a loaded
+    row. That fixes the legacy-first pair above but over-withholds here: the id
+    row's fact is correctly held back, the legacy row then finds nothing left to
+    spend even though its own fact IS loaded, and it renders a third row beside
+    the two facts. Withholding has to be per-fact — one fact reserved for the
+    one row that claims it — not per-body, which is only visible when the count
+    of facts and the count of claiming rows differ.
+    """
+    transcript = Transcript(tmp_path / "child")
+    for communication_id in ("b1", "b2"):
+        await transcript.append_custom(
+            HUB_COMMUNICATION_CUSTOM_TYPE,
+            {
+                "direction": "to_child",
+                "body": "Focus on retries",
+                "kind": "steer",
+                "communication_id": communication_id,
+            },
+        )
+    # Only `b1` has a row carrying its id; `b2`'s row predates the id fix, so
+    # `b2` is the fact the body-text arm must be left to spend on it.
+    order = ["legacy", "b1"] if legacy_first else ["b1", "legacy"]
+    for message_id in order:
+        await transcript.append_message(
+            Message.user(_steer_envelope("Focus on retries"), id=message_id)
+        )
+
+    job = _job_with([], status="completed")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    session._subagent_comms = type(
+        "Comms", (), {"session_dir_of": lambda self, _job_id: transcript.directory}
+    )()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(90, 28)) as pilot:
+        view = await _open(pilot, app, job)
+        await _wait_history(pilot, view)
+
+        redirected = [
+            entry.text
+            for entry in view._history_entries
+            if entry.text == "Parent · redirected\nFocus on retries"
+        ]
+        assert redirected == [
+            "Parent · redirected\nFocus on retries",
+            "Parent · redirected\nFocus on retries",
+        ]
+        assert "<parent-message>" not in " ".join(view.rendered_rows())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("steer", "expects_reply", "label"),
+    [
+        (True, False, "Parent · redirected"),
+        (False, True, "Parent · asked"),
+        (False, False, "Parent"),
+    ],
+)
+async def test_the_no_fact_fallback_labels_an_envelope_by_its_own_kind(
+    tmp_path, steer: bool, expects_reply: bool, label: str
+) -> None:
+    """The fallback arm — an envelope row whose communication fact is NOT in
+    the loaded window (it may sit on an unloaded page) — renders the extracted
+    body under the label matching the envelope's OWN kind.
+
+    It used to hardcode ``Parent · redirected`` for all three, so a note or a
+    question would have been reported as a redirection the parent never made.
+    The instruction line names the kind, so the fallback has no need to guess.
+    This is also the only direct coverage of the arm itself: the correlated and
+    legacy-with-fact cases both take the suppression path instead.
+    """
+    transcript = Transcript(tmp_path / "child")
+    envelope = SubagentComms._format_to_child(
+        "Focus on retries", expects_reply=expects_reply, steer=steer
+    )
+    await transcript.append_message(Message.user(envelope, id="lonely-envelope"))
+
+    job = _job_with([], status="completed")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    session._subagent_comms = type(
+        "Comms", (), {"session_dir_of": lambda self, _job_id: transcript.directory}
+    )()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(90, 28)) as pilot:
+        view = await _open(pilot, app, job)
+        await _wait_history(pilot, view)
+
+        parents = [entry.text for entry in view._history_entries if entry.kind == "parent_message"]
+        assert parents == [f"{label}\nFocus on retries"]
+        assert "<parent-message>" not in " ".join(view.rendered_rows())
+
+
+@pytest.mark.asyncio
+async def test_a_user_quoting_the_envelope_keeps_their_own_words(tmp_path) -> None:
+    """A human asking about the wrapper is NOT a parent communication.
+
+    Extraction requires the exact instruction preamble the builder emits, so a
+    user who pastes the tag shape into their own message keeps their words and
+    their ``user`` row rather than having them re-rendered as something the
+    parent said.
+    """
+    transcript = Transcript(tmp_path / "child")
+    quoted = "<parent-message>\nwhy does my log show this?\n\nsecret plan\n</parent-message>"
+    await transcript.append_message(Message.user(quoted, id="human-1"))
+
+    job = _job_with([], status="completed")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    session._subagent_comms = type(
+        "Comms", (), {"session_dir_of": lambda self, _job_id: transcript.directory}
+    )()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(90, 28)) as pilot:
+        view = await _open(pilot, app, job)
+        await _wait_history(pilot, view)
+
+        rows = [(entry.kind, entry.text) for entry in view._history_entries]
+        assert ("user", quoted) in rows
+        assert not [row for row in rows if row[0] == "parent_message"]
+
+
 @pytest.mark.asyncio
 async def test_history_unavailable_and_error_retry_keep_trajectory_fallback(
     tmp_path, monkeypatch

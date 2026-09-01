@@ -51,6 +51,7 @@ import asyncio
 import hashlib
 import math
 import reprlib
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Callable, Literal
@@ -65,7 +66,11 @@ from textual.message import Message
 from textual.widgets import Static
 
 from local_operator.ansi import strip_control_sequences
-from local_operator.harness.comms import HUB_COMMUNICATION_CUSTOM_TYPE, HUB_MESSAGE_TYPE
+from local_operator.harness.comms import (
+    HUB_COMMUNICATION_CUSTOM_TYPE,
+    HUB_MESSAGE_TYPE,
+    extract_parent_message,
+)
 from local_operator.harness.jobs import CANCELLED_BEFORE_START, TRAJECTORY_SEQ_KEY
 from local_operator.session.transcript import (
     CUSTOM_KIND_CUSTOM,
@@ -486,6 +491,17 @@ def _supersedes(new: SubagentEntry, old: SubagentEntry) -> bool:
     return False
 
 
+#: Row label per to-child communication kind, shared by the journaled-fact row
+#: and the extracted-envelope fallback so the same communication never reads as
+#: two different actions depending on which arm rendered it. An unknown kind
+#: falls back to a bare "Parent", which is honest rather than guessing.
+_PARENT_LABELS = {
+    "ask": "Parent · asked",
+    "steer": "Parent · redirected",
+    "note": "Parent",
+}
+
+
 def fold_transcript_entries(
     entries: Sequence[TranscriptEntry],
     *,
@@ -522,17 +538,54 @@ def fold_transcript_entries(
                     duration,
                 )
     communication_ids: set[str] = set()
+    # Body text -> how many to-child facts are available to supersede a LEGACY
+    # (id-less) envelope row. A MULTISET, not a set: the legacy arm below
+    # CONSUMES one count per matched row, so steering the same words twice
+    # ("focus on retries" after each of two failures is a normal operator move)
+    # still renders two rows. Membership-only matching collapsed N identical
+    # steers into one and under-reported history the parent actually sent.
+    communication_bodies: Counter[str] = Counter()
     # Host communication facts supersede their replay-visible custom message:
     # the former include replies and correlation while the latter contain XML
-    # wrappers intended for the model, never for a person.
+    # wrappers intended for the model, never for a person. The to-child bodies
+    # are retained too: a hub steer persists as a plain user row, and
+    # transcripts written before steers carried their fact's id can only be
+    # correlated by body text.
+    #
+    # CONSTRAINT — a fact may be spent at most once, and only by ITS OWN row.
+    # The two correlation arms must therefore not draw on one budget during the
+    # ordered walk: whichever row the walk reaches first would spend the other
+    # row's fact, and in a real mixed-vintage transcript the LEGACY row is the
+    # older one, so it comes first and eats the id-correlated row's fact. Two
+    # delivered steers then render as one. So id matches are resolved HERE, in
+    # the pre-pass over the whole loaded window, and the legacy budget is built
+    # from only the facts left over. That also makes the outcome independent of
+    # durable page order, which is arbitrary: a fact and its row routinely land
+    # on opposite sides of a page boundary.
+    entry_ids = {entry.id for entry in entries}
+    to_child_facts: list[tuple[str, str]] = []
     for entry in entries:
         if (
             entry.type == ENTRY_CUSTOM
             and entry.payload.get("custom_type") == HUB_COMMUNICATION_CUSTOM_TYPE
         ):
-            communication_id = entry.payload.get("details", {}).get("communication_id")
+            details = entry.payload.get("details") or {}
+            communication_id = str(details.get("communication_id") or "")
             if communication_id:
-                communication_ids.add(str(communication_id))
+                communication_ids.add(communication_id)
+            if details.get("direction") == "to_child":
+                fact_body = strip_control_sequences(str(details.get("body") or "")).strip()
+                if fact_body:
+                    to_child_facts.append((communication_id, fact_body))
+    for communication_id, fact_body in to_child_facts:
+        # A fact whose id names a row in this window is already CLAIMED by that
+        # row, which the walk suppresses on identity alone. Withholding it from
+        # the legacy budget is what stops an identical id-less row consuming it.
+        # A fact with no such row (its row sits on an unloaded page, or predates
+        # id-carrying steers) is what the body-text arm exists to spend.
+        if communication_id and communication_id in entry_ids:
+            continue
+        communication_bodies[fact_body] += 1
     for entry in entries:
         payload = entry.payload
         if entry.type == ENTRY_CUSTOM:
@@ -545,9 +598,7 @@ def fold_transcript_entries(
                 continue
             kind = str(details.get("kind") or "")
             if direction == "to_child":
-                label = {"ask": "Parent · asked", "steer": "Parent · redirected"}.get(
-                    kind, "Parent"
-                )
+                label = _PARENT_LABELS.get(kind, "Parent")
                 folded.append(
                     SubagentEntry(f"comm:{entry.id}", "parent_message", text=f"{label}\n{body}")
                 )
@@ -579,6 +630,40 @@ def fold_transcript_entries(
         role = payload.get("role")
         text = strip_control_sequences(_content_text(payload)).strip()
         if role == "user":
+            parent_message = extract_parent_message(text)
+            if parent_message is not None:
+                # A persisted hub steer: model-facing XML around the parent's
+                # own words. The human-facing fact row supersedes it — by id
+                # once steers carry their fact's id, and by body text for
+                # transcripts written before that (legacy ids never match).
+                # When NO fact exists in the loaded window (it may sit on an
+                # unloaded page), render the extracted body as the parent row
+                # instead: the XML is for the model and must never reach a
+                # person either way.
+                body = parent_message.body
+                if entry.id in communication_ids:
+                    # Correlated by id: its fact renders the row and was already
+                    # withheld from the legacy budget by the pre-pass, so there
+                    # is nothing to consume here.
+                    continue
+                if communication_bodies[body]:
+                    # Consume this occurrence so a SECOND identical steer is
+                    # not suppressed by the first one's fact.
+                    communication_bodies[body] -= 1
+                    continue
+                # No fact left to supersede this row. Label by the envelope's
+                # own kind rather than assuming a steer: the fallback exists
+                # for transcripts this code did not write, and a note or a
+                # question rendered as "redirected" would misreport what the
+                # parent did.
+                folded.append(
+                    SubagentEntry(
+                        entry.id,
+                        "parent_message",
+                        text=f"{_PARENT_LABELS.get(parent_message.kind, 'Parent')}\n{body}",
+                    )
+                )
+                continue
             if text:
                 folded.append(SubagentEntry(entry.id, "user", text=text))
             continue
