@@ -730,7 +730,17 @@ class TeamRegistry:
                 # ...unless this set is already proven unrecoverable. Losing a
                 # lock race does not un-prove that, and answering from the
                 # snapshot here would hide the row exactly as R6-4 forbids.
-                raise self._recovery_failure_repeat() from None
+                #
+                # Deliberately NOT `from None` (R9-1): that assigns
+                # ``__cause__ = None`` and would overwrite the storage error
+                # `_recovery_failure_repeat` just chained on, leaving THIS
+                # branch telling the user to fix registry permissions with the
+                # PermissionError proving it stripped out — precisely when two
+                # failures overlap and the cause is worth most. Suppression of
+                # the TeamRegistryLockTimeout context is unaffected: assigning
+                # ``__cause__`` at all sets ``__suppress_context__ = True``, so
+                # the helper already does what `from None` was here for.
+                raise self._recovery_failure_repeat()
             return
         except TeamRegistryRecoveryError as exc:
             # Restore was attempted and genuinely failed. Latch the exact

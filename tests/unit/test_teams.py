@@ -1982,12 +1982,14 @@ def test_latched_reads_do_not_churn_the_lock_or_grow_the_traceback(
 
     depths = []
     causes = []
+    raised = []
     for _ in range(200):
         registry._last_refresh_time = 0.0
         with pytest.raises(TeamRegistryRecoveryError) as caught:
             registry.list_teams()
         depths.append(len(traceback.extract_tb(caught.value.__traceback__)))
         causes.append(caught.value.__cause__)
+        raised.append(caught.value)
     # No idle churn: one attempt for the whole burst, which sits inside one
     # cooldown — the R7-1 property the re-attempt must not have loosened.
     assert attempts == 1, f"{attempts} attempts for one unchanged artifact in one cooldown"
@@ -1998,6 +2000,86 @@ def test_latched_reads_do_not_churn_the_lock_or_grow_the_traceback(
     # The chained storage cause survives the fresh-object repeat, so diagnostics
     # still reach the PermissionError that actually stopped the restore.
     assert all(isinstance(cause, PermissionError) for cause in causes)
+    # A fresh object per raise must also be a DISTINCT object; identity reuse is
+    # what grew the traceback in the first place (R8-2).
+    assert len({id(obj) for obj in raised}) > 1
+    # ...and the chained cause must not resurrect the LockTimeout-style context
+    # chatter on this branch either (R9-1 keeps both branches identical).
+    assert all(err.__suppress_context__ for err in raised)
+
+
+def test_both_proven_failed_branches_keep_the_original_cause(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R9-1: cooldown AND lock-contended repeats must chain the storage error.
+
+    Two different code paths answer a read against a proven-unrecoverable
+    artifact set: the cooldown short-circuit, and the ``TeamRegistryLockTimeout``
+    handler reached when a peer holds the writer lock. Both raise through
+    ``_recovery_failure_repeat``, so both must carry the ``PermissionError``
+    that actually stopped the restore — the message tells the user to fix
+    registry permissions, and the cause is the proof of WHICH permission.
+
+    The lock branch used ``raise ... from None``, which reset ``__cause__`` to
+    None after the helper had installed it, so only that branch lost it. The
+    round-8 test covered the cooldown branch alone, which is why it survived.
+    Both branches must also keep ``__suppress_context__`` set, so neither
+    renders a confusing "During handling of the above exception" chain.
+    """
+    registry = TeamRegistry(tmp_path)
+    team = registry.create_team(TeamEditFields(name="survivor"))
+    backup = _strand_backup(registry, team.id)
+    real_replace = teams_module.os.replace
+
+    def deny(src, dst, **kwargs):
+        if Path(src) == backup:
+            raise PermissionError("denied")
+        return real_replace(src, dst, **kwargs)
+
+    monkeypatch.setattr(teams_module.os, "replace", deny)
+
+    # Attempt one proves the set unrecoverable and latches it.
+    registry._last_refresh_time = 0.0
+    with pytest.raises(TeamRegistryRecoveryError) as first:
+        registry.list_teams()
+    assert isinstance(first.value.__cause__, PermissionError)
+
+    # Branch A: a read INSIDE the cooldown, answered by the short-circuit.
+    registry._last_refresh_time = 0.0
+    with pytest.raises(TeamRegistryRecoveryError) as cooldown:
+        registry.list_teams()
+
+    # Branch B: past the cooldown, so the read really attempts the lock — and a
+    # real peer holds it, so the attempt times out with the set still proven
+    # failed. Held from a raw fd rather than a stub so the timeout comes from
+    # the module's own acquisition path.
+    import fcntl
+
+    lock_path = tmp_path / ".teams.lock"
+    fd = os.open(lock_path, os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        registry._recovery_attempted_at -= teams_module._READ_RECOVERY_COOLDOWN_S + 0.1
+        registry._last_refresh_time = 0.0
+        with pytest.raises(TeamRegistryRecoveryError) as contended:
+            registry.list_teams()
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+    for label, caught in (("cooldown", cooldown), ("lock-contended", contended)):
+        err = caught.value
+        assert isinstance(
+            err.__cause__, PermissionError
+        ), f"{label} branch lost the chained cause: {err.__cause__!r}"
+        assert err.__suppress_context__ is True, f"{label} branch would render context noise"
+        assert "fix registry permissions" in str(err)
+        rendered = "".join(traceback.format_exception(type(err), err, err.__traceback__))
+        # The cause renders; the suppressed LockTimeout context does not.
+        assert "PermissionError: denied" in rendered, label
+        assert "During handling of the above exception" not in rendered, label
+        assert "TeamRegistryLockTimeout" not in rendered, label
+    assert backup.is_dir()
 
 
 def test_construction_never_raises_and_defers_the_error_to_first_use(
