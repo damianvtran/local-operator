@@ -37,6 +37,7 @@ from local_operator.tui.events import (
     AssistantMessageStart,
 )
 from local_operator.tui.widgets.assistant import AssistantBlock
+from local_operator.tui.widgets.copy_picker import CopyPickerScreen
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.toast import Toast
 from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView, UserBlock
@@ -109,6 +110,34 @@ async def _submit(pilot, app: OperatorApp, text: str) -> None:
     await pilot.pause()
 
 
+async def _copy_latest(pilot, app: OperatorApp) -> None:
+    """Run ``/copy`` and take the whole most-recent message out of the picker.
+
+    The gesture these tests were written for — "give me that answer" — now costs
+    one more keystroke: `/copy` opens a chooser whose cursor starts on the most
+    recent message, and Enter on that row copies it whole. Routing every payload
+    assertion through here keeps them asserting the PAYLOAD rather than silently
+    becoming assertions about the picker's default cursor; the cursor itself is
+    pinned once, by ``test_the_picker_opens_on_the_most_recent_message``.
+
+    Driven through the real screen rather than by calling the dismiss callback,
+    because the push and the callback are the pair that decides whether anything
+    reaches the clipboard at all.
+    """
+    await _submit(pilot, app, "/copy")
+    if isinstance(app.screen, CopyPickerScreen):
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+
+
+def _picker(app: OperatorApp) -> CopyPickerScreen | None:
+    """The open picker, or ``None`` — never an ``isinstance`` assert at the call
+    site, so a test that expects NO picker reads as plainly as one that does."""
+    screen = app.screen
+    return screen if isinstance(screen, CopyPickerScreen) else None
+
+
 def _notices(app: OperatorApp) -> list[str]:
     return [
         block._text
@@ -135,7 +164,7 @@ async def test_copy_puts_the_markdown_source_on_the_clipboard() -> None:
     async with app.run_test(size=(80, 24)) as pilot:
         await _boot(pilot, app)
         await _stream(pilot, app, ANSWER)
-        await _submit(pilot, app, "/copy")
+        await _copy_latest(pilot, app)
         copied = app._clipboard
 
     assert copied == ANSWER
@@ -155,7 +184,7 @@ async def test_copy_takes_the_last_message_not_the_first() -> None:
         await _boot(pilot, app)
         await _stream(pilot, app, "the first answer")
         await _stream(pilot, app, "the second answer")
-        await _submit(pilot, app, "/copy")
+        await _copy_latest(pilot, app)
         copied = app._clipboard
 
     assert copied == "the second answer"
@@ -178,7 +207,7 @@ async def test_the_receipt_is_the_shared_toast_in_the_shared_format() -> None:
     async with app.run_test(size=(80, 24)) as pilot:
         await _boot(pilot, app)
         await _stream(pilot, app, ANSWER)
-        await _submit(pilot, app, "/copy")
+        await _copy_latest(pilot, app)
         message = app.query_one(Toast).message
 
     assert message == f"copied {len(ANSWER.splitlines())} lines"
@@ -193,7 +222,7 @@ async def test_a_single_line_answer_is_reported_in_characters() -> None:
     async with app.run_test(size=(80, 24)) as pilot:
         await _boot(pilot, app)
         await _stream(pilot, app, "short answer")
-        await _submit(pilot, app, "/copy")
+        await _copy_latest(pilot, app)
         message = app.query_one(Toast).message
 
     assert message == "copied 12 characters"
@@ -211,7 +240,7 @@ async def test_the_receipt_appears_once() -> None:
         await _stream(pilot, app, ANSWER)
         toast = app.query_one(Toast)
         before = toast.generation
-        await _submit(pilot, app, "/copy")
+        await _copy_latest(pilot, app)
         after = toast.generation
 
     assert after - before == 1, "the copy raised more than one card"
@@ -287,7 +316,7 @@ async def test_mid_stream_copies_the_last_settled_message_not_the_partial() -> N
         await _stream(pilot, app, "a partial answer still arri", finish=False)
         assert app._streaming_block is not None, "the fixture must leave a live block"
         assert app._turn_is_live(), "the app must consider this turn live"
-        await _submit(pilot, app, "/copy")
+        await _copy_latest(pilot, app)
         copied = app._clipboard
 
     assert copied == "the settled answer"
@@ -365,7 +394,7 @@ async def test_the_osc52_write_happens_once_and_carries_the_source() -> None:
         sink = _tap_driver(app)
         await _boot(pilot, app)
         await _stream(pilot, app, ANSWER)
-        await _submit(pilot, app, "/copy")
+        await _copy_latest(pilot, app)
         payloads = _osc52_payloads(sink)
 
     assert payloads == [ANSWER], "one write, byte-identical to the block's source"
@@ -397,8 +426,8 @@ async def test_each_copy_writes_again_rather_than_deduplicating() -> None:
         sink = _tap_driver(app)
         await _boot(pilot, app)
         await _stream(pilot, app, "the answer")
-        await _submit(pilot, app, "/copy")
-        await _submit(pilot, app, "/copy")
+        await _copy_latest(pilot, app)
+        await _copy_latest(pilot, app)
         payloads = _osc52_payloads(sink)
 
     assert payloads == ["the answer", "the answer"]
@@ -431,7 +460,7 @@ async def test_every_markdown_construct_survives_verbatim() -> None:
     async with app.run_test(size=(80, 24)) as pilot:
         await _boot(pilot, app)
         await _stream(pilot, app, source)
-        await _submit(pilot, app, "/copy")
+        await _copy_latest(pilot, app)
         copied = app._clipboard
 
     assert copied == source
@@ -455,7 +484,7 @@ async def test_a_message_that_is_only_a_code_fence_keeps_its_fences() -> None:
     async with app.run_test(size=(80, 24)) as pilot:
         await _boot(pilot, app)
         await _stream(pilot, app, source)
-        await _submit(pilot, app, "/copy")
+        await _copy_latest(pilot, app)
         copied = app._clipboard
 
     assert copied == source
@@ -474,7 +503,7 @@ async def test_trailing_blank_lines_reach_the_clipboard_unchanged() -> None:
     async with app.run_test(size=(80, 24)) as pilot:
         await _boot(pilot, app)
         await _stream(pilot, app, source)
-        await _submit(pilot, app, "/copy")
+        await _copy_latest(pilot, app)
         copied = app._clipboard
         message = app.query_one(Toast).message
 
@@ -493,7 +522,7 @@ async def test_a_very_long_answer_is_copied_whole_in_one_write() -> None:
         sink = _tap_driver(app)
         await _boot(pilot, app)
         await _stream(pilot, app, source)
-        await _submit(pilot, app, "/copy")
+        await _copy_latest(pilot, app)
         payloads = _osc52_payloads(sink)
         message = app.query_one(Toast).message
 
@@ -511,7 +540,7 @@ async def test_unicode_and_tabs_survive_the_base64_round_trip() -> None:
         sink = _tap_driver(app)
         await _boot(pilot, app)
         await _stream(pilot, app, source)
-        await _submit(pilot, app, "/copy")
+        await _copy_latest(pilot, app)
         payloads = _osc52_payloads(sink)
 
     assert payloads == [source]
@@ -530,7 +559,7 @@ async def test_a_user_row_below_the_answer_does_not_become_the_payload() -> None
         await _boot(pilot, app)
         await _stream(pilot, app, "the agent answer")
         await _submit(pilot, app, "a plain user prompt")
-        await _submit(pilot, app, "/copy")
+        await _copy_latest(pilot, app)
         copied = app._clipboard
 
     assert copied == "the agent answer"
@@ -550,7 +579,7 @@ async def test_a_tool_card_below_the_answer_does_not_stop_the_walk() -> None:
         await _stream(pilot, app, "the agent answer before the tool")
         app._append_block(ToolCard("call-1", "bash", {"command": "ls -la"}))
         await pilot.pause()
-        await _submit(pilot, app, "/copy")
+        await _copy_latest(pilot, app)
         copied = app._clipboard
 
     assert copied == "the agent answer before the tool"
@@ -566,7 +595,7 @@ async def test_an_empty_block_above_the_answer_does_not_stop_the_walk() -> None:
         await _boot(pilot, app)
         await _stream(pilot, app, "the real answer")
         await _stream(pilot, app, "   \n\n  \n")
-        await _submit(pilot, app, "/copy")
+        await _copy_latest(pilot, app)
         copied = app._clipboard
 
     assert copied == "the real answer"
@@ -610,10 +639,10 @@ async def test_the_partial_never_reaches_the_clipboard_as_it_grows() -> None:
         await _stream(pilot, app, "the settled answer")
         await _stream(pilot, app, "the partial so far", finish=False)
         assert app._turn_is_live(), "the fixture must actually stage a live turn"
-        await _submit(pilot, app, "/copy")
+        await _copy_latest(pilot, app)
         app.post_message(AssistantDelta("the partial so far, now longer"))
         await pilot.pause()
-        await _submit(pilot, app, "/copy")
+        await _copy_latest(pilot, app)
         payloads = _osc52_payloads(sink)
 
     assert payloads == ["the settled answer", "the settled answer"]
@@ -662,7 +691,7 @@ async def test_a_follower_copies_locally_instead_of_routing_to_the_owner() -> No
         sink = _tap_driver(app)
         await _boot(pilot, app)
         await _stream(pilot, app, "the answer on the follower")
-        await _submit(pilot, app, "/copy")
+        await _copy_latest(pilot, app)
         payloads = _osc52_payloads(sink)
 
     assert routed == [], "a frontend-local command must not reach the owner"
@@ -716,7 +745,7 @@ async def test_an_aborted_answer_is_copied_but_announced_as_cut_off() -> None:
         await _stream(pilot, app, "an older complete answer")
         await _abort(pilot, app, "a partial answer still arri")
         before = len(_notices(app))
-        await _submit(pilot, app, "/copy")
+        await _copy_latest(pilot, app)
         copied = app._clipboard
         new_notices = _notices(app)[before:]
 
@@ -787,9 +816,189 @@ async def test_a_completed_answer_after_an_aborted_one_copies_clean() -> None:
         await _abort(pilot, app, "the abandoned attempt")
         await _stream(pilot, app, "the answer that finished")
         before = len(_notices(app))
-        await _submit(pilot, app, "/copy")
+        await _copy_latest(pilot, app)
         copied = app._clipboard
         new_notices = _notices(app)[before:]
 
     assert copied == "the answer that finished"
     assert new_notices == [], new_notices
+
+
+# -- the picker: what /copy now opens -----------------------------------------
+#
+# The command changed shape here: it used to take the last message outright and
+# now opens a chooser. These pin the WIRING — that a picker is pushed at all,
+# what it is built from, what the callback does with the answer, and what a
+# cancel does not do. What the picker DRAWS and how it navigates belongs to the
+# screen's own tests; asserting frame content here would pin the same rows twice
+# and make an innocent layout change fail in two files.
+
+
+@pytest.mark.asyncio
+async def test_copy_opens_the_picker_rather_than_copying_outright() -> None:
+    """The shape change, stated once. Nothing may reach the clipboard until the
+    user has chosen — a command that copied AND opened a chooser would put an
+    unasked-for payload on the clipboard of anyone who cancelled."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _boot(pilot, app)
+        await _stream(pilot, app, ANSWER)
+        await _submit(pilot, app, "/copy")
+        picker = _picker(app)
+        clipboard = app._clipboard
+        toast = app.query_one(Toast).message
+
+    assert picker is not None, "/copy must open the picker"
+    assert clipboard == "", "nothing may be copied before the user chooses"
+    assert toast == "", "and no receipt may be raised for a copy that has not happened"
+
+
+@pytest.mark.asyncio
+async def test_the_picker_opens_on_the_most_recent_message() -> None:
+    """Where the cursor starts, pinned once and relied on by every payload test
+    above (they press Enter on this row). The most recent answer is the one the
+    reader is looking at, so it is the row the common gesture must land on."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _boot(pilot, app)
+        await _stream(pilot, app, "the older answer")
+        await _stream(pilot, app, "the newest answer")
+        await _submit(pilot, app, "/copy")
+        picker = _picker(app)
+        assert picker is not None
+        target = picker.selected_target()
+
+    assert target is not None
+    assert target.content == "the newest answer"
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_picker_copies_nothing_and_says_nothing() -> None:
+    """Esc is not an event. A notice on cancel would report a non-action, and a
+    clipboard write would be the payload the user just declined."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _boot(pilot, app)
+        await _stream(pilot, app, ANSWER)
+        before = len(_notices(app))
+        await _submit(pilot, app, "/copy")
+        assert _picker(app) is not None, "the fixture must actually open the picker"
+        await pilot.press("escape")
+        await pilot.pause()
+        await pilot.pause()
+        still_open = _picker(app)
+        clipboard = app._clipboard
+        toast = app.query_one(Toast).message
+        new_notices = _notices(app)[before:]
+
+    assert still_open is None, "esc must dismiss the picker"
+    assert clipboard == "", "a cancelled picker must not write"
+    assert toast == ""
+    assert new_notices == [], new_notices
+
+
+@pytest.mark.asyncio
+async def test_a_code_block_can_be_copied_out_of_a_message() -> None:
+    """The reason the picker exists. Getting one fence out of an answer meant
+    dragging it row by row; now it is a child node, and what lands is the fence
+    BODY without its markers — the thing that pastes into a file."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _boot(pilot, app)
+        await _stream(pilot, app, ANSWER)
+        await _submit(pilot, app, "/copy")
+        picker = _picker(app)
+        assert picker is not None
+        await pilot.press("down")
+        await pilot.pause()
+        target = picker.selected_target()
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        copied = app._clipboard
+
+    assert target is not None and target.id == "msg:1:code:0"
+    assert copied == "def f(x):\n    return x + 1"
+    assert "```" not in copied, "the fence markers are frame, not payload"
+
+
+@pytest.mark.asyncio
+async def test_the_picker_is_a_snapshot_and_does_not_move_under_the_cursor() -> None:
+    """A message settling while the picker is open must not re-rank the rows.
+
+    New answers insert at the TOP of a most-recent-first list, so a live rebuild
+    would shift every row down by one — including the one the user is already
+    aiming at, which is how you copy the wrong thing. The tree is therefore
+    built once, at push time; the cost is that the new answer is not listed
+    until the picker is reopened, which this also pins so the trade-off is
+    visible rather than assumed.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _boot(pilot, app)
+        await _stream(pilot, app, "the answer that was there first")
+        await _submit(pilot, app, "/copy")
+        picker = _picker(app)
+        assert picker is not None
+        rows_before = picker.render_lines_for_test()
+
+        await _stream(pilot, app, "an answer that landed during the picker")
+        rows_after = picker.render_lines_for_test()
+        assert rows_before == rows_after, "the open picker re-ranked itself"
+
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        copied = app._clipboard
+
+    assert copied == "the answer that was there first"
+    assert "during the picker" not in copied
+
+
+@pytest.mark.asyncio
+async def test_the_new_message_is_listed_once_the_picker_is_reopened() -> None:
+    """The other half of the snapshot: it is a snapshot per OPEN, not a cache.
+    A tree built once per app would strand the user on stale rows forever."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _boot(pilot, app)
+        await _stream(pilot, app, "the first answer")
+        await _submit(pilot, app, "/copy")
+        await pilot.press("escape")
+        await pilot.pause()
+        await _stream(pilot, app, "the second answer")
+        await _copy_latest(pilot, app)
+        copied = app._clipboard
+
+    assert copied == "the second answer"
+
+
+@pytest.mark.asyncio
+async def test_mid_stream_lists_what_has_settled_instead_of_refusing() -> None:
+    """Mid-stream opens the picker; it does not refuse.
+
+    Refusing would regress behaviour this command already shipped, and the
+    refusal it would have to borrow says "esc first" — an instruction that does
+    not produce the message the user asked for, because stopping the turn does
+    not settle it. The in-flight block is excluded by ``is_finalized`` rather
+    than by any check here, so what is listed is exactly what is immutable.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _boot(pilot, app)
+        await _stream(pilot, app, "the settled answer")
+        await _stream(pilot, app, "the partial still arriving", finish=False)
+        assert app._turn_is_live(), "the fixture must actually stage a live turn"
+        await _submit(pilot, app, "/copy")
+        picker = _picker(app)
+        assert picker is not None, "mid-stream must open the picker, not refuse"
+        rows = picker.render_lines_for_test()
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        copied = app._clipboard
+        notices = _notices(app)
+
+    assert copied == "the settled answer"
+    assert not any("still arriving" in row for row in rows), "the in-flight block was listed"
+    assert not any("esc first" in text for text in notices), notices

@@ -96,6 +96,7 @@ from local_operator.session.protocol import SessionProtocol
 from local_operator.tui import images as images_mod
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.autocomplete import ArgumentChoice, ArgumentMode, SlashCommand
+from local_operator.tui.copy_targets import CopyTarget, build_copy_targets
 from local_operator.tui.costs import job_cost, turn_cost
 from local_operator.tui.events import (
     AssistantDelta,
@@ -143,6 +144,7 @@ from local_operator.tui.widgets.aside_panel import ASIDE_PROMPT, AsidePanel
 from local_operator.tui.widgets.ask_picker import AskPickerScreen
 from local_operator.tui.widgets.assistant import AssistantBlock
 from local_operator.tui.widgets.command_picker import CommandPicker
+from local_operator.tui.widgets.copy_picker import CopyPickerScreen
 from local_operator.tui.widgets.editor import (
     ASIDE_PLACEHOLDER,
     READ_ONLY_PLACEHOLDER,
@@ -6912,100 +6914,47 @@ class OperatorApp(App[None]):
             message = f"copied {lines} lines"
         self.query_one(Toast).show(message, yield_to_actionable=True, owner=owner)
 
-    def _last_settled_assistant_message(self) -> tuple[str, bool] | None:
-        """The last settled agent message as ``(markdown source, truncated)``.
-
-        Walks the main transcript backwards, which is what makes "last" mean
-        the one the reader is looking at rather than the one the model sent
-        last — a resumed conversation replays its history into the same column,
-        so append order is the only order that matches the frame.
-
-        ``_transcript_view()`` rather than a type query, for the reason that
-        method records: the full-page subagent view mounts a SECOND
-        ``TranscriptView`` for the CHILD's conversation, and copying out of it
-        while it happens to be open would hand the user a subagent's words for
-        a command they typed at the parent.
-
-        A block still streaming is skipped (``is_finalized``). Codex makes
-        ``/copy`` unavailable mid-task because a half-streamed answer that then
-        grows is a clipboard the user cannot trust; the same guarantee is
-        reached here by taking the last SETTLED message instead of refusing
-        outright, so a copy during a long turn still answers with the previous
-        completed answer rather than nothing.
-
-        **A TRUNCATED message is returned, flagged, not skipped** (review round
-        1, MAJOR-1). ``is_finalized`` means IMMUTABLE, not COMPLETE — the abort
-        path freezes a half-streamed answer exactly as a clean end freezes a
-        whole one — so the two were conflated and an aborted partial was copied
-        as though it were a finished reply.
-
-        Returning it with a flag rather than skipping to the previous complete
-        message is the deliberate choice, and the reason is WHICH ONE THE USER
-        MEANT. Someone who stops a long answer and copies usually wants the
-        part they stopped — it is on screen, it is the last thing they read,
-        and it is often why they hit esc. Silently handing them an older
-        message instead would be a different document from the one they were
-        looking at, with nothing on screen saying so; that trades a payload the
-        caller can warn about for a substitution it cannot. The caller says the
-        message was cut off, so the clipboard and the user agree about what it
-        is.
-
-        An empty block does not stop the walk. This is a DEFENSIVE guard, not a
-        response to an observed mount: a block with no text is not a message, so
-        letting one terminate the walk would report "nothing to copy" with a
-        real answer sitting above it. (An abort before the first delta was
-        checked and does NOT leave a block behind — ``on_assistant_delta``
-        refuses to mount for an empty delta, and the block count is 1 before and
-        after. The guard costs one ``strip`` and removes a whole class of
-        edge case, so it stays.)
-
-        The payload is ``AssistantBlock.text()``, the block's own markdown
-        SOURCE. Not the flattened frame: the rendered rows carry the wrap of
-        whatever width the terminal happened to be, and a paste of them puts
-        box-drawing and hard breaks into the user's document. This is the whole
-        reason ``_copy_markdown`` exists for partial selections; a whole-message
-        copy needs no alignment because the source IS the answer.
-        """
-        # Local import ONLY to name the element type in the annotation below;
-        # `app.py` already imports this module at the top, so there is no
-        # circularity to dodge — it is kept local to match the sibling walk in
-        # `_retheme_blocks`, which imports it the same way.
-        from local_operator.tui.widgets.transcript import TranscriptBlock
-
-        blocks: list[TranscriptBlock] = self._transcript_view().blocks()
-        for block in reversed(blocks):
-            if not isinstance(block, AssistantBlock):
-                continue
-            if not block.is_finalized():
-                continue
-            text = block.text()
-            if text.strip():
-                return (text, block.is_truncated())
-        return None
-
     def _cmd_copy(self, notice: NoticeFn) -> None:
-        """``/copy`` — put the last completed agent message on the clipboard.
+        """``/copy`` — pick an agent message, or a block out of one, and copy it.
+
+        Opens :class:`CopyPickerScreen` over a tree of the settled answers, each
+        drilling into its own code blocks and quotes. It replaces a command that
+        took the last message and nothing else: the common ask is "that code
+        block", and the only way to get one was to drag it row by row.
 
         The write goes through :meth:`_put_on_clipboard`, the single clipboard
         write the transcript drag and the composer already share, so this third
         gesture cannot drift from them in what it writes or what it claims. A
         bespoke toast here would make the receipt evidence about WHICH gesture
-        was used, which is exactly what ``on_editor_copied`` exists to prevent.
+        was used, which is exactly what ``on_editor_copied`` exists to prevent —
+        so the reference's per-target status is carried on ``CopyTarget`` and
+        deliberately not displayed.
 
         That helper is SILENT on an empty payload — right for a zero-width drag,
         wrong for a command the user typed deliberately, since an unexplained
         no-op reads as a broken command. So the two cases where there is nothing
-        to take speak through ``notice`` instead of reaching the helper at all.
+        to take speak through ``notice`` instead of reaching the helper at all,
+        and they stay TWO cases: "the first answer is still coming" and "there
+        is no answer here" are different states with different fixes, and the
+        reference's single string conflates them.
 
         The refusal does NOT reuse ``_live_turn_refuse_copy``. That string says
         "esc first" because ``/update`` and ``/reload`` cannot proceed until the
         turn ends — they would tear the process down over it. Nothing here needs
-        the turn stopped: a copy during a live turn takes the previous settled
-        message and succeeds. The only failing case is "no settled message
-        exists yet", and telling that user to press esc would demand an action
-        that does not help them. ``_turn_is_live`` is still the authority on
-        whether a turn is running, so the two answers cannot disagree about the
-        state — only about the noun.
+        the turn stopped: a copy during a live turn lists what has SETTLED and
+        succeeds, which is also why mid-stream does not refuse. Refusing would
+        regress behaviour this command already shipped. The only failing case is
+        "no settled message exists yet", and telling that user to press esc
+        would demand an action that does not help them. ``_turn_is_live`` is
+        still the authority on whether a turn is running, so the two answers
+        cannot disagree about the state — only about the noun.
+
+        The tree is a SNAPSHOT, taken here and never rebuilt while the picker is
+        open. Messages insert at the TOP of a most-recent-first list, so a turn
+        settling under an open picker would shift every row below it — including
+        the one the user is already aiming at. ``CopyTarget`` is frozen for this
+        reason. The cost is that an answer arriving while the picker is up is not
+        listed; the user reopens.
 
         A TRUNCATED message (aborted, or cut off by the provider) is copied and
         ANNOUNCED. The toast is the shared receipt and stays exactly as it is —
@@ -7013,21 +6962,33 @@ class OperatorApp(App[None]):
         that many lines — so the caveat goes in a notice beside it rather than
         by rewording the one string three gestures share. Silence was the actual
         defect: the user got a half sentence that reads as a complete short
-        answer (review round 1, MAJOR-1).
+        answer (review round 1, MAJOR-1). Only MESSAGE nodes carry the flag; a
+        closed fence inside a cut-off answer is itself complete, so a code-block
+        target never raises it.
         """
-        found = self._last_settled_assistant_message()
-        if found is None:
+        targets = build_copy_targets(self._transcript_view().blocks())
+        if not targets:
             if self._turn_is_live():
                 notice("nothing to copy yet — the first answer is still coming", "warning")
             else:
                 notice("nothing to copy — no agent message in this conversation", "warning")
             return
-        text, truncated = found
-        self._put_on_clipboard(text)
-        if truncated:
-            # AFTER the write, so the ordering matches what happened: the copy
-            # succeeded, and this qualifies what is now on the clipboard.
-            notice("copied — note that answer was cut off before it finished", "warning")
+
+        def _copy_choice(target: CopyTarget | None) -> None:
+            # Dismissed with Esc — nothing said. A cancelled picker is not an
+            # event worth a notice, the same silence `_resume_choice` keeps.
+            if target is None or target.content is None:
+                return
+            self._put_on_clipboard(target.content)
+            if target.truncated:
+                # AFTER the write, so the ordering matches what happened: the
+                # copy succeeded, and this qualifies what is now on the
+                # clipboard. Fired from the dismiss callback, so the modal is
+                # already gone and the notice lands on the normal screen rather
+                # than painting under an overlay.
+                notice("copied — note that answer was cut off before it finished", "warning")
+
+        self.push_screen(CopyPickerScreen(targets), _copy_choice)
 
     # -- resize (TUI-017 / D5) ----------------------------------------------
     def on_resize(self, event) -> None:  # type: ignore[no-untyped-def]
