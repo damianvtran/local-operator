@@ -260,24 +260,46 @@ RECOMMENDED_TAG = "▸ RECOMMENDED"
 #: answers painting the same text.
 LABEL_MIN_CELLS = 6
 
-#: The most lines one description may ever take, however much room there is.
+#: The most lines the ``ctrl+e`` block may ever reserve, however much room the
+#: terminal has.
 #:
-#: Six, not unbounded: the cap is what stops ONE verbose option from pushing
-#: every other option's prose off the card. Measured on the repro
-#: (``scripts/ask_long_shot.py``) at 24 columns, the four descriptions want 34,
-#: 25, 19 and 18 lines — an uncapped grant would spend a 13-row budget on a
-#: third of one option's prose and show nothing about the other three. Six lines
-#: is about 140 words at 100 columns, which is longer than any description in
-#: this repo (the approval gate's are one line at every width down to 44
-#: columns) and long enough that hitting the cap means the model wrote an essay
-#: rather than a consequence.
-DESC_MAX_ROWS = 6
+#: An ALLOCATOR bound, and deliberately not a cut applied to the wrap itself.
+#: It was the latter for a release, inside :meth:`_description_lines`, and that
+#: is how the reveal came to truncate in silence (D5): the block was handed a
+#: list that had already lost its tail, so :meth:`_reveal_text`'s
+#: ``len(wrapped) > len(kept)`` test — the card's whole mechanism for saying
+#: "there is more" — compared a six-line grant against a six-line wrap and
+#: found nothing missing. Measured on ``scripts/ask_user_repro.py``, option 1
+#: (1023 characters): at 150x40 the block stopped at 838 characters, mid-clause,
+#: with no mark and no gesture left that could reach the rest. Bounding the
+#: RESERVATION instead leaves the wrap honest about its own length, so the
+#: existing marker fires wherever the block is short.
+#:
+#: Bounded at all, because the block's height is CONSTANT across the list
+#: (:attr:`_CardLayout.reveal_rows`): every row is padded to the tallest
+#: description, so one verbose option sets the blank-row bill every other row
+#: pays. Unbounded and measured on the repro, ``remaining`` alone reserves 12
+#: rows at 100x60, 15 at 80x60 and 18 at 70x50 — where the free-text row then
+#: draws an 18-row void. The cap is what keeps that void proportionate.
+#:
+#: Eight, and the number is the reported size's: at 150x40 the longest
+#: description wraps to exactly 8 lines, so 8 is what turns that frame from
+#: 838/1023 characters into the whole consequence. Above 8 buys nothing at any
+#: size the card was verified at — ``remaining`` binds first (5 rows at 130x30,
+#: 7 at 120x34, 5 at 100x30) — and it only widens the void on tall narrow
+#: terminals. Below 8 the reported frame stays incomplete, which is the defect.
+#: The trade at 150x40 is priced and reversible: the block takes the other
+#: rows' one description line (grants 1,1,1,1 -> 0,0,0,0) and every LABEL
+#: survives, which is the ranking C2 actually protects, and the card comes out
+#: SHORTER than the six-row block it replaces (20 rows -> 18) because the
+#: column it releases costs more than the two rows it buys.
+REVEAL_MAX_ROWS = 8
 
 #: The most description lines the DEFAULT list draws for any one row.
 #:
-#: A different number for a different job than :data:`DESC_MAX_ROWS`: 2 is how
-#: much prose the LIST shows per row, 6 is how much the REVEAL shows for one
-#: row. Uncapped, the pool spent every spare row of a roomy terminal on prose
+#: A different number for a different job than :data:`REVEAL_MAX_ROWS`: 2 is
+#: how much prose the LIST shows per row, 8 is how much the REVEAL shows for
+#: one row. Uncapped, the pool spent every spare row of a roomy terminal on prose
 #: and the card stopped being a list: measured on
 #: ``scripts/ask_user_repro.py`` at 190x50, 24 body rows of which ~19 were
 #: prose, options drawn 8/5/4 rows tall with no blank line between one option's
@@ -1289,8 +1311,18 @@ class AskPickerScreen(Container):
         the same width model the rest of the card measures in is what keeps
         every line inside the column :func:`_fit_row` then pads it to.
 
-        Capped at :data:`DESC_MAX_ROWS`, and memoised, because ``_layout`` runs
-        three times per paint and ``_repaint`` runs on every keystroke.
+        The WHOLE wrap, uncapped, and memoised because ``_layout`` runs three
+        times per paint and ``_repaint`` runs on every keystroke. Callers cap
+        what they DRAW (:data:`DEFAULT_DESC_CAP` for the list,
+        :data:`REVEAL_MAX_ROWS` for the block) and both then mark the cut,
+        because both can still see the lines they are not showing.
+
+        Capped here for a release, and that is precisely how the reveal came to
+        stop mid-clause in silence (D5): a truncated return value made every
+        caller's ``len(wrapped) > len(kept)`` test compare the cut against
+        itself, so the card could not tell a description it had finished from
+        one it had abandoned. A cut is a decision about a FRAME; this is the
+        text.
 
         Returns the PROSE only. The recommendation tag is charged to the FIRST
         line, and this reserves its cells there by wrapping with a hanging
@@ -1340,9 +1372,8 @@ class AskPickerScreen(Container):
             lines = [head, *wrap_cells(rest, room)] if rest else [head]
         else:
             lines = wrap_cells(description, room)
-        wrapped = lines[:DESC_MAX_ROWS]
-        self._description_wraps[(index, width)] = wrapped
-        return wrapped
+        self._description_wraps[(index, width)] = lines
+        return lines
 
     def _reveal_wrap(self, index: int, width: int) -> list[str]:
         """The lines ``ctrl+e`` may uncover for row ``index`` — none for a FIELD.
@@ -1498,7 +1529,7 @@ class AskPickerScreen(Container):
             # Through the same reader step 7a spends by, or this cap asks for a
             # row the allocator will never buy.
             revealed = min(
-                DESC_MAX_ROWS,
+                REVEAL_MAX_ROWS,
                 max(
                     (
                         len(self._reveal_wrap(index, self._card_width()))
@@ -1734,7 +1765,7 @@ class AskPickerScreen(Container):
                 (len(self._reveal_wrap(index, width)) for index in range(self.row_count)),
                 default=0,
             )
-            reveal_rows = max(0, min(DESC_MAX_ROWS, tallest, remaining))
+            reveal_rows = max(0, min(REVEAL_MAX_ROWS, tallest, remaining))
             remaining -= reveal_rows
         space_above = remaining >= 1
         if space_above:
@@ -2602,12 +2633,22 @@ class AskPickerScreen(Container):
             if position < len(kept):
                 text = kept[position]
                 if position == len(kept) - 1 and len(wrapped) > len(kept):
-                    # The grant falls short of the wrap only where `remaining`
-                    # ran out below `DESC_MAX_ROWS`. Filled from the REST of the
-                    # prose and marked by `truncate_cells`, exactly as a granted
-                    # description line is: a wrapped line stops at a word
-                    # boundary, so marking it in place would end the text
-                    # earlier than that row's single list line already does.
+                    # The block is short of the description for either of two
+                    # reasons now — `remaining` ran out, or the wrap is longer
+                    # than `REVEAL_MAX_ROWS` — and this line says so in both.
+                    # It could say so in neither while `_reveal_wrap` returned a
+                    # pre-cut list: the wrap and the grant were then the same
+                    # six lines, this test was false, and the paragraph ended
+                    # mid-clause with nothing marking it (D5). The reveal is the
+                    # card's answer to "the prose does not fit", so it is the
+                    # one block on the card whose own shortfall a reader has no
+                    # other way to detect.
+                    #
+                    # Filled from the REST of the prose and marked by
+                    # `truncate_cells`, exactly as a granted description line
+                    # is: a wrapped line stops at a word boundary, so marking it
+                    # in place would end the text earlier than that row's single
+                    # list line already does.
                     text = _wrap_tail(self._row_description(self.state.selected), wrapped, position)
                 body.append(truncate_cells(text, room), style=ground + ink)
             rows.append(_fit_row(body, width, ground))
