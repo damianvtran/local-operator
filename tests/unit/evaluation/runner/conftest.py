@@ -299,6 +299,9 @@ class ScriptedModel:
         self.script = list(script or ["finish"])
         self.error = error
         self.calls = 0
+        # Overridable so a test can simulate a provider serving a route other
+        # than the pinned one.
+        self.route = ROUTE
 
     async def decide(
         self, observation: Observation, transcript: Sequence[Observation]
@@ -310,7 +313,7 @@ class ScriptedModel:
         self.calls += 1
         return ModelDecision(
             action_batch=_batch(observation, kind),
-            route=ROUTE,
+            route=self.route,
             usage=ModelUsage(input_tokens=10, output_tokens=5),
             cost_micros=7,
         )

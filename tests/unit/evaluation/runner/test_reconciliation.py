@@ -197,6 +197,15 @@ async def test_writer_failure_abandons_after_rescuing_first(
     assert outcome.rescue_complete is True
     assert adapter.terminated
     assert isinstance(outcome.diagnostic, str)
+    # The returned status is not evidence. A bundle whose writer died must
+    # carry its terminal ON DISK, or the "every path leaves a verifiable
+    # bundle or a coherent abandonment" invariant is only a claim.
+    root = outcome.bundle_root
+    assert root is not None
+    report = verify_bundle(root)
+    assert report.abandonment is not None
+    assert report.abandonment.reason == "infrastructure_failure"
+    assert report.terminal_state == "abandoned"
 
 
 @pytest.mark.asyncio
@@ -225,3 +234,8 @@ async def test_evidence_errors_surface_as_abandonment_not_a_crash(
     # An evidence failure is never reported as a scored or completed episode.
     assert outcome.status in ("abandoned", "failed_pre_bundle")
     assert outcome.score is None
+    root = outcome.bundle_root
+    assert root is not None
+    report = verify_bundle(root)
+    assert report.abandonment is not None
+    assert report.terminal_state == "abandoned"

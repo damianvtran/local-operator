@@ -53,6 +53,7 @@ from local_operator.evaluation.adapters.supervisor import (
     VerifiedAdapterSession,
     persist_rescue,
     run_rescue,
+    verify_artifact,
 )
 from local_operator.evaluation.evidence.models import (
     ActionBatchPayload,
@@ -240,6 +241,9 @@ class EpisodeRunner:
         self._guest_actions = 0
         self._simulator_turns = 0
         self._last_exchange_id: str | None = None
+        # Every route a provider actually served. A run whose route drifted from
+        # the pinned one is not comparable against runs that kept it.
+        self._served_routes: set[tuple[str, str, str]] = set()
         self._steps_taken = 0
         self._truncated = False
         self._last_step_terminated = False
@@ -266,10 +270,9 @@ class EpisodeRunner:
                 rescue_required=self._rescue_required,
                 diagnostic=_diagnostic(error),
             )
-        try:
-            return await self._run_with_bundle(handshake)
-        except _EvidenceFailure as error:
-            return await self._abandon_for_evidence(str(error))
+        # _run_with_bundle records its own abandonment terminal while the
+        # writer is still open, so no _EvidenceFailure escapes it here.
+        return await self._run_with_bundle(handshake)
 
     # ------------------------------------------------------------------
     # Launch, prepare, and the two-stage rescue persistence
@@ -390,8 +393,19 @@ class EpisodeRunner:
             )
         self._writer = writer
         try:
+            # The abandonment terminal MUST be recorded here, while the writer
+            # is still open. Letting _EvidenceFailure propagate to run() meant
+            # the finally below closed the writer first, so abandon() then hit
+            # "evidence writer is closed" and the bundle was left with no
+            # terminal at all -- the runner reported "abandoned" while the
+            # bundle on disk stayed open forever.
             return await self._execute(handshake)
+        except _EvidenceFailure as error:
+            return await self._abandon_for_evidence(str(error))
         finally:
+            # Still correct for FD hygiene; only its ordering against abandon()
+            # was wrong. close() after a recorded terminal is a no-op for the
+            # bundle's contents.
             writer.close()
 
     async def _execute(self, handshake: Handshake) -> EpisodeOutcome:
@@ -473,7 +487,7 @@ class EpisodeRunner:
 
         artifacts = []
         for frame in observation.frames:
-            data = _read_artifact(self._config.artifact_root, frame.artifact.sha256)
+            data = verify_artifact(self._config.artifact_root, frame.artifact)
             artifacts.append(
                 self._publish(
                     data,
@@ -584,6 +598,13 @@ class EpisodeRunner:
             ),
         )
         self._model_cycles += 1
+        self._served_routes.add(
+            (
+                decision.route.provider_id,
+                decision.route.route_id,
+                decision.route.model_id,
+            )
+        )
         self._provider_cost_micros += decision.cost_micros
         for name in (
             "input_tokens",
@@ -645,6 +666,12 @@ class EpisodeRunner:
                 receipt_id=result.receipt.receipt_id,
                 input_observation_id=result.receipt.input_observation_id,
                 output_observation_id=result.receipt.output_observation_id,
+                # PROTOCOL GAP: ``ExecutionReceipt`` carries no termination
+                # flag, so an adapter cannot currently say "the environment
+                # ended this episode" -- only the model's own FinishAction or
+                # our step cap can end the step path. If a future adapter API
+                # adds that signal, it must be plumbed through here, or an
+                # environment-initiated termination will be silently ignored.
                 terminated=False,
                 truncated=truncated,
             ),
@@ -839,7 +866,10 @@ class EpisodeRunner:
             reportable=reconciliation.reportable,
             cancelled=cancelled,
         )
-        comparability = "comparable"
+        comparability = _comparability_label(
+            requested=self._spec.requested_route,
+            served=self._served_routes,
+        )
         # ``seal`` accepts only a ``completed`` snapshot (store.py:1359); a
         # failure is carried by ``failure_kind`` plus an unscored artifact, not
         # by a ``failed`` state, which would leave the bundle unsealable.
@@ -1214,6 +1244,25 @@ def _reportability_label(
     return "reportable"
 
 
+def _comparability_label(
+    *,
+    requested: RouteIdentity,
+    served: set[tuple[str, str, str]],
+) -> str:
+    """Report a route change, which is the whole reason the served route is carried.
+
+    A silent provider fallback is exactly what invalidates a comparison against
+    runs that held the pinned route, so a run that drifted must not seal as
+    ``comparable`` however well it scored. A run that made no model call has
+    nothing to contradict its pin and stays comparable.
+    """
+
+    pinned = (requested.provider_id, requested.route_id, requested.model_id)
+    if served - {pinned}:
+        return "route_changed"
+    return "comparable"
+
+
 def _terminal_kind(batch: ActionBatch) -> Literal["finish", "ask_user"] | None:
     for action in batch.actions:
         if isinstance(action, FinishAction):
@@ -1250,10 +1299,6 @@ def _incomplete_receipt(plan: CleanupPlan, action_id: str) -> CleanupReceipt:
         evidence_code="worker-unavailable",
         duration_ms=0,
     )
-
-
-def _read_artifact(root: Path, sha256: str) -> bytes:
-    return (root / sha256).read_bytes()
 
 
 def _diagnostic(error: BaseException) -> str:

@@ -454,3 +454,43 @@ async def test_scored_zero_is_distinct_from_unscored(tmp_path: Path, episode_id:
     root = outcome.bundle_root
     assert root is not None
     assert verify_bundle(root).valid
+
+
+@pytest.mark.asyncio
+async def test_route_change_is_not_sealed_as_comparable(tmp_path: Path, episode_id: str) -> None:
+    """A silent provider fallback is exactly what comparability exists to catch."""
+
+    from local_operator.evaluation.evidence.models import RouteIdentity
+
+    adapter = FakeAdapter(tmp_path, episode_id)
+    model = ScriptedModel(["finish"])
+    model.route = RouteIdentity(
+        provider_id="other-provider", route_id="other-route", model_id="other-model"
+    )
+    runner = _runner(tmp_path, episode_id, adapter=adapter, model=model)
+
+    outcome = await runner.run()
+
+    assert outcome.status == "completed"
+    assert outcome.comparability_label == "route_changed"
+    root = outcome.bundle_root
+    assert root is not None
+    report = verify_bundle(root)
+    assert report.valid
+    assert report.outcome is not None
+    assert report.outcome.comparable is False
+
+
+@pytest.mark.asyncio
+async def test_pinned_route_stays_comparable(tmp_path: Path, episode_id: str) -> None:
+    adapter = FakeAdapter(tmp_path, episode_id)
+    runner = _runner(tmp_path, episode_id, adapter=adapter, model=ScriptedModel())
+
+    outcome = await runner.run()
+
+    assert outcome.comparability_label == "comparable"
+    root = outcome.bundle_root
+    assert root is not None
+    report = verify_bundle(root)
+    assert report.outcome is not None
+    assert report.outcome.comparable is True
