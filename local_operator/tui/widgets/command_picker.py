@@ -468,16 +468,25 @@ def skill_token(text: str, cursor: int | None = None) -> SlashContext | None:
     ``query`` is ``""`` for a bare ``$``, which opens the list on the full set.
     The caret must be INSIDE the token; moving it out into the request closes
     the list, which is what makes the picker phase a property of the parse.
+
+    LEADING WHITESPACE is skipped, matching both :func:`slash_context` (which
+    opens on ``  /he``) and the submit-side parser in
+    :mod:`local_operator.skills.invoke`, which ``lstrip``s. Requiring column 0
+    made the two disagree: ``  $research fix`` offered no list while still
+    expanding on Enter, so the invocation fired with no UI cue that it would.
+    Only spaces and tabs are skipped \u2014 a ``$`` after a NEWLINE is on a second
+    line and is not the buffer's first token.
     """
-    if not text.startswith("$"):
+    indent = len(text) - len(text.lstrip(" \t"))
+    if not text.startswith("$", indent):
         return None
     cursor = len(text) if cursor is None else cursor
-    end = 1
+    end = indent + 1
     while end < len(text) and not text[end].isspace():
         end += 1
     if cursor > end:
         return None
-    return SlashContext(0, text[1:end], end)
+    return SlashContext(indent, text[indent + 1 : end], end)
 
 
 class CompletionMode(Enum):
@@ -540,8 +549,12 @@ def completion_for(
         # token, closes the list, and opens the request. The suffix beyond the
         # token is preserved because a user can complete a `$skill` typed in
         # front of a request they already wrote.
-        completed = f"${row_name} {text[token.end :].lstrip()}"
-        return completed, len(row_name) + 2
+        # `token.start` is the `$`, which is not column 0 when the draft is
+        # indented; the leading run is preserved rather than normalised away so
+        # completing never silently reformats what the user typed.
+        lead = text[: token.start]
+        completed = f"{lead}${row_name} {text[token.end :].lstrip()}"
+        return completed, token.start + len(row_name) + 2
     if mode is CompletionMode.COMMAND:
         context = slash_context(text, caret, known)
         if context is None:

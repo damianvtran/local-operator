@@ -8,9 +8,9 @@ import pytest
 
 from local_operator.skills.discovery import Skill
 from local_operator.skills.invoke import (
-    invocation_name,
     parse_invocation,
     render_invocation,
+    typed_line_of,
 )
 
 
@@ -117,31 +117,45 @@ class TestNotAnInvocation:
         assert parse_invocation("$research go", {}) is None
 
 
-class TestInvocationName:
-    """The picker's question: is the caret in a `$` token, and what is typed."""
+class TestTypedLineRoundTrip:
+    """The payload carries the typed line, so REPLAY can repaint the row.
 
-    def test_bare_sigil_opens_the_full_list(self):
-        assert invocation_name("$") == ""
+    A persisted user message IS the payload. Without this, resuming a session
+    showed the whole SKILL.md body as the user's row and titled the thread
+    after it (the picker names a session from its first user turn).
+    """
 
-    def test_partial_name_is_the_query(self):
-        assert invocation_name("$res") == "res"
+    def test_round_trips_the_typed_line(self, skills):
+        invocation = _resolved("$research fix the login bug", skills)
+        rendered = render_invocation(invocation, "body")
+        assert typed_line_of(rendered) == "$research fix the login bug"
 
-    def test_unknown_name_still_queries(self):
-        """Three characters in, nothing is valid yet — the list must stay up."""
-        assert invocation_name("$zzz") == "zzz"
+    def test_returns_none_for_ordinary_text(self):
+        assert typed_line_of("just a normal message") is None
+        assert typed_line_of("") is None
 
-    def test_space_terminates_the_token(self):
-        assert invocation_name("$research go") is None
+    @pytest.mark.parametrize(
+        "draft",
+        [
+            '$research handle "quoted" input',
+            "$research compare <a> & <b>",
+            "$research line one\nline two",
+            '$research 100% & <tags> "all" at once',
+        ],
+    )
+    def test_escaping_survives_hostile_drafts(self, skills, draft):
+        """The attribute must not be breakable by what the user types."""
+        invocation = _resolved(draft, skills)
+        rendered = render_invocation(invocation, "body")
+        assert typed_line_of(rendered) == draft
 
-    def test_trailing_space_closes_the_list(self):
-        assert invocation_name("$research ") is None
-
-    def test_newline_terminates(self):
-        assert invocation_name("$research\nmore") is None
-
-    @pytest.mark.parametrize("text", ["", "hello", "/team", "a $research"])
-    def test_non_tokens(self, text):
-        assert invocation_name(text) is None
+    def test_body_that_looks_like_the_tag_does_not_confuse_it(self, skills):
+        """A skill DOCUMENTING this feature must not hijack the read-back."""
+        invocation = _resolved("$research go", skills)
+        rendered = render_invocation(
+            invocation, 'Write <skill name="x" invocation="$fake other"> to invoke.'
+        )
+        assert typed_line_of(rendered) == "$research go"
 
 
 class TestRenderInvocation:

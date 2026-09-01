@@ -34,7 +34,16 @@ from collections.abc import Mapping, Sequence
 from contextlib import nullcontext
 from dataclasses import dataclass
 from functools import partial
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, NamedTuple, Protocol, cast
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Awaitable,
+    Callable,
+    NamedTuple,
+    Protocol,
+    TypeGuard,
+    cast,
+)
 
 from rich.console import Group
 from rich.padding import Padding
@@ -860,6 +869,48 @@ def _parse_loop_verdict(text: str) -> tuple[bool | None, str]:
 #: is how an agent burns a budget unattended.
 DEFAULT_LOOP_ITERATIONS = 3
 MAX_LOOP_ITERATIONS = 25
+
+
+def _skill_body_has_content(body: str | None) -> TypeGuard[str]:
+    """Whether a resolved SKILL.md carries anything beyond its frontmatter.
+
+    ``resolve_skill_url`` returns the file verbatim, so a stub whose YAML block
+    is the entire file comes back as a NON-EMPTY string with zero instruction
+    in it. A plain truthiness check therefore called that a successful load and
+    sent the model a `<skill>` block containing only `name:` and
+    `description:` — which is the silent no-op this exists to catch.
+    """
+    if not body or not body.strip():
+        return False
+    text = body.lstrip()
+    if text.startswith("---"):
+        # Drop the leading YAML block, if it is terminated. An UNterminated one
+        # is malformed rather than empty, so it falls through and counts as
+        # content: the user should see the skill fire and read the odd result,
+        # not be told their skill is empty when it is broken.
+        rest = text[3:]
+        end = rest.find("\n---")
+        if end != -1:
+            text = rest[end + 4 :]
+    return bool(text.strip())
+
+
+def _typed_line_of(text: str) -> str | None:
+    """The ``$skill`` line behind a persisted payload, or ``None``.
+
+    A thin lazy-import wrapper over
+    :func:`local_operator.skills.invoke.typed_line_of`, matching the contract
+    the rest of this module keeps with the skills subsystem: it is imported at
+    the point of use and every failure degrades to "not an invocation", so a
+    broken or absent skills package can never stop a transcript replaying.
+    """
+    try:
+        from local_operator.skills.invoke import typed_line_of
+
+        return typed_line_of(text)
+    except Exception:  # noqa: BLE001 — replay must never fail on this
+        return None
+
 
 #: The prompt each loop iteration submits. Deliberately references the
 #: standing goal (carried in the system prompt) rather than restating it, so
@@ -1943,6 +1994,18 @@ class OperatorApp(App[None]):
         self._compaction_owns_working_block: bool = False
         #: A prompt typed DURING a pass, sent when the pass ends.
         self._prompt_held_for_compaction: str = ""
+        #: What the USER typed for that held prompt, when it differs from the
+        #: string above — a ``$skill`` invocation holds the expanded SKILL.md
+        #: body to SEND while the composer must get the short line back.
+        #: ``""`` means "they are the same string", which is every other
+        #: prompt, so the sentinel above keeps its load-bearing emptiness
+        #: (round 13's mutation tests) instead of widening to a tuple.
+        #:
+        #: The two consumers genuinely want opposite halves: `on_compaction_
+        #: ended` SENDS the held prompt (the payload), while the `/reload`
+        #: teardown HANDS IT BACK to the composer (the typed line). One field
+        #: could not serve both without one of them being wrong.
+        self._typed_held_for_compaction: str = ""
         #: Its attachments, held in parallel. Separate so the line above keeps
         #: `""` as its sentinel — that field's emptiness is load-bearing and
         #: mutation-tested (round 13), and widening it to a tuple would move
@@ -3653,6 +3716,16 @@ class OperatorApp(App[None]):
                     # live/replay divergence review round 2 pinned.
                     if text in (LOOP_PROMPT, _CONTINUATION_PROMPT):
                         continue
+                    # A `$skill` invocation persists as its EXPANDED payload,
+                    # because that is what the model was sent. Replaying it
+                    # verbatim showed a resumed conversation the whole SKILL.md
+                    # body as the user's row — and, since the picker titles a
+                    # session from its first user turn, named every such thread
+                    # "The user invoked the `research` skill…". The typed line
+                    # rides the payload's own opening tag, so replay repaints
+                    # exactly what the live session painted. Same live/replay
+                    # parity rule as the two prompts skipped above.
+                    text = _typed_line_of(text) or text
                     # The images ride the persisted message as base64 content
                     # blocks — the same bytes the model saw — so a resumed
                     # prompt replays WITH its pictures, not just the receipt
@@ -4438,8 +4511,13 @@ class OperatorApp(App[None]):
         # hold took it.
         self._compacting = False
         held, self._prompt_held_for_compaction = self._prompt_held_for_compaction, ""
+        typed, self._typed_held_for_compaction = self._typed_held_for_compaction, ""
         held_images, self._images_held_for_compaction = self._images_held_for_compaction, {}
         if held:
+            # The TYPED line goes back, not the payload: handing a user the
+            # expanded body of a `$skill` they invoked would make them delete a
+            # whole SKILL.md by hand to recover the one line they wrote.
+            held = typed or held
             editor = self._editor()
             # Never clobber something typed since: the draft in the box is
             # newer than the prompt we are handing back.
@@ -10373,6 +10451,9 @@ class OperatorApp(App[None]):
             # minutes and then sent the words without the screenshot would be
             # worse than not queueing at all.
             self._prompt_held_for_compaction = sent
+            # Only when they differ, so the common path leaves this empty and
+            # the hand-back below falls through to the held prompt itself.
+            self._typed_held_for_compaction = text if sent != text else ""
             # From the MESSAGE, not from the widget: the composer clears itself
             # synchronously after posting and Textual delivers on a later tick,
             # so re-reading it here saw an empty map and queued the prompt
@@ -16650,9 +16731,25 @@ class OperatorApp(App[None]):
         # `ctrl+c` leads the pair: copying is the gesture a user reaches for far
         # more often than pasting an image, and the two-line entry reads better
         # above a one-line neighbour than wedged under it.
+        # `$skill` is documented for the SAME reason as the two key rows above:
+        # it is a composer grammar, not a slash command, so the table cannot
+        # carry it — and unlike `/`, nothing else advertises it. A user who
+        # never types `$` on a hunch never discovers that naming a skill is
+        # possible at all, which makes `/help` the only durable surface for it
+        # ("the surface still there an hour in", the ctrl+c note above).
+        #
+        # Named with a placeholder rather than bare `$`, because the gesture is
+        # the NAME: a lone sigil reads as a shell prompt. MEASURED against the
+        # 74-cell ceiling the block documents at length above: `name_width` is
+        # 16 on the current registry and the description is 47, composing to
+        # 63 — inside the bound with headroom, and pinned by the same test.
+        skill_note = Text()
+        skill_note.append("$<skill>".ljust(name_width), style=muted)
+        skill_note.append("runs a named skill on the rest of the line", style=dim)
         lines.append(copy_note)
         lines.append(copy_note_more)
         lines.append(paste_note)
+        lines.append(skill_note)
         # `cmd+v` gets its own row because the claim is CONDITIONAL and a
         # conditional claim needs the words to qualify it. The chord reaches
         # the app only where the terminal implements the kitty keyboard
@@ -16853,7 +16950,17 @@ class OperatorApp(App[None]):
             if invocation is None:
                 return None
             body = resolve_skill_url(f"skill://{invocation.skill.name}", skills)
-            if not body:
+            if not _skill_body_has_content(body):
+                # NOT a silent fall-through. Returning None here sends the raw
+                # `$research fix it` line as prose while the row on screen
+                # still reads like an invocation, so the user believes the
+                # skill fired and the model never saw it. An empty SKILL.md is
+                # the realistic cause (a stub someone has not written yet).
+                self._notice(
+                    f"skill `{invocation.skill.name}` has an empty body — sending your "
+                    "message as written",
+                    "warning",
+                )
                 return None
             return render_invocation(invocation, body)
         except Exception as exc:
@@ -16861,7 +16968,19 @@ class OperatorApp(App[None]):
             return None
 
     def _skills_block(self) -> RichBlock | None:
-        """Graceful introspection of the skills stream (exception-safe)."""
+        """Graceful introspection of the skills stream (exception-safe).
+
+        Lists HIDDEN skills too, tagged. Before manual invocation existed,
+        filtering them was right: `hide` means "never route to this", so a
+        hidden skill was something only the agent could reach by URL and
+        listing it advertised a capability the user could not use. `$name`
+        inverts that — a hidden skill is now reachable ONLY by being typed, so
+        the command that exists to list skills was concealing exactly the
+        entries its reader most needs to see.
+
+        The header names the gesture for the same reason: a bare list of names
+        does not tell the reader they are typeable.
+        """
         try:
             from pathlib import Path
 
@@ -16869,14 +16988,16 @@ class OperatorApp(App[None]):
             from local_operator.skills.discovery import discover_skills
 
             skills, _warnings = discover_skills(default_skill_roots(Path(os.getcwd())))
-            visible = [skill for skill in skills if not skill.hide]
-            if not visible:
+            if not skills:
                 return None
-            return RichBlock(
-                _tree_listing(
-                    [(skill.name, skill.description) for skill in visible], "loaded skills"
+            rows = [
+                (
+                    skill.name,
+                    f"{skill.description} (hidden)" if skill.hide else skill.description,
                 )
-            )
+                for skill in skills
+            ]
+            return RichBlock(_tree_listing(rows, "loaded skills · type $<name> to run one"))
         except Exception:
             return None
 
@@ -19283,7 +19404,20 @@ class OperatorApp(App[None]):
             # round 2, D5).
             self._replace_stop_notice(RECALL_DECLINE_NOTICE, "note")
             return
-        text = message.text
+        # The row's text, NOT ``message.text``. For every ordinary steer the
+        # two are the same string, but a ``$skill`` invocation deliberately
+        # sends the expanded SKILL.md body while the row keeps the short line
+        # the user typed (``_submit_prompt``'s ``sent``). A recall hands the
+        # composer back what the USER wrote — recalling their own words is the
+        # whole gesture, and loading the payload instead dumped a whole skill
+        # body into the composer for them to delete by hand.
+        text = user_block.text()
+        # ``message.text`` is still what left the QUEUE, so history and the
+        # echo registry are keyed on their own strings below: the submit
+        # recorded the typed line in history and registered the echo under the
+        # SENT text, and taking the wrong one for either leaves a stale entry
+        # that swallows the resend.
+        sent_text = message.text
         # The steer recorded itself in prompt history on submit; the recall
         # UNSENT it, so Up-arrow must not offer the line the composer already
         # holds as a past prompt.
@@ -19329,7 +19463,7 @@ class OperatorApp(App[None]):
         # By the message's OWN id, which is the key the steer registered under:
         # `message` is the object `steer_message` queued, so this takes exactly
         # this steer's entry and never a sibling with the same words.
-        self._consume_user_echo(text, message_id=message.id)
+        self._consume_user_echo(sent_text, message_id=message.id)
         for held in self._queued_steer_notices:
             if held is notice:
                 self._queued_steer_notices.remove(held)
@@ -19550,9 +19684,22 @@ class OperatorApp(App[None]):
         # A prompt typed DURING the pass was held rather than sent into a
         # history being rewritten; now the history is settled, it goes.
         held, self._prompt_held_for_compaction = self._prompt_held_for_compaction, ""
+        # Kept, not dropped: the markers are resolved against the TYPED text
+        # below. Cleared after that so a later `/reload` cannot hand back a
+        # line whose prompt already went.
+        typed, self._typed_held_for_compaction = self._typed_held_for_compaction, ""
         held_images, self._images_held_for_compaction = self._images_held_for_compaction, {}
         if held or held_images:
-            self._start_turn(held, resolve_markers(held, held_images))
+            # `resolve_markers` orders images by WHERE the citation sits, so it
+            # must read the text the user actually wrote. Run against the
+            # expanded payload, a `[Image #N]` appearing anywhere in the
+            # SKILL.md body (a skill about screenshots is the obvious case)
+            # shifts the citation positions and the model silently receives the
+            # attachments in the wrong order — verified: a draft citing #2 then
+            # #1 sent `[BBB, AAA]` on the normal path and `[AAA, BBB]` here.
+            # The PAYLOAD is still what gets sent; only the marker walk uses
+            # the typed line.
+            self._start_turn(held, resolve_markers(typed or held, held_images))
 
     def on_effective_model_changed(self, message: EffectiveModelChanged) -> None:
         """Repaint the model segment with the model actually serving requests.

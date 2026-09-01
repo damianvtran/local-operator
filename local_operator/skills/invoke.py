@@ -25,9 +25,17 @@ it to the model together with the request. Three properties are deliberate:
 The recognition rule is narrow on purpose, because ``$`` is also money and
 also shell. A token is an invocation only when it is the FIRST token of the
 buffer, and only when what follows the ``$`` matches a DISCOVERED SKILL NAME.
-``$100 for the redesign`` matches no skill and is plain prose; so is ``$PATH``
-and a stray ``$`` alone. That is what keeps this from needing an escape rule:
-the vocabulary decides, so nothing that is not a skill name is ever captured.
+``$100 for the redesign`` matches no skill and is plain prose; so is a stray
+``$`` alone. That is what keeps this from needing an escape rule: the
+vocabulary decides, so nothing that is not a skill name is ever captured.
+
+The converse is worth stating plainly: matching is case-insensitive and the
+vocabulary is user-controlled, so a skill actually NAMED ``path`` or ``editor``
+would make ``$PATH is unset`` or ``$EDITOR is vim`` invoke it. Nothing here can
+tell those apart from a deliberate invocation — the name is the whole grammar —
+and the transcript row shows what was typed either way, so the user can see it
+happened. Naming a skill after a common environment variable is the thing to
+avoid.
 """
 
 from __future__ import annotations
@@ -38,13 +46,21 @@ from typing import NamedTuple
 
 from local_operator.skills.discovery import Skill
 
-#: A leading ``$name`` token. ``name`` uses the skill-name character set
-#: (letters, digits, hyphen, underscore, dot) so ``$research,`` and ``$research.``
-#: end the token at the punctuation rather than swallowing it — a sentence that
-#: opens with an invocation still reads as a sentence. Anchored at the start:
+#: A leading ``$name`` token. ``name`` uses the skill-name character set:
+#: letters, digits, hyphen, underscore and dot, because real skill names
+#: contain all of them. The consequence is that ``.`` and ``-`` do NOT end the
+#: token — ``$research.`` parses the name ``research.``, misses the vocabulary
+#: and is sent as prose, which is the safe direction but not a sentence that
+#: invokes. ``$research,`` DOES work, since ``,`` is outside the class.
+#: Anchored at the start:
 #: an invocation is a prefix, never something found mid-draft. A ``$`` followed
 #: by nothing usable does not match at all.
 _INVOCATION_RE = re.compile(r"^\$([A-Za-z0-9][A-Za-z0-9._-]*)")
+
+#: The opening tag of a rendered payload, capturing the typed line stored in
+#: its ``invocation`` attribute. Anchored to the tag rather than searched
+#: loosely so ordinary prose quoting the words cannot be mistaken for one.
+_INVOCATION_TAG_RE = re.compile(r'<skill name="[^"]*" invocation="([^"]*)">')
 
 
 class SkillInvocation(NamedTuple):
@@ -60,6 +76,11 @@ class SkillInvocation(NamedTuple):
     #: The raw token as typed (``"$research"``), for echoing a row that shows
     #: what the user actually wrote rather than a reconstruction of it.
     token: str
+    #: The whole line the user typed, stripped. Carried into the rendered
+    #: payload so a RESUMED session can recover it (see :func:`typed_line_of`);
+    #: without it the persisted message — which is the payload — replays as the
+    #: user's row and the skill body becomes the conversation's title.
+    typed: str = ""
 
 
 def parse_invocation(text: str, skills: Mapping[str, Skill]) -> SkillInvocation | None:
@@ -94,37 +115,12 @@ def parse_invocation(text: str, skills: Mapping[str, Skill]) -> SkillInvocation 
     if skill is None:
         return None
     request = stripped[match.end() :].strip()
-    return SkillInvocation(skill=skill, request=request, token=match.group(0))
-
-
-def invocation_name(text: str) -> str | None:
-    """The ``$``-token name being typed, or ``None`` — the picker's question.
-
-    Unlike :func:`parse_invocation` this does NOT check the token against the
-    vocabulary, because a user three characters into ``$res`` has not typed a
-    valid name yet and still wants the list. It answers "is the caret in a
-    ``$`` token", and returns ``""`` for a bare ``$`` so the picker opens on
-    the full set the moment the sigil is typed.
-
-    The token must still be the first thing in the buffer and must not have
-    been terminated by whitespace: once the user types a space they are writing
-    the REQUEST, and a skill list there is stale advice — the same phase rule
-    :func:`local_operator.tui.widgets.command_picker.slash_context` applies to
-    the command word.
-    """
-    stripped = text.lstrip()
-    if not stripped.startswith("$"):
-        return None
-    token = stripped[1:]
-    # A terminated token is no longer being typed. Checked before the pattern
-    # so `$research ` (trailing space) closes the list even though its name is
-    # perfectly valid.
-    if token != token.split(" ")[0] or "\n" in token:
-        return None
-    if not token:
-        return ""
-    match = _INVOCATION_RE.match(stripped)
-    return match.group(1) if match else None
+    return SkillInvocation(
+        skill=skill,
+        request=request,
+        token=match.group(0),
+        typed=stripped.strip(),
+    )
 
 
 def render_invocation(invocation: SkillInvocation, body: str) -> str:
@@ -138,13 +134,72 @@ def render_invocation(invocation: SkillInvocation, body: str) -> str:
     A bare ``$name`` with no request is not given a fake one. The skill body is
     the instruction in that case, and inventing "follow this skill" text around
     it would put words in the user's mouth that the skill may contradict.
+
+    The opening tag carries the typed line in an ``invocation`` attribute. That
+    is not decoration for the model: the payload is what gets PERSISTED, so a
+    resumed session replays this string as the user's row, and without the
+    typed line recorded here that row (and the conversation title derived from
+    it) becomes the whole skill body. :func:`typed_line_of` reads it back, and
+    keeping it inside the payload means there is no parallel store that can
+    disagree with the message it describes.
     """
     header = (
         f"The user invoked the `{invocation.skill.name}` skill directly. Follow it for "
         "this request. Its reference files, if any, are listed at the end of the body "
         "and are read with `skill://<name>/<path>`."
     )
-    parts = [header, f'<skill name="{invocation.skill.name}">', body, "</skill>"]
+    typed = _escape_attr(invocation.typed)
+    parts = [
+        header,
+        f'<skill name="{invocation.skill.name}" invocation="{typed}">',
+        body,
+        "</skill>",
+    ]
     if invocation.request:
         parts.append(invocation.request)
     return "\n".join(parts)
+
+
+def _escape_attr(value: str) -> str:
+    """Escape a typed line for an XML-ish attribute, reversibly.
+
+    Deliberately minimal and paired with :func:`_unescape_attr`: only the two
+    characters that could end the attribute or the tag. A newline becomes a
+    literal ``&#10;`` so a multi-line draft cannot break the single-line tag
+    the replay scanner matches.
+    """
+    return (
+        value.replace("&", "&amp;")
+        .replace('"', "&quot;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace("\n", "&#10;")
+    )
+
+
+def _unescape_attr(value: str) -> str:
+    """Inverse of :func:`_escape_attr`; ``&amp;`` last so it cannot double-undo."""
+    return (
+        value.replace("&#10;", "\n")
+        .replace("&gt;", ">")
+        .replace("&lt;", "<")
+        .replace("&quot;", '"')
+        .replace("&amp;", "&")
+    )
+
+
+def typed_line_of(text: str) -> str | None:
+    """The ``$skill`` line a rendered payload was built from, or ``None``.
+
+    The read side of the ``invocation`` attribute. Used by transcript REPLAY:
+    a persisted user message is the payload, and painting it verbatim would
+    show a resumed conversation the whole SKILL.md body as the user's row and
+    title the thread after it. Recovering the line here keeps replay showing
+    what the live session showed — the same live/replay parity the loop-prompt
+    skip in ``OperatorApp._replay_history`` exists to maintain.
+
+    ``None`` for any text that is not one of these payloads, which is every
+    ordinary message, so the caller falls through to painting it verbatim.
+    """
+    match = _INVOCATION_TAG_RE.search(text)
+    return _unescape_attr(match.group(1)) if match else None
