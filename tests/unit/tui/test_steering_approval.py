@@ -41,6 +41,7 @@ from local_operator.tui.app import (
     DOUBLE_STOP_WINDOW_S,
     OperatorApp,
 )
+from local_operator.tui import app as app_module
 from local_operator.tui.events import (
     AssistantDelta,
     AssistantMessageEnd,
@@ -73,6 +74,66 @@ from local_operator.tui.widgets.transcript import (
 
 from .test_app_pilot import FakeSession, _factory
 from .test_transcript_selection import _cell, _composer_copy
+
+
+@pytest.fixture
+def unraceable_answer_hold(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Take the wall clock out of the composer's answer-key hold.
+
+    ``ANSWER_KEY_HOLD_S`` parks a routed answer key for 180 ms so that the
+    first character of a typed word cannot authorise anything: the hold is
+    released early by the SECOND keystroke, and commits as an answer only if
+    that keystroke never comes. In production that budget is enormous — 180 ms
+    is most of a second of typing — but in a pilot test the gap between two
+    ``pilot.press`` calls is not a human's inter-key interval. It is however
+    long the harness takes to round-trip a key through the message pump, and
+    that is contention-sensitive: measured here at **85-112 ms against the
+    180 ms budget**, a margin of only ~90 ms on an idle 14-core box. A loaded
+    4-vCPU CI runner erases it, the timer fires between two characters of
+    ``and also drop the index``, and the leading ``a`` answers the prompt
+    instead of being typed — the exact failure seen on CI as
+    ``editor='d also drop the index'`` with the approval resolved.
+
+    That is a test-harness race, not a product defect: no human types the
+    second character of a word 180 ms after the first and means the first as
+    an answer. So the tests that TYPE A WORD stretch the hold far beyond any
+    pilot round trip, which makes "the second keystroke arrived first" true by
+    construction rather than by timing luck.
+
+    It does not weaken what those tests check. The hold still exists, the key
+    is still parked, and the assertions are unchanged: the sentence lands
+    whole and nothing is authorised. What the stretch removes is the ability
+    of a slow runner to decide the outcome. Tests that assert the hold COMMITS
+    (a deliberate single keypress) do not use this fixture — they press with
+    the CARD focused, which bypasses the composer routing entirely.
+    """
+    monkeypatch.setattr(app_module, "ANSWER_KEY_HOLD_S", 30.0)
+
+
+async def _focus_composer(pilot: Any, app: OperatorApp) -> None:
+    """Put the caret in the composer and wait until it is verifiably there.
+
+    ``pilot.click(Editor)`` is a COORDINATE click: it reads the widget's region
+    and posts a mouse event at its centre. Between the read and the event the
+    dock can reflow — the prompt host appears the moment a question mounts and
+    the boot card clamps away — so under load the event lands on the prompt
+    instead of the composer, and the prompt's own ``on_click`` takes focus.
+    The next keystroke then answers the question: measured as the leading
+    ``n`` of ``no wait`` vanishing from the buffer while the approval resolved
+    ``False``. The click is not the thing under test in any of these cases —
+    "the user is typing in the composer" is — and the mid-sentence twin of
+    these tests already establishes the direct idiom (``editor.focus()``).
+
+    So focus the composer the way the app would and wait on the CONDITION a
+    typing user actually has: the screen's focused widget is the Editor. The
+    ceiling is a deadlock guard, not a timing assumption.
+    """
+    app.query_one(Editor).focus()
+    for _ in range(100):
+        if isinstance(app.screen.focused, Editor):
+            return
+        await pilot.pause(0.02)
+    raise AssertionError("the composer never took focus")
 
 
 class SteerableSession(FakeSession):
@@ -727,10 +788,27 @@ async def test_an_empty_message_end_keeps_the_streamed_prose() -> None:
         app.post_message(TurnStarted())
         app.post_message(AssistantMessageStart())
         app.post_message(AssistantDelta("hello from the model"))
-        await pilot.pause()
-        assert any("hello from the model" in row for row in rows(app))
+        # Wait on the PAINTED condition, not on one idle tick: a delta posted
+        # to the message pump lands on a later frame, and a single pause is a
+        # bet on that being the very next tick. Under load the frame read here
+        # precedes the paint and the row is absent (caught by the 12-hog
+        # harness on an otherwise-green tree). _wait_for_row's ceiling is a
+        # deadlock guard, so a contended runner costs nothing.
+        await _wait_for_row(pilot, app, "hello from the model")
 
         app.post_message(AssistantMessageEnd(""))
+        # The contract is that the empty authoritative text erases nothing —
+        # so the assertion must read the frame AFTER the end handler ran, and
+        # a single pause is a bet on that being the next tick. The handler's
+        # observable fact is that it clears ``_streaming_block``; the frame
+        # itself is identical before and after (that is the point of the
+        # fix), so settling the frame would not prove it ran. Wait on the
+        # condition, then read the frame the user would see.
+        for _ in range(200):
+            if app._streaming_block is None:
+                break
+            await pilot.pause()
+        assert app._streaming_block is None, "the empty end was never processed"
         await pilot.pause()
         assert any("hello from the model" in row for row in rows(app))
         assert len(app.query(AssistantBlock)) == 1
@@ -1659,8 +1737,7 @@ async def test_the_answer_keys_work_from_the_composer() -> None:
                 await pilot.pause(0.02)
             await pilot.pause()
 
-            await pilot.click(Editor)
-            await pilot.pause()
+            await _focus_composer(pilot, app)
             await pilot.press(key)
             assert await asyncio.wait_for(pending, 2) is expected, key
             # The key answered instead of being typed.
@@ -1668,7 +1745,9 @@ async def test_the_answer_keys_work_from_the_composer() -> None:
 
 
 @pytest.mark.asyncio
-async def test_typing_a_steer_at_a_live_prompt_never_answers_it() -> None:
+async def test_typing_a_steer_at_a_live_prompt_never_answers_it(
+    unraceable_answer_hold: None,
+) -> None:
     """A sentence typed at a question is a steer, not an authorisation.
 
     This is the hazard the routing takes on, and it is the reason a routed key
@@ -1693,8 +1772,7 @@ async def test_typing_a_steer_at_a_live_prompt_never_answers_it() -> None:
                 await pilot.pause(0.02)
             await pilot.pause()
 
-            await pilot.click(Editor)
-            await pilot.pause()
+            await _focus_composer(pilot, app)
             for character in phrase:
                 await pilot.press("space" if character == " " else character)
             await pilot.pause()
@@ -1877,7 +1955,9 @@ async def test_a_prompt_hidden_by_a_shrink_comes_back_on_re_grow() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_held_answer_key_resolves_cleanly_on_every_second_key() -> None:
+async def test_a_held_answer_key_resolves_cleanly_on_every_second_key(
+    unraceable_answer_hold: None,
+) -> None:
     """The hold has three endings, and each has to leave a coherent state.
 
     A routed answer key is parked for one keystroke so that typing a word
@@ -1902,8 +1982,7 @@ async def test_a_held_answer_key_resolves_cleanly_on_every_second_key() -> None:
                 break
             await pilot.pause(0.02)
         await pilot.pause()
-        await pilot.click(Editor)
-        await pilot.pause()
+        await _focus_composer(pilot, app)
         return pending
 
     # Enter takes the answer.
@@ -1945,7 +2024,9 @@ async def test_a_held_answer_key_resolves_cleanly_on_every_second_key() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_held_key_never_answers_a_question_it_was_not_meant_for() -> None:
+async def test_a_held_key_never_answers_a_question_it_was_not_meant_for(
+    unraceable_answer_hold: None,
+) -> None:
     """A key parked against a question that then settles must not answer another.
 
     The window is short, but a stop, a `/clear` or a teardown can land inside
@@ -1962,8 +2043,7 @@ async def test_a_held_key_never_answers_a_question_it_was_not_meant_for() -> Non
                 break
             await pilot.pause(0.02)
         await pilot.pause()
-        await pilot.click(Editor)
-        await pilot.pause()
+        await _focus_composer(pilot, app)
 
         await pilot.press("y")
         assert app._held_answer_key is not None, "the key was not held"
@@ -1979,7 +2059,9 @@ async def test_a_held_key_never_answers_a_question_it_was_not_meant_for() -> Non
 
 
 @pytest.mark.asyncio
-async def test_a_prompt_arriving_mid_sentence_does_not_take_the_caret() -> None:
+async def test_a_prompt_arriving_mid_sentence_does_not_take_the_caret(
+    unraceable_answer_hold: None,
+) -> None:
     """A question can land while the user is typing, and must not hijack it.
 
     This is the mount-time twin of the routing hazard. A prompt is raised by

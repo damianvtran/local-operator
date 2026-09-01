@@ -15,6 +15,8 @@ directly because they carry no rendering state.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from local_operator.tui.app import OperatorApp
@@ -157,6 +159,26 @@ def test_todo_items_returns_phases_and_copies(monkeypatch: pytest.MonkeyPatch) -
 
 
 # --------------------------------------------------------------------------- #
+async def _adopted(pilot: Any, app: OperatorApp) -> None:
+    """Wait until the app has ADOPTED its session, on the condition itself.
+
+    The band paints its todo list from ``TODO_STORE`` keyed by the live
+    session's id, and ``_refresh_band`` reads ``app._session`` — so writing the
+    store before adoption lands paints nothing, and the assertion then reads
+    an empty panel. A single ``pilot.pause()`` is a bet on adoption taking one
+    tick: on the 3.13 CI runners it wins, on a 3.14 interpreter (and on any
+    loaded runner) adoption is the first app's ~19-tick import-and-construct
+    cost and the bet is lost — measured as an empty panel on an unmodified
+    tree. Waiting on the condition costs nothing when adoption is fast and
+    still fails, rather than hanging, when it never happens.
+    """
+    for _ in range(200):
+        if app._session is not None:
+            return
+        await pilot.pause(0.02)
+    raise AssertionError("the session was never adopted")
+
+
 # Multi-phase render — headers, indent, marks (driven through the real app)
 # --------------------------------------------------------------------------- #
 
@@ -168,7 +190,7 @@ async def test_multi_phase_renders_headers_indent_and_marks() -> None:
     session = FakeSession()
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
+        await _adopted(pilot, app)
         builtin.TODO_STORE["sess"] = [
             {
                 "name": "Foundation",
@@ -206,7 +228,7 @@ async def test_single_phase_renders_headerless() -> None:
     session = FakeSession()
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
+        await _adopted(pilot, app)
         # A flat store (item dicts at top level) coerces to one implicit phase.
         builtin.TODO_STORE["sess"] = [
             _item("wire the band", "done"),
@@ -235,7 +257,7 @@ async def test_settled_phase_hidden_after_delay_but_not_before() -> None:
     session = FakeSession()
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
+        await _adopted(pilot, app)
         builtin.TODO_STORE["sess"] = [
             {"name": "Auth", "items": [_item("token exchange", "pending")]},
             {"name": "Cleanup", "items": [_item("remove the shim", "done")]},
@@ -271,7 +293,7 @@ async def test_phase_with_a_pending_item_is_never_hidden() -> None:
     session = FakeSession()
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
+        await _adopted(pilot, app)
         builtin.TODO_STORE["sess"] = [
             {"name": "Auth", "items": [_item("token exchange", "pending")]},
             {"name": "Build", "items": [_item("compile", "done"), _item("link", "pending")]},
@@ -298,7 +320,7 @@ async def test_regaining_open_work_restarts_the_hide_clock() -> None:
     session = FakeSession()
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
+        await _adopted(pilot, app)
         builtin.TODO_STORE["sess"] = [
             {"name": "Auth", "items": [_item("token exchange", "pending")]},
             {"name": "Cleanup", "items": [_item("remove the shim", "done")]},
@@ -327,7 +349,7 @@ async def test_ctrl_t_toggles_and_expanded_reveals_a_hidden_settled_phase() -> N
     session = FakeSession()
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
+        await _adopted(pilot, app)
         builtin.TODO_STORE["sess"] = [
             {"name": "Auth", "items": [_item("token exchange", "pending")]},
             {"name": "Cleanup", "items": [_item("remove the shim", "done")]},
@@ -401,7 +423,7 @@ async def test_expanded_reveals_every_item_collapsed_hid_on_a_normal_terminal() 
     session = FakeSession()
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(100, 40)) as pilot:
-        await pilot.pause()
+        await _adopted(pilot, app)
         builtin.TODO_STORE["sess"] = _big_multi_phase()
         app._refresh_band()
         await pilot.pause()
@@ -441,7 +463,7 @@ async def test_expanded_scrolls_when_the_list_exceeds_the_bound() -> None:
     app = OperatorApp(_async_factory(session))
     # A short terminal makes even a modest list exceed the expanded bound.
     async with app.run_test(size=(100, 14)) as pilot:
-        await pilot.pause()
+        await _adopted(pilot, app)
         builtin.TODO_STORE["sess"] = _big_multi_phase()
         app._refresh_band()
         await pilot.pause()
@@ -472,7 +494,7 @@ async def test_predicted_rows_matches_the_capped_paint_in_each_state() -> None:
     session = FakeSession()
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(100, 14)) as pilot:
-        await pilot.pause()
+        await _adopted(pilot, app)
         builtin.TODO_STORE["sess"] = _big_multi_phase()
         app._refresh_band()
         await pilot.pause()
@@ -522,7 +544,7 @@ async def test_affordance_is_a_separate_widget_and_click_toggles() -> None:
     session = FakeSession()
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(100, 40)) as pilot:
-        await pilot.pause()
+        await _adopted(pilot, app)
         builtin.TODO_STORE["sess"] = _big_multi_phase()
         app._refresh_band()
         await pilot.pause()
@@ -571,7 +593,7 @@ async def test_affordance_hover_ground_is_the_shared_overlay_step() -> None:
     session = FakeSession()
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(100, 40)) as pilot:
-        await pilot.pause()
+        await _adopted(pilot, app)
         builtin.TODO_STORE["sess"] = _big_multi_phase()
         app._refresh_band()
         await pilot.pause()
@@ -611,7 +633,7 @@ async def test_toggle_still_forces_a_repaint_past_the_equality_guard() -> None:
     session = FakeSession()
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(100, 40)) as pilot:
-        await pilot.pause()
+        await _adopted(pilot, app)
         builtin.TODO_STORE["sess"] = _big_multi_phase()
         app._refresh_band()
         await pilot.pause()
@@ -644,7 +666,7 @@ async def test_headers_count_toward_budget_and_composer_survives_a_short_termina
     session = FakeSession()
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(100, 14)) as pilot:
-        await pilot.pause()
+        await _adopted(pilot, app)
         builtin.TODO_STORE["sess"] = [
             {"name": f"Phase {p}", "items": [_item(f"task {p}.{n}", "pending") for n in range(4)]}
             for p in range(5)
@@ -680,7 +702,7 @@ async def test_short_terminal_keeps_at_least_one_item_visible() -> None:
         session = FakeSession()
         app = OperatorApp(_async_factory(session))
         async with app.run_test(size=(100, height)) as pilot:
-            await pilot.pause()
+            await _adopted(pilot, app)
             builtin.TODO_STORE["sess"] = [
                 {
                     "name": f"Phase {p}",
@@ -732,7 +754,7 @@ async def test_root_stage_total_is_absolute_not_the_collapsed_view() -> None:
     session = FakeSession()
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
+        await _adopted(pilot, app)
         builtin.TODO_STORE["sess"] = [
             {"name": "Foundation", "items": [_item("a", "done"), _item("b", "done")]},
             {"name": "Auth", "items": [_item("c", "pending"), _item("d", "pending")]},
@@ -765,7 +787,7 @@ async def test_lone_named_phase_shows_its_header_matching_the_receipt() -> None:
     session = FakeSession()
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
+        await _adopted(pilot, app)
         builtin.TODO_STORE["sess"] = [
             {"name": "Foundation", "items": [_item("a", "pending"), _item("b", "done")]},
         ]
@@ -813,7 +835,7 @@ async def test_flat_expand_reveals_every_item_and_mounts_affordance() -> None:
     session = FakeSession()
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(100, 40)) as pilot:
-        await pilot.pause()
+        await _adopted(pilot, app)
         builtin.TODO_STORE["sess"] = _flat(15)
         app._refresh_band()
         await pilot.pause()
@@ -852,7 +874,7 @@ async def test_flat_collapsed_is_byte_identical_with_no_affordance() -> None:
     session = FakeSession()
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(100, 14)) as pilot:
-        await pilot.pause()
+        await _adopted(pilot, app)
         builtin.TODO_STORE["sess"] = [
             {"text": f"step {n} of the plan", "status": "pending"} for n in range(1, 13)
         ]
@@ -881,7 +903,7 @@ async def test_expanded_never_shows_fewer_rows_than_collapsed_across_heights() -
         session = FakeSession()
         app = OperatorApp(_async_factory(session))
         async with app.run_test(size=(100, height)) as pilot:
-            await pilot.pause()
+            await _adopted(pilot, app)
             builtin.TODO_STORE["sess"] = _big_multi_phase()
             app._refresh_band()
             await pilot.pause()
@@ -919,7 +941,7 @@ async def test_todo_scroll_does_not_take_focus_from_the_composer() -> None:
     session = FakeSession()
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(100, 14)) as pilot:
-        await pilot.pause()
+        await _adopted(pilot, app)
         builtin.TODO_STORE["sess"] = _big_multi_phase()
         app._refresh_band()
         await pilot.pause()
@@ -947,7 +969,7 @@ async def test_keyboard_scroll_reaches_the_expanded_overflow() -> None:
     session = FakeSession()
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(100, 14)) as pilot:
-        await pilot.pause()
+        await _adopted(pilot, app)
         builtin.TODO_STORE["sess"] = _big_multi_phase()
         app._refresh_band()
         await pilot.pause()
@@ -1043,7 +1065,7 @@ async def test_expanded_shows_an_item_at_the_floor_flat_and_phased() -> None:
         session = FakeSession()
         app = OperatorApp(_async_factory(session))
         async with app.run_test(size=(100, height)) as pilot:
-            await pilot.pause()
+            await _adopted(pilot, app)
             builtin.TODO_STORE["sess"] = [dict(p) for p in store] if shape == "phased" else store
             app._refresh_band()
             await pilot.pause()

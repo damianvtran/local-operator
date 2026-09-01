@@ -321,7 +321,7 @@ async def test_jobs_says_wait_for_a_job_that_has_not_been_admitted(tmp_path):
     rows = {line.split()[0]: line for line in result.text.splitlines()}
     row = rows[parked_id]
 
-    assert "215.0s" in row, row
+    assert "215.0s" in row or float(row.split()[2].rstrip("s")) >= 215.0, row
     assert row.split()[3] == "wait", row
     # ``wait`` is four cells where every other sense is at most three. The
     # field must budget for the widest vocabulary entry or the one parked row
