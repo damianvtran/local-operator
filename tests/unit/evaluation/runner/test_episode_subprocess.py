@@ -334,6 +334,28 @@ def real_selector(tmp_path: Path, adapter_site: Path) -> AdapterSelector:
     )
 
 
+def _subprocess_config(tmp_path: Path) -> Any:
+    """Config with timeouts sized for a REAL interpreter spawn.
+
+    The in-process default of 5s is ample for a fake adapter but marginal here:
+    a real worker must start CPython and import pydantic and ``local_operator``
+    before it can answer the handshake. Under parallel load that can exceed 5s,
+    and the episode then fails at ``prepare`` -- reporting ``failed_pre_bundle``
+    instead of reaching the cutpoint under test, which turns a genuine
+    assertion into a flake about machine speed rather than about the runner.
+    """
+
+    return build_config(
+        tmp_path,
+        handshake_timeout=60.0,
+        prepare_timeout=60.0,
+        reset_timeout=60.0,
+        step_timeout=60.0,
+        score_timeout=60.0,
+        cleanup_timeout=60.0,
+    )
+
+
 def _arm_cutpoint(site: Path, cutpoint: str | None) -> None:
     """Tell the installed adapter which operation should kill its process."""
 
@@ -354,7 +376,7 @@ async def test_real_worker_completes_a_scored_episode(
     _arm_cutpoint(adapter_site, None)
     runner = EpisodeRunner(
         build_spec(episode_id),
-        build_config(tmp_path),
+        _subprocess_config(tmp_path),
         selector=real_selector,
         model=ScriptedModel(["step", "step", "finish"]),
         launch=AdapterSupervisor.launch,
@@ -402,7 +424,7 @@ async def test_worker_killed_at_each_cutpoint_stays_coherent(
 
     runner = EpisodeRunner(
         build_spec(episode_id),
-        build_config(tmp_path),
+        _subprocess_config(tmp_path),
         selector=real_selector,
         model=ScriptedModel(["step", "finish"]),
         launch=AdapterSupervisor.launch,
@@ -472,7 +494,7 @@ async def test_killed_worker_process_group_is_reaped(
 
     runner = EpisodeRunner(
         build_spec(episode_id),
-        build_config(tmp_path),
+        _subprocess_config(tmp_path),
         selector=real_selector,
         model=ScriptedModel(["step", "finish"]),
         launch=recording_launch,
