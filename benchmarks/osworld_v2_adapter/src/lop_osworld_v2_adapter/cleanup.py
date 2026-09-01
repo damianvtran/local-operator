@@ -36,6 +36,11 @@ EVIDENCE_TERMINATE_DENIED = "terminate-denied"
 EVIDENCE_SCHEDULE_DELETED = "schedule-deleted"
 EVIDENCE_SCHEDULE_ABSENT = "schedule-absent"
 EVIDENCE_SESSION_CLOSED = "session-closed"
+# An action kind this build cannot execute. Distinct from every "we looked"
+# code above: it reports that teardown was never attempted at all, which is
+# why it pairs with an ``attempted`` status that keeps rescue_required set
+# rather than a ``not_needed`` that would clear it.
+EVIDENCE_KIND_UNSUPPORTED = "kind-unsupported"
 
 
 @dataclass(frozen=True)

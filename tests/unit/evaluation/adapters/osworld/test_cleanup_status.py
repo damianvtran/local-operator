@@ -121,3 +121,23 @@ async def test_a_rescue_worker_without_a_provider_cannot_claim_the_instance_is_g
     )
     assert status == "attempted"
     assert _rescue_required(status, evidence) is True
+
+
+@pytest.mark.asyncio
+async def test_an_unsupported_action_kind_preserves_rescue_required() -> None:
+    """Round-2 review F7: unknown KINDS are the same hazard as unknown CODES.
+
+    ``CleanupActionKind`` is a six-member Literal, so PR 2 adding
+    ``delete_volume`` or ``restore_snapshot`` makes this reachable — and during
+    rescue the plan arrives from a PERSISTED descriptor that may have been
+    authored by a different adapter build than the one executing it. Reporting
+    ``not_needed`` would assert "nothing to do" about a resource this build
+    cannot name, clearing the obligation for something nobody released.
+    """
+
+    adapter = OSWorldV2Adapter()
+    for kind in ("delete_volume", "restore_snapshot", "some_future_kind"):
+        status, evidence, _ = await adapter._run_cleanup_action(kind, "lop-vol-ep-1")
+        assert status == "attempted", kind
+        assert evidence == cleanup.EVIDENCE_KIND_UNSUPPORTED, kind
+        assert _rescue_required(status, evidence) is True, kind

@@ -534,7 +534,19 @@ class OSWorldV2Adapter:
             # a dead env is still a closed session.
             self._current_observation = None
             return "succeeded", cleanup_mod.EVIDENCE_SESSION_CLOSED, elapsed()
-        return "not_needed", cleanup_mod.EVIDENCE_SESSION_CLOSED, elapsed()
+        # An action KIND this build does not handle. Unreachable while
+        # build_cleanup_plan emits only the three canonical kinds, but
+        # CleanupActionKind is a six-member Literal, so PR 2 adding
+        # delete_volume or restore_snapshot makes it reachable -- and the plan
+        # arrives from a PERSISTED descriptor during rescue, which may have
+        # been authored by a different adapter build than the one executing it.
+        #
+        # Same rule as the unknown-code case: only positive evidence of
+        # teardown may retire the rescue obligation. Returning not_needed here
+        # would assert "there was nothing to do" about a resource this build
+        # cannot even name, clearing rescue_required for something nobody
+        # released. "attempted" fails safe toward a redundant rescue.
+        return "attempted", cleanup_mod.EVIDENCE_KIND_UNSUPPORTED, elapsed()
 
     async def begin_rescue(self, params: BeginRescueParams) -> AckResult:
         # Rebuild refs from the descriptor's plan alone. The rescue worker has
