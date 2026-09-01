@@ -468,6 +468,24 @@ SLASH_COMMANDS: list[SlashCommand] = [
     SlashCommand("exit", "Quit the app", aliases=("quit",)),
     # Empties the surface the echo would land on — it was wiped a line later.
     SlashCommand("clear", "Clear the transcript (history is untouched)"),
+    # Beside `/clear` because they are the two commands that act on the
+    # TRANSCRIPT AS A DOCUMENT rather than on the conversation: one empties the
+    # surface, the other takes a message out of it. Deliberately NOT beside
+    # `/compact`, which shares its first three letters and nothing else —
+    # compaction rewrites history for the model, this reads the frame for the
+    # human.
+    #
+    # NOT an echo. The clipboard receipt names how much landed there, which is
+    # strictly more than the typed word, and nothing here reaches the model —
+    # `/approvals`' rule exactly.
+    #
+    # The chord is advertised in the DESCRIPTION, the way `/effort` advertises
+    # `shift+tab`: `ctrl+o` is not a slash command, so the table is the only
+    # place it can be discovered, and this row is where a user already is when
+    # they want it. 36 cells, well inside the ~55 the description column wraps
+    # past (see `/model` and `/theme`, where a wrapping row renders a phantom
+    # command name in `/help`).
+    SlashCommand("copy", "Copy the last agent message (ctrl+o)"),
     # Replaces the transcript; a row describing the old one would not survive.
     SlashCommand("new", "Start a new conversation"),
     # In-process reboot cannot load a replaced wheel; this command exists so
@@ -1715,6 +1733,24 @@ class OperatorApp(App[None]):
         # still deferred); `end` returns to the live tail.
         Binding("ctrl+home", "transcript_home", "Transcript top", show=False),
         Binding("ctrl+end", "transcript_end", "Transcript end", show=False),
+        # `/copy` without opening the command menu — the chord Codex CLI binds
+        # for the same command, so a user arriving from it finds the key where
+        # they left it.
+        #
+        # `ctrl+o` audited free by the same discipline as `ctrl+t`, `ctrl+g` and
+        # `ctrl+home`/`ctrl+end`: no other `ctrl+o` in `local_operator/`, and
+        # neither `TextArea` nor Textual's `Screen`/`App` binds it (checked
+        # against textual 8.2.8's own BINDINGS, not from memory), so the
+        # composer keeps every editing key it had and nothing upstream of the
+        # App eats the chord.
+        #
+        # NOT `priority=True`, and the reason is the same one Esc's comment
+        # gives: a priority binding is matched BEFORE the focused widget sees
+        # the key, which would take it from an open picker. Bubbling is the
+        # precedence wanted — `Editor._on_key` has no branch for this chord, so
+        # with nothing open the key arrives here anyway (verified in a pilot
+        # with the composer focused, which is where it is pressed).
+        Binding("ctrl+o", "copy_last_message", "Copy the last agent message", show=False),
     ]
 
     def __init__(
@@ -6892,6 +6928,109 @@ class OperatorApp(App[None]):
         else:
             message = f"copied {lines} lines"
         self.query_one(Toast).show(message, yield_to_actionable=True, owner=owner)
+
+    def _last_settled_assistant_text(self) -> str | None:
+        """The markdown source of the last SETTLED agent message, if any.
+
+        Walks the main transcript backwards, which is what makes "last" mean
+        the one the reader is looking at rather than the one the model sent
+        last — a resumed conversation replays its history into the same column,
+        so append order is the only order that matches the frame.
+
+        ``_transcript_view()`` rather than a type query, for the reason that
+        method records: the full-page subagent view mounts a SECOND
+        ``TranscriptView`` for the CHILD's conversation, and copying out of it
+        while it happens to be open would hand the user a subagent's words for
+        a command they typed at the parent.
+
+        A block still streaming is skipped (``is_finalized``). Codex makes
+        ``/copy`` unavailable mid-task because a half-streamed answer that then
+        grows is a clipboard the user cannot trust; the same guarantee is
+        reached here by taking the last SETTLED message instead of refusing
+        outright, so a copy during a long turn still answers with the previous
+        completed answer rather than nothing.
+
+        An empty block does not stop the walk. One is mounted for a turn that
+        streamed nothing (an abort before the first delta leaves the block
+        behind), and it is not a message — treating it as one would make
+        ``/copy`` report "nothing to copy" with a real answer sitting two rows
+        above it.
+
+        The payload is ``AssistantBlock.text()``, the block's own markdown
+        SOURCE. Not the flattened frame: the rendered rows carry the wrap of
+        whatever width the terminal happened to be, and a paste of them puts
+        box-drawing and hard breaks into the user's document. This is the whole
+        reason ``_copy_markdown`` exists for partial selections; a whole-message
+        copy needs no alignment because the source IS the answer.
+        """
+        from local_operator.tui.widgets.transcript import TranscriptBlock
+
+        blocks: list[TranscriptBlock] = self._transcript_view().blocks()
+        for block in reversed(blocks):
+            if not isinstance(block, AssistantBlock):
+                continue
+            if not block.is_finalized():
+                continue
+            text = block.text()
+            if text.strip():
+                return text
+        return None
+
+    def _cmd_copy(self, notice: NoticeFn) -> None:
+        """``/copy`` — put the last completed agent message on the clipboard.
+
+        The write goes through :meth:`_put_on_clipboard`, the single clipboard
+        write the transcript drag and the composer already share, so this third
+        gesture cannot drift from them in what it writes or what it claims. A
+        bespoke toast here would make the receipt evidence about WHICH gesture
+        was used, which is exactly what ``on_editor_copied`` exists to prevent.
+
+        That helper is SILENT on an empty payload — right for a zero-width drag,
+        wrong for a command the user typed deliberately, since an unexplained
+        no-op reads as a broken command. So the two cases where there is nothing
+        to take speak through ``notice`` instead of reaching the helper at all.
+
+        The refusal does NOT reuse ``_live_turn_refuse_copy``. That string says
+        "esc first" because ``/update`` and ``/reload`` cannot proceed until the
+        turn ends — they would tear the process down over it. Nothing here needs
+        the turn stopped: a copy during a live turn takes the previous settled
+        message and succeeds. The only failing case is "no settled message
+        exists yet", and telling that user to press esc would demand an action
+        that does not help them. ``_turn_is_live`` is still the authority on
+        whether a turn is running, so the two answers cannot disagree about the
+        state — only about the noun.
+        """
+        text = self._last_settled_assistant_text()
+        if text is None:
+            if self._turn_is_live():
+                notice("nothing to copy yet — the first answer is still coming", "warning")
+            else:
+                notice("nothing to copy — no agent message in this conversation", "warning")
+            return
+        self._put_on_clipboard(text)
+
+    def action_copy_last_message(self) -> None:
+        """``ctrl+o`` — :meth:`_cmd_copy` without opening the command menu.
+
+        The same key Codex CLI binds for the same command, and the reason a
+        binding exists at all: copying the answer is a gesture repeated many
+        times per session, and typing six characters plus Enter for it puts a
+        row of machinery between the user and a routine act.
+
+        Routed to the handler rather than reimplemented, so the typed command
+        and the chord cannot answer differently — including the notices, which
+        are the half a second implementation would most easily get wrong.
+
+        VERIFIED to arrive with the composer focused, which is where a user
+        actually presses it: ``ctrl+o`` is bound by neither ``TextArea`` (whose
+        ctrl chords, enumerated from textual 8.2.8 rather than recalled, are
+        a/c/d/e/k/u/v/w/x/y/z, backspace, the arrows and shift+k) nor Textual's
+        ``Screen``/``App``, so ``Editor._on_key`` does not consume it and the
+        key reaches app level. Audited the same way ``ctrl+t``, ``ctrl+g`` and
+        ``ctrl+home``/``ctrl+end`` above were, and driven in a pilot rather than
+        reasoned about — see ``test_copy_command.py``.
+        """
+        self._cmd_copy(self._notice)
 
     # -- resize (TUI-017 / D5) ----------------------------------------------
     def on_resize(self, event) -> None:  # type: ignore[no-untyped-def]
@@ -12497,6 +12636,8 @@ class OperatorApp(App[None]):
             self._cmd_btw(arg, text)
         elif command == "/compact":
             self._cmd_compact()
+        elif command == "/copy":
+            self._cmd_copy(notice)
         elif command == "/approvals":
             self._cmd_approvals(arg, notice)
         elif command == "/skills":

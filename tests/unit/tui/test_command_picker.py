@@ -841,7 +841,10 @@ async def test_click_on_the_overflow_row_does_nothing() -> None:
         # ranked ahead of their neighbours because a prefix match on a longer
         # word still beats one that starts later in the name.
         ("s", ["settings", "search", "skills"]),
-        ("c", ["clear", "config", "context", "compact", "credential"]),
+        # `copy` ranks second on the shorter-name tiebreak, ahead of `config`'s
+        # equally-positioned prefix match — the same rule that puts `settings`
+        # above `search` on `/s`.
+        ("c", ["clear", "copy", "config", "context", "compact", "credential"]),
         ("lo", ["loop", "login", "logout"]),
         ("mo", ["model"]),
     ],

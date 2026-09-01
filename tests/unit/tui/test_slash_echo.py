@@ -44,6 +44,9 @@ ECHO_POLICY = {
     "help": False,
     "exit": False,
     "clear": False,
+    # The clipboard receipt names how much landed there — strictly more than
+    # the typed word — and nothing here reaches the model. `/approvals`' rule.
+    "copy": False,
     "new": False,
     "reload": False,
     "update": False,
@@ -113,6 +116,10 @@ PROMPT_POLICY = {
     "help": False,
     "exit": False,
     "clear": False,
+    # Takes no argument at all: the message it copies is the last one, found by
+    # walking the transcript, so there is nothing typed for an inline engage to
+    # consume. (`/copy me` and `/copy <n>` are deliberately not built.)
+    "copy": False,
     "new": False,
     "reload": False,
     "update": False,
