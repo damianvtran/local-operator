@@ -424,17 +424,26 @@ anthropic_models: Dict[str, ModelInfo] = {
         supports_images=True,
         supports_prompt_cache=True,
         limits_from_listing=True,
-        # The rate ACTUALLY in effect: Anthropic's introductory pricing for Sonnet
-        # 5 runs through 2026-08-31, and the standard $3/$15/$3.75/$0.30 takes over
-        # on 2026-09-01. Both rows are published on the same page, cache legs
-        # included, so this is a transcription rather than a choice between two
-        # wrong numbers — and `test_the_sonnet_5_introductory_price_has_not_expired`
-        # fails the build on the changeover date naming the exact edit, so the row
-        # cannot silently under-report by a third the way a bare comment would let it.
-        input_price=2.0,  # $2 / MTok introductory; $3 from 2026-09-01
-        output_price=10.0,  # $10 / MTok introductory; $15 from 2026-09-01
-        cache_writes_price=2.50,  # $2.50 / MTok (5m write); $3.75 from 2026-09-01
-        cache_reads_price=0.20,  # $0.20 / MTok; $0.30 from 2026-09-01
+        # These are Sonnet 5's STANDARD rates, not a promotion, and they are not
+        # dated. The history matters because it is the opposite of what an older
+        # comment here claimed: the model launched 2026-06-30 at $2/$10 billed as
+        # introductory pricing through 2026-08-31, with a rise to $3/$15/$3.75/$0.30
+        # scheduled for 2026-09-01. On 2026-08-10 Anthropic cancelled that rise and
+        # made these numbers permanent (launch-post changelog edit of 2026-08-10 on
+        # https://www.anthropic.com/news/claude-sonnet-5, and the
+        # `claude-sonnet-5-introductory-pricing` note on
+        # https://platform.claude.com/docs/en/about-claude/pricing: "The previously
+        # scheduled increase to $3/$15 ... will not occur").
+        #
+        # So do NOT "restore" $3/$15 here on the strength of a stale third-party
+        # pricing table — several still carry the cancelled increase. Anything other
+        # than these four values over-reports every Sonnet 5 call in the status band
+        # and the analytics ledger, which is what `test_sonnet_5_carries_the_standard_price`
+        # pins against.
+        input_price=2.0,  # $2 / MTok
+        output_price=10.0,  # $10 / MTok
+        cache_writes_price=2.50,  # $2.50 / MTok (5m write)
+        cache_reads_price=0.20,  # $0.20 / MTok
         description=(
             "Claude Sonnet 5: the balanced tier of the 5 generation, with the same "
             "1M-token context window and 128k output as Opus 5."

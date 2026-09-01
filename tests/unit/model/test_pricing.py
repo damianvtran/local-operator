@@ -10,7 +10,6 @@ own listing quotes none — so there are two separate guards here.
 
 from __future__ import annotations
 
-from datetime import date
 from typing import Any
 from unittest.mock import patch
 
@@ -388,17 +387,38 @@ def test_the_two_listing_legs_share_one_ceiling_rather_than_summing() -> None:
     )
 
 
-def test_the_sonnet_5_introductory_price_has_not_expired() -> None:
-    """Anthropic's Sonnet 5 promotion ends 2026-08-31; the row carries it.
+def test_sonnet_5_carries_the_standard_price() -> None:
+    """Sonnet 5's $2/$10/$2.50/$0.20 is the permanent standard rate — pin it.
 
-    A dated price is the one case where a correct value goes silently wrong on a
-    known day, so it gets a guard rather than a comment. When this fails, the fix
-    is the two-line edit named in the message — not a change to this test.
+    This replaces a dated guard that watched for the introductory period ending
+    2026-08-31. That expiry never happened: Anthropic cancelled the scheduled
+    2026-09-01 rise to $3/$15 and made these rates permanent on 2026-08-10
+    (launch-post changelog edit on https://www.anthropic.com/news/claude-sonnet-5,
+    and the `claude-sonnet-5-introductory-pricing` note on
+    https://platform.claude.com/docs/en/about-claude/pricing). The old guard duly
+    fired on 2026-09-01 UTC and failed every PR in the repo while instructing an
+    edit that would have over-reported every Sonnet 5 call by 50%.
+
+    With no announced end date there is no longer a date worth watching, so the
+    risk inverts: not "a correct value goes stale on a known day" but "someone
+    copies one of the many third-party tables that still print the cancelled
+    $3/$15 increase". Hence a pin on the published numbers rather than a clock —
+    deliberately time-insensitive, so it can never fail for merely being run on a
+    later date.
     """
-    assert date.today() < date(2026, 9, 1), (
-        "Claude Sonnet 5's introductory rate has lapsed. In registry.py set "
-        "input_price=3.0, output_price=15.0, cache_writes_price=3.75, "
-        "cache_reads_price=0.30, and update this guard to the next known change."
+    info = anthropic_models["claude-sonnet-5"]
+    actual = (
+        info.input_price,
+        info.output_price,
+        info.cache_writes_price,
+        info.cache_reads_price,
+    )
+    assert actual == (2.0, 10.0, 2.50, 0.20), (
+        f"Claude Sonnet 5's registry price is {actual}, not the published standard "
+        "(2.0, 10.0, 2.50, 0.20). $2/$10 is permanent as of 2026-08-10 — the "
+        "$3/$15 increase once scheduled for 2026-09-01 was cancelled. Re-verify "
+        "against https://platform.claude.com/docs/en/about-claude/pricing before "
+        "changing this, not against a third-party pricing table."
     )
 
 
