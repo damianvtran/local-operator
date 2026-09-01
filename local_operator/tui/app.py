@@ -162,6 +162,7 @@ from local_operator.tui.widgets.editor import (
     ModelQueryOpened,
     RefreshArgumentChoices,
     ShellModeChanged,
+    SkillQueryOpened,
     StopRequested,
     resolve_markers,
 )
@@ -236,6 +237,7 @@ if TYPE_CHECKING:  # keeps the provider graph off the TUI's runtime import path
     from local_operator.multiplexer import SessionBroadcast
     from local_operator.providers.controller import CatalogueEntry
     from local_operator.providers.oauth.callback_server import LoginCallbacks
+    from local_operator.skills.discovery import Skill
 
 
 #: ONE sentence for ONE instruction, carried verbatim by every surface that
@@ -2055,6 +2057,11 @@ class OperatorApp(App[None]):
         #: entries keep the historical by-text behaviour, limit included. Both
         #: in-tree sessions take the keyword, so no shipping path relies on it.
         self._pending_user_echoes: list[_PendingUserEcho] = []
+        #: Discovered skills by name, for the ``$skill`` composer prefix.
+        #: ``None`` until the first submit or picker sync asks; see
+        #: :meth:`_discovered_skills` for why one discovery per session is the
+        #: right lifetime rather than a per-keystroke filesystem walk.
+        self._skills_by_name: dict[str, Skill] | None = None
         #: Wake receipts painted LIVE this session, as ``(wake_id, occurrence)``
         #: keys. ``on_wake_delivered`` records each; the history replay skips a
         #: persisted ``wake_prompt`` whose key is already here — otherwise a
@@ -7386,7 +7393,13 @@ class OperatorApp(App[None]):
             # the markers THAT text still cites, not the whole slash line's.
             self._run_slash_command(text, message.attachments)
             return
-        self._submit_prompt(text, images, message.attachments)
+        # `$skill` is the manual counterpart to semantic routing: the user
+        # naming the skill instead of an embedder guessing it. Resolved HERE,
+        # next to the slash dispatch, because both are prefix grammars the
+        # composer owns — but it is NOT a command: it produces a prompt, so it
+        # falls through to the ordinary submit with an expanded payload rather
+        # than dispatching anything of its own.
+        self._submit_prompt(text, images, message.attachments, sent=self._expand_invocation(text))
 
     def on_inline_command_requested(self, message: InlineCommandRequested) -> None:
         """Run a slash command spliced out of the MIDDLE of a draft.
@@ -10232,8 +10245,27 @@ class OperatorApp(App[None]):
         text: str,
         images: list[ImageContent] | None = None,
         attachments: Mapping[int, Attachment] | None = None,
+        *,
+        sent: str | None = None,
     ) -> None:
+        """Paint one user prompt and dispatch it.
+
+        ``sent`` splits what the transcript SHOWS from what the model RECEIVES,
+        for the one case where they legitimately differ: a ``$skill`` manual
+        invocation, whose row must stay the short line the user typed while the
+        model gets that line with the SKILL.md body prepended. ``None`` — every
+        other caller — means the two are the same string, which is the property
+        the echo registry depends on everywhere else.
+
+        Everything DOWNSTREAM of the row takes ``sent``: the steer queue, the
+        compaction hold, and the turn itself, because those are the paths whose
+        payload the session announces back and whose echo entries are matched
+        against it. Conversation NAMING deliberately keeps the display text —
+        titling a thread from an injected skill body would name it after the
+        skill's prose instead of the user's request.
+        """
         images = images or []
+        sent = text if sent is None else sent
         user_block = UserBlock(text, len(images))
         self._append_block(user_block)
         # The pictures themselves, under the prompt that cites them. The
@@ -10260,7 +10292,7 @@ class OperatorApp(App[None]):
             # contents by identity to know which transcript blocks the user
             # took back (`_recall_queued_steers`), so the app and the queue
             # must share one Message rather than each building their own.
-            steer_message = Message.user(text, images)
+            steer_message = Message.user(sent, images)
             session.steer_message(steer_message)
             # "boundary" is engine vocabulary the UI never defines, and this is
             # the line answering "did my text just get thrown away?" — so it says
@@ -10302,7 +10334,7 @@ class OperatorApp(App[None]):
             # No such implementation exists in tree, and unlike the prompt path
             # there is no signature to probe — a re-minting host would have to
             # be caught by its own tests (round 1, F2).
-            self._register_user_echo(text, message_id=steer_message.id)
+            self._register_user_echo(sent, message_id=steer_message.id)
             # Held with the notice so Esc can lift the whole steer — the queued
             # row, the user row and its image blocks — back out of the
             # transcript and into the composer (:meth:`_recall_queued_steers`).
@@ -10340,7 +10372,7 @@ class OperatorApp(App[None]):
             # The attachments are part of the same prompt: a pass that ran for
             # minutes and then sent the words without the screenshot would be
             # worse than not queueing at all.
-            self._prompt_held_for_compaction = text
+            self._prompt_held_for_compaction = sent
             # From the MESSAGE, not from the widget: the composer clears itself
             # synchronously after posting and Textual delivers on a later tick,
             # so re-reading it here saw an empty map and queued the prompt
@@ -10349,7 +10381,7 @@ class OperatorApp(App[None]):
             self._append_block(NoticeBlock("queued — sends when compaction finishes", "note"))
             self._maybe_name_conversation(text)
             return
-        self._start_turn(text, images)
+        self._start_turn(sent, images)
         # AFTER the turn is dispatched, and then concurrently with it: the
         # title is decoration, so it must never sit in front of the user's
         # first reply — but it must also not wait for the whole turn, which is
@@ -15625,6 +15657,41 @@ class OperatorApp(App[None]):
         self._notice(f"forked {len(pairs)} aside {plural} into the chat")
 
     # -- argument lists -------------------------------------------------------
+    def on_skill_query_opened(self, message: SkillQueryOpened) -> None:
+        """The buffer just entered a ``$`` token — offer the skill vocabulary.
+
+        The ``$`` twin of :meth:`on_argument_query_opened`, and it answers on
+        the message for the same reason: every route into the list arrives at
+        one place with one set of rows.
+
+        HIDDEN skills are offered here. They are excluded from semantic
+        routing by ``hide``/``disable-model-invocation``, but manual invocation
+        is precisely the deliberate act that flag leaves open, and a name the
+        user can type but cannot see is a worse secret than a listed one.
+
+        An empty vocabulary sets a notice rather than leaving a bare list: a
+        machine with no skills installed is a real answer, and the row says so
+        instead of showing an empty box the user cannot account for.
+        """
+        message.stop()
+        picker = self._editor().picker
+        skills = self._discovered_skills()
+        if not skills:
+            picker.set_choices([])
+            picker.set_notice("no skills found — see `/skills`")
+            return
+        picker.set_notice("")
+        picker.set_choices(
+            [
+                ArgumentChoice(
+                    skill.name,
+                    skill.description,
+                    detail="hidden" if skill.hide else "",
+                )
+                for skill in sorted(skills.values(), key=lambda item: item.name.lower())
+            ]
+        )
+
     def on_argument_query_opened(self, message: ArgumentQueryOpened) -> None:
         """The buffer just entered ``/<command> …`` — fill that command's list.
 
@@ -16729,6 +16796,69 @@ class OperatorApp(App[None]):
         lines.append(notify_note)
         lines.append(notify_note_more)
         return RichBlock(Group(*lines))
+
+    def _discovered_skills(self) -> dict[str, Skill]:
+        """Discovered skills by name, computed once per session.
+
+        Cached because it is read on EVERY submit to decide whether a leading
+        ``$`` is an invocation, and discovery walks the filesystem. The cache
+        matches the lifetime the rest of the skills subsystem already assumes:
+        discovery and the semantic index are built at session creation, so a
+        skill added mid-session is not visible to routing either and telling
+        the user to restart is one consistent rule rather than two.
+
+        Hidden skills are KEPT (unlike :meth:`_skills_block`, which lists what
+        routing can select). ``hide`` suppresses automatic selection; naming a
+        skill by hand is the deliberate case that flag exists to leave open.
+
+        Never raises: a broken skills tree degrades to "no invocations", which
+        sends the user's ``$foo`` through as the prose it is indistinguishable
+        from at that point.
+        """
+        if self._skills_by_name is None:
+            try:
+                from pathlib import Path
+
+                from local_operator.skills.api import default_skill_roots
+                from local_operator.skills.discovery import discover_skills
+
+                skills, _warnings = discover_skills(default_skill_roots(Path(os.getcwd())))
+                self._skills_by_name = {skill.name: skill for skill in skills}
+            except Exception:
+                self._skills_by_name = {}
+        return self._skills_by_name
+
+    def _expand_invocation(self, text: str) -> str | None:
+        """Expand a leading ``$skill`` into skill body + request, or ``None``.
+
+        ``None`` means "not an invocation, send the text unchanged" — the
+        answer for ordinary prose, for ``$100``, and for any ``$word`` that is
+        not a discovered skill name. The body is read through the SAME
+        ``skill://`` resolver the ``read`` tool uses, so a manual invocation
+        and an agent-initiated read return byte-identical content, reference
+        listing included.
+
+        A body that cannot be read is not a silent failure: the notice says so
+        and the raw text goes through untouched, because swallowing the user's
+        request would be the worse half of the trade.
+        """
+        skills = self._discovered_skills()
+        if not skills:
+            return None
+        try:
+            from local_operator.skills.invoke import parse_invocation, render_invocation
+            from local_operator.skills.protocol import resolve_skill_url
+
+            invocation = parse_invocation(text, skills)
+            if invocation is None:
+                return None
+            body = resolve_skill_url(f"skill://{invocation.skill.name}", skills)
+            if not body:
+                return None
+            return render_invocation(invocation, body)
+        except Exception as exc:
+            self._notice(f"could not load skill: {exc}", "warning")
+            return None
 
     def _skills_block(self) -> RichBlock | None:
         """Graceful introspection of the skills stream (exception-safe)."""
