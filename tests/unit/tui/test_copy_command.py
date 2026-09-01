@@ -1,10 +1,15 @@
-"""``/copy`` and its ``ctrl+o`` chord: what reaches the clipboard, and when.
+"""``/copy``: what reaches the clipboard, and when.
 
 The command answers a gesture users already had for a DRAG (release copies,
 ``on_text_selected``) but not for the common case — "give me that whole answer"
 — which previously meant dragging a multi-screen message from its first row to
-its last. Codex CLI's ``/copy`` is the shape being matched: the latest
-*completed* response, a ``ctrl+o`` equivalent, and no partial mid-task.
+its last.
+
+There is deliberately NO keyboard chord. One shipped (``ctrl+o``) and was
+withdrawn with the picker: a global chord that opens a modal is a different
+gesture from one that copies in place, and the keymap surface was not worth
+spending twice. Everything here therefore drives the TYPED command, which is
+the only way in.
 
 What is asserted here is the PAYLOAD and the REFUSALS, because those are the two
 halves a plausible implementation gets wrong in opposite directions:
@@ -306,79 +311,6 @@ async def test_mid_stream_with_nothing_settled_refuses_and_says_why() -> None:
     assert clipboard == ""
     assert any("nothing to copy yet" in text for text in notices), notices
     assert not any("esc first" in text for text in notices), notices
-
-
-# -- the chord ----------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_ctrl_o_copies_with_the_composer_focused() -> None:
-    """WHERE THE USER ACTUALLY PRESSES IT, and the reason this is a test rather
-    than an assumption.
-
-    ``Screen.BINDINGS`` sits BETWEEN the focused widget and the App in
-    ``_binding_chain``, and this app's composer consumes several chords in
-    ``Editor._on_key`` before app level is reached — that layering is why
-    Textual's stock ``ctrl+c`` copy had to be removed from ``TranscriptScreen``
-    to get the interrupt back. So "``ctrl+o`` is unbound" is not sufficient
-    evidence that ``ctrl+o`` ARRIVES; only driving it is.
-    """
-    app = OperatorApp(lambda: _factory(FakeSession()))
-    async with app.run_test(size=(80, 24)) as pilot:
-        await _boot(pilot, app)
-        await _stream(pilot, app, ANSWER)
-        editor = app.query_one(Editor)
-        editor.focus()
-        await pilot.pause()
-        assert app.focused is editor, "the fixture must press the key from the composer"
-        await pilot.press("ctrl+o")
-        await pilot.pause()
-        copied = app._clipboard
-        composer = editor.text
-
-    assert copied == ANSWER
-    # The chord must not also type: a key that copies AND inserts a character
-    # is worse than one that does neither, because the draft is now wrong.
-    assert composer == "", composer
-
-
-@pytest.mark.asyncio
-async def test_ctrl_o_copies_with_the_composer_unfocused() -> None:
-    """The other half of the binding's reach: the key is on the App, so it must
-    work whatever holds focus — including nothing."""
-    app = OperatorApp(lambda: _factory(FakeSession()))
-    async with app.run_test(size=(80, 24)) as pilot:
-        await _boot(pilot, app)
-        await _stream(pilot, app, ANSWER)
-        app.set_focus(None)
-        await pilot.pause()
-        await pilot.press("ctrl+o")
-        await pilot.pause()
-        copied = app._clipboard
-
-    assert copied == ANSWER
-
-
-@pytest.mark.asyncio
-async def test_ctrl_o_and_the_typed_command_answer_identically_when_empty() -> None:
-    """One handler behind both, including the refusal. The notices are the half
-    a second implementation of the chord would most easily get wrong, because
-    the happy path would still look right."""
-    app = OperatorApp(lambda: _factory(FakeSession()))
-    async with app.run_test(size=(80, 24)) as pilot:
-        await _boot(pilot, app)
-        await pilot.press("ctrl+o")
-        await pilot.pause()
-        from_chord = _notices(app)
-
-    app = OperatorApp(lambda: _factory(FakeSession()))
-    async with app.run_test(size=(80, 24)) as pilot:
-        await _boot(pilot, app)
-        await _submit(pilot, app, "/copy")
-        from_command = _notices(app)
-
-    assert from_chord == from_command
-    assert from_chord, "the fixture proved nothing if neither path said anything"
 
 
 # -- the write itself ---------------------------------------------------------
@@ -688,85 +620,6 @@ async def test_the_partial_never_reaches_the_clipboard_as_it_grows() -> None:
     assert not any("partial" in payload for payload in payloads)
 
 
-@pytest.mark.asyncio
-async def test_the_chord_refuses_mid_stream_in_the_same_words() -> None:
-    """The chord's mid-stream refusal, which the typed command's fixture pins
-    but the chord's does not: the existing parity test compares the two on an
-    IDLE empty session, so both take the not-found branch and the mid-stream
-    wording is never exercised through ``ctrl+o`` at all."""
-    app = OperatorApp(lambda: _factory(FakeSession()))
-    async with app.run_test(size=(80, 24)) as pilot:
-        sink = _tap_driver(app)
-        await _boot(pilot, app)
-        await _stream(pilot, app, "the first answer, still arriving", finish=False)
-        await pilot.press("ctrl+o")
-        await pilot.pause()
-        from_chord = _notices(app)
-        payloads = _osc52_payloads(sink)
-
-    assert payloads == []
-    assert any("nothing to copy yet" in text for text in from_chord), from_chord
-
-
-# -- the chord and the composer ----------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_ctrl_o_leaves_a_half_typed_draft_alone() -> None:
-    """The realistic press: the user is mid-sentence, wants the answer above,
-    and expects to keep typing. The existing fixture presses the chord against
-    an EMPTY composer, where a binding that cleared or replaced the draft would
-    look identical to one that did not."""
-    app = OperatorApp(lambda: _factory(FakeSession()))
-    async with app.run_test(size=(80, 24)) as pilot:
-        await _boot(pilot, app)
-        await _stream(pilot, app, "the agent answer")
-        editor = app.query_one(Editor)
-        editor.focus()
-        draft = "a half-typed thought"
-        editor.text = draft
-        editor.move_cursor(editor._end_of_buffer())
-        await pilot.pause()
-        assert app.focused is editor
-        await pilot.press("ctrl+o")
-        await pilot.pause()
-        copied = app._clipboard
-        after = editor.text
-        rows = _user_rows(app)
-
-    assert copied == "the agent answer"
-    assert after == draft, "the chord must not edit, clear or submit the draft"
-    assert rows == [], "and it must not submit it either"
-
-
-@pytest.mark.asyncio
-async def test_ctrl_o_copies_without_disturbing_an_open_picker() -> None:
-    """Why the binding is deliberately NOT ``priority=True``. A priority
-    binding is matched before the focused widget sees the key; the comment on
-    the binding claims bubbling keeps an open picker intact, and this drives
-    that claim rather than trusting it."""
-    app = OperatorApp(lambda: _factory(FakeSession()))
-    async with app.run_test(size=(80, 24)) as pilot:
-        await _boot(pilot, app)
-        await _stream(pilot, app, "the agent answer")
-        editor = app.query_one(Editor)
-        editor.focus()
-        editor.text = "/"
-        editor.move_cursor(editor._end_of_buffer())
-        editor._sync_picker()
-        await pilot.pause()
-        assert editor._picker.is_open(), "the fixture must open the picker"
-        await pilot.press("ctrl+o")
-        await pilot.pause()
-        copied = app._clipboard
-        still_open = editor._picker.is_open()
-        draft = editor.text
-
-    assert copied == "the agent answer"
-    assert still_open, "the chord must not close a picker it did not open"
-    assert draft == "/"
-
-
 # -- the follower ------------------------------------------------------------
 
 
@@ -940,22 +793,3 @@ async def test_a_completed_answer_after_an_aborted_one_copies_clean() -> None:
 
     assert copied == "the answer that finished"
     assert new_notices == [], new_notices
-
-
-@pytest.mark.asyncio
-async def test_ctrl_o_reports_a_cut_off_answer_too() -> None:
-    """The chord routes to the same handler, so it inherits the caveat. Pinned
-    because a second implementation of the notice is exactly the drift the
-    shared handler exists to prevent."""
-    app = OperatorApp(lambda: _factory(FakeSession()))
-    async with app.run_test(size=(80, 24)) as pilot:
-        await _boot(pilot, app)
-        await _abort(pilot, app, "stopped part way")
-        before = len(_notices(app))
-        await pilot.press("ctrl+o")
-        await pilot.pause()
-        copied = app._clipboard
-        new_notices = _notices(app)[before:]
-
-    assert copied == "stopped part way"
-    assert any("cut off" in text for text in new_notices), new_notices

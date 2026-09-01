@@ -479,13 +479,14 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # strictly more than the typed word, and nothing here reaches the model —
     # `/approvals`' rule exactly.
     #
-    # The chord is advertised in the DESCRIPTION, the way `/effort` advertises
-    # `shift+tab`: `ctrl+o` is not a slash command, so the table is the only
-    # place it can be discovered, and this row is where a user already is when
-    # they want it. 36 cells, well inside the ~55 the description column wraps
-    # past (see `/model` and `/theme`, where a wrapping row renders a phantom
-    # command name in `/help`).
-    SlashCommand("copy", "Copy the last agent message (ctrl+o)"),
+    # The description names WHAT CAN BE PICKED, not one message, because the
+    # command opens a chooser: a whole answer, or a single code block or quote
+    # out of it. "the last agent message" described the pre-picker behaviour and
+    # would now send a user looking for the one thing the command no longer
+    # does. 35 cells, inside the ~55 the description column wraps past (see
+    # `/model` and `/theme`, where a wrapping row renders a phantom command name
+    # in `/help`).
+    SlashCommand("copy", "Copy an agent message or code block"),
     # Replaces the transcript; a row describing the old one would not survive.
     SlashCommand("new", "Start a new conversation"),
     # In-process reboot cannot load a replaced wheel; this command exists so
@@ -1733,33 +1734,6 @@ class OperatorApp(App[None]):
         # still deferred); `end` returns to the live tail.
         Binding("ctrl+home", "transcript_home", "Transcript top", show=False),
         Binding("ctrl+end", "transcript_end", "Transcript end", show=False),
-        # `/copy` without opening the command menu — the chord Codex CLI binds
-        # for the same command, so a user arriving from it finds the key where
-        # they left it.
-        #
-        # `ctrl+o` audited free by the same discipline as `ctrl+t`, `ctrl+g` and
-        # `ctrl+home`/`ctrl+end`: no other `ctrl+o` in `local_operator/`, and
-        # neither `TextArea` nor Textual's `Screen`/`App` binds it (checked
-        # against textual 8.2.8's own BINDINGS, not from memory), so the
-        # composer keeps every editing key it had and nothing upstream of the
-        # App eats the chord.
-        #
-        # NOT `priority=True`, for the same house rule Esc follows: a priority
-        # binding is dispatched ahead of the focused widget, and this app keeps
-        # composer-adjacent chords bubbling so a widget that wants one CAN
-        # claim it first.
-        #
-        # In practice nothing claims this one, and the honest statement of the
-        # behaviour is that the key fires wherever it is pressed. Driven, not
-        # assumed: with the command picker open on `/c`, `ctrl+o` copies, the
-        # picker stays open and the buffer is untouched — bubbling is not
-        # protecting the picker here, because `Editor._on_key` has no branch
-        # for this chord and the picker only intercepts the keys it routes
-        # (up/down/tab/enter/esc). That is the wanted behaviour — copying the
-        # last answer is meaningful mid-draft — and it is pinned by
-        # `test_ctrl_o_copies_without_disturbing_an_open_picker` so a future
-        # `_on_key` branch cannot silently swallow the chord.
-        Binding("ctrl+o", "copy_last_message", "Copy the last agent message", show=False),
     ]
 
     def __init__(
@@ -7054,29 +7028,6 @@ class OperatorApp(App[None]):
             # AFTER the write, so the ordering matches what happened: the copy
             # succeeded, and this qualifies what is now on the clipboard.
             notice("copied — note that answer was cut off before it finished", "warning")
-
-    def action_copy_last_message(self) -> None:
-        """``ctrl+o`` — :meth:`_cmd_copy` without opening the command menu.
-
-        The same key Codex CLI binds for the same command, and the reason a
-        binding exists at all: copying the answer is a gesture repeated many
-        times per session, and typing six characters plus Enter for it puts a
-        row of machinery between the user and a routine act.
-
-        Routed to the handler rather than reimplemented, so the typed command
-        and the chord cannot answer differently — including the notices, which
-        are the half a second implementation would most easily get wrong.
-
-        VERIFIED to arrive with the composer focused, which is where a user
-        actually presses it: ``ctrl+o`` is bound by neither ``TextArea`` (whose
-        ctrl chords, enumerated from textual 8.2.8 rather than recalled, are
-        a/c/d/e/k/u/v/w/x/y/z, backspace, the arrows and shift+k) nor Textual's
-        ``Screen``/``App``, so ``Editor._on_key`` does not consume it and the
-        key reaches app level. Audited the same way ``ctrl+t``, ``ctrl+g`` and
-        ``ctrl+home``/``ctrl+end`` above were, and driven in a pilot rather than
-        reasoned about — see ``test_copy_command.py``.
-        """
-        self._cmd_copy(self._notice)
 
     # -- resize (TUI-017 / D5) ----------------------------------------------
     def on_resize(self, event) -> None:  # type: ignore[no-untyped-def]
@@ -16860,15 +16811,6 @@ class OperatorApp(App[None]):
         lines.append(_key_row("option+up/down", "same as up/down (history, lists)"))
         lines.append(_key_row("shift+tab", "cycle reasoning effort"))
         lines.append(_key_row("ctrl+l", "clear the transcript (history stays)"))
-        # BOTH surfaces, which is the `shift+tab`/`/effort` pattern followed
-        # whole rather than by halves: the chord is named in `/copy`'s
-        # description AND has its own row here. A user scanning the chord block
-        # for what the keyboard can do never reads the command table's
-        # parentheticals, so advertising it only there left it undiscoverable
-        # for exactly the reader this block exists for (design round 1).
-        # Beside `ctrl+l` because both act on the transcript rather than on the
-        # composer. 64 cells composed, inside the 74 ceiling.
-        lines.append(_key_row("ctrl+o", "copy the last agent message to the clipboard"))
         lines.append(_key_row("ctrl+t", "expand or collapse the todo panel"))
         lines.append(_key_row("ctrl+g", "expand or collapse the subagent panel"))
         lines.append(_key_row("ctrl+b", "open an aside; ctrl+f forks it in"))
