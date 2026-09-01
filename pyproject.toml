@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-operator"
-version = "0.44.24"
+version = "0.44.25"
 description = "A team of proactive AI assistants that can work together behind the scenes to help you get mundane tasks done so you can focus on the fun stuff."
 readme = "README.md"
 authors = [{ name = "Damian Tran", email = "damian@gominerva.com" }]
@@ -249,6 +249,18 @@ profile = "black"
 reportMissingTypeArgument = true
 strictListInference = true
 reportPrivateImportUsage = false
+# Benchmark adapters are SEPARATE distributions that the harness deliberately
+# does not install (`discovery` pins them by wheel RECORD, so making one part of
+# this distribution would put the whole harness inside every adapter's
+# `package_digest`). Their tests still live in `tests/`, and CI installs only
+# `.[dev]`, so without this pyright cannot resolve `lop_osworld_v2_adapter` and
+# reports every adapter test as a missing import.
+#
+# This is a TYPE-RESOLUTION path only; it changes no runtime import. The tests
+# themselves prepend the same directory in their conftest, and the SPAWNED tests
+# install the real built wheel into a real interpreter rather than relying on
+# either mechanism — which is what keeps this from masking a packaging break.
+extraPaths = ["benchmarks/osworld_v2_adapter/src"]
 # `exclude` REPLACES pyright's built-in defaults, it does not extend them, so
 # the three defaults must be restated here alongside any addition of our own.
 # Dropping `**/.*` is not cosmetic: every worktree (and the main checkout)
