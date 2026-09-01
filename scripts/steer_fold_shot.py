@@ -43,7 +43,10 @@ from local_operator.harness.comms import (  # noqa: E402
     SubagentComms,
 )
 from local_operator.harness.types import Message  # noqa: E402
-from local_operator.session.transcript import Transcript  # noqa: E402
+from local_operator.session.transcript import (  # noqa: E402
+    TRANSCRIPT_FILENAME,
+    Transcript,
+)
 from local_operator.tui.app import OperatorApp  # noqa: E402
 from local_operator.tui.widgets.subagent_view import SubagentView  # noqa: E402
 from tests.unit.tui.test_band_panels import (  # noqa: E402
@@ -109,8 +112,66 @@ async def seed(directory: Path) -> Transcript:
     return transcript
 
 
-async def capture(output: Path, size: tuple[int, int], workdir: Path) -> None:
-    transcript = await seed(workdir / "child")
+# The one subdirectory of the workdir this script writes into. Everything the
+# capture needs lives under it, so it is also the only thing the script is
+# entitled to delete.
+SEED_DIRNAME = "child"
+
+# Filenames a seeded transcript directory legitimately contains: the rows
+# themselves plus the temporary file ``Transcript.compact_file`` writes beside
+# them. A seed target holding anything else was not produced by this script,
+# which is the signal that the operator pointed --workdir at real work.
+SEEDED_ARTIFACTS = frozenset({TRANSCRIPT_FILENAME, TRANSCRIPT_FILENAME + ".compact"})
+
+
+class WorkdirRefused(Exception):
+    """Raised when clearing the seed target would destroy data we did not write."""
+
+
+def prepare_seed_dir(workdir: Path, *, force: bool = False) -> Path:
+    """Return the cleared directory to seed into, refusing to destroy foreign data.
+
+    This is a dev tool run with the operator's full permissions, so its blast
+    radius is whatever path they typed: a mistyped or tab-completed ``--workdir
+    .`` used to recursively delete the whole directory before seeding. Two rules
+    keep that from costing anyone their work:
+
+    * Only ``<workdir>/child`` -- the subdirectory this script creates -- is ever
+      removed. The workdir itself and any sibling of ``child`` are left alone,
+      so pointing at a populated directory can no longer eat its contents.
+    * That subdirectory is cleared only when it looks like one of ours (absent,
+      empty, or holding nothing but transcript artifacts). Anything else is
+      refused unless the caller passes ``--force``, because reproducible frames
+      are worth a re-run and someone's data is not.
+
+    Errors are not swallowed: a clear that fails must surface, since the capture
+    would otherwise append to a stale generation and render evidence that lies.
+    """
+    seed_dir = workdir / SEED_DIRNAME
+    if seed_dir.exists() and not force:
+        if not seed_dir.is_dir():
+            raise WorkdirRefused(
+                f"{seed_dir} exists and is not a directory; refusing to remove it. "
+                "Pass --force to override, or choose another --workdir."
+            )
+        foreign = sorted(
+            child.name for child in seed_dir.iterdir() if child.name not in SEEDED_ARTIFACTS
+        )
+        if foreign:
+            listed = ", ".join(foreign[:5]) + (", ..." if len(foreign) > 5 else "")
+            raise WorkdirRefused(
+                f"{seed_dir} holds files this script did not write ({listed}); "
+                "refusing to delete them. Pass --force to override, or choose "
+                "another --workdir."
+            )
+    if seed_dir.exists():
+        shutil.rmtree(seed_dir)
+    workdir.mkdir(parents=True, exist_ok=True)
+    return seed_dir
+
+
+async def capture(output: Path, size: tuple[int, int], seed_dir: Path) -> None:
+    transcript = await seed(seed_dir)
     job = _job_with([], status="completed")
     session = FakeSession()
     session.jobs = _fake_jobs(job)
@@ -151,8 +212,18 @@ def main() -> None:
         type=Path,
         default=None,
         help=(
-            "Transcript directory to seed into. Emptied before seeding. "
+            "Parent directory to seed into. Only its 'child' subdirectory is "
+            "written to and cleared; nothing else under the path is touched. "
             "Omit to use a private temporary directory that is removed on exit."
+        ),
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "Clear the 'child' subdirectory even when it holds files this script "
+            "did not write. Without it, a seed target containing foreign data is "
+            "refused rather than deleted."
         ),
     )
     args = parser.parse_args()
@@ -166,22 +237,33 @@ def main() -> None:
     # wrong. That silently corrupted evidence twice -- it hid a real fold defect
     # in one capture and invented a phantom 18-entry frame in another. A shot
     # tool that lies is worse than no shot tool, so isolation is not optional:
-    # a temp dir per run by default, and an explicit --workdir is cleared rather
-    # than appended to, which keeps repeated runs byte-for-byte reproducible.
+    # a temp dir per run by default, and an explicit --workdir has its seed
+    # subdirectory cleared rather than appended to, which keeps repeated runs
+    # byte-for-byte reproducible. See prepare_seed_dir for why that clear is
+    # scoped to what this script creates instead of the whole workdir.
     if args.workdir is None:
         workdir = Path(tempfile.mkdtemp(prefix="steer-fold-shot-"))
         cleanup = True
     else:
         workdir = args.workdir
-        shutil.rmtree(workdir, ignore_errors=True)
-        workdir.mkdir(parents=True)
         cleanup = False
 
     try:
-        asyncio.run(capture(args.output, (width, height), workdir))
+        seed_dir = prepare_seed_dir(workdir, force=args.force)
+    except WorkdirRefused as exc:
+        parser.error(str(exc))
+
+    try:
+        asyncio.run(capture(args.output, (width, height), seed_dir))
     finally:
         if cleanup:
-            shutil.rmtree(workdir, ignore_errors=True)
+            # Our own mkdtemp directory, so a failure here is a real leak rather
+            # than a permissions question -- report it instead of discarding it,
+            # but do not fail a capture that already succeeded.
+            try:
+                shutil.rmtree(workdir)
+            except OSError as exc:
+                print(f"warning: could not remove {workdir}: {exc}", file=sys.stderr)
 
 
 if __name__ == "__main__":
