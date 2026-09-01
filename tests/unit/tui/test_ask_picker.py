@@ -22,12 +22,15 @@ import itertools
 
 import pytest
 from rich.cells import cell_len
+from rich.style import Style
+from rich.text import Span, Text
 from textual.app import App, ComposeResult
 from textual.containers import Container
 
 from local_operator.harness.types import AskOption, AskQuestion
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets.ask_picker import (
+    DEFAULT_DESC_CAP,
     MIN_TRANSCRIPT_ROWS,
     OTHER_LABEL,
     PROMPT_HEIGHT_SHARE,
@@ -748,21 +751,31 @@ async def test_the_position_row_is_only_drawn_when_the_list_is_windowed() -> Non
 
 @pytest.mark.asyncio
 async def test_a_long_description_wraps_instead_of_ending_in_an_ellipsis() -> None:
-    """The reported bug. At 190x50 there are rows to spare and every one of the
-    four descriptions still ends mid-sentence in `…`, because
-    `_description_text` builds each one as a single `no_wrap` line and
-    `truncate_cells`-es it into the card's width — one line per row, always,
-    however much budget is left over.
+    """The reported bug — RE-DERIVED against the 2-line default cap.
 
-    190x50 rather than a tighter size on purpose: it is the size where the
-    design's change (A) is expected to fix the bug COMPLETELY, so this test
-    states the end condition rather than a partial improvement. The card's
-    budget there is 20 rows against the 19 the wrapped card wants.
+    The original claim was "at 190x50 no description line ends in `…` and
+    option 1's text is present IN FULL inline". That claim was written when the
+    allocator spent every leftover row on prose, and it is exactly the
+    behaviour the user then rejected as a wall of text: satisfying it required
+    the 24-row, ~19-rows-of-prose frame recorded in
+    `docs/design/ask-scannable-card.md` §1.1. `DEFAULT_DESC_CAP = 2` makes
+    "complete inline" unreachable by construction for a paragraph-length
+    description, so the old assertion cannot survive the cap.
 
-    Two assertions, and they are different claims. "No description line ends in
-    `…`" is the symptom the user reported. "Option 1's full text is present
-    across its lines" is the thing they actually wanted — a card could satisfy
-    the first by dropping descriptions altogether, which is strictly worse.
+    It is re-derived rather than deleted, because the bug it guards is real and
+    still must not come back: the ORIGINAL defect was a description cut to one
+    ellipsised line with **no way to read the rest**. That defect has two
+    halves, and the cap moves the second half to `ctrl+e` without weakening
+    either:
+
+    - the card still spends more than one line on a paragraph — the
+      one-line-always regression is what `granted >= 2` catches;
+    - and where the prose IS cut, the card says so (`…`) and offers the key
+      that uncovers it. A cut with no `…` and no `^e` is the original bug.
+
+    "Readable in full" is now asserted through the reveal, which is where the
+    design put it, by
+    :func:`test_ctrl_e_is_live_at_the_sizes_the_user_reported`.
     """
     app = _AskHost([_long_description_question()])
     async with app.run_test(size=(190, 50)) as pilot:
@@ -773,13 +786,25 @@ async def test_a_long_description_wraps_instead_of_ending_in_an_ellipsis() -> No
         # The card is drawing prose at all: guards against this test passing
         # because every description was dropped.
         assert descriptions, lines
-        ellipsised = [line for line in descriptions if line.rstrip().endswith("…")]
-        assert not ellipsised, ellipsised
-        # And the first option's consequence is readable IN FULL. Compared on
-        # collapsed whitespace, because the text is wrapped across several
-        # lines and re-joined with the indent each continuation carries.
-        joined = " ".join(" ".join(line.split()) for line in descriptions)
-        assert " ".join(_LONG_DESCRIPTIONS[0].split()) in joined, joined
+        # More than ONE line for a paragraph — the regression this test was
+        # opened for. A card back on the pre-wrap path grants exactly 1 here.
+        grants = card._layout().description_rows
+        described = [index for index in range(len(_LONG_DESCRIPTIONS))]
+        assert all(grants.get(index, 0) >= 2 for index in described), grants
+        # ...and never more than the default cap, which is what keeps the list
+        # scannable. Both bounds together are the contract; either alone is a
+        # frame the user has already rejected.
+        assert all(grants.get(index, 0) <= DEFAULT_DESC_CAP for index in described), grants
+        # Where the prose is cut, the card SAYS it is cut and offers the way
+        # out. Silence about a cut is the original bug.
+        cut = [
+            index
+            for index in described
+            if len(card._description_lines(index, card._layout().width)) > grants.get(index, 0)
+        ]
+        assert cut, grants
+        assert any(line.rstrip().endswith("…") for line in descriptions), descriptions
+        assert card._offers_reveal(), grants
 
 
 @pytest.mark.asyncio
@@ -1310,21 +1335,31 @@ async def test_the_reveal_never_takes_the_last_option_row() -> None:
 @pytest.mark.asyncio
 async def test_the_footer_offers_the_reveal_only_where_it_does_something() -> None:
     """This row already refuses to name dead keys — the digits on a one-row
-    window, the whole keymap while the composer holds the caret — and `^e` is
-    dead at both ends of the size range for OPPOSITE reasons.
+    window, the whole keymap while the composer holds the caret.
 
-    At 190x50 (A)'s continuation lines have already drawn every description in
-    full, so the key would toggle a mode that changes nothing: measured, it adds
-    three blank rows and no words. At 100x20 the budget is 6 and step 7a has
-    nothing left to buy a reveal line with, so the revealed plan equals the
-    default one. Between them, at 150x40, the selected row is genuinely cut and
-    the plan can afford the block — so the hint is drawn.
+    RE-DERIVED: the 190x50 row of this table used to assert ``offered=False``,
+    and that expectation is the single clearest reason a fully green suite
+    shipped a dead `ctrl+e`. It was a faithful description of the allocator at
+    the time — the continuation-line pool drew every description in full at
+    190x50, so the key genuinely would have toggled nothing — but it PINNED the
+    wall-of-text frame as correct, and the designer's D2 is precisely that the
+    key is refused at the two sizes the user works at. A test that asserts a
+    feature is absent at the size it was built for stops being a guard and
+    becomes a lock.
 
-    Both the absent cases are asserted on the COMPOSITED footer as well as on
-    the predicate. The hint being derivable is not the claim; what the user is
-    told is.
+    Under `DEFAULT_DESC_CAP` the default view never draws a paragraph in full,
+    so 190x50 flips to ``True`` and joins 150x40. The row kept without change is
+    100x20, where the key is still correctly withheld for the OTHER reason the
+    original docstring named: the budget is 6 and step 7a has nothing left to
+    buy a reveal line with, so the revealed plan equals the default one. That is
+    a genuine "the key would do nothing", and it is the case this test still
+    exists to pin.
+
+    Both cases are asserted on the COMPOSITED footer as well as on the
+    predicate. The hint being derivable is not the claim; what the user is told
+    is.
     """
-    for size, offered in (((190, 50), False), ((100, 20), False), ((150, 40), True)):
+    for size, offered in (((190, 50), True), ((100, 20), False), ((150, 40), True)):
         app, card = await _real_app_card(size, [_long_description_question()])
         async with app.run_test(size=size) as pilot:
             await _show(app, pilot, card)
@@ -3030,3 +3065,970 @@ async def test_the_card_reaches_the_composer_at_every_width() -> None:
             assert max(cell_len(row) for row in rows) == card.size.width, size
             # Reaching further must not have cost the screen its geometry.
             assert not app.screen.show_vertical_scrollbar, size
+
+
+# --- scannability: the cap, the reveal it pays for, and the badge -----------
+#
+# Six guards for `docs/design/ask-scannable-card.md`. Every one of them is
+# written against a defect a fully green 4201-test suite did not catch, so each
+# names the assertion shape that was too weak and why the stronger one is the
+# real property.
+#
+# The fixture below is the reason the gap existed at all, and it is worth
+# stating once rather than in each test.
+#
+# `_long_description_question` — the fixture the reveal tests were written
+# against — carries a 592-character QUESTION that wraps to 4 lines at 190x50
+# and 5 at 150x40, and descriptions of 434/323/260/238 characters. The user's
+# reported frame (`scripts/ask_user_repro.py`) is the opposite shape: a
+# 74-character question that wraps to ONE line, with descriptions of
+# 1023/711/533 characters. Measured at HEAD `ade5cace`, that difference decides
+# whether `ctrl+e` is alive:
+#
+#     fixture              size     question lines   grants          ^e
+#     canary (test)        190x50   4                {0:3,1:2,2:2}   DEAD
+#     canary (test)        150x40   5                {0:1,1:1,2:1}   live
+#     repro  (user)        190x50   1                {0:6,1:4,2:3}   DEAD
+#     repro  (user)        150x40   1                {0:6,1:2,2:1}   DEAD
+#
+# The old suite asserted the reveal at 150x40 with the canary fixture — the one
+# cell of that table where it happened to be live — and asserted it ABSENT at
+# 190x50. So the tests were green, and the feature was dead at both sizes the
+# user actually reported. The lesson is a fixture lesson, not an assertion
+# lesson: a long question steals the rows the pool would otherwise spend on
+# prose, which suppresses the very starvation the reveal exists to relieve.
+#
+# Hence `_repro_question` below. It is the user's frame, and the new guards are
+# written against it.
+
+
+_REPRO_QUESTION_TEXT = "Which rollout strategy should we use for the analytics recorder migration?"
+
+#: The user's reported frame, as `scripts/ask_user_repro.py` asks it.
+#:
+#: Duplicated from the script rather than imported, exactly as
+#: `_LONG_DESCRIPTIONS` is and for the same reason: the script runs its capture
+#: at module scope, so importing it from a test would execute a screenshot run
+#: and then fail on `sys.argv[1]`. These are the strings the frames in
+#: `docs/design/ask-scannable-card.md` were rendered from.
+_REPRO_DESCRIPTIONS = (
+    "The store upgrades itself the first time a session opens it: `_migrate` runs an"
+    " idempotent sequence of `ALTER TABLE ADD COLUMN` statements for every column in"
+    " `_MIGRATION_COLUMNS` that is not already present, each carrying a DEFAULT so rows"
+    " written by older releases read back as a sane value rather than NULL. This is the"
+    " path the cost columns already took, so it is well-trodden here, and it means a"
+    " user who upgrades mid-week never has to think about their ledger at all — the"
+    " first turn after the upgrade quietly widens the table and everything downstream"
+    " keeps working. The cost is that the migration runs on the writer thread while a"
+    " real turn may be in flight, so a pathological schema change on a very large"
+    " ledger could stall the recorder's queue for a noticeable interval; in practice"
+    " the ALTERs are metadata-only in SQLite and complete in well under a millisecond"
+    " even on a multi-megabyte database, which is why the existing code takes this"
+    " route and why it remains the default recommendation for this migration.",
+    "Create a new database alongside the old one, copy rows across with the new columns"
+    " computed rather than defaulted, then atomically rename it into place once the"
+    " copy has been verified. This is the only option that can backfill a column whose"
+    " correct historical value cannot be expressed as a constant DEFAULT — for example"
+    " a per-call cost that has to be recomputed from the stored token counts against a"
+    " price table the old release never had. It is also the slowest and the most"
+    " dangerous: several `lop` sessions write to the one file concurrently, so the"
+    " rename has to be coordinated against live writers or a session that held the old"
+    " connection will keep committing into the old file, and the loss is silent.",
+    "Leave every existing database exactly as it is and teach the read path to tolerate"
+    " either shape: the aggregation queries select the new columns only when `PRAGMA"
+    " table_info` reports them, and fall back to a computed expression otherwise."
+    " Nothing is ever written to an old ledger that it did not already understand, so"
+    " downgrade is free and a user who rolls back a release loses nothing. The price is"
+    " paid forever afterwards in the read path, which grows a branch per historical"
+    " shape and becomes progressively harder to reason about.",
+)
+
+_REPRO_LABELS = (
+    "Migrate in place on open",
+    "Rebuild the ledger into a fresh file",
+    "Version the columns and read both shapes",
+)
+
+
+def _repro_question(recommended: int | None = 0) -> AskQuestion:
+    """The user's rejected frame, as a question. See the note above."""
+    return AskQuestion(
+        id="rollout",
+        question=_REPRO_QUESTION_TEXT,
+        options=[
+            AskOption(label=label, description=description)
+            for label, description in zip(_REPRO_LABELS, _REPRO_DESCRIPTIONS)
+        ],
+        recommended=recommended,
+    )
+
+
+def _prefix_reach(rows: list[str], full: str) -> int:
+    """How many characters of ``full`` the frame actually carries, from the start.
+
+    A substring check answers "is the whole thing there" and nothing else, so a
+    reveal that uncovers three more lines of a nine-line paragraph is
+    indistinguishable from one that uncovers none. This bisects for the longest
+    PREFIX present instead, which makes "strictly more than before" an
+    assertable claim and turns a partial reveal into a number that can be
+    compared across frames.
+
+    Whitespace is collapsed on both sides because the text is wrapped across
+    lines that each carry the description indent.
+    """
+    joined = " ".join(" ".join(line.split()) for line in rows)
+    low, high = 0, len(full)
+    while low < high:
+        mid = (low + high + 1) // 2
+        if full[:mid] in joined:
+            low = mid
+        else:
+            high = mid - 1
+    return low
+
+
+def _style_at(line: Text, column: int) -> Style:
+    """The composed style covering ``column`` of ``line``, spans applied in order.
+
+    Rich records a `Text`'s styling as overlapping spans rather than as one
+    style per character, so "what is this character drawn like" is a fold over
+    every span containing it, in order. Reading only the first or last match
+    would miss exactly the case the badge tests are about: a colour from one
+    span and a weight from another.
+
+    `Span.style` is typed `str | Style` because rich allows a style NAME there.
+    This card always appends real `Style` objects, so a string would mean the
+    widget started doing something new — resolving it against a theme here
+    would hide that, so it is skipped and the fold reports what it can prove.
+    """
+    found = Style()
+    for span in line.spans:
+        if span.start <= column < span.end and isinstance(span.style, Style):
+            found += span.style
+    return found
+
+
+def _reveal_block_lines(card: AskPickerScreen) -> list[str]:
+    """The `ctrl+e` block's own lines, and nothing else on the card.
+
+    Scoping matters more here than it looks. The block is drawn as CHROME —
+    `_line_rows` maps its lines to ``None`` — immediately after the last line
+    belonging to the selected row, so it is identifiable without arithmetic
+    over the rendered text.
+
+    Asked of the whole card instead, "is anything ellipsised?" is true at
+    150x40 for an unrelated reason: the OTHER rows' inline descriptions are cut
+    at the 2-line cap and correctly marked. A test that read the whole frame
+    would see those markers and conclude the reveal was honest when it is not
+    — the same class of error as the height-for-churn proxy this file already
+    records.
+    """
+    rows = [line.rstrip() for line in card.render_lines_for_test()]
+    mapped = card._line_rows
+    selected = card.state.selected
+    owned = [index for index, row in enumerate(mapped) if row == selected]
+    if not owned:
+        return []
+    block: list[str] = []
+    for index in range(max(owned) + 1, min(len(mapped), len(rows))):
+        if mapped[index] is not None:
+            break
+        block.append(rows[index])
+    return block
+
+
+def _fingerprint(card: AskPickerScreen) -> list[str]:
+    """The card's drawn text, right-padding dropped.
+
+    Right padding is the row's own ground (`_fit_row` paints the selected row
+    and every description for the card's full width), so it carries no text;
+    comparing it would pin the card's WIDTH a second time. What these tests
+    claim is what the card SAYS and on which line it says it.
+    """
+    return [line.rstrip() for line in card.render_lines_for_test()]
+
+
+@pytest.mark.asyncio
+async def test_ctrl_e_is_live_at_the_sizes_the_user_reported() -> None:
+    """D2, the blocker: the reveal must DO something at 190x50 and 150x40.
+
+    At HEAD `ade5cace` this is the state, measured through the real app with the
+    user's own question:
+
+        190x50: hint=None  md5 3ecd090d -> 3ecd090d  (byte-identical)
+        150x40: hint=None  md5 50dde915 -> 50dde915  (byte-identical)
+
+    — the key is refused at both, and at 150x40 all three descriptions are
+    ellipsised, so the text is unreachable by any means. That is the ORIGINAL
+    truncation bug, unfixed, at the size it was reported at.
+
+    Three assertions, and the ORDER is the point:
+
+    1. the footer OFFERS `^e`, on the composited frame — a reveal reachable only
+       by a user who already knew about it is not reachable;
+    2. pressing it CHANGES THE FRAME. This is the assertion the previous round
+       did not make. `test_ctrl_e_reveals_the_selected_rows_full_consequence`
+       asserted `card.state.revealed` and that the text was present, and both
+       were true at 150x40 with the canary fixture while the rendered frame was
+       identical before and after at the sizes that mattered. A flag is not a
+       feature. The frames are compared as text, so a mode that toggles and
+       redraws nothing fails here however cleanly its state moved;
+    3. and the change is the RIGHT one — the reveal SHOWS MORE of the selected
+       row's description than the default view did. A frame that merely differs
+       (three blank rows, say) satisfies (2) and is still useless.
+
+    Claim 3 is deliberately "strictly more" rather than "complete", and the
+    difference is a finding rather than a concession. Measured on the capped
+    tree, the reveal is complete at 190x50 but reaches only 838 of option 1's
+    1023 characters at 150x40, and 735 at 130x30 — and it says nothing about
+    the shortfall. That is a real defect (**D5** in the QA report accompanying
+    this change), not a property to relax: `_reveal_wrap` inherits the
+    `DESC_MAX_ROWS = 6` cut from `_description_lines`, so at a width where the
+    text needs 8 or 9 lines the block is handed a 6-line list that is ALREADY
+    complete as far as it knows. `_reveal_text`'s `len(wrapped) > len(kept)`
+    guard is therefore false, the `…` marker never fires, and the paragraph
+    stops mid-sentence in silence.
+
+    So this test asserts what the cap slice is genuinely responsible for — the
+    key is live, and it uncovers text the default view withheld — while
+    :func:`test_the_reveal_says_so_when_it_is_still_holding_text_back` carries
+    the failing claim for D5. The defect is recorded as a red test rather than
+    as a weakened assertion buried here.
+    """
+    for size in ((190, 50), (150, 40)):
+        app, card = await _real_app_card(size, [_repro_question()])
+        async with app.run_test(size=size) as pilot:
+            await _show(app, pilot, card)
+
+            # The default view is genuinely incomplete — without this the test
+            # would pass on a card that had drawn everything all along, which
+            # is the state the cap exists to prevent and the exact way the
+            # 190x50 case was allowed to be "correct" before.
+            before = _fingerprint(card)
+            before_prose = " ".join(
+                " ".join(line.split()) for line in _description_lines_of(card, before)
+            )
+            full = " ".join(_REPRO_DESCRIPTIONS[0].split())
+            assert full not in before_prose, (size, before_prose)
+
+            # 1. The card says the key exists, on the frame the user sees.
+            assert card._reveal_hint() == ("^e", "more"), (size, card._layout())
+            assert "^e more" in _painted_footer(app), (size, _painted_footer(app))
+
+            await pilot.press("ctrl+e")
+            await _until(pilot, lambda: card.state.revealed)
+            await _until(pilot, lambda: "^e less" in _painted_footer(app))
+
+            # 2. The FRAME moved. Not the flag — the drawn text.
+            after = _fingerprint(card)
+            assert after != before, (size, "ctrl+e redrew nothing", before)
+
+            # 3. ...and it moved the right way: strictly MORE of the selected
+            #    row's description is readable than before. Measured as the
+            #    longest prefix of the real text the frame carries, so a block
+            #    that redrew the same two lines lower down fails.
+            gained = _prefix_reach(after, full) - _prefix_reach(before, full)
+            assert gained > 0, (size, "the reveal uncovered no new text")
+            # At 190x50 the reveal is COMPLETE, and that is pinned per size so
+            # it cannot silently regress to 150x40's partial behaviour (D5).
+            if size == (190, 50):
+                joined = " ".join(" ".join(line.split()) for line in after)
+                assert full in joined, (size, after)
+
+            # The way back is advertised, and the conversation the question is
+            # about is still behind it: the block is bought from the card's own
+            # leftovers, never from the transcript.
+            assert "^e less" in _painted_footer(app), (size, _painted_footer(app))
+            assert not app.screen.show_vertical_scrollbar, size
+
+
+@pytest.mark.asyncio
+async def test_the_reveal_stays_live_when_the_default_view_stops_capping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The red half of the guard above, per AGENTS.md's "prove the test can
+    still fail".
+
+    `DEFAULT_DESC_CAP` is what makes `^e` affordable: the pool stops eating the
+    budget step 7a needs, which is the mechanism behind D2. Raised back out of
+    the way — which is HEAD's arithmetic exactly, since `min(n, 99) == n` for
+    every wrap this fixture produces — the key must go dead again at both
+    sizes, reproducing `ade5cace`.
+
+    Patched as the module constant rather than by editing the widget. If this
+    stops going red, either the cap is no longer what buys the reveal (in which
+    case the guard above is measuring something else and must be re-derived) or
+    the reveal is being offered where it does nothing.
+    """
+    import local_operator.tui.widgets.ask_picker as ask_picker_module
+
+    for size in ((190, 50), (150, 40)):
+        monkeypatch.setattr(ask_picker_module, "DEFAULT_DESC_CAP", 99)
+        app, card = await _real_app_card(size, [_repro_question()])
+        async with app.run_test(size=size) as pilot:
+            await _show(app, pilot, card)
+
+            # HEAD's frame: the pool has spent the budget, so the key is
+            # withheld and the footer never names it.
+            assert card._reveal_hint() is None, (size, card._layout().description_rows)
+            assert "^e" not in _painted_footer(app), (size, _painted_footer(app))
+
+            # And pressing it changes nothing, which is D2 stated as the user
+            # experiences it rather than as a predicate.
+            before = _fingerprint(card)
+            await pilot.press("ctrl+e")
+            for _ in range(4):
+                await pilot.pause()
+            assert _fingerprint(card) == before, (size, "expected the dead reveal")
+
+
+@pytest.mark.asyncio
+async def test_the_default_view_caps_prose_so_the_list_stays_scannable() -> None:
+    """D1: the card must not become a wall of text again.
+
+    The rejected frame at 190x50 was 24 body rows, ~19 of them prose, with
+    option 1 granted 6 continuation lines and no blank line between one
+    option's paragraph and the next option's label. The design's measured
+    replacement is 17 rows, 3 per option, uniform.
+
+    Three claims, and none of them is implied by the others:
+
+    - **the per-row cap holds.** No row in the default view is granted more
+      than `DEFAULT_DESC_CAP` description lines, at any of the sizes the card
+      is scanned at. This is the property; the two below are its consequences,
+      pinned because a future change could satisfy the cap and still produce a
+      bad frame.
+    - **the card's body stays within the design's bound at 190x50.** 17 rows
+      measured, asserted at <= 18 so a legitimate one-row change in chrome does
+      not fail a green tree, while the 24-row wall does. Something must fail if
+      prose is ever allowed to expand without limit again — that is what this
+      number is for.
+    - **the rhythm is uniform.** Every described option gets the same number of
+      lines, so the label/prose alternation is perceptible. The rejected frame
+      granted 6/4/3 and the labels were buried; the cap grants 2/2/2.
+    """
+    for size in ((190, 50), (150, 40), (130, 30)):
+        app, card = await _real_app_card(size, [_repro_question()])
+        async with app.run_test(size=size) as pilot:
+            await _show(app, pilot, card)
+            layout = card._layout()
+            grants = layout.description_rows
+
+            # The cap itself, over every drawn row including the free-text one.
+            assert all(granted <= DEFAULT_DESC_CAP for granted in grants.values()), (size, grants)
+
+            if not grants:
+                # 130x30 cannot afford the description column at all and falls
+                # back to label-only. That frame is already correct (design
+                # §1.3) and the cap is invisible to it.
+                continue
+
+            # Uniform rhythm across the OPTIONS. The free-text row's hint is a
+            # single short line and is not part of the claim.
+            option_grants = {
+                index: grants[index] for index in range(len(_REPRO_DESCRIPTIONS)) if index in grants
+            }
+            assert len(set(option_grants.values())) == 1, (size, grants)
+
+    # And the height bound at the reported size.
+    app, card = await _real_app_card((190, 50), [_repro_question()])
+    async with app.run_test(size=(190, 50)) as pilot:
+        await _show(app, pilot, card)
+        # 17 measured on the design's own frame; 18 leaves one row of headroom
+        # for chrome. The rejected wall was 24, so the bound discriminates.
+        assert len(card.render_lines_for_test()) <= 18, _fingerprint(card)
+
+
+@pytest.mark.asyncio
+async def test_the_uncapped_default_view_rebuilds_the_wall(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The red half of the scannability guard.
+
+    With the cap lifted the 190x50 card returns to HEAD's 24 rows and its
+    6/4/3 grants — the exact frame in `docs/design/ask-scannable-card.md` §1.1
+    that the user rejected. Both halves of the guard above are asserted to go
+    red, because they are separate claims: a change could restore the height
+    while holding the per-row cap, or vice versa.
+    """
+    import local_operator.tui.widgets.ask_picker as ask_picker_module
+
+    monkeypatch.setattr(ask_picker_module, "DEFAULT_DESC_CAP", 99)
+    app, card = await _real_app_card((190, 50), [_repro_question()])
+    async with app.run_test(size=(190, 50)) as pilot:
+        await _show(app, pilot, card)
+        grants = card._layout().description_rows
+        assert any(granted > DEFAULT_DESC_CAP for granted in grants.values()), grants
+        assert len(card.render_lines_for_test()) > 18, _fingerprint(card)
+
+
+@pytest.mark.asyncio
+async def test_one_arrow_press_barely_changes_the_card() -> None:
+    """D3: the card must not churn under the cursor.
+
+    `test_the_revealed_card_is_the_same_height_for_every_selection` pins the
+    card's HEIGHT across selections, and it passed throughout the rejected
+    round — while 9 of 20 rows rewrote their content on a single arrow press at
+    150x40. Height was a PROXY for "the card does not move" and the proxy came
+    apart: the selected row's grant grew from 3 lines to 6 and every other
+    row's shrank to pay for it, so nearly half the card rewrote itself under
+    the user's eye at a constant total.
+
+    This replaces the proxy with the property. Rows-changed is measured on the
+    drawn text, position by position, which is what the user actually sees.
+
+    The bound is 4. Measured on the capped tree over every arrow press at each
+    size, cursor position 0 through 3:
+
+        190x50   2, 2, 3   of 17 rows
+        150x40   2, 2, 3   of 17 rows
+        130x30   2, 2, 3   of 10 rows
+
+    Two for an ordinary move (the cursor leaves one row and arrives at
+    another); three on the last move, which lands on the free-text row and
+    changes its label as well as its caret. Against that, the rejected tree
+    measured 9 of 20 at 150x40. So 4 sits one row above the honest maximum and
+    five below the defect — it absorbs a legitimate change (a badge moving with
+    the cursor, a ground repaint that rewrites a row) without admitting a
+    redistribution, which cannot cost fewer than one row per option.
+
+    The old height claim is NOT dropped: it is asserted here too, because a
+    card could hold its content still by changing height instead, and the two
+    together are what "the card does not move" means.
+    """
+    for size in ((190, 50), (150, 40), (130, 30)):
+        app, card = await _real_app_card(size, [_repro_question()])
+        async with app.run_test(size=size) as pilot:
+            await _show(app, pilot, card)
+
+            before = _fingerprint(card)
+            await pilot.press("down")
+            await _until(pilot, lambda: card.selected_index == 1)
+            after = _fingerprint(card)
+
+            assert len(after) == len(before), (size, len(before), len(after))
+            changed = sum(1 for old, new in zip(before, after) if old != new)
+            assert changed <= 4, (size, changed, len(before))
+
+
+@pytest.mark.asyncio
+async def test_an_uncapped_card_churns_under_the_cursor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The red half of the churn guard, and the demonstration that the height
+    test alone could never have caught D3.
+
+    With the cap lifted, 150x40 reproduces the measured 9-of-20 rewrite. The
+    height assertion is made FIRST and passes — that is the point: the card
+    holds its height exactly as the shipped design intended while nearly half
+    its body rewrites, so a suite carrying only the height test stays green
+    through the defect. The churn assertion is the one that fails.
+    """
+    import local_operator.tui.widgets.ask_picker as ask_picker_module
+
+    monkeypatch.setattr(ask_picker_module, "DEFAULT_DESC_CAP", 99)
+    app, card = await _real_app_card((150, 40), [_repro_question()])
+    async with app.run_test(size=(150, 40)) as pilot:
+        await _show(app, pilot, card)
+
+        before = _fingerprint(card)
+        await pilot.press("down")
+        await _until(pilot, lambda: card.selected_index == 1)
+        after = _fingerprint(card)
+
+        # The proxy holds...
+        assert len(after) == len(before), (len(before), len(after))
+        # ...and the real property does not.
+        changed = sum(1 for old, new in zip(before, after) if old != new)
+        assert changed > 4, (changed, len(before))
+
+
+@pytest.mark.asyncio
+async def test_the_recommended_badge_is_drawn_unlike_the_prose_beside_it() -> None:
+    """D4: the badge must be a badge, not a word.
+
+    `test_a_recommendation_is_marked_and_preselected` asserted the STRING was
+    present and `test_the_badge_no_longer_shortens_the_option_it_promotes`
+    asserted its POSITION. Both stayed green while the tag was drawn in the
+    identical style to the prose it sits in — `muted`, no weight — because
+    neither looked at the style. A badge nobody can find is not marked.
+
+    Asserted on the SPANS of the rendered `Text`, which is the only place the
+    difference exists: the plain string is identical either way.
+
+    Two independent signals are required, and the assertion is deliberately
+    written as "differs in weight OR in colour" rather than pinning `fg` +
+    bold. The design (§3.3) chose that treatment and measured its contrast at
+    10.92:1 worst-case across both themes, but the PROPERTY is distinguishability
+    — a future change that swapped bold for reverse video, or `fg` for a hue
+    that clears AA on both themes, should not fail a test that claims to be
+    about the badge being findable. What must never pass is the state the
+    designer found: same colour, same weight, no signal at all.
+
+    Contrast is checked in the one direction it can be: the badge is asserted
+    NOT to be drawn at `dim`, the 3.43:1 step that sits under the WCAG AA 4.5:1
+    floor. Colour on this card cannot be spent downward (design §2.3) and the
+    badge is the element most likely to be "quietened" by a well-meaning
+    change.
+    """
+    app = _AskHost([_question(recommended=1)])
+    async with app.run_test(size=(100, 30)) as pilot:
+        card = await app.open_picker()
+        await pilot.pause()
+
+        line = next(
+            candidate
+            for candidate in card._card_text().split("\n")
+            if RECOMMENDED_TAG in candidate.plain
+        )
+        start = line.plain.index(RECOMMENDED_TAG)
+        end = start + len(RECOMMENDED_TAG)
+
+        badge = _style_at(line, start)
+        # The prose after the tag: the text the badge has to win against. Taken
+        # from the far side of the ` · ` separator so it is genuinely the
+        # description and not the separator's own ink.
+        prose_at = line.plain.index("·", end) + 2
+        prose = _style_at(line, prose_at)
+
+        badge_colour = badge.color.triplet.hex if badge.color and badge.color.triplet else None
+        prose_colour = prose.color.triplet.hex if prose.color and prose.color.triplet else None
+
+        # The defect, stated exactly: same ink AND same weight is no badge.
+        assert not (badge_colour == prose_colour and bool(badge.bold) == bool(prose.bold)), (
+            line.plain,
+            badge_colour,
+            prose_colour,
+        )
+        # And it is distinct by a signal that survives a monochrome terminal or
+        # a colour-blind reader: weight, or a genuinely different hue.
+        assert bool(badge.bold) != bool(prose.bold) or badge_colour != prose_colour, (
+            badge_colour,
+            prose_colour,
+        )
+        # Never quietened below the AA floor. `dim` is 3.43:1 on this ground.
+        assert badge_colour != theme_mod.semantic_color("dim"), badge_colour
+        # The prose it sits beside is untouched — the badge is not allowed to
+        # buy its emphasis by dimming the consequence text, which on the
+        # approval gate authorises a tool call (design §2.3).
+        assert prose_colour == theme_mod.semantic_color("muted"), prose_colour
+
+
+@pytest.mark.asyncio
+async def test_a_badge_drawn_like_the_prose_is_caught(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The red half of the badge guard: the shipped treatment must fail it.
+
+    Reintroduced by patching `_description_text` back to the call it had at
+    `ade5cace` — `tag_ink` and `ink` both `muted`, and no weight — rather than
+    by editing the widget. This is the state the designer measured at
+    ask_picker.py:2454/:2123, where the word "recommended" could not be found
+    in the rendered frame without searching for it.
+
+    The substitution rewrites the tag's SPAN after the fact rather than passing
+    a flattened `tag_ink` down, and that is forced by the widget rather than
+    chosen. `_description_text` composes `ground + tag_ink + Style(bold=True)`
+    at the append site (ask_picker.py:2527), so the weight is applied
+    unconditionally and no argument reaching that method can remove it — a
+    call-site patch reproduces only the colour half of the defect and leaves
+    the badge still bold, still findable, and the guard still green. Verified
+    both ways before settling here.
+
+    What is reconstructed is therefore the RENDERED RESULT at `ade5cace`: the
+    tag carrying the prose's own ink with no weight, which is what the designer
+    saw in the frame.
+    """
+    original = AskPickerScreen._description_text
+
+    def _flat_tag(
+        self: AskPickerScreen,
+        index: int,
+        width: int,
+        ground: Style,
+        tag_ink: Style,
+        ink: Style,
+        granted: int,
+    ) -> list[Text]:
+        """The rejected variant: the tag takes the prose's own ink and weight."""
+        lines = original(self, index, width, ground, tag_ink, ink, granted)
+        for line in lines:
+            if RECOMMENDED_TAG not in line.plain:
+                continue
+            start = line.plain.index(RECOMMENDED_TAG)
+            span = (start, start + len(RECOMMENDED_TAG))
+            line.spans = [
+                (
+                    Span(existing.start, existing.end, ground + ink)
+                    if (existing.start, existing.end) == span
+                    else existing
+                )
+                for existing in line.spans
+            ]
+        return lines
+
+    monkeypatch.setattr(AskPickerScreen, "_description_text", _flat_tag)
+
+    app = _AskHost([_question(recommended=1)])
+    async with app.run_test(size=(100, 30)) as pilot:
+        card = await app.open_picker()
+        await pilot.pause()
+        line = next(
+            candidate
+            for candidate in card._card_text().split("\n")
+            if RECOMMENDED_TAG in candidate.plain
+        )
+        start = line.plain.index(RECOMMENDED_TAG)
+
+        badge = _style_at(line, start)
+        prose = _style_at(line, line.plain.index("·", start + len(RECOMMENDED_TAG)) + 2)
+        badge_colour = badge.color.triplet.hex if badge.color and badge.color.triplet else None
+        prose_colour = prose.color.triplet.hex if prose.color and prose.color.triplet else None
+
+        # Indistinguishable, which is what the guard above must reject.
+        assert badge_colour == prose_colour, (badge_colour, prose_colour)
+        assert bool(badge.bold) == bool(prose.bold), (badge.bold, prose.bold)
+
+
+@pytest.mark.asyncio
+async def test_the_cap_leaves_the_approval_gate_byte_identical() -> None:
+    """The blast radius, and the reason the cap was chosen over a rewrite.
+
+    `ApprovalPrompt` subclasses this card, and there a description is not a
+    nicety — it is the CONSEQUENCE of authorising a possibly destructive tool
+    call. Its three consequences are 37/36/28 cells and wrap to one line each
+    at every width down to 44 columns, so the gate never asks for more than one
+    description line and `DEFAULT_DESC_CAP` is invisible to it.
+
+    That is the CLAIM, and this test is what makes it evidence rather than
+    reasoning. Pinned as the exact frame at the three sizes the truncation was
+    reported against, not as "the strings are present": the failure mode is the
+    allocator spending rows differently on a card whose height is already
+    correct, which shows up as a moved footer, a dropped spacer or a row
+    gaining a line — none of which a substring assertion can see.
+
+    Distinct from `test_the_approval_cards_consequences_are_unchanged_by_the_
+    wrap`, which pins the same frames against the WRAP change. This one pins
+    them against the CAP, and both are kept: they are separate changes to the
+    same allocator, and a regression from either must name itself.
+
+    If this test needs relaxing, that is a stop-and-escalate, not an
+    expectation to update.
+    """
+    from local_operator.tui.widgets.approval import ApprovalPrompt
+
+    body = [
+        "the agent needs your approval",
+        "─",
+        "Allow bash? rm -rf /Users/x/project/data",
+        "",
+        "❯ y. Allow",
+        "     run this call and ask again next time",
+        "  n. Deny",
+        "     refuse this call; the turn continues",
+        "  A. Allow all",
+        "     stop asking for this session",
+        "",
+        "↑↓ move · enter answer · esc deny",
+    ]
+
+    for size in ((100, 30), (130, 30), (150, 40)):
+        golden = ["─" * size[0] if line == "─" else line for line in body]
+        app = _AskHost([])
+        async with app.run_test(size=size) as pilot:
+            await pilot.pause()
+            card = ApprovalPrompt("bash", "rm -rf /Users/x/project/data")
+            await app.query_one("#prompt-host", Container).mount(card)
+            await pilot.pause()
+
+            assert _fingerprint(card) == golden, (size, _fingerprint(card))
+            # The gate passes NO recommended index, so the badge treatment
+            # cannot reach it either — asserted rather than assumed, because
+            # `recommended == index` would be true for index 0 if the field
+            # ever defaulted to 0 instead of None.
+            assert card.question.recommended is None, size
+            assert RECOMMENDED_TAG not in "\n".join(_fingerprint(card)), size
+            card._settled = True
+
+
+@pytest.mark.asyncio
+async def test_the_cap_leaves_the_short_description_card_byte_identical() -> None:
+    """The other protected surface: the card that was ALREADY correct.
+
+    `scripts/ask_shot.py`'s question — four two-clause consequences — renders as
+    a legible 2-line rhythm the designer judged "completely fine" (design
+    §1.4). No description there wraps past 2 lines at any of these widths, so
+    the cap must be invisible to it. This is the surface that proves the cap is
+    a CAP and not a redesign: it changes the frames that were wrong and none of
+    the frames that were right.
+
+    The golden is written out in full and pinned at both a wide and a narrow
+    size. The badge line is part of it, so the §3.3 treatment is pinned here
+    too — a change to `RECOMMENDED_TAG` that quietly widened the tag past the
+    reservation at ask_picker.py:1265 would show up as a shortened label on
+    exactly this frame.
+    """
+    question = AskQuestion(
+        id="rollout",
+        question="Which rollout should the stale-row migration take?",
+        options=[
+            AskOption(label="Drop the rows", description="nothing reads the column any more"),
+            AskOption(label="Backfill from the audit log", description="slower, keeps history"),
+            AskOption(label="Dual-write for a week", description="safest, needs a follow-up MR"),
+            AskOption(
+                label="Leave them and add a filter", description="cheapest, hides the problem"
+            ),
+        ],
+        recommended=1,
+    )
+    body = [
+        "the agent needs your decision",
+        "─",
+        "Which rollout should the stale-row migration take?",
+        "",
+        "  1. Drop the rows",
+        "     nothing reads the column any more",
+        "❯ 2. Backfill from the audit log",
+        f"     {RECOMMENDED_TAG} · slower, keeps history",
+        "  3. Dual-write for a week",
+        "     safest, needs a follow-up MR",
+        "  4. Leave them and add a filter",
+        "     cheapest, hides the problem",
+        "  5. Other (type your own)",
+        "     an answer that is not on the list — type it here",
+        "",
+        "↑↓ move · 1-9 jump · enter answer · esc skip",
+    ]
+
+    for size in ((190, 50), (100, 30)):
+        golden = ["─" * size[0] if line == "─" else line for line in body]
+        app = _AskHost([question])
+        async with app.run_test(size=size) as pilot:
+            card = await app.open_picker()
+            await pilot.pause()
+            assert _fingerprint(card) == golden, (size, _fingerprint(card))
+            # Every description fits inside the cap, which is WHY the frame is
+            # untouched. Asserted so a future fixture change that pushed one
+            # description to three lines fails here rather than silently
+            # turning this test into a cap test.
+            layout = card._layout()
+            assert all(
+                len(card._description_lines(index, layout.width)) <= DEFAULT_DESC_CAP
+                for index in range(card.row_count)
+            ), size
+
+
+@pytest.mark.asyncio
+async def test_the_card_never_reorders_the_options_it_was_given() -> None:
+    """Design §4.2: a display reorder is a silent semantic mismatch.
+
+    `recommended` is a 0-based index into `options` (harness/types.py:570) and
+    the card draws POSITIONAL ordinals with digit keys bound to them. If the
+    card floated the recommended option to the top, the user would read
+    "option 2", press `2`, and answer with a different element of `options`
+    than the model's index 2 — on the surface whose sibling is an authorisation
+    gate.
+
+    Swept over every `recommended` value including `None`, because the hazard
+    is specifically that marking a row starts to move it. Three claims:
+
+    - the drawn ordinals carry the labels in `question.options` order;
+    - the digit key for row N answers with `options[N-1]`, whatever
+      `recommended` is — asserted by actually pressing the key and reading the
+      answer, since that is the path the mismatch would travel;
+    - and `recommended` still selects the cursor, so the marking half of the
+      contract is not satisfied by simply ignoring the field.
+    """
+    labels = ("Alpha first", "Bravo second", "Charlie third", "Delta fourth")
+
+    for recommended in (None, 0, 1, 2, 3):
+        question = AskQuestion(
+            id="ordering",
+            question="Which one?",
+            options=[
+                AskOption(label=label, description=f"why {label.lower()}") for label in labels
+            ],
+            recommended=recommended,
+        )
+
+        app = _AskHost([question])
+        async with app.run_test(size=(120, 30)) as pilot:
+            card = await app.open_picker()
+            await pilot.pause()
+
+            # 1. Drawn order == given order, read off the ordinals the card
+            #    actually painted rather than off `question.options`.
+            drawn: list[tuple[int, str]] = []
+            for line in _fingerprint(card):
+                stripped = line.lstrip("❯ ").strip()
+                for position, label in enumerate(labels, start=1):
+                    if stripped.startswith(f"{position}. "):
+                        drawn.append((position, stripped[len(f"{position}. ") :]))
+            assert drawn == list(enumerate(labels, start=1)), (recommended, drawn)
+
+            # 3. ...and the recommendation still preselects, so claim 1 is not
+            #    being satisfied by a card that ignores the field entirely.
+            assert card.selected_index == (recommended or 0), (recommended, card.selected_index)
+
+        # 2. The digit key answers with the option at that POSITION.
+        for position, label in enumerate(labels, start=1):
+            app = _AskHost([question])
+            async with app.run_test(size=(120, 30)) as pilot:
+                await app.open_picker()
+                await pilot.pause()
+                await pilot.press(str(position))
+                await pilot.press("enter")
+                await pilot.pause()
+            assert app.answered == [{"ordering": [label]}], (recommended, position, app.answered)
+
+
+@pytest.mark.asyncio
+async def test_a_reordering_card_is_caught(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The red half of the ordering guard.
+
+    The hazard design §4.2 names is not hypothetical code — it is what a
+    "promote the recommendation" change would do. Reintroduced by patching
+    `_row_label` to read from a recommended-first permutation while the answer
+    path keeps reading `options` positionally, which is exactly the silent
+    mismatch: the card draws `1. Bravo second` and pressing `1` answers
+    `Alpha first`.
+
+    The guard above must reject this. If it stops going red, the ordinals and
+    the digit keys have drifted apart from `question.options` and the
+    positional contract is no longer being checked.
+    """
+    labels = ("Alpha first", "Bravo second", "Charlie third", "Delta fourth")
+    question = AskQuestion(
+        id="ordering",
+        question="Which one?",
+        options=[AskOption(label=label, description=f"why {label.lower()}") for label in labels],
+        recommended=2,
+    )
+
+    original = AskPickerScreen._row_label
+
+    def _recommended_first(self: AskPickerScreen, index: int) -> str:
+        """The rejected variant: display promotes, the answer path does not."""
+        if self.question.recommended is None or index >= len(self.question.options):
+            return original(self, index)
+        order = [self.question.recommended] + [
+            other
+            for other in range(len(self.question.options))
+            if other != self.question.recommended
+        ]
+        return self.question.options[order[index]].label
+
+    monkeypatch.setattr(AskPickerScreen, "_row_label", _recommended_first)
+
+    app = _AskHost([question])
+    async with app.run_test(size=(120, 30)) as pilot:
+        card = await app.open_picker()
+        await pilot.pause()
+        drawn = [
+            line.lstrip("❯ ").strip()
+            for line in _fingerprint(card)
+            if line.lstrip("❯ ").strip().startswith("1. ")
+        ]
+        # The card is showing the recommendation at position 1...
+        assert drawn == ["1. Charlie third"], drawn
+
+    # ...while the digit key still answers with `options[0]`. That gap is the
+    # defect, and it is why nothing may reorder.
+    app = _AskHost([question])
+    async with app.run_test(size=(120, 30)) as pilot:
+        await app.open_picker()
+        await pilot.pause()
+        await pilot.press("1")
+        await pilot.press("enter")
+        await pilot.pause()
+    assert app.answered == [{"ordering": ["Alpha first"]}], app.answered
+
+
+@pytest.mark.xfail(
+    reason=(
+        "D5: `_reveal_wrap` inherits the DESC_MAX_ROWS=6 cut from "
+        "`_description_lines`, so at 150x40 (text needs 8 lines) and 130x30 "
+        "(9 lines) the reveal block is handed an already-truncated wrap. "
+        "`_reveal_text`'s `len(wrapped) > len(kept)` guard is false, the '…' "
+        "marker never fires, and the paragraph stops mid-sentence in silence. "
+        "Open defect; do not delete this test to make the suite green."
+    ),
+    strict=True,
+)
+@pytest.mark.asyncio
+async def test_the_reveal_says_so_when_it_is_still_holding_text_back() -> None:
+    """D5, filed by QA against the capped tree. Expected to FAIL until fixed.
+
+    The reveal is the card's answer to "the prose does not fit". Where even the
+    reveal cannot fit it, the card must say so — that is the same discipline
+    the question's own tail and every granted description line already follow
+    (`_description_text`, `ask_picker.py:2463-2481`): mark the cut, never drop
+    text in silence. Here it does drop it in silence.
+
+    Measured on the capped tree with the user's own question, option 1
+    (1023 characters):
+
+        size     lines needed   reveal_rows   reached   marked `…`
+        190x50   6              6             1023      n/a (complete)
+        150x40   8              6              838      NO
+        130x30   9              6              735      NO
+
+    At 150x40 the block's last line ends `...in practice the ALTERs are
+    metadata-only in SQLite and` — mid-sentence, no marker — and the closing
+    clause ("...why it remains the default recommendation for this migration")
+    is unreachable by any gesture the card offers. The user pressed the key
+    that promises the rest and got 81% of it with no indication.
+
+    WHY IT IS NOT THE CAP SLICE'S BUG: this is independent of
+    `DEFAULT_DESC_CAP`. `DESC_MAX_ROWS` has been the reveal's cap since the
+    reveal was written; before the cap the key was simply never offered at
+    these sizes, so the shortfall was unreachable and therefore unobserved.
+    Fixing D2 made it reachable. It is a defect the cap EXPOSED, not one it
+    caused, and it belongs to whoever owns the reveal block.
+
+    Two candidate fixes, both for the owner to weigh — this test deliberately
+    asserts the PROPERTY (the card is honest about a cut) and not either
+    mechanism, so whichever is chosen satisfies it:
+
+    - mark the cut: give `_reveal_wrap` a way to report that the underlying
+      description ran past `DESC_MAX_ROWS`, so `_reveal_text`'s existing
+      fill-and-truncate path fires and the last line carries `…`;
+    - or spend the rows: start the block AFTER the lines already shown inline
+      (design F3 — the block currently repeats them, so 2 of its 6 rows are
+      wasted at every size). Measured, that alone completes 150x40 at 8/8
+      lines, though 130x30 would still be short at 8/9 and would need the
+      marker as well.
+
+    `strict=True`, so this turns into a failure the moment the defect is fixed
+    and the test must then be flipped to a plain guard. It is not an
+    accepted-forever exemption.
+    """
+    full = " ".join(_REPRO_DESCRIPTIONS[0].split())
+
+    for size in ((150, 40), (130, 30)):
+        app, card = await _real_app_card(size, [_repro_question()])
+        async with app.run_test(size=size) as pilot:
+            await _show(app, pilot, card)
+            await pilot.press("ctrl+e")
+            await _until(pilot, lambda: card.state.revealed)
+
+            reached = _prefix_reach(_fingerprint(card), full)
+
+            # The frame this is about: the reveal is genuinely short of the
+            # text. If a future change completes it here, this test has been
+            # fixed and must be flipped rather than re-tuned.
+            assert reached < len(full), (size, reached, len(full))
+
+            # THE CLAIM: a block holding text back says so. It does not.
+            #
+            # Asked of the BLOCK, never of the whole card. At 150x40 the other
+            # rows' inline descriptions are cut at the 2-line cap and correctly
+            # marked `…`, so a whole-card check passes on markers that belong
+            # to different text entirely.
+            block = _reveal_block_lines(card)
+            assert block, (size, "no reveal block to measure", _fingerprint(card))
+            assert any(line.endswith("…") for line in block), (
+                size,
+                f"reveal reached {reached}/{len(full)} chars and marked nothing",
+                block,
+            )
