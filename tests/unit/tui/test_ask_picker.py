@@ -18,6 +18,7 @@ its own text agrees with the clip instead of catching it.
 from __future__ import annotations
 
 import asyncio
+import itertools
 
 import pytest
 from rich.cells import cell_len
@@ -77,6 +78,110 @@ class _AskHost(App[None]):
         card = AskPickerScreen(self._questions, self.answered.append)
         await self.query_one("#prompt-host", Container).mount(card)
         return card
+
+
+class _BareHost(_AskHost):
+    """``_AskHost`` without the trailing free-text row.
+
+    Not a stylistic variant: ``allow_free_text=False`` is the configuration the
+    APPROVAL gate mounts this widget in (`approval.py`, `ApprovalPrompt`), and
+    it is the only one in which the position-row defect below is reachable. With
+    the free-text row present ``row_count`` is one greater than the option
+    count, so a window of every OPTION is still genuinely short of the list and
+    `showing 1-2 of 3` is honest. Take that row away and the same plan reports a
+    window over a list it is drawing in full.
+    """
+
+    def __init__(self, questions: list[AskQuestion], *, allow_free_text: bool = False) -> None:
+        super().__init__(questions)
+        self._allow_free_text = allow_free_text
+
+    async def open_picker(self) -> AskPickerScreen:
+        card = AskPickerScreen(
+            self._questions, self.answered.append, allow_free_text=self._allow_free_text
+        )
+        await self.query_one("#prompt-host", Container).mount(card)
+        return card
+
+
+#: The reported bug's own question, as `scripts/ask_long_shot.py` asks it.
+#:
+#: Duplicated from the script rather than imported: the script runs its capture
+#: at module scope (`asyncio.run(main())` on its last line), so importing it
+#: from a test would execute a screenshot run and then fail on `sys.argv[1]`.
+#: The strings are what matter here, and they are the strings the rendered
+#: frames in the report were captured from.
+_LONG_QUESTION_TEXT = (
+    "For the next iteration of the model regression canary battery (v2 currently lives at"
+    " ~/workspace/model-canary/canary-eval.md, with the 11-item CORE block fully saturated"
+    " at 11/11 for both models across every run logged so far, and essentially all of the"
+    " discriminating signal concentrated in the four self-constraint items 13, 16, 17 and 18"
+    " of the HARD block), which direction would you like the v3 item-recruitment effort to"
+    " take, bearing in mind the calibration result already recorded in the workspace notes"
+    " that mechanical difficulty does not discriminate between current frontier models?"
+)
+
+_LONG_LABELS = (
+    "Double down on self-constraint items",
+    "Add an orthogonal instruction-following block",
+    "Fix measurement before adding items",
+    "Retire the canary in its current form",
+)
+
+_LONG_DESCRIPTIONS = (
+    "Recruit eight to twelve new v3 items drawn exclusively from the self-monitoring"
+    " family that items 13, 16, 17 and 18 already occupy — exact word counts under"
+    " simultaneous lexical constraints, sentences that must state their own character"
+    " length, paragraphs forbidden from containing a letter that the instruction"
+    " itself contains — then pilot each candidate three times per model and keep only"
+    " those landing in the partial-failure band.",
+    "Keep CORE and HARD byte-stable exactly as the versioning rule requires, and"
+    " append a brand-new third scored block with its own denominator that targets"
+    " multi-turn instruction adherence and negative constraints, on the theory that"
+    " self-constraint failures and delayed-instruction failures are two faces of the"
+    " same weakness.",
+    "Leave the item set alone entirely for now and spend the effort on statistical"
+    " power instead: raise the runner from two core / three hard runs per model to ten"
+    " or more, record per-item pass rates rather than only block totals, and add"
+    " variance bands to runs.md.",
+    "Accept that a coarse hand-graded battery has reached the end of its useful life"
+    " now that CORE is saturated and HARD is carried by four items, and either fold"
+    " the surviving discriminating items into a proper harness or stop maintaining it.",
+)
+
+
+def _long_description_question(recommended: int | None = 0) -> AskQuestion:
+    """The reproduction from the truncation report, as a question."""
+    return AskQuestion(
+        id="canary_v3_direction",
+        question=_LONG_QUESTION_TEXT,
+        options=[
+            AskOption(label=label, description=description)
+            for label, description in zip(_LONG_LABELS, _LONG_DESCRIPTIONS)
+        ],
+        recommended=recommended,
+    )
+
+
+def _description_lines_of(card: AskPickerScreen, lines: list[str]) -> list[str]:
+    """The DESCRIPTION lines among ``lines``, read from the card's own map.
+
+    `_line_rows` rather than arithmetic over the rendered text: it is the map
+    the hit-test uses (`_index_at`), it is rebuilt on every paint, and it is
+    already multi-line tolerant — so this keeps working when one row's
+    description occupies several lines, which is the whole point of the change.
+    A row's FIRST line is its label; every further line belonging to the same
+    row is description.
+    """
+    seen: set[int] = set()
+    out: list[str] = []
+    for index, line in zip(card._line_rows, lines):
+        if index is None:
+            continue
+        if index in seen:
+            out.append(line)
+        seen.add(index)
+    return out
 
 
 # --- answering --------------------------------------------------------------
@@ -210,18 +315,31 @@ async def test_escape_keeps_the_questions_already_answered() -> None:
 @pytest.mark.asyncio
 async def test_a_click_on_a_row_selects_and_answers_with_it() -> None:
     """The card invites the mouse in with the wheel; a list you can scroll and
-    cannot click is a half-built affordance."""
+    cannot click is a half-built affordance.
+
+    The click target is re-derived from `_line_rows` rather than computed as
+    `2 + 1 + 1 + 2`. That arithmetic — header, rule, question, spacer, then two
+    lines per row — described this fixture at this size correctly, but only
+    because every description happened to wrap to exactly one line. It was an
+    assumption about the LAYOUT standing in for the thing under test, and once a
+    description can occupy several lines it is false for any card whose rows are
+    not uniformly two lines tall.
+
+    `_line_rows` is the map `_index_at` actually resolves a click through
+    (`ask_picker.py:870-904`): body-relative line index -> the row it belongs
+    to, recorded while painting. Asking it which line belongs to row 1 tests the
+    hit-test itself, and it keeps testing the hit-test whatever the rows cost.
+    """
     app = _AskHost([_question()])
     async with app.run_test(size=(100, 30)) as pilot:
         screen = await app.open_picker()
         await pilot.pause()
         body = screen.query_one("#ask-picker-body")
         region = body.region
-        # The second option's row. Rows start after the header, the rule and the
-        # wrapped question plus its blank spacer, and each row carries a
-        # description line at this height.
-        first_row_line = 2 + 1 + 1
-        await pilot.click(offset=(region.x + 4, region.y + first_row_line + 2))
+        # The first line the card says belongs to the SECOND option — its label
+        # line, whether that is the fourth line of the body or the ninth.
+        target = screen._line_rows.index(1)
+        await pilot.click(offset=(region.x + 4, region.y + target))
         await pilot.pause()
     assert app.answered == [{"stale": ["Backfill from the audit log"]}]
 
@@ -442,10 +560,30 @@ async def test_a_control_sequence_in_a_label_never_reaches_the_terminal() -> Non
 @pytest.mark.asyncio
 async def test_no_row_overflows_the_card_at_any_width() -> None:
     long_labels = ("Drop the whole column and every index that references it",) * 2
-    for width in (24, 30, 40, 60, 80, 120, 190):
-        app = _AskHost(
-            [_question(labels=long_labels, descriptions=("a long consequence " * 6, ""))]
-        )
+    # Three fixtures, because they reach different code. The first is the
+    # original one-line-per-description case. The second is the reported bug's
+    # own question, whose descriptions want several lines each — without it the
+    # sweep never sends a CONTINUATION line through `_fit_row`, which is the new
+    # path and the one that can overflow. The third carries grapheme clusters
+    # (design §11 risk 5): descriptions are model-authored, and a wrap that
+    # measured `👨‍👩‍👧‍👦` or a flag by string length rather than by cell width would
+    # overflow here and nowhere else.
+    emoji_question = _question(
+        text="Which pipeline should absorb the backfill? 🚚",
+        labels=("Nightly batch 🌙", "Streaming lane ⚡"),
+        descriptions=(
+            "🚚📦 moves the whole table in one pass overnight — cheapest per row, and"
+            " nothing else can run while it holds the lock 🔒🔒🔒",
+            "⚡👨‍👩‍👧‍👦 keeps the tail live for family accounts 🇬🇧🇬🇧 and costs more per row",
+        ),
+    )
+    questions = [
+        _question(labels=long_labels, descriptions=("a long consequence " * 6, "")),
+        _long_description_question(),
+        emoji_question,
+    ]
+    for width, question in itertools.product((24, 30, 40, 60, 80, 120, 190), questions):
+        app = _AskHost([question])
         async with app.run_test(size=(width, 30)) as pilot:
             screen = await app.open_picker()
             await pilot.pause()
@@ -493,7 +631,21 @@ async def test_the_card_spends_the_whole_column_the_dock_gave_it() -> None:
 @pytest.mark.asyncio
 async def test_a_short_terminal_drops_descriptions_before_it_drops_options() -> None:
     """A card that shed ROWS to keep prose would hide answers the user is being
-    asked to choose between. Descriptions go first; the list goes last."""
+    asked to choose between. Descriptions go first; the list goes last.
+
+    Amended for the wrapping change, and the amendment is deliberately narrow:
+    "descriptions" here now means a description's FIRST line. C5 — all rows get
+    a first line or none do — is unchanged, and it is still what makes `why a`
+    absent at 100x20. What the change adds is CONTINUATION lines, which are
+    bought after everything else and so can only ever be the first thing lost.
+
+    The ORDER is the contract and the order is untouched: prose is still shed
+    before an answer is. The specifics that moved are the vocabulary above and
+    the second half of the sweep, which now also pins that the shortfall is not
+    circumventable — the ban on drawing prose at a height that cannot afford it
+    has to hold for the continuation lines too, or the new rungs would have
+    quietly become a way to buy at 100x20 what step 9 refused to sell.
+    """
     question = _question(
         labels=("A", "B", "C", "D", "E"),
         descriptions=("why a", "why b", "why c", "why d", "why e"),
@@ -522,6 +674,112 @@ async def test_a_short_terminal_drops_descriptions_before_it_drops_options() -> 
         # the descriptions paid for.
         assert len(screen.visible_rows) == screen.row_count
         assert all(label in cramped for label in ("A", "B", "C", "D", "E"))
+        # No row drew prose at all — not "less prose". At this height the
+        # budget is exhausted before step 9, so the pool the continuation
+        # lines are bought from is empty and the frame is the one this card
+        # has always drawn here.
+        assert not _description_lines_of(screen, screen.render_lines_for_test())
+
+    # And the order survives a description long enough to WANT several lines.
+    # This is the half that would go quiet if continuations were ever bought
+    # ahead of the rows: same height, same five options, prose that a wrapping
+    # card would love to spend eight lines on.
+    app = _AskHost(
+        [
+            _question(
+                labels=("A", "B", "C", "D", "E"),
+                descriptions=("why a " * 20, "why b " * 20, "why c", "why d", "why e"),
+            )
+        ]
+    )
+    async with app.run_test(size=(100, 20)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+        verbose = "\n".join(screen.render_lines_for_test())
+        assert len(screen.visible_rows) == screen.row_count
+        assert all(label in verbose for label in ("A", "B", "C", "D", "E"))
+        assert not _description_lines_of(screen, screen.render_lines_for_test())
+
+
+@pytest.mark.asyncio
+async def test_the_position_row_is_only_drawn_when_the_list_is_windowed() -> None:
+    """`showing 1–2 of 2` is a card reporting a window over a list it is
+    drawing in full — the count lying in the direction that makes the user look
+    for answers that are all already on screen.
+
+    The mechanism is the one-step settle in `_layout`. The position line is
+    bought on the `page < row_count` trial; buying it takes a row from
+    `remaining`, which drops `remaining` below the two rows the TITLE costs, and
+    the two rows the title gives back buy more option rows than the count cost.
+    The retry therefore comes back with the WHOLE list drawn while still
+    carrying the count that says it is hiding some of it. `_card_text` draws the
+    row from `layout.show_position` alone, so it draws it.
+
+    Pinned in the free-text-less configuration because that is where it is
+    reachable AND where it matters: `ApprovalPrompt` mounts this widget with
+    `allow_free_text=False`, so this is a tool-authorisation card miscounting
+    its own answers. With the free-text row present `row_count` is one larger
+    than the option count and the same plan's count is honest.
+
+    The inverse of R11 (`ask_picker.py:1749-1753`), where a row nobody paid for
+    was drawn; here a row that WAS paid for should not have been.
+    """
+    question = _question(
+        text="Ship it?",
+        labels=("Yes", "No"),
+        descriptions=("do it", "do not"),
+    )
+    app = _BareHost([question])
+    async with app.run_test(size=(100, 12)) as pilot:
+        card = await app.open_picker()
+        await pilot.pause()
+        layout = card._layout()
+        text = "\n".join(card.render_lines_for_test())
+        # The list really is drawn in full: every option, nothing hidden.
+        assert layout.page >= card.row_count, (layout.page, card.row_count)
+        assert len(card.visible_rows) == card.row_count
+        # So the card must not claim otherwise. Asserted on the PLAN and on the
+        # painted text, because either one alone can be right while the other
+        # is wrong: the flag is what the renderer reads, and the string is what
+        # the user reads.
+        assert not layout.show_position, (layout.page, card.row_count, text)
+        assert "showing" not in text, text
+
+
+@pytest.mark.asyncio
+async def test_a_long_description_wraps_instead_of_ending_in_an_ellipsis() -> None:
+    """The reported bug. At 190x50 there are rows to spare and every one of the
+    four descriptions still ends mid-sentence in `…`, because
+    `_description_text` builds each one as a single `no_wrap` line and
+    `truncate_cells`-es it into the card's width — one line per row, always,
+    however much budget is left over.
+
+    190x50 rather than a tighter size on purpose: it is the size where the
+    design's change (A) is expected to fix the bug COMPLETELY, so this test
+    states the end condition rather than a partial improvement. The card's
+    budget there is 20 rows against the 19 the wrapped card wants.
+
+    Two assertions, and they are different claims. "No description line ends in
+    `…`" is the symptom the user reported. "Option 1's full text is present
+    across its lines" is the thing they actually wanted — a card could satisfy
+    the first by dropping descriptions altogether, which is strictly worse.
+    """
+    app = _AskHost([_long_description_question()])
+    async with app.run_test(size=(190, 50)) as pilot:
+        card = await app.open_picker()
+        await pilot.pause()
+        lines = card.render_lines_for_test()
+        descriptions = _description_lines_of(card, lines)
+        # The card is drawing prose at all: guards against this test passing
+        # because every description was dropped.
+        assert descriptions, lines
+        ellipsised = [line for line in descriptions if line.rstrip().endswith("…")]
+        assert not ellipsised, ellipsised
+        # And the first option's consequence is readable IN FULL. Compared on
+        # collapsed whitespace, because the text is wrapped across several
+        # lines and re-joined with the indent each continuation carries.
+        joined = " ".join(" ".join(line.split()) for line in descriptions)
+        assert " ".join(_LONG_DESCRIPTIONS[0].split()) in joined, joined
 
 
 @pytest.mark.asyncio
@@ -559,6 +817,739 @@ async def test_a_terminal_too_short_for_the_list_says_what_it_is_hiding() -> Non
         await pilot.press("down")  # onto the free-text row, the last one
         assert screen.selected_index == screen.other_row
         assert any(row.startswith("Other") for row in screen.visible_rows)
+
+
+@pytest.mark.asyncio
+async def test_the_approval_cards_consequences_are_unchanged_by_the_wrap() -> None:
+    """The blast radius. `ApprovalPrompt` subclasses this card, and there the
+    description is not a nicety — it is the CONSEQUENCE of authorising a
+    possibly destructive tool call, and the difference between "ask again next
+    time" and "stop asking for this session".
+
+    Measured on the pre-fix tree: the three consequence strings are 37, 36 and
+    28 cells and wrap to one line each at every width down to 44 columns, so the
+    approval card never truncates a description today. It is not what the
+    wrapping change fixes; it is what the change must not break.
+
+    Pinned as the EXACT frame rather than as "the strings are present". The
+    failure mode being guarded is not the text disappearing — it is the
+    allocator spending rows differently on a card whose height is already
+    correct, which shows up as a moved footer, a dropped spacer or a row gaining
+    a line, none of which a substring assertion can see. The three sizes are the
+    ones the truncation report was filed against.
+
+    If this test needs relaxing, that is a stop-and-escalate, not an expectation
+    to update (design §11 risk 1).
+    """
+    from local_operator.tui.widgets.approval import ApprovalPrompt
+
+    # The frames as the pre-fix tree draws them, captured at b64eb01c before any
+    # allocator change. Written out in full because the point is byte-identity:
+    # a golden that was regenerated from the code under test would agree with
+    # whatever that code now does.
+    expected = {
+        (100, 30): [
+            "the agent needs your approval",
+            "─" * 100,
+            "Allow bash? rm -rf /Users/x/project/data",
+            "",
+            "❯ y. Allow",
+            "     run this call and ask again next time",
+            "  n. Deny",
+            "     refuse this call; the turn continues",
+            "  A. Allow all",
+            "     stop asking for this session",
+            "",
+            "↑↓ move · enter answer · esc deny",
+        ],
+    }
+    expected[(130, 30)] = [
+        "─" * 130 if line.startswith("─") else line for line in expected[(100, 30)]
+    ]
+    expected[(150, 40)] = [
+        "─" * 150 if line.startswith("─") else line for line in expected[(100, 30)]
+    ]
+
+    for size, golden in expected.items():
+        app = _AskHost([])
+        async with app.run_test(size=size) as pilot:
+            await pilot.pause()
+            card = ApprovalPrompt("bash", "rm -rf /Users/x/project/data")
+            await app.query_one("#prompt-host", Container).mount(card)
+            await pilot.pause()
+            # Right-padding is the row's own ground (`_fit_row` paints the
+            # selected row and every description for the card's full width), so
+            # it carries no text and comparing it would pin the card's WIDTH a
+            # second time — which `test_the_card_spends_the_whole_column_the_
+            # dock_gave_it` already owns. The claim here is what the card SAYS
+            # and on which line it says it.
+            drawn = [line.rstrip() for line in card.render_lines_for_test()]
+            assert drawn == golden, (size, drawn)
+            # Never a window over a list of three it is drawing in full: the
+            # same defect the position-row test pins, on the surface where the
+            # miscount would be attached to an authorisation.
+            layout = card._layout()
+            assert not (layout.show_position and layout.page >= card.row_count), size
+            # Settled so the prompt's future is not left pending on teardown.
+            card._settled = True
+
+
+@pytest.mark.asyncio
+async def test_the_card_never_draws_more_lines_than_its_budget() -> None:
+    """C1, as a property over the plan rather than an example: the card lays out
+    exactly what it paid for, and never a line more.
+
+    This is the regression guard for the clipped footer. Textual clips the TAIL
+    of an overflowing widget, and the tail is the footer — the one statement of
+    how to leave a card the turn is parked on. The card reports the height it
+    WANTED, so its own text agrees with the clip instead of catching it; only
+    counting the laid-out lines against the budget catches it.
+
+    Swept over the long-description fixture specifically, because that is the
+    input that makes the new continuation lines reachable. On the pre-fix tree
+    every description is one line, so a sweep with the ordinary fixture never
+    exercises the arithmetic the change adds — measured: zero overdraws today
+    across this whole sweep, so any failure here is new damage.
+
+    The emoji row is per design §11 risk 5: descriptions are model-authored and
+    can carry grapheme clusters, whose cell width is not their string length.
+    """
+    emoji = _question(
+        text="Which pipeline should absorb the backfill? 🚚",
+        labels=("Nightly batch 🌙", "Streaming lane ⚡"),
+        descriptions=(
+            "🚚📦 moves the whole table in one pass overnight — cheapest per row, and"
+            " nothing else can run while it holds the lock 🔒🔒🔒",
+            "⚡👨‍👩‍👧‍👦 keeps the tail live for family accounts and costs more per row, but the"
+            " table stays writable throughout 🇬🇧🇬🇧",
+        ),
+    )
+    for question in (_long_description_question(), emoji):
+        for width in (24, 40, 60, 100, 130, 150, 190):
+            for height in (12, 20, 30, 36, 40, 50):
+                app = _AskHost([question])
+                async with app.run_test(size=(width, height)) as pilot:
+                    card = await app.open_picker()
+                    await pilot.pause()
+                    layout = card._layout()
+                    budget = card._body_rows(len(card._question_lines(layout.width)))
+                    lines = card.render_lines_for_test()
+                    assert len(lines) <= budget, (width, height, len(lines), budget, lines)
+                    # And no line overflows the card's column either. The
+                    # continuation lines are the new path through `_fit_row`,
+                    # and a wrap that measured a grapheme cluster by string
+                    # length would show up here and nowhere else.
+                    for line in lines:
+                        assert cell_len(line) <= card.size.width, (width, height, line)
+
+
+@pytest.mark.asyncio
+async def test_a_wrapped_description_never_costs_an_option_row() -> None:
+    """Steps 10-11 are ADDITIVE. A description growing a second line must never
+    take a row off the list, because a row is an ANSWER and prose about an
+    answer ranks strictly below it (`ask_picker.py:1206-1220`).
+
+    The comparison is between the same question asked with LONG descriptions and
+    with one-line descriptions: same labels, same question text, same everything
+    that costs a row before step 9. If the wrapped card draws fewer option rows
+    than the short one at any size, the continuation lines were bought with a
+    row's money.
+
+    This is the assertion that would have caught the rejected
+    "wrap-everything" design, which needs 12 lines where 5 exist at 150x40 and
+    windows the list to 2 of 5 at 100x30 — trading unreadable prose for hidden
+    answers.
+    """
+    long_question = _long_description_question()
+    short_question = AskQuestion(
+        id=long_question.id,
+        question=long_question.question,
+        options=[
+            AskOption(label=option.label, description="short") for option in long_question.options
+        ],
+        recommended=long_question.recommended,
+    )
+
+    for width in (24, 40, 60, 100, 130, 150, 190):
+        for height in (12, 20, 30, 36, 40, 50):
+            app = _AskHost([short_question])
+            async with app.run_test(size=(width, height)) as pilot:
+                card = await app.open_picker()
+                await pilot.pause()
+                baseline_page = card._layout().page
+                baseline_labels = list(card.visible_rows)
+
+            app = _AskHost([long_question])
+            async with app.run_test(size=(width, height)) as pilot:
+                card = await app.open_picker()
+                await pilot.pause()
+                assert card._layout().page == baseline_page, (width, height)
+                assert list(card.visible_rows) == baseline_labels, (width, height)
+
+
+@pytest.mark.asyncio
+async def test_a_secret_question_still_draws_one_row() -> None:
+    """The secret path has `row_count == 1` and a fixed `SECRET_HINT` as its
+    description, and neither the wrap nor the reveal may grow it.
+
+    Worth its own test because the secret row is the one place on this card
+    where the "description" is chrome the app wrote rather than prose the model
+    wrote: it explains the FIELD, and a card that spent extra rows elaborating
+    on `hidden as you type` would be padding a paste box. The hint is one line
+    at every width it is drawn at, so the row stays two lines.
+    """
+    question = AskQuestion(
+        id="GITHUB_TOKEN",
+        question="Paste the deploy token.",
+        options=[],
+        secret=True,
+    )
+    for size in ((100, 30), (150, 40), (190, 50)):
+        app = _AskHost([question])
+        async with app.run_test(size=size) as pilot:
+            card = await app.open_picker()
+            await pilot.pause()
+            assert card.row_count == 1
+            lines = card.render_lines_for_test()
+            # One label line and at most one description line for the only row.
+            row_lines = [index for index in card._line_rows if index is not None]
+            assert row_lines.count(0) <= 2, (size, lines)
+            assert len(row_lines) == row_lines.count(0), (size, lines)
+
+
+@pytest.mark.asyncio
+async def test_a_recommended_row_keeps_its_prose_when_the_first_word_is_unbreakable() -> None:
+    """Review finding (MAJOR): the recommended row drew `· recommended` and NO
+    prose at all when its description opened with a word too long to sit beside
+    the tag.
+
+    The tag reserves cells on the description's first line, and that line was
+    produced by wrapping a filler placeholder and the text in ONE pass, then
+    slicing the filler off. A first token longer than `room - tag_cells` does
+    not fit beside the filler either, so `wrap_cells` — correctly — put the
+    filler on a line of its own, and the slice left line 0 EMPTY. At a grant of
+    one line the row then spent its only line on the badge.
+
+    That is worse than the bug this whole branch is fixing: the pre-wrap card at
+    least drew one truncated line of the consequence. And it is reached by
+    exactly what a model writes into a description — a URL, a path, a hash.
+
+    Measured on the pre-fix tree: 16 frames across 60-100 columns drew an empty
+    head for the fixture below. The assertion is on the WRAP rather than on the
+    painted line because the grant varies with height; an empty first line is
+    the defect at every grant, and at a grant of 1 it is the whole row.
+    """
+    description = (
+        "https://ci.example.internal/pipelines/deploy/production/run/8891234/artifacts/download"
+        " rolls the fleet forward and cannot be undone once the canary passes."
+    )
+    question = AskQuestion(
+        id="unbreakable",
+        question="Which pipeline should run?",
+        options=[
+            AskOption(label="Roll forward", description=description),
+            AskOption(label="Hold", description="stay on the current build"),
+        ],
+        recommended=0,
+    )
+    for width in (60, 70, 80, 100, 130):
+        for height in (18, 22, 26, 30, 40):
+            app = _AskHost([question])
+            async with app.run_test(size=(width, height)) as pilot:
+                card = await app.open_picker()
+                await pilot.pause()
+                layout = card._layout()
+                if not layout.description_rows.get(0, 0):
+                    continue
+                wrapped = card._description_lines(0, layout.width)
+                assert wrapped, (width, height)
+                # The line the tag shares must carry prose, not just the badge.
+                assert wrapped[0].strip(), (width, height, wrapped[:2])
+                # And the row's painted description is not blank either.
+                drawn = _description_lines_of(card, card.render_lines_for_test())
+                assert any(line.strip() for line in drawn), (width, height, drawn)
+
+
+def test_a_cut_short_description_is_filled_from_the_source_not_a_rejoin() -> None:
+    """Review finding (MAJOR): the last kept line of a cut-short description was
+    filled by `" ".join(wrapped[position:])`, which INVENTS a space.
+
+    `wrap_cells` breaks a word longer than the row — a URL, a path, a hash; that
+    is its documented job — and the pieces either side of such a break never had
+    a space between them. Rejoining them with one fabricates a character in text
+    the user is being asked to authorise against, which on a path or a URL
+    misreads the string itself.
+
+    Pinned as a pure property of the helper rather than through a frame, because
+    it is one: whatever `_wrap_tail` returns must be a SUBSTRING of the source.
+    A frame test would only see it where `truncate_cells` does not cut before
+    the seam, which is why the defect survived a green suite — it needs wide or
+    cluster text to become visible.
+
+    The inputs are the four shapes that break a word: an unbreakable URL, a
+    path, wide CJK, and keycap clusters whose cell width is not their length.
+    """
+    from local_operator.tui.widgets.ask_picker import _wrap_tail
+    from local_operator.tui.widgets.transcript import wrap_cells
+
+    sources = (
+        "1\ufe0f\u20e3" * 5,
+        "https://a.example.com/" + "x" * 40,
+        "/very/long/path/" + "seg/" * 12,
+        "\u4f60\u597d" * 20,
+        "a normal sentence that wraps on its spaces and nothing else at all",
+    )
+    rejoin_was_wrong = 0
+    for source in sources:
+        for room in (8, 12, 20):
+            wrapped = wrap_cells(source, room)
+            for position in range(len(wrapped)):
+                tail = _wrap_tail(source, wrapped, position)
+                assert tail in source, (source[:20], room, position, tail[:20])
+                # It is a TAIL: it starts where the wrapped line does, so the
+                # fill never re-shows text the lines above already drew.
+                assert tail.startswith(wrapped[position]), (source[:20], room, position)
+                # The REJECTED expression, evaluated here rather than described
+                # in prose. Without this the test would pass on any tree that
+                # merely has the helper, and would report an ImportError rather
+                # than a defect on the tree that has the bug — proving the
+                # helper is new, not that the old fill was wrong.
+                rejoin_was_wrong += 0 if " ".join(wrapped[position:]) in source else 1
+    # The inputs really do exercise the difference. If a future `wrap_cells`
+    # stopped breaking words this drops to zero and the assertions above become
+    # a tautology, which should fail loudly rather than pass quietly.
+    assert rejoin_was_wrong > 0, rejoin_was_wrong
+
+
+# --- the reveal (`ctrl+e`) ---------------------------------------------------
+#
+# Driven against the REAL ``OperatorApp`` through :func:`_real_app_card` and
+# :func:`_show`, not against ``_AskHost``, and that is not a stylistic choice —
+# it changes the answers. ``_AskHost`` mounts the card into a bare container
+# with no stylesheet and no seeded transcript, so the card is not ANCHORED: at
+# 150x40 it gets a 25-line budget there against the 20 the real dock leaves it,
+# which is enough for (A)'s continuation lines to finish option 1 on their own
+# and the reveal is correctly refused. The reported bug lives in the anchored
+# budget, so the tests for the key that fixes it have to be measured in it.
+#
+# ``card.state.selected`` is assigned directly where a test iterates the cursor
+# over every row. ``pilot.press("down")`` is the right gesture for pinning the
+# KEYMAP and is used for that elsewhere in this file; here the claim is about
+# the LAYOUT at each selection, and the free-text row's own key handling would
+# otherwise decide which rows the loop can even reach.
+
+
+@pytest.mark.asyncio
+async def test_ctrl_e_reveals_the_selected_rows_full_consequence() -> None:
+    """The headline. 150x40 is the size the truncation was reported at, and it
+    is the frame where the bug is still visible after slice 1: the card's budget
+    is 20 rows, (A) spends its leftovers getting option 1 from one line to three
+    of its four, and the sentence that names what the option actually does is
+    still off the card.
+
+    So this is the test for the thing the user asked for — reaching the whole
+    description — rather than for the mechanism that gets there. Two assertions,
+    and they are separate claims:
+
+    - option 1's complete text is present, collapsed on whitespace because the
+      block wraps it across lines that each carry the description indent;
+    - and the card SAYS the key exists, before and after. A reveal reachable
+      only by a user who already knew about it is not reachable.
+
+    The default frame is asserted to be genuinely incomplete first. Without it
+    this test would still pass on a card that had simply drawn everything all
+    along, which is the state at 190x50 — and then it would be pinning nothing.
+    """
+    size = (150, 40)
+    full = " ".join(_LONG_DESCRIPTIONS[0].split())
+
+    app, card = await _real_app_card(size, [_long_description_question()])
+    async with app.run_test(size=size) as pilot:
+        await _show(app, pilot, card)
+
+        # The bug, still on screen after slice 1.
+        before = card.render_lines_for_test()
+        before_prose = " ".join(
+            " ".join(line.split()) for line in _description_lines_of(card, before)
+        )
+        assert full not in before_prose, before_prose
+        # ...and the card offers the way out of it.
+        assert ("^e", "more") == card._reveal_hint()
+        assert "^e more" in _painted_footer(app), _painted_footer(app)
+
+        await pilot.press("ctrl+e")
+        await _until(pilot, lambda: card.state.revealed)
+
+        lines = card.render_lines_for_test()
+        joined = " ".join(" ".join(line.split()) for line in lines)
+        assert full in joined, lines
+        # The footer names the way back, on the COMPOSITED frame: a card whose
+        # model changed without a repaint would still generate the new hint.
+        await _until(pilot, lambda: "^e less" in _painted_footer(app))
+        assert "^e less" in _painted_footer(app), _painted_footer(app)
+        # And the conversation the question is about is still there. The reveal
+        # is bought from the card's own leftovers, never from the transcript.
+        assert not app.screen.show_vertical_scrollbar
+        assert "answer 5: the audit log still has every row" in "\n".join(_painted_rows(app))
+
+
+@pytest.mark.asyncio
+async def test_the_revealed_card_is_the_same_height_for_every_selection() -> None:
+    """The property the whole reveal design rests on: the block reserves the
+    height of the TALLEST capped description in the list, not the selected
+    row's, and pads the remainder blank.
+
+    A block sized to the cursor's row would be the cheaper implementation and it
+    is the one this must not become. Measured under that scheme the card had
+    three different heights at 190x50, and a card whose height changes on every
+    arrow press moves the footer, re-lays out the dock and shifts the
+    conversation under a user who is mid-answer — the `_paint_detail` rule
+    (`settings_view.py:3044-3056`) and AGENTS.md's "animated content must
+    reserve its row even when it has nothing to show".
+
+    Asserted as ONE distinct line count over every row, which is the strongest
+    form: not "close", not "within one", exactly one. The padding is asserted
+    too, because a card could hold its height by never drawing anything.
+    """
+    for size in ((150, 40), (140, 36)):
+        app, card = await _real_app_card(size, [_long_description_question()])
+        async with app.run_test(size=size) as pilot:
+            await _show(app, pilot, card)
+            await pilot.press("ctrl+e")
+            await _until(pilot, lambda: card.state.revealed)
+
+            heights: set[int] = set()
+            reserved: set[int] = set()
+            for index in range(card.row_count):
+                card.state.selected = index
+                card._repaint()
+                await pilot.pause()
+                heights.add(len(card.render_lines_for_test()))
+                reserved.add(card._layout().reveal_rows)
+
+            assert len(heights) == 1, (size, heights)
+            # The same reservation at every selection is the MECHANISM behind
+            # the height above. Both are asserted because either can be right
+            # while the other is wrong: a block that shrank for a short row and
+            # a list that grew a line to compensate would hold the total.
+            assert len(reserved) == 1, (size, reserved)
+            assert reserved.pop() >= 1, size
+
+
+@pytest.mark.asyncio
+async def test_the_reveal_never_takes_the_last_option_row() -> None:
+    """Revealing one option's prose must never take another option's LABEL off
+    the card. A description is commentary on an answer; a row IS an answer, and
+    the priority order (`ask_picker.py:1206-1220`) ranks prose strictly below
+    it. On the approval gate a row taken off the card is an authorisation
+    choice the user cannot see.
+
+    130x30 and 100x20 are the two shapes the design names: at 130x30 the list
+    fits in full and the reveal must not window it, and at 100x20 the list is
+    ALREADY windowed, where the failure would be the reveal buying its block out
+    of the one row left.
+
+    140x36 and 150x40 are here because those two alone cannot fail. Measured in
+    the anchored budget, `reveal_rows` is 0 at both of the design's sizes — the
+    plan cannot afford a block there in either state, so a regression that
+    bought the block with an option row's money would be INERT at exactly the
+    sizes this test names, and the guard would be believed while catching
+    nothing. The two sizes added are the ones where the block is genuinely
+    bought (`reveal_rows` 4), so the trade the test forbids is reachable.
+
+    Two claims per size, and the second is what keeps the first honest: `page`
+    never drops below one drawn row in either state, and wherever the card is
+    drawing less than the whole list it BUYS the position line to say so. A card
+    that quietly windowed itself to afford prose would satisfy the first alone.
+
+    Asked of `_layout(reveal=...)` at every selection rather than of a single
+    keypress, because the block is bought against the SELECTED row's wrap and
+    the row with the tallest description is the one that could afford to take a
+    row from the list.
+    """
+    afforded = 0
+    for size in ((130, 30), (100, 20), (140, 36), (150, 40)):
+        app, card = await _real_app_card(size, [_long_description_question()])
+        async with app.run_test(size=size) as pilot:
+            await _show(app, pilot, card)
+
+            for index in range(card.row_count):
+                card.state.selected = index
+                card._repaint()
+                await pilot.pause()
+                for revealed in (False, True):
+                    plan = card._layout(reveal=revealed)
+                    assert plan.page >= 1, (size, index, revealed, plan.page)
+                    if plan.page < card.row_count:
+                        assert plan.show_position, (size, index, revealed, plan.page)
+                        assert "of {}".format(card.row_count) in "\n".join(
+                            card.render_lines_for_test()
+                        ), (size, index, revealed)
+
+                # The claim with teeth: turning the reveal ON never costs a
+                # LABEL. Continuation lines are fair game (they are the last
+                # thing bought and the first thing lost); an option row is not,
+                # because a row is an ANSWER.
+                default_plan = card._layout(reveal=False)
+                revealed_plan = card._layout(reveal=True)
+                assert revealed_plan.page >= default_plan.page, (
+                    size,
+                    index,
+                    default_plan.page,
+                    revealed_plan.page,
+                )
+                afforded += 1 if revealed_plan.reveal_rows >= 1 else 0
+
+    # The sweep above only tests anything at sizes where a block is actually
+    # bought. Asserted rather than assumed: if the budgets shift under a future
+    # change until no size here affords one, this test degrades to a tautology
+    # silently, and that is the failure mode it was rewritten to avoid.
+    assert afforded >= 1, afforded
+
+
+@pytest.mark.asyncio
+async def test_the_footer_offers_the_reveal_only_where_it_does_something() -> None:
+    """This row already refuses to name dead keys — the digits on a one-row
+    window, the whole keymap while the composer holds the caret — and `^e` is
+    dead at both ends of the size range for OPPOSITE reasons.
+
+    At 190x50 (A)'s continuation lines have already drawn every description in
+    full, so the key would toggle a mode that changes nothing: measured, it adds
+    three blank rows and no words. At 100x20 the budget is 6 and step 7a has
+    nothing left to buy a reveal line with, so the revealed plan equals the
+    default one. Between them, at 150x40, the selected row is genuinely cut and
+    the plan can afford the block — so the hint is drawn.
+
+    Both the absent cases are asserted on the COMPOSITED footer as well as on
+    the predicate. The hint being derivable is not the claim; what the user is
+    told is.
+    """
+    for size, offered in (((190, 50), False), ((100, 20), False), ((150, 40), True)):
+        app, card = await _real_app_card(size, [_long_description_question()])
+        async with app.run_test(size=size) as pilot:
+            await _show(app, pilot, card)
+
+            assert card._offers_reveal() is offered, (size, card._reveal_hint())
+            painted = _painted_footer(app)
+            assert ("^e" in painted) is offered, (size, painted)
+            # Whatever the footer says, the exit survives — it is the one hint
+            # this row defends hardest, and `^e` is inserted immediately before
+            # it in the ladder precisely so it sheds first.
+            assert "esc" in painted, (size, painted)
+
+
+@pytest.mark.asyncio
+async def test_the_reveal_block_is_drawn_under_the_row_it_explains() -> None:
+    """Regression, found in a rendered frame and invisible to the suite that
+    was green around it: the block was appended after the LIST rather than under
+    the selected row, so at 150x40 the paragraph explaining option 1 sat
+    directly beneath `Other (type your own)`, indented exactly as that row's own
+    description would be.
+
+    That is misattributed consequence text. On `ApprovalPrompt` it is a user
+    reading "stop asking for this session" with Enter still on "Allow" — the
+    same misattribution hover was rejected for, arrived at by a different route.
+
+    Pinned positionally, on `_line_rows`, because position is the entire defect:
+    the words were all on the card in the broken frame too. The block's own
+    lines map to `None` (they are chrome about a row, not the row — a click on
+    their blank padding must never answer), so the assertion is that every line
+    between the selected row's label and the NEXT row's label belongs to the
+    selected row or to the block, and that the block is not sitting after the
+    last row.
+    """
+    size = (150, 40)
+    app, card = await _real_app_card(size, [_long_description_question()])
+    async with app.run_test(size=size) as pilot:
+        await _show(app, pilot, card)
+        await pilot.press("ctrl+e")
+        await _until(pilot, lambda: card.state.revealed)
+
+        for index in (0, 2):
+            card.state.selected = index
+            card._repaint()
+            await pilot.pause()
+            lines = card.render_lines_for_test()
+            rows = card._line_rows
+            first = " ".join(_LONG_DESCRIPTIONS[index].split()).split(" ")[0:6]
+            opening = " ".join(first)
+
+            # Where the block's first line actually is.
+            block_at = next(
+                (
+                    position
+                    for position, line in enumerate(lines)
+                    if opening in " ".join(line.split()) and rows[position] is None
+                ),
+                None,
+            )
+            assert block_at is not None, (index, lines)
+            # The selected row's own label line, and the next row's.
+            label_at = rows.index(index)
+            following = [
+                position for position, row in enumerate(rows) if row is not None and row > index
+            ]
+            assert label_at < block_at, (index, label_at, block_at)
+            if following:
+                assert block_at < min(following), (index, block_at, min(following), lines)
+            # The block's blank padding is click-inert: mapped to a row, empty
+            # space under the cursor's option would answer the question.
+            assert rows[block_at] is None, (index, lines)
+
+
+@pytest.mark.asyncio
+async def test_the_reveal_is_advertised_from_the_selected_row_not_any_drawn_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression, and the one with the worst blast radius: `^e` must be offered
+    on the SELECTED row being cut, never on ANY drawn row being cut.
+
+    The block only ever shows the row under the cursor, but it is bought out of
+    the pool the OTHER rows' prose is drawn from. Asked the loose way, the
+    approval card at 40x24 advertises `^e` because *Deny*'s consequence is cut
+    — and the cursor is on *Allow*, whose consequence is already complete. The
+    trade is then pure loss: the block redraws text the user can already read
+    and the rows it was bought from lose theirs.
+
+    Reintroduced here by monkeypatching the predicate to its rejected form
+    rather than by editing the widget, per AGENTS.md's "prove the test can still
+    fail". The patched half is what makes this a guard instead of a restatement
+    of current behaviour: it shows the assertion goes red against the exact
+    variant that was shipped and reverted.
+    """
+    from local_operator.tui.widgets.approval import ApprovalPrompt
+
+    def _any_drawn_row_is_cut(self: AskPickerScreen) -> bool:
+        """The rejected variant: cut ANYWHERE on the card, not under the caret."""
+        plan = self._layout(reveal=False)
+        cut = any(
+            len(self._reveal_wrap(index, plan.width)) > plan.description_rows.get(index, 0)
+            for index in self._window(plan.page)
+        )
+        return cut and self._layout(reveal=True).reveal_rows >= 1
+
+    size = (40, 24)
+    app = _AskHost([])
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        card = ApprovalPrompt("bash", "rm -rf /Users/x/project/data")
+        await app.query_one("#prompt-host", Container).mount(card)
+        await pilot.pause()
+
+        plan = card._layout(reveal=False)
+        selected = card.state.selected
+        cut = {
+            index: (
+                len(card._reveal_wrap(index, plan.width)),
+                plan.description_rows.get(index, 0),
+            )
+            for index in card._window(plan.page)
+        }
+        # The frame this is about: a NON-selected row is cut, the selected one
+        # is not. If the approval strings ever change so that this is no longer
+        # true, this test is measuring nothing and must be re-derived rather
+        # than deleted.
+        assert any(want > got for want, got in cut.values()), cut
+        assert cut[selected][0] <= cut[selected][1], (selected, cut)
+
+        # The card is silent about a key that would only cost the user text.
+        assert card._reveal_hint() is None, cut
+
+        # And the rejected variant is not silent — the guard can go red.
+        monkeypatch.setattr(AskPickerScreen, "_reveal_is_useful", _any_drawn_row_is_cut)
+        assert card._reveal_hint() == ("^e", "more"), cut
+        card._settled = True
+
+
+@pytest.mark.asyncio
+async def test_ctrl_e_is_inert_on_a_card_too_narrow_to_advertise_it() -> None:
+    """Regression: the key must not fire where the footer does not name it.
+
+    `^e` sheds from the footer on a narrow card so `esc deny` stays whole. A key
+    that still worked there would be an unadvertised gesture on the surface that
+    authorises tool calls — and it is not a harmless one: measured on the
+    approval card at 30x24, firing it replaces the three consequence lines with
+    a single one, so the user loses two of the three things they are choosing
+    between, by a key the card never offered.
+
+    Both halves are asserted. The press does nothing (the state does not flip
+    and the frame is byte-identical), and the damage it WOULD do is measured by
+    forcing the state directly — otherwise a card that had simply stopped
+    drawing a block would look identical to one correctly refusing the key.
+    """
+    from local_operator.tui.widgets.approval import ApprovalPrompt
+
+    consequences = (
+        "run this call and ask again next time",
+        "refuse this call; the turn continues",
+        "stop asking for this session",
+    )
+    size = (30, 24)
+    app = _AskHost([])
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        card = ApprovalPrompt("bash", "rm -rf /Users/x/project/data")
+        await app.query_one("#prompt-host", Container).mount(card)
+        await pilot.pause()
+
+        before = [line.rstrip() for line in card.render_lines_for_test()]
+        # The frame this is about: the hint has been shed to keep the exit, and
+        # the reveal WOULD otherwise buy a line here.
+        assert card._reveal_is_useful(), before
+        assert not card._offers_reveal(), before
+        assert "^e" not in before[-1], before
+        assert "esc deny" in before[-1], before
+
+        await pilot.press("ctrl+e")
+        await pilot.pause()
+        assert not card.state.revealed, card.render_lines_for_test()
+        assert [line.rstrip() for line in card.render_lines_for_test()] == before
+
+        # What the ungated key would have cost, on the authorisation frame.
+        # Forced past the gate, not pressed: this is the measurement that makes
+        # the assertion above a safety property rather than a preference.
+        card.state.revealed = True
+        card._repaint()
+        await pilot.pause()
+        forced = " ".join(" ".join(line.split()) for line in card.render_lines_for_test())
+        kept = [text for text in consequences if text in forced]
+        assert len(kept) < len(consequences), forced
+        card._settled = True
+
+
+@pytest.mark.asyncio
+async def test_the_reveal_mode_does_not_follow_the_user_to_the_next_question() -> None:
+    """`revealed` is per QUESTION, held in `_QuestionState`, not per card.
+
+    A multi-question ask is several unrelated decisions on one widget. Carrying
+    the mode across them would open the second question in a state the user
+    never asked for on it — and on a mixed run where one question is an
+    approval, that is a frame chosen by a keypress aimed at something else.
+    """
+    second = AskQuestion(
+        id="second",
+        question=_LONG_QUESTION_TEXT,
+        options=[
+            AskOption(label=label, description=description)
+            for label, description in zip(_LONG_LABELS, _LONG_DESCRIPTIONS)
+        ],
+    )
+    size = (150, 40)
+    app, card = await _real_app_card(size, [_long_description_question(), second])
+    async with app.run_test(size=size) as pilot:
+        await _show(app, pilot, card)
+
+        await pilot.press("ctrl+e")
+        await _until(pilot, lambda: card.state.revealed)
+        assert card.state.revealed
+
+        await pilot.press("enter")
+        await _until(pilot, lambda: card._index == 1)
+        # The next question opens in the card's default state...
+        assert not card.state.revealed
+        # ...and still says the key is there, so the mode is available rather
+        # than lost.
+        assert card._reveal_hint() == ("^e", "more")
 
 
 # --- what survives a card with no room --------------------------------------
@@ -1199,6 +2190,49 @@ async def test_the_conversation_stays_readable_behind_a_question() -> None:
         assert transcript.region.height >= divisible * (1 - PROMPT_HEIGHT_SHARE)
         # And the composer is still there to type into, below the question.
         assert app.query_one("#input-shell").region.y > card.region.y
+
+
+@pytest.mark.asyncio
+async def test_a_long_description_never_costs_the_conversation_its_share() -> None:
+    """The anchoring rule, re-asserted against the input that most wants to
+    break it: descriptions long enough to fill the screen on their own.
+
+    Separated from the test above rather than folded into it because it is a
+    different claim about a different fixture. That one pins the rule for an
+    ordinary question; this one pins that WRAPPING cannot become a way around
+    it. The rejected "wrap everything" design needs 12 lines where 5 are spent
+    at 150x40, and the seven extra rows can only come from the transcript —
+    which is the modal behaviour this surface was rewritten to remove.
+
+    The property holds by construction if the continuation lines are bought
+    from `remaining` at the bottom of the priority order, because `_body_rows`
+    is a CAP the allocator spends within and never a request it can raise. That
+    is exactly the reasoning a test should be pinning rather than trusting: the
+    single most likely way to ship a regression here is `_body_rows`'s `wanted`
+    cap being updated with the new line counts and taking the anchoring share
+    with it (design §11 risk 2).
+    """
+    from local_operator.tui.widgets.transcript import TranscriptView
+
+    for size in ((150, 40), (190, 50)):
+        app = _baseline_app()
+        card = AskPickerScreen([_long_description_question()])
+        async with app.run_test(size=size) as pilot:
+            await pilot.pause()
+            await _show(app, pilot, card)
+
+            painted = "\n".join(_painted_rows(app))
+            assert "the agent needs your decision" in painted
+            # The conversation the question is ABOUT is still on screen.
+            assert "answer 5: the audit log still has every row" in painted
+
+            transcript = app.query_one(TranscriptView)
+            divisible = transcript.region.height + card.region.height
+            assert transcript.region.height >= MIN_TRANSCRIPT_ROWS, size
+            assert transcript.region.height >= divisible * (1 - PROMPT_HEIGHT_SHARE), size
+            # A card that overflowed its share would make the screen scrollable,
+            # which AGENTS.md calls always a bug on this app.
+            assert not app.screen.show_vertical_scrollbar, size
 
 
 @pytest.mark.asyncio
