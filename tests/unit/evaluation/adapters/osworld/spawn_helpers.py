@@ -23,6 +23,7 @@ import shutil
 import subprocess
 import sys
 import sysconfig
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -89,28 +90,49 @@ def real_interpreter(venv: Path) -> Path:
 def build_adapter_wheel(out_dir: Path) -> Path:
     """Build the real adapter wheel from benchmarks/osworld_v2_adapter.
 
-    The wheel is built once and reused: the tests assert the SHIPPED artifact
-    loads, not a recompiled one per test.
-
     Built with THIS interpreter's ``pip``, deliberately not with ``uv``. The
     developer workflow uses ``uv`` (see the adapter README and
     ``make adapter-osworld``), but ``uv`` is not on a stock GitHub runner's
     PATH, and a test that silently depends on the developer's toolchain is a
-    test that only runs where it was written -- these four errored at setup on
-    CI for exactly that reason. ``pip`` ships with every interpreter that can
-    run the suite, and produces the same PEP 517 artifact from the same
-    ``pyproject.toml``, so the thing under test is unchanged.
+    test that only runs where it was written. ``pip`` ships with every
+    interpreter that can run the suite and produces the same PEP 517 artifact
+    from the same ``pyproject.toml``, so the thing under test is unchanged.
+
+    THE BUILD RUNS ON AN ISOLATED COPY, NOT ON THE SOURCE TREE. ``pip wheel
+    <srcdir>`` hands the directory to setuptools, which writes ``build/`` and
+    ``src/*.egg-info`` INSIDE it. The suite runs under xdist, and the two
+    module-scoped fixtures that need a wheel (``test_spawn``,
+    ``test_discovery``) land on different workers, so two concurrent builds
+    clobber each other's intermediates mid-copy. That is a RACE, not a
+    deterministic failure: measured here at 2 of 3 parallel runs failing with
+    4 errors each while the serial run stayed green -- which is exactly how a
+    single green CI run can be luck rather than proof.
+
+    Copying into a per-build temp directory gives each worker its own tree, so
+    no two builds ever write the same path. This is preferred over sharing one
+    wheel behind a file lock: a lock adds cross-process failure modes (stale
+    locks, timeout tuning) to buy a few seconds of build time, whereas isolation
+    removes the shared resource altogether and keeps each build independent.
+    ``build/`` and ``*.egg-info`` are excluded from the copy so a developer's
+    existing in-tree artifacts cannot leak into it.
     """
 
     out_dir.mkdir(parents=True, exist_ok=True)
     wheel = out_dir / WHEEL_NAME
     if wheel.exists():
         return wheel
-    subprocess.run(
-        [sys.executable, "-m", "pip", "wheel", "--no-deps", "-w", str(out_dir), str(ADAPTER_SRC)],
-        check=True,
-        capture_output=True,
-    )
+    with tempfile.TemporaryDirectory(prefix="osworld-build-") as scratch:
+        source = Path(scratch) / "adapter"
+        shutil.copytree(
+            ADAPTER_SRC,
+            source,
+            ignore=shutil.ignore_patterns("build", "dist", "*.egg-info", "__pycache__", ".venv"),
+        )
+        subprocess.run(
+            [sys.executable, "-m", "pip", "wheel", "--no-deps", "-w", str(out_dir), str(source)],
+            check=True,
+            capture_output=True,
+        )
     if not wheel.exists():
         built = sorted(item.name for item in out_dir.glob("*.whl"))
         raise AssertionError(f"pip wheel did not produce {WHEEL_NAME}; built {built}")
