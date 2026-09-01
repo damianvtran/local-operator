@@ -106,6 +106,32 @@ class TaskDescriptor:
 
         return bool(self.evaluator)
 
+    def is_infeasible(self) -> bool:
+        """Whether this task grades a correct refusal rather than a completion.
+
+        OSWorld marks these with ``evaluator.func == "infeasible"``: the task
+        is impossible, and ``evaluate()`` awards 1.0 only when
+        ``action_history[-1]`` is ``FAIL`` (desktop_env.py). Our runner returns
+        on a ``finish`` batch WITHOUT calling ``execute``, so the adapter never
+        sees the terminal action and cannot put ``FAIL`` into that history. An
+        agent that correctly declared the task infeasible would therefore score
+        0 — and synthesising the ``FAIL`` ourselves would report a claim the
+        agent never made, which is score fraud rather than a workaround.
+
+        So these tasks are REFUSED at ``reset_start``, before anything is
+        allocated. Detection is on the evaluator's own field, so it follows the
+        task file rather than a maintained list that would drift from it.
+        """
+
+        evaluator = self.evaluator
+        if isinstance(evaluator, dict) and evaluator.get("func") == "infeasible":
+            return True
+        # A multi-phase or conjunctive evaluator can nest the marker; the
+        # repr scan is deliberately broad because a MISSED infeasible task
+        # scores an honest refusal as a failure, while a false positive only
+        # refuses a task we would rather not run yet.
+        return "'infeasible'" in repr(evaluator)
+
 
 def _literal(node: ast.AST) -> Any:
     """Resolve a class-level assignment value to a plain Python literal.

@@ -71,3 +71,15 @@ def test_source_text_is_carried_for_requirement_derivation() -> None:
     descriptor = taskfile.load_static(fixtures.GITLAB.encode(), module_name="tasks/t.py")
     assert "controllers" in descriptor.source_text
     assert "gitlab" in descriptor.source_text
+
+
+def test_infeasible_task_is_detected() -> None:
+    """Round-1 review F4: the exclusion must be enforced, not just documented."""
+    descriptor = taskfile.load_static(fixtures.INFEASIBLE.encode(), module_name="tasks/t.py")
+    assert descriptor.is_infeasible()
+
+
+def test_ordinary_tasks_are_not_flagged_infeasible() -> None:
+    for source in (fixtures.PLAIN, fixtures.PROXY, fixtures.CLOCK, fixtures.NO_EVALUATOR):
+        descriptor = taskfile.load_static(source.encode(), module_name="tasks/t.py")
+        assert not descriptor.is_infeasible()

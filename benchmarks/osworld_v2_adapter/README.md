@@ -84,13 +84,17 @@ Run it before and after any paid episode; it must return empty.
 
 ## Known scope limitations (PR 1)
 
-- **Infeasible tasks are excluded.** The runner returns on a `finish` batch
-  without calling `execute` (episode.py:531-534), so the adapter never sees
-  the terminal action and cannot push `DONE`/`FAIL` into OSWorld's
-  `action_history`, which `evaluate()` reads to score `infeasible` tasks. An
-  agent correctly declaring such a task infeasible would score 0. We exclude
-  them rather than fabricate a `FAIL` the agent never sent — that would be
-  score fraud. Support lands when the terminal-claim gap is resolved.
+- **Infeasible tasks are refused, not merely undocumented.** The runner returns
+  on a `finish` batch without calling `execute` (episode.py:531-534), so the
+  adapter never sees the terminal action and cannot push `DONE`/`FAIL` into
+  OSWorld's `action_history`, which `evaluate()` reads to score `infeasible`
+  tasks. An agent correctly declaring such a task infeasible would score 0. We
+  will not fabricate a `FAIL` the agent never sent — that would be score fraud.
+  `reset_start` therefore raises `InfeasibleTaskExcluded` **before allocating
+  anything** when a task's evaluator declares `func: "infeasible"`, so an
+  operator-built workspace containing one fails loudly instead of silently
+  grading an honest refusal as a failure. Support lands when the terminal-claim
+  gap is resolved.
 - **Screenshot-only observations.** The a11y tree is not shipped as a frame
   (a geometry for an XML document is a fiction). Its presence is recorded in
   observation metadata; shipping it is a protocol addition, not a fake frame.

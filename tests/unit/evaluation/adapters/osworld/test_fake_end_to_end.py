@@ -35,7 +35,10 @@ from local_operator.evaluation.adapters.api import (
     ADAPTER_SCHEMA_VERSION,
     AdapterSelector,
     Handshake,
+    PrepareParams,
     PythonRuntime,
+    ResetStartParams,
+    ScopedInfraValue,
 )
 from local_operator.evaluation.evidence.verify import verify_bundle
 from local_operator.evaluation.runner.episode import EpisodeRunner
@@ -48,6 +51,20 @@ from tests.unit.evaluation.runner.conftest import (
 )
 
 RELEASE_DIGEST = "d" * 64
+
+# The non-secret account facts the adapter's own inspect_requirements names.
+# A real host resolves these from those names; the tests supply them directly.
+_INFRA_VALUES = tuple(
+    ScopedInfraValue(name=name, purpose="benchmark_compute", value=f"test-{name}")
+    for name in (
+        "AWS_REGION",
+        "AWS_SUBNET_ID",
+        "AWS_SECURITY_GROUP_ID",
+        "AWS_SCHEDULER_ROLE_ARN",
+        "OSWORLD_CLIENT_PASSWORD",
+        "OSWORLD_FILE_BASE_URL",
+    )
+)
 
 
 class _AdapterSupervisorShim:
@@ -119,28 +136,11 @@ def _adapter(tmp_path: Path, provider: FakeProvider) -> OSWorldV2Adapter:
 
 
 def _spec_with_task(episode_id: str) -> Any:
-    from local_operator.evaluation.adapters.api import ScopedInfraValue
-
     spec = build_spec(episode_id)
     # The runner passes task_id to reset_start; the adapter loads
     # tasks/<task_id>.py from the workspace. Point the spec at the fixture.
     object.__setattr__(spec, "task_id", "task_plain")
-    # The adapter's provisioning is derived from the task plus declared infra
-    # values; the spec carries the non-secret account facts (subnet, SG, role,
-    # client password, file base URL) exactly as a real host would resolve
-    # them from the adapter's inspect_requirements names.
-    infra = tuple(
-        ScopedInfraValue(name=name, purpose="benchmark_compute", value=f"test-{name}")
-        for name in (
-            "AWS_REGION",
-            "AWS_SUBNET_ID",
-            "AWS_SECURITY_GROUP_ID",
-            "AWS_SCHEDULER_ROLE_ARN",
-            "OSWORLD_CLIENT_PASSWORD",
-            "OSWORLD_FILE_BASE_URL",
-        )
-    )
-    object.__setattr__(spec, "infra_values", infra)
+    object.__setattr__(spec, "infra_values", _INFRA_VALUES)
     return spec
 
 
@@ -276,3 +276,44 @@ async def test_an_answered_ask_runs_the_exchange(tmp_path: Path, episode_id: str
     assert outcome.status == "completed", outcome.diagnostic
     assert outcome.bundle_root is not None
     assert verify_bundle(outcome.bundle_root).valid
+
+
+@pytest.mark.asyncio
+async def test_an_infeasible_task_is_refused_before_anything_is_allocated(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """Round-1 review F4: the infeasible exclusion is enforced, not just prose.
+
+    The runner never delivers the terminal action, so OSWorld's action_history
+    never receives FAIL and a correct refusal would grade 0. Refusing the run
+    is honest; fabricating the FAIL would be score fraud. The refusal must land
+    BEFORE allocation, so nothing has to be cleaned up after it.
+    """
+
+    from lop_osworld_v2_adapter.adapter import InfeasibleTaskExcluded
+
+    workspace = tmp_path / "workspace"
+    (workspace / "tasks").mkdir(parents=True, exist_ok=True)
+    (workspace / "tasks" / "task_infeasible.py").write_text(fixtures.INFEASIBLE)
+    provider = FakeProvider()
+    adapter = OSWorldV2Adapter(provider_factory=lambda: provider, workspace_root=workspace)
+
+    await adapter.prepare(
+        PrepareParams(
+            operation_id=f"prepare-{episode_id}",
+            episode_id=episode_id,
+            secret_refs=(),
+            infra_values=_INFRA_VALUES,
+        )
+    )
+    with pytest.raises(InfeasibleTaskExcluded):
+        await adapter.reset_start(
+            ResetStartParams(
+                operation_id=f"reset-{episode_id}",
+                task_id="task_infeasible",
+                episode_id=episode_id,
+                artifact_root=str(tmp_path / "artifacts"),
+            )
+        )
+    # Nothing was allocated, so there is nothing to leak.
+    assert provider.allocated is False
