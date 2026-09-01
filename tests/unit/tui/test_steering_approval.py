@@ -132,7 +132,7 @@ def test_the_answer_key_hold_is_long_enough_to_be_a_hold() -> None:
     """The hold's DURATION is a safety property, so pin it here.
 
     ``unraceable_answer_hold`` stretches this constant to take the wall clock
-    out of four pilot tests, which necessarily makes those tests blind to its
+    out of three pilot tests, which necessarily makes those tests blind to its
     value: with the fixture applied, a 1 ms hold passes them just as happily
     as 180 ms. A 1 ms hold is not a hold — no keystroke pair arrives that
     close — so it silently reopens the F3 hazard where the first character of
