@@ -116,6 +116,16 @@ lint: ## Run linting with flake8
 type-check: ## Run type checking with pyright
 	.venv/bin/python -m pyright --pythonpath .venv/bin/python .
 
+# Build the OSWorld V2 evaluation adapter: lock, wheel, and the workspace
+# materialisation command. Deliberately NOT wired into CI's default job — the
+# workspace step needs a human-accepted gated HF dataset and an HF_TOKEN, so
+# this is a developer/operator command, not a gate.
+adapter-osworld: ## Build the OSWorld V2 adapter wheel and print workspace steps
+	cd benchmarks/osworld_v2_adapter && uv lock && uv build --wheel --out-dir dist/
+	@echo "Wheel built under benchmarks/osworld_v2_adapter/dist/."
+	@echo "Materialise the workspace (needs HF_TOKEN) with:"
+	@echo "  python scripts/build_osworld_adapter.py --benchmark-release osworld-v2-2026.08.08 --out <workspace>"
+
 # Run security audit with pip-audit
 security: ## Run security audit with pip-audit
 	pip-audit

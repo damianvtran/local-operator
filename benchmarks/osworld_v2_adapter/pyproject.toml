@@ -1,0 +1,36 @@
+# lop-osworld-v2-adapter: the OSWorld 2.0 evaluation adapter distribution.
+#
+# Built as a wheel and installed into a dedicated uv-managed venv. The wheel
+# must declare NO console scripts (discovery._record_rows refuses ``../`` RECORD
+# paths, which is where scripts land) and must never be installed editable
+# (discovery refuses unhashed RECORD rows). ``local-operator`` is a runtime
+# dependency because the adapter's ``create()`` imports
+# ``local_operator.evaluation.adapters.api`` to build its ``AdapterMetadata``.
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lop-osworld-v2-adapter"
+version = "0.1.0"
+description = "OSWorld 2.0 evaluation adapter for local-operator"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    # The adapter imports the harness's evaluation.adapters.api to build its
+    # AdapterMetadata and is coupled to that protocol version; pinned at build
+    # time by the lock.
+    "local-operator",
+    "pydantic>=2.7",
+    "typing-extensions>=4.6",
+]
+
+[project.entry-points."local_operator.evaluation_adapters.v1"]
+osworld-v2 = "lop_osworld_v2_adapter:create"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+lop_osworld_v2_adapter = ["py.typed"]
