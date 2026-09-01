@@ -32,7 +32,7 @@ import os
 import time
 import unicodedata
 from contextlib import contextmanager
-from typing import Callable, ClassVar, Iterator, Literal, Sequence
+from typing import Any, Callable, ClassVar, Iterator, Literal, Protocol, Sequence
 
 from rich.cells import cell_len
 from rich.console import Console, RenderableType
@@ -62,6 +62,14 @@ SPINE_INDENT = 2
 #: `offset == max_scroll_y` false at a place the reader cannot tell apart from
 #: the end. Two rows is the smallest tolerance that survives both.
 TAIL_TOLERANCE_ROWS = 2
+
+
+#: The signature ``set_on_user_scroll`` installs. A Protocol rather than
+#: ``Callable[..., None]`` so the ``continuous`` keyword is CHECKED: the
+#: ellipsis form erased the parameter contract entirely, which is how a
+#: docstring came to name a parameter that did not exist (review round 2, N2).
+class UserScrollHook(Protocol):
+    def __call__(self, *_args: Any, continuous: bool = False) -> None: ...
 
 
 class TailAnchor:
@@ -2206,7 +2214,12 @@ class TranscriptView(ScrollableContainer):
         #: watch on the offset would miss the one gesture that most clearly
         #: means "show me the start". The hook is the same shape as
         #: ``on_clear``: optional, app-owned, never required for the widget.
-        self._on_user_scroll: Callable[[], None] | None = None
+        #: It receives ``continuous`` — True for a free-running gesture
+        #: (wheel, scrollbar drag), False for a discrete act (keystroke,
+        #: affordance click, explicit caller) — because the page-back latch
+        #: re-arms on a deliberate act at the top but not on a wheel notch
+        #: clamped against it.
+        self._on_user_scroll: UserScrollHook | None = None
         # The ledger's shared name column, recomputed lazily. Cached because it
         # is read once per card per repaint and only changes when the set of tool
         # names on screen does.
@@ -2260,7 +2273,7 @@ class TranscriptView(ScrollableContainer):
         """Install the hook fired after every :meth:`clear_blocks`."""
         self._on_clear = hook
 
-    def set_on_user_scroll(self, hook: Callable[[], None] | None) -> None:
+    def set_on_user_scroll(self, hook: UserScrollHook | None) -> None:
         """Install the hook fired from every user-initiated scroll.
 
         Distinct from watching ``scroll_y``: a Home press while already at the
@@ -2355,7 +2368,10 @@ class TranscriptView(ScrollableContainer):
         the earliest moment a caller that gates work on "the reader is back
         where they were" can safely re-open that gate. Running it from the
         anchor restore rather than the settle itself is load-bearing: between
-        the two, the offset still sits where the inserted rows pushed it.
+        the two, the offset still sits where the inserted rows pushed it. It
+        runs INSIDE the restore's programmatic-scroll guard so the gate never
+        opens on a frame where this widget's own scroll could still be
+        reported as a reader's (see ``restore_anchor``).
         """
         additions = list(blocks)
         if not additions:
@@ -2396,8 +2412,17 @@ class TranscriptView(ScrollableContainer):
                         y=max(0, anchor_block.virtual_region.y - anchor_gap),
                         animate=False,
                     )
-                if on_settled is not None:
-                    on_settled()
+                    # INSIDE the guard, not after it: `on_settled` re-opens the
+                    # caller's page gate, and the guard is what keeps THIS
+                    # widget's own restore scroll from being reported to that
+                    # caller as a reader's scroll. Releasing outside the guard
+                    # left a frame where the gate was open and the offset sat
+                    # inside the trigger zone — harmless only while every
+                    # consumer ALSO edge-triggers on zone entry, which is a
+                    # contract too easy to regress silently. Releasing inside
+                    # makes the window not exist rather than not matter.
+                    if on_settled is not None:
+                        on_settled()
 
             self.call_after_refresh(restore_anchor)
 
@@ -2784,13 +2809,22 @@ class TranscriptView(ScrollableContainer):
         self._tail_anchor.acquire()
         self.call_after_refresh(self._scroll_to_tail)
 
-    def note_user_scroll(self) -> None:
+    def note_user_scroll(self, *, continuous: bool = False) -> None:
         """A person moved the viewport: release, then re-decide where they land.
 
         Public because a scroll gesture does not always arrive as an event on
         this widget — the subagent page's ↑↓ hint buttons page the body from
         outside it, and a click on an affordance is as much a user scroll as
         the wheel is.
+
+        ``continuous`` marks a free-running gesture (wheel, scrollbar drag)
+        rather than a discrete act (keystroke, click on an affordance, or a
+        caller announcing a gesture by hand). The distinction matters to the
+        page-back latch: a wheel notch arriving while the viewport is already
+        clamped at the top moves NOTHING, so it is not evidence the reader
+        left and came back — re-arming on it let a held wheel mount a page per
+        notch while the reader sat at y=0. A discrete act at the top IS an
+        ask ("show me the next older page"), so it re-arms.
         """
         self._tail_anchor.note_user_scroll()
         # After the refresh, not now: the scroll this call is reporting has not
@@ -2800,7 +2834,7 @@ class TranscriptView(ScrollableContainer):
         # anchor straight back rather than leaving it released forever.
         self.call_after_refresh(self._resync_tail_anchor)
         if self._on_user_scroll is not None:
-            self._on_user_scroll()
+            self._on_user_scroll(continuous=continuous)
 
     def watch_scroll_y(self, old_value: float, new_value: float) -> None:
         """Re-decide following from every offset the viewport actually rests at.
@@ -2829,7 +2863,13 @@ class TranscriptView(ScrollableContainer):
             # gate open — see `OperatorApp._check_resume_page`), so the many
             # firings of one animated gesture collapse into ONE page (M1/U1).
             if self._on_user_scroll is not None:
-                self._on_user_scroll()
+                # NOT the re-arm: the watch reports OFFSET MOTION, which is
+                # travel evidence rather than a gesture, and it fires for the
+                # clamped 1->0 step of a wheel already pinned at the top.
+                # Passing continuous=True keeps the page-back latch's re-arm
+                # rule intact (a clamped notch earns nothing) while still
+                # scheduling the at-rest check that lands the gesture.
+                self._on_user_scroll(continuous=True)
 
     def _resync_tail_anchor(self) -> None:
         # Not while the viewport is still travelling: an animated page-up is
@@ -2880,23 +2920,23 @@ class TranscriptView(ScrollableContainer):
     # messages — and a scroll arriving through one of them came from a person.
 
     def _on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
-        self.note_user_scroll()
+        self.note_user_scroll(continuous=True)
         super()._on_mouse_scroll_down(event)
 
     def _on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
-        self.note_user_scroll()
+        self.note_user_scroll(continuous=True)
         super()._on_mouse_scroll_up(event)
 
     def _on_scroll_to(self, message: ScrollTo) -> None:
-        self.note_user_scroll()
+        self.note_user_scroll(continuous=True)
         super()._on_scroll_to(message)
 
     def _on_scroll_up(self, event: ScrollUp) -> None:
-        self.note_user_scroll()
+        self.note_user_scroll(continuous=True)
         super()._on_scroll_up(event)
 
     def _on_scroll_down(self, event: ScrollDown) -> None:
-        self.note_user_scroll()
+        self.note_user_scroll(continuous=True)
         super()._on_scroll_down(event)
 
     def action_scroll_up(self) -> None:
