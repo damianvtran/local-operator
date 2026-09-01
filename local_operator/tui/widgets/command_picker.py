@@ -157,6 +157,12 @@ class PickerMode(Enum):
 
     COMMAND = "command"
     ARGUMENT = "argument"
+    #: The ``$skill`` manual-invocation list. A third mode rather than a reuse
+    #: of ``COMMAND`` because the two complete differently: a command word is
+    #: inline and caret-anchored, while a ``$`` token is only ever the FIRST
+    #: token of the buffer, and Enter on a skill row must not run anything —
+    #: an invocation produces a PROMPT the user still has to write.
+    SKILL = "skill"
 
 
 #: One rendered row: its display name and the thing it stands for. A UNION
@@ -442,10 +448,51 @@ def slash_argument(
     return None if context is None else context.value
 
 
+def skill_token(text: str, cursor: int | None = None) -> SlashContext | None:
+    """The ``$skill`` token being typed at the start of the buffer, or ``None``.
+
+    The ``$`` counterpart to :func:`slash_context`, and deliberately STRICTER
+    than it in two ways.
+
+    It is **not inline**. A ``/`` opens a command anywhere a boundary allows,
+    because a user who has typed a message may still want to route it. A ``$``
+    is only an invocation as the buffer's FIRST token: mid-draft, ``$`` is
+    overwhelmingly money or a shell variable, and there is no second syntax to
+    disambiguate them. Restricting the position is what removes the need for an
+    escape rule — ``a $5 coffee`` cannot be a token by construction.
+
+    It is **word-phase only**, like :func:`slash_context`: the terminating
+    space means the user has moved on to the request, where a skill list is
+    stale advice.
+
+    ``query`` is ``""`` for a bare ``$``, which opens the list on the full set.
+    The caret must be INSIDE the token; moving it out into the request closes
+    the list, which is what makes the picker phase a property of the parse.
+
+    LEADING WHITESPACE is skipped, matching both :func:`slash_context` (which
+    opens on ``  /he``) and the submit-side parser in
+    :mod:`local_operator.skills.invoke`, which ``lstrip``s. Requiring column 0
+    made the two disagree: ``  $research fix`` offered no list while still
+    expanding on Enter, so the invocation fired with no UI cue that it would.
+    Only spaces and tabs are skipped \u2014 a ``$`` after a NEWLINE is on a second
+    line and is not the buffer's first token.
+    """
+    indent = len(text) - len(text.lstrip(" \t"))
+    if not text.startswith("$", indent):
+        return None
+    cursor = len(text) if cursor is None else cursor
+    end = indent + 1
+    while end < len(text) and not text[end].isspace():
+        end += 1
+    if cursor > end:
+        return None
+    return SlashContext(indent, text[indent + 1 : end], end)
+
+
 class CompletionMode(Enum):
     """Which slot :func:`completion_for` is completing.
 
-    The three completion sites in ``Editor`` differ only in which span they
+    The four completion sites in ``Editor`` differ only in which span they
     rewrite and whether a trailing space follows the inserted name, and that
     difference is exactly what this enum names.
     """
@@ -458,6 +505,10 @@ class CompletionMode(Enum):
     #: A NAME+message argument — ``/team fro`` → ``/team frontend-guild ``, the
     #: space opening the message tail (``Editor._complete_name_argument``).
     NAME_ARGUMENT = "name_argument"
+    #: A ``$skill`` invocation — ``$res`` → ``$research ``. Takes the trailing
+    #: space for the same reason ``NAME_ARGUMENT`` does: the space closes the
+    #: list and opens the request tail the user is about to type.
+    SKILL = "skill"
 
 
 def completion_for(
@@ -490,6 +541,20 @@ def completion_for(
     Returns ``None`` when the caret is not in the slot ``mode`` names — the
     parse the caller would otherwise have had to repeat.
     """
+    if mode is CompletionMode.SKILL:
+        token = skill_token(text, caret)
+        if token is None:
+            return None
+        # Same trailing-space contract as the command word: it terminates the
+        # token, closes the list, and opens the request. The suffix beyond the
+        # token is preserved because a user can complete a `$skill` typed in
+        # front of a request they already wrote.
+        # `token.start` is the `$`, which is not column 0 when the draft is
+        # indented; the leading run is preserved rather than normalised away so
+        # completing never silently reformats what the user typed.
+        lead = text[: token.start]
+        completed = f"{lead}${row_name} {text[token.end :].lstrip()}"
+        return completed, token.start + len(row_name) + 2
     if mode is CompletionMode.COMMAND:
         context = slash_context(text, caret, known)
         if context is None:
@@ -795,7 +860,13 @@ class CommandPicker(Static):
         the first report a no-op — and is where a browse should start anyway.
         """
         self._choices = list(choices)
-        if self._mode is PickerMode.ARGUMENT:
+        # SKILL rides the same fill path as ARGUMENT: both are app-pushed
+        # ``ArgumentChoice`` sets that land one message-loop tick after the
+        # keystroke that opened the list, so both need the immediate re-derive
+        # below or the picker sits closed on the empty set it opened with until
+        # the user types another character. Gating this on ARGUMENT alone is
+        # exactly why a bare ``$`` painted nothing.
+        if self._mode in (PickerMode.ARGUMENT, PickerMode.SKILL):
             matches = argument_suggestions(self._query, self._choices)
             seeding = highlight is not None and not self._query and not self._chosen_by_hand
             if seeding:
@@ -805,7 +876,11 @@ class CommandPicker(Static):
                 # again one message later.
                 self._suppress_report = True
             try:
-                self._apply(PickerMode.ARGUMENT, self._query, matches)
+                # The CURRENT mode, not a hard-coded ARGUMENT: re-applying the
+                # wrong one here would be read as a mode CHANGE by `_apply` and
+                # would reset the highlight, the window and the Esc latch on
+                # every fill.
+                self._apply(self._mode, self._query, matches)
             finally:
                 self._suppress_report = False
             if seeding:
@@ -984,6 +1059,27 @@ class CommandPicker(Static):
             return
         matches = command_suggestions(context.query, self._commands)
         self._apply(PickerMode.COMMAND, context.query, matches)
+
+    def sync_skills(self, text: str, cursor: int | None = None) -> None:
+        """Re-derive the ``$skill`` suggestions from the editor's ``text``.
+
+        The third sibling of :meth:`sync` and :meth:`sync_argument`, and it
+        closes the same way they do: leaving the token forgets the dismissal,
+        so the next ``$`` opens a fresh list rather than inheriting an Esc.
+
+        Rows are :class:`ArgumentChoice` and go through
+        :func:`argument_suggestions`, so a skill name is ranked by the very
+        scorer that ranks commands and providers — ``$cr`` finds
+        ``code-review`` by the rule the user already learned from ``/lgt``
+        finding ``logout``.
+        """
+        token = skill_token(text, cursor)
+        if token is None:
+            self._dismissed_query = None
+            self._mode = PickerMode.SKILL
+            self._close()
+            return
+        self._apply(PickerMode.SKILL, token.query, argument_suggestions(token.query, self._choices))
 
     def sync_argument(self, query: str) -> None:
         """Re-derive the ARGUMENT suggestions for the current command.

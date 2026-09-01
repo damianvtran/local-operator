@@ -197,6 +197,8 @@ current session's cost live).
 
 ### Keys worth knowing
 
+- `$<skill>` — run a named skill on the rest of the line
+  (`$research the payments rewrite`); `$` alone opens the picker.
 - **Type while the agent works** — your message is delivered at the next
   step as steering, no need to wait.
 - `esc` — stop the agent without ending the session.
@@ -338,6 +340,13 @@ Drop a `SKILL.md` (with optional reference files) into
 only the skills relevant to the current turn are surfaced, and their bodies
 load on demand via `skill://<name>` reads, so your context isn't taxed by
 knowledge you aren't using. `/skills` lists what's loaded.
+
+You can also invoke one **by name** instead of leaving the choice to the
+router: type `$` in the composer to pick from your skills, then write the
+request — `$research compare these two API designs` loads that skill and
+sends it with your message. A skill marked `hide: true` is excluded from
+automatic routing and is reachable this way only, which makes `$` the home
+for "never pick this on your own, but run it when I say so".
 
 ### 🔗 MCP servers
 
