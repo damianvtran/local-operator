@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-operator"
-version = "0.44.21"
+version = "0.44.22"
 description = "A team of proactive AI assistants that can work together behind the scenes to help you get mundane tasks done so you can focus on the fun stuff."
 readme = "README.md"
 authors = [{ name = "Damian Tran", email = "damian@gominerva.com" }]
@@ -344,6 +344,10 @@ markers = [
     # Applied by LOCATION in tests/e2e/conftest.py, so a module in that package
     # cannot forget it and silently rejoin the unit run.
     "e2e: headless end-to-end tests that drive the assembled TUI application",
+    # Kept IN the default run: these spawn real worker processes and are the
+    # only coverage of the actual subprocess boundary, so they are marked for
+    # selection rather than exclusion.
+    "slow: tests that spawn real subprocesses and take seconds rather than ms",
 ]
 
 # Coverage is measured through pytest-cov (`--cov`), which understands xdist
