@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 
 from local_operator.evaluation.adapters.supervisor import SupervisionError
+from local_operator.evaluation.evidence.models import ReconciliationPayload
 from local_operator.evaluation.evidence.store import EvidenceError
 from local_operator.evaluation.evidence.verify import verify_bundle
 from local_operator.evaluation.receipts import (
@@ -29,6 +30,7 @@ from tests.unit.evaluation.runner.conftest import (
     ScriptedModel,
     build_config,
     build_spec,
+    payloads,
     selector,
 )
 
@@ -44,9 +46,7 @@ async def _rescue_ok(descriptor: Any, **kwargs: Any) -> Any:
 
 
 @pytest.mark.asyncio
-async def test_overrun_is_recorded_and_still_scores(
-    tmp_path: Path, episode_id: str
-) -> None:
+async def test_overrun_is_recorded_and_still_scores(tmp_path: Path, episode_id: str) -> None:
     """A tiny allowance is exceeded by real usage; the episode still scores."""
 
     spec = build_spec(episode_id)
@@ -87,9 +87,7 @@ async def test_overrun_is_recorded_and_still_scores(
     assert root is not None
     report = verify_bundle(root)
     assert report.valid
-    reconciliations = [
-        event.payload for event in report.events if event.kind == "reconciliation"
-    ]
+    reconciliations = payloads(root, ReconciliationPayload)
     assert len(reconciliations) == 1
     # Usage was measurable, so the run stays reportable despite the overrun.
     assert reconciliations[0].reportable is True
@@ -119,18 +117,14 @@ async def test_dead_worker_makes_environment_usage_unavailable(
     assert root is not None
     report = verify_bundle(root)
     assert report.valid
-    reconciliations = [
-        event.payload for event in report.events if event.kind == "reconciliation"
-    ]
+    reconciliations = payloads(root, ReconciliationPayload)
     # Required reporting is not demanded by this budget, so the reconciliation
     # still closes; the unavailable entries are what the record preserves.
     assert len(reconciliations) == 1
 
 
 @pytest.mark.asyncio
-async def test_cost_counters_match_the_usage_events(
-    tmp_path: Path, episode_id: str
-) -> None:
+async def test_cost_counters_match_the_usage_events(tmp_path: Path, episode_id: str) -> None:
     adapter = FakeAdapter(tmp_path, episode_id)
     runner = EpisodeRunner(
         build_spec(episode_id),
@@ -153,9 +147,7 @@ async def test_cost_counters_match_the_usage_events(
     assert report.counters.input_tokens == 30
     assert report.counters.output_tokens == 15
     assert report.counters.cost_microusd == 21
-    reconciliations = [
-        event.payload for event in report.events if event.kind == "reconciliation"
-    ]
+    reconciliations = payloads(root, ReconciliationPayload)
     # The sealed outcome's cost must equal the reconciliation's provider cost.
     assert reconciliations[0].provider_cost_microusd == 21
 

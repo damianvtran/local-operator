@@ -125,24 +125,34 @@ class ProviderModelClient:
         observation: Observation,
         transcript: Sequence[Observation],
     ) -> ModelDecision:
-        from local_operator.model.types import ChatRequest, Message
+        from local_operator.harness.types import ChatRequest, Message, TextContent
 
-        messages = [
-            Message(role="system", content=self._system_prompt),
-            Message(role="user", content=_render(observation, transcript)),
-        ]
-        request = ChatRequest(model=self._model_spec, messages=messages)
+        # The system prompt rides in ``system_blocks`` rather than as a message
+        # so the provider can place a cache breakpoint after this stable block;
+        # every episode step repeats it verbatim.
+        request = ChatRequest(
+            model=self._model_spec,
+            system_blocks=[self._system_prompt],
+            messages=[
+                Message(
+                    role="user",
+                    content=[TextContent(text=_render(observation, transcript))],
+                )
+            ],
+            tool_choice="none",
+        )
         text = ""
         usage = ModelUsage()
         stop_reason = "stop"
         async for event in self._stream_fn(request, None):
-            kind = getattr(event, "kind", None)
-            if kind == "text":
-                text += getattr(event, "text", "") or ""
-            elif kind == "usage":
-                usage = _usage_from(event)
-            elif kind == "done":
-                stop_reason = getattr(event, "stop_reason", None) or "stop"
+            if event.type == "text_delta":
+                text += event.delta
+            elif event.type == "usage":
+                usage = _usage_from(event.usage)
+            elif event.type == "end":
+                stop_reason = event.stop_reason or "stop"
+                if event.usage is not None:
+                    usage = _usage_from(event.usage)
         return parse_decision(
             text.strip(),
             observation,
@@ -190,11 +200,18 @@ def _render(observation: Observation, transcript: Sequence[Observation]) -> str:
     return "\n".join(lines)
 
 
-def _usage_from(event: Any) -> ModelUsage:
+def _usage_from(usage: Any) -> ModelUsage:
+    """Copy provider counts, clamped to the non-negative evidence range.
+
+    ``reasoning_tokens`` is a SUBSET of ``output_tokens`` in the harness's
+    accounting, and the evidence payloads treat it the same way, so it is
+    carried across unchanged rather than added on top.
+    """
+
     return ModelUsage(
-        input_tokens=max(0, int(getattr(event, "input_tokens", 0) or 0)),
-        output_tokens=max(0, int(getattr(event, "output_tokens", 0) or 0)),
-        reasoning_tokens=max(0, int(getattr(event, "reasoning_tokens", 0) or 0)),
-        cache_read_tokens=max(0, int(getattr(event, "cache_read_tokens", 0) or 0)),
-        cache_write_tokens=max(0, int(getattr(event, "cache_write_tokens", 0) or 0)),
+        input_tokens=max(0, int(usage.input_tokens or 0)),
+        output_tokens=max(0, int(usage.output_tokens or 0)),
+        reasoning_tokens=max(0, int(usage.reasoning_tokens or 0)),
+        cache_read_tokens=max(0, int(usage.cache_read_tokens or 0)),
+        cache_write_tokens=max(0, int(usage.cache_write_tokens or 0)),
     )

@@ -62,18 +62,14 @@ def test_runner_core_does_not_import_the_application(module: str) -> None:
     leaked = {
         name
         for name in imported
-        if any(
-            name == prefix or name.startswith(prefix + ".") for prefix in FORBIDDEN_PREFIXES
-        )
+        if any(name == prefix or name.startswith(prefix + ".") for prefix in FORBIDDEN_PREFIXES)
     }
     assert not leaked, f"{module} leaked application imports: {sorted(leaked)}"
 
 
 def test_runner_package_import_is_inert() -> None:
     imported = _fresh_import_modules("local_operator.evaluation.runner")
-    assert not {
-        name for name in imported if name.startswith("local_operator.evaluation.runner.")
-    }
+    assert not {name for name in imported if name.startswith("local_operator.evaluation.runner.")}
 
 
 def test_provider_client_defers_its_configure_import() -> None:

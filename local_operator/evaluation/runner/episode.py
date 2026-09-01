@@ -31,7 +31,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal, Mapping, Sequence
+from typing import Any, Literal, Mapping
 
 from local_operator.evaluation.adapters.api import (
     AskUserExchangeParams,
@@ -50,7 +50,6 @@ from local_operator.evaluation.adapters.api import (
 from local_operator.evaluation.adapters.supervisor import (
     AdapterSupervisor,
     HostVerifier,
-    SupervisionError,
     VerifiedAdapterSession,
     persist_rescue,
     run_rescue,
@@ -78,16 +77,12 @@ from local_operator.evaluation.evidence.models import (
     UserSimulatorExchangePayload,
     canonical_digest,
 )
-from local_operator.evaluation.evidence.store import (
-    EvidenceError,
-    EvidenceWriter,
-)
+from local_operator.evaluation.evidence.store import EvidenceError, EvidenceWriter
 from local_operator.evaluation.lifecycle import (
     CleanupAction,
     CleanupPlan,
     CleanupReceipt,
     EpisodeLifecycle,
-    ScoreReceipt,
     aggregate_cleanup,
     plan_episode,
 )
@@ -103,7 +98,6 @@ from local_operator.evaluation.receipts import (
     BudgetReservation,
     DependencyPlan,
     RedactionSet,
-    ResourceAmount,
     SealedPreflight,
     UnavailableUsage,
     Usage,
@@ -401,8 +395,6 @@ class EpisodeRunner:
             writer.close()
 
     async def _execute(self, handshake: Handshake) -> EpisodeOutcome:
-        writer = self._require_writer()
-        session = self._require_session()
         spec = self._spec
 
         lifecycle = plan_episode(
@@ -479,7 +471,6 @@ class EpisodeRunner:
         not yet in the bundle is an invalid bundle, not a race to be tolerated.
         """
 
-        writer = self._require_writer()
         artifacts = []
         for frame in observation.frames:
             data = _read_artifact(self._config.artifact_root, frame.artifact.sha256)
@@ -492,9 +483,7 @@ class EpisodeRunner:
             )
         text_artifact = None
         if observation.text:
-            text_artifact = self._publish(
-                observation.text.encode("utf-8"), media_type="text/plain"
-            )
+            text_artifact = self._publish(observation.text.encode("utf-8"), media_type="text/plain")
         self._append(
             "observation",
             ObservationPayload(
@@ -689,9 +678,7 @@ class EpisodeRunner:
             # An outstanding ask may not be left open, and there is no way to
             # withdraw one. Cancelling is the only coherent resolution.
             raise _Cancelled("ask-user was not answered")
-        finish = begin.model_copy(
-            update={"operation_id": f"ask-finish-{ask_id}", "answer": answer}
-        )
+        finish = begin.model_copy(update={"operation_id": f"ask-finish-{ask_id}", "answer": answer})
         result = await session.finish_ask(finish, timeout=self._config.step_timeout)
         request_artifact = self._publish(prompt.encode("utf-8"), media_type="text/plain")
         response_artifact = self._publish(answer.encode("utf-8"), media_type="text/plain")
@@ -721,7 +708,6 @@ class EpisodeRunner:
     # ------------------------------------------------------------------
 
     async def _finalize_scored(self, handshake: Handshake) -> EpisodeOutcome:
-        writer = self._require_writer()
         session = self._require_session()
         intent = FinalizationIntent(
             kind="score",
@@ -773,9 +759,7 @@ class EpisodeRunner:
         """
 
         provider_failure = isinstance(error, _ProviderFailure)
-        category: Literal["adapter", "provider"] = (
-            "provider" if provider_failure else "adapter"
-        )
+        category: Literal["adapter", "provider"] = "provider" if provider_failure else "adapter"
         self._append(
             "error",
             ErrorPayload(
@@ -880,9 +864,7 @@ class EpisodeRunner:
         # rescue_required for the same reason, and reporting "completed" here
         # would contradict the bundle's own cleanup_incomplete label.
         failed = failure_kind is not None or cleanup_result.rescue_required
-        status: EpisodeStatus = (
-            "cancelled" if cancelled else ("failed" if failed else "completed")
-        )
+        status: EpisodeStatus = "cancelled" if cancelled else ("failed" if failed else "completed")
         return EpisodeOutcome(
             status=status,
             episode_id=self._spec.episode_id,
@@ -922,7 +904,9 @@ class EpisodeRunner:
             "guest_actions": self._guest_actions,
             "user_simulator_turns": self._simulator_turns,
         }
-        unavailable = {"cloud_usd_micros", "instance_milliseconds"} if self._rescue_required else set()
+        unavailable: set[str] = (
+            {"cloud_usd_micros", "instance_milliseconds"} if self._rescue_required else set()
+        )
         usage: list[Usage] = []
         for resource, value in measured.items():
             if resource in unavailable:
@@ -964,9 +948,7 @@ class EpisodeRunner:
             # A dead worker cannot produce evidence, and "attempted" alone is
             # never evidence of cleanup, so these receipts aggregate as
             # incomplete and force rescue.
-            receipts = tuple(
-                _incomplete_receipt(plan, action.action_id) for action in plan.actions
-            )
+            receipts = tuple(_incomplete_receipt(plan, action.action_id) for action in plan.actions)
         return receipts, aggregate_cleanup(plan, receipts)
 
     async def _attempt_rescue(self) -> bool:
@@ -1287,9 +1269,9 @@ def _diagnostic_code(error: BaseException) -> str:
     is already handling a failure.
     """
 
-    raw = "".join(
-        char if char.isalnum() else "-" for char in type(error).__name__.lower()
-    ).strip("-")
+    raw = "".join(char if char.isalnum() else "-" for char in type(error).__name__.lower()).strip(
+        "-"
+    )
     return raw[:64] or "unknown-error"
 
 

@@ -15,7 +15,13 @@ from typing import Any
 import pytest
 
 from local_operator.evaluation.adapters.supervisor import SupervisionError
-from local_operator.evaluation.evidence.models import ScoreArtifact
+from local_operator.evaluation.evidence.models import (
+    CleanupPayload,
+    EnvironmentStepPayload,
+    ErrorPayload,
+    ObservationPayload,
+    ScoreArtifact,
+)
 from local_operator.evaluation.evidence.verify import verify_bundle
 from local_operator.evaluation.runner.episode import EpisodeRunner
 from tests.unit.evaluation.runner.conftest import (
@@ -24,6 +30,7 @@ from tests.unit.evaluation.runner.conftest import (
     ScriptedModel,
     build_config,
     build_spec,
+    payloads,
     selector,
 )
 
@@ -67,9 +74,7 @@ async def test_happy_episode_writes_every_event_in_protocol_order(
     tmp_path: Path, episode_id: str
 ) -> None:
     adapter = FakeAdapter(tmp_path, episode_id)
-    runner = _runner(
-        tmp_path, episode_id, adapter=adapter, model=ScriptedModel(["step", "finish"])
-    )
+    runner = _runner(tmp_path, episode_id, adapter=adapter, model=ScriptedModel(["step", "finish"]))
 
     outcome = await runner.run()
 
@@ -113,13 +118,9 @@ async def test_happy_episode_writes_every_event_in_protocol_order(
 
 
 @pytest.mark.asyncio
-async def test_step_event_precedes_its_output_observation(
-    tmp_path: Path, episode_id: str
-) -> None:
+async def test_step_event_precedes_its_output_observation(tmp_path: Path, episode_id: str) -> None:
     adapter = FakeAdapter(tmp_path, episode_id)
-    runner = _runner(
-        tmp_path, episode_id, adapter=adapter, model=ScriptedModel(["step", "finish"])
-    )
+    runner = _runner(tmp_path, episode_id, adapter=adapter, model=ScriptedModel(["step", "finish"]))
 
     outcome = await runner.run()
 
@@ -139,19 +140,13 @@ async def test_mid_episode_observe_writes_no_duplicate_observation(
     """``observe`` is a snapshot check, and a snapshot is not new evidence."""
 
     adapter = FakeAdapter(tmp_path, episode_id)
-    runner = _runner(
-        tmp_path, episode_id, adapter=adapter, model=ScriptedModel(["step", "finish"])
-    )
+    runner = _runner(tmp_path, episode_id, adapter=adapter, model=ScriptedModel(["step", "finish"]))
 
     outcome = await runner.run()
 
     root = outcome.bundle_root
     assert root is not None
-    observations = [
-        event.payload.sequence
-        for event in verify_bundle(root).events
-        if event.kind == "observation"
-    ]
+    observations = [payload.sequence for payload in payloads(root, ObservationPayload)]
     # One initial plus exactly one per executed step, with no repeats.
     assert observations == [0, 1]
 
@@ -176,11 +171,7 @@ async def test_truncation_scores_normally_and_marks_the_last_step(
     root = outcome.bundle_root
     assert root is not None
     assert verify_bundle(root).valid
-    steps = [
-        event.payload
-        for event in verify_bundle(root).events
-        if event.kind == "environment_step"
-    ]
+    steps = payloads(root, EnvironmentStepPayload)
     assert len(steps) == 2
     assert [step.truncated for step in steps] == [False, True]
 
@@ -262,9 +253,7 @@ async def test_provider_failure_finalizes_unscored_on_a_live_session(
     root = outcome.bundle_root
     assert root is not None
     assert verify_bundle(root).valid
-    errors = [
-        event.payload for event in verify_bundle(root).events if event.kind == "error"
-    ]
+    errors = payloads(root, ErrorPayload)
     assert [error.category for error in errors] == ["provider"]
     # Cleanup ran on the live session rather than being minted as incomplete.
     assert "cleanup" in adapter.calls
@@ -277,9 +266,7 @@ async def test_adapter_crash_poisons_runs_rescue_and_still_seals(
     adapter = FakeAdapter(
         tmp_path, episode_id, failures={"execute": SupervisionError("worker died")}
     )
-    runner = _runner(
-        tmp_path, episode_id, adapter=adapter, model=ScriptedModel(["step", "finish"])
-    )
+    runner = _runner(tmp_path, episode_id, adapter=adapter, model=ScriptedModel(["step", "finish"]))
 
     outcome = await runner.run()
 
@@ -291,7 +278,7 @@ async def test_adapter_crash_poisons_runs_rescue_and_still_seals(
     assert root is not None
     report = verify_bundle(root)
     assert report.valid, [issue.code for issue in report.issues]
-    errors = [event.payload for event in report.events if event.kind == "error"]
+    errors = payloads(root, ErrorPayload)
     assert [error.category for error in errors] == ["adapter"]
     assert adapter.terminated
 
@@ -320,9 +307,7 @@ async def test_scorer_failure_can_only_abandon_as_ambiguous(
 ) -> None:
     """scoring_start is durable, so a scored intent cannot seal unscored."""
 
-    adapter = FakeAdapter(
-        tmp_path, episode_id, failures={"score": SupervisionError("scorer died")}
-    )
+    adapter = FakeAdapter(tmp_path, episode_id, failures={"score": SupervisionError("scorer died")})
     runner = _runner(tmp_path, episode_id, adapter=adapter, model=ScriptedModel())
 
     outcome = await runner.run()
@@ -353,9 +338,7 @@ async def test_incomplete_cleanup_labels_the_run_and_requires_rescue(
     root = outcome.bundle_root
     assert root is not None
     assert verify_bundle(root).valid
-    cleanups = [
-        event.payload for event in verify_bundle(root).events if event.kind == "cleanup"
-    ]
+    cleanups = payloads(root, CleanupPayload)
     assert [cleanup.rescue_required for cleanup in cleanups] == [True]
 
 
@@ -371,9 +354,7 @@ async def test_cleanup_incomplete_outranks_unscored_in_the_label(
         cleanup_status="failed",
         failures={"execute": SupervisionError("worker died")},
     )
-    runner = _runner(
-        tmp_path, episode_id, adapter=adapter, model=ScriptedModel(["step", "finish"])
-    )
+    runner = _runner(tmp_path, episode_id, adapter=adapter, model=ScriptedModel(["step", "finish"]))
 
     outcome = await runner.run()
 
@@ -435,9 +416,7 @@ async def test_rescue_descriptor_is_persisted_before_prepare_and_updated_after(
         if method in ("prepare", "reset_start"):
             pending = load_pending_rescue(config.rescue_root)
             assert pending is not None, f"{method} ran with no persisted rescue"
-            seen.append(
-                (method, tuple(a.action_id for a in pending.cleanup_plan.actions))
-            )
+            seen.append((method, tuple(a.action_id for a in pending.cleanup_plan.actions)))
         return await original(method, params, result_type, **kwargs)
 
     adapter._call_raw = watching  # type: ignore[method-assign]
@@ -462,12 +441,8 @@ async def test_rescue_descriptor_is_persisted_before_prepare_and_updated_after(
 
 
 @pytest.mark.asyncio
-async def test_scored_zero_is_distinct_from_unscored(
-    tmp_path: Path, episode_id: str
-) -> None:
-    adapter = FakeAdapter(
-        tmp_path, episode_id, score=ScoreArtifact(status="scored", binary=0)
-    )
+async def test_scored_zero_is_distinct_from_unscored(tmp_path: Path, episode_id: str) -> None:
+    adapter = FakeAdapter(tmp_path, episode_id, score=ScoreArtifact(status="scored", binary=0))
     runner = _runner(tmp_path, episode_id, adapter=adapter, model=ScriptedModel())
 
     outcome = await runner.run()

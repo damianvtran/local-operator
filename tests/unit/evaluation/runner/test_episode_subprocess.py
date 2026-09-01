@@ -47,7 +47,7 @@ RELEASE_DIGEST = "b" * 64
 # A functioning adapter: it holds one observation, advances it on execute, and
 # grades trivially. Everything it returns has to satisfy the parent's verifier,
 # so the observation identity is recomputed the same way the protocol does.
-_ADAPTER_SOURCE = '''
+_ADAPTER_SOURCE = """
 from importlib.metadata import distribution
 
 from local_operator.evaluation.adapters.api import (
@@ -197,7 +197,7 @@ def create():
             ),
         )
     )
-''' % RELEASE_DIGEST
+""" % RELEASE_DIGEST
 
 
 def _real_interpreter(venv: Path) -> Path:
@@ -274,8 +274,7 @@ def _install_adapter(site: Path) -> str:
         "Metadata-Version: 2.1\nName: tiny-runner-adapter\nVersion: 1.0\n"
     )
     (info / "entry_points.txt").write_text(
-        "[local_operator.evaluation_adapters.v1]\n"
-        "tiny-runner = tiny_runner_adapter:create\n"
+        "[local_operator.evaluation_adapters.v1]\n" "tiny-runner = tiny_runner_adapter:create\n"
     )
     rows: list[list[str]] = []
     for path in sorted([module, info / "METADATA", info / "entry_points.txt"]):

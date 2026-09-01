@@ -14,7 +14,7 @@ import hashlib
 import sys
 import uuid
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Sequence, TypeVar
 
 import pytest
 
@@ -47,12 +47,14 @@ from local_operator.evaluation.receipts import (
     DependencyPlan,
     RedactionSet,
     ResourceAmount,
-    reserve_budget,
     record_preflight,
+    reserve_budget,
     seal_preflight,
 )
 from local_operator.evaluation.runner.episode import EpisodeConfig, EpisodeSpec
 from local_operator.evaluation.runner.model import ModelDecision, ModelUsage
+
+_P = TypeVar("_P")
 
 DIGEST = "0123456789abcdef" * 4
 OTHER_DIGEST = "abcdef0123456789" * 4
@@ -245,9 +247,7 @@ class FakeAdapter:
         if count >= self.fail_after.get(method, 0):
             raise error
 
-    async def _call_raw(
-        self, method: Any, params: Any, result_type: Any, *, timeout: float
-    ) -> Any:
+    async def _call_raw(self, method: Any, params: Any, result_type: Any, *, timeout: float) -> Any:
         del result_type, timeout
         self.calls.append(method)
         self._maybe_fail(method)
@@ -301,7 +301,7 @@ class ScriptedModel:
         self.calls = 0
 
     async def decide(
-        self, observation_in: Observation, transcript: Sequence[Observation]
+        self, observation: Observation, transcript: Sequence[Observation]
     ) -> ModelDecision:
         del transcript
         if self.error is not None:
@@ -309,7 +309,7 @@ class ScriptedModel:
         kind = self.script[self.calls] if self.calls < len(self.script) else "finish"
         self.calls += 1
         return ModelDecision(
-            action_batch=_batch(observation_in, kind),
+            action_batch=_batch(observation, kind),
             route=ROUTE,
             usage=ModelUsage(input_tokens=10, output_tokens=5),
             cost_micros=7,
@@ -388,3 +388,21 @@ def fake_rescue() -> Callable[..., Any]:
 
 def artifact_digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def payloads(root: Path, payload_type: type[_P]) -> list[_P]:
+    """Return every event payload of one concrete type from a bundle.
+
+    ``EventRecord.payload`` is a wide union, so reading a field off it directly
+    neither type-checks nor asserts what the test means. Selecting by type does
+    both, and keeps a renamed payload field a compile-time failure rather than
+    an ``AttributeError`` at run time.
+    """
+
+    from local_operator.evaluation.evidence.verify import verify_bundle
+
+    return [
+        event.payload
+        for event in verify_bundle(root).events
+        if isinstance(event.payload, payload_type)
+    ]
