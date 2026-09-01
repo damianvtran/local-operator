@@ -218,11 +218,23 @@ async def test_finish_history_mount_refuses_a_stale_generation(tmp_path) -> None
     transcript = Transcript(tmp_path / "child")
     for index in range(230):
         await transcript.append_message(Message.assistant(f"durable {index}"))
+    other = Transcript(tmp_path / "other")
+    for index in range(230):
+        await other.append_message(Message.assistant(f"other {index}"))
     job = _job_with([], status="completed")
     session = FakeSession()
     session.jobs = _fake_jobs(job)
+    # The comms must answer PER JOB. A single-directory stub made the app's own
+    # refresh of `job-other` arrive carrying the FIRST job's directory, which
+    # takes `show`'s changed-directory branch and fires a third `_reset_history`
+    # mid-test — clearing the very `_history_loading` this test holds open and
+    # failing the assertion for a reason that has nothing to do with the guard
+    # (a test-only race, seen ~1 in 8 under load and on CI's 3.13 leg).
+    directories = {"job-other": other.directory}
     session._subagent_comms = type(
-        "Comms", (), {"session_dir_of": lambda self, _job_id: transcript.directory}
+        "Comms",
+        (),
+        {"session_dir_of": (lambda self, job_id: directories.get(job_id, transcript.directory))},
     )()
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(90, 28)) as pilot:
@@ -231,9 +243,6 @@ async def test_finish_history_mount_refuses_a_stale_generation(tmp_path) -> None
         stale = view._history_generation
         # Retarget to a different job: bumps the generation and starts that
         # job's own initial read, so `_history_loading` is legitimately True.
-        other = Transcript(tmp_path / "other")
-        for index in range(230):
-            await other.append_message(Message.assistant(f"other {index}"))
         view.show(
             job_id="job-other",
             label="other",
