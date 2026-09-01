@@ -77,6 +77,112 @@ HUB_MESSAGE_TYPE = "hub_message"
 #: only to correlate the parent's action with a later child reply.
 HUB_COMMUNICATION_CUSTOM_TYPE = "hub_communication"
 
+#: Opening and closing tags of the model-facing envelope
+#: :meth:`SubagentComms._format_to_child` wraps parent→child text in. A hub
+#: steer persists as a plain role=user Message carrying this envelope, so
+#: human-facing surfaces match on the tag to keep the XML away from the reader
+#: (see :func:`extract_parent_message`). BOTH halves are constants and both the
+#: builder and its inverse use them, which is what stops the pair drifting
+#: apart — a literal on either side would silently break extraction the day the
+#: tag changed.
+PARENT_MESSAGE_TAG = "<parent-message>"
+PARENT_MESSAGE_CLOSE_TAG = "</parent-message>"
+
+#: The instruction line the envelope carries, per communication kind. Keyed by
+#: the same ``kind`` vocabulary the journaled communication fact uses
+#: (``details["kind"]``), so a surface can label an extracted envelope exactly
+#: as it labels the fact.
+#:
+#: WHY a table rather than three inline strings: it is the SHARED secret
+#: between the builder and :func:`extract_parent_message`. Extraction requires
+#: an exact match against one of these lines, which is what keeps a human who
+#: quotes the envelope shape in their own message ("why does my log show
+#: ``<parent-message>``?") from having their words re-rendered as a parent
+#: redirection. Matching on tag shape alone cannot tell the two apart.
+TO_CHILD_INSTRUCTIONS: dict[str, str] = {
+    "steer": (
+        "This changes your instructions. Apply it from now on, and drop work it " "makes pointless."
+    ),
+    "ask": (
+        "Answer it now with the `hub` tool — a short, direct reply — then carry on "
+        "with what you were doing. Do not restructure your work around the question."
+    ),
+    "note": (
+        "This is a note, not a question. No reply is needed unless it changes what "
+        "you should do."
+    ),
+}
+
+#: Instruction line -> kind, for extraction. Built from the same table so the
+#: two directions cannot disagree.
+_INSTRUCTION_KINDS: dict[str, str] = {
+    instruction: kind for kind, instruction in TO_CHILD_INSTRUCTIONS.items()
+}
+
+
+@dataclass(frozen=True)
+class ParentMessage:
+    """A parsed ``<parent-message>`` envelope: what the parent said, and which
+    kind of communication said it.
+
+    ``kind`` is one of ``TO_CHILD_INSTRUCTIONS``' keys (``steer``/``ask``/
+    ``note``), matching the vocabulary of the journaled communication fact, so
+    a surface labels an extracted envelope the same way it labels the fact
+    rather than assuming every envelope is a redirection.
+    """
+
+    kind: str
+    body: str
+
+
+def extract_parent_message(text: str) -> ParentMessage | None:
+    """Parse a model-facing ``<parent-message>`` envelope into its kind and
+    the human-facing body the parent authored.
+
+    Returns None when ``text`` is not an envelope THIS code built. The shape
+    parsed is exactly what :meth:`SubagentComms._format_to_child` emits:
+    ``<parent-message>\\n{instruction}\\n\\n{body}\\n</parent-message>``.
+
+    WHY this exists as a shared helper: a hub steer is persisted as a plain
+    role=user Message whose text is the envelope built for the MODEL, while
+    the human-facing fact is a separate custom row. Human-facing surfaces
+    (the TUI subagent view, the mobile projection) must show the body the
+    parent authored and never the XML wrapper — including for transcripts
+    persisted before steers carried their communication fact's id, where
+    body-text correlation is the only match left. Both surfaces import this
+    one parser so the builder and its inverse cannot drift apart.
+
+    CONSTRAINT — the instruction line must match ``TO_CHILD_INSTRUCTIONS``
+    exactly. Keying on the tag shape alone would rewrite a HUMAN's own message
+    as a parent communication the moment they quoted the envelope (asking
+    about this very wrapper is a realistic thing to do), silently
+    misattributing their words and stripping their text. The preamble is the
+    part a quoter has no reason to reproduce verbatim, so requiring it is what
+    makes the rewrite safe. These three strings have been byte-stable for the
+    life of the envelope; if one is ever reworded, the OLD text must stay in
+    this table or every transcript written before the change stops extracting.
+    """
+    stripped = text.strip()
+    if not stripped.startswith(PARENT_MESSAGE_TAG):
+        return None
+    end = stripped.rfind(PARENT_MESSAGE_CLOSE_TAG)
+    if end < 0:
+        return None
+    inner = stripped[len(PARENT_MESSAGE_TAG) : end]
+    # The builder writes a newline, the instruction line, a blank line, then the
+    # body. Split on the FIRST blank line: anything else did not come from
+    # _format_to_child and is left alone (returning None) rather than guessed at.
+    if inner.startswith("\n"):
+        inner = inner[1:]
+    separator = inner.find("\n\n")
+    if separator < 0:
+        return None
+    kind = _INSTRUCTION_KINDS.get(inner[:separator].strip())
+    if kind is None:
+        return None
+    return ParentMessage(kind=kind, body=inner[separator + 2 :].strip())
+
+
 #: How many child records to keep. A record is ~4 short strings and outlives
 #: its job row on purpose (job rows are swept 5 minutes after settling, and
 #: resuming a child an hour later is a legitimate thing to want). The cap
@@ -244,14 +350,14 @@ class ChildSession(Protocol):
     Narrower than :class:`~local_operator.session.session.Session` on
     purpose: it is the whole coupling between the parent's channel and a
     child, stated in one place. Notes and questions go through
-    ``queue_aside``, course changes through ``steer``, and the reply watcher
-    rides ``subscribe``. Anything a future op needs from a child belongs here
-    first, where the cost of the coupling is visible.
+    ``queue_aside``, course changes through ``steer_message``, and the reply
+    watcher rides ``subscribe``. Anything a future op needs from a child
+    belongs here first, where the cost of the coupling is visible.
     """
 
     def queue_aside(self, thunk: Callable[[], AsideResult]) -> None: ...
 
-    def steer(self, text: str) -> None: ...
+    def steer_message(self, message: Message) -> None: ...
 
     def subscribe(self, handler: Callable[[AgentEvent], Any]) -> Callable[[], None]: ...
 
@@ -1228,7 +1334,19 @@ class SubagentComms:
             communication_id=message.id,
             kind="steer",
         )
-        record.child.steer(str(message.details["text"]))
+        # ``steer_message`` (not ``steer``) so the persisted row carries the
+        # SAME id as the journaled communication fact: human-facing surfaces
+        # (the TUI subagent view, the mobile projection) correlate the two by
+        # id and render the fact instead of the model-facing
+        # ``<parent-message>`` XML envelope. ``steer`` would mint a fresh
+        # Message id the correlation could never match — which is exactly how
+        # the envelope leaked beside the fact. ``steer_message`` is the
+        # identity-preserving seam: it queues the caller-built Message
+        # verbatim. On a follower-owned child the id rides the wire as the
+        # ContinuationCommand id, which the owner's handle hands back to
+        # ``Session.steer`` as ``message_id``, so the correlation survives
+        # that path too.
+        record.child.steer_message(Message.user(str(message.details["text"]), id=message.id))
         return Delivery(job_id, record.label, "injected")
 
     async def _await_child(self, record: _ChildRecord, timeout_s: float) -> bool:
@@ -1872,22 +1990,13 @@ class SubagentComms:
 
     @staticmethod
     def _format_to_child(text: str, *, expects_reply: bool, steer: bool) -> str:
-        if steer:
-            instruction = (
-                "This changes your instructions. Apply it from now on, and drop work it "
-                "makes pointless."
-            )
-        elif expects_reply:
-            instruction = (
-                "Answer it now with the `hub` tool — a short, direct reply — then carry on "
-                "with what you were doing. Do not restructure your work around the question."
-            )
-        else:
-            instruction = (
-                "This is a note, not a question. No reply is needed unless it changes what "
-                "you should do."
-            )
-        return f"<parent-message>\n{instruction}\n\n{text}\n</parent-message>"
+        # Both the tags and the instruction line come from the module-level
+        # constants that `extract_parent_message` parses against: the inverse
+        # requires an exact preamble match, so an instruction reworded only
+        # here would stop every new envelope extracting.
+        kind = "steer" if steer else ("ask" if expects_reply else "note")
+        instruction = TO_CHILD_INSTRUCTIONS[kind]
+        return f"{PARENT_MESSAGE_TAG}\n{instruction}\n\n{text}\n{PARENT_MESSAGE_CLOSE_TAG}"
 
     def _journal_communication(
         self,

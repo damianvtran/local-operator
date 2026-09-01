@@ -15,12 +15,15 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from collections.abc import Sequence
 from typing import Any, Callable
 
 import pytest
 
-from local_operator.harness.comms import HUB_MESSAGE_TYPE, SubagentComms
+from local_operator.harness.comms import (
+    HUB_MESSAGE_TYPE,
+    SubagentComms,
+    extract_parent_message,
+)
 from local_operator.harness.subagent import MCP_DENIED_ATTR
 from local_operator.harness.types import (
     AgentEvent,
@@ -29,7 +32,6 @@ from local_operator.harness.types import (
     AsideResult,
     ChatRequest,
     CustomMessage,
-    ImageContent,
     Message,
     MessageEndEvent,
     ModelSpec,
@@ -259,13 +261,15 @@ class FakeChild:
     def __init__(self) -> None:
         self.asides: list[Callable[[], AsideResult]] = []
         self.steers: list[str] = []
+        self.steer_messages: list[Message] = []
         self.handlers: list[Callable[[AgentEvent], Any]] = []
 
     def queue_aside(self, thunk: Callable[[], AsideResult]) -> None:
         self.asides.append(thunk)
 
-    def steer(self, text: str, images: Sequence[ImageContent] | None = None) -> None:
-        self.steers.append(text)
+    def steer_message(self, message: Message) -> None:
+        self.steers.append(message.text)
+        self.steer_messages.append(message)
 
     def subscribe(self, handler: Callable[[AgentEvent], Any]) -> Callable[[], None]:
         self.handlers.append(handler)
@@ -695,6 +699,81 @@ def test_steer_is_a_real_user_message_not_an_aside():
     assert child.asides == []
     assert "stop after the first failing test" in child.steers[0]
     assert "changes your instructions" in child.steers[0]
+
+
+def test_steer_passes_the_journaled_communication_id_to_the_child():
+    """The persisted steer row must carry the SAME id as the journaled
+    communication fact.
+
+    Human-facing surfaces (the TUI subagent view, the mobile projection)
+    correlate the fact with the replay-visible row by id and render the fact
+    instead of the model-facing ``<parent-message>`` envelope. Before this fix
+    ``comms.steer`` went through ``steer`` — which mints a fresh Message id —
+    so the correlation could never match and the envelope rendered beside the
+    fact. The fix routes through the identity-preserving ``steer_message``
+    seam with a caller-built Message carrying the fact's id.
+    """
+    comms, _jobs, child, _parent = wire()
+
+    journaled_ids: list[str | None] = []
+    original_journal = comms._journal_communication
+
+    def record_journal(record, *, direction, body, communication_id=None, **kwargs):
+        journaled_ids.append(communication_id)
+        return original_journal(
+            record, direction=direction, body=body, communication_id=communication_id, **kwargs
+        )
+
+    comms._journal_communication = record_journal  # type: ignore[method-assign]
+
+    delivery = comms.steer("job-1", "stop after the first failing test")
+
+    assert delivery.outcome == "injected"
+    assert len(journaled_ids) == 1
+    assert journaled_ids[0] is not None
+    assert [message.id for message in child.steer_messages] == [journaled_ids[0]]
+
+
+@pytest.mark.parametrize(
+    ("steer", "expects_reply", "kind"),
+    [(True, False, "steer"), (False, True, "ask"), (False, False, "note")],
+)
+def test_every_envelope_the_builder_emits_round_trips_through_the_parser(
+    steer: bool, expects_reply: bool, kind: str
+):
+    """The builder and its inverse share the tag and instruction constants, so
+    every envelope `_format_to_child` emits must parse back to its own kind and
+    the exact body. This is the guard that keeps the pair from drifting: a
+    reworded instruction that missed `TO_CHILD_INSTRUCTIONS` fails here rather
+    than silently disabling extraction on every new transcript."""
+    envelope = SubagentComms._format_to_child(
+        "Focus on retries", expects_reply=expects_reply, steer=steer
+    )
+
+    parsed = extract_parent_message(envelope)
+
+    assert parsed is not None
+    assert (parsed.kind, parsed.body) == (kind, "Focus on retries")
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "just a normal message",
+        # The tag shape a HUMAN can type: no builder preamble, so not ours.
+        "<parent-message>\nwhy does my log show this?\n\nsecret plan\n</parent-message>",
+        # Right tags, no blank-line separator — not the builder's shape.
+        "<parent-message>\nFocus on retries</parent-message>",
+        # Opening tag with no close.
+        "<parent-message>\nThis changes your instructions.\n\nFocus on retries",
+    ],
+)
+def test_text_the_builder_did_not_emit_is_not_extracted(text: str):
+    """Extraction is keyed on the exact instruction preamble, not on tag shape
+    alone. A user asking about this very wrapper must keep their own words:
+    rewriting them as a parent communication would misattribute a human's
+    message and strip its text."""
+    assert extract_parent_message(text) is None
 
 
 def test_resolve_addresses_by_id_label_and_all():

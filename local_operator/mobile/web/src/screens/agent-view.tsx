@@ -55,6 +55,99 @@ function agentPath(sessionId: string, jobId: string): string {
 	return `/s/${encodeURIComponent(sessionId)}/a/${encodeURIComponent(jobId)}`;
 }
 
+function normalizeText(text: string): string {
+	return text.replace(/\s+/g, " ").trim();
+}
+
+/** Bound the daemon applies to a row's `prompt` before it reaches the wire.
+ * Mirrors `SUBAGENT_PROMPT_PREVIEW_CHARS` in `local_operator/mobile/projection.py`,
+ * where `_compact` emits `text[: limit - 1] + "…"` — so a preview that was
+ * actually truncated is exactly this long, and a SHORTER prompt ending in `…`
+ * ends that way because its author typed the character. */
+const SUBAGENT_PROMPT_PREVIEW_CHARS = 1_000;
+
+/** The row text plus each of its paragraph-delimited suffixes, longest first.
+ *
+ * A launch message is structurally `{preamble}\n\n{prompt}`, and every
+ * preamble builder (`AgentProfile.preamble`, `Team.member_preamble`,
+ * `SCOUT_PREAMBLE`, the specialist join) terminates on a blank line — so the
+ * launch task always begins right after a paragraph break, or at offset 0 when
+ * there is no preamble at all. Splitting there is what lets the comparison stay
+ * anchored to a real structural boundary: a steer that merely CLOSES by
+ * restating the task ("Actually ignore that and Implement the route") has no
+ * blank line in front of the restatement and so never yields a matching
+ * candidate, while a genuine launch row does.
+ *
+ * Whitespace inside each candidate is normalised because the wire `prompt` has
+ * already been flattened by `_compact`; only the paragraph boundaries
+ * themselves must survive long enough to be split on.
+ *
+ * Returned as ONE normalised string plus the offset each candidate starts at,
+ * rather than as a list of suffix strings, to keep the work linear. Building
+ * and normalising every suffix separately re-scans the tail of the row once
+ * per paragraph break — (breaks x length), measured at 9.4s for a 580KB row
+ * with 2000 breaks. The wire `text` for `user`, `assistant` and
+ * `parent_message` rows is NOT length-bounded (only `notice`, tool args/output
+ * and outcome fields go through `_compact`), so a long pasted row is a
+ * reachable input, and the phone renders this on the main thread.
+ *
+ * The rewrite is exact rather than approximate: normalising collapses every
+ * whitespace run to one space, so the normalised full text is just its words
+ * joined by single spaces, and the normalised form of a suffix beginning at a
+ * paragraph break is the same string from that word onward. Segments that
+ * normalise to nothing (consecutive breaks) contribute no words and so are
+ * dropped — they can only duplicate the following candidate's offset. Each
+ * comparison then costs the needle's length instead of the row's. */
+function launchCandidates(text: string): { normalized: string; offsets: number[] } {
+	const offsets: number[] = [];
+	const parts: string[] = [];
+	let length = 0;
+	for (const segment of text.split(/\n[ \t]*\n/)) {
+		const part = normalizeText(segment);
+		if (!part) continue;
+		// Offset of this segment's first word in the joined string, which is where
+		// the candidate starting at the preceding break begins.
+		offsets.push(length);
+		parts.push(part);
+		length += part.length + 1; // +1 for the single space the join inserts.
+	}
+	return { normalized: parts.join(" "), offsets };
+}
+
+/** Does this `parent_message` row already carry the child's LAUNCH task?
+ *
+ * Identity first: an id equal to `launch_message_id` is conclusive. Legacy and
+ * summary-stripped rows have no such id, so fall back to the prompt text — but
+ * anchored to the paragraph boundary the launch task starts at, never as a
+ * loose substring, because a steer that quotes the task ("Implement the route
+ * more narrowly") would satisfy a substring test and wrongly suppress the head.
+ *
+ * `prompt` arrives as a bounded PREVIEW, so a genuinely truncated one is
+ * matched as a PREFIX of its candidate rather than by equality. That looser
+ * comparison is gated on the preview bound as well as the trailing ellipsis:
+ * keying on the character alone put an author's own "…" — which costs a human
+ * one keystroke — on the loose path and reopened the false positive the
+ * anchoring exists to close. */
+function isLaunchHead(entry: TranscriptEntry, detail: SubagentDetail): boolean {
+	if (detail.launch_message_id && entry.id === detail.launch_message_id) return true;
+	const prompt = normalizeText(detail.prompt);
+	if (!prompt) return false;
+	// `- 1` tolerates a preview whose flattening trimmed a character; the cap is
+	// ~1000, so the loose path still demands that much agreement to be reached.
+	const truncated = prompt.endsWith("…") && prompt.length >= SUBAGENT_PROMPT_PREVIEW_CHARS - 1;
+	const needle = truncated ? prompt.slice(0, -1) : prompt;
+	if (!needle) return false;
+	const { normalized, offsets } = launchCandidates(entry.text);
+	return offsets.some((offset) =>
+		// `startsWith(needle, offset)` is the candidate's prefix test without
+		// materialising the suffix; equality additionally demands that the
+		// candidate end where the needle does.
+		truncated
+			? normalized.startsWith(needle, offset)
+			: normalized.length - offset === needle.length && normalized.startsWith(needle, offset),
+	);
+}
+
 /** The launch prompt is durable child history, while `prompt` is the raw
  * parent task retained for queued/legacy rows. Correlation identity lets the
  * opening role-expanded user row carry that task's visual semantics without
@@ -70,7 +163,18 @@ export function agentConversationEntries(detail: SubagentDetail): TranscriptEntr
 			);
 		}
 	}
-	if (!detail.prompt || detail.transcript.some((entry) => entry.kind === "parent_message")) {
+	// Only a row carrying the LAUNCH task suppresses the synthesized head. The
+	// guard used to test for `parent_message` as such, which broke once a
+	// persisted hub steer started folding to that kind server-side: a legacy
+	// child (no `launch_message_id`, or a summary row whose id the daemon
+	// stripped) that had ever been steered lost the row naming what the whole
+	// conversation is about. A steer is a mid-conversation redirection and
+	// never stands in for the launch task, so match on the launch text rather
+	// than on the kind.
+	const hasLaunchHead = detail.transcript.some(
+		(entry) => entry.kind === "parent_message" && isLaunchHead(entry, detail),
+	);
+	if (!detail.prompt || hasLaunchHead) {
 		return detail.transcript;
 	}
 	return [
