@@ -23,6 +23,7 @@ from typing import Any, cast
 
 import pytest
 from rich.cells import cell_len
+from textual.events import MouseScrollUp
 
 from local_operator.harness.comms import (
     HUB_COMMUNICATION_CUSTOM_TYPE,
@@ -1174,6 +1175,178 @@ async def test_history_prepend_preserves_anchor_and_home_dedupes_requests(
         assert calls == 1
         assert anchor_block in view._body.blocks()
         assert anchor_block.virtual_region.y - view._body.scroll_y == before_gap
+
+
+@pytest.mark.asyncio
+async def test_history_arriving_at_the_top_loads_one_page_then_stops(tmp_path) -> None:
+    """Scrolling to the top loads history per ARRIVAL — never a cascade.
+
+    The pre-fix trigger was LEVEL-triggered on ``scroll_y <= 1`` with no
+    programmatic-scroll guard, so it loaded on every watch firing while the
+    reader sat at the top: the anchor restore a prepend performs, the settle
+    frames after it, and a wheel held against the clamped top. The trigger
+    must be an EDGE, and the property that makes it one is that NO page may
+    load without the reader having actually travelled away from the top rows
+    since the previous page — the operator's complaint was loading "without
+    requiring me to scroll up to the top again on the new height".
+
+    Driven with real wheel events as a CONTINUED drag that does not stop at
+    the first mount (review round 1, M1: stopping there ends the gesture
+    exactly where a cascade would begin, so that shape passed pre-fix). Every
+    disk read is audited against the offset's peak since the previous read:
+    a read with no intervening travel is the bug.
+
+    Honest scope note: on THIS view a page is 100 rows against a ~28-row
+    viewport, so a continued drag displaces the reader a full page between
+    arrivals and the no-travel violation is frame-timing-dependent — the
+    deterministic pin for it is the latch state machine in
+    ``test_page_back_latch.py`` (which fails 3/3 on the pre-fix tree). This
+    test holds the same contract end-to-end: no no-travel read survives a
+    long drag, nothing loads once the gesture is over, and Home still buys
+    exactly one page.
+    """
+    transcript = Transcript(tmp_path / "child")
+    for index in range(320):
+        await transcript.append_message(Message.assistant(f"durable {index}"))
+    job = _job_with([], status="completed")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    session._subagent_comms = type(
+        "Comms", (), {"session_dir_of": lambda self, _job_id: transcript.directory}
+    )()
+    app = OperatorApp(_async_factory(session))
+    # The DISK READ is the unit counted (not `_history_ids`): a duplicate
+    # request inside one gesture is deduped by `_history_loading` and never
+    # lands, so the ID set cannot see it. Peak tracking supplies the travel
+    # audit: the highest offset observed since the previous read is how far
+    # the reader actually went between pages.
+    # The verdict is evaluated AFTER the drag, not at read time: a page that
+    # mounts displaces the reader DOWN only once its insert settles, which can
+    # land a frame after the read that caused it. Judging "no travel" at read
+    # time therefore called a legitimate mount-displacement "no travel" — a
+    # measurement race, not a cascade (verified by logging: y=101 was observed
+    # between two reads the audit had flagged). Each read records the peak
+    # since the PREVIOUS read, extended forward to the next observation, and
+    # the assertion judges the completed timeline.
+    reads = {"n": 0, "first": True, "peaks": [], "peak": 0.0}
+    original_read = subagent_view.read_transcript_page
+    real_scroll = SubagentView._scroll_changed
+
+    def counting_read(*args: Any, **kwargs: Any) -> Any:
+        if not reads["first"]:
+            reads["peaks"].append(reads["peak"])
+        reads["first"] = False
+        reads["n"] += 1
+        reads["peak"] = 0.0
+        return original_read(*args, **kwargs)
+
+    def auditing_scroll(self: SubagentView, *args: Any) -> None:
+        reads["peak"] = max(reads["peak"], self._body.scroll_y)
+        real_scroll(self, *args)
+
+    # BOTH patches are restored in the finally below. A module-attribute
+    # swap that leaks contaminates every later test in the same xdist worker:
+    # `read_transcript_page` is module state, not instance state, so a leaked
+    # counter keeps wrapping (and keeps mutating the shared `reads` dict) for
+    # the rest of the worker's lifetime (review round 2, M5).
+    subagent_view.read_transcript_page = counting_read
+    SubagentView._scroll_changed = auditing_scroll  # type: ignore[method-assign]
+    try:
+        async with app.run_test(size=(90, 28)) as pilot:
+            view = await _open(pilot, app, job)
+            await _wait_history(pilot, view)
+            reads["n"] = 0  # the opening page's read is not the gesture's
+            reads["peak"] = 0.0
+
+            # A CONTINUED drag in the rhythm a trackpad actually delivers:
+            # several notches per frame, running straight through every mount
+            # it causes — the shape that cascaded pre-fix (a level trigger
+            # mounted a page per clamped notch once the reader reached the
+            # top). No early stop: stopping at the first mount ends the
+            # gesture exactly where the cascade would begin.
+            for _ in range(40):
+                for _ in range(5):
+                    view._body.post_message(
+                        MouseScrollUp(
+                            widget=view._body,
+                            button=0,
+                            shift=False,
+                            meta=False,
+                            ctrl=False,
+                            x=10,
+                            y=10,
+                            delta_x=0,
+                            delta_y=-2,
+                        )
+                    )
+                reads["peak"] = max(reads["peak"], view._body.scroll_y)
+                await pilot.pause()
+            # ...and then HOLD the wheel against the clamped top: notches keep
+            # arriving while the offset is pinned at 0 and cannot move. A
+            # clamped notch is not travel and must not earn a page — this is
+            # the exact half of the reported loop where chunks loaded "one
+            # after another" with the reader parked at the top.
+            for _ in range(60):
+                for _ in range(5):
+                    view._body.post_message(
+                        MouseScrollUp(
+                            widget=view._body,
+                            button=0,
+                            shift=False,
+                            meta=False,
+                            ctrl=False,
+                            x=10,
+                            y=10,
+                            delta_x=0,
+                            delta_y=-2,
+                        )
+                    )
+                # The audit must sample the hold too: a page mounted during
+                # the hold displaces the reader DOWN, and that displacement is
+                # exactly the travel that legitimises the next page. Sampling
+                # only the burst made a mount-during-hold look like no travel
+                # at all — a measurement gap, not a cascade.
+                reads["peak"] = max(reads["peak"], view._body.scroll_y)
+                await pilot.pause()
+            await _wait_history(pilot, view)
+            await _wait_geometry_settled(pilot, view._body)
+            # The interval of the LAST read extends forward to here: its
+            # mount's displacement is observed by the settle, not by the drag.
+            reads["peaks"].append(reads["peak"])
+
+            # The contract: pages may load during a long drag (each genuine
+            # re-arrival at the top earns one), but NEVER without the reader
+            # having travelled away from the top since the previous page.
+            # `peaks[i]` is the highest offset observed between read i and
+            # read i+1 (the first entry is the pre-first-read interval).
+            no_travel = sum(1 for peak in reads["peaks"] if peak <= 1)
+            assert no_travel == 0, (
+                f"{no_travel} of {reads['n']} pages loaded with no travel "
+                "away from the top rows — the level-trigger cascade; "
+                f"peaks={reads['peaks']}"
+            )
+            assert reads["n"] >= 1, "the drag reached the top and loaded a page"
+
+            # Once the gesture is OVER, parked wherever it left them, no
+            # further page loads however long the view idles.
+            final_ids = len(view._history_ids)
+            for _ in range(80):
+                await pilot.pause()
+            assert len(view._history_ids) == final_ids
+
+            # A deliberate discrete act — the advertised Home key — still
+            # buys exactly one more page (the pinned per-press contract).
+            if not view._history_exhausted:
+                before = len(view._history_ids)
+                view.action_home()
+                await _wait_history(pilot, view)
+                await _wait_geometry_settled(pilot, view._body)
+                for _ in range(10):
+                    await pilot.pause()
+                assert len(view._history_ids) > before
+    finally:
+        SubagentView._scroll_changed = real_scroll  # type: ignore[method-assign]
+        subagent_view.read_transcript_page = original_read
 
 
 @pytest.mark.asyncio
