@@ -187,6 +187,13 @@ def _frames(root, sequence):
     elif mode == "byte_count_mismatch":
         _publish(root, payload)
         byte_count = byte_count + 1
+    elif mode == "fifo":
+        # A FIFO under an honest-looking digest name. Nothing ever writes to it,
+        # so a parent that opens it without O_NONBLOCK blocks in the kernel
+        # forever -- the liveness attack, not a content one.
+        path = os.path.join(root, digest)
+        if not os.path.lexists(path):
+            os.mkfifo(path)
     return (
         FrameRef(
             frame_id="frame-%%d" %% sequence,
@@ -754,6 +761,10 @@ async def test_real_worker_publishes_a_frame_the_parent_verifies_and_bundles(
         ("digest_mismatch", "artifact digest differs"),
         # In-root bytes of the right content but a lied-about length.
         ("byte_count_mismatch", "artifact is not a matching regular file"),
+        # A FIFO nobody writes to: the LIVENESS case. The S_ISREG check sits
+        # behind the open, so only O_NONBLOCK stops this wedging the parent
+        # forever -- and it is refused by that same existing clause.
+        ("fifo", "artifact is not a matching regular file"),
     ],
 )
 @pytest.mark.asyncio
@@ -774,6 +785,13 @@ async def test_worker_cannot_deliver_frames_from_outside_the_root(
     holding -- verified by reintroducing the weakness: dropping ``O_NOFOLLOW``
     let ``symlink_escape`` reach ``completed``, and removing the digest
     comparison turned ``digest_mismatch`` red.
+
+    ``fifo`` is the odd one out and belongs here anyway: it attacks LIVENESS
+    rather than content. The refusal it lands on is shared with
+    ``byte_count_mismatch``, so the assertion that matters is that the episode
+    TERMINATES at all -- without ``O_NONBLOCK`` the open never returns, and
+    because ``verify_artifact`` runs on the event-loop thread after the mutating
+    call's ``wait_for`` has closed, nothing upstream can time it out.
 
     The episode must not report success, and it must never seal a bundle that
     claims frames it could not verify.

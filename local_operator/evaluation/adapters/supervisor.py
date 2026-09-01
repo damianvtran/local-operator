@@ -794,7 +794,23 @@ def verify_artifact(root: Path, reference: ArtifactRef) -> bytes:
     """Read one content-addressed artifact without following attacker links."""
 
     name = reference.sha256
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    # O_NONBLOCK is a LIVENESS guard, not a performance hint. The S_ISREG check
+    # below sits BEHIND this open, so without it a worker that publishes a FIFO
+    # under an honest-looking digest name blocks the caller inside the kernel
+    # until a writer appears -- which never happens. That wedges the parent
+    # permanently: verify_artifact runs synchronously on the event-loop thread
+    # (episode._record_observation, HostVerifier._validate_observation_content)
+    # and AFTER the mutating call's wait_for has already closed, so no timeout,
+    # poison, rescue, or process-group teardown can fire. On a regular file
+    # O_NONBLOCK is a POSIX no-op -- same S_ISREG, size, and bytes -- so the
+    # FIFO simply returns immediately and falls into the existing
+    # "artifact is not a matching regular file" refusal.
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
     root_fd = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     try:
         fd = os.open(name, flags, dir_fd=root_fd)
