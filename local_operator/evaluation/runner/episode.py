@@ -450,6 +450,11 @@ class EpisodeRunner:
             return await self._finalize_cancelled(str(cancel) or "cancelled")
         except _EvidenceFailure:
             raise
+        except EvidenceError as error:
+            # A writer error is never an episode failure: the journal itself is
+            # unusable, so finalizing would write into a poisoned bundle. Route
+            # it to the abandonment path like any other evidence failure.
+            raise _EvidenceFailure(_diagnostic(error)) from error
         except BaseException as error:
             return await self._finalize_failure(error)
         return await self._finalize_scored(handshake)
