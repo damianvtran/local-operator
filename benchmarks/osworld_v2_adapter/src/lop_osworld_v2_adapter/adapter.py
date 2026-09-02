@@ -28,14 +28,16 @@ INFEASIBLE-TASK EXCLUSION: the runner returns on a ``finish`` batch WITHOUT
 calling ``execute`` (episode.py:531-534), so the adapter never sees the
 terminal action and cannot push ``DONE``/``FAIL`` into OSWorld's
 ``action_history``, which ``evaluate()`` reads to score ``infeasible`` tasks.
-An agent that correctly declares such a task infeasible would score 0. PR 1
-EXCLUDES infeasible tasks rather than fabricate a FAIL the agent never sent —
-that would be score fraud. See README.md "Known scope limitations".
+An agent that correctly declares such a task infeasible would score 0. The
+adapter therefore EXCLUDES infeasible tasks rather than fabricate a FAIL the
+agent never sent — that would be score fraud. See README.md "Known scope
+limitations".
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import importlib.metadata
 import json
 import os
@@ -104,6 +106,33 @@ class InfeasibleTaskExcluded(RuntimeError):
     """
 
 
+class JudgeUnavailable(RuntimeError):
+    """A judged task was started without the judge credential and settings.
+
+    Raised from ``reset_start`` BEFORE allocation. ``inspect_requirements``
+    already names the judge key/provider/model as required for such a task,
+    so a host that runs preflight never reaches this; it exists so a host
+    that skipped preflight cannot spend money on an episode OSWorld would
+    score as a silent zero (``llm_metrics`` returns 0.0 on any exception).
+    """
+
+
+class InputsMismatch(RuntimeError):
+    """The inputs root does not carry the manifests the workspace pinned.
+
+    The gated assets (4.2 GB) live OUTSIDE the digest-pinned workspace, so
+    the workspace records their manifest sha in ``inputs.json`` and the
+    adapter re-verifies the live root against it before constructing the
+    provider. Moving or editing the root therefore cannot change what runs.
+    """
+
+
+# The name the runner uses for the judge key in ``ResetStartParams.secrets``.
+_JUDGE_KEY = "OSWORLD_EVAL_MODEL_API_KEY"
+_USER_SIM_KEY = "OSWORLD_USER_SIM_API_KEY"
+_DEFAULT_INPUTS_ROOT = "~/worktrees/osworld"
+
+
 def _terminate_status(code: str) -> str:
     """Map a teardown evidence code to a cleanup status that cannot over-claim.
 
@@ -134,8 +163,8 @@ def _terminate_status(code: str) -> str:
 
 
 # A provider factory takes no argument and returns a backend. Injectable so
-# PR 1's tests (and the whole cloud-free slice) drive the real adapter against
-# FakeProvider; PR 2 installs the AWS factory for production.
+# the tests (and the whole cloud-free slice) drive the real adapter against
+# FakeProvider; production builds the AWS provider from the workspace.
 ProviderFactory = Callable[[], EnvironmentProvider]
 
 
@@ -150,7 +179,8 @@ class OSWorldV2Adapter:
     ) -> None:
         # ``provider_factory`` is injectable so tests drive the real adapter
         # against FakeProvider in-process. When None — the production path —
-        # PR 2's AWS factory is used; PR 1 raises if reached without one.
+        # the workspace's adapter-provider.json selects the backend (AWS by
+        # default).
         self._provider_factory = provider_factory
         # The workspace root is where task modules live (``tasks/<id>.py``).
         # Defaulted to the worker's cwd, which the supervisor sets to the
@@ -180,6 +210,11 @@ class OSWorldV2Adapter:
         self._plan: provisioning.ProvisioningPlan | None = None
         self._refs: cleanup_mod.CleanupRefs | None = None
         self._infra_values: tuple[ScopedInfraValue, ...] = ()
+        # Resolved secrets from ResetStartParams / BeginRescueParams. Held
+        # in memory only for the provider's construction; never written to
+        # the environment (bar the documented judge-key exception), never
+        # logged, dropped on close.
+        self._secrets: dict[str, str] = {}
         self._provider: EnvironmentProvider | None = None
         self._observation_builder: ObservationBuilder | None = None
         self._current_observation: Any = None
@@ -191,9 +226,9 @@ class OSWorldV2Adapter:
         The workspace is adapter-owned, digest-pinned input, and the worker's
         cwd (supervisor.py:270). An OPTIONAL ``adapter-provider.json`` there
         names which provider ``reset_start`` builds, so a cloud-free build
-        (PR 1, and every CI/test run) selects the fake WITHOUT touching the
-        stripped environment. Absent the file, the production default is the
-        AWS provider (PR 2); PR 1 raises rather than guess. The worker env is
+        (every CI/test run) selects the fake WITHOUT touching the stripped
+        environment. Absent the file, the production default is the AWS
+        provider. The worker env is
         deliberately NOT used for this: it is locale/temp only
         (supervisor._ENV_ALLOW), and a selection that rode in as an env var
         would be invisible to the workspace digest that attests the run.
@@ -321,11 +356,32 @@ class OSWorldV2Adapter:
                 "the runner never delivers the terminal action, so OSWorld's "
                 "action_history never receives FAIL"
             )
+        if requirements_mod.is_judged(self._task):
+            # Same shape as the infeasible refusal: fail BEFORE allocation.
+            names = {secret.name for secret in params.secrets}
+            settings = {value.name for value in self._infra_values}
+            missing = [
+                name
+                for name in (
+                    _JUDGE_KEY,
+                    "OSWORLD_EVAL_MODEL_PROVIDER",
+                    "OSWORLD_EVAL_MODEL_NAME",
+                )
+                if name not in names and name not in settings
+            ]
+            if missing:
+                raise JudgeUnavailable(
+                    f"task {params.task_id!r} scores through the LLM judge but "
+                    f"{missing} were not supplied; OSWorld would return a silent "
+                    "0.0, which this adapter refuses to seal"
+                )
         self._plan = provisioning.resolve(
             self._task,
             episode_id=params.episode_id,
             infra_values=self._infra_values,
         )
+        self._secrets = {secret.name: secret.value for secret in params.secrets}
+        self._install_judge_environment()
 
         provider = self._build_provider()
         await provider.allocate(self._plan, self._task)
@@ -361,12 +417,85 @@ class OSWorldV2Adapter:
     def _task_path(self, task_id: str) -> str:
         return str(self._workspace_root / "tasks" / f"{task_id}.py")
 
+    def _install_judge_environment(self) -> None:
+        # The documented exception to "secrets never touch os.environ": see
+        # vendor_bridge. Only the two names OSWorld reads from the env, only
+        # inside the worker, scrubbed on close.
+        present = {
+            name: self._secrets[name]
+            for name in (_JUDGE_KEY, _USER_SIM_KEY)
+            if name in self._secrets
+        }
+        if present:
+            vendor_bridge.install_secret_environment(present)
+
+    def _infra(self, name: str) -> str | None:
+        for value in self._infra_values:
+            if value.name == name:
+                return value.value
+        return None
+
+    def _aws_credentials(self) -> Any:
+        from lop_osworld_v2_adapter.providers.aws import AwsCredentials
+
+        try:
+            return AwsCredentials(
+                access_key_id=self._secrets["AWS_ACCESS_KEY_ID"],
+                secret_access_key=self._secrets["AWS_SECRET_ACCESS_KEY"],
+                session_token=self._secrets.get("AWS_SESSION_TOKEN"),
+            )
+        except KeyError as error:
+            # Name the MISSING ref, never a value.
+            raise AdapterStateError(f"AWS secret {error.args[0]!r} was not delivered") from None
+
+    def _ttl_seconds(self) -> int:
+        from lop_osworld_v2_adapter.providers.aws import ttl_seconds_for
+
+        override = self._infra("OSWORLD_TTL_SECONDS")
+        try:
+            parsed = int(override) if override is not None else None
+        except ValueError as error:
+            raise AdapterStateError("OSWORLD_TTL_SECONDS is not an integer") from error
+        # The wall budget is not on the adapter wire (it is the runner's
+        # BudgetAuthorization), so the derivation here sees only the
+        # operator override or the default. The runner-side derivation from
+        # ``wall_milliseconds`` is deferred: DESIGN §B.5 wants it, but
+        # carrying the budget over RPC is a schema change of its own.
+        return ttl_seconds_for(None, override=parsed)
+
+    def _verify_inputs_root(self) -> None:
+        """Re-verify the live inputs root against the workspace's pins."""
+
+        pins_path = self._workspace_root / "inputs.json"
+        try:
+            pins = json.loads(pins_path.read_bytes())
+        except OSError:
+            # A workspace built without inputs.json (fixture workspaces, the
+            # fake provider) has nothing to verify. The real build script
+            # always writes it.
+            return
+        root = Path(os.path.expanduser(self._infra("OSWORLD_INPUTS_ROOT") or _DEFAULT_INPUTS_ROOT))
+        checks = {
+            "assets_manifest_sha256": root / "gated" / "manifests" / "assets.json",
+            "tasks_manifest_sha256": root / "gated" / "tasks" / "manifests" / "task_hashes.json",
+        }
+        for key, path in checks.items():
+            expected = pins.get(key)
+            if not isinstance(expected, str):
+                raise InputsMismatch(f"workspace inputs.json carries no {key}")
+            try:
+                actual = hashlib.sha256(path.read_bytes()).hexdigest()
+            except OSError as error:
+                raise InputsMismatch(f"inputs root is missing {path}") from error
+            if actual != expected:
+                raise InputsMismatch(f"{path} sha256 {actual[:12]}… != pinned {expected[:12]}…")
+
     def _build_provider(self) -> EnvironmentProvider:
         # Precedence: an injected factory (in-process tests) wins; then the
         # workspace's adapter-provider.json selects the backend; then the
-        # production default (AWS, PR 2). The fake branch is reachable ONLY
-        # when the workspace declares it, so a production run can never
-        # silently fall back to a fake.
+        # production default (AWS). The fake branch is reachable ONLY when
+        # the workspace declares it, so a production run can never silently
+        # fall back to a fake.
         if self._provider_factory is not None:
             return self._provider_factory()
         config = self._read_provider_config()
@@ -379,11 +508,20 @@ class OSWorldV2Adapter:
                 has_user_simulator=bool(config.get("has_user_simulator", False)),
             )
         if kind in (None, "aws"):
-            raise AdapterStateError(
-                "the AWS provider is PR 2; PR 1 runs only an injected or "
-                "workspace-declared fake provider"
-            )
+            return self._build_aws_provider()
         raise AdapterStateError(f"unknown provider selection {kind!r}")
+
+    def _build_aws_provider(self) -> EnvironmentProvider:
+        from lop_osworld_v2_adapter.providers.aws import AwsProvider
+
+        assert self._plan is not None and self._refs is not None
+        self._verify_inputs_root()
+        return AwsProvider(
+            self._aws_credentials(),
+            region=self._plan.region,
+            lease_ref=self._refs.lease_ref,
+            ttl_seconds=self._ttl_seconds(),
+        )
 
     # ------------------------------------------------------------------
     # observe / execute
@@ -536,7 +674,7 @@ class OSWorldV2Adapter:
             return "succeeded", cleanup_mod.EVIDENCE_SESSION_CLOSED, elapsed()
         # An action KIND this build does not handle. Unreachable while
         # build_cleanup_plan emits only the three canonical kinds, but
-        # CleanupActionKind is a six-member Literal, so PR 2 adding
+        # CleanupActionKind is a six-member Literal, so a later PR adding
         # delete_volume or restore_snapshot makes it reachable -- and the plan
         # arrives from a PERSISTED descriptor during rescue, which may have
         # been authored by a different adapter build than the one executing it.
@@ -554,15 +692,39 @@ class OSWorldV2Adapter:
         self._refs = cleanup_mod.CleanupRefs.from_descriptor_actions(
             params.descriptor.cleanup_plan.actions
         )
+        self._infra_values = params.descriptor.infra_values
+        self._secrets = {secret.name: secret.value for secret in params.secrets}
         # A rescue worker still needs a provider to terminate the instance.
-        # PR 1's in-process rescue uses the injected factory; PR 2 builds the
-        # AWS provider from the descriptor's infra_values.
-        if self._provider is None and self._provider_factory is not None:
-            self._provider = self._provider_factory()
+        # An injected factory (in-process tests) wins; otherwise the
+        # workspace selection applies exactly as in reset_start, with the
+        # AWS branch built in TEARDOWN form: region and refs from the
+        # descriptor, credentials from the freshly delivered secrets, no
+        # plan/task/DesktopEnv because rescue only ever terminates by tag.
+        if self._provider is None:
+            if self._provider_factory is not None:
+                self._provider = self._provider_factory()
+            else:
+                kind = self._read_provider_config().get("provider")
+                if kind in (None, "aws"):
+                    from lop_osworld_v2_adapter.providers.aws import AwsProvider
+
+                    self._provider = AwsProvider.for_teardown(
+                        self._aws_credentials(),
+                        region=self._infra("AWS_REGION") or provisioning.DEFAULT_REGION,
+                        lease_ref=self._refs.lease_ref,
+                    )
+                # The fake branch has no persistent registry to rescue, so a
+                # fake rescue worker keeps provider None and reports
+                # ``attempted`` -- the honest answer for a backend that
+                # cannot look. Tests that need a confirmed fake rescue
+                # inject a factory.
         return AckResult()
 
     async def close(self, params: CloseParams) -> AckResult:
-        # Must not raise even if the env is already dead.
+        # Must not raise even if the env is already dead. The judge key is
+        # scrubbed from the worker env here, the only place it was written.
+        vendor_bridge.scrub_secret_environment()
+        self._secrets = {}
         self._provider = None
         self._current_observation = None
         return AckResult()

@@ -35,6 +35,11 @@ EVIDENCE_TERMINATE_UNCONFIRMED = "terminate-unconfirmed"
 EVIDENCE_TERMINATE_DENIED = "terminate-denied"
 EVIDENCE_SCHEDULE_DELETED = "schedule-deleted"
 EVIDENCE_SCHEDULE_ABSENT = "schedule-absent"
+# The scheduler refused or failed the delete for a reason other than "no such
+# schedule". Maps to ``attempted`` in the adapter: the TTL lease still exists
+# and will fire, which is SAFE (it terminates the instance) but leaves a cloud
+# object the operator did not retire, so rescue must look again.
+EVIDENCE_SCHEDULE_DELETE_FAILED = "schedule-delete-failed"
 EVIDENCE_SESSION_CLOSED = "session-closed"
 # An action kind this build cannot execute. Distinct from every "we looked"
 # code above: it reports that teardown was never attempted at all, which is

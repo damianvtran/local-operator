@@ -42,6 +42,7 @@ from local_operator.evaluation.adapters.api import (
     RequirementsResult,
     RescueDescriptor,
     ResetStartParams,
+    ResolvedSecret,
     ScoreParams,
     ScoreResult,
     validate_execution,
@@ -873,6 +874,36 @@ def persist_rescue(root: Path, descriptor: RescueDescriptor) -> Path:
     return path
 
 
+def discard_rescue(root: Path) -> None:
+    """Remove a descriptor whose every cleanup action was confirmed.
+
+    The descriptor is the rescue INBOX: a sweep treats each ``rescue.json`` it
+    finds as an episode that still owns cloud resources. A clean episode that
+    left its descriptor behind would therefore be re-rescued on every sweep --
+    harmless (``instance-absent``) but it makes the inbox a lie, and an operator
+    auditing for leaks after a paid run needs "no descriptor" to mean "nothing
+    to reclaim". Only the caller that HOLDS the confirmation (a cleanup result
+    with ``rescue_required`` False, or a complete rescue aggregate) may call
+    this; a missing file is not an error because two such callers may race.
+
+    The directory is fsynced after the unlink for the same reason
+    ``persist_rescue`` fsyncs after the rename: the removal must be durable
+    before the caller reports the episode clean, or a crash could resurrect an
+    already-retired obligation and terminate a successor's resources.
+    """
+
+    path = root / _RESCUE_FILE
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        return
+    directory_fd = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
 def load_pending_rescue(root: Path) -> RescueDescriptor | None:
     """Explicitly load one descriptor; importing or startup never scans."""
 
@@ -923,9 +954,18 @@ class RescueAggregate(ProtocolModel):
 async def run_rescue(
     descriptor: RescueDescriptor,
     *,
+    secrets: tuple[ResolvedSecret, ...] = (),
     launch: Callable[[AdapterSelector], AdapterSupervisor] = AdapterSupervisor.launch,
 ) -> RescueAggregate:
-    """Use a fresh exact worker and reconcile every declared cleanup action."""
+    """Use a fresh exact worker and reconcile every declared cleanup action.
+
+    ``secrets`` are the descriptor's ``secret_refs`` resolved by the caller at
+    rescue time. They are handed to the worker on ``begin_rescue`` only -- the
+    descriptor on disk never carries them -- because a cloud teardown needs a
+    credential and the rescue worker, spawned with the stripped environment,
+    has no other way to obtain one. A descriptor that declares no refs is
+    rescued with an empty tuple exactly as before.
+    """
 
     supervisor = launch(descriptor.selector)
     receipts: list[CleanupReceipt] = []
@@ -945,6 +985,7 @@ async def run_rescue(
                 handshake_digest=canonical_digest(
                     "adapter-rescue-handshake-v1", descriptor.handshake
                 ),
+                secrets=secrets,
             ),
             AckResult,
             timeout=10.0,

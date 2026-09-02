@@ -26,17 +26,30 @@ from local_operator.evaluation.receipts import (
     StrictIdentifier,
 )
 
-# 1.1 adds the parent-chosen ``artifact_root`` to ``ResetStartParams``. It is a
-# REQUIRED field on a model whose config is ``extra="forbid"`` and ``strict``,
-# so the change is wire-breaking in both directions: a 1.0 worker rejects the
-# new key as an unknown extra, and a 1.1 worker cannot serve a parent that omits
-# it. This boundary deliberately pins exact versions rather than accepting
-# ranges (see ``AdapterSelector``), so the bump is what locks a 1.0 adapter out
-# instead of letting it fail later as an opaque invalid_request.
-ADAPTER_SCHEMA_VERSION = "1.1"
+# 1.1 added the parent-chosen ``artifact_root`` to ``ResetStartParams``.
+#
+# 1.2 adds ``secrets`` -- resolved secret material -- to ``ResetStartParams`` and
+# ``BeginRescueParams``. Before 1.2 the boundary had NO secret delivery path at
+# all: ``SecretRef`` is a name only, the worker environment is built from a
+# closed allowlist (``supervisor._ENV_ALLOW``) that strips every credential-like
+# name, and nothing resolved a ref into bytes the worker could use. An adapter
+# that must call a cloud API (the OSWorld AWS provider) therefore could not run
+# out-of-process. The field is defaulted to ``()`` so an adapter that needs no
+# secrets is unaffected on the wire, but the bump is still required: a 1.1
+# worker's ``extra="forbid"`` model REJECTS the new key the moment a parent
+# sends a non-empty tuple, and it would do so as an opaque ``invalid_request``
+# mid-episode rather than at the handshake. This boundary pins exact versions
+# (see ``AdapterSelector``), so the bump is what locks a 1.1 adapter out up
+# front instead of letting it fail after resources may exist.
+#
+# The field is deliberately NOT on ``PrepareParams`` (allocation-free, so it
+# has no use for credentials) and NOT on ``RescueDescriptor`` (persisted to
+# disk; a rescue worker receives secrets fresh from the parent's resolver via
+# ``BeginRescueParams`` instead).
+ADAPTER_SCHEMA_VERSION = "1.2"
 # One alias for the three models that pin the version, so a future bump cannot
 # move the constant while leaving a model silently accepting the older literal.
-SchemaVersion: TypeAlias = Literal["1.1"]
+SchemaVersion: TypeAlias = Literal["1.2"]
 ADAPTER_ENTRY_POINT_GROUP = "local_operator.evaluation_adapters.v1"
 MAX_RESCUE_REFS = 256
 MAX_REQUIREMENTS = 256
@@ -242,10 +255,39 @@ class SecretRef(ProtocolModel):
     name: str = Field(min_length=1, max_length=256, pattern=r"^[A-Z][A-Z0-9_]*$")
 
 
+class ResolvedSecret(ProtocolModel):
+    """A ``SecretRef`` resolved to its bytes, for the private RPC pipe ONLY.
+
+    This is the one model on the boundary that carries secret material, and it
+    is admitted on exactly two calls: ``reset_start`` (the side-effect boundary,
+    where a provider first needs a credential) and ``begin_rescue`` (a fresh
+    worker that must tear down with nothing but the descriptor). It never
+    appears in a persisted structure -- ``RescueDescriptor`` carries refs -- and
+    the worker must never write a value into ``os.environ`` or a log; the
+    parent's ``RedactionSet`` canaries the evidence bundle against every value.
+
+    ``name`` reuses the ``SecretRef`` pattern so a resolved secret is always
+    addressable by the ref it satisfied. The value bound is generous enough for
+    a PEM-shaped credential while still refusing an arbitrary blob.
+    """
+
+    name: str = Field(min_length=1, max_length=256, pattern=r"^[A-Z][A-Z0-9_]*$")
+    value: str = Field(min_length=1, max_length=8192)
+
+
+# ``benchmark_judge`` and ``benchmark_user_simulator`` name the NON-SECRET
+# settings (provider name, model name, base URL) of a benchmark's own scoring
+# model and simulated user. They are model settings, but for a role the agent
+# under test never plays -- ``ModelCapabilityRequirement.role`` already
+# distinguishes ``agent | judge | user_simulator`` -- and the key itself still
+# travels as a ``SecretRef``/``ResolvedSecret``, never as infra. The agent's own
+# provider/model purposes remain structurally absent from this vocabulary.
 InfraPurpose: TypeAlias = Literal[
     "benchmark_auth",
     "benchmark_compute",
     "benchmark_storage",
+    "benchmark_judge",
+    "benchmark_user_simulator",
     "artifact_storage",
 ]
 
@@ -348,7 +390,13 @@ class OperationParams(ProtocolModel):
 
 
 class BeginRescueParams(OperationParams):
-    """Content pins only; the worker receives no resolved secret material."""
+    """Content pins plus the secrets a rescue worker needs to tear down.
+
+    The descriptor itself stays secret-free (it is persisted to disk). A rescue
+    worker enters at HANDSHAKEN having never run ``prepare``, so the parent's
+    resolver re-resolves ``descriptor.secret_refs`` at rescue time and hands the
+    values over here, on the private pipe, for the cleanup calls that follow.
+    """
 
     descriptor: RescueDescriptor
     descriptor_id: Digest
@@ -356,6 +404,12 @@ class BeginRescueParams(OperationParams):
     cleanup_plan_id: Digest
     selector_digest: Digest
     handshake_digest: Digest
+    secrets: tuple[ResolvedSecret, ...] = Field(default=(), max_length=MAX_RESCUE_REFS)
+
+    @field_validator("secrets", mode="before")
+    @classmethod
+    def _freeze_secrets(cls, value: Any) -> Any:
+        return tuple(value) if isinstance(value, list) else value
 
     @model_validator(mode="after")
     def _bind_descriptor(self) -> "BeginRescueParams":
@@ -415,11 +469,23 @@ class ResetStartParams(OperationParams):
     (``supervisor.verify_artifact``); the worker names bytes by digest and never
     supplies a path. Sending the root is what makes the worker able to write
     where the parent already looks -- it grants no new read authority.
+
+    ``secrets`` (schema 1.2) rides this call for the same reason the root does:
+    it is the side-effect boundary, the first call at which a provider needs a
+    credential, and the one call that precedes every allocation. ``prepare``
+    stays secret-free so a persisted plan can never have been produced with
+    credentials in hand.
     """
 
     task_id: StrictIdentifier
     episode_id: StrictIdentifier
     artifact_root: ArtifactRoot
+    secrets: tuple[ResolvedSecret, ...] = Field(default=(), max_length=MAX_RESCUE_REFS)
+
+    @field_validator("secrets", mode="before")
+    @classmethod
+    def _freeze_secrets(cls, value: Any) -> Any:
+        return tuple(value) if isinstance(value, list) else value
 
 
 class ObserveParams(ProtocolModel):
