@@ -2,9 +2,11 @@
 
 A separately-distributed evaluation adapter that runs OSWorld 2.0
 (`osworld-v2-2026.08.08`) episodes behind local-operator's verified adapter
-boundary. **PR 1 is the cloud-free slice**: the complete adapter plus a
-`FakeProvider`, proved end to end through the real `EpisodeRunner` with zero
-AWS spend. The AWS provider (`providers/aws.py`) is PR 2.
+boundary. The cloud-free slice — the complete adapter plus a `FakeProvider`,
+proved end to end through the real `EpisodeRunner` with zero AWS spend — is
+what CI exercises. `providers/aws.py` is the production backend: it launches
+the guest on EC2 with boto3, leases it with an EventBridge TTL schedule, and
+hands the instance to upstream's `DesktopEnv`.
 
 ## Why it is its own distribution
 
@@ -15,14 +17,36 @@ of the installed wheel — so it must be a *separate* distribution, or every
 harness release would invalidate the adapter pin. Isolation comes from the
 wheel + digest + isolated worker, not from the source's location.
 
-## Prerequisite: the gated task corpus
+## Prerequisite: the gated inputs, in a DURABLE root
 
-OSWorld 2.0's 108 task classes are a **gated** Hugging Face dataset
-(`xlangai/osworld_v2_tasks`, `gated: "auto"`). A human must accept the terms
-once, and an `HF_TOKEN` must exist, before the workspace can be materialised.
-This is a **build-time** prerequisite, never an episode-time one: the tasks are
-downloaded once into the workspace, whose `workspace_digest` then pins the
-exact task bytes every episode runs.
+OSWorld 2.0's 108 task classes and its 4.2 GB of assets are **gated** Hugging
+Face datasets (`xlangai/osworld_v2_tasks`, `xlangai/osworld_v2_assets_gated`).
+A human accepts the terms once and fetches them, together with the OSWorld
+checkout at the pinned commit, into an **inputs root**:
+
+```
+$OSWORLD_INPUTS_ROOT/            (default ~/worktrees/osworld)
+├── prepared/                    xlang-ai/OSWorld-V2 at d578d2d4 (git checkout)
+│   └── benchmark_releases/osworld-v2-2026.08.08.json
+└── gated/
+    ├── tasks/task_*.py          108 task modules
+    ├── tasks/manifests/task_hashes.json
+    ├── manifests/assets.json    per-file sha256 of the asset snapshot
+    └── assets/                  4.2 GB, served to the guest via OSWORLD_FILE_BASE_URL
+```
+
+**Never put the inputs root, the workspace, or a run's output under `/tmp`.**
+macOS purges `/private/tmp` on disk pressure and on a periodic sweep with no
+warning; a purge mid-run destroyed a previous paid pilot's prepared checkout,
+its assets, its output directory, and left an EC2 instance running.
+
+The build script (below) verifies every input against the committed pin
+`config/release-v2026.08.08.json` — release manifest sha, task-hash manifest
+sha, every task file sha, task count, prepared checkout commit — and refuses
+(exit 4, naming the path) on any mismatch. It never downloads. The assets are
+**not** copied into the workspace (the workspace cap is 4 GiB); the workspace
+records their manifest sha in `inputs.json`, and the adapter re-verifies the
+live root against it at every `reset_start`.
 
 ## Build, lock, install
 
@@ -46,12 +70,19 @@ uv pip install --python /opt/lop-adapters/osworld-v2/0.1.0/venv/bin/python \
 uv pip install --python /opt/lop-adapters/osworld-v2/0.1.0/venv/bin/python \
     local-operator==<harness version>
 
-# 4. materialise the workspace (needs HF_TOKEN once; writes
-#    adapter-release.json, tasks/, benchmark_release.json, task_hashes.json,
-#    then chmod -R a-w). See scripts/build_osworld_adapter.py.
+# 3b. for the PAID path only: OSWorld itself is an extra (~380 packages) that
+#     the cloud-free wheel does not need. Install it into the same venv.
+uv pip install --python /opt/lop-adapters/osworld-v2/0.1.0/venv/bin/python \
+    "lop-osworld-v2-adapter[osworld] @ dist/lop_osworld_v2_adapter-0.1.0-py3-none-any.whl"
+
+# 4. materialise the workspace from the verified inputs root (no download;
+#    writes adapter-release.json, benchmark_release.json, task_hashes.json,
+#    adapter-provider.json, inputs.json, tasks/, all read-only).
 python ~/local-operator/scripts/build_osworld_adapter.py \
     --benchmark-release osworld-v2-2026.08.08 \
-    --out /opt/lop-adapters/osworld-v2/0.1.0/workspace
+    --inputs-root ~/worktrees/osworld \
+    --package-digest <package_digest from step 5> \
+    --out ~/worktrees/osworld/workspaces/0.1.0
 
 # 5. compute the three digests the AdapterSelector needs
 python - <<'PY'
@@ -70,19 +101,89 @@ benchmark_release_name || task_hash_manifest_sha256)`, written into both
 `adapter-release.json` and the selector. It ties the harness build to the
 benchmark release — the claim a leaderboard number must carry.
 
-## Leak audit (operator command)
+## One-time AWS prerequisites (operator, by hand, never automated)
 
-Every instance this adapter creates carries the `lop:adapter=osworld-v2` tag,
-so a complete leak detector is one query:
+The provider creates instances, volumes and one TTL schedule per episode. It
+does NOT create IAM roles or security groups; those are one-time human steps.
+
+1. **TTL role** → infra `AWS_SCHEDULER_ROLE_ARN`. A role trusted by
+   `scheduler.amazonaws.com` (with an `aws:SourceAccount` condition) whose only
+   permission is `ec2:TerminateInstances` on instances where
+   `aws:ResourceTag/lop:adapter = osworld-v2`. The provider creates the schedule
+   **immediately after `run_instances`, before waiting for readiness**, and a
+   failure to create it terminates the instance and fails the episode — never a
+   warning. Because the role is tag-scoped, the adapter tag MUST be on the
+   instance at creation (it is, via `TagSpecifications`).
+2. **Security group** → infra `AWS_SECURITY_GROUP_ID`. A pre-existing group in
+   the default VPC allowing inbound TCP **5000** (guest control), **5910** (VNC,
+   optional) and **9222** (Chrome DevTools) from the controller's current
+   `/32`. The adapter does not create or repair groups yet; a residential or
+   VPN address that changes mid-run makes the guest unreachable (see the
+   previous pilot's "controller IP drift"). Re-check your address before a
+   run.
+3. **Subnet / region** → infra `AWS_SUBNET_ID`, `AWS_REGION=us-east-1`. The
+   release AMI exists only in us-east-1; every client is built with an
+   explicit region, so a profile whose default region differs is fine.
+4. **Credentials** → secrets `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`
+   (optional `AWS_SESSION_TOKEN`) in the harness credential store. Use a
+   **scoped key**: `ec2:RunInstances, DescribeInstances, DescribeImages,
+   DescribeVolumes, TerminateInstances, CreateTags`, `scheduler:CreateSchedule,
+   DeleteSchedule, ListSchedules`, and `iam:PassRole` on the TTL role. An admin
+   key works but should not be the one a worker subprocess holds.
+5. **Guest settings** → infra `OSWORLD_CLIENT_PASSWORD`, `OSWORLD_FILE_BASE_URL`;
+   optional `OSWORLD_INPUTS_ROOT` (default `~/worktrees/osworld`) and
+   `OSWORLD_TTL_SECONDS` (default 7200).
+6. **Judged tasks only** → secret `OSWORLD_EVAL_MODEL_API_KEY` plus infra
+   `OSWORLD_EVAL_MODEL_PROVIDER` / `OSWORLD_EVAL_MODEL_NAME` (purpose
+   `benchmark_judge`). A task whose source imports the judge client is
+   **refused at preflight and again at `reset_start`** without them: OSWorld's
+   `llm_metrics` returns `0.0` on any exception, and the previous pilot scored
+   ~17% of its suite as silent zeros that way. The key is the one secret the
+   worker writes into its own environment (OSWorld reads it from nowhere
+   else); it is scrubbed on `close`.
+
+## How secrets reach the worker
+
+The worker is spawned with an environment built from a closed allowlist, so
+nothing ambient carries a credential. Resolved secrets travel **only** on the
+private RPC pipe, on `reset_start` (the side-effect boundary) and on
+`begin_rescue` (a fresh worker tearing down from a persisted descriptor). They
+are never on `prepare`, never in `rescue.json`, and the AWS values never touch
+`os.environ`; the provider builds its boto3 session from them directly.
+
+## Teardown and rescue
+
+`cleanup` reports `succeeded` only on **positive** evidence: `terminate`
+polls `describe_instances` until the state is `terminated` (up to 55 s) and
+otherwise reports `terminate-unconfirmed`, which keeps `rescue_required` set.
+`DesktopEnv.close()` is never called — it terminates without confirming.
+
+If the parent dies mid-episode, `rescue.json` in the rescue root names the
+episode's refs. Sweep them all:
 
 ```sh
-aws ec2 describe-instances \
-  --filters Name=tag:lop:adapter,Values=osworld-v2 Name=instance-state-name,Values=running
+python ~/local-operator/scripts/osworld_rescue_sweep.py --rescue-root <rescue root>
 ```
 
-Run it before and after any paid episode; it must return empty.
+It spawns the exact pinned worker per descriptor, re-resolves the descriptor's
+secret refs from the credential store, reconciles every action, and unlinks
+the descriptor **only** when the aggregate is complete.
 
-## Known scope limitations (PR 1)
+## Leak audit (operator command)
+
+Every instance and volume this adapter creates carries `lop:adapter=osworld-v2`
+and every lease is a schedule named `lop-ttl-<episode>`, so one read-only
+script is a complete inventory:
+
+```sh
+python ~/local-operator/scripts/osworld_tag_audit.py --region us-east-1
+```
+
+It prints `[]` and exits 0 when clean, otherwise lists what it found and exits
+1. It never terminates anything. **Run it before and after every paid episode;
+it must print `[]`.**
+
+## Known scope limitations
 
 - **Infeasible tasks are refused, not merely undocumented.** The runner returns
   on a `finish` batch without calling `execute` (episode.py:531-534), so the
@@ -101,8 +202,15 @@ Run it before and after any paid episode; it must return empty.
 - **`user_simulator` is one-sided.** The harness's own responder supplies the
   answer the model sees; the benchmark's simulator is notified for the record.
   Faithful two-sided wiring is a later PR. Pilot tasks declare no simulator.
-- **No AWS provider.** `providers/aws.py`, the `rescue_root` sweep, and the
-  paid single-episode proof are PR 2.
+- **Temporary security groups and IP-drift repair are not automated.** The
+  operator supplies a pre-existing group (`AWS_SECURITY_GROUP_ID`); a
+  per-episode group with a `CleanupActionKind` of its own is a later PR.
+- **The judge is refused, not wired.** Judged tasks fail preflight without the
+  judge credential; running them through the judge with a receipt, and wiring
+  `LLMUserSimulator` as the user responder, is a later PR.
+- **The TTL lease is not yet derived from the wall budget.** The budget lives
+  in the runner's `BudgetAuthorization` and is not on the adapter wire; the
+  lease is `OSWORLD_TTL_SECONDS` or the 7200 s default.
 
 ## Out of scope (permanently)
 

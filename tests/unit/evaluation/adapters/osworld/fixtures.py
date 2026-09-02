@@ -52,6 +52,28 @@ class Task004:
     evaluator = {"func": "check_cart"}
 """
 
+# Imports the LLM judge client directly (the shape of the real task_008).
+JUDGED = """
+from desktop_env.evaluators.model_client import generate_text
+
+class Task008:
+    id = "task_judged"
+    instruction = "Write a summary the judge will grade."
+    config = [{"type": "launch", "app": "gedit"}]
+    evaluator = {"func": "compare_text_with_llm"}
+"""
+
+# Reaches the judge through an llm_metrics metric rather than the client.
+JUDGED_VIA_METRICS = """
+from desktop_env.evaluators.metrics import llm_metrics
+
+class Task009:
+    id = "task_judged_metrics"
+    instruction = "Edit the image the judge will compare."
+    config = [{"type": "launch", "app": "gimp"}]
+    evaluator = {"func": "compare_images_with_llm"}
+"""
+
 # A googledrive config entry needs Google account credentials.
 GOOGLEDRIVE = """
 class Task005:

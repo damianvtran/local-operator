@@ -22,6 +22,14 @@ _ALWAYS = {
     "OSWORLD_CLIENT_PASSWORD",
     "OSWORLD_FILE_BASE_URL",
     "HF_TOKEN",  # optional at episode time: the corpus is pre-materialised
+    "OSWORLD_INPUTS_ROOT",  # optional: the durable root the assets live in
+    "OSWORLD_TTL_SECONDS",  # optional: lease-length override
+}
+
+_JUDGE = {
+    "OSWORLD_EVAL_MODEL_API_KEY",
+    "OSWORLD_EVAL_MODEL_PROVIDER",
+    "OSWORLD_EVAL_MODEL_NAME",
 }
 
 
@@ -80,6 +88,34 @@ def test_aws_credentials_are_secrets_not_infra() -> None:
     # AWS_SCHEDULER_ROLE_ARN is REQUIRED: without it OSWorld's TTL degrades to
     # a logged warning, removing the last defence against an orphaned instance.
     assert by_name["AWS_SCHEDULER_ROLE_ARN"] == ("infra", True)
+
+
+def test_inputs_root_and_ttl_are_optional_infra() -> None:
+    by_name = _by_name(fixtures.PLAIN)
+    assert by_name["OSWORLD_INPUTS_ROOT"] == ("infra", False)
+    assert by_name["OSWORLD_TTL_SECONDS"] == ("infra", False)
+
+
+def test_judged_task_requires_the_judge_key_and_settings() -> None:
+    """A task whose evaluator calls the LLM judge is REFUSED at preflight
+    without the key: OSWorld's ``llm_metrics`` returns 0.0 on any exception,
+    so running it without a key seals a silent zero."""
+
+    by_name = _by_name(fixtures.JUDGED)
+    assert by_name["OSWORLD_EVAL_MODEL_API_KEY"] == ("secret", True)
+    assert by_name["OSWORLD_EVAL_MODEL_PROVIDER"] == ("infra", True)
+    assert by_name["OSWORLD_EVAL_MODEL_NAME"] == ("infra", True)
+    assert _names(fixtures.JUDGED) == _ALWAYS | _JUDGE
+
+
+def test_judged_via_llm_metrics_import_is_also_detected() -> None:
+    assert _JUDGE <= _names(fixtures.JUDGED_VIA_METRICS)
+
+
+def test_plain_task_does_not_require_the_judge() -> None:
+    assert not (_JUDGE & _names(fixtures.PLAIN))
+    descriptor = taskfile.load_static(fixtures.PLAIN.encode(), module_name="tasks/t.py")
+    assert requirements.is_judged(descriptor) is False
 
 
 def test_hf_token_is_optional_at_episode_time() -> None:
