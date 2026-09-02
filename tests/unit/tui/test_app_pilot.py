@@ -9712,6 +9712,7 @@ async def test_help_documents_shell_mode_and_the_composer_chords() -> None:
             "ctrl+g",
             "ctrl+b",
             "ctrl+pageup",
+            "ctrl+r",
             "esc",
             "ctrl+d",
         )
@@ -9742,6 +9743,7 @@ async def test_help_documents_shell_mode_and_the_composer_chords() -> None:
             "ctrl+g",
             "ctrl+b",
             "ctrl+pageup",
+            "ctrl+r",
             "esc",
             "ctrl+d",
         )
@@ -9981,3 +9983,135 @@ async def test_the_aside_chord_is_silent_when_there_is_nothing_to_scroll() -> No
         # Pinned on the marker's own noun rather than on the word "scroll",
         # which the card's hint row legitimately carries.
         assert not any("earlier" in line for line in after), after
+
+
+# -- the aside's copy key (Option E) ---------------------------------------
+#
+# `omp` ships copy as a first-class action beside branch and dismiss, and this
+# is the port of that idea rather than of its keybinding: its bare `c` cannot
+# work here (see `ASIDE_COPY_KEY` — Textual gives the focused TextArea the
+# character first, measured). What ports is the CONTRACT: the full answer off
+# the model, never the painted rows, and nothing written to the session.
+@pytest.mark.asyncio
+async def test_the_aside_copy_key_takes_the_whole_answer_not_the_painted_rows() -> None:
+    """The acceptance case, and the reason the payload is not read off screen.
+
+    The card paints a WINDOW — that is the defect this branch exists to fix —
+    so a copy sourced from the frame would hand back the same fragment the user
+    is complaining they cannot see past. 200 rows are asserted against the
+    clipboard while the card is painting a fraction of them.
+    """
+    from tests.unit.tui.test_aside import AsideSession
+
+    session = AsideSession(answer=_aside_answer_rows(200))
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        panel = await _open_long_aside(pilot, app, "explain the whole loop")
+        app._clipboard = ""
+
+        painted = _aside_rows_on_screen(panel)
+        assert len(painted) < 200, "the card fits everything; this proves nothing"
+
+        await pilot.press("ctrl+r")
+        await pilot.pause()
+
+        copied = app._clipboard
+        got = {index for index in range(200) if f"ANSWER-ROW-{index:03d}" in copied}
+        assert got == set(range(200)), f"clipboard is missing {sorted(set(range(200)) - got)[:5]}…"
+        # The question came with it, so the exchange reads as one.
+        assert "explain the whole loop" in copied
+        # And NO card chrome: not the title, not the rule, not the hint row.
+        # The `Chrome.ALLOW_SELECT` rule applied to this path.
+        assert "─" not in copied, copied[:200]
+        assert "esc" not in copied.lower(), copied[:200]
+
+
+@pytest.mark.asyncio
+async def test_the_aside_copy_key_writes_nothing_to_the_session() -> None:
+    """The off-the-record contract, which is the whole point of the key.
+
+    `^f` rescues the text by writing it permanently into the context AND the
+    transcript. This rescues it without touching either — the clipboard is
+    outside the session. Asserted against the message list itself, not against
+    a notice.
+    """
+    from tests.unit.tui.test_aside import AsideSession
+
+    session = AsideSession(answer=_aside_answer_rows(50))
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _open_long_aside(pilot, app)
+        app._clipboard = ""
+
+        before = list(session._history)
+        forked_before = list(session.forked)
+
+        await pilot.press("ctrl+r")
+        await pilot.pause()
+
+        assert app._clipboard, "nothing was copied, so this proves nothing"
+        assert list(session._history) == before, "copy wrote to the conversation"
+        assert list(session.forked) == forked_before, "copy forked the exchange"
+
+
+@pytest.mark.asyncio
+async def test_the_aside_copy_key_works_while_the_answer_is_still_streaming() -> None:
+    """Streaming is when the key matters MOST, because `^f` is refused there.
+
+    `_aside_can_fork` returns False while the session streams — splicing a
+    message into a live batch produces a request no provider accepts. That is a
+    constraint on WRITING to the session, and copying does not write, so this
+    path must stay open. Routing the payload through `fork_messages()` would
+    have failed exactly here: it is gated on `AsideTurn.forkable`, which needs
+    `state == "done"`, so mid-stream it returns an empty list.
+    """
+    from tests.unit.tui.test_aside import AsideSession
+
+    session = AsideSession(answer="")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        panel = await _open_long_aside(pilot, app, "why is it slow")
+
+        # A turn mid-flight: asked, partially answered, not settled.
+        session.streaming = True
+        generation = panel.ask("and what about startup")
+        panel.append_answer(generation, "PARTIAL-TEXT so far")
+        await pilot.pause()
+        assert panel.turns[-1].state == "running"
+        assert app._aside_can_fork() is False, "precondition: ^f is refused here"
+
+        app._clipboard = ""
+        await pilot.press("ctrl+r")
+        await pilot.pause()
+
+        assert "PARTIAL-TEXT so far" in app._clipboard, repr(app._clipboard)
+        assert "and what about startup" in app._clipboard
+
+
+@pytest.mark.asyncio
+async def test_the_aside_copy_key_is_inert_outside_the_aside() -> None:
+    """Closed, it copies nothing and — the part that matters — types nothing.
+
+    `ctrl+r` was chosen because `TextArea` does not bind it, so the composer
+    keeps every editing key it had. A regression that turned this into a
+    character would be invisible until someone typed it.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        for _ in range(80):
+            await pilot.pause()
+            if app._session is not None:
+                break
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        editor.load_text("a draft I am writing")
+        await pilot.pause()
+        app._clipboard = ""
+
+        assert not app._aside_is_open()
+        await pilot.press("ctrl+r")
+        await pilot.pause()
+
+        assert app._clipboard == "", "copied something with no aside open"
+        assert editor.text == "a draft I am writing", "ctrl+r reached the buffer"

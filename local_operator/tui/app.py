@@ -1275,6 +1275,46 @@ ASIDE_LAYOUT_CLASS = "aside"
 ASIDE_SCROLL_BACK_KEY = "ctrl+pageup"
 ASIDE_SCROLL_FORWARD_KEY = "ctrl+pagedown"
 
+#: The chord that lifts the aside's full text to the clipboard.
+#:
+#: `omp`, the reference implementation this surface is modelled on, ships copy
+#: as a first-class footer action next to branch and dismiss
+#: (`btw-panel.ts:126-131`), on a BARE `c` made safe by four guards in order —
+#: key matches, action available, composer focused, and the DRAFT IS EMPTY
+#: (`input-controller.ts:280-289`). The fourth is the clever one there: a bare
+#: letter costs no chord, because once anything is typed it falls through to
+#: being an ordinary character.
+#:
+#: THAT PATTERN DOES NOT PORT, and the reason is a DISPATCH-ORDER difference
+#: rather than a naming clash — which is why "just use `c` like omp does" is a
+#: change that looks obviously right and cannot work. `omp`'s input controller
+#: sees raw keypresses BEFORE its editor does, so a bare letter can be
+#: intercepted and conditionally passed through. Textual dispatches to the
+#: FOCUSED widget first, and an App-level bubbling binding is reached only if
+#: nothing focused consumed the key. So with the composer focused — which is
+#: the aside's whole premise — a bare `c` is a character, not a binding, and
+#: the empty-draft guard is UNREACHABLE: by the time it could be tested, the
+#: `c` is already in the buffer it was supposed to check.
+#:
+#: MEASURED against a real `/btw` aside, Editor focused, empty draft:
+#:
+#:     'c'        fired=[]           composer='c'   <- typed, never dispatched
+#:     'ctrl+y'   fired=[]           composer=''    <- swallowed (TextArea redo)
+#:     'ctrl+r'   fired=['ctrl+r']   composer=''    <- reaches the app, clean
+#:
+#: This app's own bare `c`/`p`/`r` are not a counter-example: they work only
+#: inside the subagent view, which sets the composer READ-ONLY (see
+#: ``_open_subagent_view``/``_set_composer_read_only``), so nothing focused is
+#: claiming characters there. The aside is the exact opposite by design — the
+#: composer stays live, because the user is meant to keep typing into it.
+#:
+#: So it is a chord. `ctrl+r` because nothing in `local_operator/` binds it and
+#: `TextArea` does not claim it (audited against its full table: it takes
+#: ctrl+a/e/w/d/x/k/u/z/y/c/v and f6/f7). NOT `ctrl+y`, which looks free and is
+#: TextArea's REDO — measured, it is swallowed and never reaches the app, which
+#: is exactly the failure this audit exists to catch.
+ASIDE_COPY_KEY = "ctrl+r"
+
 #: Class the input dock carries while the COMPOSER holds focus, which is what
 #: brightens the chevron from `dim` to `fg` (D23). NOT the accent: that means
 #: "a turn is live", and a composer is focused in nearly every frame, so an
@@ -1851,6 +1891,19 @@ class OperatorApp(App[None]):
         Binding(
             ASIDE_SCROLL_FORWARD_KEY, "scroll_aside_forward", "Scroll aside forward", show=False
         ),
+        # Lift the aside's FULL text to the clipboard. The scroll chords above
+        # make every row reachable on screen; this is the answer to the other
+        # half of the complaint — the exchange is discarded on `esc` and `^F`
+        # is the only thing that saves it, at the cost of writing it into the
+        # context and the transcript permanently. The clipboard is outside the
+        # session, so this keeps the card's off-the-record contract that
+        # forking deliberately breaks.
+        #
+        # Bubbling and guarded like its neighbours: it no-ops unless the aside
+        # is open with copyable content and the composer holds focus, so it
+        # shadows nothing on the common path. See `ASIDE_COPY_KEY` for why this
+        # is a chord and not `omp`'s bare `c`.
+        Binding(ASIDE_COPY_KEY, "copy_aside", "Copy the aside", show=False),
         # Page the TRANSCRIPT from the composer (UX round 1, U2). A bounded
         # resume is the first time scrolling the transcript is REQUIRED to see
         # one's own history, and every plain scroll key is spoken for: `up`,
@@ -13835,6 +13888,71 @@ class OperatorApp(App[None]):
         """``ctrl+pagedown`` — page the aside back toward the newest rows."""
         self._scroll_aside(back=False)
 
+    def action_copy_aside(self) -> None:
+        """``ctrl+r`` — lift the aside's FULL text to the clipboard.
+
+        The exchange is discarded on ``esc``, and until this key the only thing
+        that saved it was ``^f`` — which writes it permanently into the context
+        AND the transcript, the one thing the card's own title promises will
+        not happen. The clipboard is outside the session, so this rescues the
+        text without touching the record: the docstring's load-bearing claim
+        (the aside READS the conversation and never writes to it) survives.
+
+        The payload comes off the ``AsideTurn`` dataclass, the way
+        ``fork_messages`` does, and NOT off the painted rows. Two reasons, both
+        load-bearing. The painted rows are a WINDOW — the defect this whole
+        change exists to fix is that they are a subset of the answer — so
+        copying them would hand back the same fragment the user is complaining
+        they cannot see past. And the drag path additionally sweeps up the
+        card's title and rule, which is what ``Chrome.ALLOW_SELECT`` exists to
+        keep out of the clipboard.
+
+        Deliberately NOT gated on ``_aside_can_fork``. That refuses while the
+        session is streaming, because splicing a message into a live batch
+        produces a request no provider accepts — a constraint on WRITING to the
+        session, which this does not do. Streaming is precisely when a long
+        answer is on screen and precisely when ``^f`` is unavailable, so
+        refusing here would withhold the escape hatch exactly when it is the
+        only one left.
+        """
+        panel = self._aside_panel()
+        if panel is None or not panel.is_open:
+            return
+        # Focus is part of the guard, following `omp`'s copy gesture
+        # (`input-controller.ts:280-289`): the key belongs to the surface the
+        # user is working in. Its fourth guard, "the draft is empty", is
+        # dropped rather than forgotten — it exists there to make a BARE letter
+        # safe, and a chord cannot eat a keystroke. See `ASIDE_COPY_KEY`.
+        if self.screen.focused is not self._editor():
+            return
+        # NOT `fork_messages()`, which is gated on `AsideTurn.forkable` and so
+        # requires `state == "done"`. MEASURED: mid-stream it returns `[]`, so
+        # routing the payload through it would copy an EMPTY string in exactly
+        # the case this key exists to cover — the one where `^f` is already
+        # refused. Forking needs a settled turn because it writes a message
+        # pair into the session; the clipboard has no such requirement, so the
+        # two gestures legitimately read different sets.
+        #
+        # A FAILED turn is still excluded: its prose is an error string this
+        # app wrote, not something the model said, and `AsideTurn` keeps it in
+        # a separate field precisely so it can never be handed on as an answer.
+        # Partial text from a running turn IS included — it is genuinely what
+        # the model has said so far, and it is what is on screen.
+        #
+        # Both halves of a turn, so the copy reads as the exchange it was
+        # rather than an answer to a question the clipboard does not contain.
+        # Blank line between turns, matching how the card itself separates them.
+        blocks = [
+            f"{turn.question}\n\n{turn.answer}".strip()
+            for turn in panel.turns
+            if turn.answer.strip()
+        ]
+        # Silent when there is nothing settled to take — the `_scroll_aside`
+        # rule. `_put_on_clipboard` already treats empty as "no copy happened"
+        # rather than raising a receipt for it, so this needs no notice of its
+        # own; a warning row per stray press would be drawn behind the card.
+        self._put_on_clipboard("\n\n".join(blocks))
+
     def action_transcript_home(self) -> None:
         """``ctrl+home`` — take the transcript to its oldest row (UX1, U2).
 
@@ -13885,8 +14003,11 @@ class OperatorApp(App[None]):
         them only after dismissing the thing they were reading.
 
         A PAGE per press rather than a row: this is the no-mouse substitute for
-        a wheel that can be spun, so a press has to be worth making. Paging by
-        the body budget means one press turns over exactly what is on screen.
+        a wheel that can be spun, so a press has to be worth making. The page
+        SIZE is the panel's to decide and is decided inside it — a page is the
+        rows the card is showing, not the rows it budgeted for, because the
+        window spends budget on the marker and the pinned question. See
+        :meth:`AsidePanel.scroll_page`.
         """
         panel = self._aside_panel()
         if panel is None or not panel.is_open:
@@ -17076,6 +17197,11 @@ class OperatorApp(App[None]):
         # per row. MEASURED at 62 composed cells against the 74-cell ceiling
         # this block documents above — headroom, unlike the `cmd+v` row.
         lines.append(_key_row("ctrl+pageup", "scroll a long aside; ctrl+pagedown returns"))
+        # Names the CONTRAST with ctrl+f rather than just the verb: the two
+        # keys both get the text out of a card that says nothing here joins the
+        # conversation, and which one keeps that promise is the whole reason a
+        # user picks between them. 67 composed cells against the 74 ceiling.
+        lines.append(_key_row("ctrl+r", "copy the open aside; ctrl+f folds it in instead"))
         lines.append(_key_row("esc", "stop the agent; leave a mode"))
         lines.append(_key_row("ctrl+d", "quit, on an empty composer"))
         # Where the logs went. Console logging is off while the TUI owns the
