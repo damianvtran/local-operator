@@ -391,6 +391,18 @@ class _CardLayout:
 
     #: Content cells the card is drawing in, padding excluded.
     width: int
+    #: Cells an OPTION ROW's content (label and description) may use — ``width``
+    #: normally, ``width - 1`` when the list windows so the row reserves the
+    #: scrollbar column. Descriptions wrap into ``content_width - indent`` and
+    #: labels truncate to ``content_width``, so a windowed row is never cut by
+    #: the ``width - 1`` thumb reservation in :meth:`_card_text` — that cut used
+    #: to eat the tail of every full-width description line behind the thumb, and
+    #: mark a spurious ``…`` on blank continuation lines (the R11/R15/D5 class,
+    #: reintroduced by the line-granular wrap). This is OMP's own fix: when the
+    #: list overflows it re-renders one column narrower (``ask-dialog.ts:889-892``,
+    #: ``renderRows(width - 1)``). CHROME (header rule, question, footer, the
+    #: position row) is not under the thumb and keeps the full ``width``.
+    content_width: int
     #: The question's wrapped lines that fit, the last marked ``…`` if any were
     #: cut off.
     question: tuple[str, ...]
@@ -1852,6 +1864,7 @@ class AskPickerScreen(Container):
             )
             return _CardLayout(
                 width=width,
+                content_width=width,
                 question=tuple(first),
                 show_title=False,
                 space_above=False,
@@ -1926,9 +1939,29 @@ class AskPickerScreen(Container):
         # prose carries it and the VIEWPORT decides how many lines are visible.
         # This is where descriptions and scroll COEXIST — the headline change.
         body_line_budget = max(0, (1 + extra) + remaining)
-        line_list, line_start_by_row = self._build_line_list(
-            range(self.row_count), width, revealed=reveal, selected=self.state.selected
-        )
+
+        # The wrap width descriptions and labels are measured against. When the
+        # list windows, an OPTION ROW reserves the scrollbar's column: the paint
+        # cuts each windowed row to ``width - 1`` before appending the thumb, so
+        # a description that wrapped to the full ``width`` would lose its tail
+        # (and a padded short line would gain a spurious ``…``) exactly there —
+        # the R11/R15/D5 truncation-behind-the-thumb class. OMP has the same
+        # problem and the same fix: when the list overflows it re-renders one
+        # column narrower (``ask-dialog.ts:889-892``, ``renderRows(width - 1)``).
+        # So build at full width first; if it overflows, rebuild the option-row
+        # content at ``width - 1`` so nothing is ever cut under the thumb.
+        def build(content_width: int, cap: int) -> tuple[list[tuple[int, str]], tuple[int, ...]]:
+            return self._build_line_list(
+                range(self.row_count),
+                content_width,
+                revealed=reveal,
+                selected=self.state.selected,
+                cap=cap,
+            )
+
+        desc_cap = DEFAULT_DESC_CAP
+        content_width = width
+        line_list, line_start_by_row = build(content_width, desc_cap)
         # A surface may forbid hiding an option's LABEL behind the scroll — the
         # approval gate's authorisation contract, where a user who cannot see
         # that *Allow all* exists cannot weigh it (C3/D1, the same safety
@@ -1943,20 +1976,24 @@ class AskPickerScreen(Container):
         # SHOULD scroll its labels, with descriptions kept and the thumb honest
         # (design §0, the headline). So the cap reduction runs only where
         # :meth:`_labels_must_all_fit` is True and is a no-op elsewhere.
-        desc_cap = DEFAULT_DESC_CAP
         if self._labels_must_all_fit() and len(line_list) > body_line_budget:
             for candidate in range(DEFAULT_DESC_CAP - 1, -1, -1):
-                trial, trial_map = self._build_line_list(
-                    range(self.row_count),
-                    width,
-                    revealed=reveal,
-                    selected=self.state.selected,
-                    cap=candidate,
-                )
                 desc_cap = candidate
-                line_list, line_start_by_row = trial, trial_map
-                if len(trial) <= body_line_budget:
+                line_list, line_start_by_row = build(content_width, desc_cap)
+                if len(line_list) <= body_line_budget:
                     break
+        # OMP's ``#shouldRenderScrollbar`` (``scroll-view.ts:222-227``): the list
+        # windows iff it is taller than the viewport. Only claimed on the
+        # ``position=True`` retry — the first pass never buys the position row,
+        # exactly as before, so the thumb and the count appear together (§5).
+        show_position = position and len(line_list) > body_line_budget
+        if show_position:
+            # Reserve the thumb column: re-measure the option rows one cell
+            # narrower so no windowed line reaches the cut. Narrowing can only
+            # add wrapped lines, so a list that overflowed at ``width`` still
+            # overflows at ``width - 1`` — the window decision does not flip.
+            content_width = max(1, width - 1)
+            line_list, line_start_by_row = build(content_width, desc_cap)
         # The description COLUMN exists whenever any OPTION carries real prose;
         # a property of the QUESTION, not of the budget (§3.4). The free-text
         # row's hint is not a description (:meth:`_reveal_wrap` returns nothing
@@ -1964,7 +2001,8 @@ class AskPickerScreen(Container):
         # recommendation badge inline vs in the column.
         descriptions = any(
             index != self.other_row
-            and self._granted_lines(index, width, reveal, self.state.selected, desc_cap) >= 1
+            and self._granted_lines(index, content_width, reveal, self.state.selected, desc_cap)
+            >= 1
             for index in range(self.row_count)
         )
         # The per-row grants, uniform at the cap — what the paint draws under
@@ -1972,15 +2010,16 @@ class AskPickerScreen(Container):
         grants = {
             index: g
             for index in range(self.row_count)
-            if (g := self._granted_lines(index, width, reveal, self.state.selected, desc_cap)) >= 1
+            if (
+                g := self._granted_lines(
+                    index, content_width, reveal, self.state.selected, desc_cap
+                )
+            )
+            >= 1
         }
-        # OMP's ``#shouldRenderScrollbar`` (``scroll-view.ts:222-227``): the
-        # list windows iff it is taller than the viewport. Only claimed on the
-        # ``position=True`` retry — the first pass never buys the position row,
-        # exactly as before, so the thumb and the count appear together (§5).
-        show_position = position and len(line_list) > body_line_budget
         return _CardLayout(
             width=width,
+            content_width=content_width,
             question=tuple(kept),
             show_title=show_title,
             space_above=space_above,
@@ -2409,10 +2448,17 @@ class AskPickerScreen(Container):
         # of ``body_line_budget`` lines, clipping partial rows at the edges
         # (§2.3) so the body is a rigid rectangle. Descriptions and scroll now
         # COEXIST: a windowed list keeps every visible row's 2-line clamp.
+        # OPTION-ROW content is measured against ``content_width`` — ``width``
+        # normally, ``width - 1`` when the list windows so the row reserves the
+        # thumb column (:attr:`_CardLayout.content_width`). Rows come out exactly
+        # ``content_width`` wide, so the windowing cut below only pads and
+        # appends the glyph; it never truncates real text or marks a spurious
+        # ``…`` on a padded line (the R11/R15/D5 defect QA caught).
+        cwidth = layout.content_width
         rendered: list[tuple[int, Text]] = []
         for index in range(self.row_count):
             ground = self._row_ground(index)
-            rendered.append((index, self._row_text(index, width, ground, fg, dim, faint, layout)))
+            rendered.append((index, self._row_text(index, cwidth, ground, fg, dim, faint, layout)))
             granted = layout.description_rows.get(index, 0)
             if granted:
                 # `fg` for the TAG and `muted` for the separator and the prose.
@@ -2421,7 +2467,7 @@ class AskPickerScreen(Container):
                 # (D4); the tag carries the label's own ink and the prose keeps
                 # the ramp step it was walked up to.
                 for line in self._description_text(
-                    index, width, ground, fg, muted, granted, layout
+                    index, cwidth, ground, fg, muted, granted, layout
                 ):
                     rendered.append((index, line))
         body = layout.body_line_budget
@@ -2446,13 +2492,17 @@ class AskPickerScreen(Container):
             # (:meth:`_index_at`). A partial row's visible lines still map to it.
             newline(index)
             if layout.show_position:
-                # Cut the row to ``width - 1`` and append the track/thumb glyph
-                # in the freed column, so the bar never widens the card. No
-                # gutter is reserved when the bar is absent (unlike usage_panel,
-                # whose right-aligned numbers must not slide): these rows are
-                # left-aligned, so the reservation would buy nothing and would
-                # shift the approval gate's byte-identical frame — which never
-                # windows at its pinned sizes and so never reaches here.
+                # Pad the ``content_width``-wide row to the thumb's column and
+                # append the track/thumb glyph, so the bar never widens the
+                # card. ``content_width`` already reserved this column (the row
+                # wrapped to ``width - 1``), so the ``_cut_row`` here is a guard
+                # against an over-long LABEL, not the description-truncating cut
+                # it used to be. No gutter is reserved when the bar is absent
+                # (unlike usage_panel, whose right-aligned numbers must not
+                # slide): these rows are left-aligned, so the reservation would
+                # buy nothing and would shift the approval gate's byte-identical
+                # frame — which never windows at its pinned sizes and so never
+                # reaches here.
                 _cut_row(row, width - 1)
                 pad = (width - 1) - cell_len(row.plain)
                 if pad > 0:
