@@ -5441,10 +5441,73 @@ class OperatorApp(App[None]):
         # `tool_approval_mode`, where believing it and being wrong is a safety
         # problem. Making the promise true is the honest fix; wording around it
         # would leave `/new` quietly serving stale settings.
-        if self._on_config_changed is not None:
-            self._on_config_changed()
+        # GUARDED, because that reload is destructive on a malformed file
+        # (review round 3, B1). In production `_on_config_changed` is
+        # `ConfigManager.reload` → `_load_config`, which RAISES on a non-mapping
+        # `values:` and MOVES the user's config.yml aside on a YAML error. This
+        # PR makes that story likelier, not rarer: the watcher deliberately
+        # holds a broken file in silence, so the user's first hint that they
+        # fat-fingered an edit would be `/new` — the command this feature's own
+        # notice sends them to — either dying or replacing every setting they
+        # have with defaults. Refusing to reload here keeps the module's
+        # never-move-the-user's-file contract intact at the exact moment the
+        # watcher is protecting it.
+        #
+        # The watcher answers the question because it already encodes the rule
+        # set; the `try` covers what remains (a version migration writing to a
+        # read-only dir, a race between the check and the read). Both paths
+        # still build the session — on the last good values, which is what the
+        # watcher has been serving all along — rather than leaving the user
+        # with no new session and an unexplained traceback.
+        self._reload_config_for_new_session(notice)
         notice("starting a new session…")
         self._run_session_transition(self._reload_session())
+
+    def _reload_config_for_new_session(self, notice: NoticeFn) -> None:
+        """Adopt on-disk config for the session `/new` is about to build.
+
+        Two consumers, both of which `/new` must reach for its own notice to be
+        true, and neither of which the other covers:
+
+        * the launch-time ``ConfigManager`` the session factory closed over —
+          `hosting`, `model_name`, `auto_save_conversation`, `web_*.enabled`;
+        * the TUI's own approval gate, which is process state rather than
+          session state and is otherwise written only by
+          ``_load_approvals_default`` at mount (review round 3, Q3). Missing it
+          meant `tool_approval_mode` was the ONE key of the four whose "takes
+          effect on /new" promise was not kept — and the one where believing it
+          and being wrong is a safety problem, in both directions: a tightened
+          `auto → ask` left the new session auto-approving writes with no
+          prompt.
+
+        Refuses the reload outright when the file on disk is not parseable,
+        because `ConfigManager._load_config` would move it aside and continue
+        from defaults (B1). Says so rather than failing silently: a user who
+        just broke their config while trying to change a setting needs to know
+        that is why the change did not take.
+        """
+        if self._on_config_changed is None:
+            return
+        from local_operator.config_watch import process_watcher
+
+        try:
+            if not process_watcher().config_is_readable():
+                notice(
+                    "config.yml is not readable — starting on the last good "
+                    "settings; fix the file and run /new again",
+                    "warning",
+                )
+                return
+            self._on_config_changed()
+        except Exception:  # noqa: BLE001 — a bad config must never break /new
+            logger.warning(
+                "config reload before /new failed; building on the last good values",
+                exc_info=True,
+            )
+            return
+        # Only after a successful reload: the gate must not adopt a value the
+        # factory did not.
+        self._load_approvals_default()
 
     def _cmd_fork(self, arg: str, notice: NoticeFn) -> None:
         """``/fork [message]`` — branch this conversation into a new session.
@@ -12866,12 +12929,23 @@ class OperatorApp(App[None]):
             # also front-loads the answer to "did it take effect?" instead of
             # burying it after up to six key names.
             parts.append(f"applied: {', '.join(live)}")
+        # Verb agreement per clause (design review round 1, D7). Each of these
+        # was only ever exercised with one key, and the multi-key form is the
+        # COMMON one for at least `hosting, model_name` — the pair a user
+        # changes together when they switch models. A sentence whose whole job
+        # is to be trusted about what did and did not happen cannot visibly
+        # disagree with itself.
         if new_sessions:
-            parts.append(f"{', '.join(new_sessions)} takes effect on /new")
+            verb = "takes" if len(new_sessions) == 1 else "take"
+            parts.append(f"{', '.join(new_sessions)} {verb} effect on /new")
         if relaunch:
-            parts.append(f"{', '.join(relaunch)} needs a relaunch")
+            verb = "needs" if len(relaunch) == 1 else "need"
+            parts.append(f"{', '.join(relaunch)} {verb} a relaunch")
         if retired:
-            parts.append(f"{', '.join(retired)} is retired and does nothing")
+            tail = (
+                "is retired and does nothing" if len(retired) == 1 else "are retired and do nothing"
+            )
+            parts.append(f"{', '.join(retired)} {tail}")
         # The approval mode names its VALUE and raises the severity (design
         # review round 1, D2). "changed" is not actionable for a two-valued
         # safety switch: the user in the other pane cannot tell whether

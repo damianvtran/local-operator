@@ -366,3 +366,149 @@ async def test_new_reloads_the_launch_config_so_the_notice_promise_is_true(
         f"/new built with {built[-1]!r}: the launch-time config manager was not reloaded, "
         "so the value the notice promised would take effect did not"
     )
+
+
+#: The five shapes `ConfigManager._load_config` mishandles: the first three
+#: RAISE, the last two are the destructive ones — it moves the user's file
+#: aside to `config.yml.bad.<ts>` and continues from defaults.
+_MALFORMED_CONFIGS = {
+    "scalar": "values: 3\n",
+    "list": "values:\n - a\n",
+    "null": "values:\n",
+    "broken-yaml": "values:\n  bad: : :\n",
+    "non-mapping-top": "- a\n- b\n",
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shape", sorted(_MALFORMED_CONFIGS))
+async def test_new_survives_a_malformed_config_without_touching_the_file(
+    monkeypatch, tmp_path, shape: str
+) -> None:
+    """`/new` must not crash on, or destroy, a config it cannot parse.
+
+    Review round 3, B1 — a regression the `/new` reload introduced. In
+    production `_on_config_changed` is `ConfigManager.reload`, which raises on
+    a non-mapping `values:` and MOVES `config.yml` aside on a YAML error. The
+    story this PR makes likelier: the watcher deliberately holds a broken file
+    in silence, so the user's first hint of a fat-fingered edit is the `/new`
+    the notice sent them to — which either died or replaced every setting they
+    had with defaults.
+
+    Asserts all four properties per shape, because the fix has to deliver all
+    four: no exception, the session still builds, the file is untouched, and no
+    `.bad` file appears. The last two are the ones that matter most; a crash is
+    recoverable, a silently discarded config is not.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    launch_manager = ConfigManager(tmp_path)
+    launch_manager.set_config_value("hosting", "anthropic")
+    built: list[str] = []
+
+    async def resume_factory(resume_id):
+        built.append(str(launch_manager.get_config_value("hosting")))
+        return await _factory(FakeSession())
+
+    app = OperatorApp(
+        lambda: _factory(FakeSession()),
+        resume_factory=resume_factory,
+        on_config_changed=launch_manager.reload,
+    )
+    async with app.run_test(size=(100, 24)) as pilot:
+        await _adopted(app, pilot)
+        body = _MALFORMED_CONFIGS[shape]
+        (tmp_path / "config.yml").write_text(body)
+
+        app._cmd_new(lambda body, kind="info": None)  # must not raise
+        for _ in range(400):
+            if built:
+                break
+            await pilot.pause()
+
+    assert built, f"{shape}: /new did not build a session"
+    assert (
+        tmp_path / "config.yml"
+    ).read_text() == body, f"{shape}: the user's config was rewritten"
+    assert not list(tmp_path.glob("*.bad*")), f"{shape}: config.yml was moved aside by /new"
+
+
+@pytest.mark.asyncio
+async def test_new_adopts_the_approval_mode_into_the_real_gate(monkeypatch, tmp_path) -> None:
+    """The fourth NEW_SESSIONS key, which the round-2 fix could not reach.
+
+    QA round 3, Q3. `_cmd_new` → `_on_config_changed` repairs the session
+    FACTORY path, but the TUI's approval gate is process state written only by
+    `_load_approvals_default` at mount — so `tool_approval_mode` was the one
+    key of four whose "takes effect on /new" promise was not kept, and the one
+    where being wrong is a safety problem.
+
+    Driven in the tightening direction (`auto → ask`), which is the dangerous
+    one: the notice promises prompts and the old behaviour kept auto-approving.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    launch_manager = ConfigManager(tmp_path)
+    launch_manager.set_config_value("hosting", "anthropic")
+    _write_elsewhere(tmp_path, "tool_approval_mode", "auto")
+
+    async def resume_factory(resume_id):
+        return await _factory(FakeSession())
+
+    app = OperatorApp(
+        lambda: _factory(FakeSession()),
+        resume_factory=resume_factory,
+        on_config_changed=launch_manager.reload,
+    )
+    async with app.run_test(size=(100, 24)) as pilot:
+        await _adopted(app, pilot)
+        assert app._approve_all is True, "the app did not boot on the saved auto default"
+
+        _write_elsewhere(tmp_path, "tool_approval_mode", "ask")
+        process_watcher(tmp_path).poll_now()
+        await pilot.pause()
+        # The RUNNING session's gate must not move — the key is NEW_SESSIONS.
+        assert app._approve_all is True
+
+        app._cmd_new(lambda body, kind="info": None)
+        for _ in range(400):
+            await pilot.pause()
+            if app._approve_all is False:
+                break
+        assert app._approve_all is False, (
+            "the notice promised tool_approval_mode takes effect on /new, but the "
+            "approval gate still auto-approves"
+        )
+
+
+@pytest.mark.asyncio
+async def test_multi_key_clauses_agree_in_number(monkeypatch, tmp_path) -> None:
+    """Plural key lists take plural verbs (design review round 1, D7).
+
+    Pinned with MULTIPLE keys per clause on purpose: every other pin in this
+    file asserts a single-key string, which is exactly why three ungrammatical
+    clauses shipped — `hosting, model_name needs a relaunch` and, worse,
+    `a, b, c is retired and does nothing`. The two-key relaunch form is the
+    common case, not an edge: those are the keys a user changes together when
+    switching models.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    ConfigManager(tmp_path).set_config_value("hosting", "")
+    retired = [s.key for s in settings_io.SETTINGS if s.section == "retired"][:3]
+    assert len(retired) >= 2, "need two retired keys to pin the plural form"
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(200, 24)) as pilot:
+        await _adopted(app, pilot)
+        _write_elsewhere(tmp_path, "hosting", "openrouter")
+        _write_elsewhere(tmp_path, "model_name", "some/model")
+        for key in retired:
+            _write_elsewhere(tmp_path, key, 4321)
+        process_watcher(tmp_path).poll_now()
+        await pilot.pause()
+
+        notice = [n for n in _notices(app) if "config.yml changed" in n][-1]
+
+    assert "hosting, model_name need a relaunch" in notice, notice
+    assert f"{', '.join(sorted(retired))} are retired and do nothing" in notice, notice
+    # And the singular forms must survive the change.
+    assert " needs a relaunch" not in notice
+    assert " is retired and does nothing" not in notice

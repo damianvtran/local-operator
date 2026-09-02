@@ -41,6 +41,7 @@ from local_operator.model.configure import (
 from local_operator.providers.failover import RetrySettings
 from local_operator.session.session import Session
 from local_operator.session.transcript import Transcript
+from local_operator.spawn.policy import fork_cmux_placement, fork_mode
 
 MODEL = ModelSpec(provider="test", model_id="m", context_window=100_000)
 
@@ -124,6 +125,32 @@ def _stored(watcher: ConfigWatcher, path: list[str]) -> Any:
     """What a read-per-use consumer sees in the watcher's snapshot (default-aware)."""
     found = settings_io._walk(watcher.values, path)
     return None if found is settings_io._MISSING else found
+
+
+def _search_settings(watcher: ConfigWatcher):
+    """What `execute_web_search` builds per call, from the watcher's directory."""
+    from local_operator.web_search.tool import load_search_settings
+
+    return load_search_settings(ConfigManager(watcher.config_dir))
+
+
+def _fetch_settings(watcher: ConfigWatcher):
+    """What the fetch engine builds per call, from the watcher's directory."""
+    from local_operator.web_fetch.tool import load_fetch_settings
+
+    return load_fetch_settings(ConfigManager(watcher.config_dir))
+
+
+def _spawn_model(session: Session, tier: str, watcher: ConfigWatcher | None = None) -> str:
+    """The subagent ModelSpec the session resolves for an effort tier.
+
+    `_resolve_subagent_model` returns None when config names no model for the
+    tier, which is "inherit the parent" rather than a value — rendered as the
+    empty string so a probe comparing to a `provider/model` string reads a
+    miss as a miss instead of as an exception.
+    """
+    spec = session._resolve_subagent_model("task", tier)
+    return "" if spec is None else f"{spec.provider}/{spec.model_id}"
 
 
 def subscribe(session: Session, watcher: ConfigWatcher) -> None:
@@ -217,29 +244,33 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
     ),
     # -- subagents ---------------------------------------------------------------
     "subagents.max_running": (3, lambda s, w: s.jobs.max_running),
-    "subagents.models.lo": ("p/lo-model", lambda s, w: _stored(w, ["subagents", "models", "lo"])),
-    "subagents.models.med": (
-        "p/med-model",
-        lambda s, w: _stored(w, ["subagents", "models", "med"]),
-    ),
-    "subagents.models.hi": ("p/hi-model", lambda s, w: _stored(w, ["subagents", "models", "hi"])),
-    # -- read-per-use consumers: the snapshot they are handed ------------------
-    "fork.mode": ("here", lambda s, w: _stored(w, ["fork", "mode"])),
-    "fork.cmux_placement": ("split", lambda s, w: _stored(w, ["fork", "cmux_placement"])),
-    "web_search.strategy": ("ordered", lambda s, w: _stored(w, ["web_search", "strategy"])),
-    "web_search.providers": (["brave"], lambda s, w: _stored(w, ["web_search", "providers"])),
-    "web_search.timeout_seconds": (5.0, lambda s, w: _stored(w, ["web_search", "timeout_seconds"])),
+    "subagents.models.lo": ("openai/lo-model", lambda s, w: _spawn_model(s, "lo")),
+    "subagents.models.med": ("openai/med-model", lambda s, w: _spawn_model(s, "med")),
+    "subagents.models.hi": ("openai/hi-model", lambda s, w: _spawn_model(s, "hi")),
+    # -- read-per-use consumers: observed THROUGH the consumer ------------------
+    # Not through the watcher's snapshot (review round 3, M2). Asserting that a
+    # key reached `watcher.values` is bookkeeping: it cannot tell "this key is
+    # live" from "this key is parsed and nothing reads it", which is exactly the
+    # blind spot that let M3 and round-2's B1 through. These consumers are all
+    # genuinely read-per-use today, and the point of routing the probe through
+    # them is that the guard notices the day one of them starts caching at
+    # construction — the very change the deferred web-tools follow-up proposes.
+    "fork.mode": ("switch", lambda s, w: fork_mode(w.values)),
+    "fork.cmux_placement": ("surface", lambda s, w: fork_cmux_placement(w.values)),
+    "web_search.strategy": ("ordered", lambda s, w: _search_settings(w).strategy),
+    "web_search.providers": (["brave"], lambda s, w: list(_search_settings(w).providers)),
+    "web_search.timeout_seconds": (5.0, lambda s, w: _search_settings(w).timeout_seconds),
     "web_search.searxng_endpoint": (
         "http://searx.local",
-        lambda s, w: _stored(w, ["web_search", "searxng_endpoint"]),
+        lambda s, w: _search_settings(w).searxng_endpoint,
     ),
-    "web_fetch.timeout_seconds": (5.0, lambda s, w: _stored(w, ["web_fetch", "timeout_seconds"])),
-    "web_fetch.max_bytes": (1_000, lambda s, w: _stored(w, ["web_fetch", "max_bytes"])),
-    "web_fetch.max_redirects": (1, lambda s, w: _stored(w, ["web_fetch", "max_redirects"])),
-    "web_fetch.cache_ttl_seconds": (0, lambda s, w: _stored(w, ["web_fetch", "cache_ttl_seconds"])),
-    "web_fetch.allow_private": (True, lambda s, w: _stored(w, ["web_fetch", "allow_private"])),
-    "web_fetch.render_backend": ("plain", lambda s, w: _stored(w, ["web_fetch", "render_backend"])),
-    "web_fetch.enrich": (False, lambda s, w: _stored(w, ["web_fetch", "enrich"])),
+    "web_fetch.timeout_seconds": (5.0, lambda s, w: _fetch_settings(w).timeout_seconds),
+    "web_fetch.max_bytes": (1_048_576, lambda s, w: _fetch_settings(w).max_bytes),
+    "web_fetch.max_redirects": (1, lambda s, w: _fetch_settings(w).max_redirects),
+    "web_fetch.cache_ttl_seconds": (0, lambda s, w: _fetch_settings(w).cache_ttl_seconds),
+    "web_fetch.allow_private": (True, lambda s, w: _fetch_settings(w).allow_private),
+    "web_fetch.render_backend": ("stdlib", lambda s, w: _fetch_settings(w).render_backend),
+    "web_fetch.enrich": (False, lambda s, w: _fetch_settings(w).enrich),
 }
 
 #: LIVE sections whose keys have no session-side apply because the TUI owns
@@ -254,13 +285,20 @@ def _live_sections() -> set[str]:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("key", sorted(LIVE_KEY_PROBES))
-async def test_a_write_from_another_process_reaches_the_running_session(tmp_path, key) -> None:
+async def test_a_write_from_another_process_reaches_the_running_session(
+    tmp_path, key, monkeypatch
+) -> None:
     value, observe = LIVE_KEY_PROBES[key]
     setting = settings_io.resolve_key(key)
     assert setting is not None
     assert value != setting.default, f"{key}: the probe must write a NON-default value"
     config_dir = tmp_path / "config"
     config_dir.mkdir()
+    # Some consumers resolve their own directory through `paths.config_dir()`
+    # rather than taking one (`Session._resolve_subagent_model` builds its own
+    # `ConfigManager`). Pointing the env at the watched directory is what makes
+    # those probes read the file under test instead of the operator's real one.
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
     ConfigManager(config_dir).set_config_value("hosting", "")  # a real file to diff against
 
     stream = RebindableStream(dict(ConfigManager(config_dir).get_config().values))

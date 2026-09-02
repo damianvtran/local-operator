@@ -175,6 +175,12 @@ class ConfigWatcher:
 
     @property
     def config_dir(self) -> Path:
+        """The directory this watcher is bound to.
+
+        Public so a caller handing the watched config to a read-per-use
+        consumer (a ``ConfigManager`` for the web tools, say) can name the SAME
+        directory the watcher is on, rather than reaching into ``_config_dir``.
+        """
         return self._config_dir
 
     @property
@@ -280,6 +286,27 @@ class ConfigWatcher:
         the tests use it directly; the poll task calls it every interval.
         """
         return self._tick(source="disk")
+
+    def config_is_readable(self) -> bool:
+        """Whether the file on disk parses to a usable ``values`` mapping RIGHT NOW.
+
+        The guard a caller needs before running a DESTRUCTIVE reload.
+        ``ConfigManager._load_config`` has two behaviours this module was built
+        never to have: it raises on a ``values:`` block that is not a mapping,
+        and on a YAML syntax error or non-mapping top level it moves the user's
+        ``config.yml`` aside to ``config.yml.bad.<ts>`` and starts from
+        defaults. Both are defensible at STARTUP — better to boot clean than to
+        fail identically forever — and neither is acceptable on a hot path the
+        user chose, where it silently discards every setting they have.
+
+        Exposed here rather than reimplemented at the call site because
+        :meth:`_parse` already encodes exactly the right rule set (review round
+        3, B1), and a second copy of "is this file usable" is the kind of
+        near-duplicate that drifts. Reads the file each call — it is answering a
+        question about the CURRENT bytes, not about the snapshot, and the cost
+        is one stat plus one parse on a command boundary.
+        """
+        return self._parse() is not None
 
     def notify_local(self, values: Mapping[str, Any] | None = None) -> None:
         """The in-process write fast path.
@@ -453,6 +480,15 @@ class ConfigWatcher:
             # ABSENT `values` genuinely reads as "nothing set", which
             # `_load_config` resolves to the defaults; so does this.
             values = {}
+        # The guard is deliberately TOP-LEVEL only (review round 3, N1). One
+        # level down — `values:\n  retry: 5` — still partially adopts, and
+        # `main` behaves the same way, because the per-section consumers all
+        # coerce defensively (`RetrySettings.from_settings` and friends take
+        # the default for anything they cannot read). Recursing would mean this
+        # module deciding the shape of every section's payload, which is the
+        # consumers' job and would drift from it. The boundary is here because
+        # a non-mapping at the TOP replaces every section at once; a bad
+        # section damages only itself.
         return _with_defaults(values)
 
     def _adopt(self, values: Mapping[str, Any]) -> None:
