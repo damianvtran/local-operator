@@ -1566,6 +1566,34 @@ def _openai_api_mode(settings: Mapping[str, Any] | None) -> str:
     return "chat_completions" if configured == "chat_completions" else "responses"
 
 
+#: Default for ``providers.anthropic.cache_ttl_1h_min_context_tokens`` when the
+#: settings mapping lacks the key (an old config file, a test passing ``{}``).
+#: Mirrors ``DEFAULT_CONFIG`` in ``config.py`` rather than importing it: the
+#: ``config`` module is the CLI's, and ``_openai_api_mode`` above already takes
+#: the same restate-the-default stance for the sibling key.
+ANTHROPIC_CACHE_TTL_1H_MIN_CONTEXT_TOKENS = 150_000
+
+
+def _anthropic_cache_ttl_1h_min_context_tokens(settings: Mapping[str, Any] | None) -> int:
+    """Resolve the context size above which Anthropic requests use the 1h TTL.
+
+    Same shape as ``_openai_api_mode``: a missing ``providers`` block (old
+    config files) or a malformed value falls back to the default rather than
+    silently disabling the feature, because the failure mode of "disabled" is
+    a bill that quietly grew rather than an error anyone sees. Only an explicit
+    non-negative integer is honoured; ``0`` is the documented off switch.
+    """
+    providers = settings.get("providers") if isinstance(settings, Mapping) else None
+    anthropic = providers.get("anthropic") if isinstance(providers, Mapping) else None
+    configured = (
+        anthropic.get("cache_ttl_1h_min_context_tokens") if isinstance(anthropic, Mapping) else None
+    )
+    # ``bool`` is an ``int`` subclass; ``true`` in YAML must not read as 1 token.
+    if isinstance(configured, int) and not isinstance(configured, bool) and configured >= 0:
+        return configured
+    return ANTHROPIC_CACHE_TTL_1H_MIN_CONTEXT_TOKENS
+
+
 # ---------------------------------------------------------------------------
 # stream_fn factory
 # ---------------------------------------------------------------------------
@@ -1699,6 +1727,16 @@ class SessionStreamFn:
         # until first use, and stays None whenever the cache cannot open (a
         # permanent live-fetch miss, never an error). See ``_usage_cache_store``.
         self._usage_cache: "UsageCacheStore | None" = None
+        # The provider-reported context size of the last NON-isolated call this
+        # stream fn forwarded, carried onto the next request as
+        # ``ChatRequest.context_tokens_hint``. Only the Anthropic client reads it
+        # (to pick the prompt-cache TTL); it is remembered here rather than read
+        # off ``Session._last_usage`` because every provider call — turns, tool
+        # loops, asides, compaction summaries — funnels through ``__call__``
+        # and ``_record_stream`` already sees each final ``Usage``. Isolated
+        # (naming) calls are excluded: their tiny prefix is not the session's
+        # context and would drag the hint below the threshold mid-turn.
+        self._last_context_tokens: int | None = None
 
     def _client_for(self, spec: ModelSpec) -> WireClient:
         from local_operator.providers.clients import client_for_spec
@@ -1707,6 +1745,9 @@ class SessionStreamFn:
             spec,
             http_client=self._http,
             openai_api=_openai_api_mode(self._settings),
+            anthropic_cache_ttl_1h_min_context_tokens=_anthropic_cache_ttl_1h_min_context_tokens(
+                self._settings
+            ),
         )
 
     @property
@@ -3345,6 +3386,12 @@ class SessionStreamFn:
             # alone and is unaffected either way.
             request = request.model_copy(update={"prompt_cache_key": self._cache_lineage_id})
 
+        if request.context_tokens_hint is None and self._last_context_tokens:
+            # The provider's own count from the previous call is the most
+            # accurate size anyone has for this request (the client only has a
+            # byte estimate). A hint the caller set deliberately is kept.
+            request = request.model_copy(update={"context_tokens_hint": self._last_context_tokens})
+
         await self.preflight_usage(request.model)
         async for event in self._record_stream(
             request,
@@ -3407,6 +3454,12 @@ class SessionStreamFn:
             # input tokens) is recorded too — best-effort and never raising.
             if component_chars is not None and final_usage is not None:
                 self._record_usage(request, component_chars, final_usage, ok)
+            if final_usage is not None and not request.isolated and final_usage.context_tokens:
+                # Feeds the next request's ``context_tokens_hint``; see the
+                # attribute's note in ``__init__`` for why isolated calls are
+                # left out. Failed streams still report input usage on some
+                # wires, and that count is as honest as a successful one.
+                self._last_context_tokens = int(final_usage.context_tokens)
 
     def _record_usage(
         self,
@@ -3472,6 +3525,7 @@ class SessionStreamFn:
                     output_tokens=int(usage.output_tokens),
                     cache_read_tokens=int(usage.cache_read_tokens),
                     cache_write_tokens=int(usage.cache_write_tokens),
+                    cache_write_1h_tokens=int(getattr(usage, "cache_write_1h_tokens", 0)),
                     reasoning_tokens=int(getattr(usage, "reasoning_tokens", 0)),
                     context_tokens=int(context_tokens or 0),
                     component_chars=component_chars,

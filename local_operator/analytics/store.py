@@ -115,7 +115,12 @@ CREATE TABLE IF NOT EXISTS calls (
   -- priceable. Integer so the aggregate SUM is exact; see CallSnapshot.
   cost_micro INTEGER NOT NULL DEFAULT 0,
   cost_known INTEGER NOT NULL DEFAULT 0,
-  {_COMPONENT_COLUMNS}
+  {_COMPONENT_COLUMNS},
+  -- The slice of cache_write_tokens written with the 1-hour TTL (Anthropic
+  -- ``cache_creation.ephemeral_1h_input_tokens``); the 5m slice is the
+  -- remainder. Priced at 2x base rather than 1.25x, so the two must be
+  -- separable to judge whether the large-context 1h TTL pays for itself.
+  cache_write_1h_tokens INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_calls_ts ON calls(ts_ms);
 CREATE INDEX IF NOT EXISTS idx_calls_session ON calls(session_id);
@@ -207,6 +212,7 @@ _CALL_COLUMNS = (
     "cost_micro",
     "cost_known",
     *(f"c_{key}" for key in COMPONENT_KEYS),
+    "cache_write_1h_tokens",
 )
 
 #: Columns added AFTER the first shipped schema. A database created by an older
@@ -232,6 +238,9 @@ _MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (
     # rollup tables). After this ALTER they read ``c_images=0`` rather than
     # being re-apportioned — we cannot honestly unbake a historical estimate.
     ("c_images", "INTEGER NOT NULL DEFAULT 0"),
+    # Rows recorded before the Anthropic 1h TTL shipped were all 5m writes, so
+    # 0 here is the truth for them, not a placeholder.
+    ("cache_write_1h_tokens", "INTEGER NOT NULL DEFAULT 0"),
 )
 
 #: The names in ``_MIGRATION_COLUMNS`` as a set, for the "is this column optional
@@ -339,6 +348,7 @@ def _row_values(snapshot: CallSnapshot, cost_micro: int, cost_known: bool) -> tu
         int(cost_micro),
         1 if cost_known else 0,
         *(components[key] for key in COMPONENT_KEYS),
+        snapshot.cache_write_1h_tokens,
     )
 
 

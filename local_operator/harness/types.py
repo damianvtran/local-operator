@@ -224,6 +224,18 @@ class Usage(BaseModel):
     output_tokens: int = 0
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
+    # The TTL split of ``cache_write_tokens`` when the provider reports one
+    # (Anthropic's ``usage.cache_creation.ephemeral_5m_input_tokens`` /
+    # ``ephemeral_1h_input_tokens``). SUBSETS of ``cache_write_tokens``, never
+    # added on top — the docs state ``cache_creation_input_tokens`` equals their
+    # sum, and every existing consumer of ``cache_write_tokens`` stays correct.
+    # They exist because the two TTLs are priced differently (1.25× vs 2× base):
+    # once the Anthropic client starts writing 1h entries on large contexts,
+    # analytics needs to tell the two apart to know whether the trade paid off.
+    # Both stay 0 on providers without a TTL split, and on an Anthropic response
+    # that omits the ``cache_creation`` object (older API versions).
+    cache_write_5m_tokens: int = 0
+    cache_write_1h_tokens: int = 0
     context_tokens: int | None = None  # provider-reported full context size if given
     # The reasoning/thinking slice of ``output_tokens`` when the provider
     # breaks it out (OpenAI ``output_tokens_details.reasoning_tokens``). Kept
@@ -1530,6 +1542,18 @@ class ChatRequest(BaseModel):
     # caches. Session hosts populate it once from their session id; keeping it
     # on the request lets retries and fallback clones preserve the same value.
     prompt_cache_key: str | None = None
+    #: The provider-reported size of this session's context on its LAST call
+    #: (``Usage.context_tokens``), when the host knows it. A HINT, not wire
+    #: content: the Anthropic client reads it to decide whether the request is
+    #: large enough for the 1-hour prompt-cache TTL (see
+    #: ``AnthropicClient._cache_ttl_for``). The client cannot measure this
+    #: itself without a tokenizer, and the provider's own count from the
+    #: previous turn is the most accurate figure anyone has. ``None`` on a
+    #: session's first call and on paths that never saw a usage event (a fork's
+    #: first request, one-shot errands); the client then falls back to a byte
+    #: estimate of the serialized body. Set by ``SessionStreamFn.__call__``
+    #: from the last usage it recorded; retries and fallback clones keep it.
+    context_tokens_hint: int | None = None
     #: This call's output has NOT been shown to anyone yet, so a failed attempt
     #: may be discarded and retried whole.
     #:
