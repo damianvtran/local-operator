@@ -614,7 +614,56 @@ The rule now:
    it is the **message**; none → body from stdin.
 3. With no selector: first positional is the target, second is the message —
    unchanged.
-4. A typed body argument wins over piped stdin.
+4. With a selector, a typed positional **and** a piped stdin body are
+   **refused** as an ambiguous body. See below.
+5. An empty or whitespace positional target is **absence**, matching the shared
+   core's `(target or "").strip()`; an explicitly-passed but blank `--session`
+   is an error rather than a silent fall-back to substring matching.
+
+#### The stdin seam (review round 1, BLOCKER-1)
+
+The first cut of this rule read stdin *after* binding, and it lost payloads.
+`git log --stat | lop send alpha --pid 10` — the form the CLI's own ambiguity
+guidance leads a user to type — bound `alpha` to `message`, never looked at
+stdin, and delivered the literal string `alpha` at **exit 0** with a success
+line. That is strictly worse than the defect this revision fixes: the original
+was loud (exit 1, nothing sent), this was silent and destroyed the piped data.
+
+The cause is ordering. Rule 4 as originally drafted said stdin is read "only
+when no message positional survives rebinding", but the binder made one survive
+*before* it could know whether stdin held anything, so the rule could never
+fire. **The binder therefore takes the piped body as an INPUT** — a
+`stdin_body` parameter, keeping it pure and testable — rather than having the
+caller apply stdin as a fallback afterwards.
+
+Given both, the choice was to pick a winner or to refuse. **Refuse.** Two
+candidate bodies is the same "the command names two things" shape as two
+candidate recipients, and it gets the same answer for the same reason: whichever
+body loses is discarded silently, and a silently discarded payload is exactly
+the bug class this whole revision exists to remove. A loud error costs a retype.
+This deliberately supersedes proposal §8 case 10, which specified that the typed
+argument wins.
+
+**`isatty()` is not the discriminator.** It returns False for an empty redirect
+(`</dev/null`) exactly as it does for a pipe carrying data, so keying off it
+would turn every `lop send --pid N "hi" </dev/null` into an ambiguity error.
+Only actual bytes count as a piped body. stdin is also read only when at most
+one positional was typed, so `slow-producer | lop send NAME "body"` does not
+block on output that cannot change the outcome.
+
+#### The recovery seam (review round 1, BLOCKER-2)
+
+The ambiguity refusal made the *pre-existing* disambiguation guidance a dead
+end. `N sessions match; disambiguate with --pid:` invited the user to re-run
+with the flag appended — producing `NAME BODY --pid N`, the exact form now
+refused. The tool surface was worse, because its reader is a model making the
+minimal edit to its previous call: keep `target`, add `pid`.
+
+Both surfaces now say **replace**, not add: the CLI prints `replace the target
+with one of these:` plus a worked `lop send --pid N <body>` example, and the
+tool says `drop \`target\` and retry with pid=<n> instead (passing both is
+refused)`. Any refusal that a recovery path can walk a user into has to state
+the form that works, not merely the address that failed.
 
 The rebinding lives in `cli._bind_send_positionals`, a pure namespace-in /
 tuple-out function, for the same reason `resolve_peer_target` is a core:

@@ -195,12 +195,96 @@ def test_selector_alone_leaves_the_message_unbound_for_stdin() -> None:
 # --- Case 10-11: body precedence and the now-truthful "no message" error ---
 
 
-def test_typed_body_wins_over_piped_stdin(monkeypatch, capsys) -> None:
-    """Today ``echo X | lop send --pid N "Y"`` sent X, because "Y" was eaten as
-    the target and never looked at. After the fix the typed argument wins, which
-    matches every other CLI and rule 4 of the grammar."""
+def test_typed_body_beside_a_pipe_is_refused_not_silently_chosen(monkeypatch) -> None:
+    """A typed body AND a piped body with a selector is REFUSED.
+
+    This deliberately supersedes proposal §8 case 10, which specified that the
+    typed argument wins. Review round 1 (BLOCKER-1) showed the "pick a winner"
+    rule cannot be implemented safely: the binder has to choose the positional's
+    meaning before it can know whether a pipe carried anything, so whichever
+    body loses is discarded SILENTLY at exit 0. Two candidate bodies is the same
+    shape as two candidate recipients and gets the same answer — refuse. Nothing
+    is delivered, so the user cannot lose a payload without being told.
+    """
     monkeypatch.setattr("sys.stdin", io.StringIO("PIPED BODY\n"))
     args = _parse_send(["--pid", "123", "TYPED BODY"])
+    with (
+        patch("local_operator.cli._resolve_peer_target") as resolve,
+        patch("local_operator.mobile.peer_client.send_peer_message") as send,
+        patch("local_operator.cli._peer_red") as red,
+    ):
+        rc = send_command(args)
+    assert rc == 1
+    send.assert_not_called()
+    resolve.assert_not_called()
+    assert "ambiguous body" in red.call_args[0][0]
+
+
+def test_piped_body_with_a_target_and_selector_never_delivers_the_target(monkeypatch) -> None:
+    """BLOCKER-1 regression guard: the silent payload-loss case.
+
+    ``git log --stat | lop send alpha --pid 10`` — the exact form the CLI's own
+    ambiguity guidance leads a user to type — delivered the literal string
+    ``'alpha'`` with exit 0, discarding the commit log. The assertion that
+    matters is that the TARGET NAME is never delivered as a body: a wrong body
+    sent successfully is undetectable from the output, which is what made this
+    worse than the loud bug the PR set out to fix.
+    """
+    monkeypatch.setattr("sys.stdin", io.StringIO("commit abc123\n 5 files changed\n"))
+    args = _parse_send(["alpha", "--pid", "10"])
+    with (
+        patch("local_operator.cli._resolve_peer_target") as resolve,
+        patch("local_operator.mobile.peer_client.send_peer_message") as send,
+        patch("local_operator.cli._peer_red") as red,
+    ):
+        rc = send_command(args)
+    assert rc == 1
+    send.assert_not_called()
+    resolve.assert_not_called()
+    message = red.call_args[0][0]
+    assert "ambiguous body" in message
+    # Both recoveries are shown, and neither is the refused target+selector pair.
+    assert "`lop send --pid 10`" in message
+    assert "to send the piped input" in message
+
+
+def test_a_selector_alone_with_a_pipe_still_delivers_the_piped_body(monkeypatch) -> None:
+    """The documented workaround must survive the BLOCKER-1 fix: with no
+    positional at all, the piped bytes are the body and they are delivered."""
+    monkeypatch.setattr("sys.stdin", io.StringIO("commit abc123\n 5 files changed\n"))
+    args = _parse_send(["--pid", "123"])
+    record = _Record(os.getppid() + 9999)
+    with (
+        patch("local_operator.cli._resolve_peer_target", return_value=(record, [], "")),
+        patch("local_operator.mobile.peer_client.send_peer_message") as send,
+    ):
+        send_command(args)
+    assert send.call_args.kwargs["text"] == "commit abc123\n 5 files changed\n"
+
+
+def test_an_empty_redirect_is_not_a_piped_body(monkeypatch) -> None:
+    """``lop send --pid N "hi" </dev/null`` must still deliver ``hi``.
+
+    ``isatty()`` is False for an empty redirect exactly as it is for a pipe
+    carrying data, so keying the rule off "stdin is not a tty" would turn every
+    ``</dev/null`` invocation into an ambiguity error. Only real bytes count.
+    """
+    monkeypatch.setattr("sys.stdin", io.StringIO(""))
+    args = _parse_send(["--pid", "123", "hi"])
+    record = _Record(os.getppid() + 9999)
+    with (
+        patch("local_operator.cli._resolve_peer_target", return_value=(record, [], "")),
+        patch("local_operator.mobile.peer_client.send_peer_message") as send,
+    ):
+        send_command(args)
+    assert send.call_args.kwargs["text"] == "hi"
+
+
+def test_no_selector_keeps_the_historical_stdin_precedence(monkeypatch) -> None:
+    """Without a selector the grammar is unchanged: both positionals are filled,
+    so the typed body wins over the pipe with no ambiguity to resolve."""
+    monkeypatch.setattr("sys.stdin", io.StringIO("PIPED BODY\n"))
+    args = _parse_send(["peer", "TYPED BODY"])
     record = _Record(os.getppid() + 9999)
     with (
         patch("local_operator.cli._resolve_peer_target", return_value=(record, [], "")),
@@ -208,6 +292,60 @@ def test_typed_body_wins_over_piped_stdin(monkeypatch, capsys) -> None:
     ):
         send_command(args)
     assert send.call_args.kwargs["text"] == "TYPED BODY"
+
+
+def test_candidate_guidance_tells_the_user_to_replace_the_target(monkeypatch, capsys) -> None:
+    """BLOCKER-2 regression guard for the CLI surface.
+
+    The old wording was ``disambiguate with --pid:``, and the invocation a user
+    naturally forms from it — re-run the command with the flag appended — is the
+    ``NAME BODY --pid N`` form the ambiguity guard refuses. The guidance must
+    name the REPLACEMENT, and must not tell the user to add a flag.
+    """
+    monkeypatch.setattr("sys.stdin", _FakeTtyStdin())
+    args = _parse_send(["alpha", "BODY"])
+    candidates = [_Record(10), _Record(20)]
+    with patch("local_operator.cli._resolve_peer_target", return_value=(None, candidates, "")):
+        rc = send_command(args)
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "replace the target" in err
+    assert "disambiguate with --pid" not in err
+    # The worked example is the form that actually succeeds: selector + body,
+    # with the target gone.
+    assert "`lop send --pid 10 BODY`" in err
+
+
+def test_shell_metacharacters_in_the_retype_suggestion_are_quoted() -> None:
+    """Architect MINOR-1: the suggestions are meant to be retypeable, so a body
+    containing backticks or ``$`` must not be mangled or command-substituted
+    when pasted into a shell."""
+    args = _parse_send(["alpha", "run `whoami` for $HOME", "--pid", "10"])
+    _t, _m, error = _bind_send_positionals(args, None)
+    # shlex.quote wraps it in single quotes, which bash does not expand.
+    assert "'run `whoami` for $HOME'" in error
+    assert '"run `whoami` for $HOME"' not in error
+
+
+def test_a_blank_target_beside_a_selector_is_absence_not_a_conflict() -> None:
+    """MAJOR-2: the CLI and the shared core must agree that an empty or
+    whitespace target is ABSENCE. The core strips before comparing
+    (``peer_send.py``), so the binder does too — otherwise the two layers
+    disagree about the same input, which is the drift this PR exists to end."""
+    target, message, error = _bind(["", "BODY", "--pid", "123"])
+    assert (target, message, error) == (None, "BODY", "")
+    target, message, error = _bind(["   ", "BODY", "--pid", "123"])
+    assert (target, message, error) == (None, "BODY", "")
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_a_blank_session_selector_is_an_error_not_a_grammar_switch(blank: str) -> None:
+    """MAJOR-1: ``--session ''`` and ``--session '   '`` used to bind oppositely
+    — the first fell through to the no-selector grammar (silently making the
+    body a TARGET), the second was honoured and pasted whitespace into the error
+    text. A selector the user explicitly passed but left blank is an error."""
+    _t, _m, error = _bind(["--session", blank, "hello"])
+    assert "empty --session" in error
 
 
 def test_selector_with_no_body_on_a_tty_still_reports_no_message(monkeypatch) -> None:
@@ -251,6 +389,37 @@ def test_flag_then_body_still_parses_with_a_positional_target() -> None:
 
     args = _parse_send(["peer", "--now", "stop, do X instead"])
     assert (args.target, args.message, args.steer) == ("peer", "stop, do X instead", True)
+
+
+def test_the_guide_quotes_the_ambiguity_error_verbatim() -> None:
+    """The §6 doc lockstep, asserted rather than claimed (review round 1,
+    MINOR-1).
+
+    GUIDE.md prints a transcript of the ambiguity refusal. Every other test here
+    asserts SUBSTRINGS of that error, so a rewording would drift the guide
+    silently — precisely the failure mode the lockstep exists to prevent. This
+    reconstructs the guide's quoted block (unwrapping its hard line breaks) and
+    compares it to what the binder actually produces.
+    """
+    from pathlib import Path
+
+    guide = (
+        Path(__file__).resolve().parents[2]
+        / "local_operator"
+        / "guides"
+        / "peer-messaging"
+        / "GUIDE.md"
+    ).read_text()
+
+    marker = '$ lop send "release cutter" "gates are green" --pid 12345'
+    assert marker in guide, "the guide no longer shows the refusal transcript"
+    block = guide[guide.index(marker) : guide.index("```", guide.index(marker))]
+    # The guide hard-wraps for readability; the error itself is one line.
+    documented = " ".join(block.strip().split("\n")[1:])
+
+    args = _parse_send(["release cutter", "gates are green", "--pid", "12345"])
+    _t, _m, actual = _bind_send_positionals(args, None)
+    assert documented == actual
 
 
 def test_self_send_is_refused_before_any_network_call(capsys) -> None:

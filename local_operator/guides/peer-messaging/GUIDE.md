@@ -230,12 +230,18 @@ silently and deliver to a session the command does not appear to name:
 ```
 $ lop send "release cutter" "gates are green" --pid 12345
 ambiguous recipient: 'release cutter' and --pid 12345 name different sessions.
-Drop one — `lop send --pid 12345 "gates are green"` to address by pid, or
-`lop send 'release cutter' "gates are green"` to address by name
+Drop one — `lop send --pid 12345 'gates are green'` to address by pid, or
+`lop send 'release cutter' 'gates are green'` to address by name
 ```
 
 Nothing is delivered there and the exit status is 1. `--pid` and `--session`
-are mutually exclusive too; argparse rejects that pair at parse time.
+are mutually exclusive too; argparse rejects that pair at parse time. When a
+substring matches several sessions, `lop send` lists them and asks you to
+**replace** the target with a `--pid` — appending the flag to the command you
+just typed produces exactly the refused form above.
+
+A blank selector (`--session ''`) is an error rather than a silent fallback to
+substring matching; drop the flag if you meant to address by name.
 
 **Pipe the body when it is long** or when it comes out of another command — not
 because the argument form does not work. Both forms are fully supported:
@@ -245,7 +251,20 @@ echo "the deploy finished; verify prod" | lop send --pid 12345 --wake
 git log -1 --stat | lop send "release cutter"
 ```
 
-A typed body argument wins over piped stdin when both are present.
+**Do not pipe a body and type one at the same time.** With a selector, a
+positional and a piped body are two candidate messages, so `lop send` refuses
+rather than picking a winner — silently discarding the payload you did not get
+is worse than a retype:
+
+```
+$ git log -1 --stat | lop send "release cutter" --pid 12345
+ambiguous body: 'release cutter' and the piped input both look like the message.
+Drop one — `lop send --pid 12345` to send the piped input, or
+`lop send --pid 12345 'release cutter'` with nothing piped to send 'release cutter'
+```
+
+Without a selector both positional slots are filled, so `lop send NAME "body"`
+with a pipe is unambiguous and the typed body wins.
 
 ### What the human sees
 

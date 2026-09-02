@@ -38,6 +38,7 @@ import functools
 import math
 import os
 import platform
+import shlex
 import subprocess
 import sys
 import time
@@ -440,7 +441,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
         nargs="?",
         help=(
             "conversation-name / session-id / cwd substring (case-insensitive). "
-            "Omit when addressing with --pid/--session."
+            "Omit when addressing with --pid/--session; passing both is refused."
         ),
     )
     send_parser.add_argument(
@@ -448,7 +449,8 @@ def build_cli_parser() -> argparse.ArgumentParser:
         nargs="?",
         help=(
             "message text; omit to read the body from stdin. With --pid/--session "
-            "a single positional IS the message."
+            "a single positional IS the message, and typing one while also piping "
+            "a body is refused."
         ),
     )
     # Mutually exclusive because they name DIFFERENT recipients: argparse rejects
@@ -1130,8 +1132,9 @@ def _peer_sender_identity() -> "dict[str, Any]":
 
 def _bind_send_positionals(
     args: argparse.Namespace,
+    stdin_body: "str | None" = None,
 ) -> "tuple[str | None, str | None, str]":
-    """Map ``lop send``'s parsed positionals onto ``(target, message, error)``.
+    """Map ``lop send``'s positionals and stdin onto ``(target, message, error)``.
 
     ``lop send`` accepts the recipient EITHER as a positional substring or as a
     ``--pid``/``--session`` selector, so argparse alone cannot decide what a
@@ -1140,43 +1143,96 @@ def _bind_send_positionals(
     "no message given" — the exact form guides/peer-messaging documented.
 
     A selector fully determines the recipient, so with one present a lone
-    positional has exactly one possible meaning: the body. With BOTH a
+    positional normally has exactly one possible meaning: the body. With BOTH a
     positional and a selector the command names two different recipients; the
     resolver would silently prefer the selector and deliver somewhere the
     command does not appear to name, so we refuse instead of guessing.
 
-    Kept as a pure function (namespace in, tuple out) for the same reason
-    ``resolve_peer_target`` is a core rather than parser logic: the rule is
-    testable without a parser, a socket, or a registry. Expressing it in
+    ``stdin_body`` is the piped body (``None`` when stdin is a tty or held no
+    bytes) and it is an INPUT to the binding, not a fallback applied afterwards.
+    It has to be: with a selector and one positional there are two readings —
+    the positional is the body (discarding the pipe), or the positional is a
+    target that conflicts with the selector (making the pipe the body). Deciding
+    without knowing whether a pipe carried data is what made
+    ``git log | lop send alpha --pid 10`` deliver the literal string ``alpha``
+    and silently drop the commit log, at exit 0. Two candidate bodies is the
+    same "the command names two things" shape as two candidate recipients, so it
+    gets the same answer: refuse, rather than discard one of them silently. A
+    loud error costs a retype; a silent winner costs the payload.
+
+    Note that stdin being a pipe is NOT the discriminator — ``isatty()`` is
+    False for an empty redirect (``</dev/null``) just as it is for a pipe
+    carrying data, so keying off it would break ``lop send --pid N "hi"
+    </dev/null``. Only actual bytes count as a piped body.
+
+    Blank-vs-absent follows the shared core exactly (``peer_send.py``): a target
+    that is empty or whitespace is ABSENCE, not a competing address, so
+    ``lop send '' BODY --pid 123`` delivers. A blank ``--session`` is instead an
+    error — the user explicitly asked to address by session id and supplied
+    nothing, and falling back to substring matching there would silently switch
+    grammars (``--session '' hello`` would start treating ``hello`` as a target).
+    ``--pid`` cannot be blank; argparse's ``type=int`` rejects it first.
+
+    Kept as a pure function (namespace + stdin in, tuple out) for the same
+    reason ``resolve_peer_target`` is a core rather than parser logic: the rule
+    is testable without a parser, a socket, or a registry. Expressing it in
     argparse itself was tried and rejected — ``nargs="*"`` cannot absorb words
     that follow an optional flag (``lop send peer --wake "act now"`` becomes
     "unrecognized arguments"), and ``argparse.REMAINDER`` swallows ``--wake``
     INTO the body, silently downgrading the delivery mode. See
     ``docs/design/peer-send.md`` §4.3.
     """
-    target, message = args.target, args.message
-    selector = (
-        f"--pid {args.pid}"
-        if args.pid is not None
-        else f"--session {args.session}" if args.session else ""
-    )
-    if not selector:
-        # No selector: today's grammar exactly — first positional is the target,
-        # second is the body.
-        return target, message, ""
+    # Blank/whitespace is absence, matching the core's `(target or "").strip()`.
+    # An explicitly typed '' is not an address, so it must not read as one.
+    target = args.target if (args.target or "").strip() else None
+    message = args.message
+    piped = stdin_body if (stdin_body or "").strip() else None
+
+    if args.session is not None and not args.session.strip():
+        return None, None, "empty --session (pass a session id, or drop the flag)"
+
+    if args.pid is not None:
+        selector, by = f"--pid {args.pid}", "pid"
+    elif args.session:
+        selector, by = f"--session {args.session}", "session id"
+    else:
+        # No selector: the historical grammar exactly — first positional is the
+        # target, second is the body, stdin fills an absent body.
+        return args.target, (message if message is not None else piped), ""
+
     if target is not None and message is not None:
-        by = "pid" if args.pid is not None else "session id"
         return (
             None,
             None,
             (
                 f"ambiguous recipient: {target!r} and {selector} name different "
-                f'sessions. Drop one — `lop send {selector} "{message}"` to address '
-                f'by {by}, or `lop send {target!r} "{message}"` to address by name'
+                f"sessions. Drop one — `lop send {selector} {shlex.quote(message)}` "
+                f"to address by {by}, or `lop send {shlex.quote(target)} "
+                f"{shlex.quote(message)}` to address by name"
             ),
         )
-    # One positional (or none) alongside a selector: it is the body.
-    return None, target, ""
+    # The sole surviving positional is the body, whichever slot argparse used:
+    # a blank target is absence, so `lop send '' BODY --pid N` leaves BODY in
+    # the `message` slot with nothing addressing anyone.
+    typed = message if message is not None else target
+    if typed is not None and piped is not None:
+        # Two candidate bodies: the positional and the pipe. Refusing rather
+        # than picking is the same answer two candidate RECIPIENTS get, and for
+        # the same reason — silently discarding one of them is how
+        # `git log | lop send alpha --pid 10` delivered the string 'alpha'.
+        return (
+            None,
+            None,
+            (
+                f"ambiguous body: {typed!r} and the piped input both look like the "
+                f"message. Drop one — `lop send {selector}` to send the piped input, "
+                f"or `lop send {selector} {shlex.quote(typed)}` with nothing piped "
+                f"to send {typed!r}"
+            ),
+        )
+    # One positional (or none) alongside a selector: it is the body. With no
+    # positional the piped input is, which is how the documented pipe form works.
+    return None, (typed if typed is not None else piped), ""
 
 
 def _resolve_peer_target(
@@ -1221,22 +1277,51 @@ def send_command(args: argparse.Namespace) -> int:
 
     The positionals are rebound BEFORE anything is resolved or dialled, because
     an ambiguous recipient must cost nothing: the refusal has to happen while
-    the command is still inert."""
+    the command is still inert. stdin is read up front for the same reason —
+    the binder cannot tell a lone positional's meaning without knowing whether a
+    pipe also carried a body, and reading it later meant the positional won and
+    the piped payload was discarded silently."""
     import asyncio
 
     from local_operator.mobile.peer_client import send_peer_message
     from local_operator.mobile.peer_send import candidate_lines, validate_peer_body
 
-    target, message, bind_error = _bind_send_positionals(args)
+    # stdin can only change the binding when at most ONE positional was typed:
+    # with both slots filled the outcome is already decided (a conflict when a
+    # selector is present, the typed body otherwise), so stdin is irrelevant.
+    # Restricting the read matters beyond efficiency — `slow | lop send NAME
+    # "body"` must not block waiting for a producer whose output is not used,
+    # and a tty read would block waiting for the user to type.
+    #
+    # Only real bytes count as a piped body: `isatty()` is False for an empty
+    # redirect (`</dev/null`) exactly as it is for a pipe carrying data, so it
+    # cannot distinguish "piped a body" from "stdin merely is not a terminal".
+    stdin_body = None
+    if args.message is None and not sys.stdin.isatty():
+        stdin_body = sys.stdin.read()
+
+    target, message, bind_error = _bind_send_positionals(args, stdin_body)
     if bind_error:
         _peer_red(bind_error)
         return 1
 
     record, candidates, error = _resolve_peer_target(args, target)
     if candidates:
-        print(f"{len(candidates)} sessions match; disambiguate with --pid:", file=sys.stderr)
+        # "REPLACE the target with", not "add --pid": appending the flag to the
+        # command the user just typed produces `NAME BODY --pid N`, which the
+        # ambiguity guard now refuses. The instruction has to describe the form
+        # that actually works, or it walks the user into a second error.
+        print(
+            f"{len(candidates)} sessions match; replace the target with one of these:",
+            file=sys.stderr,
+        )
         for line in candidate_lines(candidates, indent="  ", prefix="--pid"):
             print(line, file=sys.stderr)
+        if message is not None:
+            print(
+                f"  e.g. `lop send --pid {candidates[0].pid} {shlex.quote(message)}`",
+                file=sys.stderr,
+            )
         return 1
     if error or record is None:
         _peer_red(error or "no target resolved")
@@ -1261,15 +1346,12 @@ def send_command(args: argparse.Namespace) -> int:
         _peer_red("that target is this session; use the composer to message yourself")
         return 1
 
-    # Body: positional wins; otherwise read stdin (piped note).
-
-    if message is not None:
-        text = message
-    elif not sys.stdin.isatty():
-        text = sys.stdin.read()
-    else:
+    # The binder already resolved the body from the positionals and stdin
+    # together; nothing survives here means neither supplied one.
+    if message is None:
         _peer_red("no message given (pass it as an argument or pipe it on stdin)")
         return 1
+    text = message
     body_error = validate_peer_body(text)
     if body_error:
         _peer_red(body_error)

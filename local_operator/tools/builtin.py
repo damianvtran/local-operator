@@ -4815,7 +4815,15 @@ async def execute_send(
         # ``pid=<n>`` rather than ``pid <n>``: the reader is a model that has to
         # turn this line into an argument, so the line is written in the
         # parameter syntax it will copy (review round 1, MINOR-1).
-        lines = [f"{len(candidates)} sessions match; retry with pid=<n>:"]
+        #
+        # "DROP `target` and retry with" rather than "retry with": the minimal
+        # edit a model makes to its previous call is to keep `target` and add
+        # `pid`, and that pair is now refused as an ambiguous recipient. The
+        # instruction must name the removal explicitly or it teaches the error.
+        lines = [
+            f"{len(candidates)} sessions match; drop `target` and retry with pid=<n> "
+            f"instead (passing both is refused):"
+        ]
         lines.extend(candidate_lines(candidates, indent="  ", prefix="pid="))
         return _error(tool_call_id, "send", "\n".join(lines))
     if error or record is None:
