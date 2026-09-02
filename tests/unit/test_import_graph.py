@@ -178,3 +178,36 @@ def test_configure_import_does_not_load_requests(configure_modules: set[str]) ->
         "requests",
         "+2.9 MB / +127 modules per session; only validate_model needs it",
     )
+
+
+# --- The wake index ----------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def wake_store_modules() -> set[str]:
+    """Modules loaded by importing the wake index store."""
+    return _imported_modules("local_operator.wakes.store")
+
+
+def test_wake_store_import_is_stdlib_only(wake_store_modules: set[str]) -> None:
+    # ``local_operator.wakes.store`` is read by two processes that must not
+    # carry the harness: the wake supervisor (a ~40 MB always-on trigger whose
+    # whole justification is that it does NOT load a session) and the TUI's
+    # picker at boot, before any session exists. Every heavy stack pinned on
+    # the CLI path is pinned here too, plus the two that would be the most
+    # natural to reach for from a wake module: asyncio (the live
+    # ``WakeScheduler`` needs it; the store never does) and the session/
+    # engine packages (the store describes schedules; it never runs one).
+    # Measured at this commit: 128 modules total, three of them ours.
+    _assert_absent(wake_store_modules, "asyncio", "the supervisor is a plain loop, no event loop")
+    _assert_absent(wake_store_modules, "pydantic", "WakeSchedule is TYPE_CHECKING-only here")
+    _assert_absent(wake_store_modules, "local_operator.session", "the store never opens a session")
+    _assert_absent(wake_store_modules, "local_operator.harness", "pure-layer types only, lazily")
+    _assert_absent(wake_store_modules, "local_operator.mobile", "no runtime, no daemon")
+    _assert_absent(wake_store_modules, "local_operator.tui", "no front end")
+    _assert_absent(wake_store_modules, "textual", "no front end")
+    _assert_absent(wake_store_modules, "httpx", "no provider layer")
+    _assert_absent(wake_store_modules, "requests", "no provider layer")
+    _assert_absent(wake_store_modules, "tiktoken", "no tokenizer")
+    ours = sorted(m for m in wake_store_modules if m.startswith("local_operator"))
+    assert ours == ["local_operator", "local_operator.wakes", "local_operator.wakes.store"], ours

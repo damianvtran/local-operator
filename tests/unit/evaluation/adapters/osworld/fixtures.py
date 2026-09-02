@@ -52,6 +52,84 @@ class Task004:
     evaluator = {"func": "check_cart"}
 """
 
+# Imports the LLM judge client directly (the shape of the real task_008).
+JUDGED = """
+from desktop_env.evaluators.model_client import generate_text
+
+class Task008:
+    id = "task_judged"
+    instruction = "Write a summary the judge will grade."
+    config = [{"type": "launch", "app": "gedit"}]
+    evaluator = {"func": "compare_text_with_llm"}
+"""
+
+# Reaches the judge through an llm_metrics metric rather than the client.
+JUDGED_VIA_METRICS = """
+from desktop_env.evaluators.metrics import llm_metrics
+
+class Task009:
+    id = "task_judged_metrics"
+    instruction = "Edit the image the judge will compare."
+    config = [{"type": "launch", "app": "gimp"}]
+    evaluator = {"func": "compare_images_with_llm"}
+"""
+
+# Reaches the judge through the ``metrics`` package re-export
+# (metrics/__init__.py:194-200): no ``llm_metrics``/``model_client``
+# substring anywhere in the source. The real task_007 has this shape.
+JUDGED_VIA_REEXPORT = """
+from desktop_env.evaluators import getters, metrics
+
+class Task007:
+    id = "task_judged_reexport"
+    instruction = "Answer the question in the document."
+    config = [{"type": "launch", "app": "libreoffice"}]
+
+    def evaluate(self, env):
+        return metrics.compare_text_with_llm("q", "a", "b")
+"""
+
+# Bare-name import of a re-exported judge metric.
+JUDGED_VIA_BARE_NAME = """
+from desktop_env.evaluators.metrics import compare_images_with_llm
+
+class Task010:
+    id = "task_judged_bare"
+    instruction = "Recreate the image."
+    config = []
+
+    def evaluate(self, env):
+        return compare_images_with_llm("a.png", "b.png")
+"""
+
+# compare_pdf_answers wraps _compare_answers_with_llm (metrics/pdf.py) with
+# no _with_llm suffix of its own; unused in the pinned corpus but a judge
+# entry point all the same.
+JUDGED_VIA_PDF = """
+from desktop_env.evaluators import metrics
+
+class Task012:
+    id = "task_judged_pdf"
+    instruction = "Fill the form."
+    config = []
+
+    def evaluate(self, env):
+        return metrics.compare_pdf_answers("a.pdf", {"rules": []})
+"""
+
+# A non-judge metric from the same package must NOT trip detection.
+METRICS_NOT_JUDGED = """
+from desktop_env.evaluators import metrics
+
+class Task011:
+    id = "task_metrics_plain"
+    instruction = "Compare the files."
+    config = []
+
+    def evaluate(self, env):
+        return metrics.compare_zip_files("a.zip", "b.zip")
+"""
+
 # A googledrive config entry needs Google account credentials.
 GOOGLEDRIVE = """
 class Task005:
@@ -110,7 +188,95 @@ class Task010:
     config = [{"type": "launch", "app": "files"}]
 """
 
-# An infeasible-style task (V2 shape). PR 1 EXCLUDES these from scoring support.
+# The shape of EVERY task in the pinned V2 corpus: no ``evaluator`` dict, an
+# ``evaluate(self, env)`` override on the task class instead.
+EVALUATE_OVERRIDE = """
+from desktop_env.task_base import BaseTask
+
+class Task011(BaseTask):
+    id = "task_override"
+    instruction = "Create the report."
+    config = [{"type": "launch", "app": "gedit"}]
+
+    def evaluate(self, env):
+        return 0.5
+"""
+
+# An ``evaluate`` defined OUTSIDE the task class must not count.
+EVALUATE_ELSEWHERE = """
+def evaluate(env):
+    return 1.0
+
+class Task012:
+    id = "task_helper_only"
+    instruction = "Nothing scores this."
+    config = []
+"""
+
+# The four non-literal shapes the pinned corpus actually uses (29 of 108
+# tasks): module constant for id/instruction, an earlier class attribute
+# inside user_simulator, a parenthesised f-string over module constants, and
+# ``"...".strip()``.
+FOLDED = """
+TASK_ID = "013"
+TUTORIAL_ID = "reaper-ducking-050"
+INSTRUCTION = (
+    "First line. "
+    f"Watch tutorial {TUTORIAL_ID} and then "
+    "finish."
+)
+
+class Task013:
+    id = TASK_ID
+    instruction = INSTRUCTION.strip()
+    config = [{"type": "launch", "app": "reaper"}]
+    user_simulator = {"type": "llm", "model": "gpt-4o", "instruction": instruction}
+"""
+
+# An f-string whose interpolation is an IMPORTED name: instruction folds
+# partially (literal skeleton kept, instruction_static=False).
+PARTIAL_INSTRUCTION = """
+from desktop_env.controllers.website import HOST_SUFFIX
+
+class Task014:
+    id = "task_partial"
+    instruction = f"Open https://streamview.{HOST_SUFFIX}/watch?v=1 and summarise."
+    config = []
+"""
+
+# The same unresolvable interpolation on a DECISION field must refuse.
+PARTIAL_ID = """
+import os
+
+class Task015:
+    id = f"task_{os.getpid()}"
+    instruction = "Nothing."
+    config = []
+"""
+
+# A simulator that interpolates an imported name must refuse too.
+PARTIAL_SIMULATOR = """
+from somewhere import KNOWLEDGE
+
+class Task016:
+    id = "task_partial_sim"
+    instruction = "Ask me."
+    config = []
+    user_simulator = {"type": "llm", "model": "x", "knowledge": f"{KNOWLEDGE}"}
+"""
+
+# A self-referential module constant must terminate with a refusal.
+CYCLIC = """
+A = B
+B = A
+
+class Task017:
+    id = A
+    instruction = "Loop."
+    config = []
+"""
+
+# An infeasible-style task (V2 shape). Excluded from scoring support.
 INFEASIBLE = """
 class Task011:
     id = "task_infeasible"

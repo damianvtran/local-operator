@@ -19,14 +19,9 @@ import hashlib
 import io
 import json
 import os
-import shutil
-import subprocess
-import sys
-import sysconfig
 from pathlib import Path
 from typing import Any
 
-import pydantic
 import pytest
 
 from local_operator.evaluation.adapters.api import AdapterSelector
@@ -34,6 +29,10 @@ from local_operator.evaluation.adapters.discovery import workspace_digest
 from local_operator.evaluation.adapters.supervisor import AdapterSupervisor
 from local_operator.evaluation.evidence.verify import verify_bundle
 from local_operator.evaluation.runner.episode import EpisodeRunner
+from tests.unit.evaluation.copied_interpreter import (
+    copied_interpreter,
+    site_packages_of,
+)
 from tests.unit.evaluation.runner.conftest import (
     ScriptedModel,
     build_config,
@@ -324,7 +323,7 @@ def create():
             entry_point="tiny_runner_adapter:create",
             package_digest=distribution_digest(installed),
             release_digest="%s",
-            schema_version="1.1",
+            schema_version="1.2",
             capabilities=AdapterCapabilities(
                 routes=("computer",), ask_user=False, scoring=True
             ),
@@ -333,72 +332,9 @@ def create():
 """ % RELEASE_DIGEST
 
 
-def _real_interpreter(venv: Path) -> Path:
-    """Copy a working interpreter so its content can be pinned per test run.
-
-    Candidates are tried in turn because not every interpreter can host a
-    ``--copies`` venv: a framework build whose ``libpython`` lives outside the
-    copied tree produces an executable that dies in dyld, and a system Python
-    may refuse to build one without symlinks at all. This mirrors
-    ``adapters/test_launch.py``, which exists for the same reason.
-    """
-
-    candidates = [
-        os.path.realpath(sys.executable),
-        shutil.which("python3") or "",
-        sys.base_prefix + "/bin/python3",
-    ]
-    failures: list[str] = []
-    for base in candidates:
-        if not base or not os.path.exists(base):
-            continue
-        shutil.rmtree(venv, ignore_errors=True)
-        try:
-            subprocess.run(
-                [base, "-m", "venv", "--without-pip", "--copies", str(venv)],
-                check=True,
-                capture_output=True,
-            )
-        except (OSError, subprocess.CalledProcessError) as error:
-            failures.append(f"{base}: venv creation failed ({error})")
-            continue
-        executable = next(
-            (
-                item
-                for item in sorted((venv / "bin").glob("python3.*"))
-                if item.is_file() and not item.is_symlink()
-            ),
-            None,
-        )
-        if executable is None:
-            failures.append(f"{base}: produced no copied executable")
-            continue
-        probe = subprocess.run(
-            [str(executable), "-I", "-c", "print('ok')"], capture_output=True, text=True
-        )
-        if probe.returncode == 0:
-            return executable
-        failures.append(f"{base}: copied interpreter did not run ({probe.stderr[-200:]})")
-    # Failing loudly beats skipping: a host with no usable interpreter gives no
-    # subprocess coverage at all, and a silent skip hides that from CI.
-    raise AssertionError("no usable copied interpreter on this host: " + "; ".join(failures))
-
-
-def _dependency_roots() -> list[str]:
-    roots = [str(Path(__file__).resolve().parents[4])]
-    purelib = sysconfig.get_paths().get("purelib")
-    if purelib:
-        roots.append(purelib)
-    roots.append(str(Path(pydantic.__file__).resolve().parent.parent))
-    seen: list[str] = []
-    for root in roots:
-        if root not in seen and Path(root).is_dir():
-            seen.append(root)
-    return seen
-
-
 def _install_adapter(site: Path) -> str:
-    (site / "_local_operator_repo.pth").write_text("\n".join(_dependency_roots()) + "\n")
+    # The copied venv already carries the repo .pth (``copied_interpreter``);
+    # only the adapter distribution is written here.
     module = site / "tiny_runner_adapter.py"
     module.write_text(_ADAPTER_SOURCE)
     info = site / "tiny_runner_adapter-1.0.dist-info"
@@ -433,9 +369,7 @@ def distribution_digest_of(distribution: Any) -> str:
 def adapter_site(tmp_path: Path) -> Path:
     """The installed adapter's site-packages, where the cutpoint file lives."""
 
-    executable = _real_interpreter(tmp_path / "venv")
-    site = next(executable.parent.parent.glob("lib/python*/site-packages"))
-    return site
+    return site_packages_of(copied_interpreter(tmp_path / "venv"))
 
 
 @pytest.fixture
@@ -453,7 +387,7 @@ def real_selector(tmp_path: Path, adapter_site: Path) -> AdapterSelector:
         json.dumps({"release_digest": RELEASE_DIGEST}, separators=(",", ":"), sort_keys=True)
     )
     return AdapterSelector(
-        schema_version="1.1",
+        schema_version="1.2",
         adapter_id="tiny-runner",
         distribution="tiny-runner-adapter",
         version="1.0",

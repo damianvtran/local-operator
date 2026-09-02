@@ -52,7 +52,12 @@ from local_operator.evaluation.receipts import (
     seal_preflight,
 )
 from local_operator.evaluation.runner.episode import EpisodeConfig, EpisodeSpec
-from local_operator.evaluation.runner.model import ModelDecision, ModelUsage
+from local_operator.evaluation.runner.model import (
+    CompactionRecord,
+    EpisodeTurn,
+    ModelDecision,
+    ModelUsage,
+)
 
 _P = TypeVar("_P")
 
@@ -66,7 +71,7 @@ def selector(tmp_path: Path) -> AdapterSelector:
     workspace = tmp_path / "workspace"
     workspace.mkdir(exist_ok=True)
     return AdapterSelector(
-        schema_version="1.1",
+        schema_version="1.2",
         adapter_id="tiny",
         distribution="tiny-adapter",
         version="1.0",
@@ -90,7 +95,7 @@ def handshake(tmp_path: Path) -> Handshake:
             entry_point="tiny_adapter:create",
             package_digest="a" * 64,
             release_digest="b" * 64,
-            schema_version="1.1",
+            schema_version="1.2",
             capabilities=AdapterCapabilities(routes=("computer",), ask_user=True, scoring=True),
         ),
         python=PythonRuntime.current(),
@@ -125,7 +130,9 @@ def cleanup_plan(episode_id: str) -> CleanupPlan:
     )
 
 
-def build_spec(episode_id: str) -> EpisodeSpec:
+def build_spec(episode_id: str, *, caps: dict[str, int] | None = None) -> EpisodeSpec:
+    """``caps`` overrides the per-resource capped allowance (default 1,000,000)."""
+
     plan = DependencyPlan(
         release_id="release-1",
         task_id=TASK_ID,
@@ -147,7 +154,9 @@ def build_spec(episode_id: str) -> EpisodeSpec:
     budget = BudgetAuthorization(
         episode_id=episode_id,
         allowances=tuple(
-            CappedAllowance(resource=resource, value=1_000_000, reporting="optional")
+            CappedAllowance(
+                resource=resource, value=(caps or {}).get(resource, 1_000_000), reporting="optional"
+            )
             for resource in BUDGET_RESOURCES
         ),
     )
@@ -293,29 +302,56 @@ class FakeAdapter:
 
 
 class ScriptedModel:
-    """Emits a fixed sequence of decisions, then finishes."""
+    """Emits a fixed sequence of decisions, then finishes.
 
-    def __init__(self, script: Sequence[str] | None = None, *, error: BaseException | None = None):
+    ``histories`` keeps every ``EpisodeTurn`` sequence the runner handed over,
+    so a test can assert what the model was shown. ``compact_on`` names call
+    indices at which the model reports a ``CompactionRecord`` (as a real
+    client would after rebuilding its context).
+    """
+
+    def __init__(
+        self,
+        script: Sequence[str] | None = None,
+        *,
+        error: BaseException | None = None,
+        compact_on: Sequence[int] = (),
+    ):
         self.script = list(script or ["finish"])
         self.error = error
         self.calls = 0
+        self.compact_on = set(compact_on)
+        self.histories: list[tuple[EpisodeTurn, ...]] = []
         # Overridable so a test can simulate a provider serving a route other
         # than the pinned one.
         self.route = ROUTE
 
     async def decide(
-        self, observation: Observation, transcript: Sequence[Observation]
+        self, observation: Observation, history: Sequence[EpisodeTurn]
     ) -> ModelDecision:
-        del transcript
+        self.histories.append(tuple(history))
         if self.error is not None:
             raise self.error
         kind = self.script[self.calls] if self.calls < len(self.script) else "finish"
+        compaction = None
+        if self.calls in self.compact_on:
+            compaction = CompactionRecord(
+                strategy="context-full",
+                tokens_before=900,
+                tokens_after=300,
+                frames_dropped=2,
+                messages_before=len(history) * 2,
+                messages_after=3,
+                summary_text="what happened so far",
+            )
         self.calls += 1
         return ModelDecision(
             action_batch=_batch(observation, kind),
             route=self.route,
             usage=ModelUsage(input_tokens=10, output_tokens=5),
             cost_micros=7,
+            prompt_cache_key="lop-eval-test",
+            compaction=compaction,
         )
 
 
@@ -336,6 +372,16 @@ def _batch(current: Observation, kind: str) -> ActionBatch:
                 "observation_id": current.observation_id,
                 "request_id": f"ask-{uuid.uuid4().hex[:8]}",
                 "question": "What next?",
+            }
+        ]
+    elif kind == "type":
+        # A real action: waits are transparent to the floundering guards, so
+        # a test that wants a guard to fire must act.
+        actions = [
+            {
+                "kind": "type",
+                "observation_id": current.observation_id,
+                "text": "hello",
             }
         ]
     else:

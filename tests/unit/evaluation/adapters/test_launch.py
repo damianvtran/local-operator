@@ -16,13 +16,9 @@ import hashlib
 import io
 import json
 import os
-import shutil
-import subprocess
 import sys
-import sysconfig
 from pathlib import Path
 
-import pydantic
 import pytest
 
 from local_operator.evaluation.adapters.api import AdapterSelector, Handshake
@@ -33,6 +29,10 @@ from local_operator.evaluation.adapters.discovery import (
     workspace_digest,
 )
 from local_operator.evaluation.adapters.supervisor import AdapterSupervisor
+from tests.unit.evaluation.copied_interpreter import (
+    copied_interpreter,
+    site_packages_of,
+)
 
 RELEASE_DIGEST = "b" * 64
 _ADAPTER_SOURCE = """from importlib.metadata import distribution
@@ -74,7 +74,7 @@ def create():
             entry_point="tiny_e2e_adapter:create",
             package_digest=distribution_digest(installed),
             release_digest="%s",
-            schema_version="1.1",
+            schema_version="1.2",
             capabilities=AdapterCapabilities(
                 routes=("computer",), ask_user=False, scoring=False
             ),
@@ -83,66 +83,9 @@ def create():
 """ % RELEASE_DIGEST
 
 
-def _real_interpreter() -> Path:
-    """Copy a working interpreter so its content can be pinned per test run."""
-
-    candidates = [os.path.realpath(sys.executable), shutil.which("python3") or ""]
-    for base in candidates:
-        if not base or not os.path.exists(base):
-            continue
-        venv = Path(os.environ["PYTEST_LAUNCH_VENV"])
-        shutil.rmtree(venv, ignore_errors=True)
-        try:
-            subprocess.run(
-                [base, "-m", "venv", "--without-pip", "--copies", str(venv)],
-                check=True,
-                capture_output=True,
-            )
-        except (OSError, subprocess.CalledProcessError):
-            continue
-        executable = next(
-            (
-                item
-                for item in sorted((venv / "bin").glob("python3.*"))
-                if item.is_file() and not item.is_symlink()
-            ),
-            None,
-        )
-        if executable is None:
-            continue
-        probe = subprocess.run(
-            [str(executable), "-I", "-c", "print('ok')"], capture_output=True, text=True
-        )
-        if probe.returncode == 0:
-            return executable
-    pytest.skip("no usable copied interpreter is available on this host")
-
-
-def _dependency_roots() -> list[str]:
-    """Locate the running interpreter's real import roots.
-
-    CI installs the project with ``pip install -e`` and never creates a repo
-    ``.venv``, so a hardcoded venv path leaves the spawned worker without
-    pydantic and it dies instead of skipping. Deriving the roots from this
-    interpreter works under both layouts.
-    """
-
-    roots = [str(Path(__file__).resolve().parents[4])]
-    purelib = sysconfig.get_paths().get("purelib")
-    if purelib:
-        roots.append(purelib)
-    # Follow an actually-imported third-party dependency, which stays correct
-    # for editable installs whose packages live outside purelib.
-    roots.append(str(Path(pydantic.__file__).resolve().parent.parent))
-    seen: list[str] = []
-    for root in roots:
-        if root not in seen and Path(root).is_dir():
-            seen.append(root)
-    return seen
-
-
 def _install_adapter(site: Path) -> str:
-    (site / "_local_operator_repo.pth").write_text("\n".join(_dependency_roots()) + "\n")
+    # The copied venv already carries the repo .pth (``copied_interpreter``);
+    # only the adapter distribution is written here.
     module = site / "tiny_e2e_adapter.py"
     module.write_text(_ADAPTER_SOURCE)
     info = site / "tiny_e2e_adapter-1.0.dist-info"
@@ -181,12 +124,9 @@ def test_real_running_interpreter_resolves_and_revalidates() -> None:
 
 
 @pytest.mark.asyncio
-async def test_supervisor_launch_completes_real_handshake_and_reaps(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("PYTEST_LAUNCH_VENV", str(tmp_path / "venv"))
-    executable = _real_interpreter()
-    site = next(executable.parent.parent.glob("lib/python*/site-packages"))
+async def test_supervisor_launch_completes_real_handshake_and_reaps(tmp_path: Path) -> None:
+    executable = copied_interpreter(tmp_path / "venv")
+    site = site_packages_of(executable)
     package_digest = _install_adapter(site)
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -194,7 +134,7 @@ async def test_supervisor_launch_completes_real_handshake_and_reaps(
         json.dumps({"release_digest": RELEASE_DIGEST}, separators=(",", ":"), sort_keys=True)
     )
     selector = AdapterSelector(
-        schema_version="1.1",
+        schema_version="1.2",
         adapter_id="tiny-e2e",
         distribution="tiny-e2e-adapter",
         version="1.0",

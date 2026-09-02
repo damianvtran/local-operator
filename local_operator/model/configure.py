@@ -40,6 +40,7 @@ from local_operator.harness.types import (
 from local_operator.model.catalogue import DEFAULT_TTL_S
 from local_operator.model.defaults import DEFAULT_MODEL_NAMES as _DEFAULT_MODEL_NAMES
 from local_operator.model.effort import default_effort, supported_efforts
+from local_operator.model.ids import normalised_id as _normalised_id
 from local_operator.model.registry import (
     ModelInfo,
     anthropic_default_model_info,
@@ -61,6 +62,7 @@ if TYPE_CHECKING:
     from local_operator.clients.radient import RadientListModelsResponse
     from local_operator.credentials import CredentialManager
     from local_operator.env import EnvConfig
+    from local_operator.model.discovery import DiscoveredModel
     from local_operator.providers.auth_store import AuthStore
     from local_operator.providers.clients import WireClient
     from local_operator.providers.usage import UsageReport
@@ -865,24 +867,6 @@ def _oauth_listing_token(provider: str) -> tuple[str, bool, str | None]:
     return "", False, None
 
 
-def _normalised_id(model_id: str) -> str:
-    """A model id in the one spelling both sides of a match can agree on.
-
-    Discovery NORMALISES ids on ingest — ``_row_from_gemini_entry`` strips
-    Google's ``models/`` resource prefix so the rest of the system sees a bare id
-    — while the user types whatever the provider's own documentation shows, which
-    for Gemini is ``models/gemini-2.5-pro``. An exact-match-only lookup therefore
-    missed the spelling Google itself publishes and handed that session the 128k
-    unknown default. Case is folded for the same reason: an id is a wire
-    identifier, not prose, and no provider ships two models differing only in case.
-    """
-    trimmed = model_id.strip()
-    prefix = "models/"
-    if trimmed.startswith(prefix):
-        trimmed = trimmed[len(prefix) :]
-    return trimmed.casefold()
-
-
 def _info_from_discovery(
     provider: str, model_name: str, fallback: ModelInfo, *, timeout: float | None = None
 ) -> ModelInfo:
@@ -907,6 +891,12 @@ def _info_from_discovery(
     stale-but-correct number, not the frame. That second call is reachable from a
     repaint, where ten seconds is a frozen keyboard rather than a slow start.
 
+    ``model_name`` is passed through as discovery's ``want_id``: a stored
+    document old enough to predate the model is refetched once, inside this
+    same ``timeout``, before the lookup below is allowed to miss. That is what
+    prices a model released this morning on its FIRST resolution rather than
+    after the memo bucket rolls over at midnight.
+
     Imported lazily. The discovery module pulls httpx and the provider registry,
     and this branch is only reached for a model the registry does not describe;
     putting that on the import path would cost every CLI invocation.
@@ -921,6 +911,7 @@ def _info_from_discovery(
             is_oauth=is_oauth,
             account_id=account_id,
             timeout=DEFAULT_TIMEOUT_S if timeout is None else timeout,
+            want_id=model_name,
         )
     except Exception as exc:  # noqa: BLE001 — metadata is never worth a failed start
         logger.debug("%s discovery unavailable for %s: %s", provider, model_name, exc)
@@ -951,11 +942,15 @@ def _info_from_discovery(
         info.output_price = row.output_price
     if row.cache_read_price > 0:
         info.cache_reads_price = row.cache_read_price
-        # A quoted cache-READ price is the only signal some providers give that
-        # prompt caching exists at all; the write price is often absent because the
-        # caching is implicit. Falling back to the input price keeps cost estimates
-        # from reading as free rather than inventing a number.
-        if not info.cache_writes_price:
+        if row.cache_write_price > 0:
+            info.cache_writes_price = row.cache_write_price
+        elif not info.cache_writes_price:
+            # A quoted cache-READ price is the only signal some providers give
+            # that prompt caching exists at all; a listing that quotes no write
+            # price usually caches implicitly. Falling back to the input price
+            # keeps cost estimates from reading as free rather than inventing a
+            # number — it under-states an Anthropic 5m write by 20%, which is
+            # why a quoted write price above takes precedence.
             info.cache_writes_price = info.input_price
     if row.supports_images is not None:
         # The provider's own statement, including a ``false``: ``DiscoveredModel``
@@ -968,53 +963,15 @@ def _info_from_discovery(
     return info
 
 
-#: The catalogue consulted for a direct provider's prices. OpenRouter rather than
-#: Radient because it is the one whose listing is a PUBLIC document — no key, no
-#: account — so this leg works on an install that has only, say, an Anthropic
-#: OAuth login. See :data:`local_operator.model.discovery.PUBLIC_LISTING_PROVIDERS`.
-_AGGREGATOR_CATALOGUE = "openrouter"
-
-#: Seconds this leg may block. Well under ``discovery.DEFAULT_TIMEOUT_S`` (10.0)
-#: because it runs BEHIND the provider's own listing on the same synchronous
-#: call — two default ceilings would be a 20s session start for one unresolvable
-#: model — and because it is reachable from the TUI's 1 Hz poll. Enrichment that
-#: cannot be had in three seconds is worth skipping until the next TTL bucket;
-#: the row degrades to "cost unavailable", which is the honest pre-existing state.
+#: Seconds the price-catalogue leg and the aggregator leg may each block. Well
+#: under ``discovery.DEFAULT_TIMEOUT_S`` (10.0) because they run BEHIND the
+#: provider's own listing on the same synchronous call — two default ceilings
+#: would be a 20s session start for one unresolvable model — and because they
+#: are reachable from the TUI's 1 Hz poll. Enrichment that cannot be had in
+#: three seconds is worth skipping until the next TTL bucket; the row degrades
+#: to "cost unavailable", which is the honest pre-existing state.
 _AGGREGATOR_TIMEOUT_S = 3.0
-
-#: A direct provider's id, mapped to the namespace the same models are published
-#: under in the OpenRouter catalogue. Only providers whose OWN listing quotes no
-#: prices need an entry, which is every direct provider in this tree: Anthropic's
-#: `/v1/models` has no pricing object, OpenAI's `/v1/models` is bare ids, and
-#: Gemini's listing carries token limits only. The aggregators (`openrouter`,
-#: `radient`) are deliberately absent — their own listing IS the priced one.
-#:
-#: Spelled out rather than derived because three of the namespaces are renames
-#: (`x-ai`, `qwen`, `moonshotai`), verified against
-#: `GET https://openrouter.ai/api/v1/models` on 2026-08-10; a derived guess would
-#: silently price a model from whatever else happened to match.
-_AGGREGATOR_NAMESPACE: dict[str, str] = {
-    "anthropic": "anthropic",
-    "openai": "openai",
-    "google": "google",
-    "deepseek": "deepseek",
-    "mistral": "mistralai",
-    "xai": "x-ai",
-    "alibaba": "qwen",
-    "kimi": "moonshotai",
-    # Z.AI's own listing quotes no prices, and GLM is resold on OpenRouter under
-    # the `z-ai/` namespace (verified against GET https://openrouter.ai/api/v1/models
-    # on 2026-08-17). Newer ids not yet carried there fall back to the static rows.
-    "zai": "z-ai",
-}
-
-#: A trailing Anthropic-style release stamp: `claude-opus-4-5-20251101`.
-_DATE_SUFFIX_RE = re.compile(r"-\d{8}$")
-
-#: A version separated by a dash between two digits: the `4-5` of `claude-opus-4-5`.
-#: Anchored on digits BOTH sides so `qwen2.5-coder-1.5b` and `gpt-4o-mini` are left
-#: alone — only a dash that is standing in for a decimal point is rewritten.
-_DOTTED_VERSION_RE = re.compile(r"(?<=\d)-(?=\d)")
+_PRICE_CATALOGUE_TIMEOUT_S = _AGGREGATOR_TIMEOUT_S
 
 #: Seconds a NON-BLOCKING listing refresh may take — the case where the registry
 #: already has a usable answer and is only checking whether the provider has since
@@ -1028,12 +985,13 @@ _REFRESH_TIMEOUT_S = 2.0
 def _remaining_budget(started: float) -> float:
     """What is left of one resolution's total listing budget, in seconds.
 
-    Resolution can consult two listings — the provider's own, then the public
-    aggregator catalogue. Given a ceiling each, they compose into their SUM, so a
-    model neither can describe blocks for both. One deadline across the pair keeps
-    the second leg free in the common case (the first answers in tens of
-    milliseconds) and bounds the pathological one at the single ceiling every
-    caller of this module already budgets for.
+    Resolution can consult up to three listings — the provider's own, the neutral
+    price catalogue, and (for an aggregator's own ids) the aggregator's listing.
+    Given a ceiling each, they compose into their SUM, so a model none can
+    describe blocks for all of them. One deadline across the legs keeps the later
+    ones free in the common case (the first answers in tens of milliseconds) and
+    bounds the pathological one at the single ceiling every caller of this module
+    already budgets for.
 
     Which leg gets STARVED by that is a deliberate priority, not an accident of
     ordering, and inverting it would be a real regression. On a degraded network
@@ -1053,108 +1011,20 @@ def _remaining_budget(started: float) -> float:
     return max(0.01, DEFAULT_TIMEOUT_S - (time.monotonic() - started))
 
 
-def _aggregator_spellings(model_id: str) -> list[str]:
-    """``model_id`` as the aggregator might spell it, most literal first.
+def _fill_from_row(info: ModelInfo, row: "DiscoveredModel") -> ModelInfo:
+    """``info`` with its HOLES filled from a second-hand catalogue row.
 
-    Providers and aggregators disagree about punctuation for the SAME model, and
-    the disagreement is systematic rather than per-model: Anthropic ships
-    `claude-opus-4-5-20251101` while OpenRouter lists `anthropic/claude-opus-4.5`.
-    Trying only the literal id would leave every dated Claude snapshot unpriced,
-    which is precisely the population this fallback exists for.
-
-    Both rewrites are conservative — a date stamp is eight digits at the end, and a
-    dash becomes a dot only between two digits — and every candidate must still be
-    found in the catalogue before it is believed. A miss costs one dict lookup.
-
-    Order is most-literal-first, and the DOTTED-WITH-DATE form comes before either
-    date-stripped one on purpose: OpenRouter publishes dated snapshots under their
-    own dated ids alongside the undated alias (`anthropic/claude-3.5-sonnet-20240620`
-    as well as `anthropic/claude-3.5-sonnet`), so stripping the date first would
-    answer a question about one snapshot with the alias's price. Harmless while
-    snapshots of a family share a rate, wrong the day one does not.
-    """
-    stripped = _DATE_SUFFIX_RE.sub("", model_id)
-    candidates = [model_id]
-    for candidate in (
-        _DOTTED_VERSION_RE.sub(".", model_id),
-        stripped,
-        _DOTTED_VERSION_RE.sub(".", stripped),
-    ):
-        if candidate and candidate not in candidates:
-            candidates.append(candidate)
-    return candidates
-
-
-def _from_aggregator_catalogue(
-    provider: str, model_id: str, info: ModelInfo, *, timeout: float | None = None
-) -> ModelInfo:
-    """Describe a DIRECT provider's model from the public aggregator catalogue.
-
-    The last leg of resolution, reached only when neither the registry nor the
-    provider's own listing could finish the job. It exists because those two
-    sources CANNOT close the gap between them: a direct provider's listing quotes
-    no money at all, and for a model the registry has not been taught about it
-    frequently carries no limits either. That is not a hypothetical —
-    `openai/gpt-5.4` is a shipping model with no registry row, and on a
-    fully-credentialled install it resolved to `input_price=0.0` AND no context
-    window, so the status band read "cost unavailable" and `311.0k/—` for the
-    whole session.
-
-    Structurally this is the same trick the aggregator models already get for free:
-    OpenRouter's listing describes the very same upstream models, and it is fetched
-    with NO credential — ``available_models`` treats it as keyless because it is in
-    :data:`~local_operator.model.discovery.PUBLIC_LISTING_PROVIDERS`, so the request
-    simply goes out without an ``Authorization`` header — and cached on disk for a
-    TTL. So the self-healing property is the point: a row added tomorrow with a 0.0
-    placeholder starts costing correctly instead of silently reading as free until
-    someone notices.
-
-    Every field is taken ONLY where the direct sources left a hole. The provider's
-    own answer is authoritative where it exists and can legitimately differ from
-    what the aggregator's routing exposes — OpenRouter advertises the largest
+    Shared by the price-catalogue and aggregator legs, which have the same
+    contract: every field is taken ONLY where the direct sources left one. The
+    provider's own answer is authoritative where it exists and can legitimately
+    differ from what a catalogue exposes — OpenRouter advertises the largest
     window across its routes, which is the wrong number for a specific upstream
     endpoint. ``supports_images`` is not taken at all: it carries a three-valued
-    contract (see :func:`_info_from_discovery`) in which a stated ``false`` is the
-    PROVIDER's denial, and a second-hand listing has no standing to issue one.
-    ``supports_prompt_cache`` is inferred from a quoted cache-read price, which is
-    the same inference :func:`_info_from_discovery` makes and is only ever
-    widening.
-
-    Never raises and never returns worse data than it was given.
+    contract (see :func:`_info_from_discovery`) in which a stated ``false`` is
+    the PROVIDER's denial, and a second-hand listing has no standing to issue
+    one. ``supports_prompt_cache`` is inferred from a quoted cache-read price,
+    the same inference :func:`_info_from_discovery` makes and only ever widening.
     """
-    namespace = _AGGREGATOR_NAMESPACE.get(provider)
-    if namespace is None:
-        return info
-    try:
-        from local_operator.model.discovery import available_models
-
-        # Two ceilings, whichever is smaller. `_AGGREGATOR_TIMEOUT_S` is this leg's
-        # own cap: it is pure enrichment stacked BEHIND the provider's listing, and
-        # it is reachable from the TUI's 1 Hz poll (`_harvest_subagent_costs` →
-        # `job_cost` → here, for a child on a model not yet in the memo), where a
-        # 10s synchronous stall is input lag rather than a slow start. `timeout` is
-        # what the CALLER has left of the whole resolution's budget, so the two
-        # legs together can never cost more than the single ceiling every caller of
-        # this module already assumes.
-        budget = _AGGREGATOR_TIMEOUT_S if timeout is None else min(_AGGREGATOR_TIMEOUT_S, timeout)
-        rows, _status = available_models(_AGGREGATOR_CATALOGUE, api_key=None, timeout=budget)
-    except Exception as exc:  # noqa: BLE001 — metadata is never worth a failed start
-        logger.debug("aggregator catalogue unavailable for %s/%s: %s", provider, model_id, exc)
-        return info
-
-    # Priced rows only. An unpriced aggregator row is a routing stub that can
-    # answer neither of the two questions this leg is here for, and matching one
-    # would shadow a better-spelled sibling further down the candidate list.
-    priced = {row.id: row for row in rows if row.input_price > 0 or row.output_price > 0}
-    row = None
-    for spelling in _aggregator_spellings(model_id):
-        row = priced.get(f"{namespace}/{spelling}")
-        if row is not None:
-            break
-    if row is None:
-        logger.debug("aggregator catalogue has no priced entry for %s/%s", provider, model_id)
-        return info
-
     info = info.model_copy(deep=True)
     if not (info.input_price or info.output_price):
         info.input_price = row.input_price
@@ -1162,12 +1032,13 @@ def _from_aggregator_catalogue(
         if row.cache_read_price > 0:
             info.cache_reads_price = row.cache_read_price
             info.supports_prompt_cache = True
-            # Same convention as `_info_from_discovery`: `DiscoveredModel` carries
-            # no write price, and the input price is the closest defensible
-            # stand-in. It under-states an Anthropic 5m write by 20% (1.25x base) —
-            # which is why the shipped rows in the registry carry the real number
-            # and this is only the floor for an id nobody has written down yet.
-            if not info.cache_writes_price:
+            if row.cache_write_price > 0:
+                info.cache_writes_price = row.cache_write_price
+            elif not info.cache_writes_price:
+                # A catalogue that quotes a read price and no write price. The
+                # input price is the closest defensible stand-in — it under-states
+                # an Anthropic 5m write by 20% (1.25x base), which is why a quoted
+                # write price above wins and this is only the floor.
                 info.cache_writes_price = info.input_price
     if not _has_real_window(info) and row.context_window > 0:
         # A missing window is not cosmetic and not merely a rendering gap: the
@@ -1182,6 +1053,107 @@ def _from_aggregator_catalogue(
     if not (info.max_tokens and info.max_tokens > 0) and row.max_tokens > 0:
         info.max_tokens = row.max_tokens
     return info
+
+
+def _from_price_catalogue(
+    provider: str, model_id: str, info: ModelInfo, *, timeout: float | None = None
+) -> ModelInfo:
+    """Fill a model's price and limit holes from the neutral models.dev catalogue.
+
+    The second leg of resolution, reached when the registry and the provider's
+    own listing together could not finish the job — which for every DIRECT
+    provider is the normal outcome rather than a failure: none of them quote money
+    in their listing. Until this leg existed the only price source for such an id
+    was the OpenRouter listing looked up under a per-provider namespace, which
+    tied an Anthropic-only user's cost display to one aggregator's document and
+    its id spellings; the day ``claude-fable-5-1`` shipped that document was six
+    hours old and predated the row, so the session ran at $0.00. See
+    :mod:`local_operator.model.prices` for what the catalogue is and why it is
+    trusted for prices and limits but not capabilities.
+
+    Never raises and never returns worse data than it was given. ``timeout`` is
+    what the CALLER has left of the whole resolution's budget, capped at this
+    leg's own ceiling: it is pure enrichment stacked BEHIND the provider's
+    listing and is reachable from the TUI's 1 Hz poll (via
+    ``refresh_model_info_background``'s executor thread), where a 10s stall on
+    a 4.4 MB cold download is input lag rather than a slow start.
+    """
+    try:
+        from local_operator.model.prices import price_catalogue_row
+
+        budget = (
+            _PRICE_CATALOGUE_TIMEOUT_S
+            if timeout is None
+            else min(_PRICE_CATALOGUE_TIMEOUT_S, timeout)
+        )
+        row = price_catalogue_row(provider, model_id, timeout=budget)
+    except Exception as exc:  # noqa: BLE001 — metadata is never worth a failed start
+        logger.debug("price catalogue unavailable for %s/%s: %s", provider, model_id, exc)
+        return info
+    if row is None:
+        logger.debug("price catalogue has no entry for %s/%s", provider, model_id)
+        return info
+    if not (row.input_price > 0 or row.output_price > 0 or row.context_window > 0):
+        # A key with no cost and no limit answers neither question this leg is
+        # here for; models.dev carries such stubs for plan catalogues.
+        return info
+    return _fill_from_row(info, row)
+
+
+def _from_aggregator_catalogue(
+    provider: str, model_id: str, info: ModelInfo, *, timeout: float | None = None
+) -> ModelInfo:
+    """Describe an AGGREGATOR's own model from its public listing, as a last resort.
+
+    In practice ``openrouter/*`` ids only. The gate is ``AGGREGATOR_PROVIDERS``,
+    but the lookup below needs a listing readable with NO credential, and of the
+    aggregators only OpenRouter's is public (``PUBLIC_LISTING_PROVIDERS``);
+    Radient's needs a key, so a ``radient/*`` id returns ``info`` untouched from
+    this leg and relies on leg 1 having read its listing with the credential.
+    Leg 1 has normally already priced OpenRouter's ids too; this leg survives
+    for the case where leg 1 was unavailable (a credential lookup that raised)
+    and the public OpenRouter document can still answer.
+
+    It used to be the price source for DIRECT providers too, through a
+    per-provider namespace map (``anthropic`` → ``anthropic/``, ``xai`` →
+    ``x-ai/``, ...). That coupling is gone: :func:`_from_price_catalogue` is the
+    provider-neutral leg now, and a direct-provider id this function is handed
+    is returned untouched.
+
+    Every field is taken ONLY where the direct sources left a hole
+    (:func:`_fill_from_row`). Never raises and never returns worse data than it
+    was given.
+    """
+    from local_operator.providers.registry import AGGREGATOR_PROVIDERS
+
+    if provider not in AGGREGATOR_PROVIDERS:
+        return info
+    try:
+        from local_operator.model.discovery import (
+            PUBLIC_LISTING_PROVIDERS,
+            available_models,
+        )
+
+        # Radient's listing needs a key; only a PUBLIC listing can be read here
+        # with no credential at all.
+        if provider not in PUBLIC_LISTING_PROVIDERS:
+            return info
+        # Two ceilings, whichever is smaller — see `_from_price_catalogue`.
+        budget = _AGGREGATOR_TIMEOUT_S if timeout is None else min(_AGGREGATOR_TIMEOUT_S, timeout)
+        rows, _status = available_models(provider, api_key=None, timeout=budget, want_id=model_id)
+    except Exception as exc:  # noqa: BLE001 — metadata is never worth a failed start
+        logger.debug("aggregator catalogue unavailable for %s/%s: %s", provider, model_id, exc)
+        return info
+
+    # Priced rows only. An unpriced aggregator row is a routing stub that can
+    # answer neither of the two questions this leg is here for.
+    row = next(
+        (r for r in rows if r.id == model_id and (r.input_price > 0 or r.output_price > 0)), None
+    )
+    if row is None:
+        logger.debug("aggregator catalogue has no priced entry for %s/%s", provider, model_id)
+        return info
+    return _fill_from_row(info, row)
 
 
 def _registry_fallback(provider: str, model_id: str) -> ModelInfo:
@@ -1297,14 +1269,19 @@ def _resolve_model_info_cached(provider: str, model_id: str, _bucket: int) -> Mo
         # source fully described must not pay for a second catalogue read.
         #
         # Budgeted against ONE deadline for the whole resolution, not its own fresh
-        # ceiling. Two independent budgets compose into their SUM, so adding this
+        # ceiling. Two independent budgets compose into their SUM, so adding a
         # leg silently took an unresolvable model's worst case from 10s to 13s —
         # and that model is not the exotic case for the subagent panel, it is the
         # motivating one (a child launched on a `model_spec` override the shipped
         # registry has never heard of). Spending what leg 1 left keeps this leg
         # free for the common case, where leg 1 answers in tens of milliseconds,
-        # while guaranteeing the pair can never cost more than the one ceiling
+        # while guaranteeing the legs can never cost more than the one ceiling
         # callers already budget for.
+        info = _from_price_catalogue(canonical, model_id, info, timeout=_remaining_budget(started))
+    if _needs_enrichment(info):
+        # Leg 3, for an AGGREGATOR's own ids only (the function refuses direct
+        # providers). Normally leg 1 already priced these from the same listing;
+        # this is the fallback for when leg 1 could not run. Same shared deadline.
         info = _from_aggregator_catalogue(
             canonical, model_id, info, timeout=_remaining_budget(started)
         )
@@ -2461,6 +2438,27 @@ class SessionStreamFn:
         # walk and discarded with it, so the next boundary still re-probes
         # live and can notice recovery.
         usage_memo: dict[str, UsageReport | None] = {}
+        # The credential this session is ALREADY transacting on, read before
+        # the walk resolves anything: every resolve below re-pins the session
+        # to whatever row it lands on, so after the first iteration the store's
+        # sticky no longer says where the conversation's prompt cache lives.
+        # A reserve verdict against THIS row keeps the session on it (see
+        # ``_apply_account_health``); against any other row it is a fresh pick
+        # the walk may still move. ``None`` on a session's very first boundary
+        # — nothing is warm anywhere, so every row is a fresh pick.
+        #
+        # A LOCAL, threaded through ``_apply_account_health`` like the memos
+        # above, never an attribute: this stream fn is shared by a parent and
+        # its child sessions (``harness/subagent.py`` hands the child the
+        # parent's stream fn), and a mid-turn ``/model`` probe can re-enter
+        # here while a walk is suspended at an ``await``. A second entrant
+        # would re-read the store sticky — by then the first walk's fresh pick,
+        # since every resolve re-pins — and an attribute would hand that pick
+        # back to the first walk as "warm", settling it on a reserve account it
+        # meant to move off.
+        boundary_sticky_id = self._auth_store.session_credential_id(
+            model.provider, self._session_id
+        )
         while True:
             try:
                 access = await self._auth_store.get_oauth_access(
@@ -2497,6 +2495,7 @@ class SessionStreamFn:
                             attempted_ids,
                             quota_cache,
                             usage_memo,
+                            boundary_sticky_id,
                         ):
                             continue
                         return
@@ -2649,10 +2648,13 @@ class SessionStreamFn:
                             attempted_ids,
                             quota_cache,
                             usage_memo,
+                            boundary_sticky_id,
                         ):
                             continue
                         return
                 if siblings:
+                    # Only reserve or depleted reach here: healthy and unknown
+                    # returned above.
                     if health.state == "depleted":
                         self._write_quota_block(
                             self._auth_store,
@@ -2661,16 +2663,33 @@ class SessionStreamFn:
                             health,
                             max(60_000, health.reset_after_ms or self.DEFAULT_USAGE_BLOCK_MS),
                         )
-                    else:
-                        self._auth_store.deprioritize_credential(
-                            model.provider, access.credential_id
-                        )
-                    # Rotating to another same-provider account is an internal
-                    # implementation detail — the user's request is still being
-                    # served on this provider, just on a different login. It
-                    # used to emit a notice per rotation, which spammed the
-                    # transcript on every boundary. Rotate silently.
-                    continue
+                        # Rotating to another same-provider account is an
+                        # internal implementation detail — the user's request
+                        # is still being served on this provider, just on a
+                        # different login. It used to emit a notice per
+                        # rotation, which spammed the transcript on every
+                        # boundary. Rotate silently.
+                        continue
+                    if access.credential_id != boundary_sticky_id:
+                        # Reserve on a FRESH pick: steer new picks elsewhere.
+                        # Same rule and reasoning as the account-scope path in
+                        # ``_apply_account_health``.
+                        self._demote_fresh_pick(model, access.credential_id)
+                        continue
+                    # Reserve on the account this session is already
+                    # transacting on: stay. Moving would rewrite the
+                    # conversation's prompt cache on a sibling that has never
+                    # seen it; the reserve verdict is a preference for new
+                    # picks. See ``_apply_account_health`` for the numbers.
+                    await self._announce_quota_change(
+                        selector,
+                        f"model:{health.state}",
+                        f"{model.provider} {condition}{remaining} for {model.model_id} "
+                        "— staying on this account to keep the prompt cache warm",
+                        "info",
+                    )
+                    await self._route_state.clear_settled("primary model still has quota")
+                    return
                 if health.state == "reserve":
                     # Last account, still holding this model's quota. Same
                     # rule as the account-scope path: reserve is not a
@@ -2727,6 +2746,7 @@ class SessionStreamFn:
                 attempted_ids,
                 quota_cache,
                 usage_memo,
+                boundary_sticky_id,
             ):
                 continue
             return
@@ -2743,6 +2763,7 @@ class SessionStreamFn:
         attempted_ids: set[int],
         quota_cache: dict[str, str] | None = None,
         usage_memo: "dict[str, UsageReport | None] | None" = None,
+        boundary_sticky_id: int | None = None,
     ) -> bool:
         """Act on a low/depleted account-scope verdict.
 
@@ -2755,6 +2776,11 @@ class SessionStreamFn:
         ``usage_memo`` is the same walk's per-account report memo, threaded
         for the same reason one level down: the fallback chain may list this
         walk's own provider, whose accounts have already been read.
+        ``boundary_sticky_id`` is the credential the session was sticky to
+        when the walk BEGAN — the account its prompt cache is warm on — and
+        is walk-local for the reason ``preflight_usage`` gives where it reads
+        it; the default ``None`` (nothing warm) is only for callers outside a
+        walk.
 
         The binding windows that produced ``health`` can be scoped to a model
         tier while the shared windows still hold quota (Anthropic's
@@ -2767,7 +2793,11 @@ class SessionStreamFn:
         any shared headroom — including remaining under the reserve
         threshold — is always allowed to spend it down to zero before
         a provider fallback is even considered. Reserve is a preference
-        between siblings of the same provider, not a hop to the next one.
+        between siblings of the same provider, not a hop to the next one —
+        and, since the provider's prompt cache is per account, a preference
+        for NEW picks only: a session already transacting on a reserve
+        account stays there (see the ``on_warm_account`` branch), and only a
+        depleted verdict moves it.
         """
         from local_operator.providers.failover import parse_selector
 
@@ -2806,35 +2836,47 @@ class SessionStreamFn:
             quota_cache=quota_cache,
             usage_memo=usage_memo,
         )
+        # A reserve verdict is a preference for NEW picks, never a reason to
+        # move a session that is already transacting on the account. The
+        # provider's prompt cache is per account: a conversation carrying a
+        # 150-500k-token warm prefix that is re-resolved onto a sibling
+        # rewrites the whole prefix at cache-write price on an account that
+        # has never seen it, and buys nothing for it — the reserve account
+        # still HAS quota. Measured on a five-account host: 374 such moves in
+        # 30 hours, ~102M cache-write tokens, roughly 38% of every Anthropic
+        # cache write, most of them a few seconds after a full cache hit in
+        # the same conversation; with three accounts above 90% the demotion
+        # expired and re-fired at every boundary, ping-ponging the session
+        # between cold caches. So the session under verdict stays put (the
+        # store exempts its sticky row from the demotion too, see
+        # ``AuthStore._usable_key_rows``) and only a DEPLETED verdict may move
+        # it, because at 0% the rewrite is unavoidable. This is the promise
+        # the reactive 429 path already keeps (``rotate_sibling``: "sticky
+        # preserved"), applied to the preflight.
+        #
+        # "Already transacting on" is the sticky captured BEFORE this
+        # boundary's walk started (``boundary_sticky_id``): the walk's own
+        # resolves re-pin the session as they go, so a row the walk only just
+        # landed on is a FRESH pick with nothing cached, and demoting it to
+        # keep walking (below) is still right. Both callers of this method
+        # arrive with a row the walk resolved — the boundary probe and a
+        # blocked-row recovery — so the fresh-pick branch is reachable from
+        # both.
+        on_warm_account = access.credential_id == boundary_sticky_id
         if not siblings and health.state == "reserve":
             # Last account on this provider, still holding spendable quota.
             # Crossing the reserve threshold used to hop to the next chain
             # entry (Kimi at 10% remaining → Qwen maxed → Grok) while this
             # account could still serve. Reserve is a preference BETWEEN
             # siblings of the same provider, not a licence to leave the
-            # provider; spend it to zero, then fail over. A same-provider
-            # lower-effort hop is still allowed — it reduces token spend
-            # without abandoning remaining quota.
-            if fallback is not None:
-                fallback_provider, _model_id = parse_selector(fallback.selector)
-                if fallback_provider == model.provider:
-                    await self._route_state.activate(
-                        fallback,
-                        f"{model.provider} {condition}{remaining}",
-                        quota=True,
-                    )
-                    return False
-            # ``account:`` scope token: this is the account-scope path, and its
-            # condition must dedup separately from the model-tier branch that
-            # shares this selector.
-            await self._announce_quota_change(
-                selector,
-                f"account:{health.state}",
+            # provider; spend it to zero, then fail over.
+            await self._settle_on_reserve_account(
+                model,
+                fallback,
                 f"{model.provider} {condition}{remaining} — continuing until "
                 f"{model.provider} quota is exhausted",
-                "info",
+                keep_effort=False,
             )
-            await self._route_state.clear_settled("primary model still has quota")
             return False
 
         if not siblings and health.state == "depleted":
@@ -2898,6 +2940,7 @@ class SessionStreamFn:
                     attempted_ids,
                     quota_cache,
                     usage_memo,
+                    boundary_sticky_id,
                 )
 
         if not siblings and fallback is None:
@@ -2940,6 +2983,27 @@ class SessionStreamFn:
             self._route_state.clear()
             return False
 
+        if health.state == "reserve" and on_warm_account:
+            # Reserve on the account this session is already transacting on,
+            # with a sibling available: stay anyway. Placed AFTER the
+            # tier-spent guard because that verdict is the more specific one
+            # (the binding cap does not even gate this model), and after the
+            # lone-account rule because that one must also hold when nothing
+            # is cached yet. This is the branch the rotation below used to
+            # take for every low account, warm or not.
+            #
+            # ``keep_effort``: the whole point of staying is the warm cache,
+            # and a same-provider effort hop would spend part of it — see
+            # ``_settle_on_reserve_account``.
+            await self._settle_on_reserve_account(
+                model,
+                fallback,
+                f"{model.provider} {condition}{remaining} — staying on this account to "
+                "keep the prompt cache warm",
+                keep_effort=True,
+            )
+            return False
+
         # How the account is taken out of the running depends on WHAT the
         # verdict was, and conflating the two is the incident this split
         # comes from. "Depleted" is a fact about the provider: it will 429
@@ -2961,6 +3025,11 @@ class SessionStreamFn:
         # the moment it is the only thing left. The mark is short-lived on
         # purpose; the preflight re-checks and re-applies it while the
         # preference still holds.
+        #
+        # A reserve verdict on the session's warm account never reaches this
+        # point (it settled above); a reserve verdict here is about a FRESH
+        # pick, so demoting it steers new picks — and this walk's next
+        # resolve — elsewhere.
         if health.state == "depleted":
 
             def take_out_of_rotation(credential_id: int) -> None:
@@ -2975,10 +3044,7 @@ class SessionStreamFn:
         else:
 
             def take_out_of_rotation(credential_id: int) -> None:
-                # Keyed by ``model.provider``, not ``storage``: demotions
-                # are consulted by ``_resolve`` under the provider name the
-                # request resolves with.
-                self._auth_store.deprioritize_credential(model.provider, credential_id)
+                self._demote_fresh_pick(model, credential_id)
 
         if siblings:
             take_out_of_rotation(access.credential_id)
@@ -2998,6 +3064,66 @@ class SessionStreamFn:
             quota=True,
         )
         return False
+
+    async def _settle_on_reserve_account(
+        self, model: ModelSpec, fallback: Any, text: str, *, keep_effort: bool
+    ) -> None:
+        """Keep serving on an account that is low but still holds quota.
+
+        Shared by the two account-scope reasons to stay — the LAST account on
+        the provider, and the account this session's prompt cache is warm on
+        — so they cannot drift apart. One ``account:reserve`` line per
+        transition (the ``account:`` scope token keeps it distinct from the
+        model-tier branch that shares this selector), and the route settles on
+        the primary. The two stays alias on that token on purpose: both mean
+        "low, still serving here", and a session that crosses from one to the
+        other (a sibling blocked or unblocked while this account stays low)
+        is not owed a second line for the same standing.
+
+        ``keep_effort`` decides whether a same-provider lower-effort hop the
+        chain offers is taken first. On the LAST account it is (``False``):
+        nothing else can serve, so trading a one-off cache rewrite for a
+        lower per-request spend on every request until the window resets
+        is the better side of the bargain. On the WARM account it is not
+        (``True``): the session is staying precisely to keep its cache, and
+        Anthropic invalidates cached message prefixes when the thinking
+        parameters change (system and tools stay cached; the conversation
+        does not) — the same reason the auto-effort is frozen per tool loop
+        (``_message_effort``). A hop here would rewrite the very prefix the
+        stay exists to protect, and a healthy sibling is available, so the
+        spend argument is weaker too.
+        """
+        from local_operator.providers.failover import parse_selector
+
+        if fallback is not None and not keep_effort:
+            fallback_provider, _model_id = parse_selector(fallback.selector)
+            if fallback_provider == model.provider:
+                await self._route_state.activate(fallback, text, quota=True)
+                return
+        await self._announce_quota_change(
+            f"{model.provider}/{model.model_id}", "account:reserve", text, "info"
+        )
+        await self._route_state.clear_settled("primary model still has quota")
+
+    def _demote_fresh_pick(self, model: ModelSpec, credential_id: int) -> None:
+        """Deprioritize a reserve row the walk only just resolved onto.
+
+        Keyed by ``model.provider``, not ``storage``: demotions are consulted
+        by ``_resolve`` under the provider name the request resolves with.
+
+        The pin is released in the same breath, and it has to be: the resolve
+        that found this row pinned the session to it, and the store keeps a
+        demoted STICKY row in service on purpose (the warm-cache rule in
+        ``AuthStore._usable_key_rows``). Demoting without releasing would hand
+        the walk's next resolve the very row it is trying to move off — and
+        since ``attempted_ids`` already holds it, the walk would end there
+        with the session left on the reserve account it meant to leave.
+        Releasing is safe precisely because this row is NOT the boundary's
+        original sticky (the walk-local ``boundary_sticky_id``): nothing of
+        this conversation is cached on it yet.
+        """
+        self._auth_store.deprioritize_credential(model.provider, credential_id)
+        self._auth_store.release_session_credential(model.provider, self._session_id)
 
     async def _recover_blocked_accounts(
         self,

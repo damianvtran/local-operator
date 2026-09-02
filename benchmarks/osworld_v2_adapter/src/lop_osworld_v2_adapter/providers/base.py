@@ -3,7 +3,7 @@
 This is the seam between the adapter (which owns the contract with the
 harness) and an environment backend (which owns the cloud or the fake).
 ``EnvironmentProvider`` is a structural Protocol, not a base class, so the AWS
-implementation in PR 2 and the in-process fake here are interchangeable
+implementation and the in-process fake are interchangeable
 without the adapter knowing which it holds.
 
 Every method is async because the AWS path is I/O-bound and the fake must
@@ -21,8 +21,7 @@ from lop_osworld_v2_adapter.taskfile import TaskDescriptor
 
 @runtime_checkable
 class EnvironmentProvider(Protocol):
-    """One environment backend. Implemented by FakeProvider (PR 1) and the AWS
-    provider (PR 2)."""
+    """One environment backend. Implemented by FakeProvider and AwsProvider."""
 
     async def allocate(self, plan: ProvisioningPlan, task: TaskDescriptor) -> None:
         """Create the environment. The side-effect boundary; reset_start only."""

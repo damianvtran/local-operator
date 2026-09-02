@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+from typing import Any
 
 import pytest
 from pydantic import ValidationError
@@ -13,6 +14,7 @@ from local_operator.evaluation.evidence.models import (
     BudgetCommitmentPayload,
     CancelPayload,
     CleanupPayload,
+    ContextCompactionPayload,
     EnvironmentStepPayload,
     ErrorPayload,
     EventRecord,
@@ -128,6 +130,20 @@ def test_manifest_golden_bytes_are_deterministic() -> None:
             "usage_cost",
             UsageCostPayload(
                 request_id="request", input_tokens=3, output_tokens=2, cost_microusd=9
+            ),
+        ),
+        (
+            "context_compaction",
+            ContextCompactionPayload(
+                compaction_id="compaction-1",
+                previous_request_id="request",
+                strategy="context-full",
+                tokens_before=900,
+                tokens_after=300,
+                frames_dropped=2,
+                messages_before=9,
+                messages_after=4,
+                summary_artifact=ARTIFACT,
             ),
         ),
         (
@@ -356,3 +372,24 @@ def test_models_are_deeply_immutable() -> None:
     assert copy.deepcopy(event) == event
     with pytest.raises(ValidationError):
         event.sequence = 2  # type: ignore[misc]
+
+
+def test_truncation_reason_requires_a_truncated_step() -> None:
+    """A reason on a step that did not truncate would claim a stop that never
+    happened; the model refuses it so no writer can record one."""
+
+    base: dict[str, Any] = dict(
+        step_id="step",
+        action_batch_id="batch",
+        receipt_id=DIGEST,
+        input_observation_id="observation",
+        output_observation_id="observation-2",
+        terminated=False,
+    )
+    truncated = EnvironmentStepPayload(**base, truncated=True, truncation_reason="max-steps")
+    assert truncated.truncation_reason == "max-steps"
+    # Old bundles carry no reason at all, truncated or not.
+    assert EnvironmentStepPayload(**base, truncated=True).truncation_reason is None
+    assert EnvironmentStepPayload(**base, truncated=False).truncation_reason is None
+    with pytest.raises(ValidationError):
+        EnvironmentStepPayload(**base, truncated=False, truncation_reason="max-steps")

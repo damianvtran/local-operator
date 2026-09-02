@@ -337,6 +337,27 @@ class OwnedSessionHandle(SessionHandle):
             return True
         return False
 
+    def next_wake_due_at(self) -> int | None:
+        """Epoch-ms of the earliest armed wake, or ``None`` when none is set.
+
+        The reaper's WARMTH signal (design §6.1 term 2): a runtime whose own
+        ``WakeScheduler`` will fire within ``WARM_WINDOW_S`` stays resident
+        rather than exiting and paying a cold start for a wake seconds away.
+        Read from the live scheduler, not the wake index — the index is a
+        derived file for processes that have no session; this process has
+        the truth in memory. A disposed scheduler reports no wakes so the
+        reaper never waits on a schedule that can no longer fire.
+        """
+        scheduler = getattr(self._session, "wake_scheduler", None)
+        if scheduler is None or getattr(scheduler, "disposed", False):
+            return None
+        try:
+            schedules = scheduler.schedules
+        except Exception:  # noqa: BLE001 — uncertainty must not pin the runtime
+            return None
+        due = [s.next_due_at for s in schedules if isinstance(s.next_due_at, int)]
+        return min(due) if due else None
+
     def _deny_pending_gates(self) -> None:
         """Refuse every parked approval/ask so teardown cannot hang on them.
 

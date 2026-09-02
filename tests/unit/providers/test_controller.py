@@ -16,7 +16,7 @@ import httpx
 import pytest
 
 from local_operator.harness.types import ModelSpec
-from local_operator.providers.controller import ProviderController
+from local_operator.providers.controller import PICKER_TTL_S, ProviderController
 from local_operator.providers.registry import get_provider_definition
 from local_operator.providers.usage import UsageAmount, UsageLimit, UsageReport
 from local_operator.providers.usage_cache import (
@@ -1203,14 +1203,7 @@ class TestPerAccountLastKnown:
         )
 
 
-# -- forced listing refresh (the Fable 5.1 report) ---------------------------
-
-#: Providers that list WITHOUT a credential and are therefore legitimately
-#: forced whatever the store holds: local servers (``allows_missing_api_key``)
-#: and the aggregators, whose catalogue is a public page. Named here so the
-#: assertions below are about the provider under test rather than about registry
-#: bookkeeping.
-_KEYLESS = {"ollama", "test", "openrouter", "radient"}
+# -- credential-change invalidation (the Fable 5.1 report) -------------------
 
 
 def _spy_available_models(monkeypatch, *, live: dict[str, list[str]] | None = None):
@@ -1236,144 +1229,22 @@ def _spy_available_models(monkeypatch, *, live: dict[str, list[str]] | None = No
     return calls
 
 
-def _forced(calls: list[tuple[str, float | None]]) -> set[str]:
-    """Providers asked to bypass the TTL, minus the always-connected keyless ones."""
-    return {provider for provider, ttl in calls if ttl == 0.0} - _KEYLESS
-
-
 @pytest.mark.asyncio
-async def test_opening_the_picker_forces_one_fresh_listing_per_provider(
-    controller, store, monkeypatch
-) -> None:
-    """The reported defect: `claude-fable-5-1` shipped, and `/model` could not see
-    it for a day because the 24h listing cache was never bypassed.
-
-    The first refresh must ask past the TTL. The second must not: a user who
-    opens `/model` five times in one session should cost one request, not five.
-    """
-    store.upsert_credential("anthropic", {"key": "sk-ant", "type": "api_key"})
-    calls = _spy_available_models(monkeypatch, live={"anthropic": ["claude-fable-5-1"]})
-
-    entries, _ = await controller.live_catalogue(force_fresh=True)
-
-    assert _forced(calls) == {"anthropic"}, "exactly the connected provider"
-    assert "anthropic/claude-fable-5-1" in {entry.selector for entry in entries}
-
-    calls.clear()
-    await controller.live_catalogue(force_fresh=True)
-    assert _forced(calls) == set(), "the guard holds on reopen"
-
-
-@pytest.mark.asyncio
-async def test_an_unauthenticated_provider_never_spends_a_forced_fetch(
-    controller, monkeypatch
-) -> None:
-    """It cannot list without a credential, so forcing it buys a request that can
-    only answer `unauthenticated` again -- and would burn the once-per-process
-    slot the real login is going to need."""
-    calls = _spy_available_models(monkeypatch)
-
-    await controller.live_catalogue(force_fresh=True)
-
-    assert calls, "premise: the registry was walked"
-    assert _forced(calls) == set()
-
-
-@pytest.mark.asyncio
-async def test_an_aggregator_is_forced_even_with_no_credential(controller, monkeypatch) -> None:
-    """OpenRouter's listing is public while its inference is not, and it is the one
-    catalogue that cannot be approximated from the registry -- its entry there is a
-    single placeholder for the router itself. Gating the force on ``connected``
-    looked right and silently excluded ~340 models from the refresh."""
-    calls = _spy_available_models(monkeypatch, live={"openrouter": ["vendor/model"]})
-
-    await controller.live_catalogue(force_fresh=True)
-
-    assert not controller.has_any_credential("openrouter"), "premise: nothing stored"
-    assert ("openrouter", 0.0) in calls
-
-
-@pytest.mark.asyncio
-async def test_a_failed_listing_does_not_burn_the_once_per_process_slot(
-    controller, store, monkeypatch
-) -> None:
-    """Marking the provider refreshed on ENTRY would let one picker open behind a
-    dead network pin the stale catalogue for the rest of the process -- the same
-    dead end as the TTL, merely shorter. The slot is spent on an answer."""
-    from local_operator.model.discovery import DiscoveredModel
-
-    store.upsert_credential("anthropic", {"key": "sk-ant", "type": "api_key"})
-    calls: list[tuple[str, float | None]] = []
-    answer = "cached"
-
-    def fake(provider_id: str, **kwargs: Any):
-        calls.append((provider_id, kwargs.get("ttl_s")))
-        if provider_id != "anthropic":
-            return [], "unauthenticated"
-        return [DiscoveredModel(id="claude-opus-5", name="Claude Opus 5")], answer
-
-    monkeypatch.setattr("local_operator.providers.controller.available_models", fake)
-
-    await controller.live_catalogue(force_fresh=True)
-    assert "anthropic" in _forced(calls), "premise: it was forced"
-
-    calls.clear()
-    answer = "ok"
-    await controller.live_catalogue(force_fresh=True)
-    assert "anthropic" in _forced(calls), "the failure did not consume the slot"
-
-    calls.clear()
-    await controller.live_catalogue(force_fresh=True)
-    assert "anthropic" not in _forced(calls), "the success did"
-
-
-@pytest.mark.asyncio
-async def test_the_default_call_still_honours_the_cache(controller, store, monkeypatch) -> None:
-    """`force_fresh` is opt-in. Session start and every non-picker caller keep the
-    cheap path -- a boot must not turn into a dozen synchronous listings."""
-    store.upsert_credential("anthropic", {"key": "sk-ant", "type": "api_key"})
-    calls = _spy_available_models(monkeypatch, live={"anthropic": ["claude-opus-5"]})
-
-    await controller.live_catalogue()
-
-    assert calls, "premise: providers were walked"
-    assert [ttl for _, ttl in calls if ttl is not None] == [], "no TTL override at all"
-
-
-@pytest.mark.asyncio
-async def test_an_explicit_ttl_still_wins_over_the_force(controller, store, monkeypatch) -> None:
-    """A caller naming a TTL is making a deliberate statement about freshness."""
-    store.upsert_credential("anthropic", {"key": "sk-ant", "type": "api_key"})
-    calls = _spy_available_models(monkeypatch, live={"anthropic": ["claude-opus-5"]})
-
-    await controller.live_catalogue(ttl_s=900.0, force_fresh=True)
-
-    assert {ttl for _, ttl in calls} == {900.0}
-
-
-@pytest.mark.asyncio
-async def test_logging_in_drops_the_cached_listing_and_re_arms_the_force(
-    controller, store, monkeypatch
-) -> None:
+async def test_logging_in_drops_the_cached_listing(controller, store, monkeypatch) -> None:
     """Re-authing is what a user does when a model is missing, and before this it
     provably could not help: the credential row was written and the listing cache
     -- the thing actually hiding the model -- was left alone for the rest of its
-    24h TTL.
+    TTL.
 
-    Both halves are asserted, because either alone leaves the bug: dropping the
-    document without re-arming the guard means the next picker open does not pass
-    ``ttl_s=0`` and waits on the TTL anyway.
+    The picker's own TTL (``PICKER_TTL_S``) bounds how long a stale list can
+    survive an idle session; this bounds how long it can survive the action the
+    user takes when they notice.
     """
     dropped: list[str] = []
     monkeypatch.setattr(
         "local_operator.providers.controller.invalidate_listing",
         lambda provider_id: dropped.append(provider_id) or 1,
     )
-    calls = _spy_available_models(monkeypatch, live={"anthropic": ["claude-opus-5"]})
-    store.upsert_credential("anthropic", {"key": "sk-ant", "type": "api_key"})
-
-    await controller.live_catalogue(force_fresh=True)
-    assert "anthropic" in _forced(calls), "premise: the slot is now spent"
 
     async def fake_login(_callbacks):
         return {"access_token": "t", "refresh_token": "r", "email": "you@example.com"}
@@ -1393,11 +1264,38 @@ async def test_logging_in_drops_the_cached_listing_and_re_arms_the_force(
 
     await controller.login("anthropic")
 
-    assert dropped == ["anthropic"], "the stale document is gone"
+    assert dropped == ["anthropic"]
 
-    calls.clear()
-    await controller.live_catalogue(force_fresh=True)
-    assert "anthropic" in _forced(calls), "and the next open really refetches"
+
+@pytest.mark.asyncio
+async def test_an_api_key_login_also_drops_the_cached_listing(
+    controller, store, monkeypatch
+) -> None:
+    """The paste-a-key path stores a credential exactly as the OAuth path does, and
+    a key for a different account lists a different catalogue."""
+    dropped: list[str] = []
+    monkeypatch.setattr(
+        "local_operator.providers.controller.invalidate_listing",
+        lambda provider_id: dropped.append(provider_id) or 1,
+    )
+
+    async def fake_login(_callbacks):
+        return "sk-ant-pasted"
+
+    definition = controller.provider("anthropic")
+    assert definition is not None
+    monkeypatch.setattr(
+        "local_operator.providers.controller.get_provider_definition",
+        lambda provider_id: (
+            dataclasses.replace(definition, login=fake_login)
+            if provider_id == "anthropic"
+            else get_provider_definition(provider_id)
+        ),
+    )
+
+    await controller.login("anthropic")
+
+    assert dropped == ["anthropic"]
 
 
 @pytest.mark.asyncio
@@ -1416,3 +1314,18 @@ async def test_logging_out_clears_the_listing_the_next_credential_must_not_inher
     await controller.logout("anthropic")
 
     assert "anthropic" in dropped
+
+
+@pytest.mark.asyncio
+async def test_the_picker_ttl_is_the_only_ttl_override(controller, store, monkeypatch) -> None:
+    """``live_catalogue`` passes the caller's TTL through untouched and adds none of
+    its own, so ``PICKER_TTL_S`` remains the single statement of picker freshness."""
+    store.upsert_credential("anthropic", {"key": "sk-ant", "type": "api_key"})
+    calls = _spy_available_models(monkeypatch, live={"anthropic": ["claude-opus-5"]})
+
+    await controller.live_catalogue()
+    assert [ttl for _, ttl in calls if ttl is not None] == [], "no override by default"
+
+    calls.clear()
+    await controller.live_catalogue(ttl_s=PICKER_TTL_S)
+    assert {ttl for _, ttl in calls} == {PICKER_TTL_S}

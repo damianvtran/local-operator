@@ -278,6 +278,24 @@ if TYPE_CHECKING:  # keeps the provider graph off the TUI's runtime import path
 #: notice), where "press d" alone would name a key that does nothing yet.
 PERSIST_HINT = "d in /model saves this for new sessions"
 
+#: Lead of the `/model` footer clause for a provider whose live refresh FAILED
+#: and whose rows are therefore an older document. One constant because the
+#: clause is composed at two sites (`_catalogue_status` per provider, and the
+#: `live_catalogue` exception path for all of them) and a reader who sees both
+#: across two sessions must meet one vocabulary. Kept short on purpose: the
+#: access note leads the footer and leaves ~39 cells for this clause at 100
+#: columns (see `_catalogue_status`).
+STALE_LIST_LABEL = "stale list:"
+
+#: Discovery statuses that mean "this provider produced a listing" (live or
+#: stored). The complement — ``static`` and ``unauthenticated`` — produced no
+#: listing, so they are not part of "every provider is stale". ``static`` is
+#: not only "has no listing endpoint": discovery also reports it for a provider
+#: whose fetch failed with no stored document to fall back on. Excluding that
+#: case only makes the offline collapse fire sooner, which is the right
+#: direction.
+LISTED_STATUSES = frozenset({"ok", "cached", "stale", "empty"})
+
 #: Marks a cost figure RESTORED from a resumed conversation rather than accrued
 #: this session. The restored number is a floor — only the last reported turn's
 #: usage survives in a priceable form — and it lands in the same cell a real
@@ -13908,14 +13926,7 @@ class OperatorApp(App[None]):
         what shipped too late to be in the registry — which is the whole reason this
         exists: after logging in to Anthropic, `claude-opus-5` has to be findable
         without the user already knowing its id.
-
-        That fetch is FORCED past the listing TTL, once per provider per process.
-        Without the force it was a no-op for a whole day at a time: the listing
-        cache is 24h and nothing else invalidates it, so a model released after
-        the last fetch was unreachable through the picker AND unfixable by the
-        one thing a user tries — logging in again. Measured cost of the force is
-        ~0.28s against a warm cache, in a worker, after the rows are on screen.
-        """
+"""
         rows, note = self._catalogue_rows(
             self._providers.static_catalogue() if self._providers else []
         )
@@ -13936,33 +13947,31 @@ class OperatorApp(App[None]):
     async def _refresh_catalogue(self) -> None:
         """Worker: replace the picker's rows with the live catalogue.
 
-        ``force_fresh`` asks the controller to bypass the TTL for providers it
-        has not already refreshed this process, so the first ``/model`` of a run
-        sees today's models and every later one is served from the cache it just
-        wrote.
-
-        That keyword is passed defensively, for the same reason ``entry_for``
-        below is: this facade is duck-typed (``provider_controller: Any``) and an
-        embedding host may still implement the older ``live_catalogue(*,
-        ttl_s=None)`` signature. Letting the ``TypeError`` reach the handler
-        would degrade such a host to the STATIC registry on every open and
-        report it as "live model list unavailable" — strictly worse than the
-        cached-but-real list it used to get, and precisely the "no models"
-        failure the rest of this change exists to remove.
+        Asks for a FIFTEEN-MINUTE listing rather than discovery's 24h default.
+        The user opening `/model` is the one moment a fresh list is worth a
+        request: the rows are already painted from the registry and the fetch
+        runs off-loop, so the cost is invisible, and a 24h document is exactly
+        how a model published this morning failed to appear here all day.
         """
         if self._providers is None:
             return
+        from local_operator.providers.controller import PICKER_TTL_S
+
         try:
-            try:
-                entries, statuses = await self._providers.live_catalogue(force_fresh=True)
-            except TypeError:
-                entries, statuses = await self._providers.live_catalogue()
+            entries, statuses = await self._providers.live_catalogue(ttl_s=PICKER_TTL_S)
         except Exception as error:  # noqa: BLE001 — a picker must not take the app down
             rows, note = self._catalogue_rows(self._providers.static_catalogue())
+            # Same label `_catalogue_status` uses for a failed refresh, so the two
+            # ways a live list can fail read as one vocabulary; the exception took
+            # every provider down together, which is that function's collapsed
+            # spelling, and the reason trails because it is what truncation may
+            # lose without changing the sentence's meaning.
             self._editor().model_picker.set_rows(
                 rows,
                 current=self._current_selector(),
-                status=_status_line(note, f"live model list unavailable: {error}", PERSIST_HINT),
+                status=_status_line(
+                    note, f"{STALE_LIST_LABEL} all providers — {error}", PERSIST_HINT
+                ),
             )
             return
         rows, note = self._catalogue_rows(entries)
@@ -20427,20 +20436,51 @@ def _catalogue_status(statuses: dict[str, str]) -> str:
     Silence when every provider answered, because a footer that always says
     something is a footer nobody reads. The interesting cases are the ones where a
     user hunting for a model released last week would otherwise conclude it does
-    not exist: a cached list, or a provider whose live fetch failed.
+    not exist: a provider whose live fetch FAILED and is showing an old list, or
+    one that listed nothing.
+
+    ``cached`` is silent too. The picker asks for a fifteen-minute listing
+    (``PICKER_TTL_S``), so "cached" means "listed within the last quarter hour",
+    which is not something the user needs to read; it used to be reported when
+    it could also mean "a day old", and it could not be told from a failed
+    refresh at all (both were ``cached``). ``stale`` is the new status for that
+    failure, and it is the one worth a line.
 
     An ``unauthenticated`` provider is deliberately NOT reported here. Its models
     are the ones the picker now hides, and `_catalogue_rows` already counts them
     — two footers counting one fact ("3 provider(s) need a login · 42 hidden")
     reads as two separate problems.
+
+    Wording is budgeted, not just chosen. The footer truncates at the picker's
+    width and the access note (``2 hidden — /login <provider>``, 28 cells) leads
+    it, which leaves 39 cells for this clause at a 100-column terminal. The
+    first spelling, ``live list unavailable: anthropic, xai — showing cached``,
+    was 54: the ellipsis ate the trailing ``showing cached``, the only part
+    saying the rows below are still usable, and what survived read as "these
+    providers are down". ``stale list:`` parallels ``no live list:`` so the two
+    failure clauses read as siblings, and it carries the rows-are-usable meaning
+    in the label itself (there IS a list) rather than in a tail that dies first.
+
+    When every provider that produced a listing is stale — the offline case,
+    which fails them all at once — the names are dropped: five names fit no
+    picker width the app renders, and naming only helps when the failure is
+    partial ("anthropic is down, the rest are fine"). A single stale provider
+    is always named, since "all providers" would then be less informative
+    than the name.
     """
-    cached = sorted(p for p, s in statuses.items() if s == "cached")
-    stale = sorted(p for p, s in statuses.items() if s in ("unavailable", "empty"))
+    stale = sorted(p for p, s in statuses.items() if s == "stale")
+    empty = sorted(p for p, s in statuses.items() if s == "empty")
+    # ``static`` (no listing endpoint, or a failed fetch with nothing stored)
+    # and ``unauthenticated`` produced no listing, so they do not count toward
+    # "every provider".
+    listed = sum(1 for s in statuses.values() if s in LISTED_STATUSES)
     bits: list[str] = []
-    if cached:
-        bits.append(f"cached: {', '.join(cached)}")
-    if stale:
-        bits.append(f"no live list: {', '.join(stale)}")
+    if len(stale) > 1 and len(stale) == listed:
+        bits.append(f"{STALE_LIST_LABEL} all providers")
+    elif stale:
+        bits.append(f"{STALE_LIST_LABEL} {', '.join(stale)}")
+    if empty:
+        bits.append(f"no live list: {', '.join(empty)}")
     return " · ".join(bits)
 
 

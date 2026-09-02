@@ -339,6 +339,9 @@ async def test_a_mid_turn_switch_still_quota_checks_the_new_provider(monkeypatch
         def is_blocked(self, *args, **kwargs):
             return False
 
+        def session_credential_id(self, provider, session_id):
+            return None
+
     stream._auth_store = cast(Any, WatchedAuth())
     first = ModelSpec(provider="pa", model_id="m")
     second = ModelSpec(provider="pb", model_id="m")
@@ -499,6 +502,9 @@ async def test_a_stale_call_cannot_spend_the_new_models_quota_check() -> None:
         def is_blocked(self, *args, **kwargs):
             return False
 
+        def session_credential_id(self, provider, session_id):
+            return None
+
     stream = SessionStreamFn(cast(Any, FakeAuth()), {"retry": {"usageAwareFallback": True}}, "s")
     # Observe the CREDENTIAL LOOKUP the check body performs, never the flags the
     # gate itself reads: a probe computed from that state passes even when the
@@ -516,6 +522,9 @@ async def test_a_stale_call_cannot_spend_the_new_models_quota_check() -> None:
 
         def is_blocked(self, *args, **kwargs):
             return False
+
+        def session_credential_id(self, provider, session_id):
+            return None
 
     stream._auth_store = cast(Any, WatchedAuth())
     first = ModelSpec(provider="pa", model_id="m")

@@ -13,11 +13,12 @@ not cosmetic:
   sides of a protocol change together, while the wheel + digest + isolated
   worker give the isolation that matters at runtime.
 
-PR 1 ships the complete adapter minus the cloud: task parsing, requirement
-derivation, provisioning resolution, cleanup-ref determinism, action and
-observation translation, score mapping, and a ``FakeProvider`` that drives a
-real ``EpisodeRunner`` end to end with zero AWS spend. ``providers/aws.py``
-(the one module that spends money) is PR 2.
+The cloud-free slice — task parsing, requirement derivation, provisioning
+resolution, cleanup-ref determinism, action and observation translation,
+score mapping, and a ``FakeProvider`` that drives a real ``EpisodeRunner``
+end to end with zero AWS spend — is the bulk of the adapter and is what CI
+exercises. ``providers/aws.py`` is the one module that spends money; it is
+the production default and is unit-tested against botocore's Stubber.
 """
 
 from __future__ import annotations

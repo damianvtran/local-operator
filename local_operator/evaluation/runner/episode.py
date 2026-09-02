@@ -33,6 +33,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Mapping
 
+from pydantic import ValidationError
+
 from local_operator.evaluation.adapters.api import (
     ADAPTER_SCHEMA_VERSION,
     AskUserExchangeParams,
@@ -44,6 +46,7 @@ from local_operator.evaluation.adapters.api import (
     PrepareParams,
     RescueDescriptor,
     ResetStartParams,
+    ResolvedSecret,
     ScopedInfraValue,
     ScoreParams,
     SecretRef,
@@ -52,6 +55,7 @@ from local_operator.evaluation.adapters.supervisor import (
     AdapterSupervisor,
     HostVerifier,
     VerifiedAdapterSession,
+    discard_rescue,
     persist_rescue,
     run_rescue,
     verify_artifact,
@@ -61,6 +65,7 @@ from local_operator.evaluation.evidence.models import (
     BudgetCommitmentPayload,
     CancelPayload,
     CleanupPayload,
+    ContextCompactionPayload,
     EnvironmentStepPayload,
     ErrorPayload,
     EvidenceManifest,
@@ -106,8 +111,19 @@ from local_operator.evaluation.receipts import (
     commit_budget,
     reconcile_budget,
 )
-from local_operator.evaluation.runner.model import EpisodeModelClient
+from local_operator.evaluation.runner.guards import (
+    RECENT_TURNS_WINDOW,
+    EpisodeGuard,
+    GuardInput,
+    GuardVerdict,
+    default_guards,
+)
+from local_operator.evaluation.runner.model import EpisodeModelClient, EpisodeTurn
 from local_operator.evaluation.runner.responder import NullUserResponder, UserResponder
+from local_operator.evaluation.runner.secrets import (
+    SecretResolver,
+    StaticSecretResolver,
+)
 
 # Cleanup kinds are a closed vocabulary in ``lifecycle.CleanupAction``. A worker
 # session is the one resource the parent always knows exists before the adapter
@@ -166,6 +182,16 @@ class EpisodeConfig:
     Timeouts are per adapter call. ``max_steps`` bounds the step loop; reaching
     it is a truncation, which is a normal scored outcome rather than a failure,
     so it must not be conflated with the budget's own limits.
+
+    ``guards`` are the episode guards (``runner.guards``) evaluated after every
+    executed step; a firing guard truncates exactly as ``max_steps`` does, so
+    the episode is still scored on the state it reached. ``None`` means
+    :func:`default_guards`; an empty tuple disables them.
+    ``max_cycle_cost_micros`` feeds the default cost-rate guard's absolute cap.
+    The frame policy (``keep_recent_frames``) is deliberately NOT here: the
+    model client owns its context and is built before the runner
+    (``create_provider_model_client(keep_recent_frames=...)``), so a copy on
+    this config would be a second declaration the runner could not enforce.
     """
 
     evidence_root: Path
@@ -179,6 +205,8 @@ class EpisodeConfig:
     cleanup_timeout: float = 60.0
     ask_deadline_ms: int = 60_000
     handshake_timeout: float = 30.0
+    max_cycle_cost_micros: int | None = None
+    guards: tuple[EpisodeGuard, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -221,6 +249,8 @@ class EpisodeRunner:
         model: EpisodeModelClient,
         responder: UserResponder | None = None,
         redactions: RedactionSet | None = None,
+        secrets: SecretResolver | None = None,
+        synthetic_model: bool = False,
         launch: Any = AdapterSupervisor.launch,
         rescue: Any = run_rescue,
     ) -> None:
@@ -230,6 +260,19 @@ class EpisodeRunner:
         self._model = model
         self._responder = responder or NullUserResponder()
         self._redactions = redactions or RedactionSet.from_resolved_values(())
+        # ``None`` means "this episode has no secrets to resolve", which is only
+        # true when the spec declares no refs. An empty static resolver makes a
+        # spec that DOES declare refs fail as ``MissingSecret`` before any
+        # allocation, rather than silently sending the worker nothing and
+        # letting the adapter fail closed after it has already been launched.
+        self._secrets = secrets or StaticSecretResolver({})
+        self._resolved_secrets: tuple[ResolvedSecret, ...] = ()
+        # Declared by the CALLER, who knows what it built: a scripted or
+        # replayed model client produces a bundle that verifies exactly like
+        # a real one, and nothing inside the bundle could tell them apart.
+        # The label is the runner's own claim about the run, so it is set on
+        # the runner rather than left to metadata a reader might not check.
+        self._synthetic_model = synthetic_model
         self._launch = launch
         self._rescue = rescue
 
@@ -240,7 +283,16 @@ class EpisodeRunner:
         self._cleanup_plan: CleanupPlan | None = None
         self._lifecycle: EpisodeLifecycle | None = None
         self._rescue_required = False
-        self._transcript: list[Observation] = []
+        # Every turn taken, protocol-typed: the observation the model saw and,
+        # once known, the batch it chose. The model client renders these into
+        # whatever conversation it sends; the runner never does.
+        self._turns: list[EpisodeTurn] = []
+        self._guards: tuple[EpisodeGuard, ...] = (
+            default_guards(config) if config.guards is None else tuple(config.guards)
+        )
+        self._recent_costs: list[int] = []
+        self._truncation_reason: str | None = None
+        self._last_request_id: str | None = None
         self._usage_totals: dict[str, int] = {}
         self._provider_cost_micros = 0
         self._model_cycles = 0
@@ -312,6 +364,24 @@ class EpisodeRunner:
             InspectRequirementsParams(),
             timeout=self._config.prepare_timeout,
         )
+
+        # Secrets are resolved HERE -- after the handshake, before the
+        # provisional descriptor and before ``prepare`` -- for two reasons.
+        # First, a missing credential must fail before anything is allocated:
+        # ``reset_start`` is the side-effect boundary, and a worker that has
+        # to fail closed itself has already been launched and had its rescue
+        # inbox entry written. Failing here surfaces as ``failed_pre_bundle``
+        # with a diagnostic naming the REF, never a value. Second, every
+        # resolved value must be in the redaction set before
+        # ``EvidenceWriter.create`` (``_run_with_bundle``) so the writer
+        # canaries every artifact and event against them from its first byte;
+        # a value that is resolved after the writer opens is one the bundle
+        # could carry.
+        self._resolved_secrets = self._secrets.resolve([ref.name for ref in self._spec.secret_refs])
+        if self._resolved_secrets:
+            self._redactions = self._redactions.with_values(
+                secret.value for secret in self._resolved_secrets
+            )
 
         # STAGE 1 of two-stage rescue persistence.
         #
@@ -492,6 +562,10 @@ class EpisodeRunner:
                 # verifies against, which is what keeps "where the adapter wrote"
                 # and "where the parent reads" a single parent-chosen value.
                 artifact_root=str(self._config.artifact_root),
+                # The same values ``_launch_and_prepare`` resolved and canaried.
+                # They cross only this private pipe; the descriptor on disk
+                # carries the refs, and rescue re-resolves at rescue time.
+                secrets=self._resolved_secrets,
             ),
             timeout=self._config.reset_timeout,
         )
@@ -527,7 +601,7 @@ class EpisodeRunner:
                 text_artifact=text_artifact,
             ),
         )
-        self._transcript.append(observation)
+        self._turns.append(EpisodeTurn(observation=observation))
 
     async def _step_loop(self) -> None:
         session = self._require_session()
@@ -540,6 +614,7 @@ class EpisodeRunner:
                 # as a new event, which is why it must be applied before the
                 # step is written -- see ``_execute_batch``.
                 self._truncated = True
+                self._truncation_reason = self._truncation_reason or "max-steps"
                 return
             decision = await self._decide(current)
             batch = decision.action_batch
@@ -564,7 +639,7 @@ class EpisodeRunner:
         """
 
         request_id = f"req-{self._model_cycles}-{uuid.uuid4().hex[:12]}"
-        message_count = len(self._transcript)
+        message_count = len(self._turns)
         # The provider is called BEFORE the request event is written, even
         # though the three events keep their required request/response/usage
         # order in the journal. A request written first would be left unclosed
@@ -572,11 +647,53 @@ class EpisodeRunner:
         # carry its response and usage before any terminal (verify.py:760) --
         # so recording it eagerly would make the failure path unsealable.
         try:
-            decision = await self._model.decide(observation, tuple(self._transcript))
+            decision = await self._model.decide(observation, tuple(self._turns))
         except _EvidenceFailure:
             raise
         except BaseException as error:
+            from local_operator.evaluation.runner.provider_client import (
+                ContextUnrecoverableError,
+            )
+
+            # The client could not fit the context into the window even after
+            # pruning, summarising, and shedding stale observations. That is
+            # the harness's limit, not a provider outage, so it must NOT be
+            # re-classified as a provider failure: let it propagate so
+            # ``_finalize_failure`` records it as a harness (adapter) error
+            # and seals unscored — the honest outcome the evidence model
+            # supports. A scored truncation is not representable here (the
+            # last step's event was already written), and the verifier's
+            # one-step-per-batch rule forbids amending it.
+            if isinstance(error, ContextUnrecoverableError):
+                raise
             raise _ProviderFailure(_diagnostic(error)) from error
+        if decision.compaction is not None:
+            # Declared BEFORE the request triple: the client rebuilt its
+            # context on the way to this request, so the compaction belongs
+            # between the previous request's usage receipt and this request
+            # (which is where the verifier requires it). The summary the model
+            # was handed is an artifact so a reader can see exactly what
+            # scaffolding the harness gave it.
+            record = decision.compaction
+            summary_artifact = None
+            if record.summary_text:
+                summary_artifact = self._publish(
+                    record.summary_text.encode("utf-8"), media_type="text/plain"
+                )
+            self._append(
+                "context_compaction",
+                ContextCompactionPayload(
+                    compaction_id=f"compaction-{self._model_cycles}-{uuid.uuid4().hex[:12]}",
+                    previous_request_id=self._last_request_id,
+                    strategy=record.strategy,
+                    tokens_before=record.tokens_before,
+                    tokens_after=record.tokens_after,
+                    frames_dropped=record.frames_dropped,
+                    messages_before=record.messages_before,
+                    messages_after=record.messages_after,
+                    summary_artifact=summary_artifact,
+                ),
+            )
         self._append(
             "model_request",
             ModelRequestPayload(
@@ -588,6 +705,8 @@ class EpisodeRunner:
                 input_tokens=decision.usage.input_tokens,
                 message_count=message_count,
                 tool_count=0,
+                prompt_cache_key=decision.prompt_cache_key,
+                context_tokens=decision.context_tokens,
             ),
         )
         self._append(
@@ -618,6 +737,8 @@ class EpisodeRunner:
             ),
         )
         self._model_cycles += 1
+        self._last_request_id = request_id
+        self._recent_costs.append(decision.cost_micros)
         self._served_routes.add(
             (
                 decision.route.provider_id,
@@ -674,7 +795,23 @@ class EpisodeRunner:
         self._append_batch(batch, terminal=None)
         self._steps_taken += 1
         self._guest_actions += len(batch.actions)
+        self._close_turn(batch)
         truncated = self._truncated or self._steps_taken >= self._config.max_steps
+        reason = self._truncation_reason
+        if truncated and reason is None:
+            reason = "max-steps"
+        if not truncated:
+            # Guards are evaluated HERE, on the post-step snapshot and before
+            # the step event is written, for the same reason ``max_steps`` is
+            # folded in on this line: truncation is recorded on the last step,
+            # and the verifier accepts a truncated last step as the terminal
+            # (verify.py's final-step rule). A guard checked at the loop head
+            # would fire one step too late, after a non-truncated step had
+            # already been written, leaving the bundle without a terminal.
+            verdict = self._evaluate_guards(result.observation)
+            if verdict is not None:
+                truncated = True
+                reason = verdict.code
         # The step event MUST precede its output observation: the verifier
         # expects the observation it just declared, and reversing the two makes
         # the observation unbound.
@@ -694,11 +831,55 @@ class EpisodeRunner:
                 # environment-initiated termination will be silently ignored.
                 terminated=False,
                 truncated=truncated,
+                truncation_reason=reason if truncated else None,
             ),
         )
         self._truncated = truncated
+        self._truncation_reason = reason if truncated else None
         self._last_step_terminated = truncated
         self._record_observation(result.observation)
+
+    def _close_turn(self, batch: ActionBatch, *, ask_answer: str | None = None) -> None:
+        """Attach the batch just executed to the turn it was decided on.
+
+        The batch is unknown when the turn's observation is recorded, so the
+        turn is completed here, before the next observation is appended; the
+        model client relies on seeing the batch on turn ``i`` when it renders
+        turn ``i+1``.
+        """
+        if not self._turns:
+            return
+        last = self._turns[-1]
+        update: dict[str, Any] = {"batch": batch}
+        if ask_answer is not None:
+            update["ask_answer"] = ask_answer
+        self._turns[-1] = last.model_copy(update=update)
+
+    def _evaluate_guards(self, latest: Observation) -> GuardVerdict | None:
+        """The first ``truncate`` verdict over the post-step snapshot, if any.
+
+        ``latest`` is the observation the step just produced; it is included
+        as an undecided turn so a frame-comparison guard sees the screen the
+        last action left behind, not only the screens that were acted on.
+        """
+        if not self._guards:
+            return None
+        recent = (*self._turns[-RECENT_TURNS_WINDOW:], EpisodeTurn(observation=latest))
+        snapshot = GuardInput(
+            steps_taken=self._steps_taken,
+            model_cycles=self._model_cycles,
+            provider_cost_micros=self._provider_cost_micros,
+            elapsed_ms=max(0, _now_ms() - self._started_ms),
+            usage_totals=dict(self._usage_totals),
+            recent_turns=recent,
+            recent_costs_micros=tuple(self._recent_costs[-32:]),
+            budget=self._spec.budget,
+        )
+        for guard in self._guards:
+            verdict = guard.evaluate(snapshot)
+            if verdict.kind == "truncate":
+                return verdict
+        return None
 
     async def _run_ask(self, batch: ActionBatch) -> None:
         """Answer an ask, then execute the ask batch like any other.
@@ -745,6 +926,10 @@ class EpisodeRunner:
         )
         self._last_exchange_id = exchange_id
         self._simulator_turns += 1
+        # The answer rides on the asking turn so the model client can deliver
+        # it with the observation that follows; ``_execute_batch`` then closes
+        # the turn with the batch itself.
+        self._close_turn(batch, ask_answer=answer)
         # The ask batch is then executed like any other batch: a lone
         # AskUserAction is a legal batch, and executing it is what produces the
         # observation carrying the answer's effect, which the model sees next.
@@ -871,6 +1056,13 @@ class EpisodeRunner:
         rescue_complete: bool | None = None
         if cleanup_result.rescue_required or self._rescue_required:
             rescue_complete = await self._attempt_rescue()
+        else:
+            # Every declared action confirmed on the live session: this episode
+            # owns nothing any more, so its descriptor leaves the rescue inbox.
+            # Only this branch holds that confirmation; a rescued episode's
+            # descriptor is retired by the rescue path (or the sweep) on a
+            # complete aggregate, never here on hope.
+            self._retire_descriptor()
         self._append_receipt(
             "cleanup",
             CleanupPayload(
@@ -885,6 +1077,7 @@ class EpisodeRunner:
             rescue_required=cleanup_result.rescue_required,
             reportable=reconciliation.reportable,
             cancelled=cancelled,
+            synthetic_model=self._synthetic_model,
         )
         comparability = _comparability_label(
             requested=self._spec.requested_route,
@@ -1006,10 +1199,30 @@ class EpisodeRunner:
         if descriptor is None:
             return False
         try:
-            aggregate = await self._rescue(descriptor)
+            # The rescue worker is a fresh process with nothing but the
+            # descriptor; it needs the credentials again to tear down. These
+            # are the values resolved at launch, so an in-process rescue never
+            # re-reads the store mid-failure.
+            aggregate = await self._rescue(descriptor, secrets=self._resolved_secrets)
         except BaseException:
             return False
-        return bool(aggregate.complete)
+        complete = bool(aggregate.complete)
+        if complete:
+            self._retire_descriptor()
+        return complete
+
+    def _retire_descriptor(self) -> None:
+        """Unlink this episode's ``rescue.json``; only confirmed-clean callers."""
+
+        if self._descriptor is None:
+            return
+        try:
+            discard_rescue(self._config.rescue_root)
+        except OSError:
+            # A descriptor that could not be unlinked is re-rescued by the next
+            # sweep (``instance-absent``) -- harmless, and strictly better than
+            # failing an already-clean episode over inbox hygiene.
+            pass
 
     def _build_manifest(self, handshake: Handshake, plan: CleanupPlan) -> EvidenceManifest:
         spec = self._spec
@@ -1256,12 +1469,16 @@ def _reportability_label(
     rescue_required: bool,
     reportable: bool,
     cancelled: bool,
+    synthetic_model: bool = False,
 ) -> str:
     """Pick the single most severe label.
 
     Precedence is cleanup_incomplete > budget_unreconciled > unscored, because
     a leaked resource is a worse claim about the run than an unclosed budget,
-    which in turn matters more than a missing score.
+    which in turn matters more than a missing score. ``synthetic_model`` sits
+    last: it only decides whether a run that would otherwise be reportable
+    is, because a scripted model's bundle is otherwise indistinguishable from
+    a real result, and every more severe label already says "not a result".
     """
 
     if rescue_required:
@@ -1272,6 +1489,8 @@ def _reportability_label(
         return "cancelled"
     if score.status != "scored":
         return "unscored"
+    if synthetic_model:
+        return "synthetic_model"
     return "reportable"
 
 
@@ -1333,6 +1552,26 @@ def _incomplete_receipt(plan: CleanupPlan, action_id: str) -> CleanupReceipt:
 
 
 def _diagnostic(error: BaseException) -> str:
+    """Render an error for ``EpisodeOutcome.diagnostic`` without its inputs.
+
+    A pydantic ``ValidationError``'s ``str()`` embeds ``input_value=<head>…<tail>``
+    for every failing field. The one model on this boundary that carries
+    secret bytes is ``ResolvedSecret``, and a value the wire bound refuses
+    (a PEM-shaped credential past ``max_length``) would otherwise be quoted
+    straight into the outcome JSON that a paid run redirects into its durable
+    root. The resolvers already translate that case to a name-only error;
+    this is the second line, for ANY validation error on any path: only the
+    model title, the field location and the error type are kept, never the
+    input. The location itself is safe -- it is a field NAME (``secrets``,
+    ``1``, ``value``), not the secret's name or bytes.
+    """
+
+    if isinstance(error, ValidationError):
+        details = "; ".join(
+            f"{'.'.join(str(part) for part in item['loc']) or '<root>'}: {item['type']}"
+            for item in error.errors(include_input=False, include_url=False)
+        )
+        return f"ValidationError: {error.title} ({details})"[:500]
     return f"{type(error).__name__}: {error}"[:500]
 
 

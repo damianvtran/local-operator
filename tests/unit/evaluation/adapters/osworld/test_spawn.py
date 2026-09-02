@@ -197,3 +197,111 @@ async def test_spawned_worker_reports_a_partial_score(
     assert outcome.score.partial_ppm == 500_000
     assert outcome.bundle_root is not None
     assert verify_bundle(outcome.bundle_root).valid
+
+
+@pytest.mark.asyncio
+async def test_secrets_cross_the_boundary_and_never_appear_in_the_worker_env(
+    tmp_path: Path, adapter_wheel: Path, episode_id: str
+) -> None:
+    """Schema 1.2's ``ResetStartParams.secrets`` reaches a REAL spawned worker.
+
+    The worker is the fake-provider build, so the AWS provider is never
+    constructed -- what is proved is the wire: a 1.2 parent sends resolved
+    secrets on ``reset_start`` and the real worker's strict model ACCEPTS them
+    (a 1.1 worker would reject the key as an unknown extra). And the values
+    never reach anywhere observable outside the pipe: not the worker's argv,
+    not the environment the supervisor built for it, not either stdio tail.
+    """
+
+    from local_operator.evaluation.adapters.api import (
+        PrepareParams,
+        ResetStartParams,
+        ResolvedSecret,
+    )
+    from local_operator.evaluation.adapters.supervisor import (
+        HostVerifier,
+        VerifiedAdapterSession,
+    )
+
+    selector = spawn_helpers.build_spawnable_adapter(
+        tmp_path, adapter_wheel, _TASKS, provider={"provider": "fake"}
+    )
+    spec = _spec_for_spawn(episode_id)
+    artifact_root = tmp_path / "artifacts"
+    artifact_root.mkdir()
+    supervisor = AdapterSupervisor.launch(selector)
+    marker = "marker-secret-value-9f1c"
+    try:
+        await supervisor.handshake(timeout=60)
+        session = VerifiedAdapterSession(
+            supervisor, HostVerifier("task_plain", episode_id, artifact_root)
+        )
+        # The secret-carrying reset is only reachable after prepare, and the
+        # verified session insists on a persisted descriptor first.
+        from local_operator.evaluation.adapters.api import InspectRequirementsParams
+
+        await session.inspect_requirements(InspectRequirementsParams(), timeout=60)
+        session.mark_rescue_persisted("0" * 64)
+        await session.prepare(
+            PrepareParams(
+                operation_id=f"prepare-{episode_id}",
+                episode_id=episode_id,
+                secret_refs=(),
+                infra_values=spec.infra_values,
+            ),
+            timeout=60,
+        )
+        observation = await session.reset_start(
+            ResetStartParams(
+                operation_id=f"reset-{episode_id}",
+                task_id="task_plain",
+                episode_id=episode_id,
+                artifact_root=str(artifact_root),
+                secrets=(
+                    ResolvedSecret(name="AWS_ACCESS_KEY_ID", value="AKIA" + marker),
+                    ResolvedSecret(name="AWS_SECRET_ACCESS_KEY", value=marker),
+                ),
+            ),
+            timeout=60,
+        )
+        assert observation.observation.sequence == 0
+    finally:
+        await supervisor.terminate()
+
+    # The values crossed only on the private pipe. Every other surface the
+    # parent can see is clean.
+    assert marker not in " ".join(supervisor.process.args)  # type: ignore[arg-type]
+    assert marker not in supervisor.stdout_tail.bytes().decode(errors="replace")
+    assert marker not in supervisor.stderr_tail.bytes().decode(errors="replace")
+    # The supervisor's environment builder never copies ambient values, so a
+    # marker exported by the parent cannot arrive either.
+    from local_operator.evaluation.adapters.supervisor import minimal_environment
+
+    built = minimal_environment({"AWS_SECRET_ACCESS_KEY": marker}, protocol_fds={})
+    assert marker not in built.values()
+
+
+def test_a_1_1_selector_cannot_even_be_built_against_a_1_2_parent(tmp_path: Path) -> None:
+    """The exact-version pin: a 1.1 adapter is locked out at selection, before
+    any worker is spawned, rather than failing later as invalid_request."""
+
+    from pydantic import ValidationError
+
+    from local_operator.evaluation.adapters.api import AdapterSelector
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    with pytest.raises(ValidationError):
+        AdapterSelector(
+            schema_version="1.1",  # type: ignore[arg-type]
+            adapter_id="osworld-v2",
+            distribution="lop-osworld-v2-adapter",
+            version="0.1.0",
+            entry_point="lop_osworld_v2_adapter:create",
+            package_digest="a" * 64,
+            release_digest="b" * 64,
+            python_executable="/usr/bin/python3",
+            workspace=str(workspace),
+            workspace_digest="c" * 64,
+            route_capability="computer",
+        )
