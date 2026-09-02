@@ -51,6 +51,7 @@ from local_operator.providers.registry import (
 
 if TYPE_CHECKING:  # the legacy reader stays an optional, import-guarded tier
     from local_operator.credentials import CredentialManager
+    from local_operator.providers.usage_cache import UsageCacheStore
 
 logger = logging.getLogger("local_operator.providers.auth_store")
 
@@ -75,6 +76,34 @@ MAX_CREDENTIAL_BLOCK_MS = 60 * 60 * 1000  # 1 hour
 #: is not selected, so it never earns the success that would clear it. Two
 #: minutes outlives a burst of 529s without outliving the outage that caused it.
 DEPRIORITIZE_TTL_MS = 120_000
+
+#: How far (in remaining-quota fraction) an account may trail the least-loaded
+#: account and still be treated as EQUALLY good by the first-resolve pick (see
+#: ``AuthStore._usage_ranked_order``). Ten points, because the pick's job is
+#: to keep the pool from skewing to the extremes observed in the field (three
+#: accounts at 65-99% of their 5-hour window while two sat at 6% and 29%),
+#: not to chase the single emptiest account: several sessions and subagents
+#: start within the same minute, and with a zero-width bucket every one of
+#: them would land on the same row and drain it. Within the bucket the
+#: existing per-session hash spreads them.
+USAGE_PICK_TOLERANCE = 0.10
+
+#: A cached usage report older than this is treated as UNKNOWN by the
+#: first-resolve pick rather than trusted -- UNLESS every window it measures
+#: still names a reset in the future, in which case it stays trusted at any
+#: age (see ``AuthStore._cached_remaining_fraction``). Thirty minutes: the
+#: reports come from the message-boundary preflight of whichever sessions
+#: are active, so on a busy machine they are minutes old. The exception is
+#: what makes the cutoff safe in both directions: usage inside a rolling
+#: window only rises until the window resets, so an old report whose windows
+#: have not rolled over is a LOWER bound on how full the account is, and
+#: discarding it let a 99%-full account with a two-hour-old report rank as
+#: neutral and collect most of the new sessions (observed, live). A report
+#: whose window HAS since reset says nothing about the account now, and one
+#: with no reset timestamps cannot be told apart from it. Longer than the
+#: report TTL on purpose -- the cache serves expired rows precisely so a
+#: stale-but-recent answer beats no answer.
+USAGE_PICK_MAX_REPORT_AGE_MS = 30 * 60_000
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS auth_credentials (
@@ -205,6 +234,7 @@ class AuthStore:
         *,
         credential_manager: "CredentialManager | None" = None,
         config_overrides: dict[str, str] | None = None,
+        usage_cache: "UsageCacheStore | None" = None,
     ) -> None:
         self._db_path = Path(db_path) if db_path is not None else default_db_path()
         self._credential_manager = credential_manager
@@ -232,6 +262,21 @@ class AuthStore:
         # pool whose members are all equally valid.
         self._deprioritized: dict[str, dict[int, int]] = {}
         self._refresh_locks: dict[int, asyncio.Lock] = {}
+        # The first-resolve account pick (``_usage_ranked_order``). ON by
+        # default: a store built without a settings mapping (the CLI's login
+        # surface, the server's per-job stores) should still spread load, and
+        # the opt-out rides in through :meth:`configure_usage_aware_pick` from
+        # the one place that reads ``retry.*``. The cache handle is built
+        # lazily on first use so a store that never resolves an OAuth row
+        # never opens the usage database.
+        self._usage_aware_pick = True
+        self._usage_pick_tolerance = USAGE_PICK_TOLERANCE
+        self._usage_pick_max_age_ms = USAGE_PICK_MAX_REPORT_AGE_MS
+        # ``usage_cache`` is an injection seam for tests (a temp store with
+        # synthetic reports); production callers leave it ``None`` and the
+        # shared ``~/.local-operator/usage_cache.db`` is opened on demand.
+        self._usage_cache: "UsageCacheStore | None" = usage_cache
+        self._usage_cache_probed = usage_cache is not None
         self._conn = self._connect()
 
     # -- connection ----------------------------------------------------------
@@ -263,6 +308,9 @@ class AuthStore:
 
     def close(self) -> None:
         self._conn.close()
+        if self._usage_cache is not None:
+            self._usage_cache.close()
+            self._usage_cache = None
 
     @staticmethod
     def _now_ms() -> int:
@@ -310,6 +358,30 @@ class AuthStore:
             self._fallback_resolvers.pop(provider, None)
         else:
             self._fallback_resolvers[provider] = resolver
+
+    def configure_usage_aware_pick(
+        self,
+        enabled: bool,
+        *,
+        tolerance: float | None = None,
+        max_report_age_ms: int | None = None,
+    ) -> None:
+        """Switch the usage-ranked first-resolve pick on or off.
+
+        The store defaults to ON so every constructor site spreads load
+        without knowing about the setting; the session stream, which is the
+        one place that parses ``retry.*``, calls this with
+        ``retry.usageAwareAccountPick`` so the operator's opt-out reaches the
+        cascade. ``tolerance`` and ``max_report_age_ms`` are exposed for tests
+        and diagnostics rather than as user settings: the defaults encode a
+        judgement about herding and window rollover (see the module
+        constants) that a per-user knob would only let people get wrong.
+        """
+        self._usage_aware_pick = bool(enabled)
+        if tolerance is not None:
+            self._usage_pick_tolerance = max(0.0, min(1.0, float(tolerance)))
+        if max_report_age_ms is not None:
+            self._usage_pick_max_age_ms = max(0, int(max_report_age_ms))
 
     # -- credential CRUD -------------------------------------------------------
 
@@ -815,6 +887,7 @@ class AuthStore:
         session_id: str | None,
         *,
         read_only: bool = False,
+        model_id: str = "",
     ) -> list[StoredCredential]:
         if not rows:
             return []
@@ -824,7 +897,7 @@ class AuthStore:
         # Normalized here, ahead of both the demotion marks and the base order,
         # so every keyed structure below sees one spelling.
         provider = self._storage_id(provider)
-        ordered = self._base_selection_order(rows, provider, session_id)
+        ordered = self._base_selection_order(rows, provider, session_id, model_id=model_id)
         # Demotion is applied LAST, to the finished order.
         #
         # It used to run first, which did not work: both orderings below rotate
@@ -881,12 +954,18 @@ class AuthStore:
         return preferred + [r for r in ordered if r.id in movable]
 
     def _base_selection_order(
-        self, rows: list[StoredCredential], provider: str, session_id: str | None
+        self,
+        rows: list[StoredCredential],
+        provider: str,
+        session_id: str | None,
+        *,
+        model_id: str = "",
     ) -> list[StoredCredential]:
-        """Stickiness, then a per-session hash, then round-robin.
+        """Stickiness, then a usage-ranked per-session pick, then round-robin.
 
         ``provider`` arrives already normalized by :meth:`_selection_order`,
-        its only caller.
+        its only caller. ``model_id`` names the model the request will run so
+        the usage ranking can ignore tier caps that do not gate it.
         """
         if session_id:
             sticky_id = self.session_credential_id(provider, session_id)
@@ -894,13 +973,236 @@ class AuthStore:
             if sticky is not None:
                 rest = [r for r in rows if r.id != sticky.id]
                 return [sticky, *rest]
-            index = zlib.crc32(session_id.encode("utf-8")) % len(rows)
-            return rows[index:] + rows[:index]
+            # No sticky yet: this is the session's FIRST pick for the provider
+            # (or its re-pick after a demotion cleared the sticky), the one
+            # moment the choice is free. Rank by cached usage so it lands on
+            # the account with the most headroom; the hash rotation is what
+            # remains when usage says nothing, and what breaks ties.
+            return self._usage_ranked_order(rows, provider, session_id, model_id)
         # No session: round-robin across calls.
         provider_key = f"{provider}:any"
         start = self._round_robin.get(provider_key, 0) % len(rows)
         self._round_robin[provider_key] = start + 1
         return rows[start:] + rows[:start]
+
+    @staticmethod
+    def _hash_order(rows: list[StoredCredential], session_id: str) -> list[StoredCredential]:
+        """The per-session rotation: ``crc32(session_id) % len(rows)``.
+
+        Deterministic in the session id so a session that re-resolves before
+        it has a sticky account meets the same order, and spread across
+        sessions so concurrent starts do not stampede one row.
+        """
+        if not rows:
+            return []
+        index = zlib.crc32(session_id.encode("utf-8")) % len(rows)
+        return rows[index:] + rows[:index]
+
+    def _usage_cache_store(self) -> "UsageCacheStore | None":
+        """The shared usage cache handle; ``None`` when it cannot be built.
+
+        Probed once: a cache that failed to construct once will fail again,
+        and a store that re-tried on every resolve would pay the failure on
+        each. The same contract as ``ModelConfigurator._usage_cache_store``
+        -- a missing cache is a permanent miss, never an error. The handle
+        opens its SQLite connection lazily and :meth:`_usage_ranked_order`
+        closes it again after each ranking, so between first resolves this
+        store holds no file descriptor for it (see that method).
+        """
+        if not self._usage_cache_probed:
+            self._usage_cache_probed = True
+            try:
+                from local_operator.providers.usage_cache import UsageCacheStore
+
+                self._usage_cache = UsageCacheStore()
+            except Exception:  # noqa: BLE001 -- no cache = hash order, never fatal
+                logger.debug("usage pick: cache unavailable", exc_info=True)
+                self._usage_cache = None
+        return self._usage_cache
+
+    def _cached_remaining_fraction(
+        self, row: StoredCredential, provider: str, model_id: str, now_ms: int
+    ) -> float | None:
+        """Remaining shared quota (0..1) for ``row`` from the cache, or ``None``.
+
+        ``None`` is UNKNOWN, not zero: no report, an unparseable one, one
+        older than :data:`USAGE_PICK_MAX_REPORT_AGE_MS`, or a report whose
+        windows carry no measurable fraction. The caller treats unknown as
+        neutral so a cold cache cannot demote an account.
+
+        TWO sources feed this, and the newer report wins. The per-account
+        preflight row is keyed exactly as the message-boundary preflight
+        builds it (``ModelConfigurator._cached_account_usage``): the storage
+        provider id plus the row's email, else account id, else ``cred:<id>``.
+        But that row is only ever written while ``retry.usageAwareFallback``
+        is on, which is NOT the shipped default -- with the reactive path
+        off, the only usage the cache holds is the warmer's per-provider
+        payload (``/usage`` and the TUI's background warm), whose reports
+        carry ``identity``. Reading only the preflight row made this pick a
+        silent no-op on a stock config, so the warmer payload is sliced per
+        account too (:meth:`UsageCacheStore.latest_account_report`), matched
+        on every label an enumerator might have attached to the row.
+
+        Only OAuth rows carry an identity; an API-key row is keyed by a hash
+        of its secret on the preflight side, and re-deriving that here would
+        put the secret on a read path that never needed it, so key rows are
+        simply unknown. The health reduction is the same one the reactive
+        path uses (:func:`usage_health`): shared windows always count, a
+        tier-scoped cap counts only when ``model_id`` is in that tier, and an
+        enabled extra-usage meter supersedes the plan windows.
+        """
+        if row.credential_type != "oauth":
+            return None
+        cache = self._usage_cache_store()
+        if cache is None:
+            return None
+        from local_operator.providers.usage import UsageReport, usage_health
+        from local_operator.providers.usage_cache import account_preflight_key
+
+        data = row.data
+        identity = data.get("email") or data.get("account_id") or f"cred:{row.id}"
+        candidates: list[UsageReport] = []
+        reports = cache.get(account_preflight_key(provider, str(identity)), include_expired=True)
+        if reports:
+            candidates.append(reports[0])
+        # The warmer labels an account by whichever of these its enumerator
+        # found first (``list_oauth_accesses`` vs ``list_oauth_identities``
+        # differ on the identity_key fallback), so offer every spelling.
+        labels = {
+            str(value)
+            for value in (data.get("email"), data.get("account_id"), row.identity_key)
+            if value and not str(value).startswith("oauth:")
+        }
+        labels.add(f"cred:{row.id}")
+        warmed = cache.latest_account_report(provider, labels)
+        if warmed is not None:
+            candidates.append(warmed)
+        # A report that measures nothing cannot describe the account, however
+        # fresh it is. The warmer's first failure for a never-seen account
+        # (``_mark_account_failure`` with no last-good) is exactly that: a
+        # stub stamped ``now`` with an empty ``limits``. Letting it win the
+        # recency contest below would mask a slightly older real preflight
+        # report and rank a 95%-used account as neutral (review round 2, F7).
+        candidates = [
+            r for r in candidates if any(limit.amount.fraction() is not None for limit in r.limits)
+        ]
+        if not candidates:
+            return None
+        report = max(candidates, key=lambda r: r.fetched_at)
+        if report.fetched_at <= 0:
+            return None
+        if now_ms - report.fetched_at > self._usage_pick_max_age_ms:
+            # Past the age cutoff a report is still a lower bound on usage as
+            # long as none of its measured windows has rolled over since it
+            # was fetched -- and a window that reset between then and now
+            # carries a ``resets_at_ms`` in the past, so "every reset is still
+            # ahead" is exactly that test. A window with no reset timestamp
+            # cannot be vouched for, so it makes the whole report unknown.
+            measured = [limit for limit in report.limits if limit.amount.fraction() is not None]
+            if not measured or any(
+                limit.resets_at_ms is None or limit.resets_at_ms <= now_ms for limit in measured
+            ):
+                return None
+        health = usage_health(report, model_id, now_ms=now_ms)
+        if health.state == "unknown" or health.remaining_fraction is None:
+            return None
+        return health.remaining_fraction
+
+    def _usage_ranked_order(
+        self,
+        rows: list[StoredCredential],
+        provider: str,
+        session_id: str,
+        model_id: str,
+    ) -> list[StoredCredential]:
+        """Least-loaded first, ties broken by the per-session hash.
+
+        WHY. Account choice used to be ``crc32(session_id) % n`` alone --
+        uniform over sessions, blind to how full each account already is.
+        With five OAuth accounts and ~16 concurrent sessions plus their
+        subagents, three accounts sat at 65-99% of their 5-hour window while
+        two sat at 6% and 29%, and sessions kept being told "All 5 OAuth
+        credentials unusable" because the hash kept landing new work on the
+        rows that were already spent. The REACTIVE usage-aware path
+        (``ModelConfigurator.preflight_usage``) only moves a session once its
+        account is at the reserve threshold; by then the skew exists. This is
+        the PROACTIVE half: it runs once, at the moment a session first binds
+        to an account, and steers that binding toward headroom.
+
+        HOW. Every row's remaining shared fraction is read from the cache
+        (:meth:`_cached_remaining_fraction`, no network). The rows within
+        ``tolerance`` of the best-known remaining fraction form a bucket of
+        "equally good" accounts; unknown rows join the bucket as neutral
+        members, since no evidence is not evidence against. The bucket is
+        rotated by the session hash -- the same rotation the plain order
+        applied to the whole pool -- so a burst of sessions and subagents
+        starting together spread across the bucket instead of herding onto
+        one row. Rows known to be worse follow, best first.
+
+        STICKINESS is untouched: the caller only reaches here without a
+        sticky, and the winner is pinned by ``_resolve`` exactly as before,
+        so a session never moves mid-conversation (the provider's prompt
+        cache is per account, and moving would rewrite the whole prefix).
+
+        FAIL OPEN. Any exception, a missing cache, or a pool with nothing
+        known collapses to the pre-existing hash order, unchanged -- the pick
+        may be no worse than it was before this existed.
+
+        The cache connection is CLOSED after every ranking rather than held
+        for the store's life. A ranking happens once per session per provider
+        (plus a re-pick after a demotion), so reopening costs a few
+        milliseconds a handful of times, whereas holding it would add a
+        second SQLite connection (three descriptors with WAL sidecars) to
+        every ``AuthStore`` -- and the test suite, which builds hundreds of
+        stores per worker and does not always close them, hit ``EMFILE``
+        under the default 256-descriptor limit the first time it did.
+        """
+        fallback = self._hash_order(rows, session_id)
+        if not self._usage_aware_pick or len(rows) < 2:
+            return fallback
+        try:
+            now_ms = self._now_ms()
+            remaining = {
+                r.id: self._cached_remaining_fraction(r, provider, model_id, now_ms) for r in rows
+            }
+            known = [v for v in remaining.values() if v is not None]
+            if not known:
+                return fallback
+            best = max(known)
+            floor = best - self._usage_pick_tolerance
+            bucket: list[StoredCredential] = []
+            rest: list[StoredCredential] = []
+            for r in rows:
+                value = remaining[r.id]
+                # DELIBERATE: an unknown row outranks a known-worse one. It
+                # joins the bucket beside the best-known rows rather than
+                # sorting behind a row that is provably 30% full, because a
+                # missing report is most often a cold cache or a window that
+                # just reset -- and penalising an account for the absence of
+                # data is how a fresh login gets starved by its own silence.
+                (bucket if value is None or value >= floor else rest).append(r)
+            # Stable sort: rows with equal remaining keep the store's row
+            # order, which is the order the hash fallback also assumes.
+            rest.sort(key=lambda r: -(remaining[r.id] or 0.0))
+            ordered = self._hash_order(bucket, session_id) + rest
+            logger.debug(
+                "usage pick: %s session=%s model=%s remaining=%s -> %s",
+                provider,
+                session_id,
+                model_id or "-",
+                {cid: (None if v is None else round(v, 3)) for cid, v in remaining.items()},
+                [r.id for r in ordered],
+            )
+            return ordered
+        except Exception:  # noqa: BLE001 -- a ranking failure must never block a resolve
+            logger.debug("usage pick: ranking failed; hash order", exc_info=True)
+            return fallback
+        finally:
+            if self._usage_cache is not None:
+                try:
+                    self._usage_cache.close()
+                except Exception:  # noqa: BLE001 -- releasing a handle can never fail a resolve
+                    logger.debug("usage pick: cache close failed", exc_info=True)
 
     def _set_sticky(self, provider: str, session_id: str | None, credential_id: int | None) -> None:
         if not session_id:
@@ -1302,7 +1604,9 @@ class AuthStore:
             model_id=model_id,
             session_id=session_id,
         )
-        for row in self._selection_order(oauth_rows, provider, session_id, read_only=read_only):
+        for row in self._selection_order(
+            oauth_rows, provider, session_id, read_only=read_only, model_id=model_id
+        ):
             try:
                 creds = await self._ensure_oauth_fresh(row, force=force_refresh)
             except AuthStoreError:
@@ -1330,7 +1634,9 @@ class AuthStore:
             model_id=model_id,
             session_id=session_id,
         )
-        for row in self._selection_order(login_rows, provider, session_id, read_only=read_only):
+        for row in self._selection_order(
+            login_rows, provider, session_id, read_only=read_only, model_id=model_id
+        ):
             key = row.data.get("key")
             if key:
                 pin(row.id)
@@ -1359,7 +1665,9 @@ class AuthStore:
             )
             if row.data.get("source") != "login"
         ]
-        for row in self._selection_order(stored_rows, provider, session_id, read_only=read_only):
+        for row in self._selection_order(
+            stored_rows, provider, session_id, read_only=read_only, model_id=model_id
+        ):
             key = row.data.get("key")
             if key:
                 pin(row.id)

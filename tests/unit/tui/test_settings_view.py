@@ -2522,6 +2522,86 @@ async def test_r_clears_a_malformed_cascade_and_the_frame_does_not_contradict_it
 
 
 @pytest.mark.asyncio
+async def test_selecting_a_row_keeps_its_attached_explanation_on_screen(
+    tmp_path: Path,
+) -> None:
+    """A row and the line that explains it are ONE unit for the scroll model.
+
+    The cascade's `empty` line is the page's only statement of why the value
+    looks wrong and which key repairs it, and it is unselectable — so if
+    `_scroll_to_selection` parks it below the fold nothing in the movement model
+    ever brings it back, and the user reads the broken row with no explanation
+    at all. That regressed without this page being touched: PR #533's
+    `Usage-aware account pick` and PR #532's `Anthropic 1h cache above` rows
+    both landed ABOVE the cascade and pushed its warning one line past a 16-row
+    body, which is why the guarantee is pinned here as a contract rather than
+    left implied by the coordinates of one 120x32 frame.
+
+    The height is DISCOVERED, not hardcoded: the test resizes until the body is
+    exactly tall enough to end ON the cascade row, which is the one fold that
+    exercises the defect. It cannot be computed from a single measurement
+    because the page's height ladder SHEDS chrome as the terminal shrinks, so
+    the body-to-terminal offset is not constant. A row added anywhere above the
+    cascade moves the height this test finds instead of silently making it test
+    nothing.
+    """
+    _corrupt_the_cascade(tmp_path)
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        app._open_settings_view()
+        view = app.query_one(SettingsView)
+        await pilot.pause()
+
+        cascade = _select(view, "retry.fallbackChains")
+        warning = next(
+            index
+            for index, row in enumerate(view._rows)
+            if row.kind == "empty" and "malformed cascade" in row.text
+        )
+        assert warning == cascade + 1, (
+            "this test assumes the warning is the row attached directly under the "
+            f"cascade; it is now at {warning} against a cascade at {cascade}"
+        )
+
+        # A body of exactly `cascade + 1` rows ends ON the cascade row at offset
+        # 0 — the state PRs #533/#532 produced together — so a scroll model that
+        # measures the selected row alone has no reason to move and strands the
+        # warning one line below the fold.
+        wanted = cascade + 1
+        for height in range(40, 8, -1):
+            await pilot.resize_terminal(120, height)
+            await pilot.pause()
+            if view._body_rows() == wanted:
+                break
+        else:  # pragma: no cover - only reachable if the page stops fitting
+            raise AssertionError(f"no terminal height gives a {wanted}-row body")
+
+        _select(view, "retry.fallbackChains")
+        view._scroll_to_selection()
+        await pilot.pause()
+
+        offset = view._body.scroll_offset.y
+        body = view._body_rows()
+        assert offset <= cascade < offset + body, (
+            "the selected row itself left the viewport — an explanation without the "
+            f"row it explains is the same orphan the other way round (offset {offset})"
+        )
+        assert offset <= warning < offset + body, (
+            "the cascade's `malformed cascade — press r to clear it` line is below the "
+            f"fold: viewport rows [{offset}, {offset + body - 1}], warning at {warning}"
+        )
+
+        # Asserted on the PAINTED frame too, because the offsets above are the
+        # model's opinion and this defect is only a defect on screen.
+        frame = _painted_frame(app)
+        assert "malformed cascade" in frame, (
+            "the value row is painted with no explanation of why it looks broken:\n" f"{frame}"
+        )
+
+
+@pytest.mark.asyncio
 async def test_r_on_a_healthy_cascade_still_explains_itself_without_writing(
     tmp_path: Path,
 ) -> None:
@@ -4096,9 +4176,15 @@ async def test_click_selects_a_row_without_arming_a_text_selection() -> None:
         before = view._selected
 
         body = view._body
-        # A row several lines down in the body, resolved to a settable row.
+        # Aim at the first selectable row that is NOT the cursor's, looked up
+        # from the painted rows rather than a fixed body line: the list is one
+        # line per row and grows whenever a setting is added, so a hard-coded
+        # offset silently lands on a section header (which `on_click` rightly
+        # ignores) and the assertion below reads as a product regression.
+        target = next(i for i, row in enumerate(view._rows) if row.selectable and i != before)
         x = body.region.x + 6
-        y = body.region.y + 5
+        y = body.region.y + target - body.scroll_offset.y
+        assert body.region.contains(x, y), "target row is not on screen"
         await pilot._post_mouse_events(
             [events.MouseDown, events.MouseUp, events.Click], offset=(x, y), button=1
         )

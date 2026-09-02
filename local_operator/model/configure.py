@@ -1566,6 +1566,34 @@ def _openai_api_mode(settings: Mapping[str, Any] | None) -> str:
     return "chat_completions" if configured == "chat_completions" else "responses"
 
 
+#: Default for ``providers.anthropic.cache_ttl_1h_min_context_tokens`` when the
+#: settings mapping lacks the key (an old config file, a test passing ``{}``).
+#: Mirrors ``DEFAULT_CONFIG`` in ``config.py`` rather than importing it: the
+#: ``config`` module is the CLI's, and ``_openai_api_mode`` above already takes
+#: the same restate-the-default stance for the sibling key.
+ANTHROPIC_CACHE_TTL_1H_MIN_CONTEXT_TOKENS = 150_000
+
+
+def _anthropic_cache_ttl_1h_min_context_tokens(settings: Mapping[str, Any] | None) -> int:
+    """Resolve the context size above which Anthropic requests use the 1h TTL.
+
+    Same shape as ``_openai_api_mode``: a missing ``providers`` block (old
+    config files) or a malformed value falls back to the default rather than
+    silently disabling the feature, because the failure mode of "disabled" is
+    a bill that quietly grew rather than an error anyone sees. Only an explicit
+    non-negative integer is honoured; ``0`` is the documented off switch.
+    """
+    providers = settings.get("providers") if isinstance(settings, Mapping) else None
+    anthropic = providers.get("anthropic") if isinstance(providers, Mapping) else None
+    configured = (
+        anthropic.get("cache_ttl_1h_min_context_tokens") if isinstance(anthropic, Mapping) else None
+    )
+    # ``bool`` is an ``int`` subclass; ``true`` in YAML must not read as 1 token.
+    if isinstance(configured, int) and not isinstance(configured, bool) and configured >= 0:
+        return configured
+    return ANTHROPIC_CACHE_TTL_1H_MIN_CONTEXT_TOKENS
+
+
 # ---------------------------------------------------------------------------
 # stream_fn factory
 # ---------------------------------------------------------------------------
@@ -1699,6 +1727,23 @@ class SessionStreamFn:
         # until first use, and stays None whenever the cache cannot open (a
         # permanent live-fetch miss, never an error). See ``_usage_cache_store``.
         self._usage_cache: "UsageCacheStore | None" = None
+        # The operator's opt-out for the cascade's usage-ranked first pick
+        # travels through here because this is the one place a session parses
+        # ``retry.*``; the store itself defaults to ON and knows nothing about
+        # config. Duck-typed (``getattr``) because the test doubles handed in
+        # as ``auth_store`` implement only the failover protocol.
+        configure_pick = getattr(auth_store, "configure_usage_aware_pick", None)
+        if callable(configure_pick):
+            from local_operator.providers.failover import RetrySettings
+
+            configure_pick(RetrySettings.from_settings(settings).usage_aware_account_pick)
+        # Deliberately NO prompt-cache TTL hint memory (or reader registry)
+        # here: subagents share the parent's stream fn (``harness/subagent.py``),
+        # so any per-conversation state held on this object — even a
+        # registered reader — is last-writer-wins between the parent and every
+        # child. ``ChatRequest.context_tokens_hint`` is stamped by the call's
+        # OWNER (the harness loop, or the session for its direct calls) and
+        # ``__call__`` only passes it through.
 
     def _client_for(self, spec: ModelSpec) -> WireClient:
         from local_operator.providers.clients import client_for_spec
@@ -1707,6 +1752,9 @@ class SessionStreamFn:
             spec,
             http_client=self._http,
             openai_api=_openai_api_mode(self._settings),
+            anthropic_cache_ttl_1h_min_context_tokens=_anthropic_cache_ttl_1h_min_context_tokens(
+                self._settings
+            ),
         )
 
     @property
@@ -3416,6 +3464,12 @@ class SessionStreamFn:
             # * the session's prompt cache key, which identifies a request
             #   PREFIX. The naming call's prefix is a different system block, so
             #   sharing the key buys no hit and dirties the turn's cache entry.
+            #
+            # The prompt-cache TTL hint needs no guard here: it rides the
+            # request itself (``ChatRequest.context_tokens_hint``), stamped by
+            # the conversation's owner, and an errand's request is built
+            # without one — the client's byte estimate of its tiny body
+            # decides, so it never goes out at the 1h write rate.
             async for event in self._record_stream(
                 request,
                 stream_with_failover(
@@ -3621,6 +3675,7 @@ class SessionStreamFn:
                     output_tokens=int(usage.output_tokens),
                     cache_read_tokens=int(usage.cache_read_tokens),
                     cache_write_tokens=int(usage.cache_write_tokens),
+                    cache_write_1h_tokens=int(getattr(usage, "cache_write_1h_tokens", 0)),
                     reasoning_tokens=int(getattr(usage, "reasoning_tokens", 0)),
                     context_tokens=int(context_tokens or 0),
                     component_chars=component_chars,

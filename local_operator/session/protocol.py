@@ -206,11 +206,16 @@ class SessionProtocol(Protocol):
         the conversation, no events. ``turns`` are appended for this request
         only, which is how a caller supplies the side question itself (and any
         in-flight assistant text it is painting but the context does not carry
-        yet). No tools.
+        yet). No tool is ever executed: the live tool schema rides along only
+        to keep the request on the working turn's cache prefix, and a
+        ``tool_use`` block in the answer is inert.
 
         It is NOT free: the request carries the whole conversation. Nothing is
         recorded, so ``on_usage`` reports the provider's own figures to
-        whatever the host counts spend with.
+        whatever the host counts spend with. It fires once per provider call,
+        and an aside may make two — when the answer was a bare tool call with
+        no text, the implementation retries once without tools — so a host
+        must SUM the callbacks, not keep the last; both calls were billed.
 
         Backs the TUI's ``/btw`` aside overlay. The no-trace guarantee is the
         feature: dismissing the overlay must leave the conversation, and the

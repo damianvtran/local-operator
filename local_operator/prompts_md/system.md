@@ -138,8 +138,10 @@ prompt states the TASK and the role supplies how that work is done well. Use
 role's guidance proves wrong, fix it with the `agent` tool rather than
 patching one prompt. `effort` picks a configured model tier.
 `jobs` lists what is running and `wait` blocks for a result — it returns the
-moment work settles, so prefer one generous wait over repeated short ones, and
-pass a LIST of job ids to wake on the first of several to finish. A
+moment work settles, so size ONE `wait_ms` to the whole job as the tool's
+description spells out (up to 60 minutes; an expired wait means check on the
+job, not re-poll), and pass a LIST of job ids to wake on the first of several
+to finish. A
 running subagent is not out of reach: `hub op='peek'` reads its transcript
 (ranged, so it stays cheap — usually the last few steps) to see what it is
 doing without spending its attention, which is the fast way to check on a

@@ -374,6 +374,20 @@ SETTINGS: tuple[Setting, ...] = (
             Choice("chat_completions", "chat_completions", "explicit compatibility opt-out"),
         ),
     ),
+    Setting(
+        key="providers.anthropic.cache_ttl_1h_min_context_tokens",
+        path=("providers", "anthropic", "cache_ttl_1h_min_context_tokens"),
+        section="model",
+        label="Anthropic 1h cache above (tokens)",
+        kind=Kind.INT,
+        default=150_000,
+        help=(
+            "Context size from which Anthropic requests use the 1-hour prompt-cache "
+            "TTL (2x write cost, survives idle gaps over 5 minutes). 0 disables."
+        ),
+        minimum=0,
+        maximum=10_000_000,
+    ),
     # -- failover -----------------------------------------------------------
     Setting(
         key="retry.enabled",
@@ -448,6 +462,19 @@ SETTINGS: tuple[Setting, ...] = (
         default=False,
         help="Switch before a quota runs out. Costs one quota request per user message.",
         choices=_bool_choices("check quota at message boundaries", "only react to failures"),
+    ),
+    Setting(
+        key="retry.usageAwareAccountPick",
+        path=("retry", "usageAwareAccountPick"),
+        section="failover",
+        label="Usage-aware account pick",
+        kind=Kind.BOOL,
+        default=True,
+        help=(
+            "Start new sessions on the same-provider account with the most quota left, "
+            "read from the cached /usage report. Applies to sessions only."
+        ),
+        choices=_bool_choices("prefer the least-loaded account", "spread by session hash only"),
     ),
     Setting(
         key="retry.usageReservePercent",

@@ -80,6 +80,23 @@ _PANE_WIDTH = 34
 #: which is why this is keyed on the interaction rather than on the stored type.
 _TEXT_EDITABLE_KINDS = frozenset({Kind.INT, Kind.FLOAT, Kind.TEXT, Kind.LIST})
 
+#: Row kinds that are ATTACHED to the row above them: painted underneath it,
+#: unreachable by the cursor, and meaningless on their own. The scroll model
+#: treats a row and its attached rows as ONE visual unit, so revealing the row
+#: reveals the line that explains it (see `_attached_bottom`).
+#:
+#: An ALLOW-list for the reason `_TEXT_EDITABLE_KINDS` is one: a kind added to
+#: `_build_rows` without a deliberate decision here keeps the plain
+#: one-row-one-line behaviour instead of silently joining a neighbour's unit and
+#: dragging the viewport with it. `suggest` is deliberately EXCLUDED even though
+#: it is unselectable and sits directly under its setting: the dropdown is up to
+#: `_SUGGEST_ROWS` tall, is browsed by its own `_suggest_index` highlight rather
+#: than by `_selected`, and is already scrolled by `_scroll_to_expansion` —
+#: anchoring the viewport to its last row would let an opened dropdown push the
+#: edited row itself off the top, which is the collision this page's scroll
+#: model exists to prevent.
+_ATTACHED_KINDS = frozenset({"empty"})
+
 #: Setting keys whose free-text editor is augmented with a filtered suggestion
 #: dropdown and inline ghost text. Both remain ordinary `Kind.TEXT` settings —
 #: the suggestions ASSIST, they do not constrain, so a custom endpoint id the
@@ -900,6 +917,25 @@ class SettingsView(Vertical):
         if height <= 0:
             return
         offset = self._body.scroll_offset.y
+        # The cursor's claim is on its whole VISUAL UNIT, not on its one line.
+        # Some settings carry an ATTACHED trailing row that only makes sense
+        # beside the row it belongs to — today the cascade's `empty` line, which
+        # is the page's only statement of WHY a value looks wrong and how to fix
+        # it (`malformed cascade — press r to clear it`). Scrolling that line off
+        # the bottom leaves a user staring at the broken row with the
+        # explanation one keypress away and no sign it exists, which is the same
+        # "the frame contradicts itself" defect the malformed-cascade work was
+        # for (UX round 1, U1/U2) reopened through the scroll model.
+        #
+        # It is computed rather than declared per row because the trigger is
+        # positional: this reappeared only when PR #533's `Usage-aware account
+        # pick` and PR #532's `Anthropic 1h cache above` rows both landed above
+        # the cascade and pushed its warning from body index 15 to 16 — one line
+        # past a 16-row fold. Neither PR touched this page. Any future row added
+        # anywhere above an attached pair would re-break it the same way, so the
+        # unit is derived from the row list every time instead of from
+        # coordinates that were only ever true at one list length.
+        bottom = self._attached_bottom(self._selected)
         # Scroll far enough to show the row's own SECTION HEADER, not just the
         # row. Headers are unselectable, so travelling to the first row of the
         # page settled at `scroll_y=1` with the `Model` header one line off the
@@ -922,8 +958,41 @@ class SettingsView(Vertical):
                 top -= 1
         if top < offset:
             self._body.scroll_to(y=top, animate=False, immediate=immediate)
-        elif self._selected >= offset + height:
-            self._body.scroll_to(y=self._selected - height + 1, animate=False, immediate=immediate)
+        elif bottom >= offset + height:
+            # The SELECTED row still wins when the unit is taller than the
+            # viewport: an explanation painted without the row it explains is
+            # the same orphan in the other direction. `max` with the selected
+            # row's own bottom-anchor is what keeps this a no-op whenever the
+            # attached row already fits, so a page that was fine does not move.
+            target = max(bottom - height + 1, 0)
+            target = min(target, self._selected)
+            self._body.scroll_to(y=target, animate=False, immediate=immediate)
+
+    def _attached_bottom(self, index: int) -> int:
+        """Last row index of the visual unit that starts at ``index``.
+
+        An ATTACHED row is a non-selectable row painted directly under the row
+        it describes, and it is part of that row's meaning rather than a
+        neighbour — the cascade's ``empty`` line states why the value column
+        looks the way it does and which key repairs it. The cursor cannot land
+        on one (see :attr:`_Row.selectable`), so nothing else in the movement
+        model would ever bring it on screen, and reading the broken row without
+        it is how a #440 victim ends up with no explanation at all.
+
+        Bounded by ``_ATTACHED_KINDS`` rather than by "not selectable", which is
+        what keeps this from annexing unrelated content: a ``header`` belongs to
+        the section BELOW it, and a ``suggest`` dropdown is its own browsable
+        list. ``choice``/``hop`` groups are selectable and so are untouched here
+        — an OPENED group is :meth:`_scroll_to_expansion`'s business, and two
+        rules driving the same offset is the collision this page's scroll model
+        already documents.
+        """
+        bottom = index
+        for probe in range(index + 1, len(self._rows)):
+            if self._rows[probe].kind not in _ATTACHED_KINDS:
+                break
+            bottom = probe
+        return bottom
 
     def _reveal_cursor(self) -> None:
         """Bring the cursor into view BEFORE a key acts on it.

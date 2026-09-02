@@ -39,12 +39,14 @@ from local_operator.harness.types import (
     StreamEvent,
     StreamTextDelta,
     StreamToolCallDelta,
+    StreamUsageEvent,
     TextContent,
     ToolCallComposeEvent,
     ToolContext,
     ToolExecutionEndEvent,
     ToolExecutionStartEvent,
     ToolResult,
+    Usage,
 )
 from local_operator.providers.failover import ProviderError
 
@@ -1385,6 +1387,76 @@ class TestTheModelIsReadAtEveryCall:
             pass
 
         assert self._labels(stream) == ["test/m", "test/m"]
+
+
+class TestTheContextHintIsStampedPerRequestByTheLoop:
+    """``ChatRequest.context_tokens_hint`` is stamped by the LOOP, per call.
+
+    The hint picks the Anthropic prompt-cache TTL, and the loop is the owner
+    of the conversation its calls belong to. Two contracts (review F8/F9):
+    the host's ``get_context_tokens_hint`` is only the cross-turn SEED, and
+    once a call in this run reports ``Usage.context_tokens`` that count wins
+    for the rest of the run — a subagent is one turn for its whole life, and
+    a tool loop crosses the threshold long before the host's figure moves.
+    """
+
+    @staticmethod
+    def _three_call_stream(reported: list[int | None]) -> ScriptedStream:
+        def turn(context: int | None, more: bool) -> list[StreamEvent]:
+            events: list[StreamEvent] = []
+            if more:
+                events.append(tool_call_delta(0, id="c", name="echo", args="{}"))
+            if context is not None:
+                events.append(StreamUsageEvent(usage=Usage(input_tokens=1, context_tokens=context)))
+            events.append(StreamEndEvent(stop_reason="toolUse" if more else "stop"))
+            return events
+
+        return ScriptedStream(
+            [turn(reported[0], True), turn(reported[1], True), turn(reported[2], False)]
+        )
+
+    @staticmethod
+    def _hints(stream: ScriptedStream) -> list[int | None]:
+        return [r.context_tokens_hint for r in stream.requests]
+
+    async def _run(self, stream: ScriptedStream, **kwargs: Any) -> None:
+        executed: list[str] = []
+        context = LoopContext(system_blocks=["sys"], tools=[echo_tool(executed)])
+        async for _ in AgentLoop().run(
+            [Message.user("go")], context, make_config(stream, **kwargs), None
+        ):
+            pass
+
+    @pytest.mark.asyncio
+    async def test_the_seed_covers_the_first_call_and_in_run_counts_take_over(self):
+        """Call 1 carries the host's seed; call N+1 carries what call N reported."""
+        stream = self._three_call_stream([160_000, 170_000, 180_000])
+
+        await self._run(stream, get_context_tokens_hint=lambda: 140_000)
+
+        assert self._hints(stream) == [140_000, 160_000, 170_000]
+
+    @pytest.mark.asyncio
+    async def test_without_a_seed_the_first_call_is_unstamped(self):
+        """No host callback (a subagent's first request, a bare embedder): the
+        client's own estimate decides call 1, and the run still learns its
+        size from call 1's report — the case the turn-boundary-only update
+        never covered."""
+        stream = self._three_call_stream([160_000, 170_000, 180_000])
+
+        await self._run(stream)
+
+        assert self._hints(stream) == [None, 160_000, 170_000]
+
+    @pytest.mark.asyncio
+    async def test_a_call_that_reports_no_count_keeps_the_last_one(self):
+        """A wire that omits ``context_tokens`` must not blank the hint —
+        that would send a large context out at 5m by the byte estimate."""
+        stream = self._three_call_stream([160_000, None, 180_000])
+
+        await self._run(stream, get_context_tokens_hint=lambda: None)
+
+        assert self._hints(stream) == [None, 160_000, 160_000]
 
 
 # ---------------------------------------------------------------------------

@@ -895,6 +895,12 @@ def _accumulate_usage(job: Any, usage: "Usage | None") -> None:
     total.output_tokens += usage.output_tokens
     total.cache_read_tokens += usage.cache_read_tokens
     total.cache_write_tokens += usage.cache_write_tokens
+    # The TTL split of the write count folds exactly where the write count
+    # does (they are subsets of it; see ``Usage.cache_write_1h_tokens``), so
+    # the job aggregate can price the two rates apart the moment a reader
+    # needs to.
+    total.cache_write_5m_tokens += usage.cache_write_5m_tokens
+    total.cache_write_1h_tokens += usage.cache_write_1h_tokens
     # Child failover can mix provider receipts and table-priced calls. Preserve
     # every original call so the TUI can price each one independently instead of
     # treating one receipt as authoritative for the aggregate token buckets.

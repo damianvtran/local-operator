@@ -111,17 +111,20 @@ SQUEEZE_ROWS = PANEL_HEIGHT_MARGIN + CHROME_ROWS + PANEL_PADDING_ROWS + 2
 
 #: The prompt the side question is wrapped in. Three instructions, each earning
 #: its line: OFF THE RECORD so the model does not treat the question as a new
-#: task and start narrating a plan; no tools because none are sent (the request
-#: carries an empty catalogue and ``tool_choice="none"``) and a model that
-#: tried would produce a tool call nobody executes; and answer-from-context
-#: because the whole reason to ask here rather than in the chat is that the
-#: agent already knows.
+#: task and start narrating a plan; TEXT ONLY because the request does carry
+#: the live tool catalogue (it has to, to stay on the working turn's cache
+#: prefix) and on Anthropic even ``tool_choice`` reads ``auto`` on the wire
+#: (see ``Session.complete_aside``), so the prompt is the model-facing half of
+#: "calls nothing" and a call it makes anyway is discarded unread; and
+#: answer-from-context because the whole reason to ask here rather than in the
+#: chat is that the agent already knows.
 ASIDE_PROMPT = """<aside>
 The user has stepped aside to ask you something about this session. This is OFF
 THE RECORD: neither their question nor your answer joins the conversation, and
 no work is being asked for. Answer from the context you already have, briefly
-and directly, in prose. Do not use tools, do not propose a plan, and do not ask
-a follow-up question. If your context does not answer it, say so plainly.
+and directly, in prose. Answer in text only: do not call any tool (a tool call
+here is discarded unread), do not propose a plan, and do not ask a follow-up
+question. If your context does not answer it, say so plainly.
 Question:
 {question}
 </aside>"""

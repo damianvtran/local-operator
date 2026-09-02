@@ -39,6 +39,7 @@ class _Peer:
     def __init__(self) -> None:
         self._event = asyncio.Event()
         self._count = 0
+        self._arrivals: dict[str, int] = {}
 
     def event(self) -> asyncio.Event:
         return self._event
@@ -46,8 +47,12 @@ class _Peer:
     def count(self) -> int:
         return self._count
 
-    def mark(self) -> None:
+    def arrivals(self) -> dict[str, int]:
+        return dict(self._arrivals)
+
+    def mark(self, kind: str = "peer_message") -> None:
         self._count += 1
+        self._arrivals[kind] = self._arrivals.get(kind, 0) + 1
         self._event.set()
 
 
@@ -65,8 +70,9 @@ async def _wait(context: ToolContext, signal: AbortSignal | None = None, **args:
 
 @pytest.mark.asyncio
 async def test_a_peer_message_wakes_a_blocking_wait() -> None:
-    """The headline fix: a mailbox delivery returns the wait in ~0s, not in
-    300s, and the model keeps the job id so it can re-issue the wait."""
+    """The headline fix: a mailbox delivery returns the wait in ~0s, not at
+    the budget's deadline (now up to an hour), and the model keeps the job id
+    so it can re-issue the wait."""
     manager = AsyncJobManager()
     peer = _Peer()
     context = ToolContext(cwd=".", jobs=manager, peer_arrival=peer)

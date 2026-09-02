@@ -7137,14 +7137,28 @@ class WaitParams(BaseModel):
         )
     )
     wait_ms: int = Field(
-        default=300_000,
+        # The ceiling and the default are sized to the work agents actually
+        # await, not to a round-trip latency. Measured on this host's own
+        # transcripts (30 h, Anthropic only): the old 300 000 ms cap made an
+        # agent awaiting a CI pipeline (8-20 min) or a long subagent (30-90
+        # min) poll every five minutes - 1 488 wait-only model calls in 877
+        # consecutive chains, 434 of them two or more polls deep (up to 12).
+        # Every poll re-sends the full context, and any poll landing after the
+        # provider's 5-minute prompt-cache TTL rewrites the whole prefix: one
+        # wait per chain would have saved 762 round trips (~207 M context
+        # tokens) and 69 cache rewrites (20.8 M cache-write tokens, 8.7% of
+        # all cache writes). A long budget strands nothing because the wait
+        # is already interruptible: it returns on job settle, peer message
+        # and steer (see ``execute_wait``), and the abort signal cuts it.
+        # 60 min covers the longest subagent runs observed; 10 min is the
+        # default because it spans a typical CI run without a second call.
+        default=600_000,
         gt=0,
-        le=300_000,
-        description=(
-            "Max ms to block before reporting back (capped at 300000). The "
-            "call returns as soon as a job settles, so a generous budget costs "
-            "nothing when the work finishes early."
-        ),
+        le=3_600_000,
+        # The sizing rule lives ONCE, in the tool description below: the two
+        # are shipped together in every schema, so repeating it here bought
+        # nothing but ~80 tokens on every turn (review round 1, R1-2).
+        description="Max ms to block, up to 3600000 (60 min). Size it to the work.",
     )
 
 
@@ -7285,6 +7299,20 @@ def build_task_tool(context: ToolContext) -> AgentTool | None:
     )
 
 
+#: What ``wait`` tells the model for each kind of inbound arrival that woke it,
+#: keyed by the producer's ``CustomMessage.custom_type``. Spelled as literals
+#: rather than imported: ``session.session`` and ``harness.comms`` both import
+#: this module, so naming ``PEER_MESSAGE_MESSAGE_TYPE`` / ``WAKE_PROMPT_MESSAGE_TYPE``
+#: / ``HUB_MESSAGE_TYPE`` here would be a cycle. ``test_wait_budget.py`` pins
+#: the three keys against the real constants so a rename cannot silently
+#: demote a kind to the generic fallback wording.
+_ARRIVAL_NOTES: dict[str, str] = {
+    "peer_message": "a message arrived from another session",
+    "wake_prompt": "a scheduled wake fired — read the reminder before re-waiting",
+    "hub_message": "a hub message arrived from a subagent or your parent",
+}
+
+
 @_guard("wait")
 async def execute_wait(
     tool_call_id: str,
@@ -7361,16 +7389,27 @@ async def execute_wait(
     peer = context.peer_arrival if context is not None else None
     peer_event = peer.event() if peer is not None else None
     peer_seen = peer.count() if peer is not None else 0
+    # The per-kind snapshot rides the same atomic window as the count: it is
+    # only ever DIFFED against the live tally after a wake, so the model can
+    # be told which producer woke it (peer message, scheduled wake, hub note)
+    # rather than blaming every wake on a peer.
+    peer_kinds_seen = dict(peer.arrivals()) if peer is not None else {}
     if peer_event is not None:
         peer_event.clear()
 
-    def _peer_interrupt(reason: str) -> ToolResult:
-        """The still-running payload for a wait cut short by a peer/steer.
+    def _peer_interrupt(reason: str, arrivals: dict[str, int] | None = None) -> ToolResult:
+        """The still-running payload for a wait cut short by a message/steer.
 
         Deliberately the SAME shape the deadline branch returns, so the model
         gets the job id and status back and can simply re-issue the wait. The
         jobs are untouched: nothing is cancelled and, critically, nothing is
         consumed, so auto-delivery still hands over the result later.
+
+        ``arrivals`` is the per-kind count of what landed during the park
+        (``reason == "inbound"``). The kinds are the producers' message
+        types, so the note can say "a scheduled wake fired" for the user's
+        reminder and "a subagent/parent hub message" for a child speaking up,
+        and the model knows what to read before re-issuing the wait.
         """
 
         running = _still_running()
@@ -7378,20 +7417,29 @@ async def execute_wait(
         # the model actually reads, so rendering "steering" for a cancel we
         # cannot attribute would keep the mislabelled claim alive in the one
         # place it matters (review finding N1).
-        note = (
-            "a message arrived from another session"
-            if reason == "peer_message"
-            else "the wait was cancelled"
-        )
+        details: dict[str, Any] = {
+            "job_id": (running or job_ids)[0],
+            "status": "running",
+            "interrupted_by": reason,
+        }
+        if reason == "inbound":
+            kinds = arrivals or {}
+            notes = [_ARRIVAL_NOTES.get(kind, f"a {kind} message arrived") for kind in kinds]
+            note = "; ".join(notes) or _ARRIVAL_NOTES["peer_message"]
+            # One kind is the common case, and naming it keeps the existing
+            # machine contract (``interrupted_by == "peer_message"``) intact
+            # for peer-only wakes; several at once stay "inbound" and the
+            # breakdown rides ``arrivals``.
+            if len(kinds) == 1:
+                details["interrupted_by"] = next(iter(kinds))
+            details["arrivals"] = dict(kinds)
+        else:
+            note = "the wait was cancelled"
         return _text(
             tool_call_id,
             "wait",
             f"job {', '.join(running or job_ids)} still running ({note})",
-            details={
-                "job_id": (running or job_ids)[0],
-                "status": "running",
-                "interrupted_by": reason,
-            },
+            details=details,
         )
 
     job = _settled()
@@ -7456,7 +7504,12 @@ async def execute_wait(
         # turn-safe boundary.
         job = _settled()
         if job is None and peer is not None and peer.count() > peer_seen:
-            return _peer_interrupt("peer_message")
+            arrivals = {
+                kind: total - peer_kinds_seen.get(kind, 0)
+                for kind, total in peer.arrivals().items()
+                if total > peer_kinds_seen.get(kind, 0)
+            }
+            return _peer_interrupt("inbound", arrivals)
         if job is None and all(jobs.get(job_id) is None for job_id in job_ids):
             return _error(tool_call_id, "wait", f"job {', '.join(job_ids)} disappeared")
     # Handing the result to the model HERE means auto-delivery must not
@@ -7504,11 +7557,11 @@ async def _await_any_settled(
     The ABORT is raced alongside the settle events, not checked between
     sleeps. The old 50 ms poll re-read ``signal.aborted`` on every tick, so
     parking on the settle events alone silently made the abort branch dead for
-    a job that never settles: an aborted wait sat for its whole budget (up to
-    five minutes) instead of returning. The TUI masks that through its own
-    interruptible-tool poll, but that is a different mechanism and does not
-    cover deadline-tripped signals or non-TUI embedders relying on the
-    documented ``AbortSignal`` contract.
+    a job that never settles: an aborted wait sat for its whole budget (then
+    five minutes, now up to an hour) instead of returning. The TUI masks that
+    through its own interruptible-tool poll, but that is a different mechanism
+    and does not cover deadline-tripped signals or non-TUI embedders relying
+    on the documented ``AbortSignal`` contract.
 
     Falls back to the poll loop when the manager predates ``settled_event``
     (a third-party job manager satisfying the older protocol must keep
@@ -7566,11 +7619,19 @@ def build_wait_tool(context: ToolContext) -> AgentTool | None:
     return AgentTool(
         name="wait",
         label="Wait for job",
+        # This description is the ONE place the sizing rule is stated in full
+        # (system.md points here; the agents guide carries the why). The
+        # model reads it at decision time, which is where the rule has to be.
         description=(
             "Block until a background job settles (or wait_ms elapses), returning "
             "its final output/status. Pass a LIST of job ids to wake on the first "
-            "one to finish. Returns the moment work settles, so prefer one "
-            "generous wait over repeated short ones."
+            "one to finish. Returns the moment work settles, a message arrives "
+            "(peer, scheduled wake, subagent), or you are steered, so SIZE THE "
+            "BUDGET TO THE WORK: estimate how long the job should take (CI run, "
+            "review, build) and wait for all of it in one call, up to 60 min; "
+            "an expired wait means check on the job, not re-poll. Short budgets "
+            "only to manage progress mid-run (a training loop), with `jobs "
+            "op='peek'` between them."
         ),
         parameters=WaitParams.model_json_schema(),
         # read-only observation of job state; blocks the turn but changes nothing.
