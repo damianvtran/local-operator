@@ -100,6 +100,7 @@ from local_operator.harness.types import (
     SteeringDeliveredEvent,
     StreamEvent,
     StreamTextDelta,
+    StreamToolCallDelta,
     StreamUsageEvent,
     TextContent,
     ToolCall,
@@ -264,13 +265,20 @@ class _PeerArrival:
     would drop exactly that message, and the resulting lost wakeup would delay
     delivery by a whole turn while looking intermittent. Do not "simplify"
     this to a bare Event.
+
+    Three producers share it (see ``PeerArrivalProtocol``): the peer receive
+    path, the busy-turn wake delivery, and a child's ``hub`` note. The
+    per-kind tally exists only so the woken tool can say which one it was;
+    every kind still bumps the single ``count`` the consumer compares, so
+    adding a kind never needs a consumer change.
     """
 
-    __slots__ = ("_event", "_count")
+    __slots__ = ("_event", "_count", "_arrivals")
 
     def __init__(self) -> None:
         self._event = asyncio.Event()
         self._count = 0
+        self._arrivals: dict[str, int] = {}
 
     def event(self) -> asyncio.Event:
         return self._event
@@ -278,10 +286,16 @@ class _PeerArrival:
     def count(self) -> int:
         return self._count
 
-    def mark(self) -> None:
-        """Record an arrival and wake anything parked on it."""
+    def arrivals(self) -> Mapping[str, int]:
+        # A copy: the consumer keeps its snapshot across an await, and the
+        # producer keeps incrementing the live dict underneath it.
+        return dict(self._arrivals)
+
+    def mark(self, kind: str = PEER_MESSAGE_MESSAGE_TYPE) -> None:
+        """Record an arrival of ``kind`` and wake anything parked on it."""
 
         self._count += 1
+        self._arrivals[kind] = self._arrivals.get(kind, 0) + 1
         self._event.set()
 
 
@@ -1392,6 +1406,13 @@ class Session:
             # is actually serving requests, the session persists that fact and
             # emits the event a front end repaints its model display from.
             route_bridge(self._on_route_settled)
+        # Deliberately NO bridge for the prompt-cache TTL hint, unlike the two
+        # above: the stream fn is SHARED with subagents, so a registered reader
+        # is last-writer-wins — constructing a child overwrote the parent's
+        # reader for good and downgraded every later parent request to 5m
+        # (review F8). The hint rides each request instead, stamped by its
+        # owner: the loop reads ``get_context_tokens_hint`` for turn calls and
+        # the session's direct calls stamp ``_context_tokens_hint`` themselves.
         self._tools = list(tools)
         self._transcript = transcript
         self._session_id = session_id or transcript.directory.name
@@ -1624,6 +1645,22 @@ class Session:
         # ``Transcript.usages_since_compaction`` and ``_last_reported_usage``).
         self._last_usage: Usage | None = _last_reported_usage(
             [_parsed_usage(payload) for payload in transcript.usages_since_compaction()]
+        )
+        # The per-conversation prompt-cache TTL hint (see
+        # ``ChatRequest.context_tokens_hint``): the provider-reported context
+        # size of THIS session's last turn call, excluding isolated errands
+        # (their tiny prefix is not this conversation) and one-shots that do
+        # not carry the conversation (their prompt is a different, write-once
+        # prefix — see ``_one_shot_complete``). Moves in lockstep with
+        # ``_last_usage`` (see ``_note_usage``) so a hint is never staler than
+        # the compaction trigger's figure, and is stamped per request by the
+        # call's owner: the loop seeds its run from it and then prefers its
+        # own in-run counts; asides and the advisor stamp it directly. Seeded
+        # from the transcript's last usage so a RESUMED large session starts on
+        # its real size instead of re-deriving it through the client's byte
+        # estimate. ``None`` until the first provider call reports one.
+        self._context_tokens_hint: int | None = (
+            self._last_usage.context_tokens if self._last_usage is not None else None
         )
         self._last_activity_ms: int = 0  # epoch ms; drives idle-flush pruning
         self._generation = 0  # monotonic turn counter for agent_start/end
@@ -4216,6 +4253,27 @@ class Session:
 
     # -- context accounting ---------------------------------------------------
 
+    def _note_usage(self, messages: Sequence[AgentMessage]) -> None:
+        """Adopt the newest provider usage in ``messages`` as this
+        conversation's latest reading — ONE place for both the compaction
+        trigger's figure (``_last_usage``) and the prompt-cache TTL hint.
+
+        Both the post-run scan and the mid-turn boundary hook go through
+        here, so the hint can never lag the usage the way it did when only
+        the turn boundary moved it (review F9): the hint is what the next
+        request of THIS turn (an aside, the advisor) and the NEXT turn's
+        first call are stamped with. The hint only ADVANCES on a reported
+        count — a wire that omits ``context_tokens`` keeps the previous
+        figure rather than blanking it and sending a large context out at
+        the 5m TTL by the byte estimate.
+        """
+        for message in reversed(messages):
+            if isinstance(message, Message) and message.usage is not None:
+                self._last_usage = message.usage
+                if message.usage.context_tokens:
+                    self._context_tokens_hint = int(message.usage.context_tokens)
+                return
+
     def restored_usage(self) -> Usage | None:
         """The provider's own last reading for THIS conversation, or ``None``.
 
@@ -4691,6 +4749,12 @@ class Session:
                 # waiting for another user message. The loop keeps the turn-start
                 # snapshot as a fallback if this host resolver ever fails.
                 get_system_blocks=self._system_blocks,
+                # Cross-turn seed for the prompt-cache TTL hint: the loop stamps
+                # it on the run's first request and then prefers the counts its
+                # own calls report. Lives here — not on the shared stream fn —
+                # so a subagent's calls cannot contaminate this session's hint;
+                # see ``LoopConfig.get_context_tokens_hint``.
+                get_context_tokens_hint=lambda: self._context_tokens_hint,
                 convert_to_llm=self._render_history,
                 stream_fn=self._stream_fn,
                 get_steering_messages=self._drain_steering,
@@ -4776,11 +4840,9 @@ class Session:
                 if is_todo_end and self._job_id is not None and self._subagent_comms is not None:
                     self._subagent_comms.notify_detail_persisted(self._job_id)
 
-            # Track the latest provider usage for compaction trigger math.
-            for message in reversed(new_messages):
-                if isinstance(message, Message) and message.usage is not None:
-                    self._last_usage = message.usage
-                    break
+            # Track the latest provider usage for compaction trigger math (and
+            # the TTL hint that rides with it).
+            self._note_usage(new_messages)
             self._last_activity_ms = int(time.time() * 1000)
             # The run just completed provider round-trips; the idle flush
             # measures provider-cache age from this stamp, not turn
@@ -5441,6 +5503,18 @@ class Session:
             return message
 
         self._aside_thunks.append(_wrapped)
+        # Every aside is a ``hub`` message for this session's model (a child's
+        # unprompted "I am blocked" to its parent, or a parent's note/question
+        # to a child), and the injection boundary that materializes it is
+        # exactly where a parked `wait` returns to. Without this mark the
+        # note sits in the thunk list until the wait's budget expires, and a
+        # child that speaks up early — which its system prompt tells it to —
+        # goes unheard for up to an hour. AFTER the append: the woken tool
+        # returns into _drain_asides, which must find the thunk already there.
+        # A thunk that later withdraws itself (StaleAside) still woke the
+        # wait, which is harmless — the still-running payload just gets
+        # re-issued — and cheaper than teaching the tool about withdrawal.
+        self._peer_arrival.mark(HUB_MESSAGE_TYPE)
 
     async def _todo_continuation(self) -> list[AgentMessage]:
         """The loop's follow-up hook: re-assert open todos at the yield boundary.
@@ -5622,6 +5696,14 @@ class Session:
         # was looking at when they typed the command, rather than a rewritten
         # head they never saw.
         await self._drain_pending_fork()
+        # The post-run usage scan has not happened yet — the boundary
+        # snapshot carries the assistant message that just finished, whose
+        # usage is the provider's ground truth for the trigger math below AND
+        # for the prompt-cache TTL hint a mid-turn aside or advisor call is
+        # stamped with. Unconditional, ahead of the compaction gate: the hint
+        # must track the conversation's size even for a host that switched
+        # mid-turn compaction off.
+        self._note_usage(messages)
         try:
             from local_operator.compaction.api import CompactionSettings
         except ImportError:
@@ -5632,13 +5714,6 @@ class Session:
         # (on), same posture as _resolve_strategy's capability probes.
         if not settings.enabled or not getattr(settings, "mid_turn_enabled", True):
             return None
-        # The post-run usage scan has not happened yet — the boundary
-        # snapshot carries the assistant message that just finished, whose
-        # usage is the provider's ground truth for the trigger math.
-        for message in reversed(messages):
-            if isinstance(message, Message) and message.usage is not None:
-                self._last_usage = message.usage
-                break
         # Cheap pre-gate: when the provider just reported its context size and
         # that figure already fails the trigger, skip the full plan — the
         # plan renders the whole history to prove the same thing, and this
@@ -7247,6 +7322,16 @@ class Session:
             tools=[],
             tool_choice="none",
             replayable=True,
+            # ``0`` is a DELIBERATE hint, not a missing one: this prompt is a
+            # fresh write-once system+transcript prefix, not the turn's cached
+            # prefix, so a 1h entry (2x write rate) buys nothing — it is never
+            # replayed except a stall retry. Inheriting the session's large
+            # pre-compaction count here would send a transcript-sized prompt
+            # out at the 1h rate for several dollars of pure overpayment per
+            # compaction. The stream fn passes the request's hint through
+            # untouched, and the Anthropic client treats 0 as below any
+            # threshold.
+            context_tokens_hint=0,
         )
         parts: list[str] = []
         async for event in self._stream_fn(request, None):
@@ -7297,15 +7382,40 @@ class Session:
         change the prefix at position 0 and force the provider to re-process the
         whole conversation at full/cache-write price instead of a cache READ.
         Sending the SAME tool schema the turn sends is what keeps the aside
-        warm against the turn's cached prefix. ``tool_choice="none"`` preserves
-        the "reads the turn, calls nothing" contract on every wire (and the
-        Gemini builder is taught to honour it, since it otherwise ignores
-        ``tool_choice`` and non-empty tools would newly ALLOW a call).
+        warm against the turn's cached prefix. ``tool_choice="none"`` states
+        the "reads the turn, calls nothing" intent, and the OpenAI-compatible
+        and Gemini builders put it on the wire literally (Gemini is taught to
+        honour it, since it otherwise ignores ``tool_choice`` and non-empty
+        tools would newly ALLOW a call).
 
-        Caveat: on Anthropic a ``tool_choice`` that differs from the turn's
-        can still invalidate the growing MESSAGE-tail cache while the
-        tools+system HEAD stays warm — the head is the large, stable win here;
-        the tail delta is bounded by the turn's own tail.
+        On Anthropic the wire says ``auto``, NOT ``none``. The prompt-caching
+        docs list ``tool_choice`` as invalidating the MESSAGES level of that
+        provider's cache hierarchy (tools -> system -> messages), which made a
+        differing value the prime suspect for the fleet's head-only cache
+        events; measured live, ``none`` reads the turn's full prefix just as
+        well (``scripts/measure_aside_tool_choice_cache.py``), so the mapping
+        is hygiene against that documented rule rather than a measured saving.
+        The contract is enforced HERE: the loop below consumes text and
+        usage only, never a ``StreamToolCallDelta``, so a ``tool_use`` block
+        in the answer is inert — nothing runs, nothing joins the history. The
+        appended prompts (``ASIDE_PROMPT``, ``LOOP_JUDGE_PROMPT``) also tell
+        the model to answer in text, so the case is rare to begin with.
+
+        The one way that mapping is observable is an answer that is a tool
+        call and NOTHING else — the model "answered" the question by reaching
+        for ``read``. That would surface as an empty answer on the card, which
+        reads as a provider fault. So when the stream carried a tool call and
+        no text, the request is retried once with ``tools=[]``: the tools block
+        is the front of the prefix, so this retry is a full re-process at
+        write price, but it is bounded to that rare case rather than paid on
+        every aside, and it gives the user an answer instead of a blank. An
+        answer that mixes text and a tool call is returned as its text
+        without a retry; the text is what was asked for.
+
+        ``on_usage`` fires once per provider call, so a single aside may
+        deliver TWO usage figures when that retry runs — the first call's
+        (bare tool call, discarded) and the retry's. Both were paid for, so
+        hosts must add them rather than keep the last one.
 
         Safe to call mid-turn, and the pairing below is what makes that true —
         see :meth:`_wire_legal_snapshot`.
@@ -7313,18 +7423,44 @@ class Session:
         blocks = self._system_blocks()
         if inspect.isawaitable(blocks):
             blocks = await blocks
+        messages = self._render_history([*self._wire_legal_snapshot(), *turns])
         request = ChatRequest(
             model=self._model,
             system_blocks=list(blocks),
-            messages=self._render_history([*self._wire_legal_snapshot(), *turns]),
+            messages=messages,
             # Live tools (not []): keep the aside on the SAME cache prefix the
             # working turn builds. See the docstring for why this is a cache
-            # read rather than a full re-process. tool_choice stays "none".
+            # read rather than a full re-process, and why Anthropic puts the
+            # turn's own tool_choice on the wire rather than this "none".
             tools=list(self._context.tools),
             tool_choice="none",
+            # Same prefix as the turn, so the same TTL: the session stamps its
+            # own hint here because the shared stream fn holds none (a child
+            # would overwrite it — see ``ChatRequest.context_tokens_hint``).
+            context_tokens_hint=self._context_tokens_hint,
         )
         parts: list[str] = []
+        called_tool = False
         async for event in self._stream_fn(request, None):
+            if isinstance(event, StreamTextDelta):
+                parts.append(event.delta)
+                if on_delta is not None:
+                    on_delta(event.delta)
+            elif isinstance(event, StreamToolCallDelta):
+                # Inert by design (see the docstring): recorded only so an
+                # answer that was NOTHING BUT a call can be retried below.
+                called_tool = True
+            elif isinstance(event, StreamUsageEvent) and on_usage is not None:
+                on_usage(event.usage)
+        if parts or not called_tool:
+            return "".join(parts)
+        # Tool call and no text: the model tried to act instead of answering.
+        # Retry once with no tools at all — off the cache prefix, but bounded
+        # to this case. ``tools=[]`` never reaches the Anthropic mapping, so
+        # the wire genuinely offers nothing to call.
+        logger.debug("aside answered with a bare tool call; retrying without tools")
+        retry = request.model_copy(update={"tools": []})
+        async for event in self._stream_fn(retry, None):
             if isinstance(event, StreamTextDelta):
                 parts.append(event.delta)
                 if on_delta is not None:
@@ -7372,21 +7508,36 @@ class Session:
         expensive one. The knob would invite users to silently destroy the
         economics that justify the call.
 
-        MEASURED, not assumed (``scripts/measure_advisor_cache.py``, live
-        Anthropic): this request shape reads 96.1% of its prompt from cache
-        (``cache_read=14024``, ``cache_write=568`` for the appended turn).
-        Two findings that shape the code:
+        MEASURED, not assumed. Three findings shape the code, and the third
+        corrected the first two:
 
         - The system blocks are passed through UNCHANGED. The advisor's
           instructions ride inside the appended user turn instead, because
           system sits in the cache prefix ahead of the messages: adding one
-          block there measured 0% cache hit and a full ``cache_write=14590``.
-          The request must stay APPEND-ONLY relative to the turn's prefix.
+          block there measured 0% cache hit and a full ``cache_write=14590``
+          (``scripts/measure_advisor_cache.py``). The request must stay
+          APPEND-ONLY relative to the turn's prefix.
         - On Anthropic, ``isolated=True`` measured 100% cache hit as well,
           because that provider keys caching on prefix CONTENT rather than on
           ``prompt_cache_key``. Isolation is still declined, since the key
           does govern the OpenAI-compatible wire and this method has to be
           correct on every provider a session may be running.
+        - The original 96.1%-hit figure came from a ~14k-token toy
+          conversation whose system+tools head WAS most of the prompt, so it
+          could not distinguish a head-only hit from a full one. The shared
+          context therefore blamed ``tool_choice="none"`` for the fleet's
+          head-only cache events; measured live at ~37k tokens
+          (``scripts/measure_aside_tool_choice_cache.py``), a ``none`` aside
+          reads the turn's full prefix exactly as well as an ``auto`` one, so
+          that attribution did not hold — the fleet events are better
+          explained by 5-minute TTL expiry and per-sub-context prefix
+          extension. The wire still sends the turn's own ``auto`` when tools
+          are present, as hygiene against the documented rule that
+          ``tool_choice`` invalidates the messages cache; the "calls nothing"
+          contract is kept by this method reading only text and usage events.
+          See
+          ``docs/evidence/compaction-advisor/aside-tool-choice-measurement.txt``
+          for the numbers.
         """
         blocks = self._system_blocks()
         if inspect.isawaitable(blocks):
@@ -7402,8 +7553,17 @@ class Session:
             tool_choice="none",
             replayable=True,
             isolated=False,
+            # Append-only on the turn's prefix, so it shares the turn's TTL;
+            # stamped here for the reason ``complete_aside`` gives.
+            context_tokens_hint=self._context_tokens_hint,
         )
         parts: list[str] = []
+        # Text and usage ONLY. A tool-call delta is dropped on the floor: on
+        # Anthropic the wire says ``auto`` (see the docstring), and this is the
+        # half of the contract that guarantees the advisor never acts. No
+        # bare-tool-call retry here, unlike ``complete_aside``: an unparseable
+        # answer is already a handled outcome (``parse_hint`` returns None and
+        # the size trigger stands), and nobody is looking at a blank card.
         async for event in self._stream_fn(request, None):
             if isinstance(event, StreamTextDelta):
                 parts.append(event.delta)
@@ -7950,6 +8110,8 @@ class Session:
             catchup.details["text"] = self._append_busy_resume_note(str(catchup.details["text"]))
             self._courtesy_wake_count += 1
             self._steering_queue.put_nowait(catchup)
+            # Same wake-a-parked-`wait` mark as _deliver_wake, same ordering.
+            self._peer_arrival.mark(WAKE_PROMPT_MESSAGE_TYPE)
             return
         self._spawn_background(self._prompt_messages([catchup]))
 
@@ -8629,6 +8791,17 @@ class Session:
             # of (see _has_urgent_steering).
             self._courtesy_wake_count += 1
             self._steering_queue.put_nowait(wake_message)
+            # Courtesy toward a MUTATING tool, not toward a parked `wait`. A
+            # wake is the user's "remind me", and the agent parked for the
+            # very reason the reminder exists; without this mark a wake
+            # firing inside a long wait is read only when the budget expires
+            # (up to an hour), which is a missed reminder. `wait` returns
+            # with the job still running and the wake text lands at the
+            # boundary the queue above was already headed for. AFTER the
+            # put, for the same lost-wakeup reason receive_peer_message marks
+            # last: the woken tool returns into a drain, and the drain must
+            # find the message already queued.
+            self._peer_arrival.mark(WAKE_PROMPT_MESSAGE_TYPE)
             return
         self._spawn_background(self._prompt_messages([wake_message]))
 

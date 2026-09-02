@@ -32,6 +32,7 @@ from local_operator.harness.types import (
     StreamEvent,
     StreamTextDelta,
     StreamToolCallDelta,
+    StreamUsageEvent,
     TextContent,
     ToolCall,
     ToolResult,
@@ -2641,6 +2642,67 @@ async def test_mid_turn_compaction_disabled_by_setting(tmp_path, monkeypatch):
     assert "mid-turn" not in reasons
     compactions = [e for e in session._transcript.entries() if e.type == "compaction"]
     assert len(compactions) <= 1
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_context_hint_advances_at_every_boundary_even_with_mid_turn_compaction_off(
+    tmp_path,
+):
+    """The prompt-cache TTL hint moves with ``_last_usage`` at the tool-loop
+    boundary, and that update is NOT gated on mid-turn compaction (review
+    F9): with ``mid_turn_enabled=False`` a session's asides and advisor
+    calls during a long tool run would otherwise be stamped with the
+    previous TURN's count. The boundary hook fires AFTER a tool batch lands,
+    so the tool that runs after call 1 still sees no hint, the one after
+    call 2 sees call 1's 200k, and every request the loop builds is stamped
+    from the previous call of the same run.
+    """
+    seen_by_tool: list[int | None] = []
+
+    def call(context_tokens: int, *, more: bool) -> list[StreamEvent]:
+        events: list[StreamEvent] = []
+        if more:
+            events.append(StreamToolCallDelta(index=0, id="c", name="peek", argument_delta="{}"))
+        events.append(
+            StreamUsageEvent(
+                usage=Usage(input_tokens=context_tokens, context_tokens=context_tokens)
+            )
+        )
+        events.append(StreamEndEvent(stop_reason="toolUse" if more else "stop"))
+        return events
+
+    stream = ScriptedStream(
+        [call(200_000, more=True), call(210_000, more=True), call(220_000, more=False)]
+    )
+    holder: dict[str, Session] = {}
+
+    async def peek(tool_call_id, args, signal, on_update, context):
+        seen_by_tool.append(holder["session"]._context_tokens_hint)
+        return ToolResult(
+            tool_call_id=tool_call_id, tool_name="peek", content=[TextContent(text="ok")]
+        )
+
+    tool = AgentTool(name="peek", parameters={"type": "object"}, execute=peek)
+    session = make_session(
+        tmp_path,
+        stream,
+        tools=[tool],
+        compaction_settings=CompactionSettings(mid_turn_enabled=False),
+    )
+    holder["session"] = session
+    assert session._context_tokens_hint is None
+
+    await session.prompt("go")
+
+    # The boundary hook advanced the session's hint after call 1 even though
+    # its compaction half was switched off (the second tool run saw 200k)...
+    assert seen_by_tool == [None, 200_000]
+    # ...the loop stamped each request from the previous call of THIS run, and
+    # the post-run scan left the session on the final count as the next
+    # turn's seed.
+    assert [r.context_tokens_hint for r in stream.requests] == [None, 200_000, 210_000]
+    assert session._context_tokens_hint == 220_000
     await session.dispose()
 
 

@@ -3555,3 +3555,241 @@ async def test_preflight_reuses_stale_row_when_a_peer_holds_the_lease(tmp_path) 
         await stream_a.close()
         await stream_b.close()
         store.close()
+
+
+# ---------------------------------------------------------------------------
+# Anthropic 1h prompt-cache TTL: settings → client, last usage → next request
+# ---------------------------------------------------------------------------
+
+
+def test_anthropic_cache_ttl_threshold_setting_reads_like_openai_api() -> None:
+    """Same resolution rules as ``_openai_api_mode``: missing/malformed → the
+    default, an explicit non-negative int (including the 0 off switch) wins."""
+    from local_operator.model.configure import ANTHROPIC_CACHE_TTL_1H_MIN_CONTEXT_TOKENS
+    from local_operator.model.configure import (
+        _anthropic_cache_ttl_1h_min_context_tokens as read,
+    )
+
+    assert read(None) == ANTHROPIC_CACHE_TTL_1H_MIN_CONTEXT_TOKENS
+    assert read({}) == ANTHROPIC_CACHE_TTL_1H_MIN_CONTEXT_TOKENS
+    assert read({"providers": {"openai": {"api": "responses"}}}) == (
+        ANTHROPIC_CACHE_TTL_1H_MIN_CONTEXT_TOKENS
+    )
+    assert read({"providers": {"anthropic": {"cache_ttl_1h_min_context_tokens": 0}}}) == 0
+    assert read({"providers": {"anthropic": {"cache_ttl_1h_min_context_tokens": 42}}}) == 42
+    for bad in ("150000", -1, True, None, 1.5):
+        assert read({"providers": {"anthropic": {"cache_ttl_1h_min_context_tokens": bad}}}) == (
+            ANTHROPIC_CACHE_TTL_1H_MIN_CONTEXT_TOKENS
+        )
+
+
+def _anthropic_sse(context_tokens: int, *, tool_call: bool = False) -> bytes:
+    """One mocked Anthropic stream whose usage adds up to ``context_tokens``
+    (the client derives ``Usage.context_tokens`` as input + cache read +
+    cache write). ``tool_call`` ends the message in a ``tool_use`` for the
+    ``echo`` tool so the harness loop makes a second call in the SAME turn."""
+    head = (
+        b'data: {"type":"message_start","message":{"usage":{"input_tokens":5,'
+        b'"cache_read_input_tokens":' + str(context_tokens - 5).encode() + b","
+        b'"cache_creation_input_tokens":0}}}\n\n'
+    )
+    if tool_call:
+        return (
+            head + b'data: {"type":"content_block_start","index":0,"content_block":'
+            b'{"type":"tool_use","id":"tu_1","name":"echo"}}\n\n'
+            b'data: {"type":"content_block_delta","index":0,"delta":'
+            b'{"type":"input_json_delta","partial_json":"{\\"text\\":\\"x\\"}"}}\n\n'
+            b'data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},'
+            b'"usage":{"output_tokens":1}}\n\n'
+        )
+    return (
+        head + b'data: {"type":"content_block_start","index":0,"content_block":'
+        b'{"type":"text","text":""}}\n\n'
+        b'data: {"type":"content_block_delta","index":0,"delta":'
+        b'{"type":"text_delta","text":"ok"}}\n\n'
+        b'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},'
+        b'"usage":{"output_tokens":1}}\n\n'
+    )
+
+
+def _cache_markers(body: dict[str, Any]) -> list[dict[str, Any]]:
+    found = [e["cache_control"] for e in body["system"] if "cache_control" in e]
+    for message in body["messages"]:
+        found.extend(b["cache_control"] for b in message["content"] if "cache_control" in b)
+    return found
+
+
+def _echo_tool():
+    from local_operator.harness.types import AgentTool, TextContent, ToolResult
+
+    async def execute(tool_call_id, args, signal, on_update, context):
+        return ToolResult(
+            tool_call_id=tool_call_id, tool_name="echo", content=[TextContent(text="ok")]
+        )
+
+    return AgentTool(
+        name="echo",
+        parameters={"type": "object", "properties": {"text": {"type": "string"}}},
+        execute=execute,
+    )
+
+
+def _anthropic_session(tmp_path, name: str, stream, *, blocks: list[str]):
+    """A real ``Session`` on the real stream fn — the integration under test
+    is the harness loop stamping the hint per request, so nothing here may
+    touch the hint by hand."""
+    from local_operator.session.session import Session
+    from local_operator.session.transcript import Transcript
+
+    return Session(
+        model=build_model_spec("anthropic", "claude-opus-4-8"),
+        stream_fn=stream,
+        tools=[_echo_tool()],
+        transcript=Transcript(tmp_path / name),
+        system_blocks_provider=lambda: blocks,
+    )
+
+
+def _ttl_stream(tmp_path, handler):
+    store = AuthStore(tmp_path / "auth.db")
+    store.upsert_credential("anthropic", {"key": "sk-ant", "source": "login"})
+    settings = {"providers": {"anthropic": {"cache_ttl_1h_min_context_tokens": 150_000}}}
+    stream = create_stream_fn(store, settings, session_id="session-ttl")
+    stream._http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    return store, stream
+
+
+@pytest.mark.asyncio
+async def test_session_stream_feeds_last_context_into_anthropic_ttl(tmp_path) -> None:
+    """The provider's reported context on call N picks the TTL on call N+1 —
+    INSIDE the same turn, not only at the turn boundary (review F9).
+
+    A real ``Session`` drives a real stream fn; nothing sets the hint by
+    hand. Turn 1, call 1 has no hint and a tiny body, so the byte estimate
+    keeps it at 5m even though the threshold is low; the mock answers with
+    a tool call and a 200k context. Call 2 — same turn, after the tool ran
+    — goes out with ``ttl: 1h`` on every marker: a subagent is one turn for
+    its whole life and a long tool loop crosses the threshold mid-run, so a
+    hint advanced only at the turn edge would never reach either. An
+    isolated errand (``complete_once``) between the turns neither reads nor
+    moves the hint: its own body decides (5m) and its SMALL report (5k)
+    does not enter the conversation, so turn 2's first call still goes 1h
+    on the session's own 200k. Dropping the isolation guard would have to
+    fail this test, not leave it green.
+    """
+    bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        bodies.append(body)
+        # The errand is the one request without the turn's tool schema (it
+        # carries no tools and no history). Deliberately DIFFERENT counts:
+        # 200k for the turn, 5k for the errand — a mock that reports the same
+        # figure for every call cannot prove the errand was excluded.
+        errand = not body.get("tools")
+        content = (
+            _anthropic_sse(5_000) if errand else _anthropic_sse(200_000, tool_call=len(bodies) == 1)
+        )
+        return httpx.Response(200, content=content, headers={"content-type": "text/event-stream"})
+
+    store, stream = _ttl_stream(tmp_path, handler)
+    session = _anthropic_session(
+        tmp_path, "sess", stream, blocks=["instructions", "inventory", "skills", "env"]
+    )
+    try:
+        await session.prompt("first")
+        await session.complete_once("name it", "title?")
+        await session.prompt("second")
+    finally:
+        await session.dispose()
+        await stream.close()
+        store.close()
+
+    assert len(bodies) == 4
+    # Turn 1 / call 1: no hint yet, tiny body → 5m by the estimate.
+    assert _cache_markers(bodies[0]) and all(
+        m == {"type": "ephemeral"} for m in _cache_markers(bodies[0])
+    )
+    # Turn 1 / call 2 (after the tool ran): call 1 reported 200k → 1h NOW.
+    assert bodies[1]["messages"][-1]["content"][0]["type"] == "tool_result"
+    assert _cache_markers(bodies[1]) and all(
+        m == {"type": "ephemeral", "ttl": "1h"} for m in _cache_markers(bodies[1])
+    )
+    # Isolated errand: the session's hint says 200k, but its request carries
+    # none and its small body stays 5m by the estimate.
+    assert not bodies[2].get("tools")
+    assert [b["text"] for m in bodies[2]["messages"] for b in m["content"]] == ["title?"]
+    assert all(m == {"type": "ephemeral"} for m in _cache_markers(bodies[2]))
+    # Turn 2 / call 1: the conversation's own 200k (the errand's 5k never
+    # entered it) → 1h on every marker.
+    assert _cache_markers(bodies[3]) and all(
+        m == {"type": "ephemeral", "ttl": "1h"} for m in _cache_markers(bodies[3])
+    )
+    assert session._context_tokens_hint == 200_000
+
+
+@pytest.mark.asyncio
+async def test_session_stream_hint_is_per_conversation_not_per_stream_fn(
+    tmp_path,
+) -> None:
+    """A parent and a subagent share ONE stream fn but not ONE hint (F1/F8).
+
+    Subagents are built with ``stream_fn=parent_session._stream_fn``, so any
+    memory — or registered reader — on the stream fn is last-writer-wins
+    between the two conversations. Two real ``Session`` objects drive the
+    same stream fn here exactly as the harness does, with NO manual hint
+    handling anywhere: the parent works up a 300k context, a child is then
+    constructed on the same stream fn and runs its own turn (10k), and the
+    parent works again. Both directions of the contamination are asserted:
+    the child's first request stays 5m on its own small body, and the
+    parent's post-child request goes 1h on its own large hint — the round-2
+    reproduction was exactly that request dropping to 5m because the child's
+    construction had overwritten the parent's reader for good.
+    """
+    bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        bodies.append(body)
+        is_child = body["system"][0]["text"] == "child instructions"
+        content = _anthropic_sse(10_000 if is_child else 300_000)
+        return httpx.Response(200, content=content, headers={"content-type": "text/event-stream"})
+
+    store, stream = _ttl_stream(tmp_path, handler)
+    parent = _anthropic_session(
+        tmp_path, "parent", stream, blocks=["instructions", "inventory", "skills", "env"]
+    )
+    child = None
+    try:
+        await parent.prompt("parent turn")
+        # The child is constructed AFTER the parent has a hint, the way a
+        # ``task`` call builds it mid-conversation, and runs on the same pipe.
+        child = _anthropic_session(tmp_path, "child", stream, blocks=["child instructions"])
+        await child.prompt("child errand")
+        await parent.prompt("parent again")
+    finally:
+        if child is not None:
+            await child.dispose()
+        await parent.dispose()
+        await stream.close()
+        store.close()
+
+    assert len(bodies) == 3
+    # Parent, first call: no hint, small body → 5m; the mock then reports 300k.
+    assert _cache_markers(bodies[0]) and all(
+        m == {"type": "ephemeral"} for m in _cache_markers(bodies[0])
+    )
+    assert parent._context_tokens_hint == 300_000
+    # Child (same stream fn, NO hint of its own): its small body decides and
+    # stays 5m — contamination (a), the parent's 300k on a fresh ~10k prefix.
+    assert bodies[1]["system"][0]["text"] == "child instructions"
+    assert all(m == {"type": "ephemeral"} for m in _cache_markers(bodies[1]))
+    assert child is not None and child._context_tokens_hint == 10_000
+    # Parent again after the child: 1h on its OWN 300k, proving the child's
+    # construction and its 10k report changed nothing the parent reads —
+    # contamination (b), the parent downgraded to 5m at the resume moment.
+    assert bodies[2]["system"][0]["text"] == "instructions"
+    assert _cache_markers(bodies[2]) and all(
+        m == {"type": "ephemeral", "ttl": "1h"} for m in _cache_markers(bodies[2])
+    )
+    assert parent._context_tokens_hint == 300_000

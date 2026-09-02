@@ -39,6 +39,7 @@ from typing import (
     Callable,
     Generic,
     Literal,
+    Mapping,
     Protocol,
     Sequence,
     runtime_checkable,
@@ -224,6 +225,18 @@ class Usage(BaseModel):
     output_tokens: int = 0
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
+    # The TTL split of ``cache_write_tokens`` when the provider reports one
+    # (Anthropic's ``usage.cache_creation.ephemeral_5m_input_tokens`` /
+    # ``ephemeral_1h_input_tokens``). SUBSETS of ``cache_write_tokens``, never
+    # added on top — the docs state ``cache_creation_input_tokens`` equals their
+    # sum, and every existing consumer of ``cache_write_tokens`` stays correct.
+    # They exist because the two TTLs are priced differently (1.25× vs 2× base):
+    # once the Anthropic client starts writing 1h entries on large contexts,
+    # analytics needs to tell the two apart to know whether the trade paid off.
+    # Both stay 0 on providers without a TTL split, and on an Anthropic response
+    # that omits the ``cache_creation`` object (older API versions).
+    cache_write_5m_tokens: int = 0
+    cache_write_1h_tokens: int = 0
     context_tokens: int | None = None  # provider-reported full context size if given
     # The reasoning/thinking slice of ``output_tokens`` when the provider
     # breaks it out (OpenAI ``output_tokens_details.reasoning_tokens``). Kept
@@ -362,16 +375,28 @@ class WakeSchedulerProtocol(Protocol):
 
 @runtime_checkable
 class PeerArrivalProtocol(Protocol):
-    """A wakeable signal that an inbound peer message (``lop send``) landed.
+    """A wakeable signal that a message FOR THE MODEL landed mid-turn.
 
-    Exists so a blocking tool can park on peer arrival WITHOUT importing the
+    Named for its first producer (an inbound peer message, ``lop send``) but
+    the contract is wider: every path that parks something for the model to
+    read at the next injection boundary marks it — a mailbox delivery, a
+    scheduled wake firing while a turn is busy, and a ``hub`` note or
+    question queued as an aside. They share one signal because a parked
+    ``wait`` cares about exactly one thing, "is there something new to read",
+    and a path left out of this set is a message the waiting model does not
+    see until its budget expires (up to an hour now, review round 1 of the
+    sized-waits change). :meth:`arrivals` keeps the kinds apart so the wake
+    can tell the model WHY it woke instead of blaming every wake on a peer.
+
+    Exists so a blocking tool can park on this WITHOUT importing the
     session. ``wait`` is the only consumer today and the only one that should
     be: it is a read-only sleep, so waking it early costs nothing, and the
-    message it wakes for is already in the session's journal by then. Do NOT
-    reuse this to preempt a MUTATING tool — mailbox delivery is
-    non-interrupting by contract (``guides/peer-messaging/GUIDE.md``), and
-    cancelling a ``bash`` mid-side-effect to hand the model "skipped" is a
-    price only a human pressing Esc gets to charge.
+    message it wakes for is already in the session's journal or queues by
+    then. Do NOT reuse this to preempt a MUTATING tool — mailbox delivery and
+    courtesy wakes are non-interrupting by contract
+    (``guides/peer-messaging/GUIDE.md``, ``Session._has_urgent_steering``),
+    and cancelling a ``bash`` mid-side-effect to hand the model "skipped" is
+    a price only a human pressing Esc gets to charge.
 
     Threading: the session's implementation sets the event on the loop that
     owns the session, because every registrant path hops there first
@@ -382,7 +407,7 @@ class PeerArrivalProtocol(Protocol):
     """
 
     def event(self) -> asyncio.Event:
-        """An Event set on each inbound peer message.
+        """An Event set on each inbound message.
 
         Never cleared by the producer. Consumers snapshot :meth:`count` before
         parking and compare after waking, which is what makes a message that
@@ -391,7 +416,17 @@ class PeerArrivalProtocol(Protocol):
         ...
 
     def count(self) -> int:
-        """Monotonic count of peer messages delivered to this session."""
+        """Monotonic count of inbound messages delivered to this session."""
+        ...
+
+    def arrivals(self) -> Mapping[str, int]:
+        """Monotonic per-kind counts summing to :meth:`count`.
+
+        Kinds are the producer's vocabulary (``peer_message``, ``wake``,
+        ``hub_message``); a consumer that snapshots this before parking can
+        name every kind that landed while it slept, which is how ``wait``
+        reports "a scheduled wake fired" rather than a generic wake-up.
+        """
         ...
 
 
@@ -1433,6 +1468,25 @@ class LoopConfig(BaseModel):
     # steering alone.
     has_pending_fork: Callable[[], bool] | None = Field(default=None, exclude=True)
 
+    # The provider-reported context size (``Usage.context_tokens``) of this
+    # conversation's last call BEFORE this run — the cross-turn seed. The loop
+    # reads it for the run's first request and stamps it as
+    # ``ChatRequest.context_tokens_hint``; from the second request on, the
+    # count the previous call of the SAME run reported wins, because a long
+    # tool loop grows past the TTL threshold long before the host's figure is
+    # next refreshed. Per-CONVERSATION, stamped per REQUEST by the loop that
+    # owns the call — never remembered on the stream fn: subagents share the
+    # parent's stream fn (one httpx pool, one failover cascade), so a hint
+    # held there is last-writer-wins between the parent and every child, and
+    # a child's construction would silently downgrade the parent's next
+    # request to 5m on its large context (the exact expiry this hint exists
+    # to dodge) while the child's tiny first request inherits the parent's
+    # 300k count and pays 2x write rates on a fresh ~10k prefix. The loop asks
+    # the HOST (which owns the conversation), exactly as it does for the
+    # model and the system blocks. ``None`` (no callback, or nothing reported
+    # yet) means no hint and the client's own byte estimate decides.
+    get_context_tokens_hint: Callable[[], int | None] | None = Field(default=None, exclude=True)
+
     interrupt_mode: Literal["immediate", "wait"] = "wait"
     # Epoch-ms deadline for the whole run, if any.
     deadline: float | None = None
@@ -1530,6 +1584,25 @@ class ChatRequest(BaseModel):
     # caches. Session hosts populate it once from their session id; keeping it
     # on the request lets retries and fallback clones preserve the same value.
     prompt_cache_key: str | None = None
+    #: The provider-reported size of this session's context on its LAST call
+    #: (``Usage.context_tokens``), when the host knows it. A HINT, not wire
+    #: content: the Anthropic client reads it to decide whether the request is
+    #: large enough for the 1-hour prompt-cache TTL (see
+    #: ``AnthropicClient._cache_ttl_for``). The client cannot measure this
+    #: itself without a tokenizer, and the provider's own count from the
+    #: previous turn is the most accurate figure anyone has. ``None`` on a
+    #: session's first call and on paths that never saw a usage event (a fork's
+    #: first request, one-shot errands); the client then falls back to a byte
+    #: estimate of the serialized body. Stamped by the OWNER of the
+    #: conversation the call belongs to — the harness loop for turn calls
+    #: (``LoopConfig.get_context_tokens_hint`` seeds it, then the run's own
+    #: usage events advance it) and the session for its direct calls (asides,
+    #: the compaction advisor) — never by the shared stream fn, which merely
+    #: passes through what the request carries: subagents share one stream
+    #: fn, so any memory held there is last-writer-wins across conversations.
+    #: Retries and fallback clones keep it, and an EXPLICIT ``0`` suppresses
+    #: the hint (a one-shot prompt that is a fresh write-once prefix).
+    context_tokens_hint: int | None = None
     #: This call's output has NOT been shown to anyone yet, so a failed attempt
     #: may be discarded and retried whole.
     #:

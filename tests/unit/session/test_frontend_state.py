@@ -196,6 +196,35 @@ def test_usage_join_and_turn_end_does_not_double_count_mixed_calls() -> None:
     ]
 
 
+def test_usage_join_folds_cache_write_ttl_split() -> None:
+    """The frontend's turn-end usage join folds the 5m/1h cache-write split
+    wherever it folds ``cache_write_tokens`` (review F4) — the split prices
+    differently (1.25x vs 2x base), so a join that dropped it would read as
+    zero from its first reader."""
+    from local_operator.session.frontend_state import _aggregate_usage
+
+    aggregate = _aggregate_usage(
+        [
+            Usage(
+                input_tokens=1,
+                cache_write_tokens=1_000,
+                cache_write_5m_tokens=1_000,
+                context_tokens=200_000,
+            ),
+            Usage(
+                input_tokens=1,
+                cache_write_tokens=3_000,
+                cache_write_1h_tokens=3_000,
+                context_tokens=210_000,
+            ),
+        ]
+    )
+    assert aggregate.cache_write_tokens == 4_000
+    assert aggregate.cache_write_5m_tokens == 1_000
+    assert aggregate.cache_write_1h_tokens == 3_000
+    assert aggregate.context_tokens == 210_000
+
+
 def test_subagent_progress_defers_job_publication_to_the_coalescer(monkeypatch) -> None:
     """A raw progress edge neither rescans nor publishes canonical state itself.
 

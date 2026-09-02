@@ -8,6 +8,8 @@ model through the allow-list, and a busy steer routes through the steer queue.
 
 from __future__ import annotations
 
+import asyncio
+import json
 from typing import Any
 
 import pytest
@@ -329,6 +331,118 @@ async def test_every_delivery_path_marks_a_peer_arrival(tmp_path):
     # Wake-an-idle-session path.
     await session.receive_peer_message("wake note", mode="mailbox", wake=True)
     assert peer.count() == 2
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_busy_turn_wake_and_a_hub_aside_mark_an_arrival(tmp_path):
+    """The two producers review round 1 of the sized-waits change found
+    silent (R1-1): a scheduled wake landing mid-turn is COURTESY steering
+    (never urgent, so `_peek_interrupt` never cancels the tool) and a child's
+    `hub` note is an aside thunk. Neither touched the arrival signal, so a
+    parked `wait` slept through both for its whole budget — up to an hour.
+    Each must mark, under its own kind, so the woken tool can say why.
+    """
+    from local_operator.harness.comms import HUB_MESSAGE_TYPE
+    from local_operator.harness.wake import (
+        WAKE_PROMPT_MESSAGE_TYPE,
+        DueWake,
+        WakeSchedule,
+    )
+
+    stream = ScriptedStream([[StreamTextDelta(delta="ack"), StreamEndEvent(stop_reason="stop")]])
+    session = make_session(tmp_path, stream)
+    peer = session._peer_arrival
+
+    # Busy-turn wake: the courtesy contract is untouched (not urgent), but the
+    # parked wait IS woken.
+    session._is_streaming = True
+    try:
+        schedule = WakeSchedule(id="w1", message="remind me", next_due_at=0, created_at=0)
+        await session._deliver_wake(
+            DueWake(schedule=schedule, occurrence=1, planned_total=1, final=True)
+        )
+    finally:
+        session._is_streaming = False
+    assert not session._has_urgent_steering(), "a wake must stay courtesy steering"
+    assert peer.count() == 1
+    assert peer.arrivals() == {WAKE_PROMPT_MESSAGE_TYPE: 1}
+    assert peer.event().is_set(), "a parked wait must be woken by a scheduled wake"
+
+    # Child -> parent note: `comms.reply_to_parent` lands via queue_aside.
+    comms = session.subagent_comms
+    comms.reply_to_parent("job-x", "I am blocked: no staging credentials")
+    assert peer.count() == 2
+    assert peer.arrivals() == {WAKE_PROMPT_MESSAGE_TYPE: 1, HUB_MESSAGE_TYPE: 1}
+
+    # And the peer path still reports under its own kind, so the tally sums.
+    await session.receive_peer_message("mailbox note", mode="mailbox", wake=False)
+    assert peer.count() == 3
+    assert peer.arrivals()[PEER_MESSAGE_MESSAGE_TYPE] == 1
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_scheduled_wake_cuts_an_hour_long_wait_inside_a_turn(tmp_path):
+    """End to end through the real loop: the model parks in `wait` for the
+    full hour on a job that will not settle, the user's reminder fires, and
+    the wait returns at once naming the wake — with the wake text reaching
+    the very next model call and the job left running. This is the
+    "remind me at 15:00 while inside a 45-minute review wait" case; before
+    the fix it was read at 15:45.
+    """
+    import time as _time
+
+    from local_operator.harness.types import StreamEvent, StreamToolCallDelta
+    from local_operator.harness.wake import DueWake, WakeSchedule
+
+    gate = asyncio.Event()
+
+    async def never_settles(job_id, signal, report_progress):
+        await gate.wait()
+        return "late"
+
+    # The job id must exist before the script that names it, so the script is
+    # filled in after registration; the turn list type is the stream's own.
+    turns: list[list[StreamEvent]] = []
+    stream = ScriptedStream(turns)
+    session = make_session(tmp_path, stream)
+    job_id = session.jobs.register("task", "reviewer", never_settles)
+    turns.append(
+        [
+            StreamToolCallDelta(
+                index=0,
+                id="c1",
+                name="wait",
+                argument_delta=json.dumps({"job_id": job_id, "wait_ms": 3_600_000}),
+            ),
+            StreamEndEvent(stop_reason="toolUse"),
+        ]
+    )
+    turns.append([StreamTextDelta(delta="ack"), StreamEndEvent(stop_reason="stop")])
+
+    prompt_task = asyncio.ensure_future(session.prompt("await the review"))
+    await wait_for(lambda: len(stream.requests) == 1)
+    await asyncio.sleep(0.1)  # the tool is parked by now
+
+    schedule = WakeSchedule(id="w1", message="stand-up in 5", next_due_at=0, created_at=0)
+    started = _time.perf_counter()
+    await session._deliver_wake(
+        DueWake(schedule=schedule, occurrence=1, planned_total=1, final=True)
+    )
+    await asyncio.wait_for(prompt_task, timeout=5.0)
+    elapsed = _time.perf_counter() - started
+
+    assert elapsed < 3.0, f"the wake took {elapsed:.2f}s to cut the wait"
+    follow_up = stream.requests[1].messages
+    tool_texts = [m.text for m in follow_up if isinstance(m, Message) and m.role == "tool"]
+    assert any("still running" in t and "scheduled wake fired" in t for t in tool_texts), tool_texts
+    assert any(
+        "(alarm) Scheduled wake w1" in m.text and "stand-up in 5" in m.text for m in follow_up
+    )
+    row = session.jobs.get(job_id)
+    assert row is not None and row.status == "running", "the wake must not cancel the job"
+    gate.set()
     await session.dispose()
 
 
