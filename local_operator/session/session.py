@@ -7328,6 +7328,11 @@ class Session:
         answer that mixes text and a tool call is returned as its text
         without a retry; the text is what was asked for.
 
+        ``on_usage`` fires once per provider call, so a single aside may
+        deliver TWO usage figures when that retry runs — the first call's
+        (bare tool call, discarded) and the retry's. Both were paid for, so
+        hosts must add them rather than keep the last one.
+
         Safe to call mid-turn, and the pairing below is what makes that true —
         see :meth:`_wire_legal_snapshot`.
         """
