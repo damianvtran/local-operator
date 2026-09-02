@@ -3646,6 +3646,57 @@ def test_anthropic_ttl_without_hint_falls_back_to_byte_estimate() -> None:
     )
 
 
+def test_anthropic_ttl_estimate_excludes_base64_image_payloads() -> None:
+    """The fallback byte estimate must not count base64 image data (F3).
+
+    Anthropic bills an image by pixel area (~≤1.6k tokens), not by the bytes
+    its base64 spelling takes in the serialized body. A naive ``len(json)/4``
+    turns one ~1 MB screenshot into ~330k \"tokens\" and flips an image-bearing
+    first/fork request to 1h on a prompt that is really tiny. The estimate
+    swaps each image payload for a flat per-image allowance instead, wherever
+    the image sits (message content or tool-result content)."""
+    image = ImageContent(data="a" * 1_400_000, mime_type="image/png")  # ~1 MB decoded
+    with_image = ChatRequest(
+        model=_spec(provider="anthropic"),
+        system_blocks=["instructions", "inventory", "skills", "env"],
+        messages=[Message.user("first"), Message.assistant("mid"), Message.user("second")],
+    ).model_copy(
+        update={"messages": [Message(role="user", content=[TextContent(text="look"), image])]}
+    )
+    without_image = with_image.model_copy(update={"messages": [Message.user("look")]})
+    two_images = with_image.model_copy(
+        update={
+            "messages": [Message(role="user", content=[TextContent(text="look"), image, image])]
+        }
+    )
+    # Sanity: the payload is what dominates the serialized bytes — dropping it
+    # must shrink the body by two orders of magnitude, or the test proves
+    # nothing about the estimate.
+    client = AnthropicClient()
+    with_bytes = len(json.dumps(client._build_body(with_image), default=str))
+    without_bytes = len(json.dumps(client._build_body(without_image), default=str))
+    assert with_bytes > 100 * without_bytes
+
+    # Threshold the naive estimate would blow past (1.4M base64 chars / 4 ≈
+    # 350k \"tokens\") but the real prompt (~1.6k for the image + a tiny body)
+    # cannot reach: the request stays 5m.
+    stayed_5m = AnthropicClient(cache_ttl_1h_min_context_tokens=50_000)
+    markers = _every_cache_control(stayed_5m._build_body(with_image))
+    assert markers and all(m == {"type": "ephemeral"} for m in markers)
+    # The allowance itself is counted, not just dropped: two images (2 x 1.6k
+    # + body ≈ 3.3k) clear a 3k bar while the single-image body (≈1.7k) does
+    # not — the estimate stays order-correct in image count.
+    low_bar = AnthropicClient(cache_ttl_1h_min_context_tokens=3_300)
+    assert all(
+        m == {"type": "ephemeral"} for m in _every_cache_control(low_bar._build_body(with_image))
+    )
+    tipped = AnthropicClient(cache_ttl_1h_min_context_tokens=3_000)
+    assert all(
+        m == {"type": "ephemeral", "ttl": "1h"}
+        for m in _every_cache_control(tipped._build_body(two_images))
+    )
+
+
 def test_anthropic_ttl_estimate_counts_tools_too() -> None:
     """Tools sit at position 0 of the cached prefix, so the byte estimate has
     to include them: a tool-heavy first request must not be undercounted."""
