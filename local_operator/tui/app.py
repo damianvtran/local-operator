@@ -9692,13 +9692,29 @@ class OperatorApp(App[None]):
         take down a working prompt. Imported at the call site, like that one, so
         the TUI's import cost does not carry the config stack for a command most
         sessions never run.
+
+        Written through the ``settings_io`` FACADE rather than
+        ``manager.set_config_value`` (review round 1, M2). The facade is what
+        marks a write as this process's own: it notifies the config watcher,
+        which fans the change out with ``source="local"``, which is how
+        :meth:`_on_config_change` knows the receipt below has already told the
+        user and stays quiet. Writing underneath it made this process's own
+        write arrive through the poll as ``source="disk"`` — indistinguishable
+        from another pane's edit — so the notice had to special-case the key,
+        and that special case then silenced the genuine cross-process change on
+        the one setting where not knowing is a safety problem. Going through
+        the facade removes the need for the special case rather than tuning it.
         """
         try:
+            from local_operator import settings_io
             from local_operator.config import ConfigManager
             from local_operator.paths import config_dir
 
             manager = ConfigManager(config_dir())
-            manager.set_config_value("tool_approval_mode", mode_word(auto))
+            setting = settings_io.resolve_key("tool_approval_mode")
+            if setting is None:  # pragma: no cover - the key is in the registry
+                raise KeyError("tool_approval_mode is not a registered setting")
+            settings_io.write_setting(manager, setting, mode_word(auto))
             return _home_relative(str(manager.config_file)), ""
         except Exception as error:  # config write failure
             return "", (
@@ -12794,19 +12810,7 @@ class OperatorApp(App[None]):
         """
         if getattr(change, "source", "disk") == "local":
             return
-        changed = sorted(
-            key
-            for key in getattr(change, "changed_keys", ())
-            # ``/approvals default`` writes this key WITHOUT the facade (it is
-            # older than it) and already prints its own "saved to config.yml"
-            # receipt; the write's own kqueue delivery would read as news. The
-            # source cannot tell the two apart (the write came from this
-            # process either way), so the key is suppressed for the NOTICE
-            # only — it still lands in ``changed`` for any live apply that
-            # needs it — and only when the change carries nothing else, so a
-            # batch that ALSO moved other keys stays honest.
-            if key != "tool_approval_mode" or len(getattr(change, "changed_keys", ())) > 1
-        )
+        changed = sorted(getattr(change, "changed_keys", ()))
         if not changed:
             return
         from local_operator import settings_io
@@ -12832,8 +12836,7 @@ class OperatorApp(App[None]):
                 settings_reload()
             except Exception:  # noqa: BLE001 — the cache drop is best-effort
                 logger.debug("display settings cache could not be dropped", exc_info=True)
-        raw_changed = getattr(change, "changed_keys", ())
-        if "tui.theme" in raw_changed:
+        if "tui.theme" in changed:
             values = getattr(change, "values", {})
             tui_block = values.get("tui") if isinstance(values, Mapping) else None
             wanted = tui_block.get("theme") if isinstance(tui_block, Mapping) else None

@@ -234,6 +234,22 @@ SECTIONS: tuple[Section, ...] = (
         Scope.NEW_LAUNCH,
         "The provider and model new launches boot on.",
     ),
+    # Split out of ``model`` (review round 1, M3). The design left this key in
+    # ``model`` and proposed documenting the discrepancy, which was defensible
+    # while nothing read the scope aloud — but the config-change notice now
+    # says "takes effect on /new" for every non-LIVE key, and for this one that
+    # is FALSE: ``Session._apply_config_change`` rebinds the stream fn on it and
+    # ``configure._openai_api_mode`` reads the rebound mapping when it builds
+    # the next client. Scope is uniform within a section by construction, so
+    # saying something true here means a section of its own, exactly as ``fork``
+    # and ``web_tools`` are. ``hosting``/``model_name`` genuinely stay
+    # NEW_LAUNCH: they are the session's identity, not a knob it re-reads.
+    Section(
+        "providers",
+        "Provider wire protocol",
+        Scope.LIVE,
+        "Which API surface a direct provider connection uses.",
+    ),
     # LIVE: every ``retry.*`` key routes through ``RetrySettings.from_settings``
     # PER CALL on the mapping ``SessionStreamFn`` holds, and the config watcher
     # rebinds that mapping on every change (``SessionStreamFn.apply_settings``).
@@ -390,10 +406,11 @@ SETTINGS: tuple[Setting, ...] = (
         help="Model id new launches boot on. Written by /model default.",
         empty_unsets=True,
     ),
+    # -- providers ----------------------------------------------------------
     Setting(
         key="providers.openai.api",
         path=("providers", "openai", "api"),
-        section="model",
+        section="providers",
         label="OpenAI API surface",
         kind=Kind.ENUM,
         default="responses",

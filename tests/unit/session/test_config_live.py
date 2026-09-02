@@ -33,7 +33,7 @@ from local_operator.harness.types import (
     StreamEndEvent,
     StreamTextDelta,
 )
-from local_operator.model.configure import SessionStreamFn
+from local_operator.model.configure import SessionStreamFn, _openai_api_mode
 from local_operator.providers.failover import RetrySettings
 from local_operator.session.session import Session
 from local_operator.session.transcript import Transcript
@@ -128,6 +128,14 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
     ),
     "compaction.auto_continue": (False, lambda s, w: compaction_of(s).auto_continue),
     "compaction.mid_turn_enabled": (False, lambda s, w: compaction_of(s).mid_turn_enabled),
+    # -- providers: the wire surface the NEXT client build reads ---------------
+    # Observed through the same function the client builder calls, not through
+    # the raw mapping: what makes this key live is that ``_openai_api_mode``
+    # reads the REBOUND settings, so that is what must move.
+    "providers.openai.api": (
+        "chat_completions",
+        lambda s, w: _openai_api_mode(s.routing_settings),
+    ),
     # -- failover: what RetrySettings.from_settings reads off the stream --------
     "retry.enabled": (False, lambda s, w: RetrySettings.from_settings(s.routing_settings).enabled),
     "retry.maxRetries": (
@@ -252,6 +260,107 @@ def test_every_live_section_is_exercised_and_every_probe_is_live() -> None:
         keys = {s.key for s in settings_io.settings_for(section)}
         missing = keys - set(LIVE_KEY_PROBES)
         assert not missing, f"{section}: LIVE keys without a probe: {sorted(missing)}"
+
+
+#: Non-LIVE keys whose write DOES reach the session, with the reason that is
+#: legitimate. Kept explicit so the guard below fails by name on a new one
+#: rather than being widened silently.
+#:
+#: ``subagents.*`` cannot appear here — it is LIVE. ``web_*.enabled`` cannot
+#: either: the session must NOT react to them (the tool surface is build-time),
+#: which is the whole reason they were split into ``web_tools``.
+_NON_LIVE_KEYS_ALLOWED_TO_APPLY: dict[str, str] = {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "key",
+    sorted(
+        s.key
+        for s in settings_io.SETTINGS
+        if s.section not in _live_sections() and s.kind is not settings_io.Kind.READONLY
+    ),
+)
+async def test_a_non_live_key_does_not_quietly_apply_to_a_running_session(tmp_path, key) -> None:
+    """The direction the other honesty test cannot see (review round 1, M3).
+
+    ``test_every_live_section_is_exercised_and_every_probe_is_live`` walks LIVE
+    sections DOWNWARD: every LIVE section must have a key that provably applies.
+    Nothing walked UPWARD — a key with a real live apply sitting in a NEW_LAUNCH
+    section passed both directions of that test, which is exactly how
+    ``providers.openai.api`` came to be applied live while the notice told the
+    user it "takes effect on /new". A label that overstates is a nuisance; one
+    that UNDERSTATES is the painted lie, because the user acts on it.
+
+    Asserted BEHAVIOURALLY rather than by reading the source: write the key
+    from a second ``ConfigManager``, tick, and require that the session's
+    observable state did not move. That catches a future apply added anywhere
+    in ``_apply_config_change``'s fan-out, not just a string this test knows to
+    grep for.
+    """
+    setting = settings_io.resolve_key(key)
+    assert setting is not None
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    ConfigManager(config_dir).set_config_value("hosting", "")
+
+    stream = RebindableStream(dict(ConfigManager(config_dir).get_config().values))
+    session = make_session(tmp_path, stream, compaction_settings=CompactionSettings())
+    watcher = ConfigWatcher(config_dir)
+    subscribe(session, watcher)
+    try:
+        before = (
+            compaction_of(session).model_dump(),
+            dict(RetrySettings.from_settings(session.routing_settings).__dict__),
+            session.jobs.max_running,
+            len(stream.applied),
+        )
+        # A value that differs from whatever is stored, typed to the setting.
+        # Branched rather than built as a dict literal: a dict evaluates EVERY
+        # value eagerly, so the INT arm ran `int("ask")` for an ENUM key.
+        probe: Any
+        if setting.kind is settings_io.Kind.ENUM:
+            others = [c.value for c in setting.resolved_choices if c.value != setting.default]
+            if not others:
+                pytest.skip(f"{key} has a single choice; nothing to change it to")
+            probe = others[0]
+        elif setting.kind is settings_io.Kind.BOOL:
+            probe = not bool(setting.default)
+        elif setting.kind is settings_io.Kind.INT:
+            probe = int(setting.default or 0) + 7
+        elif setting.kind is settings_io.Kind.FLOAT:
+            probe = float(setting.default or 0) + 3.5
+        elif setting.kind is settings_io.Kind.TEXT:
+            probe = "probe-value"
+        elif setting.kind is settings_io.Kind.LIST:
+            probe = ["probe"]
+        elif setting.kind is settings_io.Kind.CASCADE:
+            probe = {"default": ["probe/model"]}
+        else:
+            pytest.skip(f"{key}: no probe value for {setting.kind}")
+
+        write_from_another_process(config_dir, key, probe)
+        change = watcher.poll_now()
+        assert (
+            change is not None and key in change.changed_keys
+        ), f"{key}: the watcher did not see the write, so this test proved nothing"
+
+        after = (
+            compaction_of(session).model_dump(),
+            dict(RetrySettings.from_settings(session.routing_settings).__dict__),
+            session.jobs.max_running,
+            len(stream.applied),
+        )
+        if key in _NON_LIVE_KEYS_ALLOWED_TO_APPLY:
+            return
+        assert after == before, (
+            f"{key} is in section {setting.section!r} (not LIVE), so the config-change "
+            f"notice tells the user it 'takes effect on /new' — but writing it MOVED the "
+            f"running session. Either give it a LIVE section (as providers.openai.api "
+            f"got) or stop applying it."
+        )
+    finally:
+        await session.dispose()
 
 
 def test_the_deliberately_build_time_keys_stay_new_sessions() -> None:

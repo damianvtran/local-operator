@@ -210,9 +210,23 @@ class ConfigWatcher:
         the task is alive is a no-op, which is what lets every
         ``create_session`` call it unconditionally: the first session in the
         process starts the watcher, the ``/new`` that follows finds it running.
+
+        A call that gets PAST that guard — the task died with its loop, and
+        nobody called :meth:`stop` — must release the previous accelerator
+        before arming a new one (review round 1, M4). Without this,
+        ``_arm_kqueue`` overwrites ``_kqueue``/``_dir_fd`` while the old
+        descriptors are still open and unreferenced, so a later ``stop()`` can
+        only close the newest pair: measured at four directory fds
+        (``[6, 8, 7, 9]``) across four loops, three still open afterwards.
+        Production runs one loop per process, so this is a latent leak rather
+        than a live one — but ``start`` is called unconditionally from four
+        sites and EMFILE is the failure mode the registry's reaping already
+        exists to prevent, which is too small a margin to leave a known leak
+        inside.
         """
         if self._task is not None and not self._task.done():
             return
+        self._disarm_kqueue()
         if loop is None:
             loop = asyncio.get_running_loop()
         self._loop = loop

@@ -90,6 +90,64 @@ async def test_a_non_live_key_is_named_as_taking_effect_on_new(monkeypatch, tmp_
 
 
 @pytest.mark.asyncio
+async def test_a_lone_approval_mode_change_from_another_pane_is_announced(
+    monkeypatch, tmp_path
+) -> None:
+    """The one setting where silence is a safety problem (review round 1, M2).
+
+    ``tool_approval_mode`` used to be dropped from the notice whenever it was
+    the ONLY changed key, on the theory that `/approvals default` had already
+    printed its own receipt. But that write bypassed ``settings_io``, so it
+    arrived as ``source="disk"`` — indistinguishable from another pane's edit —
+    and the suppression silenced the genuine cross-process case too: flip the
+    approval default in pane A, hear nothing in pane B. Batched changes still
+    announced it, which is the tell that the rule was about the wrong thing.
+
+    ``_save_approvals_default`` now writes through the facade, so a local write
+    is silenced by ``source="local"`` like every other local write, and this
+    case is free to speak.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    ConfigManager(tmp_path).set_config_value("hosting", "")
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await _adopted(app, pilot)
+        _write_elsewhere(tmp_path, "tool_approval_mode", "auto")
+        process_watcher(tmp_path).poll_now()
+        await pilot.pause()
+        notices = [n for n in _notices(app) if "config.yml changed" in n]
+        assert notices == ["config.yml changed: tool_approval_mode takes effect on /new"]
+
+
+@pytest.mark.asyncio
+async def test_saving_the_approvals_default_here_does_not_announce_itself(
+    monkeypatch, tmp_path
+) -> None:
+    """The other half of M2: the LOCAL write must still be silent.
+
+    Drives the real ``/approvals default auto`` handler rather than calling the
+    writer directly, because what is being asserted is that the facade route
+    reaches the watcher as ``source="local"`` on the path a user actually
+    takes. The command's own receipt is what tells them; a harness notice on
+    top would be the same news twice.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    ConfigManager(tmp_path).set_config_value("hosting", "")
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await _adopted(app, pilot)
+        saved_to, problem = app._save_approvals_default(True)
+        await pilot.pause()
+        assert not problem, problem
+        assert saved_to, "the write reported no destination"
+        # It really landed on disk, through the facade.
+        assert ConfigManager(tmp_path).get_config_value("tool_approval_mode") == "auto"
+        # And produced no harness notice, and no pending change for the poll.
+        assert not [n for n in _notices(app) if "config.yml changed" in n]
+        assert process_watcher(tmp_path).poll_now() is None
+
+
+@pytest.mark.asyncio
 async def test_a_write_from_this_process_is_silent(monkeypatch, tmp_path) -> None:
     """The page or command here already showed its result; a second line
     would be the same news twice."""

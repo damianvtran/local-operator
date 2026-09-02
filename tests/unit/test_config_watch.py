@@ -14,7 +14,7 @@ import os
 import sys
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -411,6 +411,49 @@ async def test_process_watcher_reaps_idle_watchers_and_keeps_live_ones(tmp_path)
         await live.stop()
         await process_watcher(tmp_path / "third").stop()
         await process_watcher(tmp_path / "idle").stop()
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="only the kqueue leg holds descriptors")
+@pytest.mark.asyncio
+async def test_restarting_a_watcher_whose_task_died_does_not_leak_a_directory_fd(
+    tmp_path,
+) -> None:
+    """``start()`` after the loop died must release the old accelerator first.
+
+    Review round 1, M4. The idempotence guard only short-circuits while the
+    task is ALIVE; once it has died with its loop, ``start()`` falls through
+    and re-arms. Without a disarm first, ``_kqueue``/``_dir_fd`` are overwritten
+    while the previous descriptors are still open and now unreferenced, so a
+    later ``stop()`` can only close the newest pair — measured at four distinct
+    dir fds across four loops, three still open afterwards.
+
+    Asserted as descriptor IDENTITY rather than by counting open files: the fd
+    handed out on each cycle must be the SAME number, which is only possible if
+    the previous one was closed and its slot reused. That is a fact about the
+    release, not a bet on the process's fd table being otherwise quiet.
+    """
+    ConfigManager(tmp_path).set_config_value("hosting", "")
+    watcher = ConfigWatcher(tmp_path)
+    handed_out: list[int | None] = []
+
+    # Four separate loops, each dying without a stop() — the shape a process
+    # that builds a session, tears its loop down, and builds another produces.
+    for _ in range(4):
+
+        async def cycle() -> None:
+            watcher.start()
+            handed_out.append(watcher._dir_fd)
+
+        await asyncio.to_thread(asyncio.run, cycle())
+
+    assert all(fd is not None for fd in handed_out), handed_out
+    assert len(set(handed_out)) == 1, (
+        f"each start() took a NEW directory fd {handed_out} instead of reusing the "
+        "released one — the previous accelerator was not disarmed"
+    )
+    await watcher.stop()
+    with pytest.raises(OSError):
+        os.fstat(cast(int, handed_out[-1]))
 
 
 @pytest.mark.asyncio

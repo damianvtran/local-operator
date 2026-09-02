@@ -9013,10 +9013,16 @@ class Session:
                 _coerce_compaction_settings(dict(raw)) if isinstance(raw, Mapping) else None
             )
             self._compaction_settings = fresh
-        if any(
-            key.startswith("retry.") or key.startswith("effort.") or key == "providers.openai.api"
-            for key in changed
-        ):
+        # ``effort.*`` is deliberately NOT in this condition (review round 1,
+        # M1). The stream fn does read ``self._settings["effort"]`` per message
+        # (``configure._effort_for``), but those keys are not in the
+        # ``settings_io`` registry, and the diff walks the registry — so
+        # ``changed`` can never contain one and a ``startswith("effort.")``
+        # clause was unreachable code that read as coverage. An effort edit
+        # therefore does not propagate, exactly as before this PR; registering
+        # those keys is a separate change with its own scope decision, not
+        # something to smuggle in behind a condition nobody could reach.
+        if any(key.startswith("retry.") or key == "providers.openai.api" for key in changed):
             apply_settings = getattr(self._stream_fn, "apply_settings", None)
             if callable(apply_settings):
                 apply_settings(values)
