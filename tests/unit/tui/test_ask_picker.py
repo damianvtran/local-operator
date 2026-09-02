@@ -5154,6 +5154,16 @@ async def test_the_cap_leaves_the_short_description_card_byte_identical() -> Non
     reservation at ask_picker.py:1265 would show up as a shortened label on
     exactly this frame.
 
+    RE-DERIVED for the recommended-first hoist, and the row ORDER changed. The
+    fixture authors `recommended=1`, and `AskQuestion._shape` now rotates that
+    option to index 0 before the card is ever constructed, so "Backfill from
+    the audit log" is row 1 and carries both the cursor and the badge, with the
+    other three following in their authored order. Nothing else about the frame
+    moved: the same five rows, the same 2-line rhythm, the same badge
+    treatment, the same footer, the same widths. The card is unchanged and
+    still draws `question.options` positionally — the reordering happens once,
+    upstream, in the model.
+
     RE-DERIVED against the REAL DOCK (QA round 2, BLOCKER 2), and the second
     size CHANGED as a result. This test used to pin the same 16-line golden at
     190x50 and 100x30 through `_AskHost`, where `_dock_reserved_rows()` is 0.
@@ -5164,8 +5174,8 @@ async def test_the_cap_leaves_the_short_description_card_byte_identical() -> Non
         ────────────────────────────  (96 cells, not 100)
         Which rollout should the stale-row migration take?
 
-          1. Drop the rows
-        ❯ 2. Backfill from the audit log  · ▸ RECOMMENDED
+        ❯ 1. Backfill from the audit log  · ▸ RECOMMENDED
+          2. Drop the rows
           3. Dual-write for a week
           4. Leave them and add a filter
           5. Other (type your own)
@@ -5199,10 +5209,10 @@ async def test_the_cap_leaves_the_short_description_card_byte_identical() -> Non
         "─",
         "Which rollout should the stale-row migration take?",
         "",
-        "  1. Drop the rows",
-        "     nothing reads the column any more",
-        "❯ 2. Backfill from the audit log",
+        "❯ 1. Backfill from the audit log",
         f"     {RECOMMENDED_TAG} · slower, keeps history",
+        "  2. Drop the rows",
+        "     nothing reads the column any more",
         "  3. Dual-write for a week",
         "     safest, needs a follow-up MR",
         "  4. Leave them and add a filter",
@@ -5325,12 +5335,21 @@ async def test_the_short_card_windows_with_descriptions_when_the_real_dock_is_ti
 async def test_the_card_never_reorders_the_options_it_was_given() -> None:
     """Design §4.2: a display reorder is a silent semantic mismatch.
 
-    `recommended` is a 0-based index into `options` (harness/types.py:570) and
-    the card draws POSITIONAL ordinals with digit keys bound to them. If the
-    card floated the recommended option to the top, the user would read
-    "option 2", press `2`, and answer with a different element of `options`
-    than the model's index 2 — on the surface whose sibling is an authorisation
-    gate.
+    The card draws POSITIONAL ordinals with digit keys bound to them, over the
+    `options` list it is handed. If the card floated a row to the top on its
+    own, the user would read "option 2", press `2`, and answer with a different
+    element of `options` than the one drawn — on the surface whose sibling is an
+    authorisation gate.
+
+    The contract is therefore about the card, not about the tuple the model
+    authored: **the card draws `question.options` in order, and digit key N
+    answers `options[N-1]`**. Ordering is normalised ONCE, upstream, in
+    `AskQuestion` (`harness/types.py`, `_shape`), which hoists the recommended
+    option to index 0 and sets `recommended = 0` before the card ever sees the
+    question. That is why the assertions below read `question.options`
+    post-validation rather than the authored `labels` tuple — comparing against
+    `labels` would conflate "the card must not reorder" with "the model must not
+    reorder", and only the first is this surface's business.
 
     Swept over every `recommended` value including `None`, because the hazard
     is specifically that marking a row starts to move it. Three claims:
@@ -5339,8 +5358,9 @@ async def test_the_card_never_reorders_the_options_it_was_given() -> None:
     - the digit key for row N answers with `options[N-1]`, whatever
       `recommended` is — asserted by actually pressing the key and reading the
       answer, since that is the path the mismatch would travel;
-    - and `recommended` still selects the cursor, so the marking half of the
-      contract is not satisfied by simply ignoring the field.
+    - and the cursor sits on the recommendation, which after the upstream hoist
+      is always row 1, so claim 1 is not satisfied by a card that ignores the
+      field entirely.
     """
     labels = ("Alpha first", "Bravo second", "Charlie third", "Delta fourth")
 
@@ -5353,6 +5373,9 @@ async def test_the_card_never_reorders_the_options_it_was_given() -> None:
             ],
             recommended=recommended,
         )
+        # Post-validation order: what the card is actually handed, and the only
+        # thing it may draw.
+        given = [option.label for option in question.options]
 
         app = _AskHost([question])
         async with app.run_test(size=(120, 30)) as pilot:
@@ -5364,17 +5387,23 @@ async def test_the_card_never_reorders_the_options_it_was_given() -> None:
             drawn: list[tuple[int, str]] = []
             for line in _fingerprint(card):
                 stripped = line.lstrip("❯ ").strip()
-                for position, label in enumerate(labels, start=1):
+                for position, label in enumerate(given, start=1):
                     if stripped.startswith(f"{position}. "):
                         drawn.append((position, stripped[len(f"{position}. ") :]))
-            assert drawn == list(enumerate(labels, start=1)), (recommended, drawn)
+            assert drawn == list(enumerate(given, start=1)), (recommended, drawn)
 
-            # 3. ...and the recommendation still preselects, so claim 1 is not
-            #    being satisfied by a card that ignores the field entirely.
-            assert card.selected_index == (recommended or 0), (recommended, card.selected_index)
+            # 3. ...and the recommendation still preselects. The hoist puts it
+            #    at index 0, so the cursor lands on row 1 for every
+            #    `recommended` here — and on row 1 for `None` too, since that is
+            #    the card's default cursor. The claim that carries weight is
+            #    made by `given` above: the row the cursor sits on is the
+            #    recommended LABEL, not merely index 0 of an untouched list.
+            assert card.selected_index == 0, (recommended, card.selected_index)
+            if recommended is not None:
+                assert given[card.selected_index] == labels[recommended], (recommended, given)
 
         # 2. The digit key answers with the option at that POSITION.
-        for position, label in enumerate(labels, start=1):
+        for position, label in enumerate(given, start=1):
             app = _AskHost([question])
             async with app.run_test(size=(120, 30)) as pilot:
                 await app.open_picker()
@@ -5389,12 +5418,20 @@ async def test_the_card_never_reorders_the_options_it_was_given() -> None:
 async def test_a_reordering_card_is_caught(monkeypatch: pytest.MonkeyPatch) -> None:
     """The red half of the ordering guard.
 
-    The hazard design §4.2 names is not hypothetical code — it is what a
-    "promote the recommendation" change would do. Reintroduced by patching
-    `_row_label` to read from a recommended-first permutation while the answer
-    path keeps reading `options` positionally, which is exactly the silent
-    mismatch: the card draws `1. Bravo second` and pressing `1` answers
-    `Alpha first`.
+    The hazard design §4.2 names is not hypothetical code — it is what any
+    display-only reordering of the card would do. Reintroduced by patching
+    `_row_label` to read from a permutation while the answer path keeps reading
+    `options` positionally, which is exactly the silent mismatch: the card
+    draws one label on row 1 and pressing `1` answers a different one.
+
+    The permutation is a deliberate rotate-by-one over `question.options`, and
+    it is derived from the list's LENGTH rather than from `recommended`. It has
+    to be: ordering is normalised once upstream in `AskQuestion._shape`, so
+    `question.recommended` is 0 on every validated question, and a
+    recommended-first permutation built from that field is the identity — it
+    would draw the card correctly and make this test vacuously green. A
+    rotation reproduces the defect independently of where the recommendation
+    sits, which is the property this red half needs.
 
     The guard above must reject this. If it stops going red, the ordinals and
     the digit keys have drifted apart from `question.options` and the
@@ -5407,21 +5444,20 @@ async def test_a_reordering_card_is_caught(monkeypatch: pytest.MonkeyPatch) -> N
         options=[AskOption(label=label, description=f"why {label.lower()}") for label in labels],
         recommended=2,
     )
+    given = [option.label for option in question.options]
 
     original = AskPickerScreen._row_label
 
-    def _recommended_first(self: AskPickerScreen, index: int) -> str:
-        """The rejected variant: display promotes, the answer path does not."""
-        if self.question.recommended is None or index >= len(self.question.options):
+    def _rotated(self: AskPickerScreen, index: int) -> str:
+        """The rejected variant: display reorders, the answer path does not."""
+        count = len(self.question.options)
+        if index >= count:
+            # The free-text row keeps its real label; only the option rows are
+            # displaced, which is what a display-only reorder would look like.
             return original(self, index)
-        order = [self.question.recommended] + [
-            other
-            for other in range(len(self.question.options))
-            if other != self.question.recommended
-        ]
-        return self.question.options[order[index]].label
+        return self.question.options[(index + 1) % count].label
 
-    monkeypatch.setattr(AskPickerScreen, "_row_label", _recommended_first)
+    monkeypatch.setattr(AskPickerScreen, "_row_label", _rotated)
 
     app = _AskHost([question])
     async with app.run_test(size=(120, 30)) as pilot:
@@ -5432,11 +5468,11 @@ async def test_a_reordering_card_is_caught(monkeypatch: pytest.MonkeyPatch) -> N
             for line in _fingerprint(card)
             if line.lstrip("❯ ").strip().startswith("1. ")
         ]
-        # The card is showing the recommendation at position 1...
-        assert drawn == ["1. Charlie third"], drawn
+        # The card is showing `options[1]` on row 1...
+        assert drawn == [f"1. {given[1]}"], drawn
 
     # ...while the digit key still answers with `options[0]`. That gap is the
-    # defect, and it is why nothing may reorder.
+    # defect, and it is why nothing below the model may reorder.
     app = _AskHost([question])
     async with app.run_test(size=(120, 30)) as pilot:
         await app.open_picker()
@@ -5444,7 +5480,8 @@ async def test_a_reordering_card_is_caught(monkeypatch: pytest.MonkeyPatch) -> N
         await pilot.press("1")
         await pilot.press("enter")
         await pilot.pause()
-    assert app.answered == [{"ordering": ["Alpha first"]}], app.answered
+    assert app.answered == [{"ordering": [given[0]]}], app.answered
+    assert given[0] != given[1], given
 
 
 @pytest.mark.asyncio
