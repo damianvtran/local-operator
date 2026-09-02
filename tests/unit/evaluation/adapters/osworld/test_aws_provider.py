@@ -515,16 +515,78 @@ def test_the_seal_covers_every_upstream_launch_and_release_method() -> None:
         "save_state",
         "get_vm_path",
     }
+    launching_calls = re.compile(r"run_instances|terminate_instances|create_image")
+
+    def launching_functions(source: str) -> set[str]:
+        """Every function whose body reaches a launch call, DIRECTLY or through
+        another function in the same module (``get_vm_path`` -> ``_allocate_vm``).
+        AST-based: a regex on ``def name(self...)`` skipped signatures with a
+        nested paren (``screen_size=(1920, 1080)``) and module-level helpers."""
+
+        import ast
+
+        tree = ast.parse(source)
+        bodies: dict[str, str] = {}
+        calls: dict[str, set[str]] = {}
+        # Only module-level functions and class methods are reachable on the
+        # env; a nested def (``_allocate_vm``'s ``signal_handler``) is
+        # covered by sealing whatever encloses it.
+        scopes: list[ast.Module | ast.ClassDef] = [tree]
+        scopes.extend(node for node in tree.body if isinstance(node, ast.ClassDef))
+        for scope in scopes:
+            for node in scope.body:
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    bodies[node.name] = ast.unparse(node)
+                    calls[node.name] = {
+                        c.func.id
+                        for c in ast.walk(node)
+                        if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+                    }
+        direct = {name for name, body in bodies.items() if launching_calls.search(body)}
+        # Transitive closure over same-module calls.
+        found = set(direct)
+        changed = True
+        while changed:
+            changed = False
+            for name, callees in calls.items():
+                if name not in found and callees & found:
+                    found.add(name)
+                    changed = True
+        return found
+
     launching: set[str] = set()
     for src in (provider_src, manager_src):
-        text = src.read_text()
-        for match in re.finditer(r"def (\w+)\(self[^)]*\):(.*?)(?=\n    def |\Z)", text, re.S):
-            name, body = match.group(1), match.group(2)
-            if re.search(r"run_instances|terminate_instances|create_image", body):
-                launching.add(name)
+        launching |= launching_functions(src.read_text())
+    # Module-level helpers are not reachable on the env object, so they are
+    # covered by sealing their callers; assert they were found at all so the
+    # scan is provably looking at manager.py.
+    assert "_allocate_vm" in launching
+    assert "get_vm_path" in launching
+    methods = launching - {"_allocate_vm"}
     # start_emulator only start_instances/describe -- never launches -- and is
     # exactly the one upstream method we rely on during __init__.
-    assert launching <= sealed, f"unsealed upstream launch/release methods: {launching - sealed}"
+    assert methods <= sealed, f"unsealed upstream launch/release methods: {methods - sealed}"
+
+
+def test_the_judge_capture_file_set_matches_the_pinned_upstream() -> None:
+    """MINOR-4 (round 2). The capture filters on basename; a rename upstream
+    would silently stop it. Pin the set against the pinned checkout."""
+
+    import os
+    import pwd
+    from pathlib import Path
+
+    real_home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+    inputs_root = Path(os.environ.get("OSWORLD_INPUTS_ROOT", real_home / "worktrees" / "osworld"))
+    evaluators = inputs_root / "prepared" / "desktop_env" / "evaluators"
+    if not evaluators.exists():  # pragma: no cover - inputs root absent on CI
+        pytest.skip("pinned OSWorld checkout not present")
+    present = {p.name for p in evaluators.rglob("*.py")}
+    assert aws_mod._JUDGE_SOURCE_FILES <= present, aws_mod._JUDGE_SOURCE_FILES - present
+    # And those files really log on the loggers we attach to.
+    for name in aws_mod._JUDGE_SOURCE_FILES:
+        source = next(evaluators.rglob(name)).read_text()
+        assert any(f'getLogger("{logger}")' in source for logger in aws_mod._JUDGE_LOGGERS), name
 
 
 # ---------------------------------------------------------------------------

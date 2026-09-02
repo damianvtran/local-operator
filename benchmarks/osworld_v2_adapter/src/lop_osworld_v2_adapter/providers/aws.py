@@ -293,7 +293,6 @@ class AwsProvider:
         # Retained ONLY for _install_default_session; never logged (see
         # AwsCredentials.__repr__), dropped with the provider.
         self._credentials = credentials
-        self._reset_count = 0
         self._desktop_env_factory = desktop_env_factory
         self._task_factory = task_factory
         self._sleep = sleep
@@ -516,11 +515,6 @@ class AwsProvider:
         self._seal_upstream(env)
         env.reset(task_config=task_instance)
         self._env = env
-        # ``is_environment_used`` flips True on the first step, after which a
-        # second ``reset`` would route through ``_revert_to_snapshot``.
-        # The seal makes that raise; this records the invariant the seal
-        # protects so a reader of the env object sees it.
-        self._reset_count = 1
 
     def _install_default_session(self, region: str) -> None:
         if self._credentials is None:
