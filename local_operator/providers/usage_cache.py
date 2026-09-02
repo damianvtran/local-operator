@@ -256,6 +256,12 @@ def fingerprint_secret(secret: str) -> str:
     return "key:" + hashlib.sha256(secret.encode("utf-8", "replace")).hexdigest()[:16]
 
 
+#: The key segment that marks a per-account preflight row. Named so the reader
+#: that walks a storage id's rows can exclude preflight rows by the same token
+#: the writer used, rather than by a second spelling of ``":pf:"``.
+PREFLIGHT_KEY_SEGMENT = ":pf:"
+
+
 def account_preflight_key(storage_id: str, account_identity: str) -> str:
     """Cache key for ONE account's preflight usage probe.
 
@@ -265,15 +271,18 @@ def account_preflight_key(storage_id: str, account_identity: str) -> str:
     (where ``fingerprint_accounts([id])`` would otherwise match). Kept separate on
     purpose — see the module note in the spec: the two subsystems cache different
     shapes (one account vs the full set) with different freshness policies, and the
-    raw preflight fetch does not backfill ``UsageReport.identity``, so the warmer's
-    set-row cannot be reliably sliced per account anyway.
+    raw preflight fetch does not backfill ``UsageReport.identity``, so a preflight
+    row is only attributable through its key. (The warmer's set-row DOES carry
+    ``identity`` per report; :meth:`UsageCacheStore.latest_account_report` is the
+    read that slices it per account, and :data:`PREFLIGHT_KEY_SEGMENT` is how it
+    tells the two namespaces apart.)
 
     ``account_identity`` is a NON-SECRET stable identifier (email, account id, or a
     ``fingerprint_secret`` digest for the API-key route — never a raw key or a
     rotating OAuth token). It is hashed again here so no identity string sits in
     the row's primary key, matching the warmer's discipline.
     """
-    return f"{storage_id}:pf:{fingerprint_accounts([account_identity])}"
+    return f"{storage_id}{PREFLIGHT_KEY_SEGMENT}{fingerprint_accounts([account_identity])}"
 
 
 class UsageCacheStore:
@@ -366,6 +375,66 @@ class UsageCacheStore:
         reports = [report_from_dict(item) for item in data]
         reports = [report for report in reports if report is not None]
         return reports
+
+    def latest_account_report(self, storage_id: str, identities: set[str]) -> UsageReport | None:
+        """The newest warmer-row report naming one of ``identities``, or None.
+
+        Written for the first-resolve account pick
+        (``AuthStore._cached_remaining_fraction``). The pick needs ONE
+        account's numbers, and the preflight's per-account ``:pf:`` row only
+        exists while ``retry.usageAwareFallback`` is on -- on the stock
+        default the only rows in this cache are the warmer's per-provider-set
+        payloads (``/usage`` and the TUI's background warm), each report of
+        which carries ``identity``. Those rows are keyed by a fingerprint of
+        the WHOLE account set plus any override/env key, which the store
+        cannot rebuild without duplicating ``ProviderController
+        ._account_fingerprint`` (and hashing API-key secrets on a read path).
+        So instead of reconstructing the key, this scans every non-preflight
+        row under ``storage_id`` -- the current fingerprint and any older one
+        still inside :data:`USAGE_LAST_GOOD_RETENTION_MS` -- and returns the
+        report with the newest ``fetched_at`` whose ``identity`` matches.
+        Expiry is ignored on purpose: the pick applies its own age and
+        window-reset policy, and a stale-but-recent answer beats none.
+
+        ``identities`` is a SET because the label a report carries depends on
+        which enumerator named the account (email, account id, identity
+        key, or ``cred:<id>``); the caller passes every spelling it has.
+        Exception-safe like every read here: any failure is a miss.
+        """
+        if not identities:
+            return None
+        conn = self._connect()
+        if conn is None:
+            return None
+        prefix = f"{storage_id}:"
+        try:
+            # ``substr`` rather than ``LIKE``: a provider id is never going to
+            # contain ``%``/``_``, but an exact prefix test needs no escaping
+            # rule to stay correct if one ever does.
+            rows = conn.execute(
+                "SELECT key, payload FROM usage_reports WHERE substr(key, 1, ?) = ?",
+                (len(prefix), prefix),
+            ).fetchall()
+        except Exception:  # noqa: BLE001
+            logger.debug("usage cache: account scan failed", exc_info=True)
+            return None
+        newest: UsageReport | None = None
+        for key, payload in rows:
+            if PREFLIGHT_KEY_SEGMENT in str(key):
+                continue
+            try:
+                data = json.loads(payload)
+            except Exception:  # noqa: BLE001
+                continue
+            if not isinstance(data, list):
+                continue
+            for item in data:
+                report = report_from_dict(item)
+                if report is None or report.identity not in identities:
+                    continue
+                if newest is None or report.fetched_at > newest.fetched_at:
+                    newest = report
+        return newest
 
     def expiry_ms(self, key: str) -> int | None:
         """When the cached row for ``key`` expires, or None when absent."""

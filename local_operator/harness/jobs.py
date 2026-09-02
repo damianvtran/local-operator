@@ -132,6 +132,8 @@ def _merge_accounting_component(
     total.output_tokens += component.output_tokens
     total.cache_read_tokens += component.cache_read_tokens
     total.cache_write_tokens += component.cache_write_tokens
+    total.cache_write_5m_tokens += component.cache_write_5m_tokens
+    total.cache_write_1h_tokens += component.cache_write_1h_tokens
     total.reasoning_tokens += component.reasoning_tokens
     if component.context_tokens is not None:
         total.context_tokens = component.context_tokens

@@ -38,6 +38,7 @@ def _consumer_defaults() -> dict[str, object]:
     """
     from local_operator.compaction.thresholds import CompactionSettings
     from local_operator.harness.jobs import DEFAULT_MAX_RUNNING_JOBS
+    from local_operator.model.configure import ANTHROPIC_CACHE_TTL_1H_MIN_CONTEXT_TOKENS
     from local_operator.providers.failover import (
         CONNECTIVITY_BACKOFF_CAP_MS,
         CONNECTIVITY_MAX_RETRIES,
@@ -68,9 +69,16 @@ def _consumer_defaults() -> dict[str, object]:
         "retry.modelFallback": retry.model_fallback,
         "retry.usageAwareFallback": retry.usage_aware_fallback,
         "retry.usageReservePercent": retry.usage_reserve_percent,
+        "retry.usageAwareAccountPick": retry.usage_aware_account_pick,
         "retry.fallbackChains": dict(retry.fallback_chains),
         "subagents.max_running": DEFAULT_MAX_RUNNING_JOBS,
         "providers.openai.api": DEFAULT_CONFIG.values["providers"]["openai"]["api"],
+        # The client-side constant is the real consumer (``_anthropic_cache_ttl_
+        # 1h_min_context_tokens`` restates it for a settings mapping without the
+        # key); the config default is checked against the same constant below.
+        "providers.anthropic.cache_ttl_1h_min_context_tokens": (
+            ANTHROPIC_CACHE_TTL_1H_MIN_CONTEXT_TOKENS
+        ),
         # The fork keys have REAL single-value consumers — the constants
         # ``/fork`` itself reads — so they are mapped here rather than
         # allow-listed. An allow-list entry would buy a green test while leaving

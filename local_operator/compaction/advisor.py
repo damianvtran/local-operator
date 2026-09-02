@@ -86,10 +86,21 @@ ADVISOR_MAX_CANDIDATES = 40
 #: prefix AHEAD of the messages, so appending one more block diverges the
 #: prefix and the request pays a full cache WRITE — 0% cache hit,
 #: ``cache_write=14590`` against an identical conversation. Carried inside the
-#: appended user turn instead, the same request read 96.1% from cache
-#: (``cache_read=14024``, ``cache_write=568`` for the new turn alone). Since
-#: the whole economic case for this feature is that the read is cached, the
+#: appended user turn instead, the same request read the whole conversation
+#: from cache and wrote only the new turn (``cache_write=568``). Since the
+#: whole economic case for this feature is that the read is cached, the
 #: placement is load-bearing: do not "tidy" this into ``system_blocks``.
+#:
+#: The trailing "text only, no tools" line is the second half of that same
+#: economics. The request carries the working turn's live tool schema (the
+#: front of the cache prefix), and on Anthropic the wire ``tool_choice`` is
+#: the turn's own ``auto`` rather than ``none`` — hygiene against the
+#: documented rule that a differing ``tool_choice`` invalidates the
+#: messages-level cache (measured live, ``none`` currently reads the prefix
+#: just as well; see ``Session.advise_compaction`` and
+#: ``scripts/measure_aside_tool_choice_cache.py``). So the model CAN emit a
+#: tool call here; the caller drops it unread, and this line is what makes
+#: the model not try.
 ADVISOR_SYSTEM_PROMPT = """\
 You are a compaction advisor for a long-running agent session. You are NOT \
 answering the user and you are NOT continuing the work. You read the \
@@ -123,6 +134,8 @@ current unit is young enough that a summary of everything before it loses \
 nothing it still needs.
 - `confidence` is your own 0.0-1.0 estimate. Be honest and low when the \
 conversation does not make the task structure clear.
+- Answer in text only. Do not call any tool: none of the tools above are \
+for you, and a tool call in this answer is discarded unread.
 """
 
 
@@ -201,10 +214,16 @@ def build_advisor_prompt(
     The instructions ride here rather than in a system block because that is
     what the measurement said: a system block goes in front of the cached
     prefix and costs a full cache write (0% hit), while the same text as a
-    trailing user turn leaves the prefix intact (96.1% hit). See
+    trailing user turn leaves the prefix intact and pays only for itself. See
     :data:`ADVISOR_SYSTEM_PROMPT` and ``scripts/measure_advisor_cache.py``.
     Everything this function emits is therefore APPEND-ONLY relative to the
     conversation, which is the property the cache economics rest on.
+
+    The closing line repeats "text, not tools" because the request carries
+    the live tool schema with the turn's own ``tool_choice`` on Anthropic
+    (``scripts/measure_aside_tool_choice_cache.py`` measures why); the
+    instructions block says it once, and the last line the model reads says
+    it again where it decides how to answer.
     """
     candidates = _candidate_messages(messages)
     lines = [f"- {message.id} ({message.role}): {_excerpt(message.text)}" for message in candidates]
@@ -216,7 +235,8 @@ def build_advisor_prompt(
         f"Automatic compaction threshold: {threshold_tokens:,} tokens.\n\n"
         "Candidate anchors, oldest first — `preserve_from` must be one of these ids:\n"
         f"{listing}\n\n"
-        "Answer with the fenced JSON block described in your instructions and nothing else."
+        "Answer with the fenced JSON block described in your instructions and nothing else — "
+        "as text, without calling any tool."
     )
 
 

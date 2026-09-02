@@ -9757,3 +9757,73 @@ async def test_help_documents_shell_mode_and_the_composer_chords() -> None:
         assert keyed, "no key-reference rows found in /help"
         for row in keyed:
             assert len(row) <= 74, f"{row!r} is {len(row)} cells and wraps at 80 columns"
+
+
+class _TTLBoundController(_AccessController):
+    """A provider whose listing cache behaves the way the real one does.
+
+    Serves whatever the cache holds, and re-reads upstream only when the caller
+    asks for a document younger than the cache -- which is the contract
+    ``model/catalogue.py`` implements on disk and the reason ``PICKER_TTL_S``
+    exists. ``upstream`` is what Anthropic would answer if asked right now.
+    """
+
+    #: How old the cached document is when the picker opens. Between the 15-minute
+    #: picker TTL and the 24h default, so it is the ONE window where the two
+    #: disagree: the old default served this happily for the rest of the day.
+    CACHE_AGE_S = 3 * 60 * 60
+
+    def __init__(self) -> None:
+        super().__init__(stored=("anthropic",))
+        # Written before `claude-fable-5-1` shipped.
+        self.cached = ["claude-opus-5", "claude-sonnet-5", "claude-fable-5"]
+        self.upstream = ["claude-fable-5-1"] + self.cached
+        self.fetches = 0
+
+    def login_providers(self):
+        return [_FakeDef("anthropic", "Anthropic", None, ("claude",))]
+
+    def _entries(self, ids):
+        from local_operator.providers.controller import CatalogueEntry
+
+        return [
+            CatalogueEntry(
+                provider="anthropic",
+                model_id=i,
+                label=i,
+                context_window=1_000_000,
+                input_price=5.0,
+                output_price=25.0,
+                connected=True,
+            )
+            for i in ids
+        ]
+
+    def static_catalogue(self):
+        return self._entries(self.cached)
+
+    async def live_catalogue(self, *, ttl_s=None):
+        if ttl_s is not None and ttl_s < self.CACHE_AGE_S:
+            self.fetches += 1
+            self.cached = list(self.upstream)
+            return self._entries(self.cached), {"anthropic": "ok"}
+        return self._entries(self.cached), {"anthropic": "cached"}
+
+
+@pytest.mark.asyncio
+async def test_the_picker_shows_a_model_released_since_the_listing_was_cached() -> None:
+    """The reported defect, at the surface the user actually touches.
+
+    `claude-fable-5-1` shipped after the cached listing was written. With the 24h
+    default the document was still fresh, so the live-refresh worker asked for the
+    cache, got yesterday's answer, and the model was unreachable through `/model`
+    all day. The picker now asks for a fifteen-minute document.
+    """
+    ctrl = _TTLBoundController()
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=ctrl)
+    async with app.run_test(size=(90, 24)) as pilot:
+        await pilot.pause()
+        picker = await _open_model_picker(app, pilot)
+        offered = {row.model_id for row in picker.rows()}
+    assert "claude-fable-5-1" in offered, offered
+    assert ctrl.fetches == 1, "and it cost exactly one live listing"

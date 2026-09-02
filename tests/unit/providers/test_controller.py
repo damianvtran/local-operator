@@ -7,6 +7,7 @@ httpx transport.
 
 from __future__ import annotations
 
+import dataclasses
 import types
 from collections.abc import Iterator
 from typing import Any
@@ -15,7 +16,8 @@ import httpx
 import pytest
 
 from local_operator.harness.types import ModelSpec
-from local_operator.providers.controller import ProviderController
+from local_operator.providers.controller import PICKER_TTL_S, ProviderController
+from local_operator.providers.registry import get_provider_definition
 from local_operator.providers.usage import UsageAmount, UsageLimit, UsageReport
 from local_operator.providers.usage_cache import (
     USAGE_ACCOUNT_MAX_FAILURES,
@@ -1600,3 +1602,39 @@ async def test_logout_invalidates_once_per_storage_id(controller, store, monkeyp
     await controller.logout("zai-oauth")
 
     assert dropped == ["zai"]
+
+
+def _spy_available_models(monkeypatch, *, live: dict[str, list[str]] | None = None):
+    """Record every ``available_models`` call and the TTL it was given.
+
+    Returns the call log. ``live`` names the model ids a provider answers with;
+    anything absent answers as an unauthenticated provider, which is what the
+    registry's two dozen unconfigured entries look like in a real run.
+    """
+    calls: list[tuple[str, float | None]] = []
+    live = live or {}
+
+    def fake(provider_id: str, **kwargs: Any):
+        calls.append((provider_id, kwargs.get("ttl_s")))
+        ids = live.get(provider_id)
+        if ids is None:
+            return [], "unauthenticated"
+        return [DiscoveredModel(id=model_id, name=model_id) for model_id in ids], "ok"
+
+    monkeypatch.setattr("local_operator.providers.controller.available_models", fake)
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_the_picker_ttl_is_the_only_ttl_override(controller, store, monkeypatch) -> None:
+    """``live_catalogue`` passes the caller's TTL through untouched and adds none of
+    its own, so ``PICKER_TTL_S`` remains the single statement of picker freshness."""
+    store.upsert_credential("anthropic", {"key": "sk-ant", "type": "api_key"})
+    calls = _spy_available_models(monkeypatch, live={"anthropic": ["claude-opus-5"]})
+
+    await controller.live_catalogue()
+    assert [ttl for _, ttl in calls if ttl is not None] == [], "no override by default"
+
+    calls.clear()
+    await controller.live_catalogue(ttl_s=PICKER_TTL_S)
+    assert {ttl for _, ttl in calls} == {PICKER_TTL_S}
