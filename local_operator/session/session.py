@@ -100,6 +100,7 @@ from local_operator.harness.types import (
     SteeringDeliveredEvent,
     StreamEvent,
     StreamTextDelta,
+    StreamToolCallDelta,
     StreamUsageEvent,
     TextContent,
     ToolCall,
@@ -7356,15 +7357,40 @@ class Session:
         change the prefix at position 0 and force the provider to re-process the
         whole conversation at full/cache-write price instead of a cache READ.
         Sending the SAME tool schema the turn sends is what keeps the aside
-        warm against the turn's cached prefix. ``tool_choice="none"`` preserves
-        the "reads the turn, calls nothing" contract on every wire (and the
-        Gemini builder is taught to honour it, since it otherwise ignores
-        ``tool_choice`` and non-empty tools would newly ALLOW a call).
+        warm against the turn's cached prefix. ``tool_choice="none"`` states
+        the "reads the turn, calls nothing" intent, and the OpenAI-compatible
+        and Gemini builders put it on the wire literally (Gemini is taught to
+        honour it, since it otherwise ignores ``tool_choice`` and non-empty
+        tools would newly ALLOW a call).
 
-        Caveat: on Anthropic a ``tool_choice`` that differs from the turn's
-        can still invalidate the growing MESSAGE-tail cache while the
-        tools+system HEAD stays warm — the head is the large, stable win here;
-        the tail delta is bounded by the turn's own tail.
+        On Anthropic the wire says ``auto``, NOT ``none``. The prompt-caching
+        docs list ``tool_choice`` as invalidating the MESSAGES level of that
+        provider's cache hierarchy (tools -> system -> messages), which made a
+        differing value the prime suspect for the fleet's head-only cache
+        events; measured live, ``none`` reads the turn's full prefix just as
+        well (``scripts/measure_aside_tool_choice_cache.py``), so the mapping
+        is hygiene against that documented rule rather than a measured saving.
+        The contract is enforced HERE: the loop below consumes text and
+        usage only, never a ``StreamToolCallDelta``, so a ``tool_use`` block
+        in the answer is inert — nothing runs, nothing joins the history. The
+        appended prompts (``ASIDE_PROMPT``, ``LOOP_JUDGE_PROMPT``) also tell
+        the model to answer in text, so the case is rare to begin with.
+
+        The one way that mapping is observable is an answer that is a tool
+        call and NOTHING else — the model "answered" the question by reaching
+        for ``read``. That would surface as an empty answer on the card, which
+        reads as a provider fault. So when the stream carried a tool call and
+        no text, the request is retried once with ``tools=[]``: the tools block
+        is the front of the prefix, so this retry is a full re-process at
+        write price, but it is bounded to that rare case rather than paid on
+        every aside, and it gives the user an answer instead of a blank. An
+        answer that mixes text and a tool call is returned as its text
+        without a retry; the text is what was asked for.
+
+        ``on_usage`` fires once per provider call, so a single aside may
+        deliver TWO usage figures when that retry runs — the first call's
+        (bare tool call, discarded) and the retry's. Both were paid for, so
+        hosts must add them rather than keep the last one.
 
         Safe to call mid-turn, and the pairing below is what makes that true —
         see :meth:`_wire_legal_snapshot`.
@@ -7372,13 +7398,15 @@ class Session:
         blocks = self._system_blocks()
         if inspect.isawaitable(blocks):
             blocks = await blocks
+        messages = self._render_history([*self._wire_legal_snapshot(), *turns])
         request = ChatRequest(
             model=self._model,
             system_blocks=list(blocks),
-            messages=self._render_history([*self._wire_legal_snapshot(), *turns]),
+            messages=messages,
             # Live tools (not []): keep the aside on the SAME cache prefix the
             # working turn builds. See the docstring for why this is a cache
-            # read rather than a full re-process. tool_choice stays "none".
+            # read rather than a full re-process, and why Anthropic puts the
+            # turn's own tool_choice on the wire rather than this "none".
             tools=list(self._context.tools),
             tool_choice="none",
             # Same prefix as the turn, so the same TTL: the session stamps its
@@ -7387,7 +7415,27 @@ class Session:
             context_tokens_hint=self._context_tokens_hint,
         )
         parts: list[str] = []
+        called_tool = False
         async for event in self._stream_fn(request, None):
+            if isinstance(event, StreamTextDelta):
+                parts.append(event.delta)
+                if on_delta is not None:
+                    on_delta(event.delta)
+            elif isinstance(event, StreamToolCallDelta):
+                # Inert by design (see the docstring): recorded only so an
+                # answer that was NOTHING BUT a call can be retried below.
+                called_tool = True
+            elif isinstance(event, StreamUsageEvent) and on_usage is not None:
+                on_usage(event.usage)
+        if parts or not called_tool:
+            return "".join(parts)
+        # Tool call and no text: the model tried to act instead of answering.
+        # Retry once with no tools at all — off the cache prefix, but bounded
+        # to this case. ``tools=[]`` never reaches the Anthropic mapping, so
+        # the wire genuinely offers nothing to call.
+        logger.debug("aside answered with a bare tool call; retrying without tools")
+        retry = request.model_copy(update={"tools": []})
+        async for event in self._stream_fn(retry, None):
             if isinstance(event, StreamTextDelta):
                 parts.append(event.delta)
                 if on_delta is not None:
@@ -7435,21 +7483,36 @@ class Session:
         expensive one. The knob would invite users to silently destroy the
         economics that justify the call.
 
-        MEASURED, not assumed (``scripts/measure_advisor_cache.py``, live
-        Anthropic): this request shape reads 96.1% of its prompt from cache
-        (``cache_read=14024``, ``cache_write=568`` for the appended turn).
-        Two findings that shape the code:
+        MEASURED, not assumed. Three findings shape the code, and the third
+        corrected the first two:
 
         - The system blocks are passed through UNCHANGED. The advisor's
           instructions ride inside the appended user turn instead, because
           system sits in the cache prefix ahead of the messages: adding one
-          block there measured 0% cache hit and a full ``cache_write=14590``.
-          The request must stay APPEND-ONLY relative to the turn's prefix.
+          block there measured 0% cache hit and a full ``cache_write=14590``
+          (``scripts/measure_advisor_cache.py``). The request must stay
+          APPEND-ONLY relative to the turn's prefix.
         - On Anthropic, ``isolated=True`` measured 100% cache hit as well,
           because that provider keys caching on prefix CONTENT rather than on
           ``prompt_cache_key``. Isolation is still declined, since the key
           does govern the OpenAI-compatible wire and this method has to be
           correct on every provider a session may be running.
+        - The original 96.1%-hit figure came from a ~14k-token toy
+          conversation whose system+tools head WAS most of the prompt, so it
+          could not distinguish a head-only hit from a full one. The shared
+          context therefore blamed ``tool_choice="none"`` for the fleet's
+          head-only cache events; measured live at ~37k tokens
+          (``scripts/measure_aside_tool_choice_cache.py``), a ``none`` aside
+          reads the turn's full prefix exactly as well as an ``auto`` one, so
+          that attribution did not hold — the fleet events are better
+          explained by 5-minute TTL expiry and per-sub-context prefix
+          extension. The wire still sends the turn's own ``auto`` when tools
+          are present, as hygiene against the documented rule that
+          ``tool_choice`` invalidates the messages cache; the "calls nothing"
+          contract is kept by this method reading only text and usage events.
+          See
+          ``docs/evidence/compaction-advisor/aside-tool-choice-measurement.txt``
+          for the numbers.
         """
         blocks = self._system_blocks()
         if inspect.isawaitable(blocks):
@@ -7470,6 +7533,12 @@ class Session:
             context_tokens_hint=self._context_tokens_hint,
         )
         parts: list[str] = []
+        # Text and usage ONLY. A tool-call delta is dropped on the floor: on
+        # Anthropic the wire says ``auto`` (see the docstring), and this is the
+        # half of the contract that guarantees the advisor never acts. No
+        # bare-tool-call retry here, unlike ``complete_aside``: an unparseable
+        # answer is already a handled outcome (``parse_hint`` returns None and
+        # the size trigger stands), and nobody is looking at a blank card.
         async for event in self._stream_fn(request, None):
             if isinstance(event, StreamTextDelta):
                 parts.append(event.delta)

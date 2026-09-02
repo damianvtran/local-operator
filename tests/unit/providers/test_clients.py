@@ -3462,8 +3462,9 @@ async def test_codex_5_6_stream_skips_reasoning_items() -> None:
 # tools block is the FRONT of every provider's cache prefix, so a future
 # refactor that silently dropped `body["tools"]` for a `tool_choice="none"`
 # request would reintroduce the exact prompt-cache regression these tests
-# guard. Each of the three wires must emit the tools AND pin the choice to
-# "none" (the aside reads the turn and calls nothing).
+# guard. Each of the three wires must emit the tools. The OpenAI and Gemini
+# wires pin the choice to "none" (the aside reads the turn and calls nothing);
+# Anthropic deliberately does NOT — see the block below.
 # ---------------------------------------------------------------------------
 
 
@@ -3523,13 +3524,99 @@ def test_anthropic_emits_tools_with_tool_choice_none_and_keeps_cache_control() -
     )
     body = AnthropicClient()._build_body(request)
     assert [t["name"] for t in body["tools"]] == ["bash", "read"]
-    assert body["tool_choice"] == {"type": "none"}
+    # NOT {"type": "none"}: see test_anthropic_tool_choice_none_with_tools_rides_the_turns_auto.
+    assert body["tool_choice"] == {"type": "auto"}
     # The message-tail cache_control placement is unchanged by restoring tools:
     # the tools block sits AHEAD of system+messages in the prefix, so the
     # existing breakpoint policy (last block of the final message, and the
     # prior user turn) must still hold.
     assert "cache_control" in body["messages"][-1]["content"][-1]
     assert "cache_control" in body["messages"][0]["content"][-1]
+
+
+# ---------------------------------------------------------------------------
+# Anthropic tool_choice: "none" with tools present goes out as the turn's
+# "auto".
+#
+# Anthropic renders `tool_choice` into the MESSAGES level of its cache
+# hierarchy (docs, "What invalidates the cache": Tool choice — tools ✓,
+# system ✓, messages ✘). An aside/advisor sending `{"type": "none"}` against a
+# working turn that sent `{"type": "auto"}` therefore kept only the
+# tools+system head warm and re-wrote every message block — measured at a
+# quarter of all daily cache-write tokens across the fleet. The fix is for the
+# aside's body to be byte-identical to the turn's prefix, which means the same
+# `tool_choice`; the "calls nothing" contract is enforced by the callers
+# ignoring tool-call deltas (`Session.complete_aside`,
+# `Session.advise_compaction`). The no-tools callers never reach the branch and
+# must keep carrying no `tool_choice` key at all.
+# ---------------------------------------------------------------------------
+
+
+def _anthropic_request(
+    tool_choice: Literal["auto", "none", "required"], *, tools: list[AgentTool]
+) -> ChatRequest:
+    return ChatRequest(
+        model=_spec(provider="anthropic"),
+        system_blocks=["instructions"],
+        messages=[Message.user("first"), Message.assistant("mid"), Message.user("why?")],
+        tools=tools,
+        tool_choice=tool_choice,
+    )
+
+
+def test_anthropic_tool_choice_none_with_tools_rides_the_turns_auto() -> None:
+    """The aside body must equal the turn body: same tools, same tool_choice."""
+    client = AnthropicClient()
+    turn = client._build_body(_anthropic_request("auto", tools=_aside_tools()))
+    aside = client._build_body(_anthropic_request("none", tools=_aside_tools()))
+    assert aside["tool_choice"] == {"type": "auto"}
+    # Byte-identical prefix, not merely an equal tool_choice: any other key
+    # that differed would break the messages cache just the same.
+    assert aside == turn
+
+
+def test_anthropic_tool_choice_mapping_with_tools() -> None:
+    cases: list[tuple[Literal["auto", "none", "required"], dict[str, str]]] = [
+        ("auto", {"type": "auto"}),
+        ("none", {"type": "auto"}),
+        ("required", {"type": "any"}),
+    ]
+    for choice, expected in cases:
+        body = AnthropicClient()._build_body(_anthropic_request(choice, tools=_aside_tools()))
+        assert body["tool_choice"] == expected, choice
+
+
+def test_anthropic_tool_choice_none_without_tools_sends_no_tool_choice_key() -> None:
+    """Naming, the compaction summary and the server operator send tools=[]
+    with tool_choice="none"; they carry neither key, before and after."""
+    body = AnthropicClient()._build_body(_anthropic_request("none", tools=[]))
+    assert "tools" not in body
+    assert "tool_choice" not in body
+
+
+def test_other_wires_keep_a_literal_none_with_tools() -> None:
+    """The mapping is Anthropic-only. OpenAI-compatible wires document no
+    cache penalty for tool_choice, and Gemini's mode MUST stay NONE because
+    its default with tools present is to allow calls."""
+    openai_request = ChatRequest(
+        model=_spec(provider="openai"),
+        messages=[Message.user("why?")],
+        tools=_aside_tools(),
+        tool_choice="none",
+    )
+    assert OpenAICompatClient("https://x")._build_body(openai_request)["tool_choice"] == "none"
+    assert (
+        OpenAICompatClient("https://x")._build_responses_body(openai_request)["tool_choice"]
+        == "none"
+    )
+    google_request = ChatRequest(
+        model=_spec(provider="google", model_id="gemini-2.5-pro"),
+        messages=[Message.user("why?")],
+        tools=_aside_tools(),
+        tool_choice="none",
+    )
+    body = GoogleClient()._build_body(google_request)
+    assert body["toolConfig"]["functionCallingConfig"]["mode"] == "NONE"
 
 
 def test_google_emits_tools_and_pins_function_calling_to_none() -> None:
