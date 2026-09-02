@@ -1821,6 +1821,58 @@ class AnthropicClient:
     #: only has to land on the right side of a 150k threshold, not be exact.
     _BYTES_PER_TOKEN_ESTIMATE = 4
 
+    #: Token FLOOR counted per image in the byte-based context estimate in
+    #: ``_cache_ttl_for``. The serialized body carries images as base64 in
+    #: ``source.data``, so a naive ``len(json) / 4`` turns one ~1 MB screenshot
+    #: into ~330k "tokens". Anthropic bills an image by its PIXEL AREA
+    #: (``width × height / 750``, capped at ~1.15 megapixels), so a worst-case
+    #: image is ~1.6k tokens no matter how many bytes its base64 spelling
+    #: takes. A floor rather than a parse: media_type/size metadata is not
+    #: reliably present on every path that builds an ``ImageContent``, and
+    #: the estimate only has to land on the right side of the threshold.
+    _IMAGE_TOKENS_ESTIMATE = 1_600
+
+    @staticmethod
+    def _estimate_context_tokens(body: dict[str, Any]) -> int:
+        """Size the request for ``_cache_ttl_for``'s threshold comparison.
+
+        Counts the serialized body's characters EXCEPT base64 image payloads,
+        each of which contributes ``_IMAGE_TOKENS_ESTIMATE`` instead: bytes of
+        base64 say nothing about the tokens a provider bills (see that
+        constant), and leaving them in makes any first call, fork or resume
+        carrying a screenshot flip to the 1h TTL on a ~1.6k-token image.
+        Images are located by walking the body's shape — any dict with a
+        ``source`` whose ``type`` is ``base64`` and whose ``data`` is a string
+        — rather than by key position, because tool results nest them one
+        level deeper than plain message content.
+        """
+        images = 0
+
+        def _swap_out_images(value: Any) -> Any:
+            nonlocal images
+            if isinstance(value, dict):
+                source = value.get("source")
+                if (
+                    isinstance(source, dict)
+                    and source.get("type") == "base64"
+                    and isinstance(source.get("data"), str)
+                ):
+                    images += 1
+                    # The key stays so the shape (and key order) matches what
+                    # gets serialized; only the counted payload shrinks.
+                    return {**value, "source": {**source, "data": ""}}
+                return {k: _swap_out_images(v) for k, v in value.items()}
+            if isinstance(value, list):
+                return [_swap_out_images(item) for item in value]
+            return value
+
+        # ``default=str`` guards against any non-JSON-native value a caller
+        # slipped into the body; ``separators`` matches what httpx sends.
+        serialized = json.dumps(_swap_out_images(body), default=str, separators=(",", ":"))
+        return len(serialized) // AnthropicClient._BYTES_PER_TOKEN_ESTIMATE + (
+            images * AnthropicClient._IMAGE_TOKENS_ESTIMATE
+        )
+
     @staticmethod
     def _cache_control(ttl: str | None) -> dict[str, Any]:
         """One ``cache_control`` marker. ``ttl`` is ``"1h"`` or None (5m).
@@ -1869,23 +1921,21 @@ class AnthropicClient:
            the session's previous call, stamped by ``SessionStreamFn``. It is
            exact for the prefix this request replays, and off only by the
            one new turn appended since.
-        2. A byte estimate of the serialized body (``len(json) / 4``) when no
-           hint exists: a session's first call, a fork's first request, a
-           one-shot errand with no usage history. The estimate is coarse —
-           base64 images and JSON punctuation skew it — but it only has to
-           land on the right side of a 150k threshold, and the hint replaces
-           it from the second call on. Without the fallback a resumed 400k
-           session would send its first (and most expensive) request at 5m.
+        2. A byte estimate of the serialized body when no hint exists: a
+           session's first call, a fork's first request, a one-shot errand
+           with no usage history. The estimate (``_estimate_context_tokens``)
+           excludes base64 image payloads — Anthropic bills an image by pixel
+           area, not bytes — but is otherwise coarse; it only has to land on
+           the right side of a 150k threshold, and the hint replaces it from
+           the second call on. Without the fallback a resumed 400k session
+           would send its first (and most expensive) request at 5m.
         """
         threshold = self._cache_ttl_1h_min_context_tokens
         if threshold <= 0:
             return None
         size = request.context_tokens_hint
         if size is None:
-            # ``default=str`` guards against any non-JSON-native value a caller
-            # slipped into the body; ``separators`` matches what httpx sends.
-            serialized = json.dumps(body, default=str, separators=(",", ":"))
-            size = len(serialized) // self._BYTES_PER_TOKEN_ESTIMATE
+            size = self._estimate_context_tokens(body)
         return "1h" if size >= threshold else None
 
     @classmethod
