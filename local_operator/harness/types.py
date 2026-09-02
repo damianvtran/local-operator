@@ -1446,18 +1446,22 @@ class LoopConfig(BaseModel):
     has_pending_fork: Callable[[], bool] | None = Field(default=None, exclude=True)
 
     # The provider-reported context size (``Usage.context_tokens``) of this
-    # conversation's LAST call, re-read immediately before every provider call
-    # and stamped onto the request as ``ChatRequest.context_tokens_hint``.
-    # Per-CONVERSATION memory, not per-stream-fn: subagents share the parent's
-    # stream fn (one httpx pool, one failover cascade), so a hint remembered
-    # on the stream fn itself would let a child's tiny first request inherit
-    # the parent's 300k count and pay 2x write rates on a fresh ~10k prefix —
-    # and let the parent's post-child request go out at 5m on its large
-    # context, the exact expiry this hint exists to dodge. The loop asks the
-    # HOST (which owns the conversation), exactly as it does for the model and
-    # the system blocks. ``None`` (no callback, or nothing reported yet) means
-    # no hint and the client's own byte estimate decides. Read in
-    # ``SessionStreamFn.__call__``; see ``ChatRequest.context_tokens_hint``.
+    # conversation's last call BEFORE this run — the cross-turn seed. The loop
+    # reads it for the run's first request and stamps it as
+    # ``ChatRequest.context_tokens_hint``; from the second request on, the
+    # count the previous call of the SAME run reported wins, because a long
+    # tool loop grows past the TTL threshold long before the host's figure is
+    # next refreshed. Per-CONVERSATION, stamped per REQUEST by the loop that
+    # owns the call — never remembered on the stream fn: subagents share the
+    # parent's stream fn (one httpx pool, one failover cascade), so a hint
+    # held there is last-writer-wins between the parent and every child, and
+    # a child's construction would silently downgrade the parent's next
+    # request to 5m on its large context (the exact expiry this hint exists
+    # to dodge) while the child's tiny first request inherits the parent's
+    # 300k count and pays 2x write rates on a fresh ~10k prefix. The loop asks
+    # the HOST (which owns the conversation), exactly as it does for the
+    # model and the system blocks. ``None`` (no callback, or nothing reported
+    # yet) means no hint and the client's own byte estimate decides.
     get_context_tokens_hint: Callable[[], int | None] | None = Field(default=None, exclude=True)
 
     interrupt_mode: Literal["immediate", "wait"] = "wait"
@@ -1566,12 +1570,15 @@ class ChatRequest(BaseModel):
     #: previous turn is the most accurate figure anyone has. ``None`` on a
     #: session's first call and on paths that never saw a usage event (a fork's
     #: first request, one-shot errands); the client then falls back to a byte
-    #: estimate of the serialized body. Stamped by ``SessionStreamFn.__call__``
-    #: from the conversation owner's registered reader (see
-    #: ``SessionStreamFn.set_context_tokens_hint`` — the memory is
-    #: per-conversation precisely because subagents share one stream fn);
-    #: retries and fallback clones keep it, and a caller's EXPLICIT value —
-    #: including ``0``, which suppresses the hint — always wins.
+    #: estimate of the serialized body. Stamped by the OWNER of the
+    #: conversation the call belongs to — the harness loop for turn calls
+    #: (``LoopConfig.get_context_tokens_hint`` seeds it, then the run's own
+    #: usage events advance it) and the session for its direct calls (asides,
+    #: the compaction advisor) — never by the shared stream fn, which merely
+    #: passes through what the request carries: subagents share one stream
+    #: fn, so any memory held there is last-writer-wins across conversations.
+    #: Retries and fallback clones keep it, and an EXPLICIT ``0`` suppresses
+    #: the hint (a one-shot prompt that is a fresh write-once prefix).
     context_tokens_hint: int | None = None
     #: This call's output has NOT been shown to anyone yet, so a failed attempt
     #: may be discarded and retried whole.

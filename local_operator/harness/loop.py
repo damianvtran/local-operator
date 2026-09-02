@@ -492,6 +492,16 @@ class AgentLoop:
         # every request under it so the session's frozen auto-effort cannot
         # raise the retry back to the rung that produced nothing.
         effort_ceiling: str | None = None
+        # The provider-reported context size of the latest call in THIS run
+        # (``Usage.context_tokens``), stamped onto the next request as its
+        # prompt-cache TTL hint. Run-local on purpose: the host's
+        # ``get_context_tokens_hint`` is the cross-turn seed (last turn's
+        # final call, or a resumed transcript's), and a long tool loop can
+        # grow past the TTL threshold dozens of calls before the host's figure
+        # is next refreshed — a subagent is ONE turn for its whole life and
+        # would otherwise never carry a hint at all. Once a call in this run
+        # has reported, its count beats the seed (review F9).
+        run_context_tokens: int | None = None
 
         yield AgentStartEvent(generation=generation)
 
@@ -529,7 +539,15 @@ class AgentLoop:
 
                     assistant, stop_reason, stream_error = None, "stop", None
                     async for event in self._model_turn(
-                        context, config, signal, effort_ceiling=effort_ceiling
+                        context,
+                        config,
+                        signal,
+                        effort_ceiling=effort_ceiling,
+                        context_tokens_hint=(
+                            run_context_tokens
+                            if run_context_tokens is not None
+                            else self._host_context_tokens_hint(config)
+                        ),
                     ):
                         if isinstance(event, _ModelTurnResult):
                             assistant, stop_reason, stream_error = (
@@ -541,6 +559,11 @@ class AgentLoop:
                             yield event
                     if assistant is None:
                         raise RuntimeError("model turn produced no assistant message")
+                    if assistant.usage is not None and assistant.usage.context_tokens:
+                        # Only a REPORTED count advances the hint: a wire that
+                        # omits it must not blank a figure the previous call
+                        # (or the host's seed) supplied.
+                        run_context_tokens = int(assistant.usage.context_tokens)
                     context.messages.append(assistant)
                     new_messages.append(assistant)
 
@@ -804,18 +827,35 @@ class AgentLoop:
 
     # (``_abortable_stream`` is a module-level helper; see below the class.)
 
+    @staticmethod
+    def _host_context_tokens_hint(config: LoopConfig) -> int | None:
+        """The host's cross-turn context-size seed, or ``None`` when it has
+        none — a zero is treated as "nothing reported" because a provider
+        never reports an empty context, so 0 here can only be an unset
+        default, not a deliberate suppression (that is ``ChatRequest``'s
+        explicit ``0``, which only the session's own direct calls set)."""
+        reader = config.get_context_tokens_hint
+        if reader is None:
+            return None
+        hint = reader()
+        return int(hint) if hint else None
+
     async def _model_turn(
         self,
         context: LoopContext,
         config: LoopConfig,
         signal: AbortSignal | None,
         effort_ceiling: str | None = None,
+        context_tokens_hint: int | None = None,
     ) -> AsyncIterator[AgentEvent | _ModelTurnResult]:
         """One provider call: build the request, stream it, assemble the
         assistant message, emitting message_start/update/end events.
 
         The model is resolved HERE, per call, not once per run — see
-        :meth:`_current_model`.
+        :meth:`_current_model`. ``context_tokens_hint`` is stamped onto the
+        request by THIS loop, the owner of the conversation the call belongs
+        to — never remembered on the shared stream fn, where a subagent's
+        registration would overwrite the parent's (review F8).
         """
         shaped = list(context.messages)
         if config.transform_context is not None:
@@ -868,6 +908,7 @@ class AgentLoop:
                 messages=list(converted),
                 tools=list(context.tools),
                 effort_ceiling=effort_ceiling,
+                context_tokens_hint=context_tokens_hint,
             )
             stream = _abortable_stream(config.stream_fn(request, signal), signal)
             async for event in stream:
