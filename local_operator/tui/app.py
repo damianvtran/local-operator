@@ -13926,7 +13926,7 @@ class OperatorApp(App[None]):
         what shipped too late to be in the registry — which is the whole reason this
         exists: after logging in to Anthropic, `claude-opus-5` has to be findable
         without the user already knowing its id.
-"""
+        """
         rows, note = self._catalogue_rows(
             self._providers.static_catalogue() if self._providers else []
         )
