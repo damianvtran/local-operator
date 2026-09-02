@@ -188,6 +188,14 @@ class EpisodeConfig:
     the episode is still scored on the state it reached. ``None`` means
     :func:`default_guards`; an empty tuple disables them.
     ``max_cycle_cost_micros`` feeds the default cost-rate guard's absolute cap.
+    ``max_decision_retries`` is how many corrective re-prompts one observation
+    may take after a billed reply fails strict parsing (a ``frame_id`` the
+    observation does not carry, malformed JSON) before the episode ends as a
+    model failure. The default is 2 -- one re-prompt is the minimum for a
+    single defect, a second covers a reply that fixes it and introduces
+    another; beyond that the model is not converging and every further call
+    is money spent on a batch that can never execute. ``0`` restores the old
+    one-strike behaviour.
     The frame policy (``keep_recent_frames``) is deliberately NOT here: the
     model client owns its context and is built before the runner
     (``create_provider_model_client(keep_recent_frames=...)``), so a copy on
@@ -207,6 +215,7 @@ class EpisodeConfig:
     handshake_timeout: float = 30.0
     max_cycle_cost_micros: int | None = None
     guards: tuple[EpisodeGuard, ...] | None = None
+    max_decision_retries: int = 2
 
 
 @dataclass(frozen=True)
@@ -630,13 +639,46 @@ class EpisodeRunner:
                 return
 
     async def _decide(self, observation: Observation) -> Any:
-        """Ask the model, writing request/response/usage in that exact order.
+        """Ask the model until it returns a usable batch, within the retry bound.
+
+        A :class:`DecisionRejected` is a BILLED call whose reply failed strict
+        parsing (the first paid episode's ``frame_id "1"`` against a published
+        ``"screen"``). It is the model's error, not the provider's, and it is
+        recoverable: the client has already folded the rejection into its
+        context, so calling ``decide`` again for the same observation is a
+        corrective re-prompt. Each attempt -- rejected or not -- writes its own
+        request/response/usage triple and counts as a model cycle, because
+        each was a real provider call; a rejected one additionally writes a
+        retryable ``error`` event naming the defect, so a reader can see the
+        correction happen rather than infer it from an extra triple.
+
+        The bound is ``config.max_decision_retries`` corrective re-prompts.
+        Spending it means the model is not converging, and the episode ends
+        as a MODEL failure (``_ModelFailure``) rather than burning the budget
+        on replies that can never execute.
+        """
+
+        rejections = 0
+        while True:
+            try:
+                return await self._decide_once(observation)
+            except _DecisionRejection as rejection:
+                rejections += 1
+                if rejections > self._config.max_decision_retries:
+                    raise _ModelFailure(
+                        f"model produced no usable decision after {rejections} attempt(s): "
+                        f"{rejection.diagnostic}"
+                    ) from rejection
+
+    async def _decide_once(self, observation: Observation) -> Any:
+        """One model call, writing request/response/usage in that exact order.
 
         The verifier binds a response to its request and a usage record to that
         response, so all three must be written even when the provider reports
         nothing -- a missing usage record leaves an unclosed operation and the
         bundle cannot reach a terminal.
         """
+        from local_operator.evaluation.runner.model import DecisionRejected
 
         request_id = f"req-{self._model_cycles}-{uuid.uuid4().hex[:12]}"
         message_count = len(self._turns)
@@ -646,10 +688,18 @@ class EpisodeRunner:
         # by a provider failure, and the verifier requires every request to
         # carry its response and usage before any terminal (verify.py:760) --
         # so recording it eagerly would make the failure path unsealable.
+        rejected: DecisionRejected | None = None
         try:
             decision = await self._model.decide(observation, tuple(self._turns))
         except _EvidenceFailure:
             raise
+        except DecisionRejected as error:
+            # A billed call with an unusable reply. Its evidence is written
+            # below exactly like an accepted decision's -- the bundle's
+            # counters must stay a pure sum of what was actually spent -- and
+            # the rejection is then raised for ``_decide`` to bound.
+            rejected = error
+            decision = error
         except BaseException as error:
             from local_operator.evaluation.runner.provider_client import (
                 ContextUnrecoverableError,
@@ -694,6 +744,10 @@ class EpisodeRunner:
                     summary_artifact=summary_artifact,
                 ),
             )
+        # A rejected reply may carry no served route (a scripted client need
+        # not know one); the requested route is the honest stand-in because
+        # nothing served was accepted.
+        served_route = decision.route or self._spec.requested_route
         self._append(
             "model_request",
             ModelRequestPayload(
@@ -715,7 +769,7 @@ class EpisodeRunner:
                 request_id=request_id,
                 provider_request_id=decision.provider_request_id,
                 requested_route=self._spec.requested_route,
-                served_route=decision.route,
+                served_route=served_route,
                 stop_reason=decision.stop_reason,
                 output_tokens=decision.usage.output_tokens,
                 reasoning_tokens=decision.usage.reasoning_tokens,
@@ -741,9 +795,9 @@ class EpisodeRunner:
         self._recent_costs.append(decision.cost_micros)
         self._served_routes.add(
             (
-                decision.route.provider_id,
-                decision.route.route_id,
-                decision.route.model_id,
+                served_route.provider_id,
+                served_route.route_id,
+                served_route.model_id,
             )
         )
         self._provider_cost_micros += decision.cost_micros
@@ -757,6 +811,22 @@ class EpisodeRunner:
             self._usage_totals[name] = self._usage_totals.get(name, 0) + getattr(
                 decision.usage, name
             )
+        if rejected is not None:
+            # The diagnostic is what the model will be shown; it is published
+            # as an artifact rather than squeezed into the identifier-shaped
+            # ``diagnostic_code`` so the exact correction is auditable.
+            detail = self._publish(rejected.diagnostic.encode("utf-8"), media_type="text/plain")
+            self._append(
+                "error",
+                ErrorPayload(
+                    error_id=f"err-{uuid.uuid4().hex[:12]}",
+                    category="model",
+                    diagnostic_code="decision-rejected",
+                    detail_artifact=detail,
+                    retryable=True,
+                ),
+            )
+            raise _DecisionRejection(rejected.diagnostic) from rejected
         return decision
 
     def _append_batch(
@@ -990,8 +1060,20 @@ class EpisodeRunner:
         skips it has no terminal at all and the bundle can only be abandoned.
         """
 
-        provider_failure = isinstance(error, _ProviderFailure)
-        category: Literal["adapter", "provider"] = "provider" if provider_failure else "adapter"
+        # Three failure classes, each with its own category, unscored reason
+        # and lifecycle failure kind, because they answer different questions
+        # for whoever reads the bundle: ``provider`` is an outage on the way to
+        # the model, ``model`` is the agent under test failing to act, and
+        # ``adapter`` (crash) is the harness or environment breaking.
+        category: Literal["adapter", "provider", "model"]
+        reason: Literal["crash", "infrastructure_failure", "model_failure"]
+        failure_kind: Literal["crash", "infrastructure", "model"]
+        if isinstance(error, _ProviderFailure):
+            category, reason, failure_kind = "provider", "infrastructure_failure", "infrastructure"
+        elif isinstance(error, _ModelFailure):
+            category, reason, failure_kind = "model", "model_failure", "model"
+        else:
+            category, reason, failure_kind = "adapter", "crash", "crash"
         self._append(
             "error",
             ErrorPayload(
@@ -1001,14 +1083,11 @@ class EpisodeRunner:
                 retryable=False,
             ),
         )
-        reason: Literal["crash", "infrastructure_failure"] = (
-            "infrastructure_failure" if provider_failure else "crash"
-        )
         self._begin_finalization(FinalizationIntent(kind="unscored"), None)
         score = ScoreArtifact(status="unscored", reason=reason)
         return await self._close_out(
             score,
-            failure_kind="crash" if not provider_failure else "infrastructure",
+            failure_kind=failure_kind,
             cancelled=False,
             diagnostic=_diagnostic(error),
         )
@@ -1461,6 +1540,29 @@ class EpisodeRunner:
 
 class _ProviderFailure(Exception):
     """A terminal model-provider error after the client exhausted its retries."""
+
+
+class _DecisionRejection(Exception):
+    """One billed reply failed parsing; its evidence is already written.
+
+    Raised by ``_decide_once`` AFTER the attempt's triple and its retryable
+    ``error`` event are in the journal, so ``_decide`` can count it against
+    the retry bound without touching evidence itself.
+    """
+
+    def __init__(self, diagnostic: str) -> None:
+        super().__init__(diagnostic)
+        self.diagnostic = diagnostic
+
+
+class _ModelFailure(Exception):
+    """The model spent its corrective re-prompts without a usable decision.
+
+    Distinct from ``_ProviderFailure`` because every call was answered and
+    billed: the provider worked, the agent under test did not. The bundle
+    seals ``category="model"`` / ``reason="model_failure"`` so a run that
+    ended this way is never counted as an infrastructure outage.
+    """
 
 
 def _reportability_label(

@@ -491,9 +491,21 @@ def shed_stale_frames(messages: Sequence[Message], *, limit: int) -> tuple[list[
     TURNS, not on the presence of an image, because by the time a caller
     sheds, the oldest turns have already been pruned to notices and are the
     stalest thing in the tail. "Oldest first" means those, never the recent
-    frames a screen-driving surface actually acts on. A removed observation's
-    assistant reply goes with it: a reply that answers an observation no
-    longer visible is a decision made about a screen the model cannot see.
+    frames a screen-driving surface actually acts on. A turn is its
+    observation plus EVERYTHING up to the next observation: the reply, and
+    any rejected-reply / correction pair that preceded the accepted reply. All
+    of it goes with the observation, because a reply that answers an
+    observation no longer visible is a decision made about a screen the model
+    cannot see.
+
+    The same rule covers a tail whose FRONT is not an observation. The
+    compaction cut point may legally land on an assistant reply or on a
+    correction message, leaving the end of a turn whose observation is
+    already behind the marker; those orphans are shed first. Stopping on them
+    instead (the earlier behaviour) stalled the shed for the rest of the
+    episode: every pass found a non-observation at the front, removed
+    nothing, and the client refused the request as unrecoverable with a dozen
+    sheddable turns still in the prefix.
 
     Never removes the current observation (the last message — without it the
     request has no question), and stops short of a compaction marker in the
@@ -509,16 +521,15 @@ def shed_stale_frames(messages: Sequence[Message], *, limit: int) -> tuple[list[
             head = index + 1
     tail = list(messages[head:])
     while tail and count_stale_observations(tail) > limit:
-        observation, assistant = tail[0], (tail[1] if len(tail) > 1 else None)
-        if not _is_stale_observation(observation):
+        # Everything before the NEXT stale observation is the oldest turn (or
+        # the orphaned end of one); never the last message, which is the
+        # current observation and the request's only question.
+        end = 1
+        while end < len(tail) and not _is_stale_observation(tail[end]):
+            end += 1
+        if end >= len(tail):
             break
-        # Keeping the assistant while shedding its observation would leave a
-        # decision the model can no longer see the screen for; shed the pair
-        # but never the last message (the current observation).
-        removable = 2 if (assistant is not None and assistant.role == "assistant") else 1
-        if removable >= len(tail):
-            break
-        del tail[:removable]
+        del tail[:end]
     if head == 0 and len(tail) == len(messages):
         return list(messages), 0
     return [*messages[:head], *tail], len(messages) - head - len(tail)

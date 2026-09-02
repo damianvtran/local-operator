@@ -465,6 +465,7 @@ class EpisodeLifecycle(AuthorityModel):
             "ambiguous_finalization",
             "cleanup",
             "unreportable",
+            "model",
         ]
         | None
     ) = None
