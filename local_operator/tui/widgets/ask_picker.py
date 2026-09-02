@@ -295,18 +295,22 @@ LABEL_MIN_CELLS = 6
 #: nothing at any size the card was verified at — ``remaining`` binds first —
 #: and it only widens the void on tall narrow terminals.
 #:
-#: What the cap does NOT do any more is decide the reported frame on its own.
-#: Step 7a reserves the description column before it sizes this block, so at
-#: 150x40 under the real ``OperatorApp`` (dock 5, budget 18) the reservation
-#: binds at 4 rows and 8 is never reached. That is deliberate and it is measured
-#: against the alternatives: an unreserved 8-row block bought its rows with the
-#: other rows' prose (grants 2,2,2,1 -> 0,0,0,0), which is the trade BLOCKER 1
-#: refuses; refusing the reveal outright at that size leaves option 1 showing 2
-#: of 8 wrapped lines with no gesture reaching the rest, which is the original
-#: truncation report. Four lines beats the two the list already draws, the
-#: column survives, and :meth:`_prose_line` marks the paragraph as continuing.
-#: The cap still binds where the column is not being drawn at all — 5 rows at
-#: 130x30 and 100x30, 7 at 120x34, all ``remaining``-bound below it.
+#: 8 is still what the reported frame gets, and step 7a now pays for it without
+#: taking the other rows' prose. It sizes the block against what the DESCRIPTION
+#: COLUMN needs and buys the difference out of chrome — the two spacers, then
+#: the title — so at 150x40 under the real ``OperatorApp`` (dock 5, budget 18)
+#: the block is 8 rows, option 1's whole 1023-character consequence is on
+#: screen, and every other row keeps its description line. Before that, the same
+#: 8 rows were bought from the column (grants 2,2,2,1 -> 0,0,0,0), which is the
+#: trade BLOCKER 1 refuses.
+#:
+#: Where even the chrome is not enough the block SHRINKS rather than stripping
+#: the column, down to a floor of :data:`DEFAULT_DESC_CAP` lines — below that it
+#: would show less of the selected row than the list already does, which is a
+#: `more` key that shortens the prose it was pressed to extend (measured at
+#: 140x34 and 100x34: reach 246 -> 130 and 162 -> 90 characters). Below the
+#: floor the key is refused outright instead. ``remaining`` still binds first
+#: wherever the column is not drawn at all — 5 rows at 130x30 and 100x30.
 #:
 #: In WORDS, which is the units a description is written in: 8 lines is 126
 #: words at terminal 100 (prose column 91) and 175 at terminal 190 (column 181)
@@ -1604,7 +1608,12 @@ class AskPickerScreen(Container):
            is a caption, a rule under nothing is the edge of a box;
         7. the rest of the option rows;
            7a. the reveal block, while ``ctrl+e`` is on — after the rows, so
-           uncovering one option's prose can never take another option's LABEL;
+           uncovering one option's prose can never take another option's LABEL,
+           and sized so it can never take the description COLUMN either. What it
+           may take, and only while it is drawn, is the chrome below it: the
+           step-8 spacers first, then the step-6 title. Both are released rather
+           than the prose because the user pressed a key asking to READ, and a
+           caption over a rule is not an answer (BLOCKER 1);
         8. the blank spacers, which are rhythm and nothing else;
         9. the descriptions' FIRST lines, all of them or none;
         10. continuation lines for the SELECTED row, up to what it wraps to;
@@ -1785,7 +1794,7 @@ class AskPickerScreen(Container):
         # safety property on the approval gate.
         #
         # ...and never out of the description COLUMN either, which is the same
-        # argument one rung down and is what `column_reserve` below buys.
+        # argument one rung down and is what `affords_column` below enforces.
         # Protecting only the LABELS left the block free to spend step 9's
         # all-or-nothing first lines, so `ctrl+e` could turn the column off for
         # every row to uncover one row's prose. Measured under the real
@@ -1797,7 +1806,7 @@ class AskPickerScreen(Container):
         # sizes swept (44-190 columns x 14-60 rows, `scripts/ask_user_repro.py`)
         # and the footer ADVERTISED `^e` at 1,933 of those — the key was offered
         # in nine of every ten frames where pressing it cost the column. The
-        # same sweep after this reservation reports 0, on both surfaces.
+        # same sweep after this change reports 0, on both surfaces.
         #
         # A CONSTANT reservation: the tallest capped description in the whole
         # list, so the block does not change height as the cursor moves. The
@@ -1809,31 +1818,114 @@ class AskPickerScreen(Container):
                 (len(self._reveal_wrap(index, width)) for index in range(self.row_count)),
                 default=0,
             )
-            # What step 9 would spend if this block were not being bought. Step
-            # 8's two spacers are charged as well, because they are bought
-            # BEFORE the column and a block that left exactly `row_count` rows
-            # behind would watch the spacers take two of them.
+            # The LARGEST block that still leaves the column standing, rather
+            # than a fixed reservation subtracted from the pool. A fixed one
+            # cannot express the constraint: the spacers are bought between this
+            # step and step 9, so how much the column actually costs depends on
+            # how much is left, and a reservation big enough at one size refuses
+            # an affordable block at another. Searched downward, so the block is
+            # as tall as the frame can honestly pay for.
             #
-            # A SMALLER block rather than no block, and the difference is the
-            # whole trade at the reported size. At 150x40 on
-            # `scripts/ask_user_repro.py` (real app, dock 5, 18-row budget) the
-            # unreserved block took 8 rows and the column with it, grants
-            # 2,2,2,1 -> 0,0,0,0; reserved, it takes 4 and the grants come out
-            # 1,1,1,1. Refusing the reveal outright at that size instead was
-            # measured to leave option 1 showing 2 of its 8 wrapped lines with
-            # no gesture reaching the rest — the ORIGINAL truncation report, at
-            # the size it was reported from. Four lines is more than the two the
-            # list already draws, so the key still earns its name, and
-            # `_reveal_text`'s marker says the paragraph continues.
-            column_reserve = 0
-            if 1 + extra >= self.row_count and remaining - 2 >= self.row_count:
-                column_reserve = self.row_count + 2
-            reveal_rows = max(0, min(REVEAL_MAX_ROWS, tallest, remaining - column_reserve))
+            # What it buys the block WITH is chrome, in the order this file
+            # already ranks chrome: the two spacers first (step 8, "rhythm and
+            # nothing else"), then the title and its rule (step 6, a caption
+            # naming a card the user is already looking at). Both are released
+            # only while the block is drawn, so every frame without the reveal
+            # is byte-identical to the one before this change.
+            #
+            # That is what makes the reported size come out whole rather than
+            # merely un-stripped. At 150x40 on `scripts/ask_user_repro.py` (real
+            # app, dock 5, 18-row budget) an unconstrained block took 8 rows and
+            # the column with it, grants 2,2,2,1 -> 0,0,0,0. Paying out of the
+            # chrome instead, the block still gets its full 8 rows — option 1's
+            # whole 1023-character consequence — and every other row keeps a
+            # description line. Nothing that names an ANSWER is spent; what goes
+            # is two blank lines and the card's own title.
+            ceiling = max(0, min(REVEAL_MAX_ROWS, tallest, remaining))
+
+            def affords_column(after_block: int, *, block_drawn: bool) -> bool:
+                """Would step 9 still buy the column with ``after_block`` left?
+
+                The SPACERS are charged only where they will actually be bought.
+                While the block is drawn they yield to the column (step 8
+                below), so a block that leaves exactly ``row_count`` rows still
+                gets its consequences drawn; with them charged unconditionally,
+                an affordable block was refused on a card that was merely
+                exactly full — measured on ``_long_description_question`` at
+                150x40 and 100x44, where every description is cut at one line
+                and the key that exists to reach the rest was the one thing the
+                frame would not offer.
+                """
+                left = after_block if block_drawn else after_block - 2
+                return 1 + extra >= self.row_count and left >= self.row_count
+
+            if affords_column(remaining, block_drawn=False):
+                # The default view draws the column, so the reveal may not be
+                # what takes it away (BLOCKER 1). It may also not show LESS of
+                # the selected row than the list already does: the block
+                # REPLACES that row's granted lines, so a block shorter than the
+                # grant is a `more` key that shortens the very prose it was
+                # pressed to extend. Measured at 140x34 and 100x34 on the repro,
+                # where a 1-row block stood against a 2-line grant and the
+                # selected row's reach fell 246 -> 130 and 162 -> 90 characters.
+                floor = min(DEFAULT_DESC_CAP, len(self._reveal_wrap(self.state.selected, width)))
+                reveal_rows = 0
+                for candidate in range(ceiling, floor - 1, -1):
+                    if candidate < 1:
+                        continue
+                    if affords_column(remaining - candidate, block_drawn=True):
+                        reveal_rows = candidate
+                        break
+                    # ...and if it does not fit beside the TITLE, the title
+                    # goes. It is a caption over a rule: the card's own name,
+                    # which the user is looking at and does not need spelled
+                    # out, while the block is the prose they pressed a key to
+                    # read and the column is what the other answers mean.
+                    #
+                    # Only while the block is drawn, and only where releasing it
+                    # is what makes the difference \u2014 so the default frame keeps
+                    # its title everywhere it had one. Measured on
+                    # ``_long_description_question`` at 150x40: budget 20 leaves
+                    # 7 rows after the question and the option rows, which is
+                    # one row short of the 5-line column plus option 1's 4-line
+                    # wrap. With the title released both fit exactly, which is
+                    # the difference between showing the whole consequence and
+                    # showing half of it.
+                    if show_title and affords_column(remaining + 2 - candidate, block_drawn=True):
+                        show_title = False
+                        remaining += 2
+                        reveal_rows = candidate
+                        break
+            else:
+                # No column in either state, so there is none to protect and the
+                # block competes only against the rows themselves, as before.
+                reveal_rows = ceiling
             remaining -= reveal_rows
-        space_above = remaining >= 1
+        # 8. The blank spacers, which are rhythm and nothing else — and which
+        # therefore YIELD one row to the REVEAL BLOCK, and only to it, on a card
+        # whose budget is otherwise spent to the row.
+        #
+        # Not a general reordering of steps 8 and 9. Making the spacers yield to
+        # the column everywhere rewrote frames this card was signed off on (the
+        # short-card label fallback at 100x30 loses its blank line), and the
+        # ordinary ranking is deliberate: a list needs air around it. What is
+        # special here is that the user has PRESSED a key asking to read more
+        # prose, and on a plan with no slack the alternative is a `^e` refused
+        # for having nothing to buy with while every description on screen is
+        # cut — measured on ``_long_description_question`` at 150x40 and 100x44,
+        # where the paragraph was then unreachable by every gesture the card
+        # offers. One blank line is the cheapest thing on the card to spend on
+        # that, and it is spent only while the block is drawn.
+        # ``spacer_floor`` is what makes that yield real, and it is charged ONLY
+        # while the block is drawn — so every frame without the reveal is
+        # byte-identical to the one before this change, including the short
+        # card's label fallback, which loses its blank line if the rule is
+        # applied generally.
+        spacer_floor = self.row_count if reveal_rows >= 1 and 1 + extra >= self.row_count else 0
+        space_above = remaining - 1 >= spacer_floor
         if space_above:
             remaining -= 1
-        space_below = remaining >= 1
+        space_below = remaining - 1 >= spacer_floor
         if space_below:
             remaining -= 1
         rows = 1 + extra
@@ -2985,12 +3077,13 @@ class AskPickerScreen(Container):
 
         ...and one refusal, which is the same "trade, not a pure loss" rule the
         first condition states, applied to the description COLUMN instead of to
-        one row. Step 7a now reserves the column before it sizes the block, so
-        a reveal that would still turn it off is one no smaller block could pay
-        for — and the answer there is to stop offering the key rather than to
-        show one consequence in place of three. This is asked of the two PLANS
-        rather than of the allocator's internals, so a future step 7a that
-        found another way to spend the column is caught here too.
+        one row. Step 7a sizes the block against what the column needs and pays
+        the difference out of chrome, so a plan that still turns the column off
+        is one no affordable block could rescue — and the answer there is to
+        stop offering the key rather than to show one consequence in place of
+        three. This is asked of the two PLANS rather than of the allocator's
+        internals, so a future step 7a that found another way to spend the
+        column is caught here too.
 
         Answered against the plan the card is drawing rather than against the
         descriptions alone: "is there more" is a question about the grant.
