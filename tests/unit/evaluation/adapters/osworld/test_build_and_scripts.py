@@ -39,16 +39,51 @@ RELEASE = "osworld-v2-2026.08.08"
 COMMIT = "d578d2d4e0dc82b43e270fdaa7fa89d9708cd154"
 
 
-@pytest.fixture(autouse=True)
-def _durable_tmp(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """pytest's ``tmp_path`` lives under ``$TMPDIR``, which the build script
-    now refuses as an inputs root. Point ``TMPDIR`` somewhere the volatile-root
-    check does not cover so the happy-path tests exercise verification, not
-    the refusal; the refusal has its own test against a literal ``/tmp``."""
+def _real_home() -> Path:
+    """The account's real home, not the scratch HOME the suite's conftest sets.
 
-    durable = tmp_path / "durable-tmpdir"
-    durable.mkdir()
-    monkeypatch.setenv("TMPDIR", str(durable))
+    ``pwd`` rather than ``Path.home()`` because the root conftest re-points
+    ``HOME`` at a per-test scratch directory under pytest's basetemp -- which
+    is exactly the volatile location these tests must avoid.
+    """
+
+    import os
+    import pwd
+
+    return Path(pwd.getpwuid(os.getuid()).pw_dir)
+
+
+@pytest.fixture
+def durable_path(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """A scratch directory the build script's volatile-root refusal accepts.
+
+    pytest's ``tmp_path`` is ``$TMPDIR``-derived on macOS but a literal
+    ``/tmp/pytest-of-<user>/...`` on Linux runners, and the build script now
+    refuses BOTH as an inputs root (round-1 MINOR-1 -- a purge of /tmp
+    destroyed a paid pilot's inputs). Re-pointing ``$TMPDIR`` only fixes the
+    macOS case, which is exactly how CI went red while the local run stayed
+    green. A root under the repo is no better: this repo is worked through
+    worktrees that themselves live under ``/tmp``. So the build tests get a
+    root under the REAL home directory -- durable on every host that can run
+    the suite -- created per test and removed afterwards. The refusal itself
+    is never patched: the two literal-``/tmp`` tests and the ``$TMPDIR`` test
+    run against the unmodified function.
+    """
+
+    import shutil
+    import uuid
+
+    root = _real_home() / ".cache" / "lop-osworld-build-tests" / uuid.uuid4().hex[:12]
+    root.mkdir(parents=True)
+    # ``$TMPDIR`` is re-pointed under the durable root too, so a host whose
+    # ``$TMPDIR`` is an ancestor of home (a container might do it) cannot
+    # turn the home path volatile.
+    (root / "tmpdir").mkdir()
+    monkeypatch.setenv("TMPDIR", str(root / "tmpdir"))
+    try:
+        yield root
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
 
 
 def runner_descriptor(tmp_path: Path, episode_id: str, *, secret_refs: Any = ()) -> Any:
@@ -165,9 +200,9 @@ def _run(root: Path, pin: Path, out: Path) -> int:
     )
 
 
-def test_happy_path_builds_a_digestable_readonly_workspace(tmp_path: Path, capsys: Any) -> None:
-    root, pin = _fixture_inputs(tmp_path)
-    out = tmp_path / "workspace"
+def test_happy_path_builds_a_digestable_readonly_workspace(durable_path: Path, capsys: Any) -> None:
+    root, pin = _fixture_inputs(durable_path)
+    out = durable_path / "workspace"
     assert _run(root, pin, out) == 0
     digest = workspace_digest(str(out))
     assert len(digest) == 64
@@ -222,12 +257,12 @@ def test_happy_path_builds_a_digestable_readonly_workspace(tmp_path: Path, capsy
     ],
 )
 def test_any_tampered_input_fails_closed_with_exit_4(
-    tmp_path: Path, capsys: Any, relative: str, mutate: Any, message: str
+    durable_path: Path, capsys: Any, relative: str, mutate: Any, message: str
 ) -> None:
-    root, pin = _fixture_inputs(tmp_path)
+    root, pin = _fixture_inputs(durable_path)
     target = root / relative
     target.write_bytes(mutate(target.read_bytes()))
-    out = tmp_path / "workspace"
+    out = durable_path / "workspace"
     assert _run(root, pin, out) == build.EXIT_VERIFY
     err = capsys.readouterr().err
     assert message in err
@@ -235,31 +270,31 @@ def test_any_tampered_input_fails_closed_with_exit_4(
     assert not out.exists()
 
 
-def test_a_missing_task_and_a_wrong_count_both_fail(tmp_path: Path, capsys: Any) -> None:
-    root, pin = _fixture_inputs(tmp_path)
+def test_a_missing_task_and_a_wrong_count_both_fail(durable_path: Path, capsys: Any) -> None:
+    root, pin = _fixture_inputs(durable_path)
     (root / "gated" / "tasks" / "task_003.py").unlink()
-    assert _run(root, pin, tmp_path / "w1") == build.EXIT_VERIFY
+    assert _run(root, pin, durable_path / "w1") == build.EXIT_VERIFY
     assert "task file missing" in capsys.readouterr().err
 
-    root, pin = _fixture_inputs(tmp_path / "second")
+    root, pin = _fixture_inputs(durable_path / "second")
     payload = json.loads(pin.read_text())
     payload["tasks"]["task_count"] = 108
     pin.write_text(json.dumps(payload))
-    assert _run(root, pin, tmp_path / "w2") == build.EXIT_VERIFY
+    assert _run(root, pin, durable_path / "w2") == build.EXIT_VERIFY
     assert "pin says 108" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("volatile", ["/tmp/osworld-inputs", "/private/tmp/osworld-inputs"])
 def test_an_inputs_root_under_tmp_is_refused_before_verification(
-    tmp_path: Path, capsys: Any, volatile: str, monkeypatch: pytest.MonkeyPatch
+    durable_path: Path, capsys: Any, volatile: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The documented constraint is enforced: a purge of /tmp destroyed a paid
     pilot's inputs mid-run. Refused BEFORE any manifest is read, so a root that
     does not even exist under /tmp still fails on the location, not on a
     missing file."""
 
-    _root, pin = _fixture_inputs(tmp_path)
-    out = tmp_path / "workspace"
+    _root, pin = _fixture_inputs(durable_path)
+    out = durable_path / "workspace"
     assert (
         build.main(
             [
@@ -281,22 +316,22 @@ def test_an_inputs_root_under_tmp_is_refused_before_verification(
 
 
 def test_a_root_under_tmpdir_is_refused_too(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    durable_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("TMPDIR", str(tmp_path / "scratch"))
-    (tmp_path / "scratch").mkdir()
+    monkeypatch.setenv("TMPDIR", str(durable_path / "scratch"))
+    (durable_path / "scratch").mkdir()
     with pytest.raises(build.VerificationFailed, match="OS may purge"):
-        build.refuse_volatile_root(tmp_path / "scratch" / "inputs")
+        build.refuse_volatile_root(durable_path / "scratch" / "inputs")
     # A sibling of the volatile root is fine.
-    build.refuse_volatile_root(tmp_path / "elsewhere")
+    build.refuse_volatile_root(durable_path / "elsewhere")
 
 
-def test_a_wrong_prepared_commit_fails(tmp_path: Path, capsys: Any) -> None:
-    root, pin = _fixture_inputs(tmp_path)
+def test_a_wrong_prepared_commit_fails(durable_path: Path, capsys: Any) -> None:
+    root, pin = _fixture_inputs(durable_path)
     payload = json.loads(pin.read_text())
     payload["osworld"]["commit"] = COMMIT
     pin.write_text(json.dumps(payload))
-    assert _run(root, pin, tmp_path / "w") == build.EXIT_VERIFY
+    assert _run(root, pin, durable_path / "w") == build.EXIT_VERIFY
     assert "prepared checkout HEAD" in capsys.readouterr().err
 
 
