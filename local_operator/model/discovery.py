@@ -51,6 +51,7 @@ from local_operator.model.catalogue import (
     SOFT_TTL_S,
     Listing,
     invalidate,
+    invalidate_documents,
     read_listing,
 )
 from local_operator.model.ids import id_spellings, normalised_id
@@ -1179,6 +1180,28 @@ def _rows_from_payload(
             )
         )
     return rows
+
+
+def invalidate_listing(provider_id: str, *, cache_dir: Path | None = None) -> int:
+    """Drop ``provider_id``'s cached listing so the next call refetches.
+
+    For callers reacting to an event that can CHANGE WHAT THE LISTING RETURNS
+    but that no TTL can observe -- a login, a re-auth, a logout. The picker's
+    15-minute TTL and the hourly background revalidation bound ordinary drift,
+    but neither knows that the CREDENTIAL changed: a different account or plan
+    can list a different catalogue, and a listing fetched anonymously (or under
+    the account just removed) must not decide what the next credential can
+    select.
+
+    Keyed on the CREDENTIAL identity, not the provider id, because that is what
+    names the documents: ``openai-device`` and ``openai`` are one logged-in
+    account sharing one document, and invalidating under the literal id would
+    miss it. Returns how many documents were dropped -- 0 is the ordinary answer
+    for a provider that was never listed, not an error.
+    """
+    definition = get_provider_definition(provider_id)
+    storage_id = credential_provider_id(definition.id if definition else provider_id)
+    return invalidate_documents(storage_id, cache_dir=cache_dir)
 
 
 def available_models(

@@ -1805,3 +1805,77 @@ def test_purge_stranded_is_safe_when_the_cache_dir_does_not_exist(tmp_path) -> N
     missing = tmp_path / "never-created"
     catalogue.purge_stranded_temp_files(missing)  # must not raise
     assert not missing.exists()
+
+
+# -- credential-change invalidation (ported from bbqben's #535) ---------------
+
+
+def test_every_scoped_document_of_one_credential_is_dropped_together(tmp_path) -> None:
+    """A login cannot know WHICH document the new credential will resolve to.
+
+    ``discovery._cache_key`` picks between a plain document, a host-scoped one
+    and a per-account one using the credential it is handed -- a decision made
+    after the login, not before it. Dropping only the plain key therefore leaves
+    the document the next listing actually reads in place, which is the stale
+    catalogue this exists to clear.
+    """
+    for name in (
+        "openai.listing.json",
+        "openai.oauth.listing.json",
+        "openai.oauth.abc123def456.listing.json",
+    ):
+        (tmp_path / name).write_text("{}", encoding="utf-8")
+
+    dropped = catalogue.invalidate_documents("openai", cache_dir=tmp_path)
+
+    assert dropped == 3
+    assert list(tmp_path.glob("*.json")) == []
+
+
+def test_invalidation_does_not_reach_a_provider_whose_id_shares_a_prefix(tmp_path) -> None:
+    """``zai`` and ``zai-oauth`` are separate credential identities.
+
+    The dot in the glob is what keeps them apart. Without it, logging in to the
+    shorter id would silently drop the longer one's catalogue -- an invisible
+    extra fetch for a provider the user never touched, and a cache stampede on
+    a shared machine.
+    """
+    (tmp_path / "zai.listing.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "zai-oauth.listing.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "openrouter.listing.json").write_text("{}", encoding="utf-8")
+
+    assert catalogue.invalidate_documents("zai", cache_dir=tmp_path) == 1
+
+    survivors = {path.name for path in tmp_path.glob("*.json")}
+    assert survivors == {"zai-oauth.listing.json", "openrouter.listing.json"}
+
+
+def test_invalidating_an_unlisted_provider_is_zero_not_an_error(tmp_path) -> None:
+    """The ordinary case for any provider that was never listed. A login must not
+    fail because there was no catalogue to clear."""
+    assert catalogue.invalidate_documents("anthropic", cache_dir=tmp_path) == 0
+
+
+def test_the_skills_index_sharing_this_directory_is_never_touched(tmp_path) -> None:
+    """The cache root is shared (see ``purge_legacy_documents``). A glob loose
+    enough to take the skills index out would make every login re-embed it."""
+    (tmp_path / "anthropic.listing.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "anthropic.skills.meta.json").write_text("{}", encoding="utf-8")
+
+    assert catalogue.invalidate_documents("anthropic", cache_dir=tmp_path) == 1
+    assert (tmp_path / "anthropic.skills.meta.json").exists()
+
+
+def test_the_models_dev_projection_is_not_a_provider_document(tmp_path) -> None:
+    """``models-dev.listing.json`` belongs to no credential, and no provider's
+    storage id is a dotted prefix of it, so no login can drop it and cost the
+    machine a 4.4 MB refetch."""
+    from local_operator.providers.registry import (
+        PROVIDER_REGISTRY,
+        credential_provider_id,
+    )
+
+    (tmp_path / "models-dev.listing.json").write_text("{}", encoding="utf-8")
+    for definition in PROVIDER_REGISTRY:
+        catalogue.invalidate_documents(credential_provider_id(definition.id), cache_dir=tmp_path)
+    assert (tmp_path / "models-dev.listing.json").exists()

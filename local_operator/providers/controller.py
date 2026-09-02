@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import logging
 import random
 import time
 from typing import TYPE_CHECKING, Any, Callable, Protocol
@@ -26,7 +27,11 @@ from local_operator.harness.types import ModelSpec
 from local_operator.model.configure import (  # noqa: F401  (used by callers)
     build_model_spec,
 )
-from local_operator.model.discovery import available_models
+from local_operator.model.discovery import (
+    DiscoveredModel,
+    available_models,
+    invalidate_listing,
+)
 from local_operator.model.naming import model_label
 from local_operator.model.registry import static_models
 from local_operator.providers.registry import (
@@ -62,6 +67,8 @@ if TYPE_CHECKING:  # auth_store stays off this module's runtime import graph
     from local_operator.providers.oauth.callback_server import LoginCallbacks
 
 LoginCallbackFactory = Callable[[ProviderDefinition], "LoginCallbacks"]
+
+logger = logging.getLogger("local_operator.providers.controller")
 
 #: How long an empty refresh keeps deferring to old data before it is believed.
 #: The empty-over-data heuristic reads a blank answer over non-empty history as
@@ -311,11 +318,18 @@ class ProviderController:
                 self.auth_store.upsert_credential(
                     storage, {"key": result, "source": "login", "type": "api_key"}
                 )
+                _invalidate_cached_listing(storage)
                 return f"Stored API key for '{storage}'."
             return f"Login for '{storage}' produced no key; nothing stored."
 
         result.setdefault("authorized_at", int(time.time() * 1000))
         self.auth_store.upsert_credential(storage, result)
+        # The new credential may list DIFFERENT models than the one it replaced
+        # -- a different account, a different plan, or a catalogue listed
+        # anonymously before there was a credential at all. No TTL can observe
+        # that, so the login event has to say so itself. Same hook as the CLI's
+        # ``run_login``; the TUI's ``/login`` arrives here.
+        _invalidate_cached_listing(storage)
         identity = result.get("email") or result.get("account_id") or result.get("org_name") or ""
         suffix = f" ({identity})" if identity else ""
         msg = f"Logged in to '{storage}'{suffix}."
@@ -336,6 +350,10 @@ class ProviderController:
             )
         if removed == 0:
             raise ValueError(f"No stored credentials for '{provider_id}'.")
+        # Symmetrical with login: a catalogue fetched under the credential just
+        # removed must not decide what the NEXT credential can select.
+        for target in sorted(targets):
+            _invalidate_cached_listing(target)
         return f"Removed {removed} credential(s) for '{provider_id}'."
 
     # -- usage -------------------------------------------------------------
@@ -1078,6 +1096,7 @@ class ProviderController:
         """
         entries: list[CatalogueEntry] = []
         statuses: dict[str, str] = {}
+        listed: list[tuple[ProviderDefinition, bool, list[DiscoveredModel]]] = []
         usable = self.usable_providers()
         for definition in PROVIDER_REGISTRY:
             connected = usable is None or definition.id in usable
@@ -1101,7 +1120,17 @@ class ProviderController:
             # provider fetches on the loop would freeze a TUI's repaint.
             models, status = await asyncio.to_thread(available_models, definition.id, **kwargs)
             statuses[definition.id] = status
-            for model in models:
+            listed.append((definition, connected, models))
+        # Prices for the rows no listing priced, from the same keyless chain the
+        # status band resolves through (see :func:`_enrich_prices`). After the
+        # listings rather than per provider so the two documents are read ONCE
+        # for the whole catalogue, and off-loop for the same reason the listings
+        # are: the OpenRouter document is ~120 KB of JSON.
+        rows_by_provider = await asyncio.to_thread(
+            _enrich_prices, [(definition, models) for definition, _connected, models in listed]
+        )
+        for definition, connected, _models in listed:
+            for model in rows_by_provider[definition.id]:
                 entries.append(
                     CatalogueEntry(
                         provider=definition.id,
@@ -1209,6 +1238,85 @@ class ProviderController:
             # needs to know which one the numbers describe.
             report.identity = getattr(access, "email", None) or access.account_id
         return report
+
+
+def _invalidate_cached_listing(storage_id: str) -> None:
+    """Best-effort listing drop after a credential change; never raises.
+
+    An exception here would fail a login that actually succeeded, which is far
+    worse than a stale list that the picker's TTL clears within the quarter
+    hour anyway.
+    """
+    try:
+        invalidate_listing(storage_id)
+    except Exception:  # noqa: BLE001 - never fail a successful login over a cache
+        logger.debug("listing invalidation failed for %s", storage_id, exc_info=True)
+
+
+def _enrich_prices(
+    listed: list[tuple[ProviderDefinition, list[DiscoveredModel]]],
+) -> dict[str, list[DiscoveredModel]]:
+    """Each provider's rows with price/limit HOLES filled from the keyless chain.
+
+    WHY: the picker used to price a row from ``merge_models(registry, listing)``
+    alone, while the status band priced the same model through the resolver's
+    models.dev/OpenRouter leg. A direct-provider model the shipped registry did
+    not carry therefore showed a blank price in the picker (``_price``'s unknown
+    sentinel) and ``$10/50`` in the band the moment it was selected — the
+    operator's ``claude-fable-5-1`` screenshot. Both surfaces now go through
+    ``prices.price_row`` so they cannot drift again.
+
+    CONSTRAINTS. (1) Disk only, one read per document: the models.dev projection
+    is ~141 KB and the OpenRouter document ~120 KB; parsing either per row would
+    turn 400 OpenRouter rows into seconds, and ``resolve_model_info`` per row is
+    a three-leg memoised resolution that may fetch. The OpenRouter rows come
+    straight from the ``openrouter`` provider's own listing, which this same
+    ``live_catalogue`` call has just read under the picker's TTL — so no second
+    document, no second request. (2) Only rows whose listing quoted NO money are
+    touched, and only the money and the limits the listing left at zero: a price
+    the provider's own listing stated is authoritative and never overridden.
+    (3) Aggregator rows are never enriched — their listing IS the priced source —
+    and a provider the chain does not map (``ollama``, ``radient``) is left as
+    is, so a keyless provider's genuine ``free`` stays free (``_price``).
+    """
+    from local_operator.model.prices import models_dev_providers, price_row
+
+    models_dev = models_dev_providers()
+    openrouter: list[DiscoveredModel] = next(
+        (rows for definition, rows in listed if definition.id == "openrouter"), []
+    )
+    result: dict[str, list[DiscoveredModel]] = {}
+    for definition, rows in listed:
+        if definition.id in AGGREGATOR_PROVIDERS or (models_dev is None and not openrouter):
+            result[definition.id] = rows
+            continue
+        # The chain is keyed on the canonical provider, the same translation the
+        # resolver applies: ``openai-device`` prices as ``openai``.
+        canonical = credential_provider_id(definition.id)
+        enriched: list[DiscoveredModel] = []
+        for row in rows:
+            if row.input_price > 0 or row.output_price > 0:
+                enriched.append(row)
+                continue
+            found = price_row(canonical, row.id, models_dev=models_dev, openrouter=openrouter)
+            if found is None or not (found.input_price > 0 or found.output_price > 0):
+                enriched.append(row)
+                continue
+            enriched.append(
+                dataclasses.replace(
+                    row,
+                    input_price=found.input_price,
+                    output_price=found.output_price,
+                    cache_read_price=row.cache_read_price or found.cache_read_price,
+                    cache_write_price=row.cache_write_price or found.cache_write_price,
+                    # Limits only where the listing gave none: the provider's
+                    # own window is the right number for its endpoint.
+                    context_window=row.context_window or found.context_window,
+                    max_tokens=row.max_tokens or found.max_tokens,
+                )
+            )
+        result[definition.id] = enriched
+    return result
 
 
 def _price(value: float | None, definition: ProviderDefinition) -> float:

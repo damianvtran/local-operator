@@ -985,10 +985,11 @@ _REFRESH_TIMEOUT_S = 2.0
 def _remaining_budget(started: float) -> float:
     """What is left of one resolution's total listing budget, in seconds.
 
-    Resolution can consult up to three listings — the provider's own, the neutral
-    price catalogue, and (for an aggregator's own ids) the aggregator's listing.
-    Given a ceiling each, they compose into their SUM, so a model none can
-    describe blocks for all of them. One deadline across the legs keeps the later
+    Resolution can consult up to three listings — the provider's own, the
+    keyless price chain (models.dev, then OpenRouter's public listing on a
+    models.dev miss), and (for an aggregator's own ids) the aggregator's own
+    listing. Given a ceiling each, they compose into their SUM, so a model none
+    can describe blocks for all of them. One deadline across the legs keeps the later
     ones free in the common case (the first answers in tens of milliseconds) and
     bounds the pathological one at the single ceiling every caller of this module
     already budgets for.
@@ -1058,18 +1059,22 @@ def _fill_from_row(info: ModelInfo, row: "DiscoveredModel") -> ModelInfo:
 def _from_price_catalogue(
     provider: str, model_id: str, info: ModelInfo, *, timeout: float | None = None
 ) -> ModelInfo:
-    """Fill a model's price and limit holes from the neutral models.dev catalogue.
+    """Fill a model's price and limit holes from the ranked keyless price chain.
 
     The second leg of resolution, reached when the registry and the provider's
     own listing together could not finish the job — which for every DIRECT
     provider is the normal outcome rather than a failure: none of them quote money
-    in their listing. Until this leg existed the only price source for such an id
-    was the OpenRouter listing looked up under a per-provider namespace, which
-    tied an Anthropic-only user's cost display to one aggregator's document and
-    its id spellings; the day ``claude-fable-5-1`` shipped that document was six
-    hours old and predated the row, so the session ran at $0.00. See
-    :mod:`local_operator.model.prices` for what the catalogue is and why it is
-    trusted for prices and limits but not capabilities.
+    in their listing. The chain (``prices.price_row``) is models.dev FIRST, then
+    OpenRouter's public listing under the provider's vendor namespace ONLY when
+    models.dev has no priced row for the id, then nothing (the registry row the
+    caller already holds). Two independent sources because one community JSON is
+    a single point of failure — a day-0 gap or an outage there would unprice
+    every direct provider at once — and OpenRouter used to be the ONLY source,
+    which is how a six-hour-old document ran a session at $0.00 the day
+    ``claude-fable-5-1`` shipped. Neither source overrides a price the provider
+    itself quoted, and OpenRouter never overrides models.dev. See
+    :mod:`local_operator.model.prices` for what each document is and why they
+    are trusted for prices and limits but not capabilities.
 
     Never raises and never returns worse data than it was given. ``timeout`` is
     what the CALLER has left of the whole resolution's budget, capped at this
@@ -1114,11 +1119,12 @@ def _from_aggregator_catalogue(
     for the case where leg 1 was unavailable (a credential lookup that raised)
     and the public OpenRouter document can still answer.
 
-    It used to be the price source for DIRECT providers too, through a
-    per-provider namespace map (``anthropic`` → ``anthropic/``, ``xai`` →
-    ``x-ai/``, ...). That coupling is gone: :func:`_from_price_catalogue` is the
-    provider-neutral leg now, and a direct-provider id this function is handed
-    is returned untouched.
+    It used to be the ONLY price source for DIRECT providers too, through a
+    per-provider namespace map. That map now lives in
+    ``prices.OPENROUTER_NAMESPACE`` and is the SECONDARY step of leg 2's chain,
+    behind models.dev; a direct-provider id this function is handed is returned
+    untouched, so that OpenRouter can never be consulted for one outside the
+    chain's ranking.
 
     Every field is taken ONLY where the direct sources left a hole
     (:func:`_fill_from_row`). Never raises and never returns worse data than it
@@ -1263,6 +1269,9 @@ def _resolve_model_info_cached(provider: str, model_id: str, _bucket: int) -> Mo
         # way such a model is ever described is a human editing the registry, and the
         # ten current-generation Claude rows plus every shipping `gpt-5.x` show how
         # that goes — they sat at 0.0 with no window on a fully working install.
+        # The leg is a ranked chain of two keyless documents (models.dev, then
+        # OpenRouter's public listing on a models.dev miss), so no single
+        # third-party source can unprice every direct provider at once.
         #
         # The SAME gate as above, deliberately re-evaluated rather than folded in:
         # the provider's own answer must get first refusal, and a model either

@@ -1,14 +1,18 @@
-"""The models.dev price catalogue: provider-neutral prices with no OpenRouter coupling.
+"""The keyless price chain: models.dev first, OpenRouter's public listing second.
 
 The defect this module exists for: Anthropic's ``/v1/models`` quotes no prices,
 so a model the registry had not been taught was priced from the OpenRouter
-listing under a per-provider namespace. The day ``claude-fable-5-1`` shipped,
-that document was six hours old and predated the row, and a user signed in only
-to Anthropic ran the whole day at ``$0.00``. models.dev carried
-``10/50/0.25/12.5`` on release day.
+listing under a per-provider namespace — and from nowhere else. The day
+``claude-fable-5-1`` shipped, that document was six hours old and predated the
+row, and a user signed in only to Anthropic ran the whole day at ``$0.00``.
+models.dev carried ``10/50/0.25/12.5`` on release day. It is the primary now;
+OpenRouter is the independent secondary so that a gap in ONE community source
+is not a gap in every direct provider's price.
 
 No live network anywhere here: ``httpx.get`` is patched with a canned response,
-and every document lands in ``tmp_path``.
+the OpenRouter leg is stubbed by an autouse fixture (``openrouter``) that
+answers with whatever rows a test hands it, and every document lands in
+``tmp_path``.
 """
 
 from __future__ import annotations
@@ -22,10 +26,12 @@ import httpx
 import pytest
 
 from local_operator.model import catalogue, prices
+from local_operator.model.discovery import DiscoveredModel
 from local_operator.model.prices import (
     PRICE_CATALOGUE_CAPTURE,
     PRICE_CATALOGUE_KEY,
     price_catalogue_row,
+    price_row,
     project,
 )
 
@@ -153,6 +159,45 @@ def canned():
     recorder = _Canned([_ok()])
     with patch("httpx.get", recorder):
         yield recorder
+
+
+class _OpenRouterStub:
+    """The secondary leg, offline: answers ``rows`` and records every call.
+
+    Autouse (below) because the chain reaches OpenRouter on every models.dev
+    miss, and that leg goes through discovery's ``httpx.Client`` rather than
+    ``httpx.get`` — without this stub a models.dev-miss test would hit the real
+    endpoint. Tests that want a secondary answer append to ``rows``.
+    """
+
+    def __init__(self) -> None:
+        self.rows: list[DiscoveredModel] = []
+        self.calls: list[dict[str, Any]] = []
+
+    def __call__(self, **kwargs: Any) -> list[DiscoveredModel]:
+        self.calls.append(kwargs)
+        return list(self.rows)
+
+
+@pytest.fixture(autouse=True)
+def openrouter():
+    stub = _OpenRouterStub()
+    with patch("local_operator.model.prices.openrouter_rows", stub):
+        yield stub
+
+
+_OPENROUTER_FABLE = DiscoveredModel(
+    id="anthropic/claude-fable-5.1",
+    name="Anthropic: Claude Fable 5.1",
+    context_window=1_000_000,
+    max_tokens=128_000,
+    input_price=10.0,
+    output_price=50.0,
+    cache_read_price=0.25,
+    cache_write_price=12.5,
+    supports_images=True,
+    supports_prompt_cache=True,
+)
 
 
 def _plant(tmp_path, document: dict[str, Any], *, age_s: float = 0.0) -> None:
@@ -400,3 +445,157 @@ def test_supports_images_is_never_taken_from_the_price_catalogue(tmp_path) -> No
     row = _lookup("anthropic", "claude-fable-5-1", tmp_path)
     assert row is not None
     assert row.supports_images is None
+
+
+# -- the ranked chain: models.dev, then OpenRouter, then nothing ----------------
+
+
+def _providers(body: dict[str, Any] | None = None) -> dict[str, Any]:
+    return project(_MODELS_DEV_BODY if body is None else body, _ETAG)["providers"]
+
+
+def _without(model_id: str, provider: str = "anthropic") -> dict[str, Any]:
+    body = json.loads(json.dumps(_MODELS_DEV_BODY))
+    body[provider]["models"].pop(model_id)
+    return body
+
+
+def test_a_models_dev_miss_is_priced_from_openrouter() -> None:
+    """The day-0 gap: the row is not in models.dev yet, OpenRouter has it under
+    the vendor namespace with the dotted spelling. The chain answers 10/50 and
+    carries the write price, instead of leaving the id unpriced."""
+    row = price_row(
+        "anthropic",
+        "claude-fable-5-1",
+        models_dev=_providers(_without("claude-fable-5-1")),
+        openrouter=[_OPENROUTER_FABLE],
+    )
+    assert row is not None
+    assert (row.input_price, row.output_price, row.cache_write_price) == (10.0, 50.0, 12.5)
+
+
+def test_both_sources_missing_is_none_so_the_registry_decides() -> None:
+    row = price_row(
+        "anthropic", "claude-nova-9", models_dev=_providers(), openrouter=[_OPENROUTER_FABLE]
+    )
+    assert row is None
+
+
+def test_a_models_dev_price_is_never_overridden_by_openrouter() -> None:
+    """Primary wins outright, even when the secondary quotes something else."""
+    cheaper = DiscoveredModel(
+        id="anthropic/claude-fable-5.1", input_price=1.0, output_price=2.0, context_window=42
+    )
+    row = price_row("anthropic", "claude-fable-5-1", models_dev=_providers(), openrouter=[cheaper])
+    assert row is not None
+    assert (row.input_price, row.output_price) == (10.0, 50.0)
+    assert row.context_window == 1_000_000, "and its native limits ride along"
+
+
+def test_a_disagreement_over_five_percent_is_logged_and_not_acted_on(caplog) -> None:
+    caplog.set_level("DEBUG", logger="local_operator.model.prices")
+    cheaper = DiscoveredModel(id="anthropic/claude-fable-5.1", input_price=9.0, output_price=50.0)
+    row = price_row("anthropic", "claude-fable-5-1", models_dev=_providers(), openrouter=[cheaper])
+    assert row is not None and row.input_price == 10.0
+    assert any("disagree" in record.message for record in caplog.records)
+    caplog.clear()
+    within = DiscoveredModel(id="anthropic/claude-fable-5.1", input_price=9.7, output_price=50.0)
+    price_row("anthropic", "claude-fable-5-1", models_dev=_providers(), openrouter=[within])
+    assert not any("disagree" in record.message for record in caplog.records)
+
+
+def test_a_models_dev_stub_with_limits_takes_openrouter_money_and_keeps_its_limits() -> None:
+    """``kimi-for-coding/k3``: limits, no cost. The money comes from the secondary,
+    the native window stays — every field is first-source-that-has-it."""
+    secondary = DiscoveredModel(
+        id="moonshotai/k3", input_price=0.6, output_price=2.5, context_window=131_072
+    )
+    row = price_row("kimi", "k3", models_dev=_providers(), openrouter=[secondary])
+    assert row is not None
+    assert (row.input_price, row.output_price) == (0.6, 2.5)
+    assert row.context_window == 262_144
+
+
+def test_openrouter_ids_never_enter_the_secondary_leg() -> None:
+    """An ``openrouter/*`` id is that listing's own business (leg 1 / leg 3 of the
+    resolver); the chain has no namespace for it and does not invent one."""
+    assert prices.openrouter_lookup([_OPENROUTER_FABLE], "openrouter", "some/model") is None
+    row = price_row(
+        "openrouter", "anthropic/claude-fable-5.1", models_dev=_providers(), openrouter=[]
+    )
+    assert row is not None and row.input_price == 10.0, "models.dev's openrouter key still answers"
+
+
+def test_a_plan_provider_never_borrows_the_pay_per_token_rate() -> None:
+    """``alibaba-token-plan`` bills credits; models.dev's 0/0 is the intended answer
+    and the ``qwen/`` USD rate must not be printed for it."""
+    assert "alibaba-token-plan" not in prices.OPENROUTER_NAMESPACE
+    priced = DiscoveredModel(id="qwen/qwen3.7-max", input_price=1.6, output_price=6.4)
+    assert prices.openrouter_lookup([priced], "alibaba-token-plan", "qwen3.7-max") is None
+
+
+def test_an_unpriced_openrouter_row_is_a_routing_stub_not_a_hit() -> None:
+    stub = DiscoveredModel(id="anthropic/claude-fable-5.1", context_window=1_000_000)
+    assert prices.openrouter_lookup([stub], "anthropic", "claude-fable-5-1") is None
+
+
+def test_no_documents_at_all_is_none_without_raising() -> None:
+    assert price_row("anthropic", "claude-fable-5-1", models_dev=None, openrouter=None) is None
+    assert price_row("anthropic", "claude-fable-5-1", models_dev=None, openrouter=[]) is None
+
+
+def test_the_resolver_leg_reaches_openrouter_only_on_a_models_dev_miss(
+    tmp_path, openrouter
+) -> None:
+    """A hit on the primary costs NO OpenRouter read: the second document is
+    never parsed on a path the first already answered."""
+    _plant(tmp_path, project(_MODELS_DEV_BODY, _ETAG))
+    row = price_catalogue_row("anthropic", "claude-fable-5-1", cache_dir=tmp_path)
+    assert row is not None and row.input_price == 10.0
+    assert openrouter.calls == []
+
+    _plant(tmp_path, project(_without("claude-fable-5-1"), _ETAG))
+    openrouter.rows.append(_OPENROUTER_FABLE)
+    with patch("httpx.get", _Canned([_ok(_without("claude-fable-5-1"))])):
+        row = price_catalogue_row("anthropic", "claude-fable-5-1", cache_dir=tmp_path)
+    assert row is not None and (row.input_price, row.output_price) == (10.0, 50.0)
+    assert len(openrouter.calls) == 1
+    assert (
+        openrouter.calls[0]["want_id"] == "anthropic/claude-fable-5-1"
+    ), "the miss-refetch rule is armed for the namespaced row"
+    assert openrouter.calls[0]["cache_dir"] == tmp_path
+
+
+def test_the_openrouter_leg_gets_what_the_primary_left_of_the_budget(tmp_path, openrouter) -> None:
+    _plant(
+        tmp_path,
+        project(_without("claude-fable-5-1"), _ETAG),
+        age_s=catalogue.MISS_REFETCH_MIN_AGE_S + 1,
+    )
+    clock = [100.0]
+
+    def slow_primary(url, **kwargs):
+        clock[0] += 2.0  # the models.dev refetch burns two of the three seconds
+        return _ok(_without("claude-fable-5-1"))
+
+    with (
+        patch("httpx.get", slow_primary),
+        patch("local_operator.model.prices.time.monotonic", side_effect=lambda: clock[0]),
+    ):
+        price_catalogue_row("anthropic", "claude-fable-5-1", timeout=3.0, cache_dir=tmp_path)
+    assert len(openrouter.calls) == 1
+    assert openrouter.calls[0]["timeout"] == pytest.approx(1.0)
+
+
+def test_models_dev_providers_reads_disk_only_and_never_fetches(tmp_path) -> None:
+    """The picker's bulk read: whatever is on disk, at any age, no request."""
+    recorder = _Canned([])
+    with patch("httpx.get", recorder):
+        assert prices.models_dev_providers(cache_dir=tmp_path) is None
+        _plant(tmp_path, project(_MODELS_DEV_BODY, _ETAG), age_s=10 * 24 * 3600)
+        providers = prices.models_dev_providers(cache_dir=tmp_path)
+    assert providers is not None and "claude-fable-5-1" in providers["anthropic"]
+    assert recorder.calls == []
+    # An older capture reads as absent rather than as a half-usable document.
+    _plant(tmp_path, {"capture": 0, "providers": {}})
+    assert prices.models_dev_providers(cache_dir=tmp_path) is None
