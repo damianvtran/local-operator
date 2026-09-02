@@ -43,10 +43,10 @@ if str(_ADAPTER_SRC) not in sys.path:
 def profile_clients(region: str) -> Any:
     """Clients from the operator's own profile, region pinned explicitly."""
 
-    import boto3  # type: ignore[import-not-found]
+    from boto3.session import Session  # type: ignore[import-not-found]
     from lop_osworld_v2_adapter.providers.aws import _Clients
 
-    session = boto3.session.Session(region_name=region)
+    session = Session(region_name=region)
     return _Clients(
         ec2=session.client("ec2", region_name=region),
         scheduler=session.client("scheduler", region_name=region),
