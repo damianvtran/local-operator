@@ -120,6 +120,13 @@ CREATE TABLE IF NOT EXISTS calls (
   -- ``cache_creation.ephemeral_1h_input_tokens``); the 5m slice is the
   -- remainder. Priced at 2x base rather than 1.25x, so the two must be
   -- separable to judge whether the large-context 1h TTL pays for itself.
+  -- SCOPE: a RAW-LEDGER diagnostic, deliberately NOT in the usage_daily /
+  -- usage_monthly rollups or the report projection — the rollup tables have
+  -- no ALTER migration path (CREATE TABLE IF NOT EXISTS cannot add a column
+  -- to an existing one, unlike calls' _MIGRATION_COLUMNS), so threading it
+  -- there is a schema change of its own (follow-up tracked on the feature
+  -- PR). Answers the trade question within the 90-day ledger window
+  -- (DEFAULT_RETENTION_DAYS); beyond that, price the split when it ships.
   cache_write_1h_tokens INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_calls_ts ON calls(ts_ms);

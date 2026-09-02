@@ -1691,6 +1691,11 @@ def _aggregate_usage(usages: list[Usage]) -> Usage:
         output_tokens=sum(u.output_tokens for u in usages),
         cache_read_tokens=sum(u.cache_read_tokens for u in usages),
         cache_write_tokens=sum(u.cache_write_tokens for u in usages),
+        # Same contract as ``cache_write_tokens`` above: the TTL split folds
+        # wherever the write count does, or the frontend's split would read
+        # as the first call's value only (see ``Usage.cache_write_1h_tokens``).
+        cache_write_5m_tokens=sum(u.cache_write_5m_tokens for u in usages),
+        cache_write_1h_tokens=sum(u.cache_write_1h_tokens for u in usages),
         reasoning_tokens=sum(u.reasoning_tokens for u in usages),
         context_tokens=last_context,
         cost_components=components,
