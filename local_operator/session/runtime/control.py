@@ -362,13 +362,56 @@ def _identity_by_record(record: SessionRecord) -> tuple[bool, str]:
     has no terminal to lose, so the SIGTERM is safe there too once identity
     is proven from the record.
 
-    The heartbeat-freshness gate stays OUT of this check: the refusal rule
-    (fresh heartbeat ⇒ socket must answer) is what --force exists to
-    bypass, with the user having been told exactly what they are doing.
+    Two facts must BOTH hold, and neither is optional:
+
+    1. The record on disk still names this pid and session (``_same_uid``).
+    2. The pid still HOLDS the port the record claims, and its heartbeat is
+       fresh. A starved runtime keeps heartbeating (the heartbeat thread is
+       SIGSTOP-immune and independent of the socket loop), so a fresh
+       heartbeat is precisely what separates "alive but not answering" from
+       "record outlived its process". Without this, --force degenerates into
+       "signal whatever holds this pid": a stale record whose pid a stranger
+       inherited passed check 1 alone and SIGTERMed an unrelated process in
+       testing — the exact pid-reuse accident the ladder exists to prevent.
     """
     if not _same_uid(record):
         return False, "the record on disk no longer names this pid and session"
+    # A lapsed heartbeat means the recorded process is gone, whatever now
+    # holds its pid. Refusing here is the conservative answer a kill switch
+    # owes: --force widens WHICH proof is admissible, never whether one is.
+    age = time.time() - record.heartbeat_at
+    if age > HEARTBEAT_TIMEOUT_S:
+        return False, (
+            f"its record stopped heartbeating {int(age)}s ago, so the pid may "
+            f"belong to another process now — identity cannot be confirmed"
+        )
+    if not _pid_holds_port(record):
+        return False, "the pid no longer holds the control port its record claims"
     return True, ""
+
+
+def _pid_holds_port(record: SessionRecord) -> bool:
+    """True when ``record.pid`` still owns the record's control port.
+
+    The kernel's own answer to "is this pid the process that published this
+    record": the port was bound at spawn, so a pid that holds it IS the
+    runtime rather than a stranger who inherited the number. ``lsof`` is the
+    portable reach for this (macOS has no /proc and psutil is deliberately
+    not a dependency); an unreadable answer means unproven, which refuses.
+    """
+    import subprocess
+
+    try:
+        out = subprocess.run(
+            ["lsof", "-nP", "-a", "-p", str(record.pid), "-iTCP", "-sTCP:LISTEN"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return f":{record.control_port}" in out
 
 
 async def _identity_by_start_time(record: SessionRecord) -> tuple[bool, str]:
@@ -700,7 +743,9 @@ async def stop_session(
         # cannot collide on. Gated on the caller's explicit opt-in and
         # named in the receipt, because the refusal rule this bypasses is
         # the one that keeps a wrong pid alive.
-        confirmed, why_not = _identity_by_record(record)
+        # Off the loop: this forks ``lsof`` and the TUI runs the ladder on
+        # its event loop, the same constraint the ``ps`` probe above carries.
+        confirmed, why_not = await asyncio.to_thread(_identity_by_record, record)
         if confirmed:
             why_not = ""
     if not confirmed:

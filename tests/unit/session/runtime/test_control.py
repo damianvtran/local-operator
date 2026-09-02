@@ -23,8 +23,10 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 import pytest
 
@@ -355,34 +357,66 @@ async def test_old_runtime_unknown_op_is_a_miss_not_a_failure() -> None:
 
 @pytest.mark.asyncio
 async def test_force_escalates_past_a_fresh_heartbeat_on_record_identity(no_signals) -> None:
-    """A heartbeating-but-socket-silent process (a starved TUI burning 100%
-    CPU) is refused without --force and stopped with it: the record's own
-    fields (pid, session, port, key) prove identity past the refusal rule."""
+    """A heartbeating runtime whose socket never answers (a TUI burning
+    100% CPU, its socket loop queued behind the runaway) is refused without
+    --force and signalled with it.
+
+    The runtime here stays UP — its port stays bound and its record fresh —
+    but the ladder's dial is starved, which is the shape the CLI evidence
+    reproduced with SIGSTOP. --force reads identity from the record's own
+    fields, which is sound precisely because the pid still holds the
+    recorded control port.
+    """
     server, record = await _serve()
     try:
-        # Starve the socket: SIGSTOP the server's loop thread shape is
-        # infeasible in-process; instead make the socket silent by stopping
-        # the server but keeping its record live and the pid alive. The
-        # heartbeat stays fresh (the fixture's pid_alive returns True), so
-        # without force the refusal names the wait; with force the record
-        # fields carry identity.
-        # Close the server and let its async unpublish LAND before the
-        # republish, or the close's cleanup deletes the file we just wrote.
+        target = _record_for(record, pid=os.getpid())
+        target.heartbeat_at = time.time()
+        registry.publish(target)
+
+        # Starve the dial without freeing the port: the socket is up, but no
+        # identity answer comes back inside the ladder's window.
+        async def _never(*args, **kwargs):
+            # The starved shape: the dial never yields an identity answer,
+            # exactly as _confirmed_session_id reports a silent socket.
+            return False, control._SOCKET_SILENT
+
+        with mock.patch.object(control, "_confirmed_session_id", _never):
+            refused = await control.stop_session(target, timeout_s=0.5, _root=registry.run_dir())
+            assert refused.method == "refused"
+            assert "must lapse" in refused.line  # the named wait (U2-3)
+            assert no_signals[0] == []
+            stopped = await control.stop_session(
+                target, timeout_s=0.5, force=True, _root=registry.run_dir()
+            )
+        assert stopped.method in ("sigterm", "sigkill")
+        assert no_signals[0] != []  # the force gate opened
+    finally:
+        server.close()
+
+
+@pytest.mark.asyncio
+async def test_force_still_refuses_a_stale_record_over_a_recycled_pid(no_signals) -> None:
+    """--force widens WHICH identity proof is admissible, never whether one
+    is required.
+
+    Caught in real testing: an earlier --force accepted the record-file check
+    alone, which a stale record trivially satisfies, and SIGTERMed an
+    unrelated process holding the recycled pid. Both halves are now
+    mandatory — a fresh heartbeat AND the pid still holding the recorded
+    control port — so a record that outlived its process refuses even under
+    --force, and nothing is signalled.
+    """
+    server, record = await _serve()
+    try:
         server.close()
         await asyncio.sleep(0.3)
-        target = _record_for(record, pid=os.getpid())  # the runner's pid, alive
-        registry.publish(target)
-        refused = await control.stop_session(target, timeout_s=1.0, _root=registry.run_dir())
-        assert refused.method == "refused"
-        assert "must lapse" in refused.line  # the named wait (U2-3)
-        assert no_signals[0] == []
-        stopped = await control.stop_session(
-            target, timeout_s=1.0, force=True, _root=registry.run_dir()
+        stale = _record_for(record, pid=os.getpid())
+        stale.heartbeat_at = time.time() - 3600  # long past the window
+        registry.publish(stale)
+        outcome = await control.stop_session(
+            stale, timeout_s=1.0, force=True, _root=registry.run_dir()
         )
-        # The ladder signalled (the spy saw it) and the outcome names the
-        # rung; the process is the runner, so pid_alive stays True and the
-        # ladder reports the rung it reached, not a lie.
-        assert stopped.method in ("sigterm", "sigkill")
-        assert no_signals[0] != []  # signals WERE sent — the force gate opened
+        assert outcome.method == "refused"
+        assert no_signals[0] == []  # nothing was signalled
     finally:
         pass
