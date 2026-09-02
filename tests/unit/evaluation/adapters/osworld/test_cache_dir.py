@@ -22,7 +22,6 @@ the invariant.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
@@ -32,9 +31,11 @@ from lop_osworld_v2_adapter.providers.fake import FakeProvider
 from local_operator.evaluation.adapters.api import (
     ADAPTER_SCHEMA_VERSION,
     AdapterSelector,
+    CloseParams,
     Handshake,
     PrepareParams,
     PythonRuntime,
+    ResetStartParams,
     ScopedInfraValue,
 )
 from local_operator.evaluation.adapters.discovery import workspace_digest
@@ -82,12 +83,16 @@ def test_episode_cache_root_is_absolute_outside_workspace_and_episode_owned(
     assert root.is_absolute(), "cache root must be absolute, never cwd-relative"
     # Outside the pinned workspace: the whole point of the fix.
     assert workspace not in root.parents and root != workspace
-    # Episode-scoped: reset_cache_dir replaces contents wholesale per reset.
+    # Episode-scoped: upstream's reset_cache_dir only reassigns the attribute
+    # and clears nothing, so isolation has to come from the path itself.
     assert root.name == "ep-1"
-    # A sibling of the artifact root, under the parent-owned run root.
+    # Durability is STRUCTURAL, not a string test: the cache root is a sibling
+    # under the run root, so it inherits whatever guarantee the run root has.
+    # scripts/run_episode.py puts the run root through refuse_volatile_root,
+    # which is what actually keeps this off /tmp — asserting the prefix here
+    # would only re-test pytest's tmp_path, which IS under $TMPDIR.
     assert root.parent.parent == artifact_root.parent
-    # Never volatile: macOS purges /private/tmp with no warning.
-    assert not str(root).startswith(("/tmp", "/private/tmp", os.environ.get("TMPDIR", "\0")))
+    assert root.parent.name == "osworld-cache"
 
     other = _episode_cache_root(artifact_root, "ep-2")
     assert other != root, "two episodes must not share a cache root"
@@ -154,11 +159,19 @@ def _selector(workspace: Path, adapter: OSWorldV2Adapter, digest: str) -> Adapte
 
 
 @pytest.mark.asyncio
-async def test_episode_leaves_workspace_byte_identical(tmp_path: Path, episode_id: str) -> None:
+async def test_episode_leaves_workspace_byte_identical(
+    tmp_path: Path, episode_id: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """After a real episode the workspace is untouched: nothing newer than the
     selector, and the digest recomputes to the pin the episode started with."""
 
     workspace = _write_workspace(tmp_path, {"task_plain": fixtures.PLAIN})
+    # THE FAILURE GEOMETRY. The supervisor spawns the worker with
+    # cwd=selector.workspace, so a cwd-relative upstream write lands in the
+    # pinned workspace. Without this chdir the test runs from the repo root
+    # and a regression's stray write would land THERE, leaving the digest
+    # clean for the wrong reason -- the test would pass under the bug.
+    monkeypatch.chdir(workspace)
     pin = workspace_digest(str(workspace))
     provider = FakeProvider(scripted_score=1.0)
     adapter = OSWorldV2Adapter(provider_factory=lambda: provider, workspace_root=workspace)
@@ -219,13 +232,16 @@ class _DownloadingFakeProvider(FakeProvider):
 
 @pytest.mark.asyncio
 async def test_rescue_digest_recheck_passes_after_a_download(
-    tmp_path: Path, episode_id: str
+    tmp_path: Path, episode_id: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The regression: an episode that downloads assets must NOT change the
     workspace digest, so the rescue worker's re-check passes and the sweep
     retires the descriptor instead of wedging ``rescue_required``."""
 
     workspace = _write_workspace(tmp_path, {"task_plain": fixtures.PLAIN})
+    # Same reason as above: reproduce the worker's real cwd, or a cwd-relative
+    # regression escapes into the repo root instead of the workspace.
+    monkeypatch.chdir(workspace)
     pin = workspace_digest(str(workspace))
     provider = _DownloadingFakeProvider(scripted_score=1.0)
     adapter = OSWorldV2Adapter(provider_factory=lambda: provider, workspace_root=workspace)
@@ -276,3 +292,155 @@ async def test_prepare_does_not_create_the_cache_root(tmp_path: Path, episode_id
     )
     # No cache root was created anywhere under the would-be run root.
     assert not (tmp_path / "run").exists()
+
+
+# ---------------------------------------------------------------------------
+# the cwd guarantee: relative writes cannot reach the workspace at all
+# ---------------------------------------------------------------------------
+
+
+class _RelativeWritingFakeProvider(FakeProvider):
+    """A fake that writes a HARD-CODED RELATIVE filename during allocate.
+
+    This is the shape of the upstream helpers that ``cache_dir`` does NOT
+    cover: ``evaluators/metrics/vscode.py:210`` opens ``"temp.pdf"``,
+    ``slides.py:2051`` opens ``temp_extracted_<n>.jpeg``, ``others.py:64-72``
+    makes ``<name>.dir``. They call the BUILTIN ``open`` at module scope, so
+    no attribute installed on the env object can intercept them — the only
+    thing that decides where they land is the process cwd.
+    """
+
+    async def allocate(self, plan, task, *, cache_root):  # type: ignore[override]
+        await super().allocate(plan, task, cache_root=cache_root)
+        # Deliberately the builtin, deliberately relative — exactly what
+        # upstream does. Under the fix the cwd is the episode scratch dir,
+        # so this cannot reach the pinned workspace.
+        with open("temp.pdf", "wb") as handle:
+            handle.write(b"%PDF-1.4 stray upstream write\n")
+        self.stray_write = Path("temp.pdf").resolve()
+
+
+@pytest.mark.asyncio
+async def test_a_relative_upstream_write_cannot_land_in_the_workspace(
+    tmp_path: Path, episode_id: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE guarantee behind the cwd move: a relative write by ANY upstream
+    path — not just the cache downloads ``cache_dir`` covers — lands in the
+    episode scratch dir, so the pin survives and rescue's re-check passes.
+
+    This is what the (inert) ``env.open`` seal claimed and did not deliver:
+    upstream never resolves ``open`` through the env object, so the guarantee
+    has to come from the cwd, not from patching a call site nobody uses.
+    """
+
+    workspace = _write_workspace(tmp_path, {"task_plain": fixtures.PLAIN})
+    pin = workspace_digest(str(workspace))
+    # Reproduce the worker's real starting cwd: the pinned workspace.
+    monkeypatch.chdir(workspace)
+
+    provider = _RelativeWritingFakeProvider(scripted_score=1.0)
+    adapter = OSWorldV2Adapter(provider_factory=lambda: provider, workspace_root=workspace)
+    shim = _Shim(adapter, _selector(workspace, adapter, pin))
+
+    runner = EpisodeRunner(
+        _spec(episode_id),
+        build_config(tmp_path / "run"),
+        selector=shim.selector,
+        model=ScriptedModel(["finish"]),
+        launch=lambda _s: shim,
+    )
+    outcome = await runner.run()
+    assert outcome.status == "completed", outcome.diagnostic
+
+    # The stray relative write really happened...
+    assert provider.stray_write.exists(), "the test's own stray write did not occur"
+    # ...but it landed in the episode scratch dir, NOT the pinned workspace.
+    assert workspace not in provider.stray_write.parents
+    assert provider.cache_root is not None
+    assert provider.stray_write.parent == provider.cache_root.resolve()
+    assert not (workspace / "temp.pdf").exists()
+
+    # Which is the property that matters: the pin is intact, so a rescue
+    # worker's digest re-check passes instead of wedging rescue_required.
+    assert workspace_digest(str(workspace)) == pin
+
+
+@pytest.mark.asyncio
+async def test_close_restores_the_cwd_the_supervisor_spawned_us_in(
+    tmp_path: Path, episode_id: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """reset_start moves the cwd; close must put it back, so a worker reused
+    across episodes starts each one where the supervisor placed it."""
+
+    workspace = _write_workspace(tmp_path, {"task_plain": fixtures.PLAIN})
+    monkeypatch.chdir(workspace)
+    entry = Path.cwd().resolve()
+
+    provider = FakeProvider(scripted_score=1.0)
+    adapter = OSWorldV2Adapter(provider_factory=lambda: provider, workspace_root=workspace)
+    artifacts = tmp_path / "run" / "artifacts"
+    artifacts.mkdir(parents=True)
+
+    await adapter.prepare(
+        PrepareParams(
+            operation_id=f"prepare-{episode_id}",
+            episode_id=episode_id,
+            secret_refs=(),
+            infra_values=_INFRA,
+        )
+    )
+    await adapter.reset_start(
+        ResetStartParams(
+            operation_id=f"reset-{episode_id}",
+            task_id="task_plain",
+            episode_id=episode_id,
+            artifact_root=str(artifacts),
+            secrets=(),
+        )
+    )
+    # During the episode the cwd is the scratch dir, off the workspace.
+    assert Path.cwd().resolve() != entry
+    assert Path.cwd().resolve() == provider.cache_root.resolve()  # type: ignore[union-attr]
+
+    await adapter.close(CloseParams(operation_id=f"close-{episode_id}"))
+    assert Path.cwd().resolve() == entry
+
+
+@pytest.mark.asyncio
+async def test_reset_start_observes_the_guest_exactly_once(
+    tmp_path: Path, episode_id: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Observation 0 costs exactly one round-trip.
+
+    On the paid path ``observe()`` is a live HTTP call to the guest (a
+    screenshot plus the a11y tree), so a duplicated call doubles reset
+    latency and network work on every episode. Pinned because a stray second
+    call is invisible to every other assertion — the extra result is simply
+    overwritten.
+    """
+
+    workspace = _write_workspace(tmp_path, {"task_plain": fixtures.PLAIN})
+    monkeypatch.chdir(workspace)
+    provider = FakeProvider(scripted_score=1.0)
+    adapter = OSWorldV2Adapter(provider_factory=lambda: provider, workspace_root=workspace)
+    artifacts = tmp_path / "run" / "artifacts"
+    artifacts.mkdir(parents=True)
+
+    await adapter.prepare(
+        PrepareParams(
+            operation_id=f"prepare-{episode_id}",
+            episode_id=episode_id,
+            secret_refs=(),
+            infra_values=_INFRA,
+        )
+    )
+    await adapter.reset_start(
+        ResetStartParams(
+            operation_id=f"reset-{episode_id}",
+            task_id="task_plain",
+            episode_id=episode_id,
+            artifact_root=str(artifacts),
+            secrets=(),
+        )
+    )
+    assert provider.observe_calls == 1

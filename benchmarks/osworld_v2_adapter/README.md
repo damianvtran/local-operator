@@ -274,13 +274,32 @@ refused even though the instance was already terminated. The adapter now hands
 `DesktopEnv` an ABSOLUTE, per-episode cache root at
 `<artifact_root>/../osworld-cache/<episode_id>` — beside the artifact root, not
 inside it (the bundle verifier walks the artifact directory and refuses any
-non-digest entry), and per-episode because upstream's `reset_cache_dir`
-replaces/deletes the cache wholesale between resets, so two episodes sharing a
-task id must never share a cache. The cache root is durable (the parent refuses
-a run root under /tmp) and is minted at `reset_start`, never in `prepare`.
-Upstream's few cwd-RELATIVE metric writes (`temp.pdf`, `temp_extracted_N.jpeg`,
-epub `<name>.dir`) are sealed at the env instance: an open-for-write that
-resolves inside the workspace raises rather than silently corrupting the pin.
+non-digest entry), and per-episode so two episodes running the same task never
+share a cache — upstream's `reset_cache_dir` only reassigns the attribute
+(`controllers/setup.py:55-56`) and clears nothing, so the isolation has to come
+from the path. The cache root is durable (it is a sibling under the run root,
+which `run_episode.py` puts through `refuse_volatile_root`, so it can never be
+`/tmp`) and is minted at `reset_start`, never in `prepare`.
+
+**The episode's cache root is also its working directory.** Routing `cache_dir`
+fixes the one write path we observed; it does not fix the class. Several
+upstream helpers open a hard-coded RELATIVE name with the builtin `open` at
+module scope — `temp.pdf` (`evaluators/metrics/vscode.py:210`),
+`temp_extracted_<n>.jpeg` (`slides.py:2051`), an epub's `<name>.dir`
+(`others.py:64-72`) — and they never consult the env object, so no attribute
+the adapter installs on it can intercept them. Since a relative write resolves
+against the cwd, `reset_start` moves the worker's cwd to the episode cache root
+and `close` puts it back. Any relative write by any upstream path, known or
+not, therefore lands in the episode's scratch dir rather than the pin. This is
+safe because the workspace is never reached via the cwd: `instantiate_task`
+loads task modules by absolute location, the worker runs with `-I` so the cwd
+is not on `sys.path`, and both the worker's digest re-check and the rescue
+sweep hash `selector.workspace`, an absolute path.
+
+If a future upstream path still manages to write into the workspace, the
+digest re-check is what surfaces it: the worker (and `sweep-rescue`) refuse
+with `adapter workspace content digest differs`. Restore the workspace from
+the verified inputs root and sweep again.
 
 ## Leak audit (operator command)
 
