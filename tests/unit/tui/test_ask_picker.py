@@ -619,13 +619,11 @@ async def test_a_recommendation_is_marked_and_preselected() -> None:
         screen = await app.open_picker()
         await pilot.pause()
         assert screen.selected_index == 0
-        lines = screen.render_lines_for_test()
-        assert RECOMMENDED_TAG in "\n".join(lines)
+        text = "\n".join(screen.render_lines_for_test())
+        assert RECOMMENDED_TAG in text
         # The hoisted option is the FIRST row drawn, not merely the selected
         # index: on a surface with no recommended marker, order is the message.
-        assert "Backfill from the audit log" in next(
-            line for line in lines if "Backfill from the audit log" in line or "Drop them" in line
-        )
+        assert text.index("Backfill from the audit log") < text.index("Drop them")
         await pilot.press("enter")
         await pilot.pause()
     assert app.answered == [{"stale": ["Backfill from the audit log"]}]

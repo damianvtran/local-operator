@@ -656,12 +656,12 @@ class AskQuestion(BaseModel):
                 f"recommended must index options (0..{len(self.options) - 1}), "
                 f"got {self.recommended}"
             )
-        if self.recommended:
+        if self.recommended is not None:
             # Rotate rather than swap: the authored order of everything the
             # model did NOT recommend is still its ranking, and a swap would
             # promote whatever happened to sit at index 0 over the rest of it.
-            # `not self.recommended` already covers 0 and None, which makes
-            # this a no-op on an already-normalised question.
+            # Rotating by 0 is the identity, so an already-normalised question
+            # passes through untouched however many times it is re-validated.
             hoisted = self.options.pop(self.recommended)
             self.options.insert(0, hoisted)
             self.recommended = 0
