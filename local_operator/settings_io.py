@@ -456,7 +456,7 @@ SETTINGS: tuple[Setting, ...] = (
         label="Usage reserve (%)",
         kind=Kind.FLOAT,
         default=10.0,
-        help="Quota headroom kept in reserve before usage-aware fallback moves on.",
+        help="Headroom below which new sessions avoid an account; running ones stay.",
         minimum=0.0,
         maximum=100.0,
     ),

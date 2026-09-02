@@ -832,6 +832,251 @@ async def test_usage_preflight_demotes_rather_than_blocks_a_reserve_account(tmp_
 
 
 @pytest.mark.asyncio
+async def test_reserve_on_the_sticky_account_keeps_the_session_there(tmp_path) -> None:
+    """A reserve verdict is a preference for NEW picks, never an eviction.
+
+    The measured defect: a session sticky to account A (its whole conversation
+    cached there) hit a boundary where A read 8% remaining and B was healthy.
+    The preflight demoted A process-wide, the cascade dropped A from the tier,
+    the session was re-pinned to B and its 150-500k-token prefix was rewritten
+    on B at cache-write price — then, 120s later with B also low, back again.
+    Now the session stays on A with one info line, and only a FRESH session
+    prefers B."""
+    store = AuthStore(tmp_path / "auth.db")
+    warm = store.upsert_credential("anthropic", _oauth("oauth-a", "account-a"))
+    cold = store.upsert_credential("anthropic", _oauth("oauth-b", "account-b"))
+    stream = create_stream_fn(
+        store,
+        {"retry": {"usageAwareFallback": True, "usageReservePercent": 10}},
+        session_id="session-a",
+    )
+    notices: list[str] = []
+    stream.set_notice_handler(lambda text, kind: notices.append(f"{kind}:{text}"))
+    model = ModelSpec(provider="anthropic", model_id="claude-opus-5")
+    # The session has been transacting on A: that is where its cache is warm.
+    store.pin_session_credential("anthropic", "session-a", warm.id)
+
+    async def usage_for_access(_client, _provider, *, access_token=None, **_kwargs):
+        return _anthropic_usage(92.0 if access_token == "oauth-a" else 40.0)
+
+    async def boundary() -> None:
+        stream.begin_message()
+        stream._usage_checked_at = 0.0
+
+    try:
+        with patch("local_operator.providers.usage.fetch_usage", side_effect=usage_for_access):
+            await boundary()
+            await stream.preflight_usage(model)
+
+            selected = await store.get_oauth_access("anthropic", "session-a")
+            assert selected is not None and selected.credential_id == warm.id
+            assert not store.is_blocked(warm.id, "anthropic")
+            # Not demoted either: the mark is for a fresh pick the walk is
+            # moving off, and this walk moved off nothing.
+            assert store._active_demotions("anthropic") == set()
+            assert stream._route_state.active is None
+            assert notices == [
+                "info:anthropic quota low (8% remaining) — staying on this account to keep "
+                "the prompt cache warm; new sessions will prefer other accounts"
+            ]
+
+            # Steady state is silent, and the session still does not move.
+            await boundary()
+            await stream.preflight_usage(model)
+            selected = await store.get_oauth_access("anthropic", "session-a")
+            assert selected is not None and selected.credential_id == warm.id
+            assert len(notices) == 1
+
+        # A session with nothing cached anywhere still prefers the healthy
+        # account: that is what the reserve threshold is FOR.
+        fresh = create_stream_fn(
+            store,
+            {"retry": {"usageAwareFallback": True, "usageReservePercent": 10}},
+            session_id=_session_hashing_to_first_row(2),
+        )
+        try:
+            with patch("local_operator.providers.usage.fetch_usage", side_effect=usage_for_access):
+                await fresh.preflight_usage(model)
+            picked = await store.get_oauth_access("anthropic", fresh._session_id)
+            assert picked is not None and picked.credential_id == cold.id
+        finally:
+            await fresh.close()
+    finally:
+        await stream.close()
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_depleted_on_the_sticky_account_still_moves_the_session(tmp_path) -> None:
+    """The one verdict that may move a warm session: at 0% the rewrite is
+    unavoidable, so the block is written and the session re-pins to a sibling."""
+    store = AuthStore(tmp_path / "auth.db")
+    warm = store.upsert_credential("anthropic", _oauth("oauth-a", "account-a"))
+    cold = store.upsert_credential("anthropic", _oauth("oauth-b", "account-b"))
+    stream = create_stream_fn(
+        store,
+        {"retry": {"usageAwareFallback": True, "usageReservePercent": 10}},
+        session_id="session-a",
+    )
+    model = ModelSpec(provider="anthropic", model_id="claude-opus-5")
+    store.pin_session_credential("anthropic", "session-a", warm.id)
+
+    async def usage_for_access(_client, _provider, *, access_token=None, **_kwargs):
+        return _anthropic_usage(100.0 if access_token == "oauth-a" else 40.0)
+
+    try:
+        with patch("local_operator.providers.usage.fetch_usage", side_effect=usage_for_access):
+            await stream.preflight_usage(model)
+
+        assert store.is_blocked(warm.id, "anthropic")
+        selected = await store.get_oauth_access("anthropic", "session-a")
+        assert selected is not None and selected.credential_id == cold.id
+        assert store.session_credential_id("anthropic", "session-a") == cold.id
+    finally:
+        await stream.close()
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_reserve_on_a_fresh_pick_moves_on_and_the_walk_terminates(tmp_path) -> None:
+    """A row the walk only just landed on holds nothing cached, so reserve on it
+    still steers the walk to a sibling — and the walk must END there.
+
+    The trap: the store keeps a demoted STICKY row in service, and the walk's
+    own resolve pinned the session to this fresh pick. Demoting without
+    releasing the pin would re-resolve the same row, find it in
+    ``attempted_ids``, and return with the session parked on the account it
+    meant to leave. Three accounts, the first two in reserve, so the walk has
+    to move twice; every probe is counted so a re-probe of the same account
+    would show up as a fourth fetch."""
+    store = AuthStore(tmp_path / "auth.db")
+    first = store.upsert_credential("anthropic", _oauth("oauth-a", "account-a"))
+    second = store.upsert_credential("anthropic", _oauth("oauth-b", "account-b"))
+    third = store.upsert_credential("anthropic", _oauth("oauth-c", "account-c"))
+    session = _session_hashing_to_first_row(3)
+    stream = create_stream_fn(
+        store,
+        {"retry": {"usageAwareFallback": True, "usageReservePercent": 10}},
+        session_id=session,
+    )
+    notices: list[str] = []
+    stream.set_notice_handler(lambda text, kind: notices.append(f"{kind}:{text}"))
+    model = ModelSpec(provider="anthropic", model_id="claude-opus-5")
+    probed: list[str] = []
+
+    async def usage_for_access(_client, _provider, *, access_token="", **_kwargs):
+        probed.append(access_token)
+        return _anthropic_usage({"oauth-a": 95.0, "oauth-b": 93.0}.get(access_token, 20.0))
+
+    try:
+        with patch("local_operator.providers.usage.fetch_usage", side_effect=usage_for_access):
+            await stream.preflight_usage(model)
+
+        assert probed == ["oauth-a", "oauth-b", "oauth-c"]
+        selected = await store.get_oauth_access("anthropic", session)
+        assert selected is not None and selected.credential_id == third.id
+        assert store._active_demotions("anthropic") == {first.id, second.id}
+        assert not store.is_blocked(first.id, "anthropic")
+        assert not store.is_blocked(second.id, "anthropic")
+        # Silent: fresh-pick rotation is the internal detail it always was.
+        assert notices == []
+    finally:
+        await stream.close()
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_reserve_on_the_sticky_account_is_silent_after_the_walk_settles(
+    tmp_path,
+) -> None:
+    """The stay decision is taken against the sticky captured BEFORE the walk,
+    so a session whose warm account is reached only after the walk moves off a
+    fresh reserve pick is still recognised as warm there — and not demoted.
+
+    Shape: sticky on C (warm). The walk starts on C (sticky first), finds it
+    in reserve, and must settle immediately, never touching A or B."""
+    store = AuthStore(tmp_path / "auth.db")
+    store.upsert_credential("anthropic", _oauth("oauth-a", "account-a"))
+    store.upsert_credential("anthropic", _oauth("oauth-b", "account-b"))
+    warm = store.upsert_credential("anthropic", _oauth("oauth-c", "account-c"))
+    stream = create_stream_fn(
+        store,
+        {"retry": {"usageAwareFallback": True, "usageReservePercent": 10}},
+        session_id="session-a",
+    )
+    model = ModelSpec(provider="anthropic", model_id="claude-opus-5")
+    store.pin_session_credential("anthropic", "session-a", warm.id)
+    probed: list[str] = []
+
+    async def usage_for_access(_client, _provider, *, access_token="", **_kwargs):
+        probed.append(access_token)
+        return _anthropic_usage(94.0 if access_token == "oauth-c" else 20.0)
+
+    try:
+        with patch("local_operator.providers.usage.fetch_usage", side_effect=usage_for_access):
+            await stream.preflight_usage(model)
+
+        assert probed == ["oauth-c"]
+        selected = await store.get_oauth_access("anthropic", "session-a")
+        assert selected is not None and selected.credential_id == warm.id
+        assert store._active_demotions("anthropic") == set()
+    finally:
+        await stream.close()
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_model_tier_reserve_on_the_sticky_account_keeps_the_session_there(
+    tmp_path,
+) -> None:
+    """The model-tier branch (a scoped weekly cap in reserve) keeps the same
+    promise as the account-scope one: warm account stays, fresh pick moves."""
+    store = AuthStore(tmp_path / "auth.db")
+    warm = store.upsert_credential("anthropic", _oauth("oauth-a", "account-a"))
+    cold = store.upsert_credential("anthropic", _oauth("oauth-b", "account-b"))
+    stream = create_stream_fn(
+        store,
+        {"retry": {"usageAwareFallback": True, "usageReservePercent": 10}},
+        session_id="session-a",
+    )
+    notices: list[str] = []
+    stream.set_notice_handler(lambda text, kind: notices.append(f"{kind}:{text}"))
+    model = ModelSpec(provider="anthropic", model_id="claude-fable-5")
+    store.pin_session_credential("anthropic", "session-a", warm.id)
+
+    async def usage_for_access(_client, _provider, *, access_token=None, **_kwargs):
+        return _anthropic_fable_usage(95.0 if access_token == "oauth-a" else 20.0)
+
+    try:
+        with patch("local_operator.providers.usage.fetch_usage", side_effect=usage_for_access):
+            await stream.preflight_usage(model)
+
+        selected = await store.get_oauth_access("anthropic", "session-a")
+        assert selected is not None and selected.credential_id == warm.id
+        assert store._active_demotions("anthropic") == set()
+        assert not store.is_blocked(warm.id, "anthropic")
+        assert len(notices) == 1 and "staying on this account" in notices[0]
+        assert "for claude-fable-5" in notices[0]
+
+        # And a session that is NOT warm on A moves to B (silently).
+        fresh = create_stream_fn(
+            store,
+            {"retry": {"usageAwareFallback": True, "usageReservePercent": 10}},
+            session_id=_session_hashing_to_first_row(2),
+        )
+        try:
+            with patch("local_operator.providers.usage.fetch_usage", side_effect=usage_for_access):
+                await fresh.preflight_usage(model)
+            picked = await store.get_oauth_access("anthropic", fresh._session_id)
+            assert picked is not None and picked.credential_id == cold.id
+        finally:
+            await fresh.close()
+    finally:
+        await stream.close()
+        store.close()
+
+
+@pytest.mark.asyncio
 async def test_reserve_account_still_serves_after_the_healthy_sibling_depletes(tmp_path) -> None:
     """The incident this change fixes, replayed end to end.
 
@@ -1219,8 +1464,9 @@ async def test_distinct_quota_conditions_on_one_selector_do_not_alias(tmp_path) 
       exhausted" line.
     - Phase 2 (``model-reserve``): the Opus weekly tier cap that gates this exact
       model is in reserve while the shared pool is healthy → a MODEL-scope reserve
-      verdict and the ``model:reserve`` "for <model> — continuing until anthropic
-      quota is exhausted" line.
+      verdict and the ``model:reserve`` "for <model> — staying on this account to
+      keep the prompt cache warm" line (the session is already sticky to this
+      account from phase 1, so a reserve verdict keeps it there).
 
     Under the fix both are announced once (tokens ``tier-spent:reserve`` and
     ``model:reserve`` are distinct). Under the bug — a token that encoded only
@@ -1231,9 +1477,10 @@ async def test_distinct_quota_conditions_on_one_selector_do_not_alias(tmp_path) 
     point. See ``test_state_only_quota_token_would_alias_distinct_scopes`` for the
     companion that pins the bug direction by forcing a state-only token.
 
-    Two same-provider accounts are configured so the walk rotates siblings
-    silently before the last account lands on the scoped reserve announce (the
-    model-tier branch), and so the account-scope tier-spent branch is reachable."""
+    Two same-provider accounts are configured so a sibling exists (the shape
+    under which phase 2 takes the model-tier stay-on-sticky branch rather than
+    the lone-account one), and so the account-scope tier-spent branch is
+    reachable."""
     store = AuthStore(tmp_path / "auth.db")
     store.upsert_credential("anthropic", _oauth("oauth-a", "account-a"))
     store.upsert_credential("anthropic", _oauth("oauth-b", "account-b"))
@@ -1263,7 +1510,7 @@ async def test_distinct_quota_conditions_on_one_selector_do_not_alias(tmp_path) 
         stream._usage_checked_at = 0.0
 
     tier_spent_line = "continuing until shared windows are exhausted"
-    model_reserve_line = "for claude-opus-5 — continuing until anthropic quota is exhausted"
+    model_reserve_line = "for claude-opus-5 — staying on this account to keep the prompt cache warm"
     try:
         with patch("local_operator.providers.usage.fetch_usage", side_effect=report_for_phase):
             # 1) The account-scope (tier-spent) reserve condition announces once
@@ -1341,7 +1588,7 @@ async def test_state_only_quota_token_would_alias_distinct_scopes(tmp_path) -> N
         stream._usage_checked_at = 0.0
 
     tier_spent_line = "continuing until shared windows are exhausted"
-    model_reserve_line = "for claude-opus-5 — continuing until anthropic quota is exhausted"
+    model_reserve_line = "for claude-opus-5 — staying on this account to keep the prompt cache warm"
     try:
         with patch("local_operator.providers.usage.fetch_usage", side_effect=report_for_phase):
             phase["value"] = "tier-spent"

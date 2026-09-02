@@ -1665,6 +1665,15 @@ class SessionStreamFn:
         self._primary_selector: str | None = None
         self._usage_checked_selector: str | None = None
         self._usage_checked_at = 0.0
+        # The credential this session was sticky to when the CURRENT boundary
+        # walk began — i.e. the account whose prompt cache holds this
+        # conversation. Captured by ``preflight_usage`` ahead of its first
+        # resolve, because every resolve in the walk re-pins the session, so
+        # the store's live sticky stops answering "where is my cache warm?"
+        # after the first hop. Read by ``_apply_account_health`` to decide
+        # whether a reserve verdict is about a warm account (stay) or a fresh
+        # pick (move on).
+        self._boundary_sticky_id: int | None = None
         # Quota is re-probed at EVERY user-message boundary, but the user only
         # needs to hear about a CHANGE in quota standing — not the same "quota
         # low"/"quota exhausted" line echoed on every message they send while
@@ -2438,6 +2447,17 @@ class SessionStreamFn:
         # walk and discarded with it, so the next boundary still re-probes
         # live and can notice recovery.
         usage_memo: dict[str, UsageReport | None] = {}
+        # The credential this session is ALREADY transacting on, read before
+        # the walk resolves anything: every resolve below re-pins the session
+        # to whatever row it lands on, so after the first iteration the store's
+        # sticky no longer says where the conversation's prompt cache lives.
+        # A reserve verdict against THIS row keeps the session on it (see
+        # ``_apply_account_health``); against any other row it is a fresh pick
+        # the walk may still move. ``None`` on a session's very first boundary
+        # — nothing is warm anywhere, so every row is a fresh pick.
+        self._boundary_sticky_id = self._auth_store.session_credential_id(
+            model.provider, self._session_id
+        )
         while True:
             try:
                 access = await self._auth_store.get_oauth_access(
@@ -2630,6 +2650,8 @@ class SessionStreamFn:
                             continue
                         return
                 if siblings:
+                    # Only reserve or depleted reach here: healthy and unknown
+                    # returned above.
                     if health.state == "depleted":
                         self._write_quota_block(
                             self._auth_store,
@@ -2638,16 +2660,34 @@ class SessionStreamFn:
                             health,
                             max(60_000, health.reset_after_ms or self.DEFAULT_USAGE_BLOCK_MS),
                         )
-                    else:
-                        self._auth_store.deprioritize_credential(
-                            model.provider, access.credential_id
-                        )
-                    # Rotating to another same-provider account is an internal
-                    # implementation detail — the user's request is still being
-                    # served on this provider, just on a different login. It
-                    # used to emit a notice per rotation, which spammed the
-                    # transcript on every boundary. Rotate silently.
-                    continue
+                        # Rotating to another same-provider account is an
+                        # internal implementation detail — the user's request
+                        # is still being served on this provider, just on a
+                        # different login. It used to emit a notice per
+                        # rotation, which spammed the transcript on every
+                        # boundary. Rotate silently.
+                        continue
+                    if access.credential_id != self._boundary_sticky_id:
+                        # Reserve on a FRESH pick: steer new picks elsewhere.
+                        # Same rule and reasoning as the account-scope path in
+                        # ``_apply_account_health``.
+                        self._demote_fresh_pick(model, access.credential_id)
+                        continue
+                    # Reserve on the account this session is already
+                    # transacting on: stay. Moving would rewrite the
+                    # conversation's prompt cache on a sibling that has never
+                    # seen it; the reserve verdict is a preference for new
+                    # picks. See ``_apply_account_health`` for the numbers.
+                    await self._announce_quota_change(
+                        selector,
+                        f"model:{health.state}",
+                        f"{model.provider} {condition}{remaining} for {model.model_id} "
+                        "— staying on this account to keep the prompt cache warm; "
+                        "new sessions will prefer other accounts",
+                        "info",
+                    )
+                    await self._route_state.clear_settled("primary model still has quota")
+                    return
                 if health.state == "reserve":
                     # Last account, still holding this model's quota. Same
                     # rule as the account-scope path: reserve is not a
@@ -2744,7 +2784,11 @@ class SessionStreamFn:
         any shared headroom — including remaining under the reserve
         threshold — is always allowed to spend it down to zero before
         a provider fallback is even considered. Reserve is a preference
-        between siblings of the same provider, not a hop to the next one.
+        between siblings of the same provider, not a hop to the next one —
+        and, since the provider's prompt cache is per account, a preference
+        for NEW picks only: a session already transacting on a reserve
+        account stays there (see the ``on_warm_account`` branch), and only a
+        depleted verdict moves it.
         """
         from local_operator.providers.failover import parse_selector
 
@@ -2783,35 +2827,46 @@ class SessionStreamFn:
             quota_cache=quota_cache,
             usage_memo=usage_memo,
         )
+        # A reserve verdict is a preference for NEW picks, never a reason to
+        # move a session that is already transacting on the account. The
+        # provider's prompt cache is per account: a conversation carrying a
+        # 150-500k-token warm prefix that is re-resolved onto a sibling
+        # rewrites the whole prefix at cache-write price on an account that
+        # has never seen it, and buys nothing for it — the reserve account
+        # still HAS quota. Measured on a five-account host: 374 such moves in
+        # 30 hours, ~102M cache-write tokens, roughly 38% of every Anthropic
+        # cache write, most of them a few seconds after a full cache hit in
+        # the same conversation; with three accounts above 90% the demotion
+        # expired and re-fired at every boundary, ping-ponging the session
+        # between cold caches. So the session under verdict stays put (the
+        # store exempts its sticky row from the demotion too, see
+        # ``AuthStore._usable_key_rows``) and only a DEPLETED verdict may move
+        # it, because at 0% the rewrite is unavoidable. This is the promise
+        # the reactive 429 path already keeps (``rotate_sibling``: "sticky
+        # preserved"), applied to the preflight.
+        #
+        # "Already transacting on" is the sticky captured BEFORE this
+        # boundary's walk started (``_boundary_sticky_id``): the walk's own
+        # resolves re-pin the session as they go, so a row the walk only just
+        # landed on is a FRESH pick with nothing cached, and demoting it to
+        # keep walking (below) is still right. Both callers of this method
+        # arrive with a row the walk resolved — the boundary probe and a
+        # blocked-row recovery — so the fresh-pick branch is reachable from
+        # both.
+        on_warm_account = access.credential_id == self._boundary_sticky_id
         if not siblings and health.state == "reserve":
             # Last account on this provider, still holding spendable quota.
             # Crossing the reserve threshold used to hop to the next chain
             # entry (Kimi at 10% remaining → Qwen maxed → Grok) while this
             # account could still serve. Reserve is a preference BETWEEN
             # siblings of the same provider, not a licence to leave the
-            # provider; spend it to zero, then fail over. A same-provider
-            # lower-effort hop is still allowed — it reduces token spend
-            # without abandoning remaining quota.
-            if fallback is not None:
-                fallback_provider, _model_id = parse_selector(fallback.selector)
-                if fallback_provider == model.provider:
-                    await self._route_state.activate(
-                        fallback,
-                        f"{model.provider} {condition}{remaining}",
-                        quota=True,
-                    )
-                    return False
-            # ``account:`` scope token: this is the account-scope path, and its
-            # condition must dedup separately from the model-tier branch that
-            # shares this selector.
-            await self._announce_quota_change(
-                selector,
-                f"account:{health.state}",
+            # provider; spend it to zero, then fail over.
+            await self._settle_on_reserve_account(
+                model,
+                fallback,
                 f"{model.provider} {condition}{remaining} — continuing until "
                 f"{model.provider} quota is exhausted",
-                "info",
             )
-            await self._route_state.clear_settled("primary model still has quota")
             return False
 
         if not siblings and health.state == "depleted":
@@ -2917,6 +2972,22 @@ class SessionStreamFn:
             self._route_state.clear()
             return False
 
+        if health.state == "reserve" and on_warm_account:
+            # Reserve on the account this session is already transacting on,
+            # with a sibling available: stay anyway. Placed AFTER the
+            # tier-spent guard because that verdict is the more specific one
+            # (the binding cap does not even gate this model), and after the
+            # lone-account rule because that one must also hold when nothing
+            # is cached yet. This is the branch the rotation below used to
+            # take for every low account, warm or not.
+            await self._settle_on_reserve_account(
+                model,
+                fallback,
+                f"{model.provider} {condition}{remaining} — staying on this account to "
+                "keep the prompt cache warm; new sessions will prefer other accounts",
+            )
+            return False
+
         # How the account is taken out of the running depends on WHAT the
         # verdict was, and conflating the two is the incident this split
         # comes from. "Depleted" is a fact about the provider: it will 429
@@ -2938,6 +3009,11 @@ class SessionStreamFn:
         # the moment it is the only thing left. The mark is short-lived on
         # purpose; the preflight re-checks and re-applies it while the
         # preference still holds.
+        #
+        # A reserve verdict on the session's warm account never reaches this
+        # point (it settled above); a reserve verdict here is about a FRESH
+        # pick, so demoting it steers new picks — and this walk's next
+        # resolve — elsewhere.
         if health.state == "depleted":
 
             def take_out_of_rotation(credential_id: int) -> None:
@@ -2952,10 +3028,7 @@ class SessionStreamFn:
         else:
 
             def take_out_of_rotation(credential_id: int) -> None:
-                # Keyed by ``model.provider``, not ``storage``: demotions
-                # are consulted by ``_resolve`` under the provider name the
-                # request resolves with.
-                self._auth_store.deprioritize_credential(model.provider, credential_id)
+                self._demote_fresh_pick(model, credential_id)
 
         if siblings:
             take_out_of_rotation(access.credential_id)
@@ -2975,6 +3048,50 @@ class SessionStreamFn:
             quota=True,
         )
         return False
+
+    async def _settle_on_reserve_account(self, model: ModelSpec, fallback: Any, text: str) -> None:
+        """Keep serving on an account that is low but still holds quota.
+
+        Shared by the two account-scope reasons to stay — the LAST account on
+        the provider, and the account this session's prompt cache is warm on
+        — so they cannot drift apart. A same-provider lower-effort hop is
+        still taken first when the chain offers one: it reduces token spend
+        without abandoning remaining quota or the account's warm cache.
+        Otherwise one ``account:reserve`` line per transition (the
+        ``account:`` scope token keeps it distinct from the model-tier branch
+        that shares this selector), and the route settles on the primary.
+        """
+        from local_operator.providers.failover import parse_selector
+
+        if fallback is not None:
+            fallback_provider, _model_id = parse_selector(fallback.selector)
+            if fallback_provider == model.provider:
+                await self._route_state.activate(fallback, text, quota=True)
+                return
+        await self._announce_quota_change(
+            f"{model.provider}/{model.model_id}", "account:reserve", text, "info"
+        )
+        await self._route_state.clear_settled("primary model still has quota")
+
+    def _demote_fresh_pick(self, model: ModelSpec, credential_id: int) -> None:
+        """Deprioritize a reserve row the walk only just resolved onto.
+
+        Keyed by ``model.provider``, not ``storage``: demotions are consulted
+        by ``_resolve`` under the provider name the request resolves with.
+
+        The pin is released in the same breath, and it has to be: the resolve
+        that found this row pinned the session to it, and the store keeps a
+        demoted STICKY row in service on purpose (the warm-cache rule in
+        ``AuthStore._usable_key_rows``). Demoting without releasing would hand
+        the walk's next resolve the very row it is trying to move off — and
+        since ``attempted_ids`` already holds it, the walk would end there
+        with the session left on the reserve account it meant to leave.
+        Releasing is safe precisely because this row is NOT the boundary's
+        original sticky (``_boundary_sticky_id``): nothing of this
+        conversation is cached on it yet.
+        """
+        self._auth_store.deprioritize_credential(model.provider, credential_id)
+        self._auth_store.release_session_credential(model.provider, self._session_id)
 
     async def _recover_blocked_accounts(
         self,

@@ -35,7 +35,9 @@ first, then a per-session hash of the session id so concurrent sessions start on
 different accounts rather than stampeding one, then round-robin for callers with
 no session. An account that just failed on a provider-side fault is *demoted*
 (sorted last), never removed — a 500 is not the account's fault, so it stays
-available as a last resort.
+available as a last resort. A demotion never applies to the account a session
+is already sticky to: it steers *new* picks, and a session's warm prompt cache
+lives on its current account (see "Quota reserve" below).
 
 When a request fails on quota, `_recover_quota_blocked` (in
 `providers/failover.py`) probes the *other* accounts' own usage before the chain
@@ -62,10 +64,22 @@ rather than on quota forecasts. Turn it on to spend one lightweight quota
 request per user-message boundary in exchange for routing that leaves a
 provider before it fails.
 
-`usageReservePercent` (default 10) holds back a slice of quota. Two rules that
-are easy to get backwards:
+`usageReservePercent` (default 10) is the headroom below which an account
+counts as **low**. Three rules that are easy to get backwards:
 
-- Reserve quota can select a **lower-effort route on the same provider** without
+- **Low is a preference for new picks, never an eviction.** The provider's
+  prompt cache is per account, so a session already transacting on a low
+  account **stays there** — it is told once (`quota low (N% remaining) —
+  staying on this account to keep the prompt cache warm; new sessions will
+  prefer other accounts`) and keeps spending that account down to zero. Moving
+  it would rewrite its whole conversation prefix at cache-write price on an
+  account that has never seen it; on a multi-account host that rewrite was
+  measured at ~38% of all cache writes. The low account is demoted for
+  *other* sessions' first picks (and for a session that only just landed on
+  it with nothing cached), and the reactive 429 path keeps the same promise
+  (`rotate_sibling`: "sticky preserved"). Only a **depleted** verdict (0%
+  remaining) moves a running session, because then the rewrite is unavoidable.
+- Low quota can select a **lower-effort route on the same provider** without
   blocking the account. Dropping from high to low effort on the model the user
   chose is cheaper than leaving for another vendor, so the reserve buys a
   cheaper route before it buys a different provider.
