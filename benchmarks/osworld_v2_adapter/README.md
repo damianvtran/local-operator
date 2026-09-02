@@ -243,6 +243,23 @@ It spawns the exact pinned worker per descriptor, re-resolves the descriptor's
 secret refs from the credential store, reconciles every action, and unlinks
 the descriptor **only** when the aggregate is complete.
 
+The sweep takes no `--region`, unlike the audit below: each descriptor
+already carries the episode's `AWS_REGION` in its `infra_values`, and the
+worker reconciles in that region. Passing one would only invite a mismatch
+between where the operator thinks the instance is and where the descriptor
+says it is.
+
+The sweep re-hashes the pinned workspace before it will spawn the worker, so
+the workspace must still match the selector's `workspace_digest`. Bytecode
+caches never count: `__pycache__/` and `*.pyc` are excluded from the digest
+by rule, and the worker is launched with `-B` so it writes none — upstream's
+`instantiate_task` imports the task module from the workspace, and in the
+first paid episode the cache that import left behind made the sweep refuse
+("adapter workspace content digest differs") for an instance that was in
+fact already terminated. Anything else that changes under the workspace is a
+genuine drift and the sweep will (rightly) refuse; restore the workspace from
+the verified inputs root and sweep again.
+
 ## Leak audit (operator command)
 
 Every instance and volume this adapter creates carries `lop:adapter=osworld-v2`
