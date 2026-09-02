@@ -770,3 +770,56 @@ def test_checkpoint_strips_trajectories_and_live_events() -> None:
     assert payload["state"]["jobs"][0]["trajectory"] == []
     # The in-memory state a live follower reads keeps its trajectory.
     assert len(store.state.jobs[0].trajectory) == 50
+
+
+def test_queued_custom_steers_project_their_human_text() -> None:
+    """The queued-steering snapshot reads ``text``/``content``, which only a
+    plain user Message has. A busy-path peer steer and a busy-path wake queue
+    their CustomMessage instead, and those used to project as ``{"text": ""}``
+    — a blank row for any follower that renders the queue. A peer row keeps
+    its raw text in ``details["body"]`` (``details["text"]`` is the
+    model-facing envelope); a wake's human text is its ``details["text"]``."""
+    from local_operator.harness.types import CustomMessage
+    from local_operator.harness.wake import WAKE_PROMPT_MESSAGE_TYPE
+    from local_operator.session.peer import PEER_MESSAGE_MESSAGE_TYPE
+
+    peer = CustomMessage(
+        custom_type=PEER_MESSAGE_MESSAGE_TYPE,
+        attribution="user",
+        details={
+            "text": "<peer-session-message from_pid=3>\nredirect now\n</peer-session-message>",
+            "body": "redirect now",
+            "sender": {"pid": 3},
+        },
+    )
+    wake = CustomMessage(
+        custom_type=WAKE_PROMPT_MESSAGE_TYPE,
+        attribution="user",
+        details={"wake_id": "w1", "occurrence": 1, "text": "wake: check the build"},
+    )
+    typed = Message.user("plain steer")
+    session = SimpleNamespace(
+        jobs=SimpleNamespace(list=lambda: []),
+        _subagent_comms=None,
+        model=_spec(),
+        effective_model=_spec(),
+        session_id="s1",
+        cwd="/repo",
+        queued_steering=lambda: [peer, wake, typed],
+        conversation_name="Canonical state",
+        goal="",
+        active_agent="",
+        active_team_name="",
+        wake_scheduler=None,
+        mcp_manager=None,
+        mcp_startup=None,
+    )
+    store = FrontendStateStore(_state(jobs=[]))
+    state = store.refresh_from_session(session)
+    assert [entry["text"] for entry in state.queued_steering] == [
+        "redirect now",
+        "wake: check the build",
+        "plain steer",
+    ]
+    assert [entry["id"] for entry in state.queued_steering] == [peer.id, wake.id, typed.id]
+    assert all(entry["image_count"] == 0 for entry in state.queued_steering)

@@ -12,7 +12,12 @@ from typing import Any
 
 import pytest
 
-from local_operator.harness.types import Message, StreamEndEvent, StreamTextDelta
+from local_operator.harness.types import (
+    CustomMessage,
+    Message,
+    StreamEndEvent,
+    StreamTextDelta,
+)
 from local_operator.session.peer import PEER_MESSAGE_MESSAGE_TYPE
 from local_operator.session.transcript import Transcript
 from tests.unit.session.test_session import ScriptedStream, make_session, wait_for
@@ -229,20 +234,69 @@ async def test_steer_while_busy_routes_through_the_steer_queue(tmp_path):
         ]
     )
     session = make_session(tmp_path, stream, tools=[tool])
+    events: list[Any] = []
+    session.subscribe(events.append)
 
     prompt_task = asyncio.ensure_future(session.prompt("long task"))
     await wait_for(lambda: tool_started.is_set())
 
     detail = await session.receive_peer_message("redirect now", mode="steer", sender={"pid": 3})
     assert "steer" in detail
-    # It went onto the steering queue, not a direct transcript append.
-    assert not session._steering_queue.empty()
+    # It went onto the steering queue, not a direct transcript append — and
+    # the queued item is the peer row ITSELF, not a plain user Message minted
+    # from its body. A plain Message is what produced the double paint: the
+    # drain announced it as a user MessageStartEvent under the PeerMessageBlock
+    # the receipt had already painted, and persisted a bare user row that lost
+    # the sender and the provenance envelope.
+    queued = session.queued_steering()
+    assert len(queued) == 1
+    assert isinstance(queued[0], CustomMessage)
+    assert queued[0].custom_type == PEER_MESSAGE_MESSAGE_TYPE
+    assert queued[0].details["body"] == "redirect now"
+    # Nothing persisted yet: the drain owns the write.
+    assert _peer_rows(session) == []
+    # An explicit `now=True` send is a real steer, not a courtesy wake, so it
+    # must count as urgent (it may interrupt a running tool like a typed one).
+    assert session._has_urgent_steering()
 
     release_tool.set()
     await prompt_task
 
-    # The steered text reached the follow-up model call.
-    assert any("redirect now" in m.text for m in stream.requests[1].messages)
+    # Persisted exactly once, as the peer CustomMessage with its provenance —
+    # not as a plain user row.
+    rows = _peer_rows(session)
+    assert len(rows) == 1
+    assert rows[0].payload["details"]["body"] == "redirect now"
+    assert rows[0].payload["details"]["sender"]["pid"] == 3
+    plain_user_rows = [
+        e
+        for e in session._transcript.entries()
+        if e.type == "message"
+        and e.payload.get("kind") != "custom"
+        and e.payload.get("role") == "user"
+        and "redirect now" in str(e.payload.get("content"))
+    ]
+    assert plain_user_rows == []
+
+    # The model saw the ENVELOPE (sender provenance), not the bare body.
+    follow_up = [m.text for m in stream.requests[1].messages]
+    assert any("<peer-session-message" in t and "redirect now" in t for t in follow_up)
+
+    # The front end got exactly one receipt for it — the peer delivery — and
+    # NO user-role MessageStartEvent (that is the second, spurious UserBlock).
+    receipts = [e for e in events if getattr(e, "type", None) == "peer_message_delivered"]
+    assert len(receipts) == 1
+    assert receipts[0].message_id == queued[0].id
+    user_starts = [
+        e
+        for e in events
+        if getattr(e, "type", None) == "message_start"
+        and getattr(e.message, "role", None) == "user"
+        and "redirect now" in getattr(e.message, "text", "")
+    ]
+    assert user_starts == []
+    # The steer drain still reported that it delivered the message.
+    assert any(getattr(e, "type", None) == "steering_delivered" for e in events)
     await session.dispose()
 
 
