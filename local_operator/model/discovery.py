@@ -25,8 +25,11 @@ of this feature broke in exactly that way:
   :func:`available_models` degrades to the registry instead of propagating.
 
 Results are cached on disk through
-:func:`local_operator.model.catalogue.cached_listing`, so the picker opens at
+:func:`local_operator.model.catalogue.read_listing`, so the picker opens at
 disk speed and a listing outage is invisible for as long as the cache holds.
+An ageing document is served and refreshed in the background, and a requested
+id missing from a document old enough to be wrong triggers one synchronous
+refetch (``want_id``) — together, a model released today is offered today.
 """
 
 from __future__ import annotations
@@ -42,7 +45,15 @@ from typing import Any, Literal
 
 import httpx
 
-from local_operator.model.catalogue import DEFAULT_TTL_S, cached_listing, invalidate
+from local_operator.model.catalogue import (
+    DEFAULT_TTL_S,
+    MISS_REFETCH_MIN_AGE_S,
+    SOFT_TTL_S,
+    Listing,
+    invalidate,
+    read_listing,
+)
+from local_operator.model.ids import id_spellings, normalised_id
 from local_operator.model.registry import ModelInfo, static_models
 from local_operator.providers.registry import (
     PROVIDER_REGISTRY,
@@ -115,7 +126,19 @@ LYING_MAX_TOKENS = 4096
 #: number invalidated every provider's cache on upgrade — including transports
 #: whose payload was already correct — and for an aggregator with no static rows
 #: to fall back on, the replacement answer was an EMPTY model list.
-LISTING_CAPTURE_VERSIONS: dict[str, int] = {"anthropic": 2}
+#:
+#: Version 2 for ``openrouter`` and ``radient`` is ``_row_from_openai_entry``
+#: reading ``pricing.input_cache_write`` into ``cache_write_price``. A version-1
+#: document parses to rows with a zero write price, which is harmless in itself,
+#: but without the bump the real number would stay invisible for a day on every
+#: install — the same argument as above. Only the two OpenAI-compatible
+#: aggregators quote a write price, so only they pay the one-time refetch — and
+#: it is paid ON the calling path: a version-1 document is invalidated and
+#: refetched synchronously (up to ``DEFAULT_TIMEOUT_S``) by the first resolution
+#: after the upgrade, not in the background. Exactly once per install, which is
+#: acceptable; a bump here is not free for the user whose only provider is
+#: OpenRouter.
+LISTING_CAPTURE_VERSIONS: dict[str, int] = {"anthropic": 2, "openrouter": 2, "radient": 2}
 #: What a transport not named above is stamped with. Version 1 is the original
 #: shape; a transport only earns a bump when its own reader starts needing a
 #: field its writer did not record.
@@ -139,10 +162,16 @@ def listing_capture_version(provider_id: str) -> int:
 PUBLIC_LISTING_PROVIDERS = frozenset({"openrouter", "radient"})
 
 #: What :func:`available_models` managed to do, for the UI to annotate:
-#: ``ok`` fetched live now, ``cached`` served a stored document, ``static``
-#: registry only, ``unauthenticated`` needs a credential it was not given,
-#: ``empty`` the provider answered and listed nothing.
-ListingStatus = Literal["ok", "cached", "static", "unauthenticated", "empty"]
+#: ``ok`` fetched live now, ``cached`` served a stored document with no fetch
+#: needed (fresh enough, or refreshing in the background), ``stale`` a fetch was
+#: attempted on this call and FAILED so the stored document is what you got,
+#: ``static`` registry only, ``unauthenticated`` needs a credential it was not
+#: given, ``empty`` the provider answered and listed nothing.
+#:
+#: ``cached`` and ``stale`` used to be one value, which is why the picker footer
+#: could not tell "fresh enough" from "offline" — the only case a user hunting
+#: for a model released this morning actually needs to hear about.
+ListingStatus = Literal["ok", "cached", "stale", "static", "unauthenticated", "empty"]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -178,14 +207,19 @@ class DiscoveredModel:
     input_price: float = 0.0
     output_price: float = 0.0
     cache_read_price: float = 0.0
+    #: $/MTok to WRITE a prompt-cache entry. Zero is "not quoted", and the
+    #: consumers then fall back to the input price — which under-states an
+    #: Anthropic 5-minute write by 20% (1.25x base), so a quoted number is
+    #: worth carrying rather than guessing.
+    cache_write_price: float = 0.0
     supports_images: bool | None = None
     supports_prompt_cache: bool = False
 
 
 class _ListingUnavailable(RuntimeError):
-    """Raised inside the ``cached_listing`` thunk when a live listing failed.
+    """Raised inside the ``read_listing`` thunk when a live listing failed.
 
-    ``cached_listing`` chooses between a stale document and ``None`` by catching
+    ``read_listing`` chooses between a stale document and ``None`` by catching
     an exception from the thunk, so a failed transport has to be re-raised rather
     than returned: handing back an empty payload would overwrite a good cache
     with nothing and then serve that for a full day.
@@ -416,6 +450,10 @@ def _row_from_openai_entry(entry: Mapping[str, object]) -> DiscoveredModel | Non
     return DiscoveredModel(
         id=model_id,
         name=_first_str(entry.get("name"), entry.get("display_name")),
+        # OpenRouter also publishes ``input_cache_write_1h`` for the one-hour
+        # Anthropic tier; the five-minute rate is the one every write is billed
+        # at unless a caller asks otherwise, so that is the one carried.
+        cache_write_price=_per_million(pricing.get("input_cache_write")),
         context_window=_first_positive_int(
             entry.get("context_length"),
             entry.get("context_window"),
@@ -962,6 +1000,7 @@ def _from_static(model_id: str, info: ModelInfo) -> DiscoveredModel:
         input_price=_positive_float(info.input_price),
         output_price=_positive_float(info.output_price),
         cache_read_price=_positive_float(info.cache_reads_price),
+        cache_write_price=_positive_float(info.cache_writes_price),
         supports_images=_stated_bool(info.supports_images),
         supports_prompt_cache=bool(info.supports_prompt_cache),
     )
@@ -1005,6 +1044,9 @@ def _merge_one(row: DiscoveredModel, info: ModelInfo | None) -> DiscoveredModel:
         output_price=_positive_float(row.output_price) or _positive_float(info.output_price),
         cache_read_price=(
             _positive_float(row.cache_read_price) or _positive_float(info.cache_reads_price)
+        ),
+        cache_write_price=(
+            _positive_float(row.cache_write_price) or _positive_float(info.cache_writes_price)
         ),
         # The provider decides its own capabilities WHEN IT SPEAKS: a stated
         # ``false`` is an answer, and OR-ing it against the registry made it
@@ -1127,6 +1169,7 @@ def _rows_from_payload(
                 input_price=_positive_float(entry.get("input_price")),
                 output_price=_positive_float(entry.get("output_price")),
                 cache_read_price=_positive_float(entry.get("cache_read_price")),
+                cache_write_price=_positive_float(entry.get("cache_write_price")),
                 # ``null`` in the document is the listing's silence, faithfully
                 # stored by ``dataclasses.asdict``. Reading it as False would let
                 # a cache round-trip turn "unstated" into a denial, so the same
@@ -1149,6 +1192,7 @@ def available_models(
     cache_dir: Path | None = None,
     client: httpx.Client | None = None,
     timeout: float = DEFAULT_TIMEOUT_S,
+    want_id: str | None = None,
 ) -> tuple[list[DiscoveredModel], ListingStatus]:
     """Every model a UI should offer for ``provider_id``, plus how it was obtained.
 
@@ -1157,13 +1201,28 @@ def available_models(
     replace registry-only ids. This never raises and never blocks longer than
     ``timeout``; a fresh cache skips the request entirely.
 
+    ``ttl_s`` is the HARD TTL beyond which the call blocks on a fetch. A
+    document older than ``catalogue.SOFT_TTL_S`` but inside it is served as-is
+    and refreshed in the background (stale-while-revalidate), so callers on a
+    boot or paint path pay nothing for freshness; a caller that wants a fresher
+    answer NOW (the model picker) passes a shorter ``ttl_s``.
+
+    ``want_id`` is the id the caller is about to look up. If it is absent from a
+    stored document at least ``catalogue.MISS_REFETCH_MIN_AGE_S`` old, the
+    document is refetched ONCE, synchronously, within ``timeout`` — the one
+    trigger that beats every TTL for a model released this morning, because it
+    fires for exactly the id the user asked for. A young document that lacks the
+    id is believed (a typo must not refetch on every resolution), and the
+    refetched document is zero seconds old, so a second miss is believed too.
+
     Returns:
         ``(models, status)``, where status is ``"ok"`` (fetched live just now),
-        ``"cached"`` (served a stored document because the fetch failed or was
-        skipped as still fresh), ``"static"`` (registry only -- no listing
-        endpoint, or no cache and no successful fetch), ``"unauthenticated"``
-        (the provider needs a credential to list and none was supplied) or
-        ``"empty"`` (the provider answered and listed no models).
+        ``"cached"`` (served a stored document with no fetch needed), ``"stale"``
+        (a fetch was attempted and failed; the stored document is what you got),
+        ``"static"`` (registry only -- no listing endpoint, or no cache and no
+        successful fetch), ``"unauthenticated"`` (the provider needs a credential
+        to list and none was supplied) or ``"empty"`` (the provider answered and
+        listed no models).
     """
     rows = _static_rows(provider_id)
     try:
@@ -1178,6 +1237,7 @@ def available_models(
             cache_dir=cache_dir,
             client=client,
             timeout=timeout,
+            want_id=want_id,
         )
     except Exception as exc:  # noqa: BLE001 - a broken provider is an annotation
         # The layers below already swallow transport failures, so reaching here
@@ -1199,6 +1259,7 @@ def _available_models(
     cache_dir: Path | None,
     client: httpx.Client | None,
     timeout: float,
+    want_id: str | None = None,
 ) -> tuple[list[DiscoveredModel], ListingStatus]:
     definition = get_provider_definition(provider_id)
     transport = _TRANSPORTS.get(definition.id) if definition is not None else None
@@ -1222,16 +1283,9 @@ def _available_models(
         # catalogue is a public page even though inference is not.
         return merge_models(rows, None), "unauthenticated"
 
-    # ``cached_listing`` signals "the fetch failed, serve the stale document" by
-    # catching an exception from the thunk, and reports nothing about which path
-    # it took. This flag is how a live answer is told from a cached one, which is
-    # the whole difference between the "ok" and "cached" statuses.
-    fetched = False
-
     capture = listing_capture_version(definition.id)
 
-    def fetch() -> dict[str, Any]:
-        nonlocal fetched
+    def fetch_within(ceiling: float) -> dict[str, Any]:
         live = fetch_models(
             definition.id,
             api_key=api_key,
@@ -1239,15 +1293,26 @@ def _available_models(
             account_id=account_id,
             base_url=resolved_base,
             client=client,
-            timeout=timeout,
+            timeout=ceiling,
         )
         if live is None:
             raise _ListingUnavailable(definition.id)
-        fetched = True
         return {
             "capture": capture,
             "models": [dataclasses.asdict(row) for row in live],
         }
+
+    def fetch() -> dict[str, Any]:
+        # On the calling path: the caller's budget, which from a repaint is 2 s.
+        return fetch_within(timeout)
+
+    def revalidate() -> dict[str, Any]:
+        # Off the calling path, so the caller's budget is the wrong ceiling: a
+        # background refresh that inherited 2 s failed on every link slower
+        # than that, backed off, and left the document to the 24 h sync path.
+        # The provider's full default is what an unhurried listing gets, the
+        # same choice ``prices._price_catalogue_row`` makes for its retry.
+        return fetch_within(DEFAULT_TIMEOUT_S)
 
     storage_id = credential_provider_id(definition.id)
     # Derived ONCE and reused for both the document name and the pruning
@@ -1265,11 +1330,37 @@ def _available_models(
         account_id=account_id,
         host_scoped=bool(is_oauth and definition.oauth_base_url),
     )
-    payload = cached_listing(key, fetch, ttl_s=ttl_s, cache_dir=cache_dir)
+    # The soft TTL never exceeds the hard one: a picker asking for a 15-minute
+    # document wants it fetched NOW, not served-and-refreshed-later.
+    soft_ttl_s = min(SOFT_TTL_S, ttl_s)
+
+    def lacks_want_id(document: Mapping[str, object], age_s: float) -> bool:
+        # The id the caller is about to resolve is not in a document old enough
+        # to predate it: declare the document expired so `read_listing` fetches
+        # ONCE, synchronously, under the lease and inside the caller's budget.
+        # Not a loop: the refetched document is 0s old, so the next miss for the
+        # same id is believed for ten minutes. A young document that lacks the
+        # id is right (a typo), and a document this reader cannot map is handled
+        # by the invalidate-and-re-enter below rather than here.
+        if want_id is None or age_s < MISS_REFETCH_MIN_AGE_S:
+            return False
+        mapped = _rows_from_payload(document, capture)
+        return mapped is not None and not _lists_id(mapped, want_id)
+
+    listing = read_listing(
+        key,
+        fetch,
+        soft_ttl_s=soft_ttl_s,
+        ttl_s=ttl_s,
+        cache_dir=cache_dir,
+        refetch_if=lacks_want_id,
+        revalidate=revalidate,
+    )
+    payload = listing.payload
     live_rows = _rows_from_payload(payload, capture)
     if live_rows is None:
         if payload is not None:
-            # A document `cached_listing` could read but this reader cannot use:
+            # A document `read_listing` could read but this reader cannot use:
             # a `models` key that is not an array (a payload-shape change, a
             # truncated write) or a capture older than the transports that will
             # read it. It is written before anything interprets it, so leaving it
@@ -1279,13 +1370,21 @@ def _available_models(
             # Dropping it costs one refetch.
             invalidate(key, cache_dir=cache_dir)
             # RE-ENTER once. Dropping the document without retrying meant the
-            # fetch that was supposed to replace it never ran: `cached_listing`
+            # fetch that was supposed to replace it never ran: `read_listing`
             # had already served this call from a fresh hit, so the thunk was
             # never invoked, and the answer fell through to the registry's static
             # rows — of which an aggregator has NONE. Offline that is an empty
             # model list on every start; online it memoises a session booted at
             # default context, no prompt cache and zero prices.
-            payload = cached_listing(key, fetch, ttl_s=ttl_s, cache_dir=cache_dir)
+            listing = read_listing(
+                key,
+                fetch,
+                soft_ttl_s=soft_ttl_s,
+                ttl_s=ttl_s,
+                cache_dir=cache_dir,
+                revalidate=revalidate,
+            )
+            payload = listing.payload
             live_rows = _rows_from_payload(payload, capture)
         if live_rows is None:
             # Neither a listing nor a cache: the registry is all there is.
@@ -1305,6 +1404,55 @@ def _available_models(
         live_rows,
         include_static_only=not authoritative_live,
     )
-    if not fetched:
-        return merged, "cached"
-    return merged, ("empty" if not live_rows else "ok")
+    return merged, _status_of(listing, live_rows)
+
+
+def _status_of(listing: Listing, live_rows: list[DiscoveredModel]) -> ListingStatus:
+    """The status a served document earns, from how :func:`read_listing` got it."""
+    if listing.fetched:
+        return "empty" if not live_rows else "ok"
+    if listing.failed:
+        return "stale"
+    return "cached"
+
+
+def _lists_id(rows: list[DiscoveredModel], model_id: str) -> bool:
+    """Whether ``rows`` already accounts for ``model_id`` under ANY known spelling.
+
+    This answers "could a refetch plausibly list this id?", not "will the lookup
+    find a row?" — the two differ, and conflating them put a synchronous listing
+    fetch on every process start. Anthropic's ``/v1/models`` lists dated
+    snapshots only (``claude-sonnet-4-5-20250929``) while its API accepts the
+    undated alias, and ``claude-sonnet-4-5`` is a common configured id. Matched
+    exactly or normalised, the alias was a miss against a document that DID
+    list its snapshot, so every process older than ``MISS_REFETCH_MIN_AGE_S``
+    paid a blocking round trip on boot for a document the refetch could not
+    improve — indefinitely, since the refetched document lacked the alias too.
+
+    So a row counts as a hit when the wanted id's LITERAL (normalised) is one
+    of the row's :func:`id_spellings` (the id as given, date-stripped, dotted),
+    or the row's literal is one of the wanted id's. That covers both directions
+    — an alias whose snapshot is listed, and a snapshot whose alias is listed
+    (the aggregators' habit) — so neither direction can refetch for a row the
+    provider spells differently. The rewrites are the conservative ones
+    ``prices._lookup`` already trusts.
+
+    The match is literal-against-spellings on purpose, NOT spellings-against-
+    spellings: both sides date-stripped coincide for ANY two snapshots of one
+    family, so a document listing only ``claude-opus-4-5-20251101`` counted
+    ``claude-opus-4-5-20260315`` as present — the day a new snapshot landed,
+    the one trigger built for that case stayed silent, the lookup missed, and
+    the memo pinned the fallback for the rest of the day. A literal never loses
+    its date, so two dated ids match only when they are the same id.
+    """
+    if any(row.id == model_id for row in rows):
+        return True
+    wanted_literal = normalised_id(model_id)
+    wanted_spellings = {normalised_id(spelling) for spelling in id_spellings(model_id)}
+    for row in rows:
+        row_literal = normalised_id(row.id)
+        if row_literal in wanted_spellings:
+            return True
+        if any(normalised_id(spelling) == wanted_literal for spelling in id_spellings(row.id)):
+            return True
+    return False

@@ -2217,8 +2217,9 @@ xai_models: Dict[str, ModelInfo] = {
 #: OpenRouter resells through its own discounted arrangements, and a user
 #: billed by Z.AI directly is charged the direct rate. Quoting the aggregator's
 #: number on the direct route would under-report every session's cost, so the
-#: direct rate is the one carried here and `_AGGREGATOR_NAMESPACE`'s OpenRouter
-#: fallback only ever fills a model this table does not price at all.
+#: direct rate is the one carried here and the models.dev price-catalogue leg
+#: (`configure._from_price_catalogue`) only ever fills a model this table does
+#: not price at all.
 #:
 #: They are carried STATICALLY because Z.AI's `/models` endpoint
 #: returns bare `{id, object, created, owned_by}` rows with no pricing, context

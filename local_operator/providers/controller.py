@@ -74,6 +74,15 @@ LoginCallbackFactory = Callable[[ProviderDefinition], "LoginCallbacks"]
 #: a request per warm tick the same day.
 EMPTY_OVER_DATA_ACCEPT_MS = 30 * 60_000
 
+#: The listing TTL the ``/model`` picker asks :meth:`live_catalogue` for. The
+#: user is asking NOW, and the fetch already runs off-loop behind rows painted
+#: from the registry, so a short TTL costs nothing visible. Fifteen minutes is
+#: short enough that a release announced during a working session shows on the
+#: next open, and long enough that scrolling in and out of the picker does not
+#: re-list nine providers. Boot and repaint paths keep the default 24h hard TTL
+#: (with an hourly background refresh) because there a request IS visible.
+PICKER_TTL_S = 15 * 60
+
 
 @dataclasses.dataclass(frozen=True)
 class CatalogueEntry:
@@ -1052,8 +1061,11 @@ class ProviderController:
         """The catalogue with each provider's LIVE listing layered over the registry.
 
         Returns ``(entries, statuses)`` where ``statuses`` maps provider id to one
-        of discovery's status strings, so a UI can say "cached" or "login
+        of discovery's status strings, so a UI can say "stale" or "login
         required" instead of implying the catalogue is complete.
+
+        ``ttl_s`` is the hard TTL passed to discovery; the picker passes
+        :data:`PICKER_TTL_S`, and ``None`` keeps discovery's default.
 
         Only providers with a credential are fetched. An unconnected provider still
         contributes its STATIC models — the question "what would I get if I logged

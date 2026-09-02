@@ -6804,6 +6804,36 @@ async def _open_model_picker(app, pilot):
     return editor.model_picker
 
 
+class _TtlRecordingController(_AccessController):
+    """Records what listing TTL the picker asks for."""
+
+    def __init__(self) -> None:
+        super().__init__(stored=("openrouter",))
+        self.asked: list[float | None] = []
+
+    async def live_catalogue(self, *, ttl_s=None):
+        self.asked.append(ttl_s)
+        return self.static_catalogue(), {}
+
+
+@pytest.mark.asyncio
+async def test_the_picker_asks_for_a_fifteen_minute_listing() -> None:
+    """The user opening `/model` is the one moment a fresh list is worth a request.
+
+    Discovery's 24h default is what hid a model published that morning from the
+    picker all day; the fetch is off-loop behind painted rows, so a short TTL
+    costs nothing visible.
+    """
+    from local_operator.providers.controller import PICKER_TTL_S
+
+    ctrl = _TtlRecordingController()
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=ctrl)
+    async with app.run_test(size=(90, 24)) as pilot:
+        await pilot.pause()
+        await _open_model_picker(app, pilot)
+    assert ctrl.asked == [PICKER_TTL_S], ctrl.asked
+
+
 @pytest.mark.asyncio
 async def test_the_model_list_offers_what_the_user_can_actually_run() -> None:
     """The list is a set of choices. A row whose only outcome is a login prompt is
