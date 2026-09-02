@@ -1646,6 +1646,117 @@ def test_the_background_refresh_runs_the_revalidate_thunk_not_the_on_path_one(
     assert listing.fetched is True and ran == ["fetch"]
 
 
+def test_a_sync_reader_that_loses_the_lease_to_its_own_thread_joins_it(
+    tmp_path, _no_backoff_state
+) -> None:
+    """R1-5: call A serves the soft-window document and schedules a refresh; call
+    B, declared expired by its predicate, finds the lease held by A's thread.
+    It must join that thread — returning the moment the refresh lands, with
+    the refreshed document — rather than poll the mtime for the whole window
+    or serve the old document (which the caller's memo would pin for a day)."""
+    import threading
+
+    _plant(tmp_path, "anthropic.listing", _payload(window=1), age_s=2 * 3600)
+    gate = threading.Event()
+    entered = threading.Event()  # set once A's thread HOLDS the lease
+    sync_calls: list[int] = []
+
+    def slow_refresh():
+        entered.set()
+        gate.wait(timeout=5.0)
+        return _payload(window=2)
+
+    def sync_fetch():
+        sync_calls.append(1)
+        return _payload(window=99)
+
+    first = catalogue.read_listing("anthropic.listing", slow_refresh, cache_dir=tmp_path)
+    assert first.refreshing is True
+    thread = catalogue._revalidation_threads()[0]
+    # Not a clock wait: B must start AFTER the thread took the lease, or B
+    # would legitimately win it and fetch on its own.
+    assert entered.wait(timeout=5.0)
+
+    result: list[catalogue.Listing] = []
+
+    def second_call():
+        result.append(
+            catalogue.read_listing(
+                "anthropic.listing",
+                sync_fetch,
+                cache_dir=tmp_path,
+                refetch_if=lambda _payload_, _age: True,
+            )
+        )
+
+    joiner = threading.Thread(target=second_call)
+    joiner.start()
+    # B is parked on A's thread, not fetching on its own and not returning
+    # the stale document: nothing has been served yet.
+    joiner.join(timeout=0.3)
+    assert joiner.is_alive() and result == []
+    gate.set()
+    joiner.join(timeout=5.0)
+    thread.join(timeout=5.0)
+
+    assert sync_calls == [], "B must not fetch behind its own process's refresh"
+    assert result[0].payload == _payload(window=2), "B serves what its own thread wrote"
+    assert result[0].fetched is False and result[0].failed is False
+
+
+def test_a_sync_reader_joining_its_own_failed_thread_returns_at_once(
+    tmp_path, _no_backoff_state
+) -> None:
+    """The case the mtime poll got wrong: a refresh that FAILS never renames a
+    document, so a poller waits out the whole window. Joining returns as soon
+    as the thread does, with the stale document."""
+    import threading
+
+    _plant(tmp_path, "anthropic.listing", _payload(window=1), age_s=2 * 3600)
+    gate = threading.Event()
+    entered = threading.Event()
+
+    def failing_refresh():
+        entered.set()
+        gate.wait(timeout=5.0)
+        raise RuntimeError("offline")
+
+    first = catalogue.read_listing("anthropic.listing", failing_refresh, cache_dir=tmp_path)
+    assert first.refreshing is True
+    assert entered.wait(timeout=5.0)
+
+    result: list[catalogue.Listing] = []
+    sync_calls: list[int] = []
+
+    def sync_fetch():
+        sync_calls.append(1)
+        return _payload(window=99)
+
+    def second_call():
+        result.append(
+            catalogue.read_listing(
+                "anthropic.listing",
+                sync_fetch,
+                cache_dir=tmp_path,
+                refetch_if=lambda _payload_, _age: True,
+            )
+        )
+
+    joiner = threading.Thread(target=second_call)
+    joiner.start()
+    joiner.join(timeout=0.3)
+    assert joiner.is_alive() and result == [], "B is parked on A's thread"
+    released = time.monotonic()
+    gate.set()
+    joiner.join(timeout=5.0)
+    _join_revalidations()
+
+    assert sync_calls == []
+    assert result[0].payload == _payload(window=1)
+    # The join ended when the thread did, not when the 2 s poll window ran out.
+    assert time.monotonic() - released < catalogue._LISTING_LEASE_WAIT_S / 2
+
+
 # -- stranded temp files ------------------------------------------------------
 
 

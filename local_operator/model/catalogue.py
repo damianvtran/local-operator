@@ -440,6 +440,17 @@ def _revalidation_threads() -> list[threading.Thread]:
         return [thread for thread in _threads.values() if thread.is_alive()]
 
 
+def _in_flight_revalidation(path: Path) -> threading.Thread | None:
+    """This process's live background thread for ``path``, if one is running.
+
+    Lets a synchronous reader that lost the lease tell its own thread from a
+    peer process: the former can be joined (bounded), the latter only watched.
+    """
+    with _revalidate_lock:
+        thread = _threads.get(str(path))
+    return thread if thread is not None and thread.is_alive() else None
+
+
 def _schedule_revalidate(
     key: str, fetch: Callable[[], dict[str, Any]], cache_dir: Path | None
 ) -> bool:
@@ -562,6 +573,14 @@ def read_listing(
     before either path starts means one fetch, on the calling thread, with a
     ``fetched``/``failed`` flag that means what it says.
 
+    That closes the race within ONE call; across two it can still happen (call
+    A schedules the refresh, call B is declared expired a moment later and
+    loses the lease to A's thread). B then JOINS that thread for at most
+    ``_LISTING_LEASE_WAIT_S`` and serves the document it left — a bounded wait
+    that ends the instant the refresh lands or fails, rather than the mtime
+    poll a foreign lease holder gets. Rare (two ids, one missing, resolved
+    within seconds of each other) and bounded, so the paint path stays bounded.
+
     A cross-process fetch lease guards the miss path: several lop sessions
     cold-starting together all miss in the same instant, and without the
     lease each fires its own live listing request at the same public
@@ -590,7 +609,22 @@ def read_listing(
     # stale-beats-absent rule. Every failure degrades to fetching.
     lease = _ListingFetchLease(path)
     if not lease.acquire():
-        lease.await_peer_briefly()
+        own = _in_flight_revalidation(path)
+        if own is not None:
+            # The holder is THIS process's background thread (call A served the
+            # soft-window document and scheduled it; call B, moments later, was
+            # declared expired by `refetch_if` for an id the document lacks).
+            # Joining it is strictly better than polling the document's mtime:
+            # the same ceiling, but it returns the instant the thread finishes —
+            # including when its fetch FAILED, where the poll would have spun
+            # the whole window waiting for a rename that is never coming.
+            # Serving disk without waiting was the other option, and it is
+            # wrong here: the caller's memo pins whatever this returns for the
+            # day, so an id the refresh is about to land would stay missing
+            # until midnight — the incident this trigger exists to prevent.
+            own.join(timeout=_LISTING_LEASE_WAIT_S)
+        else:
+            lease.await_peer_briefly()
         payload, age = _read_cache(path)
         if payload is not None:
             return Listing(payload=payload, age_s=age)
