@@ -87,7 +87,7 @@ from local_operator.evaluation.adapters.discovery import (
 
 _DISTRIBUTION = "lop-osworld-v2-adapter"
 _ADAPTER_ID = "osworld-v2"
-_VERSION = "0.1.0"
+_VERSION = "0.1.1"
 _ENTRY_POINT = "lop_osworld_v2_adapter:create"
 
 
@@ -131,6 +131,85 @@ class InputsMismatch(RuntimeError):
 _JUDGE_KEY = "OSWORLD_EVAL_MODEL_API_KEY"
 _USER_SIM_KEY = "OSWORLD_USER_SIM_API_KEY"
 _DEFAULT_INPUTS_ROOT = "~/worktrees/osworld"
+
+
+def _episode_cache_root(artifact_root: Path, episode_id: str) -> Path:
+    """Where an episode's upstream writes live: an ABSOLUTE dir OUTSIDE the
+    digest-pinned workspace.
+
+    Upstream OSWorld defaults ``cache_dir="cache"``, which ``DesktopEnv``
+    resolves against the process cwd — and the worker's cwd IS the pinned
+    workspace (supervisor spawns with ``cwd=selector.workspace``). The first
+    paid episode's ``_download_setup`` therefore wrote
+    ``workspace/cache/001/…`` — real content that the workspace digest
+    correctly refused to ignore, so the rescue worker's digest re-check
+    failed and ``rescue_required`` wedged True for an instance that was in
+    fact terminated.
+
+    The cache cannot be shared across episodes: ``DesktopEnv`` derives
+    ``cache_dir/<task_id>`` from this base, so two episodes running the same
+    task would otherwise read each other's cached uploads. (Upstream's
+    ``reset_cache_dir`` only REASSIGNS the attribute
+    (``controllers/setup.py:55-56``) — it deletes nothing — so isolation has
+    to come from the path being per-episode, not from upstream clearing it.)
+    So the root is per-episode, and it sits BESIDE the artifact root, not
+    inside it: the bundle verifier walks the artifact directory and refuses
+    any entry that is not a digest-named artifact. The parent owns the
+    artifact root's parent (the run root, which ``run_episode`` refuses to
+    place under /tmp), so a sibling is durable and episode-owned.
+
+    This root is also the episode's WORKING DIRECTORY (see
+    ``_enter_episode_scratch``), which is what makes the guarantee hold for
+    upstream write paths nobody has enumerated.
+    """
+
+    # ``..`` is one segment of a directory that never becomes a filesystem
+    # PATH: the artifact root itself is absolute (the ArtifactRoot validator
+    # rejects relative and non-normalized roots), so parent.joinpath lands
+    # inside it directly. The worker never stores or re-parses this string —
+    # it is handed straight to DesktopEnv and mkdir'd here.
+    root = artifact_root.parent / "osworld-cache" / episode_id
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _enter_episode_scratch(scratch: Path) -> None:
+    """Move the worker's cwd OFF the pinned workspace for the episode.
+
+    Routing ``cache_dir`` fixes the one upstream write path we observed. It
+    does not fix the class. Several upstream helpers open a HARD-CODED
+    RELATIVE name with the builtin ``open`` at module scope — ``temp.pdf``
+    (``evaluators/metrics/vscode.py:210``), ``temp_extracted_<n>.jpeg``
+    (``slides.py:2051``), an epub's ``<name>.dir`` (``others.py:64-72``) —
+    and they never consult the env object, so no attribute we install on it
+    can intercept them. A relative write resolves against the CWD, and the
+    supervisor spawns the worker with ``cwd=selector.workspace``
+    (``supervisor.py:279``), so every one of them lands in the digest-pinned
+    workspace and re-wedges rescue exactly as the cache download did.
+
+    Changing the cwd removes the exposure at its root rather than guessing
+    at call sites: any relative write by any upstream path, known or not,
+    now lands in the episode's own scratch directory. That is a guarantee by
+    CONSTRUCTION, which is why it is preferred over intercepting ``open``.
+
+    Three things make this safe, each verified rather than assumed:
+
+    * The workspace stays importable. ``instantiate_task`` loads task
+      modules by absolute LOCATION (``vendor_bridge.instantiate_task`` uses
+      ``spec_from_file_location`` against ``self._workspace_root``), never
+      by ``sys.path``, and the worker runs with ``-I`` so the cwd is not on
+      ``sys.path`` in the first place.
+    * The digest pin is still verified from the SELECTOR path. Both the
+      worker's re-check and the rescue sweep call
+      ``workspace_digest(selector.workspace)`` — an absolute path
+      (``worker.py:68-72``) — so it is unaffected by the cwd.
+    * The adapter's own two cwd reads (``_workspace_root`` default and
+      ``_release_digest``) both happen in ``__init__``, at ``create()`` /
+      handshake time, strictly before ``reset_start`` runs. Moving the cwd
+      afterwards cannot change what they already resolved.
+    """
+
+    os.chdir(scratch)
 
 
 def _terminate_status(code: str) -> str:
@@ -186,6 +265,12 @@ class OSWorldV2Adapter:
         # Defaulted to the worker's cwd, which the supervisor sets to the
         # workspace (supervisor.py:270).
         self._workspace_root = workspace_root or Path(os.getcwd())
+        # The cwd as it was at construction (the pinned workspace, in
+        # production). ``reset_start`` moves the process into the episode
+        # scratch dir; ``close`` puts it back, so a worker reused across
+        # episodes — and any later relative path — starts from the same
+        # place the supervisor spawned it in.
+        self._entry_cwd = Path(os.getcwd())
         self.metadata = AdapterMetadata(
             adapter_id=_ADAPTER_ID,
             distribution=_DISTRIBUTION,
@@ -384,7 +469,14 @@ class OSWorldV2Adapter:
         self._install_judge_environment()
 
         provider = self._build_provider()
-        await provider.allocate(self._plan, self._task)
+        # The cache root exists BEFORE allocate so a provider that downloads
+        # during setup (upstream's reset already runs inside allocate) writes
+        # into it, not into the workspace. The cwd moves there too, in the
+        # same breath and for the same reason: allocate is where upstream
+        # first runs, so a relative write is possible from that call onward.
+        cache_root = _episode_cache_root(Path(params.artifact_root), params.episode_id)
+        _enter_episode_scratch(cache_root)
+        await provider.allocate(self._plan, self._task, cache_root=cache_root)
         self._provider = provider
 
         # Capture observation 0 eagerly so the runner's immediately-following
@@ -724,6 +816,13 @@ class OSWorldV2Adapter:
         # Must not raise even if the env is already dead. The judge key is
         # scrubbed from the worker env here, the only place it was written.
         vendor_bridge.scrub_secret_environment()
+        # Restore the cwd reset_start moved off the workspace. Best-effort:
+        # close must not raise, and a scratch dir that vanished under us is
+        # not a reason to fail teardown — the episode is over either way.
+        try:
+            os.chdir(self._entry_cwd)
+        except OSError:
+            pass
         self._secrets = {}
         self._provider = None
         self._current_observation = None

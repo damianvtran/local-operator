@@ -13,6 +13,7 @@ resource; it is called from ``reset_start``, never from ``prepare``.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 from lop_osworld_v2_adapter.provisioning import ProvisioningPlan
@@ -23,8 +24,16 @@ from lop_osworld_v2_adapter.taskfile import TaskDescriptor
 class EnvironmentProvider(Protocol):
     """One environment backend. Implemented by FakeProvider and AwsProvider."""
 
-    async def allocate(self, plan: ProvisioningPlan, task: TaskDescriptor) -> None:
-        """Create the environment. The side-effect boundary; reset_start only."""
+    async def allocate(
+        self, plan: ProvisioningPlan, task: TaskDescriptor, *, cache_root: Path
+    ) -> None:
+        """Create the environment. The side-effect boundary; reset_start only.
+
+        ``cache_root`` is the ABSOLUTE, episode-scoped directory (outside the
+        digest-pinned workspace) that any backend which downloads assets must
+        write into. See ``adapter._episode_cache_root`` for why a cwd-relative
+        cache wedges the rescue sweep.
+        """
         ...
 
     async def observe(self) -> dict[str, Any]:
