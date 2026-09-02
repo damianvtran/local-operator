@@ -436,7 +436,6 @@ class OSWorldV2Adapter:
         # exactly here is what makes a frame verifiable rather than a guess.
         self._observation_builder = ObservationBuilder(Path(params.artifact_root))
         raw = await provider.observe()
-        raw = await provider.observe()
         self._sequence = 0
         self._current_observation = self._observation_builder.build(
             raw,

@@ -59,6 +59,10 @@ class FakeProvider:
         self.terminated_refs: list[str] = []
         self.deleted_schedules: list[str] = []
         self.evaluate_calls = 0
+        # On the paid path each observe() is a live HTTP round-trip to the
+        # guest (screenshot + a11y tree), so a duplicated call is real cost,
+        # not a cosmetic issue. Counted here so a test can pin it.
+        self.observe_calls = 0
         # Where the adapter told us to cache. Recorded (never used to write
         # anything: the fake downloads nothing) so tests assert the cache
         # root actually crossed the adapter -> provider boundary.
@@ -91,6 +95,7 @@ class FakeProvider:
         self._sequence = 0
 
     async def observe(self) -> dict[str, Any]:
+        self.observe_calls += 1
         return {
             "screenshot": self._frame(),
             "accessibility_tree": None,
