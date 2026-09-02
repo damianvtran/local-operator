@@ -278,21 +278,44 @@ LABEL_MIN_CELLS = 6
 #: Bounded at all, because the block's height is CONSTANT across the list
 #: (:attr:`_CardLayout.reveal_rows`): every row is padded to the tallest
 #: description, so one verbose option sets the blank-row bill every other row
-#: pays. Unbounded and measured on the repro, ``remaining`` alone reserves 12
-#: rows at 100x60, 15 at 80x60 and 18 at 70x50 — where the free-text row then
-#: draws an 18-row void. The cap is what keeps that void proportionate.
+#: pays. Unbounded and measured on the repro, the longest description wraps to
+#: 12 lines at terminal 100, 15 at terminal 80 and 18 at terminal 70 — where the
+#: free-text row then draws an 18-row void, on a terminal tall enough for
+#: ``remaining`` to pay for it. The cap is what keeps that void proportionate.
+#:
+#: Widths here are TERMINAL columns, and the card is 4 cells narrower (padding
+#: one cell each side, plus the dock's own two): terminal 100 is card width 96,
+#: and the prose column is 5 narrower again (:meth:`_description_indent`). That
+#: conversion is stated because getting it backwards is what produced the "44
+#: columns" figure this file carried for a release — see :data:`DEFAULT_DESC_CAP`.
 #:
 #: Eight, and the number is the reported size's: at 150x40 the longest
-#: description wraps to exactly 8 lines, so 8 is what turns that frame from
-#: 838/1023 characters into the whole consequence. Above 8 buys nothing at any
-#: size the card was verified at — ``remaining`` binds first (5 rows at 130x30,
-#: 7 at 120x34, 5 at 100x30) — and it only widens the void on tall narrow
-#: terminals. Below 8 the reported frame stays incomplete, which is the defect.
-#: The trade at 150x40 is priced and reversible: the block takes the other
-#: rows' one description line (grants 1,1,1,1 -> 0,0,0,0) and every LABEL
-#: survives, which is the ranking C2 actually protects, and the card comes out
-#: SHORTER than the six-row block it replaces (20 rows -> 18) because the
-#: column it releases costs more than the two rows it buys.
+#: description wraps to exactly 8 lines, so 8 is the cap that could turn that
+#: frame from 838/1023 characters into the whole consequence. Above 8 buys
+#: nothing at any size the card was verified at — ``remaining`` binds first —
+#: and it only widens the void on tall narrow terminals.
+#:
+#: What the cap does NOT do any more is decide the reported frame on its own.
+#: Step 7a reserves the description column before it sizes this block, so at
+#: 150x40 under the real ``OperatorApp`` (dock 5, budget 18) the reservation
+#: binds at 4 rows and 8 is never reached. That is deliberate and it is measured
+#: against the alternatives: an unreserved 8-row block bought its rows with the
+#: other rows' prose (grants 2,2,2,1 -> 0,0,0,0), which is the trade BLOCKER 1
+#: refuses; refusing the reveal outright at that size leaves option 1 showing 2
+#: of 8 wrapped lines with no gesture reaching the rest, which is the original
+#: truncation report. Four lines beats the two the list already draws, the
+#: column survives, and :meth:`_prose_line` marks the paragraph as continuing.
+#: The cap still binds where the column is not being drawn at all — 5 rows at
+#: 130x30 and 100x30, 7 at 120x34, all ``remaining``-bound below it.
+#:
+#: In WORDS, which is the units a description is written in: 8 lines is 126
+#: words at terminal 100 (prose column 91) and 175 at terminal 190 (column 181)
+#: — measured on ``scripts/ask_user_repro.py``'s longest option, 1023 characters
+#: and 175 words, which the 190-column figure therefore reaches in full. The
+#: design note this cap descends from put six lines at "about 140 words at 100
+#: columns"; six lines there is 94, 90 and 94 words for the three options, mean
+#: 15.5 words per line, so the figure was high by half a line's worth per line.
+#: Counted here on the fixture's own prose rather than from an assumed average.
 REVEAL_MAX_ROWS = 8
 
 #: The most description lines the DEFAULT list draws for any one row.
@@ -300,19 +323,19 @@ REVEAL_MAX_ROWS = 8
 #: A different number for a different job than :data:`REVEAL_MAX_ROWS`: 2 is
 #: how much prose the LIST shows per row, 8 is how much the REVEAL shows for
 #: one row. Uncapped, the pool spent every spare row of a roomy terminal on prose
-#: and the card stopped being a list: measured on
-#: ``scripts/ask_user_repro.py`` at 190x50, 24 body rows of which ~19 were
-#: prose, options drawn 8/5/4 rows tall with no blank line between one option's
-#: paragraph and the next option's label. The labels are ``fg`` bold against
-#: ``muted`` prose, so the contrast ranking was intact and the list was still
-#: uncountable — a bold line every seven lines does not separate anything at
-#: that density.
+#: and the card stopped being a list: measured on ``scripts/ask_user_repro.py``
+#: (three described options plus the free-text row) at 190x50 under the real
+#: ``OperatorApp``, an 18-row budget of which 14 were prose, options drawn
+#: 7/5/4/2 rows tall with no blank line between one option's paragraph and the
+#: next option's label. The labels are ``fg`` bold against ``muted`` prose, so
+#: the contrast ranking was intact and the list was still uncountable — a bold
+#: line every six lines does not separate anything at that density.
 #:
 #: Two, not three. The label/prose pair still reads as one unit at 2 lines and
-#: stops being perceptible from 3. And 3 is unaffordable where it matters: at
-#: 150x40 a 3-cap wants 4 rows x 4 options = 16 of a 20-row budget, leaving one
-#: row for the reveal block — back on the boundary where ``ctrl+e`` is refused
-#: for having nothing to buy with, which is the defect this cap exists to clear.
+#: stops being perceptible from 3. Measured on the same fixture and size, a
+#: 3-cap draws rows 4/4/4/2 and a 24-row card against the 2-cap's 3/3/3/2 and
+#: 17 — seven rows of the conversation spent to add a third line to prose the
+#: reveal already reaches in full.
 #:
 #: The cap is what makes the reveal reachable at all. The two halves of the
 #: previous round fought each other: the pool spent the budget step 7a needed,
@@ -323,6 +346,16 @@ REVEAL_MAX_ROWS = 8
 #: ``muted`` 6.51:1 and the next step down is ``dim`` 3.43:1, under the AA floor
 #: the description was deliberately walked UP to, and on the approval gate that
 #: text authorises a tool call.
+#:
+#: The APPROVAL gate is untouched by this cap, and the reason is a width the
+#: file previously mis-stated. Its three consequences are 37, 36 and 28 cells,
+#: so each wraps to one line — and therefore never asks for a second — down to a
+#: prose column of 37, which is card width 42, which is TERMINAL width 46. Not
+#: "44 columns": that figure was a card width transcribed as a terminal one, and
+#: it is the number the gate's byte-identity argument used to rest on. Below 46
+#: the consequences do wrap and the cap does apply to them; the first wrap going
+#: down is at terminal 45 (card 41, column 36), where *Allow*'s takes two lines.
+#: Measured through the same ``wrap_cells`` the card wraps with.
 DEFAULT_DESC_CAP = 2
 
 
@@ -412,17 +445,13 @@ class _CardLayout:
     #: and reading the column's existence out of it asks whichever rows happen
     #: to carry text to stand in for a decision step 9 already made.
     #:
-    #: ``any(description_rows.values())`` does agree with it today — swept over
-    #: 900 configurations (empty/mixed/all-described shapes, with and without a
-    #: recommendation, both hosts, 44-190 columns) with 0 mismatches, because
-    #: step 9 is all-or-nothing across the window and records a grant for every
-    #: row in it. That agreement is a consequence of the current allocator, not
-    #: a property the renderer should depend on: a future step 9 that skipped
-    #: the grant for a row with nothing to say would silently move the tag and
-    #: collapse the alternation the list is scanned by, with nothing here to
-    #: say the flag had changed meaning.
+    #: Read by ``_reveal_is_useful`` as well as by the renderer, and that is the
+    #: second reason it is a stored decision: the reveal is REFUSED where buying
+    #: its block would flip this false for the whole window (BLOCKER 1), which is
+    #: a comparison between two PLANS. Derived per row it would have answered
+    #: "does this row happen to carry prose", which is not the question.
     #:
-    #: The failure that once looked like a derived-flag bug — a three-option
+    #: The failure that once looked like a bug in this flag — a three-option
     #: question where only the middle option was described losing that
     #: description entirely — was the ``_body_rows`` ``wanted`` cap counting a
     #: row's true zero instead of the one line step 9 still charges for it, so
@@ -1755,6 +1784,21 @@ class AskPickerScreen(Container):
         # card, which inverts the priority order this file is built on and is a
         # safety property on the approval gate.
         #
+        # ...and never out of the description COLUMN either, which is the same
+        # argument one rung down and is what `column_reserve` below buys.
+        # Protecting only the LABELS left the block free to spend step 9's
+        # all-or-nothing first lines, so `ctrl+e` could turn the column off for
+        # every row to uncover one row's prose. Measured under the real
+        # `OperatorApp` (dock 5): on the approval gate at 130x30 with a
+        # paragraph-long command the revealed card showed only *Allow*'s
+        # consequence and left `Deny` and `Allow all` bare — an authorisation
+        # surface losing two of three consequences behind an advertised key.
+        # On the ask card the same trade was reachable at 2,129 of the 3,478
+        # sizes swept (44-190 columns x 14-60 rows, `scripts/ask_user_repro.py`)
+        # and the footer ADVERTISED `^e` at 1,933 of those — the key was offered
+        # in nine of every ten frames where pressing it cost the column. The
+        # same sweep after this reservation reports 0, on both surfaces.
+        #
         # A CONSTANT reservation: the tallest capped description in the whole
         # list, so the block does not change height as the cursor moves. The
         # selected row draws into it and the remainder is padded blank
@@ -1765,7 +1809,26 @@ class AskPickerScreen(Container):
                 (len(self._reveal_wrap(index, width)) for index in range(self.row_count)),
                 default=0,
             )
-            reveal_rows = max(0, min(REVEAL_MAX_ROWS, tallest, remaining))
+            # What step 9 would spend if this block were not being bought. Step
+            # 8's two spacers are charged as well, because they are bought
+            # BEFORE the column and a block that left exactly `row_count` rows
+            # behind would watch the spacers take two of them.
+            #
+            # A SMALLER block rather than no block, and the difference is the
+            # whole trade at the reported size. At 150x40 on
+            # `scripts/ask_user_repro.py` (real app, dock 5, 18-row budget) the
+            # unreserved block took 8 rows and the column with it, grants
+            # 2,2,2,1 -> 0,0,0,0; reserved, it takes 4 and the grants come out
+            # 1,1,1,1. Refusing the reveal outright at that size instead was
+            # measured to leave option 1 showing 2 of its 8 wrapped lines with
+            # no gesture reaching the rest — the ORIGINAL truncation report, at
+            # the size it was reported from. Four lines is more than the two the
+            # list already draws, so the key still earns its name, and
+            # `_reveal_text`'s marker says the paragraph continues.
+            column_reserve = 0
+            if 1 + extra >= self.row_count and remaining - 2 >= self.row_count:
+                column_reserve = self.row_count + 2
+            reveal_rows = max(0, min(REVEAL_MAX_ROWS, tallest, remaining - column_reserve))
             remaining -= reveal_rows
         space_above = remaining >= 1
         if space_above:
@@ -2490,9 +2553,26 @@ class AskPickerScreen(Container):
             # (D2/D6). A badge that truncates what it promotes, or that
             # overflows the screen to fit, is worth less than no badge: the
             # recommendation is PRESELECTED too, so the cursor is already there.
-            tag = f"  · {RECOMMENDED_TAG}"
-            if cell_len(row.plain) + cell_len(tag) <= width:
-                row.append(tag, style=ground + dim)
+            #
+            # Drawn exactly as :meth:`_description_text` draws it: the separator
+            # at ``muted`` and the tag at ``fg`` + bold, the label's own ink.
+            # The whole run sat at ``dim`` here — 3.43:1, under the 4.5:1 WCAG
+            # AA floor the description text was deliberately walked UP to (D7),
+            # and a second unscoped treatment of one badge besides. This is the
+            # call site that fires where there is NO description column, so it
+            # is the frame on which the badge is the only thing marking the
+            # promoted row: the least legible place to spend the least legible
+            # ink.
+            #
+            # ``muted`` is derived here rather than taken as a parameter, for
+            # the same reason ``accent`` above is: the caller's style set is the
+            # one the ROW needs, and a sixth Style threaded through the
+            # signature for one branch would change a call shape the tests hold.
+            separator = "  · "
+            muted = ground + Style(color=theme_mod.semantic_color("muted"))
+            if cell_len(row.plain) + cell_len(separator) + cell_len(RECOMMENDED_TAG) <= width:
+                row.append(separator, style=muted)
+                row.append(RECOMMENDED_TAG, style=ground + fg + Style(bold=True))
         return _fit_row(row, width, ground)
 
     def _description_text(
@@ -2563,30 +2643,48 @@ class AskPickerScreen(Container):
                 else:
                     text = ""
             if text:
-                if position == len(kept) - 1 and len(wrapped) > len(kept):
-                    # The last kept line of a paragraph that continues is filled
-                    # from the REST of the prose rather than from its own
-                    # wrapped line, and `truncate_cells` marks the cut it makes.
-                    #
-                    # Filling rather than marking the wrapped line matters where
-                    # the grant is one, which is every description the approval
-                    # gate draws on a narrow terminal: a wrapped line stops at a
-                    # word boundary, so marking it would end the consequence
-                    # several cells earlier than today's single truncated line
-                    # does. That is the authorisation frame getting WORSE, which
-                    # this change is not allowed to do. Filled, the line carries
-                    # at least as much of the consequence as it carries today
-                    # and says that there is more.
-                    body.append(
-                        truncate_cells(
-                            _wrap_tail(self._row_description(index), wrapped, position), room
-                        ),
-                        style=ground + ink,
-                    )
-                else:
-                    body.append(truncate_cells(text, room), style=ground + ink)
+                body.append(
+                    truncate_cells(self._prose_line(index, wrapped, kept, position, text), room),
+                    style=ground + ink,
+                )
             rows.append(_fit_row(body, width, ground))
         return rows
+
+    def _prose_line(
+        self,
+        index: int,
+        wrapped: list[str],
+        kept: list[str],
+        position: int,
+        text: str,
+    ) -> str:
+        """One drawn line of ``index``'s prose: its own, or the SOURCE tail if last.
+
+        The last kept line of a paragraph that continues is filled from the REST
+        of the prose rather than from its own wrapped line; the caller's
+        :func:`truncate_cells` then marks the cut it makes.
+
+        Filling rather than marking the wrapped line matters where the grant is
+        one, which is every description the approval gate draws on a narrow
+        terminal: a wrapped line stops at a word boundary, so marking it would
+        end the consequence several cells earlier than a single truncated line
+        does. That is the authorisation frame getting WORSE. Filled, the line
+        carries at least as much of the consequence as it carried before and
+        says that there is more.
+
+        ONE implementation, shared by the list's rows
+        (:meth:`_description_text`) and the ``ctrl+e`` block
+        (:meth:`_reveal_text`). It was written out twice, and D5 is what that
+        cost: the block could not see that its own wrap had already been cut, so
+        the ``len(wrapped) > len(kept)`` test compared a six-line grant against a
+        six-line wrap and the paragraph ended mid-clause with nothing marking it.
+        Two copies of "say that it continues" is two places for the condition to
+        drift, on the one block whose shortfall a reader has no other way to
+        detect.
+        """
+        if position == len(kept) - 1 and len(wrapped) > len(kept):
+            return _wrap_tail(self._row_description(index), wrapped, position)
+        return text
 
     def _reveal_text(self, layout: _CardLayout, ink: Style) -> list[Text]:
         """The ``ctrl+e`` block: the selected row's description, padded to height.
@@ -2631,25 +2729,20 @@ class AskPickerScreen(Container):
             body.append(" " * indent, style=ground)
             room = max(1, width - indent)
             if position < len(kept):
-                text = kept[position]
-                if position == len(kept) - 1 and len(wrapped) > len(kept):
-                    # The block is short of the description for either of two
-                    # reasons now — `remaining` ran out, or the wrap is longer
-                    # than `REVEAL_MAX_ROWS` — and this line says so in both.
-                    # It could say so in neither while `_reveal_wrap` returned a
-                    # pre-cut list: the wrap and the grant were then the same
-                    # six lines, this test was false, and the paragraph ended
-                    # mid-clause with nothing marking it (D5). The reveal is the
-                    # card's answer to "the prose does not fit", so it is the
-                    # one block on the card whose own shortfall a reader has no
-                    # other way to detect.
-                    #
-                    # Filled from the REST of the prose and marked by
-                    # `truncate_cells`, exactly as a granted description line
-                    # is: a wrapped line stops at a word boundary, so marking it
-                    # in place would end the text earlier than that row's single
-                    # list line already does.
-                    text = _wrap_tail(self._row_description(self.state.selected), wrapped, position)
+                # The block is short of the description for either of two reasons
+                # — `remaining` ran out, or the wrap is longer than
+                # `REVEAL_MAX_ROWS` — and :meth:`_prose_line` says so in both.
+                # It could say so in neither while `_reveal_wrap` returned a
+                # pre-cut list: the wrap and the grant were then the same six
+                # lines, the test was false, and the paragraph ended mid-clause
+                # with nothing marking it (D5). The reveal is the card's answer
+                # to "the prose does not fit", so it is the one block on the
+                # card whose own shortfall a reader has no other way to detect —
+                # which is why it shares that method with the list rather than
+                # keeping a second copy that cannot see the first.
+                text = self._prose_line(
+                    self.state.selected, wrapped, kept, position, kept[position]
+                )
                 body.append(truncate_cells(text, room), style=ground + ink)
             rows.append(_fit_row(body, width, ground))
         return rows
@@ -2890,6 +2983,15 @@ class AskPickerScreen(Container):
           nothing left to buy with (measured at 130x30 and every size under it)
           and the revealed frame equals the default one.
 
+        ...and one refusal, which is the same "trade, not a pure loss" rule the
+        first condition states, applied to the description COLUMN instead of to
+        one row. Step 7a now reserves the column before it sizes the block, so
+        a reveal that would still turn it off is one no smaller block could pay
+        for — and the answer there is to stop offering the key rather than to
+        show one consequence in place of three. This is asked of the two PLANS
+        rather than of the allocator's internals, so a future step 7a that
+        found another way to spend the column is caught here too.
+
         Answered against the plan the card is drawing rather than against the
         descriptions alone: "is there more" is a question about the grant.
         """
@@ -2899,8 +3001,17 @@ class AskPickerScreen(Container):
             # The cursor's row is not even drawn (a card windowed below it).
             # Nothing on screen would change in a way the user can attribute.
             return False
+        revealed = self._layout(reveal=True)
+        if plan.show_descriptions and not revealed.show_descriptions:
+            # Buying the block would cost every OTHER row its prose. The reveal
+            # exists to show more; a card that advertises `more` and then says
+            # strictly less about the answers it is not uncovering has spent an
+            # advertised key to make the frame worse. On the approval gate those
+            # are the consequences of authorising a possibly destructive call,
+            # which is the 44x30 failure named above reached a second way.
+            return False
         cut = len(self._reveal_wrap(selected, plan.width)) > plan.description_rows.get(selected, 0)
-        return cut and self._layout(reveal=True).reveal_rows >= 1
+        return cut and revealed.reveal_rows >= 1
 
     def _shed_to_fit(
         self, hints: list[tuple[str, str]], ladder: list[str], width: int
