@@ -1527,3 +1527,274 @@ class TestADemotionNeverMovesASessionOffItsStickyAccount:
 
         access = await store.get_oauth_access("anthropic", "s1")
         assert access is not None and access.credential_id == b.id
+
+
+class TestUsageAwareFirstPick:
+    """A session's FIRST account pick prefers cached headroom.
+
+    Before this, the pick was ``crc32(session_id) % n`` alone: uniform over
+    sessions and blind to how full each account already was. Field data over
+    one day showed three of five Anthropic accounts at 65-99% of their 5-hour
+    window while two sat at 6% and 29%, and 33 "All 5 OAuth credentials
+    unusable" incidents. These tests pin the ranking (``_usage_ranked_order``)
+    against a temp usage cache carrying synthetic reports.
+    """
+
+    @staticmethod
+    def _store(tmp_path: Any, count: int = 5) -> "tuple[AuthStore, list[Any], Any]":
+        from local_operator.providers.usage_cache import UsageCacheStore
+
+        cache = UsageCacheStore(tmp_path / "usage_cache.db")
+        store = AuthStore(db_path=tmp_path / "auth.db", usage_cache=cache)
+        rows = [
+            store.upsert_credential(
+                "anthropic",
+                {
+                    "type": "oauth",
+                    "access": f"tok-{i}",
+                    "refresh": "r",
+                    "expires": None,
+                    "email": f"damian+{i}@example.com",
+                },
+            )
+            for i in range(count)
+        ]
+        return store, rows, cache
+
+    @staticmethod
+    def _cache_report(
+        cache: Any,
+        row: Any,
+        *,
+        five_hour: float,
+        # Zero by default so the 5-hour figure IS the binding shared window;
+        # the ranking takes the worst shared window, and a 7-day figure that
+        # happened to bind would silently change which account a case is about.
+        seven_day: float = 0.0,
+        fable: float | None = None,
+        age_ms: int = 0,
+        resets_in_ms: int | None = None,
+    ) -> None:
+        """Write one account's report the way the preflight writes it.
+
+        Same key derivation (``account_preflight_key`` over the row's email)
+        and same limit shape (shared 5h/7d rows, an optional fable-scoped
+        weekly) as ``fetch_anthropic_oauth`` produces, so the test exercises
+        the exact read path a live cache would.
+        """
+        import time
+
+        from local_operator.providers.usage import UsageAmount, UsageLimit, UsageReport
+        from local_operator.providers.usage_cache import account_preflight_key
+
+        limits = [
+            UsageLimit(
+                id="anthropic:5h",
+                label="5 hour",
+                amount=UsageAmount(used_fraction=five_hour, unit="percent"),
+                shared=True,
+            ),
+            UsageLimit(
+                id="anthropic:7d",
+                label="7 day",
+                amount=UsageAmount(used_fraction=seven_day, unit="percent"),
+                shared=True,
+            ),
+        ]
+        if fable is not None:
+            limits.append(
+                UsageLimit(
+                    id="anthropic:7d:fable",
+                    label="7 day (Fable)",
+                    amount=UsageAmount(used_fraction=fable, unit="percent"),
+                    tier="fable",
+                )
+            )
+        now = int(time.time() * 1000)
+        if resets_in_ms is not None:
+            for limit in limits:
+                limit.resets_at_ms = now + resets_in_ms
+        report = UsageReport(provider="anthropic", fetched_at=now - age_ms, limits=limits)
+        key = account_preflight_key("anthropic", row.data["email"])
+        cache.set(key, "anthropic", [report], expires_at_ms=now + 60_000)
+
+    @staticmethod
+    def _order(store: AuthStore, session_id: str, model_id: str = "claude-opus-5") -> list[int]:
+        rows = store.list_credentials("anthropic")
+        return [
+            r.id for r in store._selection_order(rows, "anthropic", session_id, model_id=model_id)
+        ]
+
+    @staticmethod
+    def _hash_order(store: AuthStore, session_id: str) -> list[int]:
+        rows = store.list_credentials("anthropic")
+        return [r.id for r in AuthStore._hash_order(rows, session_id)]
+
+    def test_least_loaded_wins_when_reports_differ_beyond_tolerance(self, tmp_path: Any) -> None:
+        """(a) The observed skew: three near-full, two mostly empty. Every
+        session must start on one of the two, whatever its hash says."""
+        store, rows, cache = self._store(tmp_path)
+        used = [0.65, 0.92, 0.99, 0.06, 0.29]
+        for row, fraction in zip(rows, used):
+            self._cache_report(cache, row, five_hour=fraction)
+
+        winners = {self._order(store, f"session-{i}")[0] for i in range(40)}
+
+        # 0.06 used is best (0.94 remaining); 0.29 (0.71) trails it by more
+        # than the tolerance, so the bucket is the single emptiest account.
+        assert winners == {rows[3].id}
+        # The full order is best-first behind the bucket.
+        assert self._order(store, "session-0") == [
+            rows[3].id,
+            rows[4].id,
+            rows[0].id,
+            rows[1].id,
+            rows[2].id,
+        ]
+
+    def test_within_tolerance_ties_spread_by_the_session_hash(self, tmp_path: Any) -> None:
+        """(b) Herding guard: accounts within the tolerance are one bucket and
+        the per-session hash rotates it, so concurrent starts fan out."""
+        store, rows, cache = self._store(tmp_path, 4)
+        # Two within 10 points of each other, two far behind.
+        for row, fraction in zip(rows, [0.10, 0.15, 0.80, 0.90]):
+            self._cache_report(cache, row, five_hour=fraction)
+
+        firsts = {self._order(store, f"session-{i}")[0] for i in range(40)}
+        assert firsts == {rows[0].id, rows[1].id}
+        for i in range(40):
+            order = self._order(store, f"session-{i}")
+            # Deterministic per session, bucket first, then the rest best-first.
+            assert order == self._order(store, f"session-{i}")
+            assert set(order[:2]) == {rows[0].id, rows[1].id}
+            assert order[2:] == [rows[2].id, rows[3].id]
+
+    def test_all_equal_is_exactly_the_hash_order(self, tmp_path: Any) -> None:
+        """(b, degenerate) A uniform pool must reproduce the pre-existing order
+        byte for byte -- the ranking is a no-op when it has nothing to say."""
+        store, rows, cache = self._store(tmp_path)
+        for row in rows:
+            self._cache_report(cache, row, five_hour=0.5)
+        for i in range(20):
+            assert self._order(store, f"session-{i}") == self._hash_order(store, f"session-{i}")
+
+    def test_stale_or_missing_reports_fall_back_to_hash_order(self, tmp_path: Any) -> None:
+        """(c) No evidence is not evidence: an empty cache, and a cache whose
+        rows are past the max age, both leave the hash order untouched."""
+        from local_operator.providers import auth_store as auth_store_mod
+
+        store, rows, cache = self._store(tmp_path)
+        for i in range(20):
+            assert self._order(store, f"session-{i}") == self._hash_order(store, f"session-{i}")
+
+        for row, fraction in zip(rows, [0.65, 0.92, 0.99, 0.06, 0.29]):
+            self._cache_report(
+                cache,
+                row,
+                five_hour=fraction,
+                age_ms=auth_store_mod.USAGE_PICK_MAX_REPORT_AGE_MS + 1_000,
+            )
+        for i in range(20):
+            assert self._order(store, f"session-{i}") == self._hash_order(store, f"session-{i}")
+
+    def test_an_old_report_whose_windows_have_not_reset_is_still_trusted(
+        self, tmp_path: Any
+    ) -> None:
+        """(c, refined) Usage inside a window only rises until the window
+        resets, so an old report with every reset still ahead is a lower
+        bound and must keep ranking. Observed live: a 99%-full account with
+        a two-hour-old report ranked neutral and drew most new sessions."""
+        from local_operator.providers import auth_store as auth_store_mod
+
+        store, rows, cache = self._store(tmp_path, 3)
+        old = auth_store_mod.USAGE_PICK_MAX_REPORT_AGE_MS * 4
+        self._cache_report(cache, rows[0], five_hour=0.10, age_ms=old, resets_in_ms=60 * 60_000)
+        self._cache_report(cache, rows[1], five_hour=0.99, age_ms=old, resets_in_ms=60 * 60_000)
+        # rows[2]: as old, as full, but its window reset since -- unknown.
+        self._cache_report(cache, rows[2], five_hour=0.99, age_ms=old, resets_in_ms=-60_000)
+
+        firsts = {self._order(store, f"session-{i}")[0] for i in range(40)}
+        assert firsts == {rows[0].id, rows[2].id}
+        for i in range(40):
+            assert self._order(store, f"session-{i}")[-1] == rows[1].id
+
+    def test_an_unknown_account_is_neutral_not_penalised(self, tmp_path: Any) -> None:
+        """(c, partial) One account with no report joins the bucket rather than
+        sorting last: a cold row must not be starved by its own missing data."""
+        store, rows, cache = self._store(tmp_path, 3)
+        self._cache_report(cache, rows[0], five_hour=0.10)
+        self._cache_report(cache, rows[1], five_hour=0.95)
+        # rows[2] has no report.
+        firsts = {self._order(store, f"session-{i}")[0] for i in range(40)}
+        assert firsts == {rows[0].id, rows[2].id}
+        for i in range(40):
+            assert self._order(store, f"session-{i}")[-1] == rows[1].id
+
+    async def test_sticky_is_respected_regardless_of_usage(self, tmp_path: Any) -> None:
+        """(d) Once a session is on an account it stays there even when the
+        cache later says a sibling has more headroom -- the provider's prompt
+        cache is per account, and moving would rewrite the whole prefix."""
+        store, rows, cache = self._store(tmp_path, 3)
+        for row in rows:
+            self._cache_report(cache, row, five_hour=0.5)
+        first = await store.get_oauth_access("anthropic", "s-sticky", model_id="claude-opus-5")
+        assert first is not None
+        chosen = first.credential_id
+        # Now make the chosen account look nearly spent and a sibling empty.
+        for row in rows:
+            self._cache_report(cache, row, five_hour=0.99 if row.id == chosen else 0.01)
+        again = await store.get_oauth_access("anthropic", "s-sticky", model_id="claude-opus-5")
+        assert again is not None and again.credential_id == chosen
+        # A NEW session, with no sticky, does move away from it.
+        fresh = await store.get_oauth_access("anthropic", "s-new", model_id="claude-opus-5")
+        assert fresh is not None and fresh.credential_id != chosen
+
+    def test_a_tier_cap_does_not_penalise_a_model_outside_that_tier(self, tmp_path: Any) -> None:
+        """(e) A spent Fable weekly must not push an account down for an Opus
+        request; for a Fable request it must."""
+        store, rows, cache = self._store(tmp_path, 2)
+        # Both accounts identical on the shared windows; only rows[0] has a
+        # nearly spent fable cap.
+        self._cache_report(cache, rows[0], five_hour=0.30, fable=0.98)
+        self._cache_report(cache, rows[1], five_hour=0.30)
+
+        opus = {self._order(store, f"session-{i}", "claude-opus-5")[0] for i in range(20)}
+        assert opus == {rows[0].id, rows[1].id}, "opus must see a tie and spread"
+        fable = {self._order(store, f"session-{i}", "claude-fable-5-1")[0] for i in range(20)}
+        assert fable == {rows[1].id}, "fable must avoid the account whose fable cap is spent"
+
+    def test_opt_out_restores_the_hash_order(self, tmp_path: Any) -> None:
+        """``retry.usageAwareAccountPick: false`` reaches the store through
+        ``configure_usage_aware_pick`` and the ranking steps aside entirely."""
+        store, rows, cache = self._store(tmp_path)
+        for row, fraction in zip(rows, [0.65, 0.92, 0.99, 0.06, 0.29]):
+            self._cache_report(cache, row, five_hour=fraction)
+        store.configure_usage_aware_pick(False)
+        for i in range(20):
+            assert self._order(store, f"session-{i}") == self._hash_order(store, f"session-{i}")
+        store.configure_usage_aware_pick(True)
+        assert self._order(store, "session-0")[0] == rows[3].id
+
+    def test_a_broken_cache_fails_open_to_the_hash_order(self, tmp_path: Any) -> None:
+        """Fail open: a cache read that raises must never change the resolve."""
+        store, rows, cache = self._store(tmp_path)
+
+        def boom(*_a: Any, **_k: Any) -> None:
+            raise RuntimeError("cache exploded")
+
+        cache.get = boom  # type: ignore[method-assign]
+        for i in range(20):
+            assert self._order(store, f"session-{i}") == self._hash_order(store, f"session-{i}")
+
+    def test_the_session_stream_forwards_the_opt_out(self, tmp_path: Any) -> None:
+        """The setting is parsed in exactly one place -- ``SessionStreamFn`` --
+        and must reach the store; a default settings mapping leaves it on."""
+        from local_operator.model.configure import SessionStreamFn
+
+        store, _rows, _cache = self._store(tmp_path, 2)
+        stream = SessionStreamFn(store, {"retry": {"usageAwareAccountPick": False}}, "s1")
+        assert store._usage_aware_pick is False
+        stream2 = SessionStreamFn(store, {}, "s2")
+        assert store._usage_aware_pick is True
+        # Close the streams' http clients without awaiting: no loop is running.
+        del stream, stream2

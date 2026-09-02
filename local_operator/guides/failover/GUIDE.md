@@ -152,6 +152,7 @@ values:
     modelFallback: true     # shipped default
     usageAwareFallback: true   # NOT the default (ships false); see below
     usageReservePercent: 10 # shipped default
+    usageAwareAccountPick: true  # shipped default; see "Rotation within one provider"
     fallbackChains:
       anthropic/claude-opus-5:
         - provider: zai

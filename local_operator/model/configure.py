@@ -1699,6 +1699,16 @@ class SessionStreamFn:
         # until first use, and stays None whenever the cache cannot open (a
         # permanent live-fetch miss, never an error). See ``_usage_cache_store``.
         self._usage_cache: "UsageCacheStore | None" = None
+        # The operator's opt-out for the cascade's usage-ranked first pick
+        # travels through here because this is the one place a session parses
+        # ``retry.*``; the store itself defaults to ON and knows nothing about
+        # config. Duck-typed (``getattr``) because the test doubles handed in
+        # as ``auth_store`` implement only the failover protocol.
+        configure_pick = getattr(auth_store, "configure_usage_aware_pick", None)
+        if callable(configure_pick):
+            from local_operator.providers.failover import RetrySettings
+
+            configure_pick(RetrySettings.from_settings(settings).usage_aware_account_pick)
 
     def _client_for(self, spec: ModelSpec) -> WireClient:
         from local_operator.providers.clients import client_for_spec

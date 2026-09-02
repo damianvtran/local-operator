@@ -68,6 +68,7 @@ def _consumer_defaults() -> dict[str, object]:
         "retry.modelFallback": retry.model_fallback,
         "retry.usageAwareFallback": retry.usage_aware_fallback,
         "retry.usageReservePercent": retry.usage_reserve_percent,
+        "retry.usageAwareAccountPick": retry.usage_aware_account_pick,
         "retry.fallbackChains": dict(retry.fallback_chains),
         "subagents.max_running": DEFAULT_MAX_RUNNING_JOBS,
         "providers.openai.api": DEFAULT_CONFIG.values["providers"]["openai"]["api"],

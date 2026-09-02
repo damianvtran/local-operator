@@ -450,6 +450,16 @@ SETTINGS: tuple[Setting, ...] = (
         choices=_bool_choices("check quota at message boundaries", "only react to failures"),
     ),
     Setting(
+        key="retry.usageAwareAccountPick",
+        path=("retry", "usageAwareAccountPick"),
+        section="failover",
+        label="Usage-aware account pick",
+        kind=Kind.BOOL,
+        default=True,
+        help="Start new sessions on the same-provider account with the most quota left.",
+        choices=_bool_choices("prefer the least-loaded account", "spread by session hash only"),
+    ),
+    Setting(
         key="retry.usageReservePercent",
         path=("retry", "usageReservePercent"),
         section="failover",
