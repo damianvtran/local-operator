@@ -26,7 +26,7 @@ import json
 import re
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence, get_args, get_origin
+from typing import TYPE_CHECKING, Any, Mapping, Sequence, get_args, get_origin
 
 from local_operator.evaluation.adapters.supervisor import verify_artifact
 from local_operator.evaluation.evidence.models import RouteIdentity
@@ -237,10 +237,12 @@ class ContextUnrecoverableError(ValueError):
     Raised only when a threshold pass has pruned, summarised, and shed every
     stale observation it may and the rebuilt prefix still exceeds the engine's
     recovery band — or when there is nothing to shed (a frameless benchmark).
-    The runner turns it into a scored truncation with the
-    ``context-unrecoverable`` reason: the episode is scored on the state it
-    reached, because a context the harness can no longer manage is the
-    harness's limit, not a fabricated failure of the agent's.
+    The runner records it as a harness (adapter) error and seals the episode
+    UNSCORED: a context the harness can no longer build is the harness's
+    limit, not an agent outcome, and scoring the partial would fold a harness
+    defect into the agent's number. A scored truncation is not representable
+    here — the last executed step's event is already written and the
+    verifier's one-step-per-batch rule forbids a corrective re-write.
     """
 
 
@@ -416,11 +418,6 @@ class ProviderModelClient:
             rebuild_every_frames=rebuild_every_frames,
         )
         self._last_provider_context_tokens: int | None = None
-        # The one pricing fact a rebuild cannot know locally: whether the provider
-        # reported a context size for the current prefix. Set only by a request that
-        # actually ran, so a client built fresh on a retained builder does not
-        # inherit a figure that described some other prefix (see ``_maybe_compact``).
-        self._reported_context_for_current_prefix: bool = False
         self._last_request_ms = _now_ms()
 
     async def decide(
@@ -453,7 +450,6 @@ class ProviderModelClient:
             # the prefix that is about to be reused verbatim, so it stays
             # exact through plain appends until a rebuild replaces the list.
             self._last_provider_context_tokens = context_tokens
-            self._reported_context_for_current_prefix = True
         # The summary call was a billed provider call on the way to this
         # decision. It is folded into THIS decision's figures rather than
         # reported separately so the bundle's usage events remain the whole
@@ -490,9 +486,9 @@ class ProviderModelClient:
         not clear the engine's recovery band, stale observation turns are shed
         oldest-first (``_shed_stale_frames``) until the rebuilt prefix fits the
         reserve; only when even that cannot get under the line does the client
-        raise :class:`ContextUnrecoverableError`, which the runner turns into a
-        scored truncation (``context-unrecoverable``) instead of sending a
-        request the provider will reject. The earlier stall latch is removed
+        raise :class:`ContextUnrecoverableError`, which the runner records as a
+        harness error and seals unscored instead of sending a request the
+        provider will reject. The earlier stall latch is removed
         because it let the priced context grow past the window between
         rebuilds — a provider rejection, strictly worse than a cache miss.
         """
@@ -564,7 +560,6 @@ class ProviderModelClient:
         # reports a fresh figure for it (the next request's usage reports
         # ``context_tokens``), which is one request away at most.
         self._last_provider_context_tokens = None
-        self._reported_context_for_current_prefix = False
 
         if threshold is not None:
             # A threshold pass must FIT, not merely run. Re-asking the trigger
@@ -576,13 +571,18 @@ class ProviderModelClient:
             # docstring for why a silent trigger is never the alternative.
             fits, shed = self._enforce_threshold_fit(threshold, band=int(0.8 * threshold))
             if not fits:
+                from local_operator.compaction.pruning import count_stale_observations
+
+                # Says how much was sheddable: "after shedding" with nothing
+                # shed was how a dead shed went unnoticed (review round 3).
                 raise ContextUnrecoverableError(
                     "context cannot fit the window: the rebuilt prefix exceeds the "
-                    "compaction threshold even after shedding stale observations "
+                    "compaction threshold "
                     f"({self._priced_estimate(self._context.messages)} priced tokens "
-                    f"against a band of {int(0.8 * threshold)}); the episode must "
-                    "truncate as context-unrecoverable rather than send a "
-                    "rejected request"
+                    f"against a band of {int(0.8 * threshold)}) with "
+                    f"{count_stale_observations(self._context.messages)} stale "
+                    "observation turn(s) that shedding could not fit under it; the "
+                    "episode ends as a harness error rather than send a rejected request"
                 )
         if result.frames_dropped == 0 and not result.ran and not result.pruned:
             return None, None, 0
@@ -627,57 +627,61 @@ class ProviderModelClient:
     def _enforce_threshold_fit(self, threshold: int, *, band: int) -> tuple[bool, int]:
         """After a threshold pass, shed stale observations until the prefix fits.
 
-        Returns ``(fits, frames_shed)``. The pass above has already pruned and
+        Returns ``(fits, turns_shed)``. The pass above has already pruned and
         summarised everything it could; what remains is how many of the OLD
-        observations to keep as frames. A shed removes an observation turn
-        (frame plus its assistant reply) from the front of the kept tail, never
-        the current observation, never past a compaction marker in the tail,
-        and stops at the first frame-less prefix (a frameless benchmark has
-        nothing to shed — a text-only window problem is not this method's to
-        solve, and pretending to fix it with deletion would corrupt the
-        episode). ``fits`` is False only when no shed could get under ``band``.
+        observation turns to keep. A shed removes a stale turn (its
+        observation — framed, or pruned to a notice — plus its assistant
+        reply) from the front of the kept tail, never the current
+        observation, never past a compaction marker in the tail, and is inert
+        on a prefix with no stale turns (a text-only benchmark has nothing to
+        shed — its window problem is the summary's, and deletion would corrupt
+        the episode). ``fits`` is False only when no shed could get under
+        ``band``.
 
         The band is judged on the PROVIDER's price, not the local ruler: the
         ruler counts a frame at a flat 1,200 tokens while vision providers bill
-        per visual tokens (Anthropic ~5,000 for a 1932px frame), so a residual
+        per visual token (Anthropic ~5,000 for a 1932px frame), so a residual
         that fits locally can still be rejected on the wire. The session prices
         a compaction's residual the same way (its archive frame correction), and
         the engine ships the formula (``frame_token_estimate_for``), so the
-        correction here is ``frames x (per_frame - IMAGE_TOKEN_ESTIMATE)`` added
-        to the local estimate — an ADDEND per frame, never a multiplier on the
-        whole context (review round 2, m4: a multiplier learned before a
-        rebuild misprices the residual after it, in whichever direction the
-        frame count moved).
+        correction is ``frames x (per_frame - IMAGE_TOKEN_ESTIMATE)`` added to
+        the local estimate — an ADDEND per frame, never a multiplier on the
+        whole context (review round 2, m4).
         """
         if self._priced_estimate(self._context.messages) <= band:
             return True, 0
-        if self._context.frames_in_history() == 0:
-            return False, 0
-        return self._shed_stale_frames(band, priced=self._priced_estimate)
+        return self._shed_stale_turns(band)
 
-    def _shed_stale_frames(
-        self, band: int, *, priced: Callable[[Sequence[Any]], int]
-    ) -> tuple[bool, int]:
-        from local_operator.compaction.pruning import shed_stale_frames
+    def _shed_stale_turns(self, band: int) -> tuple[bool, int]:
+        """Shed the oldest stale turns, one at a time, until the priced prefix
+        fits ``band``; ``(False, 0)`` when no amount of shedding can.
+
+        Walks ``limit`` DOWN from one below the current stale count: asking
+        the engine for the count it already has removes nothing and must not
+        be read as "nothing left to shed" — that reading is exactly how this
+        method was dead code in review round 3 (M3). A step that removes
+        nothing after the first decrement is the genuine end: the tail is
+        down to the current observation, or the next turn is not stale.
+        """
+        from local_operator.compaction.pruning import (
+            count_stale_observations,
+            shed_stale_frames,
+        )
 
         messages = self._context.messages
-        frames = self._context.frames_in_history()
-        if frames == 0:
+        stale = count_stale_observations(messages)
+        if stale == 0:
             return False, 0
-        # The cheapest prefix that still answers the current observation: shed
-        # until the frame count allows the PRICED estimate under the band. The
-        # limit walks down from the current frame count, so a text-heavy
-        # episode sheds fewer turns than a frame-heavy one.
-        limit = frames
         best: list[Any] | None = None
         shed = 0
+        limit = stale - 1
         while limit >= 0:
             candidate, removed = shed_stale_frames(messages, limit=limit)
-            if priced(candidate) <= band and candidate[-1] is messages[-1]:
+            if removed == 0:
+                break
+            if self._priced_estimate(candidate) <= band and candidate[-1] is messages[-1]:
                 best = candidate
                 shed = removed
-                break
-            if removed == 0:
                 break
             limit -= 1
         if best is None:

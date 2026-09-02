@@ -49,6 +49,7 @@ __all__ = [
     "USELESS_NOTICE",
     "compute_suffix_tokens",
     "count_frame_messages",
+    "count_stale_observations",
     "prune_stale_frames",
     "prune_tool_outputs",
     "shed_stale_frames",
@@ -446,35 +447,70 @@ def prune_tool_outputs(
     return list(messages), changed
 
 
+def _is_stale_observation(message: Message) -> bool:
+    """An observation turn the shed may remove: it carries a frame, or the
+    notice a frame prune left in a frame's place.
+
+    The pruned form matters more than the framed one. ``run_compaction_pass``
+    prunes frames to ``keep_recent_frames`` BEFORE a caller can shed, so the
+    front of the kept tail is always pruned notices, never images; a shed that
+    stopped at the first frameless message stopped before it began (review
+    round 3, M3). A plain text-only turn (no frame, no notice) is not stale in
+    this sense — a text-only benchmark has nothing here to shed, and its
+    window is the summary's problem, not deletion's.
+    """
+    if _has_frame(message):
+        return True
+    return any(
+        isinstance(block, TextContent) and block.text == STALE_FRAME_NOTICE
+        for block in message.content
+    )
+
+
+def count_stale_observations(messages: Sequence[Message]) -> int:
+    """How many observation turns :func:`shed_stale_frames` could shed
+    (framed or pruned-to-notice), the unit its ``limit`` is counted in.
+
+    A compaction marker is excluded even when it carries frames (a snapcompact
+    replay does): the shed never removes one, so counting it would hand a
+    caller a ``limit`` one too high — the first shed request would then be
+    for the count the tail already has, remove nothing, and read as "nothing
+    left to shed" (the exact miscount that made the client's shed a no-op).
+    """
+    return sum(
+        1 for message in messages if _is_stale_observation(message) and not marker_exists([message])
+    )
+
+
 def shed_stale_frames(messages: Sequence[Message], *, limit: int) -> tuple[list[Message], int]:
     """Remove whole stale observation turns, oldest first, from the FRONT of
-    the kept tail so its frame count is at most ``limit``.
+    the kept tail so at most ``limit`` stale observations remain.
 
-    "Oldest first" means the stalest messages (all the way to the head, when
-    the head is itself stale), never the recent frames a screen-driving
-    surface actually acts on. A removed observation's assistant reply goes
-    with it: both messages carry the turn's frame-billing cost (the reply is
-    re-billed inside the next frame's visual tokens), and a reply that
-    answers an observation no longer visible is a decision made about a
-    screen the model cannot see.
+    A stale observation is one that carries a frame OR the notice a frame
+    prune left behind (:func:`_is_stale_observation`) — the shed operates on
+    TURNS, not on the presence of an image, because by the time a caller
+    sheds, the oldest turns have already been pruned to notices and are the
+    stalest thing in the tail. "Oldest first" means those, never the recent
+    frames a screen-driving surface actually acts on. A removed observation's
+    assistant reply goes with it: a reply that answers an observation no
+    longer visible is a decision made about a screen the model cannot see.
 
-    Never removes the current observation (the last message, frame or not —
-    without it the request has no question), and stops short of a compaction
-    marker in the kept tail: content already summarised must not be deleted
-    twice. Returns ``(messages, removed)``; the survivors are reused by
-    identity, same as :func:`prune_stale_frames`.
+    Never removes the current observation (the last message — without it the
+    request has no question), and stops short of a compaction marker in the
+    kept tail: content already summarised must not be deleted twice. Returns
+    ``(messages, removed)``; the survivors are reused by identity, same as
+    :func:`prune_stale_frames`.
     """
     if limit < 0:
         raise ValueError("limit must be non-negative")
     head = 0
     for index, message in enumerate(messages):
-        payload = message.provider_payload
-        if isinstance(payload, dict) and marker_exists([message]):
+        if marker_exists([message]):
             head = index + 1
     tail = list(messages[head:])
-    while tail and count_frame_messages(tail) > limit:
+    while tail and count_stale_observations(tail) > limit:
         observation, assistant = tail[0], (tail[1] if len(tail) > 1 else None)
-        if not _has_frame(observation):
+        if not _is_stale_observation(observation):
             break
         # Keeping the assistant while shedding its observation would leave a
         # decision the model can no longer see the screen for; shed the pair

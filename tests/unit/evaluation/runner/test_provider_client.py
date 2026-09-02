@@ -1016,6 +1016,98 @@ async def test_boundedness_tight_window_stays_under_with_a_priced_shed(tmp_path:
 
 
 @pytest.mark.asyncio
+async def test_shed_actually_sheds_and_a_mid_size_window_runs_to_the_end(tmp_path: Path) -> None:
+    """The reviewer's 64k probe (round 3, M3): with the shed dead, this drive
+    refused at turn 23 with 17 stale turns still in the prefix that shedding
+    would have fit (48,612 priced against a 40,960 band). A working shed keeps
+    the episode going for all 48 turns, sheds real turns (``messages_after <
+    messages_before`` on a ``CompactionRecord``), keeps every request within
+    the window, and keeps rebuilds sparse. A shed replaced by ``return False,
+    0`` fails this test at the refusal."""
+
+    from local_operator.compaction.thresholds import CompactionSettings
+
+    class FaithfulStream:
+        def __init__(self) -> None:
+            from local_operator.compaction.tokens import IMAGE_TOKEN_ESTIMATE
+
+            # The reviewer's probe billed 5,000/frame; the client prices the
+            # unknown "provider" family at 3,293, so the fake bills ABOVE what
+            # the client predicts and the window bound is the harder test.
+            self.per_image = 5_000 - IMAGE_TOKEN_ESTIMATE
+            self.requests: list[Any] = []
+            self.priced: list[int] = []
+
+        def __call__(self, request: Any, signal: Any) -> AsyncIterator[Any]:
+            from local_operator.compaction.tokens import estimate_messages_tokens
+
+            images = sum(
+                1
+                for message in request.messages
+                for block in message.content
+                if block.type == "image"
+            )
+            priced = estimate_messages_tokens(request.messages) + images * self.per_image
+            self.priced.append(priced)
+            self.requests.append(request)
+            oid = next(
+                line.split(": ", 1)[1]
+                for line in request.messages[-1].content[0].text.splitlines()
+                if line.startswith("Observation ID: ")
+            )
+            text = json.dumps(
+                {"actions": [{"kind": "wait", "observation_id": oid, "duration_ms": 1}]}
+            )
+            usage = Usage(input_tokens=10, output_tokens=5, usd_cost=0.001, context_tokens=priced)
+
+            async def events() -> AsyncIterator[Any]:
+                yield StreamTextDelta(delta=text)
+                yield StreamEndEvent(stop_reason="stop", usage=usage)
+
+            return events()
+
+    window = 64_000
+    stream = FaithfulStream()
+    spec = ModelSpec(provider="provider", model_id="model", context_window=window)
+    client = ProviderModelClient(
+        stream,
+        route=ROUTE,
+        model_spec=spec,
+        artifact_root=tmp_path,
+        compaction=CompactionSettings(keep_recent_tokens=20_000),
+    )
+
+    history: list[EpisodeTurn] = []
+    records = []
+    for sequence in range(48):
+        current = _framed_observation(tmp_path, sequence, text=f"screen {sequence} " + "x " * 900)
+        history.append(EpisodeTurn(observation=current))
+        decision = await client.decide(current, tuple(history))
+        if decision.compaction is not None:
+            records.append(decision.compaction)
+        history[-1] = history[-1].model_copy(update={"batch": decision.action_batch})
+
+    # Ran to the end: no premature refusal.
+    assert len(stream.requests) == 48
+    # The shed removed real turns on at least one threshold pass.
+    shed = [r for r in records if r.messages_after < r.messages_before]
+    assert shed, [(r.strategy, r.messages_before, r.messages_after) for r in records]
+    peak = max(stream.priced)
+    assert peak <= window, f"priced context exceeded the window: {peak} ({peak / window:.2f}x)"
+    rebuilds = [
+        index
+        for index in range(1, len(stream.requests))
+        if not all(
+            a is b
+            for a, b in zip(stream.requests[index - 1].messages, stream.requests[index].messages)
+        )
+    ]
+    gaps = [b - a for a, b in zip(rebuilds, rebuilds[1:])]
+    assert len(rebuilds) <= 16, rebuilds
+    assert max(gaps) >= 3, (rebuilds, gaps)
+
+
+@pytest.mark.asyncio
 async def test_frameless_benchmark_stays_bounded_with_no_frames_to_shed(tmp_path: Path) -> None:
     """A text-only benchmark (no ImageContent ever) has no frames for the shed or the
     cadence to fire on; with the stall latch removed, the threshold trigger is the only

@@ -429,3 +429,46 @@ def test_shed_stale_frames_stops_at_a_compaction_marker_and_at_a_frameless_prefi
 
     with pytest.raises(ValueError):
         shed_stale_frames(messages, limit=-1)
+
+
+def test_shed_stale_frames_treats_pruned_notices_as_stale_turns() -> None:
+    """The shed operates on TURNS, not on the presence of an image: by the
+    time a caller sheds, ``run_compaction_pass`` has already pruned the oldest
+    frames to notices, so the tail front is frameless and a shed that stopped
+    at the first frameless message never began (review round 3, M3)."""
+
+    from local_operator.compaction.marker import COMPACTION_MARKER_TYPE
+    from local_operator.compaction.pruning import (
+        count_stale_observations,
+        shed_stale_frames,
+    )
+
+    def pruned(index: int) -> Message:
+        return Message(
+            role="user",
+            content=[TextContent(text=f"step {index}"), TextContent(text=STALE_FRAME_NOTICE)],
+        )
+
+    # A snapcompact marker carries frames of its own; it is never shed and
+    # must not be counted, or the caller's first limit removes nothing.
+    marker = _frame_turn("<previous-context-summary>...")
+    marker.provider_payload = {COMPACTION_MARKER_TYPE: {"summary": "..."}}
+    messages = [
+        marker,
+        pruned(1),
+        Message.assistant("a1"),
+        pruned(2),
+        Message.assistant("a2"),
+        _frame_turn("t3"),
+    ]
+    assert count_stale_observations(messages) == 3
+
+    out, removed = shed_stale_frames(messages, limit=2)
+    assert removed == 2
+    assert out[0] is marker
+    assert [_texts(m)[0] for m in out[1:]] == ["step 2", "a2", "t3"]
+
+    out, removed = shed_stale_frames(messages, limit=0)
+    # Both pruned turns went; the current framed observation never does.
+    assert removed == 4
+    assert [_texts(m)[0] for m in out] == ["<previous-context-summary>...", "t3"]
