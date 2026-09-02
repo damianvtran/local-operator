@@ -204,24 +204,75 @@ PASTE_READING_NOTICE_MIN_S = 0.4
 _PATH_SEGMENT = re.compile(r"^(?:~|\.{0,2}/|/)")
 
 
-#: One attachment marker. The number is the key into ``Editor._attachments``;
-#: the tail (``, 1568x200``) is a label for the user and is matched loosely so
-#: changing it later cannot orphan every marker already in a draft.
+#: The composer's row budget - `Editor { max-height: 8 }`
+#: (local_operator.tcss:441-444), which is the ONLY height constraint on the
+#: field. Read from the tcss rather than invented, so a layout change that
+#: reserves a row moves the threshold with it instead of leaving a magic number
+#: silently out of agreement with the stylesheet.
+COMPOSER_ROWS = 8
+
+#: Collapse only when a paste overruns the field by enough that scrolling back
+#: is the only way to see the draft. At 1x, a 9-line snippet pasted to be
+#: EDITED would collapse, and the expand action would become routine - which is
+#: the signal that the default is wrong. 2.5x leaves short snippets alone and
+#: still catches the logs and diffs this exists for.
+COLLAPSE_ROWS = COMPOSER_ROWS * 5 // 2
+
+#: How many rows the PASTE ITSELF must occupy before it is eligible at all.
+#:
+#: The prospective total is the right question ("does the draft still fit?") but
+#: it is not sufficient, because it says nothing about WHICH text overflowed.
+#: Once a draft is already past the budget every subsequent paste overruns it,
+#: so a two-character paste into a 20-row draft was chipped: the composer GREW
+#: by seventeen characters and hid two characters of visible text behind a
+#: marker naming them. It reproduced one keystroke after the escape hatch, too -
+#: expand a 300-line paste, paste one word, and that word collapsed (review
+#: round 1, MAJOR 1).
+#:
+#: Half the field is the floor because that is the smallest paste that can
+#: plausibly be what pushed the draft out of view. Below it the draft was
+#: already too tall on its own, and chipping the newcomer hides the wrong text
+#: while making the buffer longer than leaving it alone would have.
+MIN_PASTE_ROWS = COMPOSER_ROWS // 2
+
+
+#: One attachment marker, of EITHER payload shape. The number is the key into
+#: ``Editor._attachments``; the tail (``, 1568x200``, ``, 240 lines``) is a
+#: label for the user and is matched loosely so changing it later cannot orphan
+#: every marker already in a draft.
 #:
 #: Also the ATOMIC unit for editing: backspace and delete take the whole marker
 #: rather than a bracket, because a half-eaten ``[Image #2, 1568x20`` is neither
 #: text the user meant nor a reference anything can resolve.
 #:
-#: The tail excludes ``[`` as well as ``]``: the app only ever writes ``WxH``
-#: there, so a bracket inside one can only mean the tail ran past its own
-#: marker into the next. Without that, deleting the closing bracket of a stale
-#: marker sitting in front of a live one merged the pair into a single match
-#: whose start is not where the live marker begins - the chip vanished for ten
-#: keystrokes of an ordinary cleanup while the image stayed attached and sent,
-#: and the live marker dropped out of the atomic set (design round 20, D12).
-#: It also states the assumption `cite`'s ``str.find`` already relies on: a
-#: marker cannot contain another marker.
-IMAGE_MARKER = re.compile(r"\[Image #([1-9]\d*)(?:,[^\]\n\[]*)?\]")
+#: The tail excludes ``[`` as well as ``]``: the app only ever writes ``WxH`` or
+#: a paste size there, so a bracket inside one can only mean the tail ran past
+#: its own marker into the next. Without that, deleting the closing bracket of a
+#: stale marker sitting in front of a live one merged the pair into a single
+#: match whose start is not where the live marker begins - the chip vanished for
+#: ten keystrokes of an ordinary cleanup while the image stayed attached and
+#: sent, and the live marker dropped out of the atomic set (design round 20,
+#: D12). It holds across the MIXED pair too - ``[Image #1, 10x20][Paste #2, 12
+#: lines]`` is two matches, never one - which is the same property re-armed by a
+#: second payload type. It also states the assumption `cite`'s ``str.find``
+#: already relies on: a marker cannot contain another marker.
+#:
+#: NAMED groups, not positional. ``match.group(1)`` meant "the number" at every
+#: site in this file and one in ``app.py``, and adding the ``Image|Paste``
+#: alternation would have silently made it mean "the kind" at all of them - a
+#: rewrite with no type error and no failing test until an index came back as
+#: ``'Image'``. Naming the groups makes the conversion mechanical instead.
+ATTACHMENT_MARKER = re.compile(r"\[(?P<kind>Image|Paste) #(?P<index>[1-9]\d*)(?:,[^\]\n\[]*)?\]")
+
+
+#: The IMAGE half of the grammar, for the one consumer that must keep counting
+#: images ONLY: ``_append_image_blocks`` labels transcript image blocks from the
+#: prompt's citations (app.py:12391-12393), and a ``[Paste #2]`` between two
+#: image markers would shift every label one to the right - the positional bug
+#: review round 2 (F9) already fixed once. Everything else in this file uses
+#: :data:`ATTACHMENT_MARKER`, because everything else keys on the NUMBER and the
+#: number space is shared.
+IMAGE_MARKER = re.compile(r"\[Image #(?P<index>[1-9]\d*)(?:,[^\]\n\[]*)?\]")
 
 
 #: Appended to a marker whose image was downscaled on the way in. One glyph,
@@ -234,7 +285,7 @@ IMAGE_MARKER = re.compile(r"\[Image #([1-9]\d*)(?:,[^\]\n\[]*)?\]")
 #:
 #: Chosen over spending width on both sizes: the marker sits inline in the
 #: user's prompt text and is an atomic editing unit, so it has to stay short.
-#: ``IMAGE_MARKER`` already matches it, since the tail is matched loosely for
+#: ``ATTACHMENT_MARKER`` already matches it, since the tail is matched loosely for
 #: exactly this kind of later change.
 RESIZED_MARK = " ↓"
 
@@ -326,16 +377,181 @@ def _bounded_dimensions(payload: bytes, info: ImageInfo) -> str:
     return bounded.dimensions
 
 
+#: How many lines of a paste are SAMPLED to decide whether it is a file drag.
+#:
+#: A pure COST bound, and nothing else. It caps the shlex parse on the keystroke
+#: that pasted, the same job the 4096-character bound does in
+#: :func:`_pasted_paths`, without which a 20,000-line paste would be tokenised
+#: inside the key handler.
+#:
+#: It must never decide the VERDICT. An earlier revision returned "not a drag"
+#: past this length, which flipped the guard from protective to permissive at
+#: exactly the wrong boundary: 256 files stayed readable and 257 collapsed, so
+#: one `Cmd+A` in a folder of 300 refused files hid the very paths the user
+#: needed in order to see which one was rejected - verbatim the D5 failure this
+#: guard exists to prevent (review round 2, MAJOR). A cost bound that changes
+#: the answer is not a cost bound.
+#:
+#: Sampling is sound here because the shapes this separates are homogeneous:
+#: a file manager hands over a list of paths and a compiler hands over a list of
+#: diagnostics, so the first few hundred lines are representative of the rest.
+#: The failure it admits is a paste whose first 256 lines are all whole paths
+#: and whose 257th is not, which stays raw - and staying raw is the safe
+#: direction, being what every paste did before this feature existed.
+_MAX_DRAG_LINES = 256
+
+
+def _all_segments_are_paths(line: str) -> bool:
+    """Is every whitespace-separated segment of ``line`` a WHOLE path?
+
+    THE one definition of "this text is paths", shared by the two callers that
+    have to agree about it: :func:`_pasted_paths`, which turns a drag into
+    attachments, and :func:`_looks_path_shaped`, which refuses to collapse one.
+
+    Extracted because the two had grown their own copies of it, sharing only
+    ``_PATH_SEGMENT``. That is precisely the drift
+    :func:`_looks_path_shaped`'s own docstring warned about - "two notions of
+    'this paste is paths' is how the refused-drag case would drift back open" -
+    and it is the root cause of the D5 boundary defect above (review round 2).
+    One predicate, so the pair cannot disagree.
+
+    ``shlex`` does the splitting because it is the grammar terminals quote for:
+    a dropped file arrives shell-quoted with spaces backslash-escaped, and
+    hand-rolled unescaping is how one path with a space becomes two that do not
+    exist. Unbalanced quotes mean prose, not a path list.
+
+    Both words in "whole path" are load-bearing. Asking only that a line OPEN
+    with a separator is true of most build output, which left a 500-line mypy
+    log (``/usr/local/lib/pkg/mod.py:12: error: …``) refusing to collapse -
+    "paste 500 log lines" being the case this feature exists for (round 1,
+    MAJOR 2). ``error:`` is not a path, so that line is not a path list.
+    """
+    try:
+        segments = shlex.split(line)
+    except ValueError:
+        return False
+    return bool(segments) and all(_PATH_SEGMENT.match(segment) for segment in segments)
+
+
+def _looks_path_shaped(pasted: str) -> bool:
+    """Could ``pasted`` be a drag of files, as opposed to tool output?
+
+    The collapse guard for design D5: :meth:`_attach_pasted_images` returns
+    ``None`` both for "not an image" and for "refused", so a multi-file drag
+    where one file is a PDF lands in the text branch, and collapsing it would
+    hide the very paths the user needs in order to see what went wrong. It holds
+    at ANY size - a 300-file drag is as much a refused drag as a 40-file one,
+    and the design's position is that it stays readable whatever its length.
+
+    Deliberately NOT :func:`_pasted_paths` itself, whose 4096-character bound is
+    right for its own job but wrong here, because a paste only reaches this
+    predicate when it is LARGE: a 40-file drag of ordinary macOS paths is 5-6 KB
+    and comes back from that helper as "not paths", which collapsed the exact
+    gesture D5 protects. The two now share the PREDICATE
+    (:func:`_all_segments_are_paths`) while keeping their own bounds, which is
+    the arrangement that stops them drifting apart again.
+
+    THE PAYLOAD CLASS THIS PUTS OUT OF SCOPE, named because someone will paste
+    one, notice it did not collapse, and go looking for the bug: a listing of
+    BARE paths - ``find`` output, ``ls -1``, ``git ls-files``. It is
+    byte-identical, line by line, to a drag of the same files. There is nothing
+    outside the text to key on either: :meth:`_attach_pasted_images` returns
+    ``None`` for "not images" and for "refused" alike (all-or-nothing across the
+    paste), so a refused 300-file drag and a ``find /`` dump arrive here by the
+    identical route carrying identical bytes. No route flag, no clipboard
+    signal. Size was the only discriminator available, and the round-2 MAJOR is
+    exactly the finding that size must not be allowed to decide it.
+
+    So the tie is broken by D5, and the failure modes are asymmetric enough that
+    it is not close. Collapsing a refused drag hides the very information the
+    user needs to diagnose a failure at the moment they hit it - they cannot
+    even see which file was rejected. Declining to collapse a ``find`` dump
+    leaves them with the composer they had before this feature existed: nothing
+    hidden, nothing lost, and no need for the expand action because nothing
+    collapsed. One is a NEW HARM this feature would introduce; the other is a
+    benefit it declines to extend, which decides it independently of which
+    paste is more common.
+
+    Path-PREFIXED tool output is unaffected and still collapses - a mypy line,
+    a compiler warning, a stack frame - because ``error:`` is not a path, so the
+    line is not a path list. That is the case the feature exists for.
+    """
+    sampled = 0
+    for raw in pasted.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if not _all_segments_are_paths(line):
+            return False
+        sampled += 1
+        if sampled >= _MAX_DRAG_LINES:
+            # Every line looked at is a whole path. Stopping here bounds the
+            # cost WITHOUT changing the verdict - see `_MAX_DRAG_LINES`.
+            return True
+    return sampled > 0
+
+
+def _paste_label(payload: str) -> str:
+    """The marker's tail: ``240 lines``, or ``1240 chars`` for a single line.
+
+    The same job the image marker's ``1568x200`` does - make the receipt
+    checkable at a glance, so a user can tell one paste from another and see
+    that the big one landed once rather than twice. A bare ``[Paste #3]`` could
+    be anything.
+
+    Lines for a multi-line paste because that is what the user watched vanish
+    off the top of the field; characters for a single long line, where a line
+    count of 1 says nothing at all.
+    """
+    lines = payload.count("\n") + 1
+    if lines > 1:
+        return f"{lines} lines"
+    return f"{len(payload)} chars"
+
+
+def strip_paste_citations(text: str, attachments: Mapping[int, Marked]) -> str:
+    """``text`` with the app's own citations of collapsed pastes REMOVED.
+
+    The sibling of :func:`expand_pastes`, over the same spans and by the same
+    predicate: :func:`cite` returns the ONE citation per number that the app
+    itself wrote, which is exactly the set ``_marker_cells`` paints. So a
+    hand-typed ``[Paste #1, 240 lines]`` sitting in the same text is prose here
+    too - it does not paint, it does not expand, and it is not stripped.
+
+    For text on its way INTO the prompt history, where the payload cannot
+    follow it (see :meth:`Editor._navigate_history`). Descending for the reason
+    :func:`expand_pastes` is: each removal invalidates every later offset.
+
+    Takes the trailing space the marker was issued with, so
+    ``[Paste #1, 240 lines] why does this fail?`` records as
+    ``why does this fail?`` rather than with a leading gap.
+    """
+    spans = [
+        span
+        for index, pasted in attachments.items()
+        if isinstance(pasted, PastedText) and (span := cite(text, index, pasted)) is not None
+    ]
+    for start, end in sorted(spans, reverse=True):
+        if text[end : end + 1] == " ":
+            end += 1
+        text = text[:start] + text[end:]
+    return text
+
+
 def _marker_indices(text: str) -> list[int]:
     """Every marker number in ``text``, in order, without duplicates.
 
     One walk of the buffer, shared by everything that has to agree about which
     markers exist. Two implementations of "the markers in this text" is exactly
     what let a restore rebind images one marker left (review round 18).
+
+    Both payload shapes, because they share one number space: the counter this
+    feeds must never hand out a number an ``[Image #N]`` is already standing on,
+    and vice versa.
     """
     indices: list[int] = []
-    for match in IMAGE_MARKER.finditer(text):
-        index = int(match.group(1))
+    for match in ATTACHMENT_MARKER.finditer(text):
+        index = int(match.group("index"))
         if index not in indices:
             indices.append(index)
     return indices
@@ -365,7 +581,45 @@ class Attachment:
     marker: str
 
 
-def cite(text: str, index: int, attachment: Attachment) -> tuple[int, int] | None:
+@dataclass(frozen=True)
+class PastedText:
+    """A collapsed paste, and the marker text the app wrote to cite it.
+
+    The text sibling of :class:`Attachment`, and deliberately a SIBLING rather
+    than an ``image: ImageContent | None`` field on it: one dataclass carrying
+    both would make ``both None`` and ``both set`` representable in the exact
+    type whose invariants this feature has repeatedly got wrong.
+
+    The marker is kept here for the same reason it is kept on ``Attachment`` -
+    the NUMBER alone cannot say which citation is the app's own - and so that
+    :func:`cite` needs no branch: both shapes carry ``.marker``, which is the
+    only field it reads.
+    """
+
+    #: The payload, verbatim, as the model must receive it. Newlines are
+    #: normalised at capture (see :meth:`Editor._collapse_paste`); nothing else
+    #: about it is touched.
+    text: str
+    #: Exactly the text issued at :meth:`Editor._collapse_paste`, e.g.
+    #: ``[Paste #1, 240 lines]``.
+    marker: str
+
+
+#: One map, two payload shapes. Everything that keys on the marker NUMBER - the
+#: counter, the chip, the atomic-token gate, the release rule, the aside stash,
+#: the compaction hold, ``EditorSubmitted``, ``/reload`` - is unchanged and
+#: payload-agnostic.
+#:
+#: A SECOND MAP (``_pastes: dict[int, str]``) is the trap this feature has
+#: fallen into three times over (see :class:`Attachment`, and rounds 18/19):
+#: ``_sync_next_marker`` derives the counter from the buffer, but
+#: ``adopt_attachments``, the aside stash, the compaction hold and
+#: ``EditorSubmitted.attachments`` would each need a second parameter threaded
+#: through, and every one of those is a round trip an earlier round broke.
+Marked = Attachment | PastedText
+
+
+def cite(text: str, index: int, attachment: Marked) -> tuple[int, int] | None:
     """The span of the APP's citation of ``index`` in ``text``, or ``None``.
 
     A SPAN, not an offset, because the citation in the buffer is not always the
@@ -384,14 +638,14 @@ def cite(text: str, index: int, attachment: Attachment) -> tuple[int, int] | Non
     exact = text.find(attachment.marker)
     if exact != -1:
         return exact, exact + len(attachment.marker)
-    for match in IMAGE_MARKER.finditer(text):
-        if int(match.group(1)) == index:
+    for match in ATTACHMENT_MARKER.finditer(text):
+        if int(match.group("index")) == index:
             return match.span()
     return None
 
 
-def resolve_markers(text: str, attachments: Mapping[int, Attachment]) -> list[ImageContent]:
-    """The attachments ``text`` cites, in the order it cites them.
+def resolve_markers(text: str, attachments: Mapping[int, Marked]) -> list[ImageContent]:
+    """The IMAGES ``text`` cites, in the order it cites them.
 
     THE one place a marker becomes an image, shared by the composer and by any
     caller holding a stashed prompt. A second implementation of this walk is
@@ -401,13 +655,54 @@ def resolve_markers(text: str, attachments: Mapping[int, Attachment]) -> list[Im
     Ordered by where the APP's citation sits, which is the same order and the
     same set the chip paints - "what is chipped is what is sent" is one
     predicate, not two that happen to agree.
+
+    A collapsed paste is skipped, not resolved to anything: it is not an image,
+    and its payload reaches the model through :func:`expand_pastes` on the text
+    itself. Filtered on the PAYLOAD TYPE rather than on the marker's ``kind``,
+    so this stays one predicate - a map entry either holds an image or it does
+    not, whatever its marker happens to read.
     """
     cited = [
-        (span[0], index)
+        (span[0], attachment.image)
         for index, attachment in attachments.items()
-        if (span := cite(text, index, attachment)) is not None
+        if isinstance(attachment, Attachment)
+        and (span := cite(text, index, attachment)) is not None
     ]
-    return [attachments[index].image for _, index in sorted(cited)]
+    return [image for _, image in sorted(cited, key=lambda item: item[0])]
+
+
+def expand_pastes(text: str, attachments: Mapping[int, Marked]) -> str:
+    """``text`` with every APP citation of a collapsed paste replaced by its payload.
+
+    The inverse of the collapse, and the last thing that happens to a prompt
+    before it is sent. Two properties, both load-bearing.
+
+    **Spliced by :func:`cite`'s span, not substituted.** Expansion obeys the
+    same predicate as the chip, the atomic-token gate and
+    :func:`resolve_markers` - what is chipped is what is sent. A hand-typed
+    ``[Paste #1, 240 lines]``, or a prompt copied out of the transcript and
+    pasted back, is PROSE: it does not paint, it does not delete atomically, and
+    it must not expand either (rounds 16-19, D1/D4).
+
+    **Never ``re.sub`` with a string template.** A template interprets ``\\1``
+    and ``\\g<...>`` found in the PASTED CONTENT, so a diff or a regex in the
+    payload would be silently rewritten on its way to the model - a corruption
+    with no error and no frame to notice it on. Splicing by span cannot express
+    that bug; the reference implementation hit it and fixed it with a function
+    replacer (omp editor.ts:2070-2077).
+
+    DESCENDING, so each splice lands before any span it has not yet used: an
+    ascending walk invalidates every later offset the moment the first payload
+    (longer than its marker, always) is written in.
+    """
+    spans = [
+        (span, pasted.text)
+        for index, pasted in attachments.items()
+        if isinstance(pasted, PastedText) and (span := cite(text, index, pasted)) is not None
+    ]
+    for (start, end), payload in sorted(spans, reverse=True):
+        text = text[:start] + payload + text[end:]
+    return text
 
 
 def _marker_runs(
@@ -469,17 +764,15 @@ def _pasted_paths(pasted: str) -> list[str]:
         line = line.strip()
         if not line:
             continue
-        try:
-            parsed = shlex.split(line)
-        except ValueError:
-            # Unbalanced quotes: prose, not a path list.
+        # ONE predicate with the collapse guard - see
+        # :func:`_all_segments_are_paths`. Re-split rather than threaded back
+        # out of it: this is a bounded 4096-character payload, so the second
+        # tokenise is free, and a shared *rule* with separate bounds is what
+        # keeps the two callers from drifting (round 2, MINOR).
+        if not _all_segments_are_paths(line):
             return []
-        if not parsed:
-            return []
-        segments.extend(parsed)
+        segments.extend(shlex.split(line))
     if not segments:
-        return []
-    if not all(_PATH_SEGMENT.match(segment) for segment in segments):
         return []
     return [str(Path(segment).expanduser()) for segment in segments]
 
@@ -491,7 +784,7 @@ class EditorSubmitted(Message):
         self,
         text: str,
         images: list[ImageContent] | None = None,
-        attachments: Mapping[int, Attachment] | None = None,
+        attachments: Mapping[int, Marked] | None = None,
         *,
         shell: bool = False,
     ) -> None:
@@ -1055,6 +1348,27 @@ class Editor(TextArea):
         Binding("alt+b", "cursor_word_left", "Cursor word left", show=False),
         Binding("alt+f", "cursor_word_right", "Cursor word right", show=False),
         Binding("ctrl+v,super+v", "system_paste", "Paste from the system clipboard", show=False),
+        # The inverse of the collapse: put a collapsed paste's text back in the
+        # buffer. This is the whole reason the feature ships with no setting -
+        # "I wanted that paste raw" is a per-PASTE want, not a per-user one, and
+        # a global boolean cannot express it. So this key has to work.
+        #
+        # `ctrl+o` audited against textual 8.2.8's RESOLVED binding map in a
+        # live pilot, the way the `ctrl+home`/`ctrl+end` note in
+        # `OperatorApp.BINDINGS` documents, rather than assumed: the editor
+        # instance answers `ctrl+e` with `cursor_line_end` (TextArea binds
+        # `end,ctrl+e`) and `ctrl+v` with `system_paste`, while `ctrl+o` is
+        # bound by nothing on the editor, the Screen (`tab`, `shift+tab`,
+        # `ctrl+c`, `super+c`) or the App (`ctrl+q`, `ctrl+c`, `ctrl+p`). The
+        # other free chords were rejected on meaning, not availability:
+        # `ctrl+r` is reverse-history-search everywhere and this composer HAS
+        # history, `ctrl+j` is LF and risks aliasing Enter, `ctrl+s` reads as
+        # save. `ctrl+t/g/b/f/l` are already claimed by the app.
+        #
+        # A binding rather than an `_on_key` branch, by the rule recorded above
+        # for `ctrl+v`: nothing in `_on_key` inspects this key and no picker
+        # changes what it means, so the binding is the whole behaviour.
+        Binding("ctrl+o", "expand_paste", "Expand the paste at the cursor", show=False),
     ]
 
     #: The CSI-modifier spelling of every vertical option chord, mapped to the
@@ -1169,8 +1483,8 @@ class Editor(TextArea):
     #: colours sit in the stylesheet beside every other composer colour and
     #: follow the theme's ``$lo-*`` variables through a theme switch.
     COMPONENT_CLASSES = TextArea.COMPONENT_CLASSES | {
-        "text-area--image-marker",
-        "text-area--image-marker-selected",
+        "text-area--attachment-marker",
+        "text-area--attachment-marker-selected",
         # Slash-command syntax highlighting (see :meth:`_paint_slash`). Component
         # classes rather than Python hexes for the same reason the chip uses
         # them: the colours live in the stylesheet beside every other composer
@@ -1314,7 +1628,7 @@ class Editor(TextArea):
         #: and its attachments, saved with it. Kept together because they are
         #: one unsent message: restoring the text without these resolves its
         #: markers to nothing, and restoring neither loses the user's work.
-        self._draft_attachments: dict[int, Attachment] = {}
+        self._draft_attachments: dict[int, Marked] = {}
         self._on_model_chosen: Callable[[ModelRow], None] | None = None
         #: Attachments pasted into the current draft, keyed by the number in
         #: their ``[Image #N, WxH]`` marker. A DICT rather than a list because
@@ -1323,7 +1637,7 @@ class Editor(TextArea):
         #: position. A number in use is never handed out twice, so nothing
         #: renumbers under the cursor; a number the draft has stopped citing
         #: IS reused, which the next comment explains.
-        self._attachments: dict[int, Attachment] = {}
+        self._attachments: dict[int, Marked] = {}
         #: Next marker number to hand out. Fully DERIVED — `_sync_next_marker`
         #: recomputes it from the buffer immediately before every issuance, so
         #: the field only carries the value between those two lines and the
@@ -2618,7 +2932,7 @@ class Editor(TextArea):
         """
         return resolve_markers(self.text, self._attachments)
 
-    def attachments(self) -> dict[int, Attachment]:
+    def attachments(self) -> dict[int, Marked]:
         """The index→image map, for a caller that will hand the draft back.
 
         A COPY of the mapping, not a list, because identity is the thing that
@@ -2629,7 +2943,7 @@ class Editor(TextArea):
         """
         return dict(self._attachments)
 
-    def adopt_attachments(self, attachments: Mapping[int, Attachment]) -> None:
+    def adopt_attachments(self, attachments: Mapping[int, Marked]) -> None:
         """Restore an index→image map onto the buffer's markers.
 
         For handing a prompt BACK — a draft the aside borrowed, or one restored
@@ -2701,7 +3015,7 @@ class Editor(TextArea):
             # Every keystroke lands here, and a marker always opens with a
             # bracket. `_marker_cells` keeps the same guard for the same reason.
             return None
-        for match in IMAGE_MARKER.finditer(line):
+        for match in ATTACHMENT_MARKER.finditer(line):
             start, end = match.span()
             if not (
                 start < column < end
@@ -2733,7 +3047,7 @@ class Editor(TextArea):
         if span is None:
             return False
         start, end = span
-        match = IMAGE_MARKER.match(self.document.get_line(row)[start:end])
+        match = ATTACHMENT_MARKER.match(self.document.get_line(row)[start:end])
         self.delete((row, start), (row, end), maintain_selection_offset=False)
         # The attachment goes with its marker. This is the whole contract:
         # what the text no longer cites is no longer sent, so removing the
@@ -2762,7 +3076,7 @@ class Editor(TextArea):
         # OR when the token just deleted was the app's own marker and no copy of
         # it survives. D6's exact duplicate fails both and keeps the image.
         if match is not None:
-            self._release_deleted(int(match.group(1)), match.group(0))
+            self._release_deleted(int(match.group("index")), match.group(0))
         return True
 
     def _release_deleted(self, index: int, token: str) -> None:
@@ -2794,21 +3108,45 @@ class Editor(TextArea):
             return False
         row, column = self.selection.end
         line = self.document.get_line(row)
+        span = self._marker_span_past_spaces(row, column, before=before)
+        if span is None:
+            return False
+        start, end = span
+        match = ATTACHMENT_MARKER.match(line[start:end])
+        # The spaces go with it: ctrl+w removes the word AND the run it crossed.
+        self.delete((row, start), (row, column), maintain_selection_offset=False)
+        if match is not None:
+            self._release_deleted(int(match.group("index")), match.group(0))
+        return True
+
+    def _marker_span_past_spaces(
+        self, row: int, column: int, *, before: bool = True
+    ) -> tuple[int, int] | None:
+        """The marker separated from ``(row, column)`` only by spaces.
+
+        The shared reach of the two gestures that NAME a marker rather than
+        touching it: ctrl+w (:meth:`_delete_marker_past_spaces`) and the expand
+        action (:meth:`action_expand_paste`). Both are reached at the caret a
+        paste leaves - one column past the marker, on the trailing space the
+        insertion itself added - where :meth:`_marker_span` correctly finds
+        nothing because the character the caret touches is a space.
+
+        One implementation because it is one rule. Two copies of "walk back over
+        the spaces and ask again" is how the pair would drift, and this file's
+        recurring lesson is that a second walk under slightly different rules
+        cannot be relied on to agree with the first (review round 18).
+
+        Backspace and delete stay OUT of this deliberately, and the split is the
+        whole point: at that caret the character before really is a space, and
+        eating a marker instead of it would be a surprise (round 22, D13).
+        """
+        line = self.document.get_line(row)
         edge = column
         while edge > 0 and line[edge - 1] == " ":
             edge -= 1
         if edge == column:
-            return False  # no whitespace to cross; the plain check already ran
-        span = self._marker_span(row, edge, before=before)
-        if span is None:
-            return False
-        start, end = span
-        match = IMAGE_MARKER.match(line[start:end])
-        # The spaces go with it: ctrl+w removes the word AND the run it crossed.
-        self.delete((row, start), (row, column), maintain_selection_offset=False)
-        if match is not None:
-            self._release_deleted(int(match.group(1)), match.group(0))
-        return True
+            return None  # no whitespace to cross; the plain check already ran
+        return self._marker_span(row, edge, before=before)
 
     def _offset_at(self, row: int, column: int) -> int:
         """``(row, column)`` as an offset into :attr:`text`.
@@ -2910,7 +3248,7 @@ class Editor(TextArea):
             return set()
         chipped = self._first_citation_columns(row)
         edges: set[int] = set()
-        for match in IMAGE_MARKER.finditer(line):
+        for match in ATTACHMENT_MARKER.finditer(line):
             if match.start() in chipped:
                 edges.update(match.span())
         return edges
@@ -2968,7 +3306,7 @@ class Editor(TextArea):
         gutter = self.gutter_width
         cells: list[tuple[int, int, bool]] = []
         chipped = self._first_citation_columns(line_index)
-        for match in IMAGE_MARKER.finditer(line):
+        for match in ATTACHMENT_MARKER.finditer(line):
             # A chip is a claim that an image is attached here, so it is painted
             # only when the number RESOLVES, and only at the citation that
             # actually carries it. Painting from the text pattern alone drew a
@@ -3031,8 +3369,8 @@ class Editor(TextArea):
         width = strip.cell_length
         edges = sorted({0, width} | {x for start, end, _ in cells for x in (start, end)})
         styles = {
-            False: self.get_component_rich_style("text-area--image-marker"),
-            True: self.get_component_rich_style("text-area--image-marker-selected"),
+            False: self.get_component_rich_style("text-area--attachment-marker"),
+            True: self.get_component_rich_style("text-area--attachment-marker-selected"),
         }
         pieces: list[Strip] = []
         for left, piece in zip(edges, strip.divide(edges[1:])):
@@ -3381,7 +3719,7 @@ class Editor(TextArea):
           get that treatment. A word span over it selected ``Image`` alone, so
           the commonest edit after a double-click — typing over the selection —
           left ``[x #1, 1568x200]`` in the draft: that no longer matches
-          ``IMAGE_MARKER``, so :func:`resolve_markers` drops it and THE IMAGE
+          ``ATTACHMENT_MARKER``, so :func:`resolve_markers` drops it and THE IMAGE
           IS SILENTLY NOT SENT, with a corrupted token left behind that is
           neither chip nor prose (agent review round 1, R1-1). Chain 1 already
           selected the whole marker through :meth:`_on_mouse_up`; this asks the
@@ -4014,6 +4352,27 @@ class Editor(TextArea):
                 # Skipping the read also makes an ordinary indent paste cost
                 # nothing again, rather than paying a clipboard round trip an
                 # editing gesture never needed (round 2, U7).
+                #
+                # It still gets the SIZE question asked of it, though, because
+                # this guard tests emptiness and the collapse is about how much
+                # room the payload takes. Forty blank lines strip to nothing
+                # exactly like a one-tab indent does, so returning here put a
+                # 41-row payload into an eight-row field and scrolled the
+                # user's question off the top - verbatim the legibility defect
+                # this feature exists to fix, reached through the one shape of
+                # it that never asks (QA round 1, DEFECT-1).
+                #
+                # The predicate is the discriminator the payload text cannot
+                # be: an indent, a tab or a blank line is one row and falls
+                # through to Textual untouched, while only a payload that
+                # actually swamps the field is chipped. D9 is preserved by
+                # being small, not by being whitespace.
+                collapsed = self._collapse_paste(event.text)
+                if collapsed is None:
+                    return
+                event.prevent_default()
+                event.stop()
+                self._replace_selection(collapsed)
                 return
             attached = await self._attach_clipboard_image()
             if attached is None:
@@ -4024,6 +4383,16 @@ class Editor(TextArea):
             return
         attached = await self._attach_pasted_images(event.text)
         if attached is None:
+            # Not an image paste. It may still be a LARGE one, which the
+            # composer collapses to a marker for the same reason it collapses
+            # an image: eight rows of anonymous payload is not a draft the user
+            # can check before pressing Enter.
+            collapsed = self._collapse_paste(event.text)
+            if collapsed is None:
+                return
+            event.prevent_default()
+            event.stop()
+            self._replace_selection(collapsed)
             return
         event.prevent_default()
         event.stop()
@@ -4301,6 +4670,90 @@ class Editor(TextArea):
             return
         self._replace_selection(pasted)
 
+    def action_expand_paste(self) -> None:
+        """Replace the collapsed paste at the caret with its text.
+
+        The no-setting escape hatch (design §1). A user who wanted THIS paste
+        raw - a 40-line function pasted to edit two lines of it - presses one
+        key and gets it, where a global toggle would force them to choose once,
+        for every future paste, on the evidence of this one.
+
+        Scoped to the marker at the caret through :meth:`_marker_span`, the same
+        predicate backspace uses, so "the thing this key acts on" is exactly the
+        thing the chip is drawn around. An unscoped "expand everything" would
+        act on markers the user cannot see, several screens up.
+
+        The map entry goes with it. Once the text is in the buffer it IS the
+        draft: leaving the entry behind would let a later hand-typed
+        ``[Paste #N]`` splice the payload in a second time at submit.
+
+        ``SkipAction`` when there is no collapsed paste at the caret, so the key
+        keeps walking the chain instead of silently doing nothing - a
+        read-only composer and a caret in prose both fall through here.
+        """
+        if self.read_only or self.selection.start != self.selection.end:
+            raise SkipAction()
+        row, column = self.selection.end
+        # `before=False` then `before=True`: the caret may be standing at the
+        # start of the marker, inside it, or just past its end, and a user who
+        # can see the chip means the chip whichever edge they are touching.
+        span = self._marker_span(row, column, before=False) or self._marker_span(
+            row, column, before=True
+        )
+        if span is None:
+            # THE caret this key is reached from, and it was the one position
+            # that did not work. `_collapse_paste` returns `<marker> `, so the
+            # paste itself parks the caret one column past the marker, on the
+            # trailing space - and `_marker_span` asks about the character the
+            # caret is touching, which there is a space. The gesture this key
+            # exists for is "that collapsed and I did not want it to", pressed
+            # by reflex the instant after pasting, so the key did nothing at
+            # the only caret it is reached from by reflex (QA round 1,
+            # DEFECT-2). The whole no-setting recommendation rests on this key
+            # working, which is what makes an unreachable escape hatch worse
+            # than its severity looks.
+            #
+            # Crossing the space rather than widening `_marker_span`: the same
+            # split `_delete_marker_past_spaces` draws for ctrl+w (round 22,
+            # D13). Backspace and delete must NOT cross it - at that caret the
+            # character before really is a space and eating a whole marker
+            # instead would be a surprise - but a gesture that names the marker
+            # has already said it will reach across whitespace to find it.
+            span = self._marker_span_past_spaces(row, column)
+        if span is None:
+            raise SkipAction()
+        start, end = span
+        match = ATTACHMENT_MARKER.match(self.document.get_line(row)[start:end])
+        if match is None:
+            raise SkipAction()
+        index = int(match.group("index"))
+        pasted = self._attachments.get(index)
+        if not isinstance(pasted, PastedText):
+            # An image marker, or a number that resolves to nothing. There is
+            # no text to put back, and expanding an image is not a thing.
+            raise SkipAction()
+        # Dropped BEFORE the edit. `edit()` runs `_release_uncited` over the
+        # attachments this removal touches, and the entry is gone by then
+        # anyway; removing it first means there is no window in which the buffer
+        # holds the payload AND the map still offers to splice it in again.
+        del self._attachments[index]
+        self.replace(pasted.text, (row, start), (row, end), maintain_selection_offset=False)
+        self.move_cursor(self._offset_to_location(self._offset_at(row, start) + len(pasted.text)))
+
+    def _offset_to_location(self, offset: int) -> tuple[int, int]:
+        """A document offset as ``(row, column)`` - the inverse of :meth:`_offset_at`.
+
+        Walks lines rather than using ``wrapped_document``, which answers in
+        SCREEN coordinates; the caret is set in document ones.
+        """
+        separator = len(self.document.newline)
+        for row in range(self.document.line_count):
+            span = len(self.document.get_line(row)) + separator
+            if offset < span:
+                return row, offset
+            offset -= span
+        return self._end_of_buffer()
+
     def _replace_selection(self, pasted: str) -> None:
         """Put ``pasted`` at the caret, replacing a live selection if there is one.
 
@@ -4524,6 +4977,108 @@ class Editor(TextArea):
             self._attachments[index] = Attachment(image, marker)
             markers.append(marker)
         return " ".join(markers) + " "
+
+    # -- collapsing a large paste ---------------------------------------------
+    def _overflows_composer(self, pasted: str) -> bool:
+        """Would ``pasted``, spliced at the selection, overrun the field badly?
+
+        Measured as WRAPPED ROWS of the PROSPECTIVE buffer - what the composer
+        would hold after the paste - not as a line or character count. A
+        character count is width-dependent and therefore wrong at both ends:
+        the field overflows at 576 characters on an 80-column terminal and at
+        1,536 on a 200-column one, so any stored number is nearly 2x too
+        permissive on one and too eager on the other. Rows ask the question the
+        user actually has ("does my draft still fit?") and follow the tcss on
+        their own if ``max-height`` ever moves.
+
+        PROSPECTIVE, because the fragment alone is the wrong subject: six lines
+        pasted into a draft already holding twenty overflows the field just as
+        surely, and the user loses their question just the same.
+
+        SHORT-CIRCUITED, and this is the performance-critical part.
+        ``WrappedDocument`` wraps every line eagerly, so building a prospective
+        one costs a second O(total chars) pass - fine at 20k lines, wasteful on
+        a 10 MB paste. The predicate is a boolean, so the count starts from the
+        widget's own already-computed ``wrapped_document.height`` and stops the
+        moment it exceeds the budget: O(rows) on exactly the pastes where cost
+        would matter. It uses the same tab expansion ``_marker_cells`` applies,
+        so the count and the paint agree about how wide a line is.
+        """
+        width = self.wrap_width
+        if width <= 0:
+            # No soft wrap (or not yet laid out): there is no row budget to
+            # overrun, and dividing by it below would raise.
+            return False
+        # The rows already on screen. The pasted text REPLACES the selection, so
+        # a paste over a selected range is measured a little high - it cannot be
+        # measured exactly without wrapping the prospective document, which is
+        # the O(n) pass this avoids, and erring high only means a paste that
+        # would have exactly filled the field collapses.
+        rows = self.wrapped_document.height
+        # The paste's OWN rows, tracked separately. Two conditions have to hold
+        # together - see :data:`MIN_PASTE_ROWS` - and the running total cannot
+        # answer the second one because it has the draft baked into it.
+        pasted_rows = 0
+        for line in pasted.splitlines() or [pasted]:
+            # `or 1`: an empty line still occupies one row.
+            cells = cell_len(expand_tabs_inline(line, self.indent_width))
+            pasted_rows += max(1, -(-cells // width))
+            rows += max(1, -(-cells // width))
+            if rows > COLLAPSE_ROWS and pasted_rows >= MIN_PASTE_ROWS:
+                # Still short-circuits on the pastes where cost matters: the
+                # floor is reached within the first few lines of any paste big
+                # enough to be worth collapsing, so this exits early for exactly
+                # the same inputs it did before.
+                return True
+        return False
+
+    def _collapse_paste(self, pasted: str) -> str | None:
+        """Collapse a large text paste to a marker, or ``None`` to insert it raw.
+
+        ``None`` is the common case and must stay cheap: an ordinary paste falls
+        through to ``TextArea``'s own handling, byte for byte as before.
+
+        NEVER collapses a PATH-SHAPED paste, whatever its size. That branch is
+        the dangerous one: :meth:`_attach_pasted_images` returns ``None`` both
+        for "not an image" and for "refused", so a 40-file drag where one file
+        is a PDF lands here as 40 lines of text under the all-or-nothing rule -
+        and hiding the very paths the user needs in order to see what went wrong
+        would make this feature complicit in the mistake (design round D5). A
+        deliberate 40-path paste should stay readable too, so the guard is right
+        for the unrefused case as well. See :func:`_looks_path_shaped` for why
+        that guard is not :func:`_pasted_paths` itself.
+        """
+        if not pasted or _looks_path_shaped(pasted) or not self._overflows_composer(pasted):
+            return None
+        # NEWLINES NORMALISED HERE, and nowhere else, because this payload is
+        # the one that BYPASSES the document. Textual normalises CRLF for text
+        # that goes through the buffer (verified against textual 8.2.8: pasting
+        # `a\r\nb` yields the two lines `a`, `b` and the text `a\nb`), but a
+        # collapsed payload is held in the map and spliced back in at submit, so
+        # a raw `\r\n` would reach the model for the first time BECAUSE the
+        # paste was large. Normalising keeps collapsed and uncollapsed pastes
+        # delivering identical bytes - it preserves today's behaviour rather
+        # than changing it.
+        #
+        # Deliberately nothing else: no NFC, no tab expansion, no control-
+        # character stripping. Every one of those would change what the model
+        # receives versus an uncollapsed paste today, which is a separate change
+        # with its own evidence (see the paste-sanitisation follow-up).
+        payload = pasted.replace("\r\n", "\n").replace("\r", "\n")
+        # From the BUFFER, immediately before issuing, for the reason
+        # `_attach_image_bytes` records: a marker that arrived as TEXT is
+        # invisible to the map, and numbering over it hands out a number already
+        # standing on screen (design round 18, D4). Images and pastes share one
+        # number space, so this counts both.
+        self._sync_next_marker()
+        index = self._next_marker
+        self._next_marker += 1
+        marker = f"[Paste #{index}, {_paste_label(payload)}]"
+        self._attachments[index] = PastedText(payload, marker)
+        # The trailing space matches the image branch: it separates the marker
+        # from whatever the user types next, and `_delete_marker_past_spaces`
+        # already knows to cross it for ctrl+w (design round 22, D13).
+        return marker + " "
 
     # -- command completion -------------------------------------------------
     def edit(self, edit: Edit) -> EditResult:
@@ -5724,6 +6279,16 @@ class Editor(TextArea):
         return self._caret_row() == self.document.line_count - 1
 
     def _record_history(self, text: str) -> None:
+        # The payload cannot follow the text into the history list, so its
+        # citation must not either: numbering restarts at #1 every submit and
+        # `_navigate_history` clears the map, so a recorded `[Paste #1, 240
+        # lines]` comes back as a chip-shaped string that sends twenty-five
+        # characters in place of the paste. Stripped HERE because this is the
+        # last seam where the map is still live and `cite()` can therefore tell
+        # the app's own citation from a hand-typed lookalike; see
+        # :meth:`_navigate_history` for the full argument and for why images
+        # are deliberately left alone.
+        text = strip_paste_citations(text, self._attachments)
         stripped = text.strip()
         if stripped and (not self._history or self._history[-1] != stripped):
             self._history.append(stripped)
@@ -5748,6 +6313,36 @@ class Editor(TextArea):
         text comes back as a starting point, and its markers resolve to nothing
         until the user pastes again. The DRAFT's attachments are stashed and
         restored with its text, because that is still the same unsent message.
+
+        A COLLAPSED PASTE cannot survive that rule the way an image can, which
+        is why its citation is stripped before the text is ever recorded (see
+        :meth:`_record_history`) rather than coming back here to resolve to
+        nothing. The asymmetry is deliberate and it is about which failure the
+        user can SEE:
+
+        - An orphaned ``[Image #1, 1568x200]`` fails LOUDLY. The chip does not
+          paint, because painting is gated on the number resolving ("what is
+          chipped is what is sent"), no image rides the submit, and the prompt
+          never implied a picture in the first place — the marker is an ADJUNCT
+          to the message.
+        - An orphaned ``[Paste #1, 240 lines]`` IS the message. The user sees a
+          chip-shaped string in their recalled prompt, presses Enter, and the
+          model receives twenty-five characters where two hundred and forty
+          lines were meant. Silent, and round 17 judged exactly this class —
+          the model answering about content the user did not send — the worst
+          failure this feature has.
+
+        Stripping at the RECORD seam and not at submit is what keeps this from
+        becoming a second rule that drifts from :func:`cite`. At submit a
+        recalled marker and a user's own prose about one ("the
+        ``[Paste #1, 240 lines]`` chip confused me") are byte-identical in the
+        text AND in the now-empty map, so no predicate can separate them and a
+        submit-time strip would silently eat the sentence. At the record seam
+        the map is still live, so :func:`strip_paste_citations` asks the same
+        first-citation question the chip asks and removes only what the app
+        itself wrote. It also means the user SEES the recalled prompt without
+        its paste, before Enter, instead of having their message rewritten on
+        the way out.
         """
         if not self._history:
             return

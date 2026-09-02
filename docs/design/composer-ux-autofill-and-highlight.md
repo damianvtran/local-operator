@@ -64,7 +64,9 @@ are used throughout below. Nothing in the brief's architecture was found wrong.
   post-processes the finished `Strip` via `_overlay`/`Segment.apply_style(...,
   post_style=...)` (1694–1697). `_marker_cells` (1566) computes which cells to
   repaint, with a hot-path bail `if "[" not in line: return []` (1595–1599).
-- `COMPONENT_CLASSES` (578–581): `text-area--image-marker[-selected]`. tcss at
+- `COMPONENT_CLASSES` (578–581): `text-area--attachment-marker[-selected]`
+  (named `text-area--image-marker[-selected]` when this document was written;
+  renamed when the chip gained a second payload shape). tcss at
   `local_operator/tui/local_operator.tcss` 459–467, using `$lo-signal`,
   `$lo-tint-attach`, `$lo-fg`, `$lo-tint-attach-hi`.
 
@@ -383,7 +385,7 @@ Add to `COMPONENT_CLASSES` (578–581):
 "text-area--slash-argument",    # recognized team/agent NAME
 "text-area--slash-unknown",     # leading /word that is NOT a command
 ```
-tcss (`local_operator/tui/local_operator.tcss`, beside the image-marker block
+tcss (`local_operator/tui/local_operator.tcss`, beside the attachment-marker block
 459–467), foreground-only, using existing `$lo-*` semantic tokens (theme.py
 32–43 / 88–98 define them for both dark and light ramps):
 ```
@@ -461,7 +463,7 @@ agent owns the final hues/contrast (this IS a user-visible change, so a
    painting it "unknown" would flicker on every keystroke. Only an exact set
    membership (`_name_choices`) paints the name.
 
-5. **Interaction with image-marker overlays.** A slash line has no image marker
+5. **Interaction with attachment-marker overlays.** A slash line has no marker
    (the marker grammar opens with `[` and a command opens with `/`; the command
    word and name are on line 0, a pasted image marker would sit in the message
    tail which is not highlighted). The two passes therefore never contend for
@@ -481,7 +483,7 @@ agent owns the final hues/contrast (this IS a user-visible change, so a
 
 8. **Theme switch.** Because styles are component classes reading `$lo-*` (not
    Python hexes), a `/theme` switch repaints them for free — same property the
-   image-marker comment (575–577) relies on. No extra work.
+   attachment-marker comment (575–577) relies on. No extra work.
 
 ---
 

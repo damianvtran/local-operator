@@ -472,8 +472,8 @@ Editor .text-area--cursor {
  * prose" ground, and the attachment chip's colours are calibrated AGAINST it —
  * the resting chip is iso-luminant with `edge` so it never outranks a real
  * selection, and the selected chip sits a further step above it (see
- * `.text-area--image-marker` below). Swapping the band for another tint would
- * silently retune that relationship. */
+ * `.text-area--attachment-marker` below). Swapping the band for another
+ * tint would silently retune that relationship. */
 Editor .text-area--selection {
     color: $lo-fg;
     background: $lo-edge;
@@ -496,9 +496,13 @@ Editor .text-area--suggestion {
     color: $lo-dim;
 }
 
-/* An attachment marker — `[Image #1, 1568x200]` — is an OBJECT the composer
- * put in the buffer, not text the user typed, and it used to render in the
- * prose colour on the prose ground with nothing to say so.
+/* An attachment marker — `[Image #1, 1568x200]`, `[Paste #2, 240 lines]` — is
+ * an OBJECT the composer put in the buffer, not text the user typed, and it
+ * used to render in the prose colour on the prose ground with nothing to say so.
+ *
+ * ONE style for both payload shapes. The rationale below is about
+ * attachment-ness, not image-ness, so a second colour for the paste chip would
+ * be a second way of saying one thing; the class is named for what it marks.
  *
  * A chip, not coloured text: syntax-highlighting the token would still read as
  * text, where a ground behind it reads as something embedded. The ink is
@@ -509,12 +513,12 @@ Editor .text-area--suggestion {
  * Not a focus ring and not a selection: the chip is iso-luminant with `edge`
  * (1.04:1) so it never outranks a real selection sitting beside it, and the
  * SELECTED chip is a further 1.61:1 up, so clicking one always brightens. */
-Editor .text-area--image-marker {
+Editor .text-area--attachment-marker {
     color: $lo-signal;
     background: $lo-tint-attach;
 }
 
-Editor .text-area--image-marker-selected {
+Editor .text-area--attachment-marker-selected {
     color: $lo-fg;
     background: $lo-tint-attach-hi;
 }
