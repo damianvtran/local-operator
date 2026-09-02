@@ -1105,10 +1105,13 @@ def _from_aggregator_catalogue(
 ) -> ModelInfo:
     """Describe an AGGREGATOR's own model from its public listing, as a last resort.
 
-    Only for ``provider in AGGREGATOR_PROVIDERS`` — the ``openrouter/*`` and
-    ``radient/*`` ids, whose own listing IS the priced one. Leg 1 has normally
-    already priced them from it; this leg survives for the case where leg 1 was
-    unavailable (a credential lookup that raised, a listing behind a login)
+    In practice ``openrouter/*`` ids only. The gate is ``AGGREGATOR_PROVIDERS``,
+    but the lookup below needs a listing readable with NO credential, and of the
+    aggregators only OpenRouter's is public (``PUBLIC_LISTING_PROVIDERS``);
+    Radient's needs a key, so a ``radient/*`` id returns ``info`` untouched from
+    this leg and relies on leg 1 having read its listing with the credential.
+    Leg 1 has normally already priced OpenRouter's ids too; this leg survives
+    for the case where leg 1 was unavailable (a credential lookup that raised)
     and the public OpenRouter document can still answer.
 
     It used to be the price source for DIRECT providers too, through a

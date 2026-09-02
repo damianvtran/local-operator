@@ -132,7 +132,12 @@ LYING_MAX_TOKENS = 4096
 #: document parses to rows with a zero write price, which is harmless in itself,
 #: but without the bump the real number would stay invisible for a day on every
 #: install — the same argument as above. Only the two OpenAI-compatible
-#: aggregators quote a write price, so only they pay the one-time refetch.
+#: aggregators quote a write price, so only they pay the one-time refetch — and
+#: it is paid ON the calling path: a version-1 document is invalidated and
+#: refetched synchronously (up to ``DEFAULT_TIMEOUT_S``) by the first resolution
+#: after the upgrade, not in the background. Exactly once per install, which is
+#: acceptable; a bump here is not free for the user whose only provider is
+#: OpenRouter.
 LISTING_CAPTURE_VERSIONS: dict[str, int] = {"anthropic": 2, "openrouter": 2, "radient": 2}
 #: What a transport not named above is stamped with. Version 1 is the original
 #: shape; a transport only earns a bump when its own reader starts needing a

@@ -162,6 +162,19 @@ State machine in `read_listing` (replaces `catalogue.py:343-376`):
   `catalogue-revalidate:<key>`. A daemon thread killed by process exit leaves
   a lease that lapses in `_LISTING_LEASE_S` (60s, `:221`) — the existing
   crash contract, no new state.
+- *Amended in review round 1 (R1-2, R1-3, R1-5).* The thread runs a separate
+  `revalidate` thunk (defaulting to `fetch`) that carries the provider's full
+  `DEFAULT_TIMEOUT_S`, not the caller's on-path budget: a background refresh
+  that inherited a repaint's 2 s ceiling failed on every slower link, backed
+  off, and left the document to the 24 h sync path. A daemon kill mid-`json.dump`
+  *does* strand `<key>.listing.json.<random>.tmp` (§9 risk 1 confirmed), so
+  `read_listing` also sweeps such files older than five minutes
+  (`purge_stranded_temp_files`; age-gated so a peer's in-flight write is never
+  taken). And a sync reader that loses the lease to *this process's own*
+  thread (call A scheduled it, call B was declared expired by `refetch_if` a
+  moment later) joins that thread for at most `_LISTING_LEASE_WAIT_S` instead
+  of polling the document's mtime — same ceiling, but it returns the instant the
+  refresh lands *or fails*, where the poll spun the whole window on a failure.
 - Plain `threading.Thread`, not the asyncio loop: `catalogue.py` is
   synchronous and is entered from the CLI, the server, `asyncio.to_thread`
   workers and `run_in_executor` threads (`configure.py:1478`). The existing
@@ -213,6 +226,18 @@ MISS_REFETCH_MIN_AGE_S`: call `read_listing(..., ttl_s=0, soft_ttl_s=0)` once
 remaining budget, see §3.3) and re-map. Status becomes `"ok"` or `"stale"`
 accordingly. One retry, never a loop: the refetched document is 0s old, so a
 second miss for the same id in the same process is believed for ten minutes.
+
+*Amended in review round 1 (R1-1).* "Matches" must be wider than the lookup's
+exact/normalised test. Anthropic's `/v1/models` lists dated snapshots only
+(`claude-sonnet-4-5-20250929`) while the API accepts the undated alias, so the
+common configured id `claude-sonnet-4-5` was a miss against a document that
+listed its snapshot — one blocking listing fetch on **every** process start
+older than the miss floor, indefinitely, for a document the refetch could not
+improve. The trigger asks "could a refetch plausibly list this id?", so a row
+counts as present when any of its `ids.id_spellings` (as given, date-stripped,
+dotted) coincides with any of the wanted id's after normalisation, in either
+direction. A genuinely new family id (`claude-fable-5-1` against a
+`claude-sonnet-4-5-*` document) still misses and still refetches.
 
 **`cache_write_price`.** Add `cache_write_price: float = 0.0` to
 `DiscoveredModel` after `cache_read_price` (`:180`), and thread it through:
@@ -575,7 +600,9 @@ Rough size: ~350 lines of source, ~500 of tests. One coder, one PR.
    means the document is never half-written, and the lease lapses in 60s. Watch
    for stranded `*.tmp` files in `~/.local-operator/cache`
    (`_write_cache`'s `finally` should prevent them; a daemon kill bypasses
-   `finally`). If they appear, add them to the legacy purge glob.
+   `finally`). Review round 1 confirmed the daemon-kill path is reachable;
+   `purge_stranded_temp_files` now sweeps `*.listing.json.*.tmp` older than
+   five minutes on every `read_listing`.
 2. **models.dev availability / shape drift.** It is a GitHub-maintained JSON;
    a key rename lands as "no prices" (holes stay holes), never as wrong prices.
    `capture` stamp on the projection lets us force a refetch when the reader

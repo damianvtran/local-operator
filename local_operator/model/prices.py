@@ -85,12 +85,18 @@ PRICE_CATALOGUE_CAPTURE = 1
 #: canonical one after ``credential_provider_id``, so the login flavours
 #: (``xai-oauth``, ``openai-device``, ...) need no entry.
 #:
-#: The second keys are subscription/plan catalogues models.dev lists apart from
-#: the pay-per-token one (Kimi's coding plan lists ``k3``, which ``moonshotai``
-#: does not; Z.AI's coding plan likewise). They carry no ``cost`` today, so they
-#: contribute limits only, and only for ids the primary key lacks.
-#: ``alibaba-token-plan`` is a plan of ``alibaba``'s models, so its own key comes
-#: first (plan-specific limits) and the pay-per-token key fills the price.
+#: ``_lookup`` returns the first key's entry for an id OUTRIGHT; it never
+#: merges a second key's fields into it. The second keys are subscription/plan
+#: catalogues models.dev lists apart from the pay-per-token one (Kimi's coding
+#: plan lists ``k3``, which ``moonshotai`` does not; Z.AI's coding plan
+#: likewise), reached only for an id the first key lacks entirely.
+#: ``alibaba-token-plan`` is a plan of ``alibaba``'s models with its own key
+#: first, so an id it lists answers with the plan's numbers alone — which
+#: models.dev quotes as 0/0 on purpose, because the plan bills credits rather
+#: than USD per token. Those zeros are the intended answer ("cost unknown", per
+#: ``_fill_from_row``), NOT a hole for the pay-per-token key to fill: quoting
+#: ``alibaba``'s USD rate for a credit plan would print a cost the user is not
+#: paying. The pay-per-token key is there for a model the plan does not list.
 #:
 #: ``radient`` is deliberately absent: models.dev does not list it, and its own
 #: listing quotes prices, so leg 1 of resolution already covers it.
