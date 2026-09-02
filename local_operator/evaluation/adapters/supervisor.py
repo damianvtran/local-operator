@@ -257,11 +257,14 @@ class AdapterSupervisor:
         }
         env = minimal_environment(environment or os.environ, protocol_fds=protocol_fds)
         env[LAUNCH_IDENTITY_ENV] = json.dumps(resolved.__dict__, sort_keys=True)
+        # Same flags the worker gets (``discovery.worker_argv``): the leader
+        # runs in the workspace too and must leave no bytecode there either.
         argv = (
             selector.python_executable,
             "-I",
             "-s",
             "-E",
+            "-B",
             "-m",
             "local_operator.evaluation.adapters.supervisor",
             "--supervise",

@@ -54,9 +54,9 @@ REPO_PTH_NAME = "_local_operator_repo.pth"
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 
-# Mirrors the supervisor's spawn flags (``supervisor.py``: ``-I -s -E``) so the
-# probe exercises the same import environment the worker will get.
-_WORKER_FLAGS = ("-I", "-s", "-E")
+# Mirrors the supervisor's spawn flags (``supervisor.py``: ``-I -s -E -B``) so
+# the probe exercises the same import environment the worker will get.
+_WORKER_FLAGS = ("-I", "-s", "-E", "-B")
 
 
 def dependency_roots() -> list[str]:

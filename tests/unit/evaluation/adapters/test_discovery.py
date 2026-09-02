@@ -975,7 +975,46 @@ def test_workspace_content_mutation_changes_digest(tmp_path: Path) -> None:
 def test_exact_record_digest_and_worker_flags(tmp_path: Path) -> None:
     distribution = fake_distribution(tmp_path, [])
     selector = selected(tmp_path, distribution_digest(distribution))
-    assert worker_argv(selector)[1:5] == ("-I", "-s", "-E", "-m")
+    # ``-B`` is load-bearing: the worker's cwd is the pinned workspace, and a
+    # bytecode cache written there by an adapter import is what broke the
+    # first paid episode's rescue (workspace digest drift).
+    assert worker_argv(selector)[1:6] == ("-I", "-s", "-E", "-B", "-m")
+
+
+def test_workspace_digest_ignores_bytecode_caches_by_rule(tmp_path: Path) -> None:
+    """The exact drift from bundle ep-6ea01a117eee: upstream imported
+    ``tasks/task_001.py`` inside the pinned workspace and CPython wrote
+    ``tasks/__pycache__/task_001.cpython-312.pyc``; the rescue worker then
+    refused with "adapter workspace content digest differs". Bytecode is
+    never verified content, so a cache -- standard or legacy-beside-source,
+    planted by any tool -- must leave the digest exactly where it was."""
+
+    base = selected(tmp_path, "a" * 64)
+    workspace = Path(base.workspace)
+    tasks = workspace / "tasks"
+    tasks.mkdir()
+    (tasks / "task_001.py").write_text("MARK = 'source'\n")
+    before = workspace_digest(str(workspace))
+
+    cache = tasks / "__pycache__"
+    cache.mkdir()
+    (cache / "task_001.cpython-312.pyc").write_bytes(b"\x00" * 64)
+    assert workspace_digest(str(workspace)) == before
+
+    (tasks / "task_001.pyc").write_bytes(b"\x00" * 64)
+    assert workspace_digest(str(workspace)) == before
+
+    # The whole cache directory is excluded (nothing imports from it), but it
+    # is still INSPECTED: a symlink planted inside one is refused like any
+    # other. Real content outside the cache still moves the digest.
+    (cache / "stray.py").write_text("x = 1\n")
+    assert workspace_digest(str(workspace)) == before
+    (cache / "task_002.cpython-312.pyc").symlink_to(tasks / "task_001.py")
+    with pytest.raises(AdapterDiscoveryError, match="symlink"):
+        workspace_digest(str(workspace))
+    (cache / "task_002.cpython-312.pyc").unlink()
+    (tasks / "task_002.py").write_text("MARK = 'more'\n")
+    assert workspace_digest(str(workspace)) != before
 
 
 def test_verify_uses_only_selected_distribution(
