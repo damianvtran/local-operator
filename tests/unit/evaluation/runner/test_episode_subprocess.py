@@ -145,6 +145,31 @@ def _frame_mode():
         return ""
 
 
+# Whether reset_start should import a task module from the WORKSPACE (the
+# worker's cwd), the way upstream OSWorld's ``instantiate_task`` does. Armed
+# through a file beside the module like the cutpoint. This is the import that
+# left ``tasks/__pycache__/task_001.cpython-312.pyc`` in the first paid
+# episode's pinned workspace and broke its rescue.
+def _maybe_import_workspace_task():
+    import importlib.util
+    import os
+
+    marker = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tiny_workspace_import")
+    if not os.path.exists(marker):
+        return
+    for relative, expected in (
+        (("tasks", "task_001.py"), "source"),
+        (("tasks", "pkg", "mod.py"), "nested"),
+    ):
+        path = os.path.join(os.getcwd(), *relative)
+        spec = importlib.util.spec_from_file_location(
+            "osworld_task_" + relative[-1].replace(".py", ""), path
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        assert module.MARK == expected
+
+
 # Build the frame list for one observation, publishing real bytes into the root
 # the PARENT supplied on reset_start. The dishonest modes each break exactly one
 # clause of the parent's verification so the refusals cannot pass for each other.
@@ -260,6 +285,7 @@ class TinyAdapter:
 
     async def reset_start(self, params):
         self._maybe_die("reset_start")
+        _maybe_import_workspace_task()
         self.task_id = params.task_id
         self.episode_id = params.episode_id
         self.artifact_root = params.artifact_root
@@ -386,6 +412,13 @@ def real_selector(tmp_path: Path, adapter_site: Path) -> AdapterSelector:
     (workspace / "adapter-release.json").write_text(
         json.dumps({"release_digest": RELEASE_DIGEST}, separators=(",", ":"), sort_keys=True)
     )
+    # Task modules in the pinned workspace, as the OSWorld layout has, so a
+    # test can make the worker import from the verified tree. The nested
+    # module proves ``-B`` covers subdirectory caches, not only the top level.
+    (workspace / "tasks").mkdir(exist_ok=True)
+    (workspace / "tasks" / "task_001.py").write_text("MARK = 'source'\n")
+    (workspace / "tasks" / "pkg").mkdir(exist_ok=True)
+    (workspace / "tasks" / "pkg" / "mod.py").write_text("MARK = 'nested'\n")
     return AdapterSelector(
         schema_version="1.2",
         adapter_id="tiny-runner",
@@ -448,6 +481,14 @@ async def _accepting_rescue(descriptor: Any, **kwargs: Any) -> Any:
         descriptor_id = descriptor.descriptor_id
 
     return _Aggregate()
+
+
+def _arm_workspace_import(site: Path, enabled: bool) -> None:
+    marker = site / "tiny_workspace_import"
+    if enabled:
+        marker.write_text("1")
+    else:
+        marker.unlink(missing_ok=True)
 
 
 def _arm_frames(site: Path, mode: str | None) -> None:
@@ -760,3 +801,40 @@ async def test_worker_cannot_deliver_frames_from_outside_the_root(
         assert report.valid, [issue.code for issue in report.issues]
         assert report.outcome is not None
         assert report.outcome.reportable is False
+
+
+@pytest.mark.asyncio
+async def test_worker_importing_from_the_workspace_leaves_no_bytecode_behind(
+    tmp_path: Path,
+    episode_id: str,
+    real_selector: AdapterSelector,
+    adapter_site: Path,
+) -> None:
+    """The workspace-digest drift from bundle ep-6ea01a117eee, reproduced with
+    a real worker: the adapter imports ``tasks/task_001.py`` from the pinned
+    workspace during ``reset_start``. The worker runs with ``-B`` (and sets
+    ``sys.dont_write_bytecode``), so no ``__pycache__`` may appear under the
+    workspace, and the workspace still hashes to the selector's pin afterwards
+    -- which is what a later rescue re-checks."""
+
+    _arm_cutpoint(adapter_site, None)
+    _arm_workspace_import(adapter_site, True)
+    try:
+        runner = EpisodeRunner(
+            build_spec(episode_id),
+            _subprocess_config(tmp_path),
+            selector=real_selector,
+            model=ScriptedModel(["step", "finish"]),
+            launch=AdapterSupervisor.launch,
+        )
+
+        outcome = await runner.run()
+    finally:
+        _arm_workspace_import(adapter_site, False)
+
+    assert outcome.status == "completed", outcome.diagnostic
+    workspace = Path(real_selector.workspace)
+    caches = [path for path in workspace.rglob("*") if path.name == "__pycache__"]
+    assert caches == [], caches
+    assert not list(workspace.rglob("*.pyc"))
+    assert workspace_digest(str(workspace)) == real_selector.workspace_digest

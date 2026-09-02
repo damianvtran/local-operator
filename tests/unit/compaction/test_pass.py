@@ -431,6 +431,54 @@ def test_shed_stale_frames_stops_at_a_compaction_marker_and_at_a_frameless_prefi
         shed_stale_frames(messages, limit=-1)
 
 
+def test_shed_stale_frames_sheds_a_whole_turn_and_an_orphaned_turn_end() -> None:
+    """A turn is its observation plus everything up to the next observation.
+
+    Two shapes the pair-wise shed got wrong. (1) A turn whose accepted reply
+    was preceded by a rejected reply and a correction (the runner's
+    corrective re-prompt) is FOUR messages; shedding only the first two left
+    the rejection pair orphaned at the front, where it is not an observation,
+    and the shed stopped for good. (2) The compaction cut point may land on a
+    reply or a correction, so the tail can START with the end of a turn whose
+    observation is behind the marker; the shed must clear those orphans
+    rather than refuse. Either way it stalled the client's shed and the
+    request was refused as unrecoverable with sheddable turns still present.
+    """
+    from local_operator.compaction.pruning import shed_stale_frames
+
+    corrected = [
+        _frame_turn("t0"),
+        Message.assistant("bad0"),
+        Message.user("Your previous reply was rejected: ..."),
+        Message.assistant("a0"),
+        _frame_turn("t1"),
+        Message.assistant("a1"),
+        _frame_turn("t2"),
+    ]
+    # limit counts the current observation too (as the sibling tests show).
+    out, removed = shed_stale_frames(corrected, limit=2)
+    assert removed == 4
+    assert [_texts(m)[0] for m in out] == ["t1", "a1", "t2"]
+    assert out[0] is corrected[4] and out[-1] is corrected[-1]
+
+    orphaned_front = [
+        Message.assistant("a-behind-marker"),
+        Message.user("Your previous reply was rejected: ..."),
+        Message.assistant("a-corrected"),
+        _frame_turn("t1"),
+        Message.assistant("a1"),
+        _frame_turn("t2"),
+    ]
+    out, removed = shed_stale_frames(orphaned_front, limit=0)
+    assert removed == 5
+    assert [_texts(m)[0] for m in out] == ["t2"]
+
+    # limit already satisfied: identity out, nothing removed.
+    out, removed = shed_stale_frames(orphaned_front, limit=2)
+    assert removed == 0
+    assert all(a is b for a, b in zip(out, orphaned_front))
+
+
 def test_shed_stale_frames_treats_pruned_notices_as_stale_turns() -> None:
     """The shed operates on TURNS, not on the presence of an image: by the
     time a caller sheds, ``run_compaction_pass`` has already pruned the oldest

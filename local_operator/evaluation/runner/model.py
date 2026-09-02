@@ -101,6 +101,60 @@ class EpisodeTurn(ProtocolModel):
     ask_answer: str | None = None
 
 
+class DecisionRejected(Exception):
+    """The provider answered, and was billed, but the reply is not a usable batch.
+
+    This is the MODEL's error, not the provider's: the request went through,
+    tokens were spent, and what came back failed strict decision parsing (not
+    JSON, wrong shape, a stale observation id, a ``frame_id`` the observation
+    does not carry, a coordinate outside the frame). It is raised INSTEAD of a
+    :class:`ModelDecision` so the runner can still record the attempt honestly
+    -- every field a decision would have carried for the bundle's
+    request/response/usage triple is here -- and then ask again.
+
+    The first paid OSWorld episode ended on exactly this: the model named
+    ``frame_id "1"`` where the adapter had published ``"screen"``, the reply
+    was classified as a provider failure, and the episode was sealed unscored
+    after a single call. A rejected reply is recoverable in a way a dead
+    provider is not, which is why it has its own type and its own path.
+
+    ``diagnostic`` is the parse error, phrased so it can be shown back to the
+    model verbatim. An implementation that raises this is expected to have
+    folded the rejection into its own context first (the bad reply, then the
+    diagnostic as the next user turn) so that the runner's re-call of
+    :meth:`EpisodeModelClient.decide` for the same observation is a corrective
+    re-prompt rather than a blind replay.
+    """
+
+    def __init__(
+        self,
+        diagnostic: str,
+        *,
+        route: RouteIdentity | None = None,
+        usage: ModelUsage | None = None,
+        cost_micros: int = 0,
+        stop_reason: str = "stop",
+        provider_request_id: str = "unknown",
+        tool_call_count: int = 0,
+        prompt_cache_key: str | None = None,
+        context_tokens: int | None = None,
+        compaction: CompactionRecord | None = None,
+    ) -> None:
+        super().__init__(diagnostic)
+        self.diagnostic = diagnostic
+        # The served route matters even for a rejected reply: a fallback that
+        # answered badly still moved the run off its pinned route.
+        self.route = route
+        self.usage = usage or ModelUsage()
+        self.cost_micros = cost_micros
+        self.stop_reason = stop_reason
+        self.provider_request_id = provider_request_id
+        self.tool_call_count = tool_call_count
+        self.prompt_cache_key = prompt_cache_key
+        self.context_tokens = context_tokens
+        self.compaction = compaction
+
+
 @runtime_checkable
 class EpisodeModelClient(Protocol):
     """Chooses the next action batch for an episode.
@@ -111,10 +165,19 @@ class EpisodeModelClient(Protocol):
     on prompt construction. The current ``observation`` is the last entry's
     observation too (its ``batch`` is still ``None``).
 
-    Raising is the contract for an unrecoverable provider failure: the runner
-    treats it as ``ErrorPayload(category="provider")`` and finalizes the
-    episode unscored on a still-live session. Internal retries therefore belong
-    inside the implementation, below this boundary.
+    Two failure contracts, deliberately distinct:
+
+    * Raising :class:`DecisionRejected` means the call was billed but the
+      reply was unusable. The runner records the attempt (request, response,
+      usage, and a retryable ``error`` event) and calls ``decide`` AGAIN with
+      the same observation and history, up to ``EpisodeConfig.max_decision_retries``
+      times; only when that bound is spent does the episode end, as a MODEL
+      failure. The implementation owns making the re-call corrective.
+    * Raising anything else is the contract for an unrecoverable provider
+      failure: the runner treats it as ``ErrorPayload(category="provider")``
+      and finalizes the episode unscored on a still-live session. Internal
+      retries for transport faults therefore belong inside the implementation,
+      below this boundary.
     """
 
     async def decide(

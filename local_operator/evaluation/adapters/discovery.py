@@ -31,6 +31,20 @@ MAX_WORKSPACE_FILES = 100_000
 MAX_WORKSPACE_BYTES = 4 * 1024 * 1024 * 1024
 RELEASE_MANIFEST = "adapter-release.json"
 
+#: Bytecode caches are never verified content. The finder refuses to load any
+#: ``.pyc`` (RECORD-covered or not), the worker is spawned with ``-B`` so it
+#: writes none, and the workspace digest skips them by RULE rather than by
+#: hoping nothing writes one: in the first paid episode, upstream OSWorld's
+#: ``instantiate_task`` imported ``tasks/task_001.py`` inside the pinned
+#: workspace and CPython dropped ``tasks/__pycache__/task_001.cpython-312.pyc``
+#: there. The rescue worker then re-hashed the workspace, found the cache,
+#: refused with "adapter workspace content digest differs", and the sweep
+#: exited 1 forever for an instance that was in fact already terminated. A
+#: cache file that no loader here will ever execute cannot be allowed to
+#: invalidate a pin.
+BYTECODE_CACHE_DIRECTORY = "__pycache__"
+BYTECODE_SUFFIXES: tuple[str, ...] = tuple(importlib.machinery.BYTECODE_SUFFIXES)
+
 
 class AdapterDiscoveryError(RuntimeError):
     """A closed discovery failure safe to report across the RPC boundary."""
@@ -154,6 +168,12 @@ def workspace_digest(path: str) -> str:
     handshake, but it is not re-verified immediately before spawn the way the
     executable identity is. That asymmetry is a known, deliberate gap for a
     later round to close or accept explicitly.
+
+    ``__pycache__`` directories and bytecode files are excluded by rule (see
+    ``BYTECODE_CACHE_DIRECTORY``): they are a side effect of importing, not
+    content, and no loader in this subsystem will ever execute one. A symlink
+    or an unsafe file INSIDE a cache directory is still fatal -- the exclusion
+    is of bytecode from the manifest, not of the directory from inspection.
     """
 
     root = Path(path)
@@ -173,8 +193,14 @@ def workspace_digest(path: str) -> str:
                 raise AdapterDiscoveryError("adapter workspace contains a symlink")
             if stat.S_ISDIR(info.st_mode):
                 continue
+            # The unsafe-file check precedes the bytecode exclusion: the cache
+            # rule forgives a bytecode FILE, not any entry named like one, so a
+            # fifo or hardlink named ``x.pyc`` under ``__pycache__`` is refused
+            # like any other.
             if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
                 raise AdapterDiscoveryError("adapter workspace contains an unsafe file")
+            if _is_bytecode_cache(candidate.relative_to(root)):
+                continue
             if len(entries) >= MAX_WORKSPACE_FILES:
                 raise AdapterDiscoveryError("adapter workspace file count exceeds limit")
             total_bytes += info.st_size
@@ -194,6 +220,19 @@ def workspace_digest(path: str) -> str:
             )
     entries.sort(key=lambda entry: entry["path"])
     return canonical_digest("adapter-workspace-manifest-v1", entries)
+
+
+def _is_bytecode_cache(relative: Path) -> bool:
+    """Whether a workspace-relative path is a bytecode artifact to skip.
+
+    Both spellings are matched: the standard ``__pycache__/<stem>.<tag>.pyc``
+    and a legacy ``<stem>.pyc`` beside its source, because CPython writes the
+    former and ``compileall -b`` writes the latter, and neither is content.
+    """
+
+    if BYTECODE_CACHE_DIRECTORY in relative.parts[:-1]:
+        return True
+    return any(relative.name.endswith(suffix) for suffix in BYTECODE_SUFFIXES)
 
 
 def verify_release_manifest(selector: AdapterSelector) -> None:
@@ -224,12 +263,17 @@ def worker_argv(selector: AdapterSelector) -> tuple[str, ...]:
     if workspace_digest(selector.workspace) != selector.workspace_digest:
         raise AdapterDiscoveryError("adapter workspace content digest differs")
     # Isolation flags prevent user site, PYTHON* variables, and current-directory
-    # imports from changing which exact wheel the worker verifies.
+    # imports from changing which exact wheel the worker verifies. ``-B`` keeps
+    # the worker from writing bytecode: its cwd IS the pinned workspace, and an
+    # adapter that imports a task module from it (upstream OSWorld does) would
+    # otherwise leave a ``__pycache__`` behind that the digest must then ignore
+    # by rule -- see ``BYTECODE_CACHE_DIRECTORY``. Belt and braces.
     return (
         selector.python_executable,
         "-I",
         "-s",
         "-E",
+        "-B",
         "-m",
         "local_operator.evaluation.adapters.worker",
     )

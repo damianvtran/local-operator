@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
 from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any, cast
@@ -408,6 +409,10 @@ def _descriptor(name: str) -> int:
 
 
 def main() -> int:
+    # The launcher passes ``-B``; this is the in-process guarantee of the same
+    # thing, so a worker started any other way (a test harness, a debugger)
+    # still never writes bytecode into the verified workspace it runs in.
+    sys.dont_write_bytecode = True
     request_fd = _descriptor(REQUEST_FD_ENV)
     response_fd = _descriptor(RESPONSE_FD_ENV)
     # stdout belongs to diagnostics, never framing.  Redirect it before metadata

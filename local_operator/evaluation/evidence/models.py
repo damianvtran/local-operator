@@ -96,6 +96,11 @@ UnscoredReason = Literal[
     "crash",
     "ambiguous_finalization",
     "scorer_failure",
+    # The model never produced a usable decision within the runner's retry
+    # bound. Neither infrastructure (the provider answered every call) nor a
+    # crash (nothing broke): the agent under test could not act, which is a
+    # fact about the agent that must not be filed under the harness.
+    "model_failure",
 ]
 AbandonmentReason = Literal[
     "preflight_failure",
@@ -265,6 +270,7 @@ class LifecycleTransitionPayload(ProtocolModel):
             "scorer",
             "cleanup",
             "cancelled",
+            "model",
         ]
         | None
     ) = None
@@ -520,7 +526,13 @@ class CleanupPayload(ProtocolModel):
 
 class ErrorPayload(ProtocolModel):
     error_id: StrictIdentifier
-    category: Literal["adapter", "environment", "provider", "infrastructure", "scorer", "internal"]
+    # ``model`` is the agent under test itself: a billed reply that failed
+    # strict decision parsing (retryable while the runner re-prompts, terminal
+    # once its bound is spent). It is kept apart from ``provider`` so a model
+    # that cannot follow the action contract is never reported as an outage.
+    category: Literal[
+        "adapter", "environment", "provider", "infrastructure", "scorer", "internal", "model"
+    ]
     diagnostic_code: StrictIdentifier
     detail_artifact: EvidenceArtifactRef | None = None
     retryable: bool
