@@ -256,6 +256,14 @@ def test_a_token_zero_is_not_free_when_the_model_does_not_bill_in_tokens() -> No
                 "pricing": {"prompt": "0", "completion": "0"},
                 "architecture": {"modality": "text->text+audio"},
             },
+            # A3: the arrow branch is case-folded like the list branch and like
+            # ``_has_image_input``'s own arrow branch, so a gateway shouting the
+            # output side does not cost a genuinely free route its label.
+            {
+                "id": "legacy/shouty-free",
+                "pricing": {"prompt": "0", "completion": "0"},
+                "architecture": {"modality": "TEXT->TEXT"},
+            },
         ]
     }
     rows = fetch_models("openrouter", api_key="k", client=_StubClient([_Response(200, body)]))
@@ -267,6 +275,7 @@ def test_a_token_zero_is_not_free_when_the_model_does_not_bill_in_tokens() -> No
         "google/gemma:free": True,
         "terse/free": True,
         "legacy/audio": False,
+        "legacy/shouty-free": True,
     }
 
 

@@ -532,7 +532,13 @@ def _bills_in_tokens(architecture: Mapping[str, object]) -> bool:
     if isinstance(modality, str) and "->" in modality:
         # The older encoding packs the same fact to the RIGHT of the arrow.
         # Only the output side decides what the model bills for.
-        return all(part.strip() == "text" for part in modality.split("->")[-1].split("+") if part)
+        # Lowercased like the list branch above and like ``_has_image_input``'s
+        # own arrow branch: the encoding is the gateway's, not a normalised
+        # field, so ``text->TEXT`` must not read as a non-text output and strip
+        # ``free`` from a genuinely free model.
+        return all(
+            part.strip().lower() == "text" for part in modality.split("->")[-1].split("+") if part
+        )
     return True
 
 
