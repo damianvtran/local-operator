@@ -13373,7 +13373,14 @@ class OperatorApp(App[None]):
         # nothing paints reads as a swallowed command. Same retire-the-
         # promise rule as the /stop all listing.
         name = record.conversation_name or record.session_id
-        pending = NoticeBlock(f'stopping "{name}" (pid {record.pid})…', "info")
+        # Says a BOUNDED wait is running, not just that something started: a
+        # wedged target pays the graceful timeout plus the identity probes,
+        # which is ~20 s of otherwise-silent screen before the refusal lands,
+        # and a user who cannot tell waiting from hung reaches for the
+        # keyboard again (round-4 U4-2).
+        pending = NoticeBlock(
+            f'stopping "{name}" (pid {record.pid})… waiting for it to answer', "info"
+        )
         self._append_block(pending)
         outcome = await control.stop_session(record, _root=config_dir())
         kind: NoticeKind = (
