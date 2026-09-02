@@ -2513,13 +2513,27 @@ class AskPickerScreen(Container):
         # exceeds ``body_line_budget`` (§2.2/§4.3, the label-anchor case). Stamp
         # the ``…`` onto that last visible line so the marker reflects what the
         # user can actually SEE being cut, not what the grant would have drawn.
-        # Only when the NEXT rendered line is the SAME row (its wrap genuinely
-        # continues off-screen); a row that ends inside the viewport, or whose
-        # own grant already marked its last line, is left alone.
+        #
+        # ONLY when that last visible line is a DESCRIPTION line, never the row's
+        # LABEL. ``_mark_clipped`` assumes a description line — it slices off the
+        # indent and recolours to ``muted`` — so run on a label it would strip
+        # the cursor glyph and the number gutter and repaint the label as if it
+        # were unselected prose, on the very row ``_scroll_offset_for_cursor``
+        # pins to the top for the user to answer (the D8-fix's own false-cut, one
+        # view over). When only the label fits (``body_line_budget`` of 1 leaves
+        # no room for even one description line), the row's truncation is already
+        # told by the thumb and the position row; the label is left intact. The
+        # label is the row's FIRST rendered line, so restamp only when the last
+        # visible line sits PAST it.
         if viewport and offset + body < total:
             last_index, last_row = viewport[-1]
             next_index, _ = rendered[offset + body]
-            if next_index == last_index and last_index != self.other_row:
+            label_pos = next(
+                (pos for pos, (idx, _) in enumerate(rendered) if idx == last_index), None
+            )
+            last_visible_pos = offset + body - 1
+            on_description = label_pos is not None and last_visible_pos > label_pos
+            if next_index == last_index and last_index != self.other_row and on_description:
                 marked = self._mark_clipped(last_row, cwidth, last_index)
                 viewport = viewport[:-1] + [(last_index, marked)]
         # The scrollbar thumb spans the full body height, one cell per VISUAL
@@ -3249,6 +3263,12 @@ class AskPickerScreen(Container):
     def _mark_clipped(self, row: Text, width: int, index: int) -> Text:
         """Re-mark ``row``'s last VISIBLE line with ``…`` when the viewport clips
         its row below.
+
+        **Assumes ``row`` is a DESCRIPTION line, never a LABEL.** It slices off
+        the description indent and repaints the remainder at ``muted``, so run on
+        a label it would strip the cursor glyph and the number gutter and recolour
+        the label as unselected prose. The caller guards this: it only fires when
+        the last visible line sits PAST the row's label line (:meth:`_card_text`).
 
         The line came out of :meth:`_description_text` already fitted to
         ``width`` (indent, prose, then ground padding). It is the last line of a
