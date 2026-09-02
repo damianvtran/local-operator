@@ -216,6 +216,21 @@ REVEAL_HINT_KEY = "^e"
 CHECK_ON = "[x] "
 CHECK_OFF = "[ ] "
 
+#: The scrollbar track and thumb, painted over the rightmost column of the
+#: windowed body rows so the user can see WHERE in a taller list the window is.
+#: The same two glyphs and the same proportional maths as ``usage_panel.py``
+#: (``SCROLLBAR_TRACK``/``SCROLLBAR_THUMB``, :meth:`_scrollbar_thumb`), so the
+#: bar matches the rest of the app. The gutter is NOT reserved (unlike
+#: usage_panel, whose right-aligned numbers must not slide when the bar
+#: toggles): this card's rows are left-aligned labels with nothing at the right
+#: edge to keep stable, and a persistent column would shift the approval gate's
+#: byte-identical frame one column. So the thumb is painted only while the list
+#: windows (``page < row_count``), cutting that frame's rows to ``width - 1`` —
+#: a state no pinned golden reaches, since those all sit at ``page ==
+#: row_count`` (the approval gate never windows above ~44 columns).
+SCROLLBAR_TRACK = "│"
+SCROLLBAR_THUMB = "█"
+
 #: The free-text row's label while it holds nothing and is not selected.
 OTHER_LABEL = "Other (type your own)"
 #: Its label once it is selected or carries text; the typed string follows.
@@ -535,6 +550,12 @@ class AskPickerScreen(Container):
         Binding("j", "move(1)", "Down", show=False),
         Binding("ctrl+p", "move(-1)", "Up", show=False),
         Binding("ctrl+n", "move(1)", "Down", show=False),
+        # PageUp/PageDown move the cursor a page and let `_move_to` autoscroll
+        # the window to keep it drawn. CLAMPED, unlike the arrows: paging past
+        # an end lands on the end rather than wrapping, so a page key can never
+        # jump the cursor to the far end of the list.
+        Binding("pageup", "page(-1)", "Page up", show=False),
+        Binding("pagedown", "page(1)", "Page down", show=False),
         # ``toggle_row``, not ``toggle``: ``DOMNode.action_toggle`` already
         # exists and takes an attribute name, so an ``action_toggle(self)``
         # here would override a live Textual action with an incompatible
@@ -768,6 +789,22 @@ class AskPickerScreen(Container):
     def action_move(self, delta: int) -> None:
         """Arrow/vi movement WRAPS: a discrete, deliberate keypress."""
         self._move_to((self.state.selected + delta) % self.row_count)
+
+    def action_page(self, delta: int) -> None:
+        """PageUp/PageDown move the cursor a page and let the window follow.
+
+        CLAMPED, not wrapped: paging past the end lands on the end, unlike
+        :meth:`action_move` which wraps a discrete keypress. The step is
+        ``max(1, page - 1)`` ROWS — OMP's ``Math.max(1, bodyRows - 1)`` — so a
+        page keeps one row of context across the jump, and it is row-granular
+        (never line-granular) because the card only ever windows when every
+        drawn row is one visual line (`_allocate` buys descriptions
+        all-or-nothing only when the whole list fits). Routes through
+        :meth:`_move_to`, so the viewport autoscrolls to keep the cursor drawn.
+        """
+        step = max(1, self._layout().page - 1)
+        target = self.state.selected + delta * step
+        self._move_to(max(0, min(self.row_count - 1, target)))
 
     def action_jump(self, number: int) -> None:
         """``1``..``9`` jumps straight to a row, the free-text row included."""
@@ -1994,6 +2031,27 @@ class AskPickerScreen(Container):
         self._offset = offset
         return list(range(offset, min(self.row_count, offset + page)))
 
+    def _scrollbar_thumb(self, total: int, budget: int) -> tuple[int, int]:
+        """``(thumb_top, thumb_len)`` inside a ``budget``-tall track.
+
+        The standard proportional model, copied from
+        ``usage_panel.py``:meth:`_scrollbar_thumb` so the two bars agree: the
+        thumb is the fraction of the track the viewport is of the content
+        (``budget / total``), and its top is that fraction of the free travel
+        the offset is of its range. Here ``total`` is :attr:`row_count`,
+        ``budget`` is ``layout.page`` (both ROW counts, never lines — the card
+        only windows when every drawn row is one visual line, §4.2 of the
+        design), and the offset is :attr:`_offset`, whose range is
+        ``total - budget`` (the same clamp :meth:`_window` applies). Guards a
+        zero-travel range so a thumb as tall as the track never moves.
+        """
+        track = max(1, budget)
+        thumb = max(1, min(track, round(track * budget / total))) if total > 0 else track
+        span = track - thumb
+        max_off = max(0, total - budget)
+        top = round(span * self._offset / max_off) if (span > 0 and max_off > 0) else 0
+        return max(0, min(span, top)), thumb
+
     # -- internals -----------------------------------------------------------
     def _move_to(self, index: int) -> None:
         self.state.selected = max(0, min(self.row_count - 1, index))
@@ -2325,6 +2383,7 @@ class AskPickerScreen(Container):
         muted = Style(color=theme_mod.semantic_color("muted"))
         dim = Style(color=theme_mod.semantic_color("dim"))
         faint = Style(color=theme_mod.semantic_color("faint"))
+        edge = Style(color=theme_mod.semantic_color("edge"))
         layout = self._layout()
         width = layout.width
 
@@ -2351,10 +2410,43 @@ class AskPickerScreen(Container):
             newline(None)
 
         window = self._window(layout.page)
-        for index in window:
+        # The scrollbar thumb is painted over the rightmost column of the
+        # windowed option rows, ONLY when the list windows — and keyed on
+        # ``show_position``, the allocator's own overflow decision, rather than
+        # on a raw ``page < row_count``. The two are NOT equivalent: at a very
+        # tight height the D1 collapse (:meth:`_allocate`) drops the position
+        # row to protect the question while the list still windows, and keying
+        # the thumb on the raw comparison would then paint a bar with no count
+        # beside it. Sharing ``show_position`` keeps the thumb and the count one
+        # overflow signal in two renderings — they appear and vanish together at
+        # every size. In this regime ``desc_rows`` is ``{}`` and ``reveal_rows``
+        # is 0 (§4.2/§5), so each windowed option row is exactly one visual line
+        # and one thumb cell maps to one option row.
+        thumb_top, thumb_len = (
+            self._scrollbar_thumb(self.row_count, layout.page) if layout.show_position else (0, 0)
+        )
+        for position, index in enumerate(window):
             ground = self._row_ground(index)
             newline(index)
-            out.append_text(self._row_text(index, width, ground, fg, dim, faint, layout))
+            row = self._row_text(index, width, ground, fg, dim, faint, layout)
+            if layout.show_position:
+                # Cut the row to ``width - 1`` and append the track/thumb glyph
+                # in the freed column, so the bar never widens the card. No
+                # gutter is reserved when the bar is absent (unlike usage_panel,
+                # whose right-aligned numbers must not slide): these rows are
+                # left-aligned labels, so the reservation would buy nothing and
+                # would shift the approval gate's byte-identical frame — which
+                # never windows at its pinned sizes and so never reaches here.
+                _cut_row(row, width - 1)
+                pad = (width - 1) - cell_len(row.plain)
+                if pad > 0:
+                    row.append(" " * pad, style=ground)
+                on_thumb = thumb_top <= position < thumb_top + thumb_len
+                row.append(
+                    SCROLLBAR_THUMB if on_thumb else SCROLLBAR_TRACK,
+                    style=ground + (muted if on_thumb else edge),
+                )
+            out.append_text(row)
             granted = layout.description_rows.get(index, 0)
             if granted:
                 # One `newline(index)` per line, so `_line_rows` maps every one
