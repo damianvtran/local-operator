@@ -292,6 +292,25 @@ def test_a_failed_cold_fetch_returns_none_and_schedules_a_background_retry(tmp_p
     assert _stored(tmp_path)["payload"]["providers"]["anthropic"]["claude-fable-5-1"]
 
 
+def test_a_background_revalidation_gets_the_full_default_timeout(tmp_path) -> None:
+    """R1-2, this document: the leg budget (3 s at most) bounds only the sync
+    fetch; a soft-window refresh runs off-path with the full default."""
+    with catalogue._revalidate_lock:
+        catalogue._revalidating.clear()
+        catalogue._last_attempt.clear()
+        catalogue._threads.clear()
+    _plant(tmp_path, project(_MODELS_DEV_BODY, _ETAG), age_s=2 * 3600)
+    recorder = _Canned([_ok()])
+    with patch("httpx.get", recorder):
+        row = price_catalogue_row("anthropic", "claude-fable-5-1", timeout=0.5, cache_dir=tmp_path)
+        assert row is not None
+        threads = catalogue._revalidation_threads()
+        assert len(threads) == 1
+        for thread in threads:
+            thread.join(timeout=5.0)
+    assert recorder.calls[0]["timeout"] == prices.DEFAULT_TIMEOUT_S
+
+
 def test_a_document_from_an_older_capture_is_refetched_in_the_same_call(tmp_path, canned) -> None:
     _plant(tmp_path, {"capture": 0, "etag": '"old"', "providers": {}}, age_s=60)
     row = price_catalogue_row("anthropic", "claude-fable-5-1", cache_dir=tmp_path)

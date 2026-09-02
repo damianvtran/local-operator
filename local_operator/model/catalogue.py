@@ -469,6 +469,7 @@ def read_listing(
     ttl_s: float = DEFAULT_TTL_S,
     cache_dir: Path | None = None,
     refetch_if: Callable[[dict[str, Any], float], bool] | None = None,
+    revalidate: Callable[[], dict[str, Any]] | None = None,
 ) -> Listing:
     """A provider's ``list_models()`` payload, stale-while-revalidate.
 
@@ -479,6 +480,15 @@ def read_listing(
     client's response). ``payload`` is None only when there is no cache AND the
     fetch failed, which is the one case where the caller must keep its static
     fallbacks.
+
+    ``revalidate`` is the thunk the BACKGROUND refresh runs; it defaults to
+    ``fetch``. They differ in budget, not in what they fetch: ``fetch`` runs on
+    the calling path and carries the caller's ceiling (2 s from a repaint), while
+    the background thread is off-path and may take the provider's full default.
+    A background thunk that inherited the on-path budget failed every time on a
+    link slower than that budget, backed off five minutes, and the document only
+    ever advanced through the 24 h synchronous path — the pre-revalidation
+    behaviour, silently restored.
 
     State machine, by document age:
 
@@ -520,7 +530,7 @@ def read_listing(
         if refetch_if is None or not refetch_if(payload, age):
             refreshing = False
             if age >= soft_ttl_s:
-                refreshing = _schedule_revalidate(key, fetch, cache_dir)
+                refreshing = _schedule_revalidate(key, revalidate or fetch, cache_dir)
             return Listing(payload=payload, age_s=age, refreshing=refreshing)
         logger.debug("%s catalogue (%.0fs old) declared expired by its reader", key, age)
 

@@ -284,7 +284,16 @@ def _price_catalogue_row(
     provider: str, model_id: str, timeout: float, ttl_s: float, cache_dir: Path | None
 ) -> DiscoveredModel | None:
     def fetch() -> dict[str, Any]:
+        # On the calling path: the leg's budget (3 s at most, less when the
+        # provider's own listing spent some of the shared deadline).
         return _fetch(timeout, cache_dir)
+
+    def revalidate() -> dict[str, Any]:
+        # Off the calling path, where the leg budget is the wrong ceiling: a 4.4 MB
+        # download that needs more than 3 s would fail every background attempt
+        # and leave the document to the 24 h sync path. Same full ceiling the
+        # cold-miss retry below already uses.
+        return _fetch(DEFAULT_TIMEOUT_S, cache_dir)
 
     def lacks_model(document: Mapping[str, Any], age_s: float) -> bool:
         # The `want_id` rule: a usable document old enough to predate the id
@@ -303,6 +312,7 @@ def _price_catalogue_row(
         ttl_s=ttl_s,
         cache_dir=cache_dir,
         refetch_if=lacks_model,
+        revalidate=revalidate,
     )
     providers = _usable(listing.payload)
     if providers is None and listing.payload is not None:

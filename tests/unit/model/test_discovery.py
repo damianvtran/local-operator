@@ -1463,6 +1463,41 @@ def test_a_genuinely_unlisted_id_still_refetches_after_the_alias_widening(tmp_pa
     assert len(client.calls) == 1
 
 
+def test_a_background_revalidation_gets_the_full_default_timeout(tmp_path) -> None:
+    """R1-2: the caller's on-path budget (2 s from a repaint) bounds the SYNC
+    fetch only. The background refresh is off-path and must get the provider's
+    full default, or on any link slower than the caller's budget it fails every
+    time and the document only ever advances via the 24 h sync path."""
+    from local_operator.model import catalogue
+
+    with catalogue._revalidate_lock:
+        catalogue._revalidating.clear()
+        catalogue._last_attempt.clear()
+        catalogue._threads.clear()
+    _plant_anthropic_document(tmp_path, age_s=2 * 3600, ids=["claude-opus-5"])
+    client = _StubClient([_Response(200, _ANTHROPIC_BODY)])
+
+    _models, status = available_models(
+        "anthropic", api_key="sk-ant", client=client, cache_dir=tmp_path, timeout=2.0
+    )
+    assert status == "cached"
+    for thread in catalogue._revalidation_threads():
+        thread.join(timeout=5.0)
+
+    assert len(client.calls) == 1
+    _url, _headers, _params, timeout = client.calls[0]
+    assert timeout == discovery.DEFAULT_TIMEOUT_S
+
+    # And the SYNC path keeps the caller's budget: it is the one waiting.
+    _plant_anthropic_document(tmp_path, age_s=25 * 3600, ids=["claude-opus-5"])
+    client = _StubClient([_Response(200, _ANTHROPIC_BODY)])
+    _models, status = available_models(
+        "anthropic", api_key="sk-ant", client=client, cache_dir=tmp_path, timeout=2.0
+    )
+    assert status == "ok"
+    assert client.calls[0][3] == 2.0
+
+
 def test_a_failed_want_id_refetch_keeps_the_document_and_reports_stale(tmp_path) -> None:
     _plant_anthropic_document(tmp_path, age_s=22 * 3600, ids=["claude-opus-5"])
     client = _StubClient([httpx.ConnectError("offline")])

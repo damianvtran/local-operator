@@ -1607,3 +1607,40 @@ def test_a_failed_sync_fetch_reports_failed_with_the_stale_document(tmp_path) ->
     listing = catalogue.read_listing("anthropic.listing", boom, cache_dir=tmp_path)
     assert listing.payload == _payload(window=1)
     assert (listing.fetched, listing.failed) == (False, True)
+
+
+def test_the_background_refresh_runs_the_revalidate_thunk_not_the_on_path_one(
+    tmp_path, _no_backoff_state
+) -> None:
+    """The two thunks differ in BUDGET: `fetch` carries the caller's ceiling (2 s
+    from a repaint), `revalidate` the provider's full default. A background
+    refresh that inherited the on-path budget failed on every link slower than
+    2 s, backed off, and left the document to the 24 h sync path."""
+    _plant(tmp_path, "anthropic.listing", _payload(window=1), age_s=2 * 3600)
+    ran: list[str] = []
+
+    def on_path():
+        ran.append("fetch")
+        return _payload(window=2)
+
+    def off_path():
+        ran.append("revalidate")
+        return _payload(window=3)
+
+    listing = catalogue.read_listing(
+        "anthropic.listing", on_path, cache_dir=tmp_path, revalidate=off_path
+    )
+    assert listing.refreshing is True
+    _join_revalidations()
+    assert ran == ["revalidate"]
+    raw = json.loads((tmp_path / "anthropic.listing.json").read_text(encoding="utf-8"))
+    assert raw["payload"] == _payload(window=3)
+
+    # The SYNC path still runs `fetch`: past the hard TTL the caller's budget
+    # is the right one, because the caller is waiting on it.
+    _plant(tmp_path, "anthropic.listing", _payload(window=1), age_s=25 * 3600)
+    ran.clear()
+    listing = catalogue.read_listing(
+        "anthropic.listing", on_path, cache_dir=tmp_path, revalidate=off_path
+    )
+    assert listing.fetched is True and ran == ["fetch"]

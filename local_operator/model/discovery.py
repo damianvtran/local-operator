@@ -1280,7 +1280,7 @@ def _available_models(
 
     capture = listing_capture_version(definition.id)
 
-    def fetch() -> dict[str, Any]:
+    def fetch_within(ceiling: float) -> dict[str, Any]:
         live = fetch_models(
             definition.id,
             api_key=api_key,
@@ -1288,7 +1288,7 @@ def _available_models(
             account_id=account_id,
             base_url=resolved_base,
             client=client,
-            timeout=timeout,
+            timeout=ceiling,
         )
         if live is None:
             raise _ListingUnavailable(definition.id)
@@ -1296,6 +1296,18 @@ def _available_models(
             "capture": capture,
             "models": [dataclasses.asdict(row) for row in live],
         }
+
+    def fetch() -> dict[str, Any]:
+        # On the calling path: the caller's budget, which from a repaint is 2 s.
+        return fetch_within(timeout)
+
+    def revalidate() -> dict[str, Any]:
+        # Off the calling path, so the caller's budget is the wrong ceiling: a
+        # background refresh that inherited 2 s failed on every link slower
+        # than that, backed off, and left the document to the 24 h sync path.
+        # The provider's full default is what an unhurried listing gets, the
+        # same choice ``prices._price_catalogue_row`` makes for its retry.
+        return fetch_within(DEFAULT_TIMEOUT_S)
 
     storage_id = credential_provider_id(definition.id)
     # Derived ONCE and reused for both the document name and the pruning
@@ -1337,6 +1349,7 @@ def _available_models(
         ttl_s=ttl_s,
         cache_dir=cache_dir,
         refetch_if=lacks_want_id,
+        revalidate=revalidate,
     )
     payload = listing.payload
     live_rows = _rows_from_payload(payload, capture)
@@ -1359,7 +1372,12 @@ def _available_models(
             # model list on every start; online it memoises a session booted at
             # default context, no prompt cache and zero prices.
             listing = read_listing(
-                key, fetch, soft_ttl_s=soft_ttl_s, ttl_s=ttl_s, cache_dir=cache_dir
+                key,
+                fetch,
+                soft_ttl_s=soft_ttl_s,
+                ttl_s=ttl_s,
+                cache_dir=cache_dir,
+                revalidate=revalidate,
             )
             payload = listing.payload
             live_rows = _rows_from_payload(payload, capture)
