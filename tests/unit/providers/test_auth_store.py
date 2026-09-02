@@ -1324,3 +1324,206 @@ class TestLoginFlavourAliases:
         assert row.provider == "xai"
         assert await store.get_api_key("xai") == "flavour-write"
         assert await store.get_api_key("xai-oauth") == "flavour-write"
+
+
+class TestADemotionNeverMovesASessionOffItsStickyAccount:
+    """A demotion is a preference for NEW picks, never an eviction.
+
+    The provider's prompt cache is per account. Before this, a reserve
+    demotion written by the quota preflight — process-wide and shared by every
+    session in the process — dropped the demoted row from its tier, so a
+    session sticky to it fell to the hash pick and was re-pinned to a sibling
+    whose cache had never seen its conversation: the whole prefix rewritten at
+    cache-write price, and with several accounts low, again at the next
+    boundary once the 120s mark expired. Measured on a five-account host at
+    ~38% of all Anthropic cache writes over 30 hours. The reactive 429 path
+    already kept the sticky (``rotate_sibling``: "sticky preserved"); this
+    class pins the same rule for the preference marks.
+    """
+
+    @staticmethod
+    def _pool(tmp_path: Any) -> tuple[AuthStore, Any, Any]:
+        store = AuthStore(db_path=tmp_path / "auth.db")
+        a = store.upsert_credential(
+            "anthropic",
+            {"type": "oauth", "access": "tok-a", "refresh": "r", "email": "a@example.com"},
+        )
+        b = store.upsert_credential(
+            "anthropic",
+            {"type": "oauth", "access": "tok-b", "refresh": "r", "email": "b@example.com"},
+        )
+        return store, a, b
+
+    async def test_sticky_survives_its_own_demotion_when_a_sibling_is_available(
+        self, tmp_path: Any
+    ) -> None:
+        """(a) The regression: sticky on A, A demoted, B healthy → still A."""
+        store, a, b = self._pool(tmp_path)
+        store.pin_session_credential("anthropic", "s1", a.id)
+
+        store.deprioritize_credential("anthropic", a.id)
+
+        access = await store.get_oauth_access("anthropic", "s1")
+        assert access is not None and access.credential_id == a.id
+        # The mark is untouched: it still steers OTHER picks (below).
+        assert store._active_demotions("anthropic") == {a.id}
+
+    async def test_a_session_without_a_sticky_still_skips_the_demoted_row(
+        self, tmp_path: Any
+    ) -> None:
+        """(b) Unchanged: a fresh session's hash pick never lands on a demoted row."""
+        store, a, b = self._pool(tmp_path)
+        store.deprioritize_credential("anthropic", a.id)
+
+        # Every session id, whatever its hash, avoids A while B is usable.
+        for session in ("s1", "s2", "s3", "session-abc", "another"):
+            access = await store.get_oauth_access("anthropic", session)
+            assert access is not None and access.credential_id == b.id, session
+
+    async def test_a_blocked_sticky_still_moves(self, tmp_path: Any) -> None:
+        """(c) Unchanged: a BLOCK is a verdict that the account cannot serve, and
+        the block filter runs ahead of the sticky exemption."""
+        store, a, b = self._pool(tmp_path)
+        store.pin_session_credential("anthropic", "s1", a.id)
+
+        store.block_credential(a.id, "anthropic", block_ms=60_000)
+
+        access = await store.get_oauth_access("anthropic", "s1")
+        assert access is not None and access.credential_id == b.id
+
+    async def test_a_blocked_and_demoted_sticky_still_moves(self, tmp_path: Any) -> None:
+        """Both marks at once (the depleted-then-demoted shape) still moves."""
+        store, a, b = self._pool(tmp_path)
+        store.pin_session_credential("anthropic", "s1", a.id)
+        store.deprioritize_credential("anthropic", a.id)
+        store.block_credential(a.id, "anthropic", block_ms=60_000)
+
+        access = await store.get_oauth_access("anthropic", "s1")
+        assert access is not None and access.credential_id == b.id
+
+    async def test_the_usage_limit_path_still_preserves_the_sticky(self, tmp_path: Any) -> None:
+        """(d) The reactive promise this change extends is itself unchanged."""
+        from local_operator.providers.failover import ProviderError
+
+        store, a, b = self._pool(tmp_path)
+        store.pin_session_credential("anthropic", "s1", a.id)
+
+        usage_limit = ProviderError(429, "rate limit reached", retryable=True)
+        assert store.rotate_sibling("anthropic", "s1", usage_limit, api_key="tok-a") is True
+
+        assert store.session_credential_id("anthropic", "s1") == a.id
+        # Blocked for the backoff, so the request in hand goes to B; the pin
+        # brings the session back to A once the block lapses.
+        assert store.is_blocked(a.id, "anthropic")
+
+    async def test_the_exemption_is_per_session(self, tmp_path: Any) -> None:
+        """Another session's warm account is not this session's: a demotion
+        written by (or for) one session still steers every OTHER session."""
+        store, a, b = self._pool(tmp_path)
+        store.pin_session_credential("anthropic", "warm", a.id)
+        store.deprioritize_credential("anthropic", a.id)
+
+        warm = await store.get_oauth_access("anthropic", "warm")
+        cold = await store.get_oauth_access("anthropic", "cold")
+        assert warm is not None and warm.credential_id == a.id
+        assert cold is not None and cold.credential_id == b.id
+
+    async def test_releasing_the_pin_lets_the_demotion_take_effect(self, tmp_path: Any) -> None:
+        """The escape hatch the preflight uses for a FRESH pick: a row the walk
+        only just pinned holds nothing cached, so release + demote moves on."""
+        store, a, b = self._pool(tmp_path)
+        store.pin_session_credential("anthropic", "s1", a.id)
+        store.deprioritize_credential("anthropic", a.id)
+        store.release_session_credential("anthropic", "s1")
+
+        access = await store.get_oauth_access("anthropic", "s1")
+        assert access is not None and access.credential_id == b.id
+        # ...and the session is now pinned to the account that served.
+        assert store.session_credential_id("anthropic", "s1") == b.id
+
+    async def test_a_read_only_resolve_also_stays_on_the_demoted_sticky(
+        self, tmp_path: Any
+    ) -> None:
+        """An isolated request beside the turn lands on the SAME credential the
+        turn is transacting on — the point of ``read_only`` reading stickiness."""
+        store, a, b = self._pool(tmp_path)
+        store.pin_session_credential("anthropic", "s1", a.id)
+        store.deprioritize_credential("anthropic", a.id)
+
+        access = await store.get_oauth_access("anthropic", "s1", read_only=True)
+        assert access is not None and access.credential_id == a.id
+        assert store._active_demotions("anthropic") == {a.id}
+
+    def test_the_all_demoted_stale_marks_rule_ignores_the_exemption(self, tmp_path: Any) -> None:
+        """ "Every row in the tier is demoted" is judged on the raw marks, so the
+        stale-marks clear in ``_selection_order`` fires exactly as before."""
+        store, a, b = self._pool(tmp_path)
+        store.pin_session_credential("anthropic", "s1", a.id)
+        store.deprioritize_credential("anthropic", a.id)
+        store.deprioritize_credential("anthropic", b.id)
+
+        order = store._selection_order(store.list_credentials("anthropic"), "anthropic", "s1")
+        assert [r.id for r in order] == [a.id, b.id]
+        assert store._active_demotions("anthropic") == set()
+
+    async def test_an_all_demoted_tier_clears_both_marks_through_resolve(
+        self, tmp_path: Any
+    ) -> None:
+        """Review F3: the same rule seen from ``_resolve``, where the tier
+        filter runs first. Sticky on A, A and B both demoted (an outage, not a
+        verdict about either account). The exemption used to hand the cascade
+        ``[A]`` alone, ``_selection_order`` read that one-row tier as "all
+        demoted" and cleared only A's mark — B stayed demoted, and every other
+        session's fresh pick then skewed onto A for the rest of the TTL. The
+        all-demoted judgement runs on the RAW rows so both marks clear
+        together, exactly as they did before the exemption existed, and the
+        sticky session still lands on A."""
+        store, a, b = self._pool(tmp_path)
+        store.pin_session_credential("anthropic", "s1", a.id)
+        store.deprioritize_credential("anthropic", a.id)
+        store.deprioritize_credential("anthropic", b.id)
+
+        access = await store.get_oauth_access("anthropic", "s1")
+        assert access is not None and access.credential_id == a.id
+        assert store._active_demotions("anthropic") == set()
+
+        # With the marks gone, a non-sticky session spreads by hash again
+        # rather than being funnelled onto the sticky's account.
+        picks = set()
+        for session in ("s2", "s3", "s4", "s5", "s6", "s7"):
+            other = await store.get_oauth_access("anthropic", session, read_only=True)
+            assert other is not None
+            picks.add(other.credential_id)
+        assert picks == {a.id, b.id}
+
+    def test_the_sticky_sorts_first_even_while_demoted(self, tmp_path: Any) -> None:
+        """The ordering half agrees with the tier-filter half: a demoted sticky
+        is not sorted last either, or the two would disagree on the second
+        (``ignore_demotions``) pass."""
+        store, a, b = self._pool(tmp_path)
+        store.pin_session_credential("anthropic", "s1", a.id)
+        store.deprioritize_credential("anthropic", a.id)
+
+        order = store._selection_order(store.list_credentials("anthropic"), "anthropic", "s1")
+        assert [r.id for r in order] == [a.id, b.id]
+        # A session with no sticky still sees A last.
+        order = store._selection_order(store.list_credentials("anthropic"), "anthropic", "s2")
+        assert order[-1].id == a.id
+
+    async def test_a_server_fault_on_the_sticky_still_moves_the_session(
+        self, tmp_path: Any
+    ) -> None:
+        """The exemption must not undo 529 rotation: ``rotate_sibling`` clears
+        the session's sticky for a server fault before the mark is consulted,
+        so the demoted row has no pin to hide behind and the next attempt
+        moves to the sibling as it always did."""
+        from local_operator.providers.failover import ProviderError
+
+        store, a, b = self._pool(tmp_path)
+        store.pin_session_credential("anthropic", "s1", a.id)
+
+        overloaded = ProviderError(529, "overloaded_error: Overloaded", retryable=True)
+        assert store.rotate_sibling("anthropic", "s1", overloaded, api_key="tok-a") is True
+
+        access = await store.get_oauth_access("anthropic", "s1")
+        assert access is not None and access.credential_id == b.id
