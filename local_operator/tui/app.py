@@ -13898,14 +13898,10 @@ class OperatorApp(App[None]):
         text without touching the record: the docstring's load-bearing claim
         (the aside READS the conversation and never writes to it) survives.
 
-        The payload comes off the ``AsideTurn`` dataclass, the way
-        ``fork_messages`` does, and NOT off the painted rows. Two reasons, both
-        load-bearing. The painted rows are a WINDOW — the defect this whole
-        change exists to fix is that they are a subset of the answer — so
-        copying them would hand back the same fragment the user is complaining
-        they cannot see past. And the drag path additionally sweeps up the
-        card's title and rule, which is what ``Chrome.ALLOW_SELECT`` exists to
-        keep out of the clipboard.
+        The payload is :meth:`AsidePanel.copy_text`'s, which takes it off the
+        ``AsideTurn`` dataclass rather than off the painted rows — the rows are
+        the windowed subset the reader can already see, which is the very
+        defect this key exists beside, and they carry the card's chrome.
 
         Deliberately NOT gated on ``_aside_can_fork``. That refuses while the
         session is streaming, because splicing a message into a live batch
@@ -13925,33 +13921,24 @@ class OperatorApp(App[None]):
         # safe, and a chord cannot eat a keystroke. See `ASIDE_COPY_KEY`.
         if self.screen.focused is not self._editor():
             return
-        # NOT `fork_messages()`, which is gated on `AsideTurn.forkable` and so
-        # requires `state == "done"`. MEASURED: mid-stream it returns `[]`, so
-        # routing the payload through it would copy an EMPTY string in exactly
-        # the case this key exists to cover — the one where `^f` is already
-        # refused. Forking needs a settled turn because it writes a message
-        # pair into the session; the clipboard has no such requirement, so the
-        # two gestures legitimately read different sets.
+        # The panel composes the payload; this method only decides WHEN to copy
+        # and routes the result to the one clipboard write. Which turns qualify
+        # and how they are joined is a fact about the exchange, so it lives with
+        # the exchange — beside `fork_messages`, whose sibling rule it is.
         #
-        # A FAILED turn is still excluded: its prose is an error string this
-        # app wrote, not something the model said, and `AsideTurn` keeps it in
-        # a separate field precisely so it can never be handed on as an answer.
-        # Partial text from a running turn IS included — it is genuinely what
-        # the model has said so far, and it is what is on screen.
+        # This is not a stylistic split. Rebuilding the payload here from
+        # `panel.turns` produced a SECOND implementation of one idea, and the
+        # two immediately drifted: they disagreed on whitespace, and both
+        # filtered on "the answer is non-empty" while claiming to exclude
+        # failed turns — so a turn that streamed a few tokens and then errored
+        # had that fragment copied as though the model had said it. One
+        # implementation cannot disagree with itself.
         #
-        # Both halves of a turn, so the copy reads as the exchange it was
-        # rather than an answer to a question the clipboard does not contain.
-        # Blank line between turns, matching how the card itself separates them.
-        blocks = [
-            f"{turn.question}\n\n{turn.answer}".strip()
-            for turn in panel.turns
-            if turn.answer.strip()
-        ]
-        # Silent when there is nothing settled to take — the `_scroll_aside`
-        # rule. `_put_on_clipboard` already treats empty as "no copy happened"
+        # Silent when there is nothing to take — the `_scroll_aside` rule.
+        # `_put_on_clipboard` already treats empty as "no copy happened"
         # rather than raising a receipt for it, so this needs no notice of its
         # own; a warning row per stray press would be drawn behind the card.
-        self._put_on_clipboard("\n\n".join(blocks))
+        self._put_on_clipboard(panel.copy_text())
 
     def action_transcript_home(self) -> None:
         """``ctrl+home`` — take the transcript to its oldest row (UX1, U2).

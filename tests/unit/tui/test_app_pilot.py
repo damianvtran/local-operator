@@ -10115,3 +10115,78 @@ async def test_the_aside_copy_key_is_inert_outside_the_aside() -> None:
 
         assert app._clipboard == "", "copied something with no aside open"
         assert editor.text == "a draft I am writing", "ctrl+r reached the buffer"
+
+
+@pytest.mark.asyncio
+async def test_the_aside_copy_key_leaves_out_a_turn_that_failed() -> None:
+    """A failed turn's partial text is NOT the model's answer, so it is not copied.
+
+    `fail_answer` keeps whatever streamed before the failure in `.answer` and
+    puts the reason in a separate `.error` field, precisely so the fragment can
+    never be handed on as though the model had said it — the same rule
+    `fork_messages` applies when it drops non-`forkable` turns ("half an
+    exchange is not one").
+
+    A filter written against "the answer is non-empty" rather than against the
+    turn's STATE passes every other test in this file and still leaks here,
+    which is why this case is pinned at the KEY level: it asserts what the user
+    actually gets on the clipboard, not what a helper returns.
+
+    The running turn in the same card must still come through. That is the
+    distinction this test exists to hold: exclude error and cancelled, include
+    running — `^f` is refused mid-stream, so copy is the only way out there.
+    """
+    from tests.unit.tui.test_aside import AsideSession
+
+    session = AsideSession(answer=_aside_answer_rows(20, tag="GOOD"))
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        panel = await _open_long_aside(pilot, app, "the settled question")
+
+        # A turn that streamed some text and then failed.
+        failed = panel.ask("the doomed question")
+        panel.append_answer(failed, "HALF-AN-ANSWER before it broke")
+        panel.fail_answer(failed, "provider exploded")
+        await pilot.pause()
+        assert panel.turns[-1].state == "error"
+        assert panel.turns[-1].answer, "precondition: the fragment survived on the turn"
+
+        app._clipboard = ""
+        await pilot.press("ctrl+r")
+        await pilot.pause()
+
+        copied = app._clipboard
+        assert "GOOD-ROW-000" in copied, "the settled turn should still be copied"
+        assert "HALF-AN-ANSWER" not in copied, f"a failed turn's fragment leaked: {copied!r}"
+        assert "the doomed question" not in copied, copied
+        # The failure text itself is this app's prose, never the model's.
+        assert "provider exploded" not in copied, copied
+
+
+@pytest.mark.asyncio
+async def test_the_aside_copy_key_leaves_out_a_cancelled_turn() -> None:
+    """Cancelled is the other half of the same rule, and it is a separate state.
+
+    A filter that special-cased only ``error`` would pass the failure test above
+    and still leak here.
+    """
+    from tests.unit.tui.test_aside import AsideSession
+
+    session = AsideSession(answer=_aside_answer_rows(20, tag="GOOD"))
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        panel = await _open_long_aside(pilot, app, "the settled question")
+
+        abandoned = panel.ask("the abandoned question")
+        panel.append_answer(abandoned, "ABANDONED-TEXT")
+        panel.turns  # the accessor copies, so mutate the turn the card holds
+        panel._turns[-1].state = "cancelled"
+        await pilot.pause()
+
+        app._clipboard = ""
+        await pilot.press("ctrl+r")
+        await pilot.pause()
+
+        copied = app._clipboard
+        assert "GOOD-ROW-000" in copied, "the settled turn should still be copied"
+        assert "ABANDONED-TEXT" not in copied, f"a cancelled turn leaked: {copied!r}"
