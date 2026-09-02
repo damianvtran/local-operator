@@ -486,8 +486,29 @@ class AsyncJobManager:
         self._invalidate_accounting()
 
     def note_usage_changed(self) -> None:
-        """Invalidate after an in-place Usage mutation owned by a child relay."""
+        """Invalidate after an in-place Usage mutation owned by a child relay.
+
+        ``usage`` is a DURABLE roster field (see ``_ROSTER_ROW_FIELDS`` in
+        ``session.py``), so mutating it changes the projection the resume
+        sidecar stores — not merely the live cost aggregate. Announcing it on
+        the roster seam is what marks that sidecar dirty, and it is load-bearing
+        because the session's writer is WATERMARK-GUARDED: it flushes only while
+        ``written_generation < generation``. A usage mutation that bumped no
+        generation therefore left the next ``_persist_subagent_roster()`` a
+        no-op, and the new tokens stayed off disk until some unrelated roster
+        event happened to bump the generation. Whether an unrelated event had
+        already drained the writer is what decided if those tokens survived a
+        restart — a real durability race, and the mechanism behind the #548
+        flake (a resumed session's folded predecessor came back billing 0
+        instead of its settled spend).
+
+        The production relay already follows this call with its own
+        ``_notify_roster_change()``. The duplicate generation bump costs no
+        extra I/O: the writer loops on the watermark so both bumps coalesce into
+        one pass, and the fingerprint guard drops a byte-identical payload.
+        """
         self._invalidate_accounting()
+        self._notify_roster_change()
 
     def _notify_roster_change(self) -> None:
         """Publish and persist a mutation of the durable task-row projection."""

@@ -79,6 +79,36 @@ def _status(session, job_id: str) -> str | None:
     return None if job is None else job.status
 
 
+async def wait_for_settled_delivery(session, stream) -> None:
+    """Block until the auto-delivered parent turn a settled child triggers has
+    both STARTED and finished.
+
+    A completed subagent is not the end of the parent's activity: settlement
+    runs ``Session._on_job_completed``, which spawns a background parent turn
+    that feeds the child's result back into the conversation. That turn is a
+    real production behaviour, but it is asynchronous and nothing about the
+    child's ``completed`` status implies it has run — so a test that merely
+    waits on the child's status is waiting on a PROXY for parent quiescence
+    that the parent has not actually reached.
+
+    Both halves are load-bearing. Waiting only for "not streaming" can observe
+    the gap BEFORE the delivery turn starts and return immediately; waiting
+    only for the request count can return while the turn is still streaming.
+    Together they pin the turn's whole lifecycle, which is what makes a
+    following observation window contain only what the test provoked.
+
+    Without this, a delivery turn that happened to still be in flight published
+    its own ``streaming`` and ``history_cursor`` updates into a window the test
+    believed held only its own coalesced batch (measured: ``assert 3 == 1`` at
+    ~10% locally, and reproducible on demand by delaying the parent stream).
+    """
+    # The delivery turn's own provider call is the only unambiguous evidence it
+    # started; the launch turn is request #1.
+    await wait_for(lambda: len(stream.requests) >= 2)
+    await wait_for(lambda: not session.is_streaming)
+    await wait_for(lambda: not any(not task.done() for task in session._background_tasks))
+
+
 async def _todo(ctx, call_id: str, args: dict[str, object]) -> None:
     """Drive the todo tool with the full positional signature its guard
     decorator declares (signal / on_update default to ``None``)."""
@@ -239,6 +269,9 @@ async def test_live_continuation_preserves_prior_accounting_across_restart(tmp_p
     old_row = parent.jobs.get(old_id)
     assert old_row is not None
     old_row.usage = Usage(input_tokens=4, provider="test", model_id="m")
+    # ``usage`` is a durable roster field, so this announcement is what marks
+    # the sidecar dirty; the persist below is a no-op without it, and the
+    # tokens never reach disk (see AsyncJobManager.note_usage_changed).
     parent.jobs.note_usage_changed()
     await parent._persist_subagent_roster()
     await parent.dispose()
@@ -255,6 +288,12 @@ async def test_live_continuation_preserves_prior_accounting_across_restart(tmp_p
     # second after waiting on the first is wait-on-a-proxy-then-assert-on-
     # the-real-thing, and under load the fold has not landed when the
     # identity has (#463: ``assert 0 == 4`` on an otherwise-green commit).
+    #
+    # This wait is reachable ONLY because the predecessor's usage actually
+    # reached the sidecar above. When it did not, the restored row billed 0,
+    # no later event could fix it, and this loop burned its whole timeout —
+    # the #548 CI failure. That is a durability bug, not a slow machine, so
+    # the fix is in the manager rather than in this deadline.
     await wait_for(
         lambda: sum(item.input_tokens for item in resumed.jobs.accounting_components()) == 4,
         timeout=30.0,
@@ -272,6 +311,53 @@ async def test_live_continuation_preserves_prior_accounting_across_restart(tmp_p
     assert sum(item.input_tokens for item in restarted.jobs.accounting_components()) == 4
 
     await restarted.dispose()
+    await resumed.dispose()
+
+
+@pytest.mark.asyncio
+async def test_usage_mutation_persists_when_the_writer_already_drained(tmp_path, monkeypatch):
+    """A settled child's usage reaches the sidecar even when the roster writer
+    has ALREADY caught up before the mutation.
+
+    ``usage`` is a durable roster field, but the session's writer is
+    watermark-guarded: ``_persist_subagent_roster`` flushes only while
+    ``written_generation < generation``. So a usage mutation that announced
+    nothing on the roster seam left the very next persist a no-op and the
+    tokens off disk — the row came back from a resume billing 0.
+
+    Whether it survived depended on a RACE with unrelated roster traffic: if
+    some other event had not yet drained the writer, the mutation rode along
+    on that pending flush and looked correct. This test pins the losing
+    interleaving deterministically by draining the writer FIRST, which is the
+    state a contended machine reaches on its own and is what made the sibling
+    accounting test fail intermittently in CI (#548).
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+
+    parent = _session(tmp_path, OneShotStream())
+    await parent.async_init()
+    job_id = parent._launch_subagent(label="accounted", prompt="do a thing")
+    await wait_for(lambda: _status(parent, job_id) == "completed")
+
+    # The whole point: no pending flush is left for the mutation to ride on.
+    await parent._await_subagent_roster_writer()
+    assert parent._subagent_roster_written_generation == parent._subagent_roster_generation
+
+    row = parent.jobs.get(job_id)
+    assert row is not None
+    row.usage = Usage(input_tokens=4, provider="test", model_id="m")
+    parent.jobs.note_usage_changed()
+    await parent._persist_subagent_roster()
+
+    sidecar = parent._transcript.directory / SUBAGENT_ROSTER_SIDECAR
+    persisted = json.loads(sidecar.read_text())
+    assert [(item.get("usage") or {}).get("input_tokens") for item in persisted["jobs"]] == [4]
+    await parent.dispose()
+
+    # And it survives the round trip a resume actually performs.
+    resumed = _session(tmp_path, IdleStream())
+    await resumed.async_init()
+    assert sum(item.input_tokens for item in resumed.jobs.accounting_components()) == 4
     await resumed.dispose()
 
 
@@ -690,10 +776,15 @@ async def test_snapshot_entry_is_written_for_a_launched_child(tmp_path, monkeypa
 async def test_live_progress_never_schedules_the_roster_writer(tmp_path, monkeypatch):
     """Transient activity publishes to frontends without touching durability."""
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
-    parent = _session(tmp_path, OneShotStream())
+    stream = OneShotStream()
+    parent = _session(tmp_path, stream)
     await parent.async_init()
     job_id = parent._launch_subagent(label="x", prompt="p")
     await wait_for(lambda: _status(parent, job_id) == "completed")
+    # The observation window below must contain ONLY the progress batch this
+    # test provokes, so the parent has to be genuinely idle first — see
+    # wait_for_settled_delivery for the turn that otherwise publishes into it.
+    await wait_for_settled_delivery(parent, stream)
     await parent._await_subagent_roster_writer()
     generation = parent._subagent_roster_generation
     updates = []
