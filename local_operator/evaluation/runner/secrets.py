@@ -21,15 +21,22 @@ the one runner module besides ``provider_client.py`` allowed to import the
 application; keeping it out of this file is what lets ``episode.py`` import
 the protocol here without dragging the store along.
 
-Failure shape: a resolver raises ``MissingSecret(name)`` and NEVER includes a
-value in any exception. The runner turns that into a pre-bundle failure whose
-diagnostic names the ref, so the operator learns which credential to provision
-without a value ever crossing into a durable record.
+Failure shape: a resolver raises ``MissingSecret(name)`` (or its subclass
+``UnusableSecret(name)`` for a value the wire model refuses) and NEVER
+includes a value in any exception. The runner turns that into a pre-bundle
+failure whose diagnostic names the ref, so the operator learns which
+credential to provision without a value ever crossing into a durable record.
+Every resolver MUST build its ``ResolvedSecret`` through
+``build_resolved_secret``: pydantic's ``ValidationError`` quotes the offending
+input, so an over-long value (``max_length=8192``; a cert chain does it)
+constructed anywhere else would put the secret on stdout.
 """
 
 from __future__ import annotations
 
 from typing import Mapping, Protocol, Sequence, runtime_checkable
+
+from pydantic import ValidationError
 
 from local_operator.evaluation.adapters.api import ResolvedSecret
 
@@ -49,6 +56,44 @@ class MissingSecret(LookupError):
 
     def __str__(self) -> str:
         return f"missing secret {self.name}"
+
+
+class UnusableSecret(MissingSecret):
+    """A value the store holds but the wire model refuses (empty, too long).
+
+    A ``MissingSecret`` subclass so every guard that routes a missing ref to a
+    name-only failure routes this the same way; a distinct type so the message
+    tells the operator to FIX the stored value rather than provision one. The
+    underlying ``ValidationError`` is deliberately not chained: pydantic
+    renders ``input_value=`` in its message, which is the value itself.
+    """
+
+    def __str__(self) -> str:
+        return f"unusable secret {self.name}"
+
+
+def build_resolved_secret(name: str, value: str) -> ResolvedSecret:
+    """The ONLY sanctioned constructor for a ``ResolvedSecret`` in the parent.
+
+    ``ResolvedSecret`` bounds ``value`` (``min_length=1``, ``max_length=8192``)
+    and re-validates the name pattern; a violation raises pydantic's
+    ``ValidationError`` whose message embeds ``input_value='<head>…<tail>'``.
+    That message would ride ``_diagnostic`` into ``EpisodeOutcome.diagnostic``
+    and the run's stdout. Translating it here to a name-only error is what
+    keeps a PEM-shaped credential out of the durable record.
+    """
+
+    if not value:
+        raise MissingSecret(name)
+    try:
+        return ResolvedSecret(name=name, value=value)
+    except ValidationError:
+        failure = UnusableSecret(name)
+    # Raised OUTSIDE the except block on purpose. ``raise ... from None`` only
+    # clears ``__cause__`` and sets ``__suppress_context__``; ``__context__``
+    # would still reference the ValidationError -- and its input -- for any
+    # logger or serializer that walks the chain rather than the traceback.
+    raise failure
 
 
 @runtime_checkable
@@ -101,13 +146,6 @@ class EnvSecretResolver:
 def _resolve_from_mapping(
     values: Mapping[str, str], names: Sequence[str]
 ) -> tuple[ResolvedSecret, ...]:
-    resolved: list[ResolvedSecret] = []
-    for name in names:
-        value = values.get(name)
-        if not value:
-            raise MissingSecret(name)
-        # ``ResolvedSecret`` re-validates the name pattern and the value bound,
-        # so a mapping that carries a malformed entry fails here, in the
-        # parent, before anything has been allocated.
-        resolved.append(ResolvedSecret(name=name, value=value))
-    return tuple(resolved)
+    # A malformed entry fails here, in the parent, before anything has been
+    # allocated -- and by name only (``build_resolved_secret``).
+    return tuple(build_resolved_secret(name, values.get(name, "")) for name in names)

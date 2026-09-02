@@ -129,20 +129,125 @@ def test_credential_store_resolver_wraps_the_manager_and_names_only_the_ref() ->
             return self._value
 
     class _Manager:
-        def get_credential(self, key: str) -> _Secret:
-            if key == "BOOM":
+        def __init__(self, explode: bool = False) -> None:
+            self.explode = explode
+
+        def get_credentials(self) -> dict[str, _Secret]:
+            if self.explode:
                 raise RuntimeError("store exploded reading /path/credentials.env")
-            return _Secret({"PRESENT": CANARY}.get(key, ""))
+            return {"PRESENT": _Secret(CANARY), "EMPTY": _Secret("")}
+
+        def get_credential(self, key: str) -> _Secret:  # pragma: no cover
+            raise AssertionError("the resolver must not use the env-falling-back getter")
 
     resolver = CredentialStoreResolver(_Manager())
     assert resolver.resolve(["PRESENT"]) == (ResolvedSecret(name="PRESENT", value=CANARY),)
-    with pytest.raises(MissingSecret) as missing:
-        resolver.resolve(["ABSENT"])
-    assert missing.value.name == "ABSENT"
+    for absent in ("ABSENT", "EMPTY"):
+        with pytest.raises(MissingSecret) as missing:
+            resolver.resolve([absent])
+        assert missing.value.name == absent
     with pytest.raises(MissingSecret) as errored:
-        resolver.resolve(["BOOM"])
+        CredentialStoreResolver(_Manager(explode=True)).resolve(["BOOM"])
     assert errored.value.name == "BOOM"
     assert "credentials.env" not in str(errored.value)
+
+
+def test_credential_store_resolver_never_falls_back_to_the_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The REAL CredentialManager falls back to os.environ; the resolver must not.
+
+    A name not on ``--secret-env`` is documented as store-only. Serving an
+    ambient variable for it would make that claim false in the operator's
+    own proof.
+    """
+
+    from local_operator.credentials import CredentialManager
+    from local_operator.evaluation.runner.host_secrets import CredentialStoreResolver
+
+    (tmp_path / "credentials.env").write_text("IN_STORE=from-the-file\n")
+    monkeypatch.setenv("ONLY_IN_ENV", "ambient-value")
+    resolver = CredentialStoreResolver(CredentialManager(tmp_path))
+    assert resolver.resolve(["IN_STORE"])[0].value == "from-the-file"
+    with pytest.raises(MissingSecret) as raised:
+        resolver.resolve(["ONLY_IN_ENV"])
+    assert raised.value.name == "ONLY_IN_ENV"
+    assert "ambient-value" not in str(raised.value)
+
+
+# ---------------------------------------------------------------------------
+# MAJOR-1: an over-long value never reaches a message
+# ---------------------------------------------------------------------------
+
+LONG_CANARY = "SECRETVALUE-" + "z" * 9000
+
+
+@pytest.mark.parametrize("kind", ["static", "env", "store"])
+def test_over_long_value_is_unusable_by_name_only(kind: str) -> None:
+    """``ResolvedSecret.max_length`` is 8192; a cert chain exceeds it.
+
+    pydantic's ValidationError embeds ``input_value=`` -- the value -- in its
+    message, so every resolver has to translate it before it can escape.
+    """
+
+    from local_operator.evaluation.runner.host_secrets import CredentialStoreResolver
+    from local_operator.evaluation.runner.secrets import UnusableSecret
+
+    class _Secret:
+        def get_secret_value(self) -> str:
+            return LONG_CANARY
+
+    class _Manager:
+        def get_credentials(self) -> dict[str, _Secret]:
+            return {"K": _Secret()}
+
+    resolver: SecretResolver = {
+        "static": StaticSecretResolver({"K": LONG_CANARY}),
+        "env": EnvSecretResolver({"K": LONG_CANARY}),
+        "store": CredentialStoreResolver(_Manager()),
+    }[kind]
+    with pytest.raises(UnusableSecret) as raised:
+        resolver.resolve(["K"])
+    assert isinstance(raised.value, MissingSecret)
+    assert raised.value.name == "K"
+    assert raised.value.__cause__ is None and raised.value.__context__ is None
+    assert "SECRETVALUE" not in str(raised.value) and "zzz" not in repr(raised.value)
+
+
+def test_diagnostic_strips_inputs_from_any_validation_error() -> None:
+    """Second line of defence: even a raw ValidationError renders without its input."""
+
+    from pydantic import ValidationError
+
+    from local_operator.evaluation.runner.episode import _diagnostic
+
+    with pytest.raises(ValidationError) as raised:
+        ResolvedSecret(name="K", value=LONG_CANARY)
+    rendered = _diagnostic(raised.value)
+    assert rendered == "ValidationError: ResolvedSecret (value: string_too_long)"
+    assert "SECRETVALUE" not in rendered and "zzz" not in rendered
+
+
+@pytest.mark.asyncio
+async def test_over_long_secret_fails_pre_bundle_with_the_name_only(
+    tmp_path: Path, episode_id: str
+) -> None:
+    adapter = FakeAdapter(tmp_path, episode_id)
+    config = build_config(tmp_path)
+    runner = EpisodeRunner(
+        _spec_with_refs(episode_id, "AWS_SECRET_ACCESS_KEY"),
+        config,
+        selector=selector(tmp_path),
+        model=ScriptedModel(["finish"]),
+        secrets=StaticSecretResolver({"AWS_SECRET_ACCESS_KEY": LONG_CANARY}),
+        launch=lambda _: adapter,
+    )
+    outcome = await runner.run()
+    assert outcome.status == "failed_pre_bundle"
+    assert outcome.diagnostic == "UnusableSecret: unusable secret AWS_SECRET_ACCESS_KEY"
+    assert load_pending_rescue(config.rescue_root) is None
+    assert b"SECRETVALUE" not in _all_bytes_under(tmp_path)
+    assert b"zzzz" not in _all_bytes_under(tmp_path)
 
 
 def test_redaction_set_with_values_widens_without_dropping_existing() -> None:
@@ -391,3 +496,55 @@ async def test_complete_rescue_after_incomplete_cleanup_retires_the_descriptor(
     assert outcome.rescue_required is True
     assert outcome.rescue_complete is True
     assert not (config.rescue_root / "rescue.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# MAJOR-3: a synthetic model client never seals reportable
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_synthetic_model_seals_a_valid_but_non_reportable_bundle(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """The label is the runner's own claim; metadata alone can be overlooked."""
+
+    adapter = FakeAdapter(tmp_path, episode_id)
+    runner = EpisodeRunner(
+        build_spec(episode_id),
+        build_config(tmp_path),
+        selector=selector(tmp_path),
+        model=ScriptedModel(["finish"]),
+        synthetic_model=True,
+        launch=lambda _: adapter,
+        rescue=_rescue_returning(True),
+    )
+    outcome = await runner.run()
+    assert outcome.status == "completed"
+    assert outcome.reportability_label == "synthetic_model"
+    assert outcome.score is not None and outcome.score.status == "scored"
+    root = outcome.bundle_root
+    assert root is not None
+    report = verify_bundle(root)
+    assert report.valid, [issue.code for issue in report.issues]
+    assert report.outcome is not None
+    assert report.outcome.reportable is False
+    assert report.outcome.reportability_label == "synthetic_model"
+
+
+@pytest.mark.asyncio
+async def test_synthetic_model_yields_to_more_severe_labels(
+    tmp_path: Path, episode_id: str
+) -> None:
+    adapter = FakeAdapter(tmp_path, episode_id, cleanup_status="attempted")
+    runner = EpisodeRunner(
+        build_spec(episode_id),
+        build_config(tmp_path),
+        selector=selector(tmp_path),
+        model=ScriptedModel(["finish"]),
+        synthetic_model=True,
+        launch=lambda _: adapter,
+        rescue=_rescue_returning(False),
+    )
+    outcome = await runner.run()
+    assert outcome.reportability_label == "cleanup_incomplete"

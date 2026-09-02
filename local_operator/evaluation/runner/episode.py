@@ -33,6 +33,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Mapping
 
+from pydantic import ValidationError
+
 from local_operator.evaluation.adapters.api import (
     ADAPTER_SCHEMA_VERSION,
     AskUserExchangeParams,
@@ -248,6 +250,7 @@ class EpisodeRunner:
         responder: UserResponder | None = None,
         redactions: RedactionSet | None = None,
         secrets: SecretResolver | None = None,
+        synthetic_model: bool = False,
         launch: Any = AdapterSupervisor.launch,
         rescue: Any = run_rescue,
     ) -> None:
@@ -264,6 +267,12 @@ class EpisodeRunner:
         # letting the adapter fail closed after it has already been launched.
         self._secrets = secrets or StaticSecretResolver({})
         self._resolved_secrets: tuple[ResolvedSecret, ...] = ()
+        # Declared by the CALLER, who knows what it built: a scripted or
+        # replayed model client produces a bundle that verifies exactly like
+        # a real one, and nothing inside the bundle could tell them apart.
+        # The label is the runner's own claim about the run, so it is set on
+        # the runner rather than left to metadata a reader might not check.
+        self._synthetic_model = synthetic_model
         self._launch = launch
         self._rescue = rescue
 
@@ -1068,6 +1077,7 @@ class EpisodeRunner:
             rescue_required=cleanup_result.rescue_required,
             reportable=reconciliation.reportable,
             cancelled=cancelled,
+            synthetic_model=self._synthetic_model,
         )
         comparability = _comparability_label(
             requested=self._spec.requested_route,
@@ -1459,12 +1469,16 @@ def _reportability_label(
     rescue_required: bool,
     reportable: bool,
     cancelled: bool,
+    synthetic_model: bool = False,
 ) -> str:
     """Pick the single most severe label.
 
     Precedence is cleanup_incomplete > budget_unreconciled > unscored, because
     a leaked resource is a worse claim about the run than an unclosed budget,
-    which in turn matters more than a missing score.
+    which in turn matters more than a missing score. ``synthetic_model`` sits
+    last: it only decides whether a run that would otherwise be reportable
+    is, because a scripted model's bundle is otherwise indistinguishable from
+    a real result, and every more severe label already says "not a result".
     """
 
     if rescue_required:
@@ -1475,6 +1489,8 @@ def _reportability_label(
         return "cancelled"
     if score.status != "scored":
         return "unscored"
+    if synthetic_model:
+        return "synthetic_model"
     return "reportable"
 
 
@@ -1536,6 +1552,26 @@ def _incomplete_receipt(plan: CleanupPlan, action_id: str) -> CleanupReceipt:
 
 
 def _diagnostic(error: BaseException) -> str:
+    """Render an error for ``EpisodeOutcome.diagnostic`` without its inputs.
+
+    A pydantic ``ValidationError``'s ``str()`` embeds ``input_value=<head>…<tail>``
+    for every failing field. The one model on this boundary that carries
+    secret bytes is ``ResolvedSecret``, and a value the wire bound refuses
+    (a PEM-shaped credential past ``max_length``) would otherwise be quoted
+    straight into the outcome JSON that a paid run redirects into its durable
+    root. The resolvers already translate that case to a name-only error;
+    this is the second line, for ANY validation error on any path: only the
+    model title, the field location and the error type are kept, never the
+    input. The location itself is safe -- it is a field NAME (``secrets``,
+    ``1``, ``value``), not the secret's name or bytes.
+    """
+
+    if isinstance(error, ValidationError):
+        details = "; ".join(
+            f"{'.'.join(str(part) for part in item['loc']) or '<root>'}: {item['type']}"
+            for item in error.errors(include_input=False, include_url=False)
+        )
+        return f"ValidationError: {error.title} ({details})"[:500]
     return f"{type(error).__name__}: {error}"[:500]
 
 

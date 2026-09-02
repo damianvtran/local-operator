@@ -115,6 +115,28 @@ async def test_sweep_reports_missing_secret_by_name_and_never_launches(tmp_path:
 
 
 @pytest.mark.asyncio
+async def test_sweep_reports_an_over_long_secret_by_name_and_keeps_the_descriptor(
+    tmp_path: Path,
+) -> None:
+    """An UnusableSecret (value past the wire bound) is a per-entry report, not a crash."""
+
+    root = tmp_path / "rescue"
+    persist_rescue(root / "ep-x", _descriptor(tmp_path / "a", "ep-x", "AWS_SECRET_ACCESS_KEY"))
+    long_value = "SECRETVALUE-" + "z" * 9000
+
+    async def never(descriptor: Any, **kwargs: Any) -> Any:  # pragma: no cover
+        raise AssertionError("rescue must not run with an unusable secret")
+
+    entries = await sweep_rescue_root(
+        root, StaticSecretResolver({"AWS_SECRET_ACCESS_KEY": long_value}), rescue=never
+    )
+    assert [(e.episode_id, e.complete, e.error) for e in entries] == [
+        ("ep-x", False, "unusable secret AWS_SECRET_ACCESS_KEY")
+    ]
+    assert (root / "ep-x" / "rescue.json").exists()
+
+
+@pytest.mark.asyncio
 async def test_sweep_reports_a_failed_rescue_and_keeps_going(tmp_path: Path) -> None:
     root = tmp_path / "rescue"
     persist_rescue(root / "ep-1", _descriptor(tmp_path / "a", "ep-1"))
