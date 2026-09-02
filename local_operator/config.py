@@ -168,6 +168,7 @@ DEFAULT_CONFIG = Config(
                 "modelFallback": True,
                 "usageAwareFallback": False,
                 "usageReservePercent": 10,
+                "usageAwareAccountPick": True,
                 "fallbackChains": {},
             },
             # Search is useful on first run without a credential: DuckDuckGo

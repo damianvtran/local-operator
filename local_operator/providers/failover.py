@@ -1249,6 +1249,14 @@ class RetrySettings:
     model_fallback: bool = True
     usage_aware_fallback: bool = False
     usage_reserve_percent: float = 10.0
+    #: Whether a session's FIRST account pick for a provider ranks the pool by
+    #: cached remaining quota (``AuthStore._usage_ranked_order``). ON by
+    #: default, unlike ``usage_aware_fallback``: it costs no network (it reads
+    #: the reports the preflight and ``/usage`` already cached) and it can
+    #: only reorder a pool of equally valid accounts, never remove one. The
+    #: opt-out exists for an operator who wants the pure hash spread back --
+    #: a single-account pool or a deliberately partitioned one.
+    usage_aware_account_pick: bool = True
     fallback_chains: Mapping[str, Sequence[Any]] = dataclasses.field(default_factory=dict)
 
     @staticmethod
@@ -1287,6 +1295,9 @@ class RetrySettings:
                 retry.get("usageAwareFallback", retry.get("usage_aware_fallback", False))
             ),
             usage_reserve_percent=reserve_percent,
+            usage_aware_account_pick=bool(
+                retry.get("usageAwareAccountPick", retry.get("usage_aware_account_pick", True))
+            ),
             # Normalized HERE, at the one place config crosses into the module,
             # so every consumer downstream can rely on the declared type.
             fallback_chains=_normalize_chains(chains),
