@@ -685,3 +685,38 @@ async def test_the_allow_all_key_reports_and_paints_like_the_command(
         # unwritten rather than by a word in the band.
         assert _band(app).rstrip().endswith("!")
         assert _saved_mode(config_dir) is None
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_session_settles_its_live_approval() -> None:
+    """A stop must not leave a gate live enough to eat the next keystroke.
+
+    Round-5 MAJOR-4: the viewer's stop handler retired the band and the tool
+    cards but never settled the gate, so the docked prompt survived with its
+    key routing intact. The user's next keystroke was then read as an ANSWER —
+    the `y` of a typed word approved the tool — and the transcript kept a
+    receipt saying the user approved a command nobody approved. The owner's
+    own `/stop` already denies queued approvals; this is the viewer path
+    catching up to it.
+    """
+    session = GatedSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        gate = _gate(session)
+        pending = asyncio.ensure_future(gate("bash", "bash: rm -rf /tmp/x"))
+        await _wait_prompt(pilot, app)
+        assert app.query(ApprovalPrompt), "the gate never mounted its question"
+
+        app._stopped_session_id = session.session_id
+        app._on_watched_session_stopped()
+        await _settle(pilot)
+
+        # The card is gone and the gate answered NO by the stop, not by a user.
+        assert not app.query(ApprovalPrompt), "the stop left the question live"
+        assert await asyncio.wait_for(pending, 2) is False
+        # A keystroke after the stop is text, never an answer.
+        receipts_before = len(app.query(ApprovalBlock))
+        await pilot.press("y")
+        await _settle(pilot)
+        assert len(app.query(ApprovalBlock)) == receipts_before

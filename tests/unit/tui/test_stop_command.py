@@ -730,11 +730,17 @@ async def test_owner_local_stop_announces_to_viewers_before_teardown(
 
 
 @pytest.mark.asyncio
-async def test_announce_stop_is_safe_without_viewers_or_registrant() -> None:
+@pytest.mark.parametrize("in_process", [False, True])
+async def test_announce_stop_is_safe_without_viewers_or_registrant(in_process: bool) -> None:
     """Announcing never breaks a stop: no registrant and no viewers both pass.
 
     The stop is the user's instruction; a best-effort courtesy frame that
     could raise would turn a working kill switch into a failing one.
+
+    Parameterised over BOTH hosting modes, which are the two branches of
+    ``announce_stop``: the TUI hosts its registrant in a thread, a runtime
+    process hosts in-process, and both are production paths. Covering one
+    only moves the gap rather than closing it (round-5 MINOR-6).
     """
     from local_operator.session.runtime.server import RuntimeServer
     from tests.unit.session.runtime.test_server import FakeHandle
@@ -746,8 +752,80 @@ async def test_announce_stop_is_safe_without_viewers_or_registrant() -> None:
         app._mobile_registrant = None
         app._announce_stop_to_viewers()  # no registrant at all
         server = RuntimeServer(FakeHandle(), kind="tui")
-        server.start()  # the thread-hosted branch production uses
+        if in_process:
+            await server.start_in_process()
+        else:
+            server.start()
         app._mobile_registrant = server
         app._announce_stop_to_viewers()  # registrant, zero viewers
         server.close()
         app._announce_stop_to_viewers()  # already closed
+
+
+@pytest.mark.asyncio
+async def test_a_second_stop_after_a_resume_still_notifies() -> None:
+    """The notice latch belongs to the session, not to the app.
+
+    Round-5 MAJOR-5: `_watched_stop_notice_shown` was set once and cleared
+    only in `__init__`, so a viewer that survived one stop, `/resume`d onto a
+    second session and had THAT stopped too saw nothing at all — the
+    transcript stopped mid-air, which is the round-3 D3-1 defect returning one
+    `/resume` later. The latch exists to keep ONE stop from painting twice, so
+    a session transition is exactly where it must be cleared.
+    """
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _booted(app, pilot, session)
+
+        app._stopped_session_id = "sess-a"
+        app._on_watched_session_stopped()
+        await pilot.pause()
+        first = [b._text for b in app.query(NoticeBlock) if "was stopped" in b._text]
+        assert first, "the first stop painted no notice"
+
+        # The transition BOTH /resume branches go through. The operation
+        # itself is irrelevant here — what is under test is the state reset
+        # the transition performs before running it.
+        async def _swap() -> Any:
+            return session
+
+        app._run_session_transition(_swap())
+        for _ in range(20):
+            await pilot.pause()
+
+        app._on_watched_session_stopped()
+        await pilot.pause()
+        painted = [b._text for b in app.query(NoticeBlock) if "was stopped" in b._text]
+        # The point is that the SECOND stop speaks at all; the id it names is
+        # read from the live session, as it is on every other route.
+        assert len(painted) == len(first) + 1, painted
+
+
+@pytest.mark.asyncio
+async def test_a_failed_stop_does_not_claim_the_next_one() -> None:
+    """A stop that stopped nothing must not be remembered as this app's own.
+
+    Round-5 MINOR-5: `_issued_own_stop` was set before the op was issued and
+    never cleared when the owner refused, so the NEXT stop — a stranger's —
+    dropped the "from another terminal" clause and implied the user had ended
+    their own session. Same latching class as round-3 MAJOR-1.
+    """
+
+    class RefusingSession(FakeSession):
+        async def request_stop(self) -> str:
+            raise ConnectionError("owner refused")
+
+    session = RefusingSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _booted(app, pilot, session)
+        await app._stop_remote_worker(session)
+        assert app._issued_own_stop is False, "a refused stop stayed latched"
+
+        # A later EXTERNAL stop is still attributed to whoever really did it.
+        app._stopped_session_id = "sess-x"
+        app._on_watched_session_stopped()
+        await pilot.pause()
+        painted = [b._text for b in app.query(NoticeBlock) if "was stopped" in b._text]
+        assert "from another terminal" in painted[-1], painted

@@ -3106,7 +3106,19 @@ class OperatorApp(App[None]):
         # forever — the same measured bug the owner's own /stop path calls
         # `_dismiss_working_block` for (round-4 MAJOR-3/D4-1).
         self._dismiss_working_block()
-        self._retire_live_tool_cards()
+        # D5-1: the count is what the aborted-message handler reads to decide
+        # whether the turn already explained itself. Dropped, it left the
+        # viewer with a second bare "interrupted" row where the owner's own
+        # /stop settles to one dim receipt.
+        self._interrupted_cards = self._retire_live_tool_cards()
+        # A parked gate must not outlive its session. Left live, the docked
+        # card keeps its key routing, so the user's next keystroke is read as
+        # an ANSWER: the `y` of a typed word approved the tool and the
+        # transcript kept a receipt saying so, for a decision nobody made and
+        # an owner that is gone (round-5 MAJOR-4). `_deny_queued_approvals`
+        # rather than `_settle_live_approval` because a stop ENDS the turn —
+        # the asks queued behind the visible one must not mount either.
+        self._deny_queued_approvals()
         self._refresh_working_activity()
         self._paint_watched_stop_notice()
 
@@ -5283,6 +5295,13 @@ class OperatorApp(App[None]):
         # promise rows again (U7-1). Same for a /stop: the reopen is happening.
         self._boot_failed = False
         self._stopped_session_id = ""
+        # The notice latch belongs to the SESSION, not the app: it exists to
+        # keep one stop from painting twice. Left set across a transition it
+        # silenced the notice for every LATER session, so a viewer that
+        # /resumed onto a second session and had that stopped too watched the
+        # transcript stop mid-air with no explanation — the round-3 D3-1
+        # defect returning one /resume later (round-5 MAJOR-5).
+        self._watched_stop_notice_shown = False
         self.run_worker(
             self._finish_session_transition(operation),
             thread=False,
@@ -13305,6 +13324,13 @@ class OperatorApp(App[None]):
         self._issued_own_stop = True
         request = getattr(session, "request_stop", None)
         if not callable(request):
+            # Unlatch on every path that did NOT stop anything: the flag says
+            # "this app ended the session", and a stop that was refused ended
+            # nothing. Left latched, the NEXT stop — a stranger's — was
+            # reported as the user's own (round-5 MINOR-5), the same latching
+            # class as round-3 MAJOR-1 and unlatched the same way
+            # `RemoteSession.request_stop` does.
+            self._issued_own_stop = False
             self._system_notice(
                 "cannot stop this session's owner — the owner is an older process; "
                 "close it there or upgrade",
@@ -13313,7 +13339,13 @@ class OperatorApp(App[None]):
             return
         try:
             detail = await cast(Callable[[], Awaitable[str]], request)()
-        except Exception as error:  # noqa: BLE001 — the refusal is the receipt
+        except BaseException as error:  # noqa: BLE001 — the refusal is the receipt
+            # BaseException, not Exception: a cancelled stop also stopped
+            # nothing, and leaving the flag set on the cancel path is exactly
+            # how round-3 MAJOR-1 survived its first fix.
+            self._issued_own_stop = False
+            if isinstance(error, asyncio.CancelledError):
+                raise
             self._system_notice(f"could not stop the owner: {error}", "warning")
             return
         # The owner's ack says the stop is UNDERWAY ("stopping …"); what
