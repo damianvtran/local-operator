@@ -296,7 +296,7 @@ def test_a_1_1_selector_cannot_even_be_built_against_a_1_2_parent(tmp_path: Path
             schema_version="1.1",  # type: ignore[arg-type]
             adapter_id="osworld-v2",
             distribution="lop-osworld-v2-adapter",
-            version="0.1.0",
+            version="0.1.1",
             entry_point="lop_osworld_v2_adapter:create",
             package_digest="a" * 64,
             release_digest="b" * 64,

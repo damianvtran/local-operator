@@ -79,7 +79,7 @@ def test_refs_round_trip_through_a_descriptor() -> None:
         schema_version=ADAPTER_SCHEMA_VERSION,
         adapter_id="osworld-v2",
         distribution="lop-osworld-v2-adapter",
-        version="0.1.0",
+        version="0.1.1",
         entry_point="lop_osworld_v2_adapter:create",
         package_digest="a" * 64,
         release_digest="b" * 64,
@@ -93,7 +93,7 @@ def test_refs_round_trip_through_a_descriptor() -> None:
         metadata=AdapterMetadata(
             adapter_id="osworld-v2",
             distribution="lop-osworld-v2-adapter",
-            version="0.1.0",
+            version="0.1.1",
             entry_point="lop_osworld_v2_adapter:create",
             package_digest="a" * 64,
             release_digest="b" * 64,
