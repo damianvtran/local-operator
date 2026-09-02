@@ -1,4 +1,4 @@
-"""Multi-connection registrant: N authenticated clients on one control socket.
+"""Multi-connection session runtime: N authenticated clients on one control socket.
 
 Protocol v2's core contract — the daemon plus up to ATTACH_MAX_CLIENTS attach
 terminals, broadcast pushes, point-to-point acks, watch/unwatch accounting,
@@ -16,15 +16,14 @@ from typing import Any, cast
 
 import pytest
 
-from local_operator.mobile import registry
-from local_operator.mobile.registrant import Registrant
 from local_operator.mobile.types import (
-    ATTACH_MAX_CLIENTS,
-    PROTOCOL_VERSION,
     PendingRequest,
     SessionProjection,
     TranscriptEntry,
 )
+from local_operator.session.runtime import registry
+from local_operator.session.runtime.server import RuntimeServer
+from local_operator.session.runtime.types import ATTACH_MAX_CLIENTS, PROTOCOL_VERSION
 
 
 class FakeHandle:
@@ -205,7 +204,7 @@ async def _wait_record() -> registry.SessionRecord:
         if found and found[0][1] == "live":
             return found[0][0]
         await asyncio.sleep(0.05)
-    raise AssertionError("registrant never published a live record")
+    raise AssertionError("runtime never published a live record")
 
 
 async def _dial(record: registry.SessionRecord, *, client: str | None = None):
@@ -244,7 +243,7 @@ async def test_protocol_version_is_five_and_cap_constant() -> None:
 
 @pytest.mark.asyncio
 async def test_pushed_projection_frame_carries_no_subagent_transcript() -> None:
-    """The wire frame a registrant pushes must never embed a child transcript.
+    """The wire frame a runtime pushes must never embed a child transcript.
 
     Regression guard for the real-time freeze: a full-repaint projection is
     pushed ~30x/s and the daemon's control-socket reader caps a single frame at
@@ -261,11 +260,11 @@ async def test_pushed_projection_frame_carries_no_subagent_transcript() -> None:
     from local_operator.session.session import Session
 
     handle = FakeHandle()
-    registrant = Registrant(handle, kind="tui")
+    runtime = RuntimeServer(handle, kind="tui")
 
-    # Seed one subagent row through the same fold the registrant pushes, then
+    # Seed one subagent row through the same fold the runtime pushes, then
     # hydrate it with a transcript far larger than the render tail.
-    fold = registrant.fold
+    fold = runtime.fold
     session = SimpleNamespace(jobs=SimpleNamespace(get=lambda job_id: None))
     comms = SubagentComms(cast(Session, cast(Any, session)))
     comms.record_launch("child", "child")
@@ -273,13 +272,13 @@ async def test_pushed_projection_frame_carries_no_subagent_transcript() -> None:
     heavy = [TranscriptEntry(id=f"row-{i}", kind="assistant", text="x" * 4096) for i in range(200)]
     fold.set_subagent_hydrated_details("child", heavy, [{"text": "verify", "status": "pending"}])
 
-    registrant.start()
+    runtime.start()
     daemon_writer = None
     try:
         record = await _wait_record()
         daemon_reader, daemon_writer = await _dial(record)
         # Force a repaint and read the resulting daemon-side broadcast frame.
-        registrant._schedule_push()
+        runtime._schedule_push()
         frame = await _until(daemon_reader, "projection")
         subagents = frame["data"]["subagents"]
         assert subagents, "expected the seeded child row on the wire"
@@ -289,7 +288,7 @@ async def test_pushed_projection_frame_carries_no_subagent_transcript() -> None:
     finally:
         if daemon_writer is not None:
             daemon_writer.close()
-        registrant.close()
+        runtime.close()
 
 
 @pytest.mark.asyncio
@@ -298,8 +297,8 @@ async def test_v4_event_client_gets_seed_and_events_daemon_gets_no_raw_frames() 
     from local_operator.harness.types import AgentStartEvent, NoticeEvent
 
     handle = FakeHandle()
-    registrant = Registrant(handle, kind="tui")
-    registrant.start()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
     daemon_writer = attach_writer = None
     try:
         record = await _wait_record()
@@ -340,15 +339,15 @@ async def test_v4_event_client_gets_seed_and_events_daemon_gets_no_raw_frames() 
         for writer in (daemon_writer, attach_writer):
             if writer is not None:
                 writer.close()
-        registrant.close()
+        runtime.close()
 
 
 @pytest.mark.asyncio
 async def test_pending_gate_uses_canonical_stream_not_projection_overlay() -> None:
     """A TUI gate reaches followers while phone projection bytes stay ordinary."""
     handle = FakeHandle()
-    registrant = Registrant(handle, kind="tui")
-    registrant.start()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
     daemon_writer = attach_writer = None
     try:
         record = await _wait_record()
@@ -380,14 +379,14 @@ async def test_pending_gate_uses_canonical_stream_not_projection_overlay() -> No
         )
         update = await _until(attach_reader, "frontend_update")
         assert update["data"]["changes"]["pending_gate"]["request_id"] == "approval-1"
-        await registrant._push()
+        await runtime._push()
         daemon = json.loads(await daemon_reader.readline())
         assert daemon["data"]["pending"] is None
     finally:
         for writer in (daemon_writer, attach_writer):
             if writer is not None:
                 writer.close()
-        registrant.close()
+        runtime.close()
 
 
 @pytest.mark.asyncio
@@ -396,8 +395,8 @@ async def test_event_seed_covers_events_before_client_is_ready() -> None:
     from local_operator.harness.types import AgentStartEvent, NoticeEvent
 
     handle = FakeHandle()
-    registrant = Registrant(handle, kind="tui")
-    registrant.start()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
     writer = None
     try:
         record = await _wait_record()
@@ -427,14 +426,14 @@ async def test_event_seed_covers_events_before_client_is_ready() -> None:
     finally:
         if writer is not None:
             writer.close()
-        registrant.close()
+        runtime.close()
 
 
 @pytest.mark.asyncio
 async def test_recall_steer_dispatches_by_command_id() -> None:
     handle = FakeHandle()
-    registrant = Registrant(handle, kind="tui")
-    registrant.start()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
     writer = None
     try:
         record = await _wait_record()
@@ -448,15 +447,15 @@ async def test_recall_steer_dispatches_by_command_id() -> None:
     finally:
         if writer is not None:
             writer.close()
-        registrant.close()
+        runtime.close()
 
 
 @pytest.mark.asyncio
 async def test_peer_message_dispatches_with_parsed_args() -> None:
     """A `lop send` peer_message reaches the handle with mode/wake/sender parsed."""
     handle = FakeHandle()
-    registrant = Registrant(handle, kind="tui")
-    registrant.start()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
     writer = None
     try:
         record = await _wait_record()
@@ -487,11 +486,11 @@ async def test_peer_message_dispatches_with_parsed_args() -> None:
     finally:
         if writer is not None:
             writer.close()
-        registrant.close()
+        runtime.close()
 
 
 class NoPeerHandle(FakeHandle):
-    """An owner host that predates peer messaging: no receive_peer_message.
+    """An owner runtime that predates peer messaging: no receive_peer_message.
 
     The dispatch probes the capability with getattr, so a handle that simply
     lacks the method must surface the clear "cannot receive" error rather than
@@ -504,8 +503,8 @@ class NoPeerHandle(FakeHandle):
 @pytest.mark.asyncio
 async def test_peer_message_on_handle_without_capability_errors_cleanly() -> None:
     handle = NoPeerHandle()
-    registrant = Registrant(handle, kind="tui")
-    registrant.start()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
     writer = None
     try:
         record = await _wait_record()
@@ -520,20 +519,20 @@ async def test_peer_message_on_handle_without_capability_errors_cleanly() -> Non
     finally:
         if writer is not None:
             writer.close()
-        registrant.close()
+        runtime.close()
 
 
 @pytest.mark.asyncio
 async def test_daemon_and_attach_clients_coexist() -> None:
     handle = FakeHandle()
-    registrant = Registrant(handle, kind="tui")
-    registrant.start()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
     try:
         record = await _wait_record()
         rd, wd = await _dial(record)
         ra, wa = await _dial(record, client="attach")
         ra2, wa2 = await _dial(record, client="attach")
-        assert registrant.attach_clients() == 2
+        assert runtime.attach_clients() == 2
         # All three stay live across traffic from any of them.
         wa.write(json.dumps({"op": "ping", "req": 1}).encode() + b"\n")
         await wa.drain()
@@ -541,62 +540,62 @@ async def test_daemon_and_attach_clients_coexist() -> None:
         wa2.write(json.dumps({"op": "ping", "req": 2}).encode() + b"\n")
         await wa2.drain()
         await _until(ra2, "ack", 2)
-        assert registrant.attach_clients() == 2
+        assert runtime.attach_clients() == 2
         for w in (wd, wa, wa2):
             w.close()
     finally:
-        registrant.close()
+        runtime.close()
 
 
 @pytest.mark.asyncio
 async def test_in_process_close_joins_delayed_projection_push() -> None:
     """Loop teardown leaves no coalesced repaint task behind."""
     handle = FakeHandle()
-    registrant = Registrant(handle, kind="tui")
-    await registrant.start_in_process()
-    registrant._schedule_push()
+    runtime = RuntimeServer(handle, kind="tui")
+    await runtime.start_in_process()
+    runtime._schedule_push()
     await asyncio.sleep(0)
-    task = registrant._push_task
+    task = runtime._push_task
     assert task is not None and not task.done()
 
-    await registrant.aclose()
+    await runtime.aclose()
 
     assert task.done()
-    assert registrant._push_task is None
-    assert not registrant._push_scheduled
-    assert registrant._heartbeat_task is None
-    assert registrant._server is None
+    assert runtime._push_task is None
+    assert not runtime._push_scheduled
+    assert runtime._heartbeat_task is None
+    assert runtime._server is None
 
     # A second awaited close must join the completed shutdown rather than
     # returning early based only on the cross-thread close latch.
-    await registrant.aclose()
+    await runtime.aclose()
 
 
 @pytest.mark.asyncio
 async def test_in_process_sync_close_schedules_cleanup_without_deadlock() -> None:
     """Legacy synchronous hosts may close from inside the owning loop."""
     handle = FakeHandle()
-    registrant = Registrant(handle, kind="tui")
-    await registrant.start_in_process()
-    registrant._schedule_push()
+    runtime = RuntimeServer(handle, kind="tui")
+    await runtime.start_in_process()
+    runtime._schedule_push()
     await asyncio.sleep(0)
 
-    registrant.close()
-    registrant.close()
-    task = registrant._shutdown_task
+    runtime.close()
+    runtime.close()
+    task = runtime._shutdown_task
     assert task is not None
     await asyncio.wait_for(asyncio.shield(task), timeout=2)
 
-    assert registrant._heartbeat_task is None
-    assert registrant._push_task is None
-    assert registrant._server is None
+    assert runtime._heartbeat_task is None
+    assert runtime._push_task is None
+    assert runtime._server is None
 
 
 @pytest.mark.asyncio
 async def test_broadcast_reaches_every_client() -> None:
     handle = FakeHandle()
-    registrant = Registrant(handle, kind="tui")
-    registrant.start()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
     try:
         record = await _wait_record()
         rd, wd = await _dial(record)
@@ -610,7 +609,7 @@ async def test_broadcast_reaches_every_client() -> None:
         wd.close()
         wa.close()
     finally:
-        registrant.close()
+        runtime.close()
 
 
 @pytest.mark.asyncio
@@ -618,8 +617,8 @@ async def test_broadcast_reaches_every_client() -> None:
 async def test_concurrent_producers_ack_once_and_converge(op: str) -> None:
     """Daemon plus two attaches submit together through one transcript owner."""
     handle = ConcurrentHandle()
-    registrant = Registrant(handle, kind="tui")
-    registrant.start()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
     try:
         record = await _wait_record()
         clients = [
@@ -657,7 +656,7 @@ async def test_concurrent_producers_ack_once_and_converge(op: str) -> None:
         for _, writer in clients:
             writer.close()
     finally:
-        registrant.close()
+        runtime.close()
 
 
 @pytest.mark.asyncio
@@ -666,16 +665,16 @@ async def test_high_volume_event_relay_bounds_nonreader_and_preserves_healthy_or
 ) -> None:
     """One slow writer has one bounded task; a healthy peer sees ordered events."""
     from local_operator.harness.types import NoticeEvent
-    from local_operator.mobile import registrant as registrant_module
+    from local_operator.session.runtime import server as server_module
 
     handle = FakeHandle()
-    registrant = Registrant(handle, kind="tui")
-    await registrant.start_in_process()
+    runtime = RuntimeServer(handle, kind="tui")
+    await runtime.start_in_process()
     slow_reader = slow_writer = healthy_writer = None
     blocked = asyncio.Event()
-    original_send = registrant._send_to
+    original_send = runtime._send_to
     try:
-        record = registrant._record
+        record = runtime._record
         slow_reader, slow_writer = await asyncio.open_connection(
             "127.0.0.1", record.control_port, limit=1 << 20
         )
@@ -693,8 +692,8 @@ async def test_high_volume_event_relay_bounds_nonreader_and_preserves_healthy_or
         await slow_writer.drain()
         assert json.loads(await slow_reader.readline())["op"] == "projection"
         assert json.loads(await slow_reader.readline())["op"] == "frontend_sync"
-        assert len(registrant._clients) == 1
-        slow_conn = next(iter(registrant._clients.values()))
+        assert len(runtime._clients) == 1
+        slow_conn = next(iter(runtime._clients.values()))
 
         healthy_reader, healthy_writer = await asyncio.open_connection(
             "127.0.0.1", record.control_port, limit=1 << 20
@@ -720,8 +719,8 @@ async def test_high_volume_event_relay_bounds_nonreader_and_preserves_healthy_or
                 return
             await original_send(conn, frame)
 
-        monkeypatch.setattr(registrant, "_send_to", block_only_slow)
-        total = registrant_module._EVENT_QUEUE_MAX * 2
+        monkeypatch.setattr(runtime, "_send_to", block_only_slow)
+        total = server_module._EVENT_QUEUE_MAX * 2
         for index in range(total):
             handle.emit_event(NoticeEvent(text=f"event-{index}", kind="info"))
             # Healthy writer gets scheduling opportunities while the deliberately
@@ -730,9 +729,9 @@ async def test_high_volume_event_relay_bounds_nonreader_and_preserves_healthy_or
 
         # The slow client is dropped on overflow rather than retaining one task
         # per event. The only remaining event writer belongs to the healthy peer.
-        assert id(slow_conn.writer) not in registrant._clients
-        assert len(registrant._event_sends) <= 1
-        assert slow_conn.event_queue.qsize() <= registrant_module._EVENT_QUEUE_MAX
+        assert id(slow_conn.writer) not in runtime._clients
+        assert len(runtime._event_sends) <= 1
+        assert slow_conn.event_queue.qsize() <= server_module._EVENT_QUEUE_MAX
 
         received = []
         deadline = asyncio.get_running_loop().time() + 2
@@ -746,7 +745,7 @@ async def test_high_volume_event_relay_bounds_nonreader_and_preserves_healthy_or
         for writer in (slow_writer, healthy_writer):
             if writer is not None:
                 writer.close()
-        await registrant.aclose()
+        await runtime.aclose()
 
 
 @pytest.mark.asyncio
@@ -756,8 +755,8 @@ async def test_nonreading_socket_cannot_block_active_ack_and_projection() -> Non
     # Each repaint is large enough that a handful fill the non-reader's kernel
     # window, while remaining below the protocol's one-megabyte frame limit.
     handle._projection.conversation_name = "x" * 700_000
-    registrant = Registrant(handle, kind="tui")
-    registrant.start()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
     try:
         record = await _wait_record()
         slow_reader, slow_writer = await _dial(record, client="attach")
@@ -773,14 +772,14 @@ async def test_nonreading_socket_cannot_block_active_ack_and_projection() -> Non
         active_writer.close()
         slow_writer.close()
     finally:
-        registrant.close()
+        runtime.close()
 
 
 @pytest.mark.asyncio
 async def test_acks_stay_point_to_point_under_concurrent_ops() -> None:
     handle = FakeHandle()
-    registrant = Registrant(handle, kind="tui")
-    registrant.start()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
     try:
         record = await _wait_record()
         ra, wa = await _dial(record, client="attach")
@@ -800,14 +799,14 @@ async def test_acks_stay_point_to_point_under_concurrent_ops() -> None:
         wa.close()
         wa2.close()
     finally:
-        registrant.close()
+        runtime.close()
 
 
 @pytest.mark.asyncio
 async def test_new_daemon_dial_evicts_the_old() -> None:
     handle = FakeHandle()
-    registrant = Registrant(handle, kind="tui")
-    registrant.start()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
     try:
         record = await _wait_record()
         rd, wd = await _dial(record)
@@ -822,18 +821,18 @@ async def test_new_daemon_dial_evicts_the_old() -> None:
         wd.close()
         wd2.close()
     finally:
-        registrant.close()
+        runtime.close()
 
 
 @pytest.mark.asyncio
 async def test_attach_cap_evicts_least_recently_seen() -> None:
     handle = FakeHandle()
-    registrant = Registrant(handle, kind="tui")
-    registrant.start()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
     try:
         record = await _wait_record()
         pairs = [await _dial(record, client="attach") for _ in range(ATTACH_MAX_CLIENTS)]
-        assert registrant.attach_clients() == ATTACH_MAX_CLIENTS
+        assert runtime.attach_clients() == ATTACH_MAX_CLIENTS
         # Touch every attach EXCEPT the first (the LRU victim).
         for i in range(1, ATTACH_MAX_CLIENTS):
             reader, writer = pairs[i]
@@ -851,19 +850,19 @@ async def test_attach_cap_evicts_least_recently_seen() -> None:
         while raw != b"" and asyncio.get_running_loop().time() < deadline:
             raw = await asyncio.wait_for(victim_reader.readline(), timeout=5)
         assert raw == b""  # evicted: EOF
-        assert registrant.attach_clients() == ATTACH_MAX_CLIENTS
+        assert runtime.attach_clients() == ATTACH_MAX_CLIENTS
         wn.close()
         for _, w in pairs:
             w.close()
     finally:
-        registrant.close()
+        runtime.close()
 
 
 @pytest.mark.asyncio
 async def test_attach_client_cannot_rebind_the_session() -> None:
     handle = FakeHandle()
-    registrant = Registrant(handle, kind="tui")
-    registrant.start()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
     try:
         record = await _wait_record()
         ra, wa = await _dial(record, client="attach")
@@ -884,75 +883,75 @@ async def test_attach_client_cannot_rebind_the_session() -> None:
         wa.close()
         wd.close()
     finally:
-        registrant.close()
+        runtime.close()
 
 
 @pytest.mark.asyncio
 async def test_dead_socket_leaves_the_registry() -> None:
     handle = FakeHandle()
-    registrant = Registrant(handle, kind="tui")
-    registrant.start()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
     try:
         record = await _wait_record()
         ra, wa = await _dial(record, client="attach")
-        assert registrant.attach_clients() == 1
+        assert runtime.attach_clients() == 1
         wa.close()
         deadline = asyncio.get_running_loop().time() + 5
         while asyncio.get_running_loop().time() < deadline:
-            if registrant.attach_clients() == 0:
+            if runtime.attach_clients() == 0:
                 break
             await asyncio.sleep(0.05)
-        assert registrant.attach_clients() == 0
+        assert runtime.attach_clients() == 0
     finally:
-        registrant.close()
+        runtime.close()
 
 
 @pytest.mark.asyncio
 async def test_watch_unwatch_accounting_and_floor() -> None:
     handle = FakeHandle()
-    registrant = Registrant(handle, kind="tui")
-    registrant.start()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
     try:
         record = await _wait_record()
-        assert registrant.phone_watchers == 0
-        assert registrant.watch_supported is False
+        assert runtime.phone_watchers == 0
+        assert runtime.watch_supported is False
         rd, wd = await _dial(record)
         wd.write(json.dumps({"op": "unwatch", "req": 1}).encode() + b"\n")
         await wd.drain()
         await _until(rd, "ack", 1)
         # The unwatch-before-watch case floors at zero: a daemon restart
         # redials without unwatching and the counter must not go negative.
-        assert registrant.phone_watchers == 0
-        assert registrant.watch_supported is True
+        assert runtime.phone_watchers == 0
+        assert runtime.watch_supported is True
         wd.write(json.dumps({"op": "watch", "req": 2}).encode() + b"\n")
         await wd.drain()
         await _until(rd, "ack", 2)
-        assert registrant.phone_watchers == 1
+        assert runtime.phone_watchers == 1
         wd.write(json.dumps({"op": "watch", "req": 3}).encode() + b"\n")
         await wd.drain()
         await _until(rd, "ack", 3)
-        assert registrant.phone_watchers == 2
+        assert runtime.phone_watchers == 2
         wd.write(json.dumps({"op": "unwatch", "req": 4}).encode() + b"\n")
         await wd.drain()
         await _until(rd, "ack", 4)
-        assert registrant.phone_watchers == 1
+        assert runtime.phone_watchers == 1
         # The latch never resets.
-        assert registrant.watch_supported is True
+        assert runtime.watch_supported is True
         wd.close()
     finally:
-        registrant.close()
+        runtime.close()
 
 
 @pytest.mark.asyncio
 async def test_absent_client_field_means_daemon() -> None:
-    """An OLD daemon dialing a NEW registrant keeps the daemon class."""
+    """An OLD daemon dialing a NEW runtime keeps the daemon class."""
     handle = FakeHandle()
-    registrant = Registrant(handle, kind="tui")
-    registrant.start()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
     try:
         record = await _wait_record()
         rd, wd = await _dial(record)  # no client field
-        assert registrant.attach_clients() == 0
+        assert runtime.attach_clients() == 0
         # And a second daemon-class dial still evicts it (reconnect).
         rd2, wd2 = await _dial(record)
         raw = await asyncio.wait_for(rd.readline(), timeout=5)
@@ -960,4 +959,4 @@ async def test_absent_client_field_means_daemon() -> None:
         wd.close()
         wd2.close()
     finally:
-        registrant.close()
+        runtime.close()

@@ -38,13 +38,13 @@ from local_operator.mobile.projection import (
     _image_refs,
     _summarize_args,
 )
-from local_operator.mobile.registry import SessionRecord
 from local_operator.mobile.types import (
     PROJECTION_TRANSCRIPT_LIMIT,
     PendingRequest,
     SessionProjection,
     _projection_from_json,
 )
+from local_operator.session.runtime.registry import SessionRecord
 from local_operator.session.session import Session
 
 

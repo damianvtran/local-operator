@@ -24,8 +24,8 @@ import os
 import subprocess
 from typing import Any
 
-from local_operator.mobile import registry
 from local_operator.paths import config_dir
+from local_operator.session.runtime import registry
 
 #: Peer messaging body cap. Well under the registrant's 1 MB line limit so a huge
 #: paste is rejected with a clear message here rather than becoming a silently

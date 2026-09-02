@@ -7,8 +7,8 @@ import asyncio
 
 import pytest
 
-from local_operator.mobile import child as child_mod
-from local_operator.mobile.child import _clean_exit, _reaper, _should_exit
+from local_operator.session.runtime import process as child_mod
+from local_operator.session.runtime.process import _clean_exit, _reaper, _should_exit
 
 
 class FakeRegistrant:
@@ -51,7 +51,7 @@ class FakeHandle:
         FakeRegistrant(supported=True, watchers=5, attaches=3),
     ],
 )
-def test_viewer_counts_never_pin_idle_host(reg: FakeRegistrant) -> None:
+def test_viewer_counts_never_pin_idle_runtime(reg: FakeRegistrant) -> None:
     assert _should_exit(FakeHandle(), reg) is True
 
 

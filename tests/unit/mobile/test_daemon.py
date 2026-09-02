@@ -12,9 +12,7 @@ import json
 import pytest
 from starlette.testclient import TestClient
 
-from local_operator.mobile import registry
 from local_operator.mobile.daemon import MobileDaemon, SessionEntry, _dial, build_app
-from local_operator.mobile.registrant import Registrant
 from local_operator.mobile.types import (
     PROJECTION_TRANSCRIPT_LIMIT,
     SessionProjection,
@@ -24,6 +22,8 @@ from local_operator.mobile.types import (
     TodoPhase,
     TranscriptEntry,
 )
+from local_operator.session.runtime import registry
+from local_operator.session.runtime.server import RuntimeServer
 
 
 class FakeHandle:
@@ -88,7 +88,7 @@ class FakeHandle:
 @pytest.mark.asyncio
 async def test_registrant_publishes_and_daemon_adopts() -> None:
     handle = FakeHandle()
-    registrant = Registrant(handle, kind="tui")
+    registrant = RuntimeServer(handle, kind="tui")
     registrant.start()
     try:
         # Wait for the record to appear.
@@ -219,7 +219,7 @@ async def test_dial_skips_oversized_frame_and_delivers_the_next() -> None:
 @pytest.mark.asyncio
 async def test_wrong_key_is_rejected_silently() -> None:
     handle = FakeHandle()
-    registrant = Registrant(handle, kind="tui")
+    registrant = RuntimeServer(handle, kind="tui")
     registrant.start()
     try:
         deadline = asyncio.get_running_loop().time() + 5

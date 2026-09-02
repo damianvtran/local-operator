@@ -1,18 +1,22 @@
 """Wire types for the mobile control plane.
 
 This module is the CONTRACT between the three parties of the mobile stack —
-the registrant shim inside every interactive ``lop`` process
-(:mod:`local_operator.mobile.registrant`), the daemon
+the session runtime inside every interactive ``lop`` process
+(:mod:`local_operator.session.runtime.server`), the daemon
 (:mod:`local_operator.mobile.daemon`), and the phone web UI — and it is
-deliberately stdlib-only (dataclasses, no pydantic): the registrant ships on
+deliberately stdlib-only (dataclasses, no pydantic): the runtime ships on
 the CLI startup path where a pydantic import would cost every ``lop``
 invocation real milliseconds, and the frames are small enough that
 ``dataclasses.asdict`` round-tripping is all the validation the loopback
 channel needs.
 
+The discovery record and the control-socket constants are NOT defined here
+any more — they are session-runtime concepts and live in
+:mod:`local_operator.session.runtime.types`, re-exported below.
+
 Two wire formats live here:
 
-1. **Control frames** — the newline-delimited JSON spoken on the registrant's
+1. **Control frames** — the newline-delimited JSON spoken on the runtime's
    loopback socket. Every frame is ``{"op": ..., ...}``; requests carry a
    caller-chosen ``req`` id the matching ``ack``/``error`` echoes so one
    socket multiplexes concurrent answers (an approval prompt and a model
@@ -27,8 +31,8 @@ Two wire formats live here:
    implementation.
 
 Both formats version together: bumping ``PROTOCOL_VERSION`` is a breaking
-change for registrant and daemon alike, which is fine — they ship in the same
-binary and a stale registrant is re-registered on its next heartbeat.
+change for runtime and daemon alike, which is fine — they ship in the same
+binary and a stale runtime is re-registered on its next heartbeat.
 """
 
 from __future__ import annotations
@@ -37,6 +41,23 @@ import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
+
+# Discovery + control-plane primitives now live in the session runtime package:
+# a record, a heartbeat, a client kind and an attach cap describe one session
+# reachable over a control socket, and the phone is one client of that, not
+# its owner. They are re-exported here (and NOT redefined) so the whole mobile
+# stack — daemon, web layer, attach client, peer send — keeps importing them
+# from the path it always has. See local_operator/session/runtime/types.py for
+# why that package is neutral and why RUN_DIRNAME keeps its mobile-era name.
+from local_operator.session.runtime.types import (  # noqa: F401  (re-exported)
+    ATTACH_MAX_CLIENTS,
+    HEARTBEAT_INTERVAL_S,
+    HEARTBEAT_TIMEOUT_S,
+    PROTOCOL_VERSION,
+    RUN_DIRNAME,
+    ClientKind,
+    SessionRecord,
+)
 
 
 @dataclass(frozen=True)
@@ -187,100 +208,8 @@ def validate_control_frame(frame: dict[str, Any]) -> None:
             raise ValueError("sender must be an object")
 
 
-#: Bumped on any breaking change to control frames or web payloads. The
-#: registrant and daemon always ship together; the phone UI learns the
-#: version in its bootstrap payload and can warn on a stale cached bundle.
-#:
-#: v2 (attach + reaping) added the ``watch``/``unwatch`` ops, the auth
-#: frame's optional ``client`` field, and multi-connection registrants. The
-#: bump is load-bearing for ATTACH specifically: an old (v1) registrant
-#: treats any authenticated dial as THE daemon and evicts the real one, so
-#: an attach client must refuse to dial a record whose ``protocol`` is < 2
-#: rather than silently breaking the owner's phone bridge. The record's
-#: version field is the only pre-dial gate — the socket itself speaks the
-#: same frame shapes either side of the bump.
-#:
-#: v4 (full-TUI attach) is ADDITIVE: an attach client's auth frame may carry
-#: ``"events": true`` to subscribe to the owner's raw ``AgentEvent`` relay,
-#: and the ``recall_steer`` op lets a follower unsend a queued steer. A v3 attach
-#: client that omits the flag gets exactly the v3 behaviour (projection
-#: frames only), and daemon connections never see the new frames, so the
-#: phone path is byte-identical across the bump.
-# v5 adds an attach-only canonical frontend state channel. Phone/daemon
-# connections still receive projection frames only; the new capability is
-# negotiated explicitly by full TUI clients.
-PROTOCOL_VERSION = 5
-
-#: Which side of the owner relationship a control connection speaks for.
-#: ``daemon`` (the default when the auth frame omits ``client``) may rebind
-#: the owner's conversation; ``attach`` is a follower terminal that may
-#: watch and steer but never rebind. Absent-means-daemon keeps an OLD
-#: daemon dialing a NEW registrant on the same class it always had.
-ClientKind = Literal["daemon", "attach"]
-
-#: How many concurrent attach (follower terminal) connections one registrant
-#: accepts before evicting the least-recently-seen one. Connection close is
-#: detected anyway (the reader loop drops the registry entry); the cap is
-#: defense against leaked-but-open sockets — half-open TCP with no FIN —
-#: which liveness detection cannot see.
-ATTACH_MAX_CLIENTS = 4
-
-
 # ---------------------------------------------------------------------------
-# Discovery record
-# ---------------------------------------------------------------------------
-
-#: Directory (under the config root) holding one record per live session.
-RUN_DIRNAME = "run/mobile"
-
-#: How often a registrant rewrites its record's ``heartbeat_at``. The daemon
-#: treats a record as wedged (not merely quiet) after ``HEARTBEAT_TIMEOUT_S``.
-HEARTBEAT_INTERVAL_S = 15.0
-HEARTBEAT_TIMEOUT_S = 45.0
-
-
-@dataclass
-class SessionRecord:
-    """The discovery record one ``lop`` process publishes for one session.
-
-    Lives at ``~/.local-operator/run/mobile/<pid>.json`` — keyed by pid
-    because a process hosts exactly one interactive session at a time, so the
-    pid is the natural uniqueness token and ``kill -9`` leaves exactly one
-    stale file to reap.
-
-    ``control_key`` is the whole authorization story of the control socket:
-    the record is mode 0600 under a 0700 directory, so anything that can read
-    the key is already the owning account. The daemon never transmits it
-    further — the phone never learns it.
-    """
-
-    pid: int
-    kind: Literal["tui", "exec", "daemon"]
-    session_id: str
-    conversation_name: str
-    cwd: str
-    model_label: str
-    control_port: int
-    control_key: str
-    protocol: int = PROTOCOL_VERSION
-    started_at: float = field(default_factory=time.time)
-    heartbeat_at: float = field(default_factory=time.time)
-    capabilities: list[str] = field(default_factory=list)
-
-    def to_json(self) -> dict[str, Any]:
-        return asdict(self)
-
-    @staticmethod
-    def from_json(data: dict[str, Any]) -> "SessionRecord":
-        # Tolerate unknown keys (a NEWER binary's record read by an older
-        # daemon mid-upgrade): forward-compat here is what lets a restart
-        # rolling-upgrade the daemon without the phone losing sessions.
-        known = {f for f in SessionRecord.__dataclass_fields__}
-        return SessionRecord(**{k: v for k, v in data.items() if k in known})
-
-
-# ---------------------------------------------------------------------------
-# Control frames (daemon <-> registrant socket)
+# Control frames (daemon <-> runtime socket)
 # ---------------------------------------------------------------------------
 
 # Requests the daemon may send. Kept as Literal aliases rather than enums so
@@ -294,7 +223,7 @@ ControlOp = Literal[
     "slash",  # {command, args} — execute a TUI slash command
     "complete_aside",  # {turns} — authoritative off-record provider request
     "new_conversation",  # {} — the TUI's /new
-    "resume_session",  # {session_id} — rebind the host to another transcript
+    "resume_session",  # {session_id} — rebind the runtime to another transcript
     "approval_answer",  # {request_id, approved, remember}
     "ask_answer",  # {request_id, value}
     "snapshot",  # {} — ask for a fresh welcome-equivalent projection

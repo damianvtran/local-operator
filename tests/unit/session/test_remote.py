@@ -13,11 +13,11 @@ from local_operator.harness.types import (
     Message,
     ToolExecutionStartEvent,
 )
-from local_operator.mobile import registry
-from local_operator.mobile.registrant import Registrant
 from local_operator.mobile.types import AskOptionWire, PendingRequest
 from local_operator.session.remote import RemoteSession
-from tests.unit.mobile.test_registrant import FakeHandle
+from local_operator.session.runtime import registry
+from local_operator.session.runtime.server import RuntimeServer
+from tests.unit.session.runtime.test_server import FakeHandle
 
 
 async def _wait_record(root: Path) -> registry.SessionRecord:
@@ -41,7 +41,7 @@ async def test_remote_session_rehydrates_seed_then_streams_concrete_events(
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     (tmp_path / "sessions" / "s1").mkdir(parents=True)
     handle = FakeHandle()
-    registrant = Registrant(handle, kind="tui")
+    registrant = RuntimeServer(handle, kind="tui")
     registrant.start()
     remote = None
     try:
@@ -95,7 +95,7 @@ async def test_multi_question_ask_advances_same_request_across_two_followers(
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     (tmp_path / "sessions" / "s1").mkdir(parents=True)
     handle = FakeHandle()
-    registrant = Registrant(handle, kind="tui")
+    registrant = RuntimeServer(handle, kind="tui")
     registrant.start()
     first_remote = second_remote = None
     never = asyncio.Event()
@@ -178,7 +178,7 @@ async def test_remote_aside_runs_on_owner_without_joining_transcript(
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     (tmp_path / "sessions" / "s1").mkdir(parents=True)
     handle = FakeHandle()
-    registrant = Registrant(handle, kind="tui")
+    registrant = RuntimeServer(handle, kind="tui")
     registrant.start()
     remote = None
     try:
@@ -206,7 +206,7 @@ async def test_remote_prompt_steer_and_approval_route_to_owner(tmp_path: Path, m
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     (tmp_path / "sessions" / "s1").mkdir(parents=True)
     handle = FakeHandle()
-    registrant = Registrant(handle, kind="tui")
+    registrant = RuntimeServer(handle, kind="tui")
     registrant.start()
     remote = None
     try:
@@ -272,7 +272,7 @@ async def test_remote_slash_returns_typed_result_rendered_by_invoker(
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     (tmp_path / "sessions" / "s1").mkdir(parents=True)
     handle = FakeHandle()
-    registrant = Registrant(handle, kind="tui")
+    registrant = RuntimeServer(handle, kind="tui")
     registrant.start()
     remote = None
     try:
@@ -299,7 +299,7 @@ async def test_remote_adopt_aside_and_cancel_route_to_owner(tmp_path: Path, monk
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     (tmp_path / "sessions" / "s1").mkdir(parents=True)
     handle = FakeHandle()
-    registrant = Registrant(handle, kind="tui")
+    registrant = RuntimeServer(handle, kind="tui")
     registrant.start()
     remote = None
     try:

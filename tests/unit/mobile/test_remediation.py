@@ -7,9 +7,9 @@ import asyncio
 
 import pytest
 
-from local_operator.mobile import registry
 from local_operator.mobile.daemon import MobileDaemon, SessionEntry
 from local_operator.mobile.types import SessionRecord
+from local_operator.session.runtime import registry
 
 
 def make_record(port: int) -> SessionRecord:

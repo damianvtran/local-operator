@@ -9,8 +9,8 @@ import stat
 import time
 from pathlib import Path
 
-from local_operator.mobile import registry
-from local_operator.mobile.types import HEARTBEAT_TIMEOUT_S, SessionRecord
+from local_operator.session.runtime import registry
+from local_operator.session.runtime.types import HEARTBEAT_TIMEOUT_S, SessionRecord
 
 
 def make_record(pid: int | None = None) -> SessionRecord:

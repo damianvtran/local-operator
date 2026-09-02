@@ -138,7 +138,7 @@ async def _control_for(app: OperatorApp, pilot) -> _Control:
     """Connect to the app's control socket once its record is really published.
 
     Waits on the DISCOVERY RECORD, not on the registrant object, and the
-    distinction is the whole bug this replaced. ``Registrant.start`` spawns a
+    distinction is the whole bug this replaced. ``RuntimeServer.start`` spawns a
     daemon thread and returns; the record is written by ``_serve`` on that
     thread. So ``app._mobile_registrant is not None`` means "registration was
     requested", not "the record is on disk" — and the old helper waited for the
@@ -155,7 +155,7 @@ async def _control_for(app: OperatorApp, pilot) -> _Control:
     The bound is a deadlock guard rather than a timing assumption: it is
     reached only when nothing ever publishes.
     """
-    from local_operator.mobile import registry
+    from local_operator.session.runtime import registry
 
     records = []
     for _ in range(200):

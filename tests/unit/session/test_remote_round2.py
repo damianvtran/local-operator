@@ -36,10 +36,10 @@ from local_operator.harness.types import (
     ToolCall,
     ToolResult,
 )
-from local_operator.mobile.registrant import Registrant
 from local_operator.session.remote import RemoteSession
+from local_operator.session.runtime.server import RuntimeServer
 from local_operator.session.transcript import Transcript
-from tests.unit.mobile.test_registrant import FakeHandle
+from tests.unit.session.runtime.test_server import FakeHandle
 from tests.unit.session.test_remote import _never_take_over, _wait_record
 
 
@@ -165,7 +165,7 @@ async def test_reconnect_paints_rows_that_became_durable_during_the_gap(
     transcript = Transcript(tmp_path / "sessions" / "s1")
     await transcript.append_message(Message.user("visible before disconnect"))
     handle = FakeHandle()
-    registrant = Registrant(handle, kind="tui")
+    registrant = RuntimeServer(handle, kind="tui")
     registrant.start()
     remote = None
     try:
@@ -198,7 +198,7 @@ async def test_reconnect_paints_rows_that_became_durable_during_the_gap(
         gap_assistant = Message.assistant("answer while disconnected")
         await transcript.append_message(gap_assistant)
 
-        replacement = Registrant(handle, kind="tui")
+        replacement = RuntimeServer(handle, kind="tui")
         replacement.start()
         try:
             # The transient redial can land a client whose sync then fails;
@@ -248,7 +248,7 @@ async def test_failed_cancel_resolution_preserves_failure_sentinel(
         raise RuntimeError("socket lost mid-cancel")
 
     handle.cancel_subagents_count = broken_cancel  # type: ignore[assignment]
-    registrant = Registrant(handle, kind="tui")
+    registrant = RuntimeServer(handle, kind="tui")
     registrant.start()
     remote = None
     try:
@@ -281,7 +281,7 @@ async def test_partial_and_successful_cancel_counts_resolve_authoritatively(
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     (tmp_path / "sessions" / "s1").mkdir(parents=True)
     handle = FakeHandle()
-    registrant = Registrant(handle, kind="tui")
+    registrant = RuntimeServer(handle, kind="tui")
     registrant.start()
     remote = None
     try:
@@ -317,7 +317,7 @@ async def test_reconnect_replays_each_gap_row_once_even_across_two_cycles(
     transcript = Transcript(tmp_path / "sessions" / "s1")
     await transcript.append_message(Message.user("row one"))
     handle = FakeHandle()
-    registrant = Registrant(handle, kind="tui")
+    registrant = RuntimeServer(handle, kind="tui")
     registrant.start()
     remote = None
     try:
@@ -337,7 +337,7 @@ async def test_reconnect_replays_each_gap_row_once_even_across_two_cycles(
                 break
             await asyncio.sleep(0.02)
         await transcript.append_message(Message.assistant("row two in gap"))
-        replacement = Registrant(handle, kind="tui")
+        replacement = RuntimeServer(handle, kind="tui")
         replacement.start()
         try:
             deadline = asyncio.get_running_loop().time() + 15
@@ -358,7 +358,7 @@ async def test_reconnect_replays_each_gap_row_once_even_across_two_cycles(
                 if remote._recovering:
                     break
                 await asyncio.sleep(0.02)
-            third = Registrant(handle, kind="tui")
+            third = RuntimeServer(handle, kind="tui")
             third.start()
             try:
                 deadline = asyncio.get_running_loop().time() + 15
@@ -418,7 +418,7 @@ async def test_reconnect_gap_delta_preserves_every_native_row_shape(
     transcript = Transcript(tmp_path / "sessions" / "s1")
     await transcript.append_message(Message.user("visible before disconnect"))
     handle = FakeHandle()
-    registrant = Registrant(handle, kind="tui")
+    registrant = RuntimeServer(handle, kind="tui")
     registrant.start()
     remote = None
     try:
@@ -468,7 +468,7 @@ async def test_reconnect_gap_delta_preserves_every_native_row_shape(
         )
         await transcript.append_message(gap_custom)
 
-        replacement = Registrant(handle, kind="tui")
+        replacement = RuntimeServer(handle, kind="tui")
         replacement.start()
         try:
             deadline = asyncio.get_running_loop().time() + 15
@@ -517,7 +517,7 @@ async def test_routed_slash_during_recovery_refuses_in_user_language(
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     (tmp_path / "sessions" / "s1").mkdir(parents=True)
     handle = FakeHandle()
-    registrant = Registrant(handle, kind="tui")
+    registrant = RuntimeServer(handle, kind="tui")
     registrant.start()
     remote = None
     try:
@@ -558,7 +558,7 @@ async def test_prompt_during_recovery_still_queues_and_delivers(
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     (tmp_path / "sessions" / "s1").mkdir(parents=True)
     handle = FakeHandle()
-    registrant = Registrant(handle, kind="tui")
+    registrant = RuntimeServer(handle, kind="tui")
     registrant.start()
     remote = None
     try:
@@ -578,7 +578,7 @@ async def test_prompt_during_recovery_still_queues_and_delivers(
         prompt_task = asyncio.create_task(remote.prompt("queued during gap"))
         await asyncio.sleep(0.2)
         assert not prompt_task.done()  # waiting on _owner_ready, not failing
-        replacement = Registrant(handle, kind="tui")
+        replacement = RuntimeServer(handle, kind="tui")
         replacement.start()
         try:
             await asyncio.wait_for(prompt_task, timeout=15)
@@ -610,7 +610,7 @@ async def test_reconnect_delivers_gap_delta_before_live_frames_buffered_mid_pars
     transcript = Transcript(tmp_path / "sessions" / "s1")
     await transcript.append_message(Message.user("visible before disconnect"))
     handle = FakeHandle()
-    registrant = Registrant(handle, kind="tui")
+    registrant = RuntimeServer(handle, kind="tui")
     registrant.start()
     remote = None
     parse_opened = asyncio.Event()
@@ -651,7 +651,7 @@ async def test_reconnect_delivers_gap_delta_before_live_frames_buffered_mid_pars
             return await real_read(self_inner)
 
         replacement_handle = FakeHandle()
-        replacement = Registrant(replacement_handle, kind="tui")
+        replacement = RuntimeServer(replacement_handle, kind="tui")
         replacement.start()
         try:
             from unittest.mock import patch as _patch
@@ -711,7 +711,7 @@ async def test_reconnect_tool_result_only_gap_settles_painted_card(
     transcript = Transcript(tmp_path / "sessions" / "s1")
     await transcript.append_message(Message.user("visible before disconnect"))
     handle = FakeHandle()
-    registrant = Registrant(handle, kind="tui")
+    registrant = RuntimeServer(handle, kind="tui")
     registrant.start()
     remote = None
     try:
@@ -758,7 +758,7 @@ async def test_reconnect_tool_result_only_gap_settles_painted_card(
         await transcript.append_message(gap_result)
         assert str(gap_result.id) not in painted_ids
 
-        replacement = Registrant(handle, kind="tui")
+        replacement = RuntimeServer(handle, kind="tui")
         replacement.start()
         try:
             deadline = asyncio.get_running_loop().time() + 15
@@ -792,7 +792,7 @@ async def test_compact_now_during_recovery_refuses_in_user_language(
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     (tmp_path / "sessions" / "s1").mkdir(parents=True)
     handle = FakeHandle()
-    registrant = Registrant(handle, kind="tui")
+    registrant = RuntimeServer(handle, kind="tui")
     registrant.start()
     remote = None
     try:

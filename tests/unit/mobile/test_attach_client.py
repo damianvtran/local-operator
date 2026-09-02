@@ -9,10 +9,10 @@ from pathlib import Path
 
 import pytest
 
-from local_operator.mobile import registry
 from local_operator.mobile.attach_client import AttachClient, find_owner_record
-from local_operator.mobile.registrant import Registrant
 from local_operator.mobile.types import SessionProjection, TranscriptEntry
+from local_operator.session.runtime import registry
+from local_operator.session.runtime.server import RuntimeServer
 
 
 class FakeHandle:
@@ -98,7 +98,7 @@ def config(tmp_path: Path, monkeypatch) -> Path:
 @pytest.mark.asyncio
 async def test_discovery_finds_the_live_owner(config: Path) -> None:
     handle = FakeHandle("sess-a")
-    r = Registrant(handle, kind="tui")
+    r = RuntimeServer(handle, kind="tui")
     r.start()
     try:
         record = await _wait_record()
@@ -131,7 +131,7 @@ async def test_discovery_owner_without_record_reports_pid_only(config: Path) -> 
 @pytest.mark.asyncio
 async def test_protocol_gate_refuses_v1_records(config: Path) -> None:
     handle = FakeHandle("sess-old")
-    r = Registrant(handle, kind="tui")
+    r = RuntimeServer(handle, kind="tui")
     r.start()
     try:
         record = await _wait_record()
@@ -171,7 +171,7 @@ async def test_welcome_identity_mismatch_is_a_connection_error(config: Path) -> 
     # The owner is hosting sess-a; the user asked for sess-b (a rebind raced
     # the heartbeat). The welcome projection must arbitrate against attaching.
     handle = FakeHandle("sess-a")
-    r = Registrant(handle, kind="tui")
+    r = RuntimeServer(handle, kind="tui")
     r.start()
     try:
         record = await _wait_record()
@@ -186,7 +186,7 @@ async def test_welcome_identity_mismatch_is_a_connection_error(config: Path) -> 
 @pytest.mark.asyncio
 async def test_prompt_ack_and_repaint_flow(config: Path) -> None:
     handle = FakeHandle("sess-a")
-    r = Registrant(handle, kind="tui")
+    r = RuntimeServer(handle, kind="tui")
     r.start()
     try:
         record = await _wait_record()
@@ -212,7 +212,7 @@ async def test_prompt_ack_and_repaint_flow(config: Path) -> None:
 @pytest.mark.asyncio
 async def test_owner_death_fires_on_disconnected_once(config: Path) -> None:
     handle = FakeHandle("sess-a")
-    r = Registrant(handle, kind="tui")
+    r = RuntimeServer(handle, kind="tui")
     r.start()
     try:
         record = await _wait_record()
@@ -238,7 +238,7 @@ async def test_owner_death_fires_on_disconnected_once(config: Path) -> None:
 @pytest.mark.asyncio
 async def test_request_error_raises_runtime_error(config: Path) -> None:
     handle = FakeHandle("sess-a")
-    r = Registrant(handle, kind="tui")
+    r = RuntimeServer(handle, kind="tui")
     r.start()
     try:
         record = await _wait_record()

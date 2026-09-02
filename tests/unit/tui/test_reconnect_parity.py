@@ -32,12 +32,12 @@ from local_operator.harness.types import (
     ToolCall,
     ToolResult,
 )
-from local_operator.mobile.registrant import Registrant
 from local_operator.session.remote import RemoteSession
+from local_operator.session.runtime.server import RuntimeServer
 from local_operator.session.transcript import Transcript
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.transcript import TranscriptView
-from tests.unit.mobile.test_registrant import FakeHandle
+from tests.unit.session.runtime.test_server import FakeHandle
 from tests.unit.session.test_remote import _never_take_over, _wait_record
 
 # One transparent 1x1 PNG: enough for the image pipeline without a real
@@ -104,7 +104,7 @@ def _block_signature(app: OperatorApp) -> list[str]:
 async def _fresh_boot_signature(tmp_path: Path) -> list[str]:
     """Boot a cold follower app on the finished transcript; return its blocks."""
     handle = FakeHandle()
-    registrant = Registrant(handle, kind="tui")
+    registrant = RuntimeServer(handle, kind="tui")
     registrant.start()
     remote = None
     try:
@@ -134,7 +134,7 @@ async def test_reconnect_paints_gap_rows_with_fresh_boot_block_parity(
     await transcript.append_message(Message.user("visible before disconnect"))
 
     handle = FakeHandle()
-    registrant = Registrant(handle, kind="tui")
+    registrant = RuntimeServer(handle, kind="tui")
     registrant.start()
     remote = None
     reconnect_signature: list[str] = []
@@ -161,7 +161,7 @@ async def test_reconnect_paints_gap_rows_with_fresh_boot_block_parity(
             for row in _gap_rows():
                 await transcript.append_message(row)
 
-            replacement = Registrant(handle, kind="tui")
+            replacement = RuntimeServer(handle, kind="tui")
             replacement.start()
             try:
                 deadline = asyncio.get_running_loop().time() + 15

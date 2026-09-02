@@ -22,10 +22,10 @@ from typing import Any, cast
 import pytest
 
 from local_operator.harness.types import ToolContext
-from local_operator.mobile import registry
-from local_operator.mobile.registrant import Registrant
+from local_operator.session.runtime import registry
+from local_operator.session.runtime.server import RuntimeServer
 from local_operator.tools.builtin import execute_send
-from tests.unit.mobile.test_registrant import FakeHandle, _wait_record
+from tests.unit.session.runtime.test_server import FakeHandle, _wait_record
 
 
 class _DetailHandle(FakeHandle):
@@ -54,7 +54,7 @@ async def _start_peer(conversation_name: str = "peer-target"):
     is NOT this process's, so the send tool's self-send guard does not fire on
     the only reachable session. Returns ``(registrant, alias_record, handle)``."""
     handle = _DetailHandle()
-    registrant = Registrant(handle, kind="tui")
+    registrant = RuntimeServer(handle, kind="tui")
     registrant.start()
     try:
         own = await _wait_record()  # the registrant's record (pid = this process)
