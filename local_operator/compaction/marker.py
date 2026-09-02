@@ -16,7 +16,7 @@ compaction package is consumed by hosts that are forbidden those imports.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Sequence
 
 from local_operator.harness.types import (
     Content,
@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "COMPACTION_MARKER_TYPE",
     "build_compaction_marker",
+    "marker_exists",
     "render_compaction_marker",
     "replayed_user_message",
 ]
@@ -128,3 +129,17 @@ def render_compaction_marker(marker: CustomMessage, entry_id: str | None = None)
         ],
         entry_id,
     )
+
+
+def marker_exists(messages: Sequence[Any]) -> bool:
+    """Whether any message in ``messages`` carries a rendered compaction
+    marker (the tag ``run_compaction_pass`` writes on its rebuilt head).
+
+    The frame shed walks up the kept tail until it reaches one, which needs a
+    cheap way to find it without re-deriving the tag format.
+    """
+    for message in messages:
+        payload = getattr(message, "provider_payload", None)
+        if isinstance(payload, dict) and payload.get(COMPACTION_MARKER_TYPE):
+            return True
+    return False

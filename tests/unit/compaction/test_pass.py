@@ -373,3 +373,59 @@ def test_pass_module_is_import_isolated() -> None:
         if any(name == prefix or name.startswith(prefix + ".") for prefix in forbidden)
     }
     assert not leaked, sorted(leaked)
+
+
+# ---------------------------------------------------------------------------
+# shed_stale_frames
+# ---------------------------------------------------------------------------
+
+
+def test_shed_stale_frames_removes_oldest_turns_never_the_current_observation() -> None:
+    from local_operator.compaction.pruning import shed_stale_frames
+
+    messages = [
+        _frame_turn("t0"),
+        Message.assistant("a0"),
+        _frame_turn("t1"),
+        Message.assistant("a1"),
+        _frame_turn("t2"),
+        Message.assistant("a2"),
+        _frame_turn("t3"),
+    ]
+    out, removed = shed_stale_frames(messages, limit=2)
+
+    # The two oldest turns (observation + reply) went; the newest two frames
+    # and the current observation stayed, by identity.
+    assert removed == 4
+    assert [_texts(m)[0] for m in out] == ["t2", "a2", "t3"]
+    assert out[0] is messages[4] and out[-1] is messages[-1]
+    assert count_frame_messages(out) == 2
+
+    # limit=0 keeps only the current observation: it is never shed.
+    out, removed = shed_stale_frames(messages, limit=0)
+    assert [_texts(m)[0] for m in out] == ["t3"]
+    assert out[0] is messages[-1]
+    assert removed == 6
+
+
+def test_shed_stale_frames_stops_at_a_compaction_marker_and_at_a_frameless_prefix() -> None:
+    from local_operator.compaction.marker import COMPACTION_MARKER_TYPE
+    from local_operator.compaction.pruning import shed_stale_frames
+
+    marker = Message.user("<previous-context-summary>...</previous-context-summary>")
+    marker.provider_payload = {COMPACTION_MARKER_TYPE: {"summary": "..."}}
+    messages = [marker, _frame_turn("t1"), Message.assistant("a1"), _frame_turn("t2")]
+    out, removed = shed_stale_frames(messages, limit=1)
+    # The marker is never shed: content already summarised is not deleted twice.
+    assert out[0] is marker
+    assert removed == 2
+    assert [_texts(m)[0] for m in out[1:]] == ["t2"]
+
+    # A frameless prefix (text-only benchmark) has nothing to shed: identity out.
+    text_only = [Message.user("s0"), Message.assistant("a0"), Message.user("s1")]
+    out, removed = shed_stale_frames(text_only, limit=0)
+    assert removed == 0
+    assert [a is b for a, b in zip(out, text_only)] == [True, True, True]
+
+    with pytest.raises(ValueError):
+        shed_stale_frames(messages, limit=-1)

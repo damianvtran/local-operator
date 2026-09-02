@@ -39,6 +39,7 @@ from typing import Any, Sequence
 
 from local_operator.harness.types import Content, ImageContent, Message, TextContent
 
+from .marker import marker_exists
 from .tokens import estimate_tokens, invalidate_message_cache
 
 __all__ = [
@@ -50,6 +51,7 @@ __all__ = [
     "count_frame_messages",
     "prune_stale_frames",
     "prune_tool_outputs",
+    "shed_stale_frames",
 ]
 
 #: Generic pruning floor. Below this, blanking recovers nothing — the
@@ -442,3 +444,45 @@ def prune_tool_outputs(
             changed = True
 
     return list(messages), changed
+
+
+def shed_stale_frames(messages: Sequence[Message], *, limit: int) -> tuple[list[Message], int]:
+    """Remove whole stale observation turns, oldest first, from the FRONT of
+    the kept tail so its frame count is at most ``limit``.
+
+    "Oldest first" means the stalest messages (all the way to the head, when
+    the head is itself stale), never the recent frames a screen-driving
+    surface actually acts on. A removed observation's assistant reply goes
+    with it: both messages carry the turn's frame-billing cost (the reply is
+    re-billed inside the next frame's visual tokens), and a reply that
+    answers an observation no longer visible is a decision made about a
+    screen the model cannot see.
+
+    Never removes the current observation (the last message, frame or not —
+    without it the request has no question), and stops short of a compaction
+    marker in the kept tail: content already summarised must not be deleted
+    twice. Returns ``(messages, removed)``; the survivors are reused by
+    identity, same as :func:`prune_stale_frames`.
+    """
+    if limit < 0:
+        raise ValueError("limit must be non-negative")
+    head = 0
+    for index, message in enumerate(messages):
+        payload = message.provider_payload
+        if isinstance(payload, dict) and marker_exists([message]):
+            head = index + 1
+    tail = list(messages[head:])
+    while tail and count_frame_messages(tail) > limit:
+        observation, assistant = tail[0], (tail[1] if len(tail) > 1 else None)
+        if not _has_frame(observation):
+            break
+        # Keeping the assistant while shedding its observation would leave a
+        # decision the model can no longer see the screen for; shed the pair
+        # but never the last message (the current observation).
+        removable = 2 if (assistant is not None and assistant.role == "assistant") else 1
+        if removable >= len(tail):
+            break
+        del tail[:removable]
+    if head == 0 and len(tail) == len(messages):
+        return list(messages), 0
+    return [*messages[:head], *tail], len(messages) - head - len(tail)
