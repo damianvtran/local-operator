@@ -838,13 +838,14 @@ class AuthStore:
         demoted = self._active_demotions(provider)
         if not demoted:
             return ordered
-        preferred = [r for r in ordered if r.id not in demoted]
         # Every row demoted means the pool has been walked once, so the marks
         # describe an outage rather than any one account: they are stale and the
         # rows are equally good again. Only THIS tier's rows are cleared -- the
         # cascade calls this once per credential tier with a different subset,
         # so popping the whole provider would let a one-row tier wipe the marks
-        # belonging to rows it never saw.
+        # belonging to rows it never saw. Judged on the RAW mark set, before the
+        # sticky exemption below, so "the whole tier is demoted" keeps meaning
+        # exactly that and the stale-marks rule is unchanged by stickiness.
         #
         # This branch is NOT the cascade's safety net, and exactly one pass
         # reaches it. On :meth:`_resolve`'s FIRST pass ``_usable_key_rows`` has
@@ -861,7 +862,7 @@ class AuthStore:
         # demoted lone row resolvable at all is the ``ignore_demotions`` pass in
         # :meth:`_resolve`; do not reason about cascade-wide all-demoted
         # behaviour from here.
-        if not preferred:
+        if all(r.id in demoted for r in ordered):
             # Not under ``read_only``: clearing the marks is a routing DECISION,
             # and an isolated request running beside a user's turn must not be
             # able to move that turn's account. It still gets the same order --
@@ -870,7 +871,14 @@ class AuthStore:
             if not read_only:
                 self.clear_deprioritized(provider, [r.id for r in ordered])
             return ordered
-        return preferred + [r for r in ordered if r.id in demoted]
+        # The session's sticky row is exempt from the sort-last: see
+        # ``_usable_key_rows`` for why a demotion is a preference for NEW picks
+        # and never a reason to move a session off the account it is
+        # transacting on. ``_base_selection_order`` already put it first, and
+        # the partition is stable, so exempting it keeps it there.
+        movable = demoted - {self.session_credential_id(provider, session_id)}
+        preferred = [r for r in ordered if r.id not in movable]
+        return preferred + [r for r in ordered if r.id in movable]
 
     def _base_selection_order(
         self, rows: list[StoredCredential], provider: str, session_id: str | None
@@ -881,7 +889,7 @@ class AuthStore:
         its only caller.
         """
         if session_id:
-            sticky_id = self._sticky.get((provider, session_id))
+            sticky_id = self.session_credential_id(provider, session_id)
             sticky = next((r for r in rows if r.id == sticky_id), None)
             if sticky is not None:
                 rest = [r for r in rows if r.id != sticky.id]
@@ -902,6 +910,33 @@ class AuthStore:
             self._sticky.pop((provider, session_id), None)
         else:
             self._sticky[(provider, session_id)] = credential_id
+
+    def session_credential_id(self, provider: str, session_id: str | None) -> int | None:
+        """The credential ``session_id`` is sticky to for ``provider``, if any.
+
+        The read half of :meth:`pin_session_credential`. The quota preflight
+        captures this BEFORE its boundary walk resolves anything, because the
+        walk's own resolve pins the session to whatever row it lands on — so
+        "is the account under verdict the one this session is transacting
+        on?" can only be answered from a reading taken ahead of the walk. Same
+        storage-id normalisation as the write, so an alias and its base agree.
+        """
+        if not session_id:
+            return None
+        return self._sticky.get((self._storage_id(provider), session_id))
+
+    def release_session_credential(self, provider: str, session_id: str | None) -> None:
+        """Forget a session's sticky selection so its next resolve picks afresh.
+
+        The public clear beside :meth:`pin_session_credential`. Needed by the
+        quota preflight when it demotes a row the session was only just pinned
+        to by the walk's own resolve (a fresh pick, nothing cached on it yet):
+        the cascade keeps a demoted STICKY row in service on purpose (see
+        ``_usable_key_rows``), so without dropping the pin the re-resolve would
+        hand back the very row the walk is trying to move off. A no-op without
+        a session id, like the write it mirrors.
+        """
+        self._set_sticky(provider, session_id, None)
 
     def pin_session_credential(
         self, provider: str, session_id: str | None, credential_id: int
@@ -926,6 +961,7 @@ class AuthStore:
         *,
         ignore_demotions: bool = False,
         model_id: str = "",
+        session_id: str | None = None,
     ) -> list[StoredCredential]:
         # ``model_id`` scopes the block filter: an account blocked only for a
         # model family (a spent scoped weekly cap) still serves every other
@@ -967,13 +1003,48 @@ class AuthStore:
         # the net has already fired -- that is what suppressed this filter.
         demoted = set() if ignore_demotions else self._active_demotions(provider)
         if demoted:
-            remaining = [r for r in rows if r.id not in demoted]
-            if remaining:
-                return remaining
             # Every row in THIS tier is demoted: yield the tier so the cascade
             # moves on to whatever comes next -- another tier, the env var, or
-            # the resolver.
-            return []
+            # the resolver -- and, if nothing else serves, the second pass at
+            # the end of :meth:`_resolve` clears the marks together and
+            # re-resolves (the sticky then wins as usual). Judged on the RAW
+            # rows, BEFORE the sticky exemption below, and it has to be: run
+            # after it, an all-demoted tier with a sticky inside came back as
+            # the one sticky row, ``_selection_order`` read that one-row tier
+            # as "all demoted" and cleared only the sticky's mark -- an
+            # outage's marks then decayed asymmetrically and every other
+            # session's fresh pick skewed onto the sticky's account for the
+            # rest of the TTL. The stale-marks rule is about the tier, and
+            # stickiness must not change what "the whole tier" means.
+            if all(r.id in demoted for r in rows):
+                return []
+            # The session's STICKY row survives the drop (a BLOCKED sticky does
+            # not: the block filter above ran first and blocks are verdicts
+            # that the account cannot serve). A demotion is a preference about
+            # where NEW picks go; it is never a reason to move a session that
+            # is already transacting on the account. The provider's prompt
+            # cache is per account, so moving a live conversation rewrites its
+            # whole prefix (150-500k tokens at cache-write price) to buy
+            # nothing — the sibling has never seen it. Measured on this host:
+            # 374 such moves in 30h, 102M cache-write tokens, ~38% of every
+            # Anthropic cache write, most of them 2-70s after a full cache hit
+            # in the same conversation. The marks are process-wide, so this
+            # exemption is also what keeps ANOTHER session's demotion of this
+            # account from evicting a sibling session mid-conversation on it.
+            # A session whose OWN request 529'd still moves: ``rotate_sibling``
+            # clears that session's sticky for a server fault before the mark
+            # is consulted, so the exemption finds nothing to keep. The
+            # reactive quota path already keeps the warm-account promise
+            # (``rotate_sibling``: "sticky preserved" on a usage 429); this is
+            # the same rule applied to the preference marks.
+            #
+            # The exemption is keyed on stickiness alone, not on whether the
+            # session has actually sent a request yet — the store cannot tell.
+            # A caller that demotes a row the session was pinned to by a
+            # resolve moments ago (a fresh pick) and wants the next resolve to
+            # move must release the pin first (``release_session_credential``).
+            sticky_id = self.session_credential_id(provider, session_id)
+            return [r for r in rows if r.id not in demoted or r.id == sticky_id]
         return rows
 
     # -- the cascade ---------------------------------------------------------
@@ -1229,6 +1300,7 @@ class AuthStore:
             source=None,
             ignore_demotions=ignore_demotions,
             model_id=model_id,
+            session_id=session_id,
         )
         for row in self._selection_order(oauth_rows, provider, session_id, read_only=read_only):
             try:
@@ -1256,6 +1328,7 @@ class AuthStore:
             source="login",
             ignore_demotions=ignore_demotions,
             model_id=model_id,
+            session_id=session_id,
         )
         for row in self._selection_order(login_rows, provider, session_id, read_only=read_only):
             key = row.data.get("key")
@@ -1282,6 +1355,7 @@ class AuthStore:
                 source=None,
                 ignore_demotions=ignore_demotions,
                 model_id=model_id,
+                session_id=session_id,
             )
             if row.data.get("source") != "login"
         ]
