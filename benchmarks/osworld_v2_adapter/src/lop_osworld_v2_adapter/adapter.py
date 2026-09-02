@@ -87,7 +87,7 @@ from local_operator.evaluation.adapters.discovery import (
 
 _DISTRIBUTION = "lop-osworld-v2-adapter"
 _ADAPTER_ID = "osworld-v2"
-_VERSION = "0.1.0"
+_VERSION = "0.1.1"
 _ENTRY_POINT = "lop_osworld_v2_adapter:create"
 
 
@@ -131,6 +131,40 @@ class InputsMismatch(RuntimeError):
 _JUDGE_KEY = "OSWORLD_EVAL_MODEL_API_KEY"
 _USER_SIM_KEY = "OSWORLD_USER_SIM_API_KEY"
 _DEFAULT_INPUTS_ROOT = "~/worktrees/osworld"
+
+
+def _episode_cache_root(artifact_root: Path, episode_id: str) -> Path:
+    """Where an episode's upstream writes live: an ABSOLUTE dir OUTSIDE the
+    digest-pinned workspace.
+
+    Upstream OSWorld defaults ``cache_dir="cache"``, which ``DesktopEnv``
+    resolves against the process cwd — and the worker's cwd IS the pinned
+    workspace (supervisor spawns with ``cwd=selector.workspace``). The first
+    paid episode's ``_download_setup`` therefore wrote
+    ``workspace/cache/001/…`` — real content that the workspace digest
+    correctly refused to ignore, so the rescue worker's digest re-check
+    failed and ``rescue_required`` wedged True for an instance that was in
+    fact terminated.
+
+    The cache cannot be shared across episodes: ``DesktopEnv`` derives
+    ``cache_dir/<task_id>`` from this base, and ``reset_cache_dir``
+    REPLACES its contents wholesale at every ``reset`` — a second episode
+    with the same task would read a cached upload belonging to the first.
+    So the root is per-episode, and it sits BESIDE the artifact root, not
+    inside it: the bundle verifier walks the artifact directory and refuses
+    any entry that is not a digest-named artifact. The parent owns the
+    artifact root's parent (the run root, which ``run_episode`` refuses to
+    place under /tmp), so a sibling is durable and episode-owned.
+    """
+
+    # ``..`` is one segment of a directory that never becomes a filesystem
+    # PATH: the artifact root itself is absolute (the ArtifactRoot validator
+    # rejects relative and non-normalized roots), so parent.joinpath lands
+    # inside it directly. The worker never stores or re-parses this string —
+    # it is handed straight to DesktopEnv and mkdir'd here.
+    root = artifact_root.parent / "osworld-cache" / episode_id
+    root.mkdir(parents=True, exist_ok=True)
+    return root
 
 
 def _terminate_status(code: str) -> str:
@@ -384,7 +418,11 @@ class OSWorldV2Adapter:
         self._install_judge_environment()
 
         provider = self._build_provider()
-        await provider.allocate(self._plan, self._task)
+        # The cache root exists BEFORE allocate so a provider that downloads
+        # during setup (upstream's reset already runs inside allocate) writes
+        # into it, not into the workspace.
+        cache_root = _episode_cache_root(Path(params.artifact_root), params.episode_id)
+        await provider.allocate(self._plan, self._task, cache_root=cache_root)
         self._provider = provider
 
         # Capture observation 0 eagerly so the runner's immediately-following
@@ -397,6 +435,7 @@ class OSWorldV2Adapter:
         # reset whose root differs from the one its verifier reads, so writing
         # exactly here is what makes a frame verifiable rather than a guess.
         self._observation_builder = ObservationBuilder(Path(params.artifact_root))
+        raw = await provider.observe()
         raw = await provider.observe()
         self._sequence = 0
         self._current_observation = self._observation_builder.build(

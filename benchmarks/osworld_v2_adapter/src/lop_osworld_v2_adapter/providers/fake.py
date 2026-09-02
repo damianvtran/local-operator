@@ -20,6 +20,7 @@ two steps never hash to the same artifact.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from lop_osworld_v2_adapter.cleanup import (
@@ -58,6 +59,10 @@ class FakeProvider:
         self.terminated_refs: list[str] = []
         self.deleted_schedules: list[str] = []
         self.evaluate_calls = 0
+        # Where the adapter told us to cache. Recorded (never used to write
+        # anything: the fake downloads nothing) so tests assert the cache
+        # root actually crossed the adapter -> provider boundary.
+        self.cache_root: Path | None = None
 
     def _frame(self) -> bytes:
         """A deterministic but sequence-varying 1920x1080 PNG frame."""
@@ -70,9 +75,12 @@ class FakeProvider:
         pixel = bytes((shade, (shade * 3) % 256, (shade * 7) % 256))
         return write_png_rgb(width, height, pixel * (width * height))
 
-    async def allocate(self, plan: ProvisioningPlan, task: TaskDescriptor) -> None:
+    async def allocate(
+        self, plan: ProvisioningPlan, task: TaskDescriptor, *, cache_root: Path | None = None
+    ) -> None:
         # The ref is the tag; allocation registers the instance under it, so
         # teardown-by-ref is the same operation a rescue worker performs.
+        self.cache_root = cache_root
         self._instances[plan.tag_dict()["Name"]] = {
             "state": "running",
             "task_id": task.task_id,

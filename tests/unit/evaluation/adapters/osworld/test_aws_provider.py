@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 from typing import Any
 
 import boto3
@@ -39,6 +40,9 @@ from tests.unit.evaluation.adapters.osworld import fixtures
 
 REGION = "us-east-1"
 EPISODE = "ep-aws-test"
+# The episode-owned, absolute, workspace-external cache root the adapter mints
+# in reset_start. Tests pass a fresh tmp path; allocate refuses without one.
+_CACHE_ROOT_ARG = "cache_root"
 
 
 @pytest.fixture(autouse=True)
@@ -84,6 +88,16 @@ def _plan() -> provisioning.ProvisioningPlan:
 
 def _task() -> taskfile.TaskDescriptor:
     return taskfile.load_static(fixtures.PLAIN.encode(), module_name="tasks/task_plain.py")
+
+
+def _cache_root(tmp_path: Path) -> Path:
+    """The episode-owned, absolute, workspace-external cache root the adapter
+    mints in reset_start. Tests supply a fresh tmp path; allocate refuses
+    without one because a missing root re-opens the digest-break defect."""
+
+    root = tmp_path / "osworld-cache" / EPISODE
+    root.mkdir(parents=True, exist_ok=True)
+    return root
 
 
 class _Stubs:
@@ -322,7 +336,7 @@ class _FakeEnv:
 
 @pytest.mark.asyncio
 async def test_allocate_launches_with_client_token_and_both_tag_specs(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     with _Stubs() as stubs:
         _expect_describe_images(stubs)
@@ -342,7 +356,7 @@ async def test_allocate_launches_with_client_token_and_both_tag_specs(
             desktop_env_factory=factory,
             task_factory=lambda t: {"id": t.task_id},
         )
-        await provider.allocate(_plan(), _task())
+        await provider.allocate(_plan(), _task(), cache_root=_cache_root(tmp_path))
         stubs.ec2_stub.assert_no_pending_responses()
         stubs.sched_stub.assert_no_pending_responses()
 
@@ -358,8 +372,61 @@ async def test_allocate_launches_with_client_token_and_both_tag_specs(
 
 
 @pytest.mark.asyncio
+async def test_desktop_env_cache_dir_is_absolute_and_outside_the_workspace(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """THE regression: upstream's default cache_dir="cache" is cwd-relative and
+    the worker's cwd is the pinned workspace, so the paid episode's
+    _download_setup broke the rescue digest. The adapter must hand DesktopEnv
+    the episode's absolute cache root instead."""
+
+    with _Stubs() as stubs:
+        _expect_describe_images(stubs)
+        _expect_run_instances(stubs)
+        _expect_create_schedule(stubs)
+        _expect_running(stubs)
+        envs: list[_FakeEnv] = []
+
+        def factory(**kwargs: Any) -> _FakeEnv:
+            env = _FakeEnv(**kwargs)
+            envs.append(env)
+            return env
+
+        provider = _provider(
+            stubs,
+            monkeypatch,
+            desktop_env_factory=factory,
+            task_factory=lambda t: {"id": t.task_id},
+        )
+        cache_root = _cache_root(tmp_path)
+        await provider.allocate(_plan(), _task(), cache_root=cache_root)
+
+    cache_dir = Path(envs[0].kwargs["cache_dir"])
+    assert cache_dir.is_absolute(), "cache_dir must never be cwd-relative"
+    assert cache_dir == cache_root
+    # It must not be the workspace the worker runs in (the cwd here).
+    cwd = Path.cwd().resolve()
+    assert cwd not in cache_dir.parents and cache_dir != cwd
+    # And never under a volatile /tmp that macOS purges mid-run.
+    assert not str(cache_dir).startswith(("/tmp", "/private/tmp")) or str(cache_dir).startswith(
+        str(tmp_path)
+    )
+
+
+@pytest.mark.asyncio
+async def test_allocate_refuses_without_a_cache_root(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A missing cache root must fail loudly before any boto3 call: defaulting
+    to cwd would silently re-open the digest-break defect."""
+
+    with _Stubs() as stubs:
+        provider = _provider(stubs, monkeypatch, desktop_env_factory=_FakeEnv)
+        with pytest.raises(AllocationError, match="cache root"):
+            await provider.allocate(_plan(), _task(), cache_root=None)
+
+
+@pytest.mark.asyncio
 async def test_schedule_is_created_before_readiness_and_its_failure_is_fatal(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """The lease covers the boot window: it is created right after
     run_instances, and if it cannot be, the instance is terminated and
@@ -380,7 +447,7 @@ async def test_schedule_is_created_before_readiness_and_its_failure_is_fatal(
         )
         provider = _provider(stubs, monkeypatch, desktop_env_factory=_FakeEnv)
         with pytest.raises(AllocationError, match="TTL lease .* could not be created"):
-            await provider.allocate(_plan(), _task())
+            await provider.allocate(_plan(), _task(), cache_root=_cache_root(tmp_path))
         stubs.ec2_stub.assert_no_pending_responses()
         stubs.sched_stub.assert_no_pending_responses()
     # No readiness wait happened: the prober was never called.
@@ -388,7 +455,9 @@ async def test_schedule_is_created_before_readiness_and_its_failure_is_fatal(
 
 
 @pytest.mark.asyncio
-async def test_readiness_timeout_raises_after_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_readiness_timeout_raises_after_deadline(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     with _Stubs(http_codes=[503]) as stubs:
         _expect_describe_images(stubs)
         _expect_run_instances(stubs)
@@ -398,7 +467,7 @@ async def test_readiness_timeout_raises_after_deadline(monkeypatch: pytest.Monke
             stubs, monkeypatch, desktop_env_factory=_FakeEnv, readiness_timeout_s=12.0
         )
         with pytest.raises(ReadinessTimeout):
-            await provider.allocate(_plan(), _task())
+            await provider.allocate(_plan(), _task(), cache_root=_cache_root(tmp_path))
     # 12 s deadline at 5 s per probe: probes at t=0, 5, 10, 15; the last one
     # is past the deadline, so it raises instead of sleeping again.
     assert len(stubs.http_calls) == 4
@@ -406,13 +475,15 @@ async def test_readiness_timeout_raises_after_deadline(monkeypatch: pytest.Monke
 
 
 @pytest.mark.asyncio
-async def test_allocate_refuses_a_plan_for_another_region(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_allocate_refuses_a_plan_for_another_region(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     with _Stubs() as stubs:
         provider = AwsProvider(
             CREDS, region="eu-west-1", lease_ref="lop-ttl-x", clients=stubs.clients
         )
         with pytest.raises(AllocationError, match="region"):
-            await provider.allocate(_plan(), _task())
+            await provider.allocate(_plan(), _task(), cache_root=_cache_root(tmp_path))
 
 
 # ---------------------------------------------------------------------------
@@ -421,7 +492,7 @@ async def test_allocate_refuses_a_plan_for_another_region(monkeypatch: pytest.Mo
 
 
 async def _allocated(
-    stubs: _Stubs, monkeypatch: pytest.MonkeyPatch
+    stubs: _Stubs, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> tuple[AwsProvider, _FakeEnv]:
     _expect_describe_images(stubs)
     _expect_run_instances(stubs)
@@ -437,7 +508,7 @@ async def _allocated(
     provider = _provider(
         stubs, monkeypatch, desktop_env_factory=factory, task_factory=lambda t: {"id": t.task_id}
     )
-    await provider.allocate(_plan(), _task())
+    await provider.allocate(_plan(), _task(), cache_root=_cache_root(tmp_path))
     stubs.ec2_stub.assert_no_pending_responses()
     return provider, envs[0]
 
@@ -445,6 +516,7 @@ async def _allocated(
 @pytest.mark.asyncio
 async def test_a_second_reset_on_a_used_env_is_refused_before_any_boto3_call(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """MAJOR-1. Upstream's second ``reset`` routes through
     ``_revert_to_snapshot`` -> ``AWSProvider.revert_to_snapshot``, which
@@ -459,7 +531,7 @@ async def test_a_second_reset_on_a_used_env_is_refused_before_any_boto3_call(
     """
 
     with _Stubs() as stubs:
-        provider, env = await _allocated(stubs, monkeypatch)
+        provider, env = await _allocated(stubs, monkeypatch, tmp_path)
         assert env.reset_calls == [{"id": "task_plain"}]
         assert env.is_environment_used is True
         with pytest.raises(aws_mod.UpstreamAllocationRefused, match="_revert_to_snapshot"):
@@ -479,9 +551,10 @@ async def test_a_second_reset_on_a_used_env_is_refused_before_any_boto3_call(
 @pytest.mark.asyncio
 async def test_upstream_close_is_refused_so_teardown_is_only_ever_confirmed(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     with _Stubs() as stubs:
-        provider, env = await _allocated(stubs, monkeypatch)
+        provider, env = await _allocated(stubs, monkeypatch, tmp_path)
         with pytest.raises(aws_mod.UpstreamAllocationRefused, match="close"):
             env.close()
         with pytest.raises(aws_mod.UpstreamAllocationRefused, match="stop_emulator"):
