@@ -397,7 +397,7 @@ class _ForkRequest:
     on_complete: Callable[[str, str], None]
 
 
-def _configured_max_running() -> dict[str, int]:
+def _configured_max_running(values: Mapping[str, Any] | None = None) -> dict[str, int]:
     """``{"max_running": N}`` from config, or ``{}`` to keep the default.
 
     The concurrent-job ceiling governs how many subagents (and backgrounded
@@ -411,16 +411,24 @@ def _configured_max_running() -> dict[str, int]:
     the single source of truth for it. Duplicating the default here is how the
     two would later disagree.
 
+    ``values`` is the ``values`` mapping to read from. Passed by the config
+    watcher's listener (``_apply_config_change``) so the live re-read applies
+    exactly the validation the build applied; ``None`` reads the file through
+    a fresh ``ConfigManager`` as the constructor always has.
+
     Never raises: a malformed config must not stop a session from starting.
     A non-positive value is rejected rather than honoured, because 0 would
     deadlock every launch behind a gate that can never open.
     """
     try:
-        from local_operator.config import ConfigManager
-        from local_operator.paths import config_dir
+        if values is None:
+            from local_operator.config import ConfigManager
+            from local_operator.paths import config_dir
 
-        raw = ConfigManager(config_dir()).get_config_value("subagents", None)
-        if not isinstance(raw, dict):
+            raw = ConfigManager(config_dir()).get_config_value("subagents", None)
+        else:
+            raw = values.get("subagents")
+        if not isinstance(raw, Mapping):
             return {}
         value = raw.get("max_running")
         if value is None:
@@ -2413,12 +2421,12 @@ class Session:
     def routing_settings(self) -> Any:
         """The settings this session's stream will ROUTE on, or ``None``.
 
-        The stream captured its settings mapping at session build and holds it
-        for the session's life, so a surface that re-reads ``config.yml`` is
-        answering a different question than "what will this session do". Kept
-        as a pass-through to the stream (rather than a second copy stored here)
-        so the two can never disagree; ``None`` when the stream predates the
-        accessor, which callers must treat as "cannot say", never as "empty".
+        The mapping the stream holds — captured at build and rebound by the
+        config watcher through :meth:`_apply_config_change` on every change —
+        so it IS what the session will do next. Kept as a pass-through to the
+        stream (rather than a second copy stored here) so the two can never
+        disagree; ``None`` when the stream predates the accessor, which callers
+        must treat as "cannot say", never as "empty".
         """
         return getattr(self._stream_fn, "routing_settings", None)
 
@@ -8950,6 +8958,76 @@ class Session:
         )
 
     # -- lifecycle ----------------------------------------------------------------
+
+    def _apply_config_change(self, change: Any) -> None:
+        """Apply a ``config.yml`` change to this running session.
+
+        The listener the composition root subscribes to the process's
+        :class:`~local_operator.config_watch.ConfigWatcher` (``create_session``
+        for top-level sessions, ``_build_child_session`` for subagents). One
+        listener per session that fans out to the session's own consumers, so
+        the order in which they see a change is deterministic.
+
+        Three groups are live, each for a reason that makes the apply trivial:
+
+        * ``compaction.*`` — re-coerced into a fresh ``CompactionSettings``.
+          All three trigger checks read ``self._compaction_settings`` at check
+          time, so rebinding it IS the change. A compaction pass already in
+          flight keeps the object it captured — a threshold edit does not
+          retarget a summary mid-write — and the next check sees the new one.
+        * ``retry.*``, ``providers.openai.api``, ``effort.*`` — handed to the
+          stream fn's ``apply_settings``, which rebinds the mapping its
+          per-call ``RetrySettings.from_settings`` reads. A subagent shares
+          the parent's stream fn, so the parent's rebind covers the tree;
+          the child still calls it (idempotent) so a child built against a
+          parent whose stream fn has no ``apply_settings`` degrades the same
+          way as its parent.
+        * ``subagents.max_running`` — pushed into the live job manager with
+          the same validation the constructor applied; an unset or invalid
+          value restores the manager's built-in default rather than freezing
+          the last explicit one, so "reset to default" on the page means it.
+
+        Everything else the registry calls LIVE is already read per use
+        (``fork.*``, ``web_*`` knobs, ``subagents.models.*``) and needs no
+        apply here. Everything it calls NEW_SESSIONS is deliberately ignored.
+
+        Guards on ``_disposed`` because the unsubscribe runs as a dispose
+        HOOK, after the session's own teardown, and a tick can land between.
+        Swallows nothing else: the watcher isolates a raising listener and
+        logs it, and a coercion failure here already degrades to defaults.
+        """
+        if self._disposed:
+            return
+        changed = getattr(change, "changed_keys", frozenset())
+        values = getattr(change, "values", None)
+        if not isinstance(values, Mapping):
+            return
+        if any(key.startswith("compaction.") for key in changed):
+            # Same outcome as the factory's ``coerce_compaction_settings`` at
+            # build (dict -> validated, invalid -> defaults, absent -> None,
+            # so the read sites' ``or CompactionSettings()`` applies) but via
+            # the logging coercion: the factory's prints to stderr, which is
+            # the TUI's screen.
+            raw = values.get("compaction")
+            fresh: Any = (
+                _coerce_compaction_settings(dict(raw)) if isinstance(raw, Mapping) else None
+            )
+            self._compaction_settings = fresh
+        if any(
+            key.startswith("retry.") or key.startswith("effort.") or key == "providers.openai.api"
+            for key in changed
+        ):
+            apply_settings = getattr(self._stream_fn, "apply_settings", None)
+            if callable(apply_settings):
+                apply_settings(values)
+        if "subagents.max_running" in changed:
+            from local_operator.harness.jobs import DEFAULT_MAX_RUNNING_JOBS
+
+            cap = _configured_max_running(values).get("max_running", DEFAULT_MAX_RUNNING_JOBS)
+            try:
+                self.jobs.set_max_running(cap)
+            except ValueError:
+                logger.warning("subagents.max_running=%r rejected by the job manager", cap)
 
     def add_dispose_hook(self, hook: Callable[[], Awaitable[None] | None]) -> None:
         """Register teardown that runs after the session's own dispose.

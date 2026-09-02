@@ -1461,5 +1461,22 @@ async def _build_child_session(
         # disconnect hook, because the child does not own the servers.
         child.mcp_manager = parent_session.mcp_manager
         child.mcp_startup = parent_session.mcp_startup
+    # Follow ``config.yml`` like the parent does (``session_factory
+    # .attach_config_watch``). The ``model_copy`` of the parent's compaction
+    # settings above is the correct INITIAL value; this subscription is what
+    # keeps it current, so a threshold lowered while a long review child runs
+    # bounds the child too. Same process and loop as the parent, so no extra
+    # poller and no extra wake — one more listener on the process watcher.
+    # Unsubscribed by ``_dispose_child`` through the dispose hook, exactly as
+    # the parent's is. Degrades silently: a child that cannot follow config is
+    # a child built the way every child was before this seam.
+    try:
+        from local_operator.config_watch import process_watcher
+
+        watcher = process_watcher(config_dir())
+        watcher.start(asyncio.get_running_loop())
+        child.add_dispose_hook(watcher.subscribe(child._apply_config_change))
+    except Exception:  # noqa: BLE001 — a child must build without the watcher
+        logger.warning("config watcher could not be attached to the child", exc_info=True)
     await child.async_init()
     return child

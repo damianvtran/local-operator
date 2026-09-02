@@ -4263,18 +4263,18 @@ async def test_failovers_does_not_call_a_usable_provider_accountless(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_failovers_flags_config_edited_after_the_session_started(
-    monkeypatch, tmp_path
-) -> None:
-    """The listing must describe what the SESSION routes on, and flag drift.
+async def test_failovers_describes_what_the_session_routes_on(monkeypatch, tmp_path) -> None:
+    """The listing must describe what the SESSION routes on, never the file.
 
-    The router captures its settings once at session build; nothing watches
-    config.yml. Without this the command confirmed cascade edits the running
-    session would not honour — a green light, and most wrong for the user who
-    followed this command's own "ask the agent to change…" hint.
+    The session's ``routing_settings`` is the mapping the stream will actually
+    use — kept current by the process config watcher — so a listing built from
+    disk would answer a different question. The old ``stale · /reload`` row is
+    gone with the gap it described: nothing must reintroduce a "reload to
+    apply" hint for a change that already applied.
     """
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
-    # On DISK: two targets. The session captured only the first.
+    # On DISK: two targets. The session (a test double the watcher cannot
+    # update) reports only the first — the listing follows the session.
     _failover_config(tmp_path, {"fallbackChains": {"default": ["zai/glm-5.3", "kimi/k3"]}})
 
     class SnapshotSession(FakeSession):
@@ -4293,9 +4293,9 @@ async def test_failovers_flags_config_edited_after_the_session_started(
     # What the SESSION will do, not what the file says.
     assert "1. zai/glm-5.3" in text
     assert "kimi/k3" not in text
-    # And it says so, naming the step that makes the edit real.
-    assert "config.yml changed since this session started" in text
-    assert "/reload" in text
+    # No drift row and no reload hint: the change path is live now.
+    assert "stale" not in text
+    assert "/reload" not in text
 
 
 @pytest.mark.asyncio

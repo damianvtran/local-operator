@@ -403,6 +403,35 @@ class AsyncJobManager:
         )
         return running >= self._max_running
 
+    @property
+    def max_running(self) -> int:
+        return self._max_running
+
+    def set_max_running(self, value: int) -> None:
+        """Change the concurrency ceiling on a LIVE manager.
+
+        The config watcher's entry point for ``subagents.max_running``. Both
+        directions are safe by construction because every gate reads
+        ``_max_running`` at decision time rather than caching a verdict:
+
+        * RAISING the cap lets the next launch through, and parked jobs are
+          promoted immediately (same FIFO path a settled job uses) so a queue
+          that built up under the old cap does not wait for a completion that
+          may be minutes away.
+        * LOWERING it below the running count evicts nothing — a subagent
+          mid-task is not cancelled because the operator typed a smaller
+          number — ``at_capacity`` simply stays true until enough jobs settle.
+
+        A value below 1 is refused with the same reasoning ``Session`` applies
+        at build: ``0`` would park every future launch behind a gate that can
+        never open.
+        """
+        cap = int(value)
+        if cap < 1:
+            raise ValueError("max_running must be >= 1")
+        self._max_running = cap
+        self._promote_oldest_queued()
+
     def accounting_components(self) -> list[Usage]:
         """A detached, provenance-preserving snapshot of this whole ledger.
 

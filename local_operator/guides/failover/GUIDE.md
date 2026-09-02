@@ -190,12 +190,12 @@ chain re-list the *current* model at a different effort as a real route.
 `enabled: false` or `modelFallback: false` switches the cascade off entirely —
 `/failovers` names whichever of the two did it.
 
-**An edit does not reach a running session.** The stream captures its settings
-once at session build and nothing watches `config.yml`, so after changing the
-cascade the user must run `/reload` (or start a new session) for the new routing
-to take effect. `/failovers` compares the two and prints a `stale` row naming
-`/reload` when they diverge, so the listing never shows a cascade the running
-session will not honour.
+**An edit reaches every running session.** Each process watches `config.yml`
+and rebinds the stream's settings mapping when it changes — immediately in the
+process that wrote it, within about two seconds in any other `lop` session on
+the machine — so a cascade change needs no `/reload`. The other session prints
+a `config.yml changed: retry.fallbackChains — applied` notice so the user knows
+why routing moved. `/failovers` reads that same live mapping.
 
 **Never put tokens or API keys in this mapping.** Credentials live in the
 credential store (`local-operator login <provider>`); a chain entry names a
