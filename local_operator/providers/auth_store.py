@@ -1030,10 +1030,20 @@ class AuthStore:
         windows carry no measurable fraction. The caller treats unknown as
         neutral so a cold cache cannot demote an account.
 
-        The cache key is rebuilt exactly as the message-boundary preflight
+        TWO sources feed this, and the newer report wins. The per-account
+        preflight row is keyed exactly as the message-boundary preflight
         builds it (``ModelConfigurator._cached_account_usage``): the storage
         provider id plus the row's email, else account id, else ``cred:<id>``.
-        Only OAuth rows carry that identity; an API-key row is keyed by a hash
+        But that row is only ever written while ``retry.usageAwareFallback``
+        is on, which is NOT the shipped default -- with the reactive path
+        off, the only usage the cache holds is the warmer's per-provider
+        payload (``/usage`` and the TUI's background warm), whose reports
+        carry ``identity``. Reading only the preflight row made this pick a
+        silent no-op on a stock config, so the warmer payload is sliced per
+        account too (:meth:`UsageCacheStore.latest_account_report`), matched
+        on every label an enumerator might have attached to the row.
+
+        Only OAuth rows carry an identity; an API-key row is keyed by a hash
         of its secret on the preflight side, and re-deriving that here would
         put the secret on a read path that never needed it, so key rows are
         simply unknown. The health reduction is the same one the reactive
@@ -1046,15 +1056,30 @@ class AuthStore:
         cache = self._usage_cache_store()
         if cache is None:
             return None
-        from local_operator.providers.usage import usage_health
+        from local_operator.providers.usage import UsageReport, usage_health
         from local_operator.providers.usage_cache import account_preflight_key
 
         data = row.data
         identity = data.get("email") or data.get("account_id") or f"cred:{row.id}"
+        candidates: list[UsageReport] = []
         reports = cache.get(account_preflight_key(provider, str(identity)), include_expired=True)
-        if not reports:
+        if reports:
+            candidates.append(reports[0])
+        # The warmer labels an account by whichever of these its enumerator
+        # found first (``list_oauth_accesses`` vs ``list_oauth_identities``
+        # differ on the identity_key fallback), so offer every spelling.
+        labels = {
+            str(value)
+            for value in (data.get("email"), data.get("account_id"), row.identity_key)
+            if value and not str(value).startswith("oauth:")
+        }
+        labels.add(f"cred:{row.id}")
+        warmed = cache.latest_account_report(provider, labels)
+        if warmed is not None:
+            candidates.append(warmed)
+        if not candidates:
             return None
-        report = reports[0]
+        report = max(candidates, key=lambda r: r.fetched_at)
         if report.fetched_at <= 0:
             return None
         if now_ms - report.fetched_at > self._usage_pick_max_age_ms:
@@ -1140,6 +1165,12 @@ class AuthStore:
             rest: list[StoredCredential] = []
             for r in rows:
                 value = remaining[r.id]
+                # DELIBERATE: an unknown row outranks a known-worse one. It
+                # joins the bucket beside the best-known rows rather than
+                # sorting behind a row that is provably 30% full, because a
+                # missing report is most often a cold cache or a window that
+                # just reset -- and penalising an account for the absence of
+                # data is how a fresh login gets starved by its own silence.
                 (bucket if value is None or value >= floor else rest).append(r)
             # Stable sort: rows with equal remaining keep the store's row
             # order, which is the order the hash fallback also assumes.

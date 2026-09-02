@@ -456,7 +456,10 @@ SETTINGS: tuple[Setting, ...] = (
         label="Usage-aware account pick",
         kind=Kind.BOOL,
         default=True,
-        help="Start new sessions on the same-provider account with the most quota left.",
+        help=(
+            "Start new sessions on the same-provider account with the most quota left, "
+            "read from the cached /usage report. Applies to sessions only."
+        ),
         choices=_bool_choices("prefer the least-loaded account", "spread by session hash only"),
     ),
     Setting(

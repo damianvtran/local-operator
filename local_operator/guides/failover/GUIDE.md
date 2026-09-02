@@ -31,14 +31,26 @@ leave when all four are spent.
 
 Every credential for a provider is a candidate for every request. Selection
 order (`AuthStore._base_selection_order`) is: the session's sticky account
-first, then a per-session hash of the session id so concurrent sessions start on
-different accounts rather than stampeding one, then round-robin for callers with
-no session. An account that just failed on a provider-side fault is *demoted*
-(sorted last), never removed — a 500 is not the account's fault, so it stays
-available as a last resort. A demotion never applies to the account a session
-is already sticky to: it steers *new* picks, and a session's warm prompt cache
-lives on its current account (see "Quota reserve" below). Because the marks
-are process-wide, this also means *another* session's 500 on account A no
+first; then, for a session's **first** pick on a provider, a usage-ranked order
+(`usageAwareAccountPick`, default on) that reads each account's last cached
+quota report and puts the accounts with the most remaining headroom first —
+accounts within ten points of the best form one bucket that the per-session hash
+rotates, so concurrent starts still fan out instead of herding onto the single
+emptiest row, and accounts with no usable report rank as neutral (in the bucket)
+rather than last; then the plain per-session hash of the session id when usage
+says nothing; then round-robin for callers with no session. The ranking reads
+only what is already on disk — the per-account rows the message-boundary
+preflight writes when `usageAwareFallback` is on, and otherwise the per-provider
+payload `/usage` and the TUI's background warmer keep fresh — so it costs no
+network, and an empty cache leaves the pure hash order untouched. Once a session
+has an account it stays there (sticky) whatever the cache later says. An account
+that just failed on a provider-side fault is *demoted* (sorted last), never
+removed — a 500 is not the account's fault, so it stays available as a last
+resort. A demotion never applies to the account a session is already sticky to:
+it steers *new* picks — including the usage-ranked first pick, which only ever
+orders the rows that survive the demotion filter — and a session's warm prompt
+cache lives on its current account (see "Quota reserve" below). Because the
+marks are process-wide, this also means *another* session's 500 on account A no
 longer moves a session that is sticky to A — only that session's **own** 500
 does, since `rotate_sibling` clears its sticky for a server fault before the
 mark is consulted.
@@ -153,6 +165,10 @@ values:
     usageAwareFallback: true   # NOT the default (ships false); see below
     usageReservePercent: 10 # shipped default
     usageAwareAccountPick: true  # shipped default; see "Rotation within one provider"
+    # `false` restores the pure per-session hash spread for SESSIONS (the
+    # setting is applied where a session's stream is built; store instances
+    # the login/credential CLI or MCP auth build on their own never pass a
+    # session id, so they never rank and never read this setting).
     fallbackChains:
       anthropic/claude-opus-5:
         - provider: zai
