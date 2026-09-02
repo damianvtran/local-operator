@@ -1412,6 +1412,57 @@ def test_a_want_id_that_is_present_makes_no_request(tmp_path) -> None:
     assert client.calls == []
 
 
+@pytest.mark.parametrize(
+    ("listed", "wanted"),
+    [
+        # The R1-1 case: Anthropic's listing carries the dated snapshot only, the
+        # user configures the undated alias its API accepts. Before, this was a
+        # miss on EVERY process start older than the miss floor: a blocking
+        # round trip on boot, forever, for a document the refetch could not fix.
+        ("claude-sonnet-4-5-20250929", "claude-sonnet-4-5"),
+        ("claude-opus-4-5-20251101", "claude-opus-4-5"),
+        ("claude-haiku-4-5-20251001", "claude-haiku-4-5"),
+        # The reverse: an alias-only listing (the aggregators' habit) asked for
+        # a snapshot, and the dotted spelling either way.
+        ("claude-opus-4-5", "claude-opus-4-5-20251101"),
+        ("claude-opus-4.5", "claude-opus-4-5-20251101"),
+        ("gpt-5.4", "gpt-5-4"),
+    ],
+)
+def test_a_want_id_listed_under_another_spelling_makes_no_request(
+    tmp_path, listed: str, wanted: str
+) -> None:
+    # Past the miss floor and inside the soft TTL: the only request possible
+    # is the miss-triggered one, and there must not be one.
+    _plant_anthropic_document(tmp_path, age_s=20 * 60, ids=[listed])
+    client = _StubClient([])
+
+    _models, status = available_models(
+        "anthropic", api_key="sk-ant", client=client, cache_dir=tmp_path, want_id=wanted
+    )
+
+    assert status == "cached"
+    assert client.calls == []
+
+
+def test_a_genuinely_unlisted_id_still_refetches_after_the_alias_widening(tmp_path) -> None:
+    """The widening must not swallow the trigger it sits beside: a NEW family
+    id that no spelling of any listed row matches is still a miss."""
+    _plant_anthropic_document(tmp_path, age_s=20 * 60, ids=["claude-sonnet-4-5-20250929"])
+    fresh = {
+        "data": [{"id": "claude-fable-5-1", "display_name": "Claude Fable 5.1", "type": "model"}],
+        "has_more": False,
+    }
+    client = _StubClient([_Response(200, fresh)])
+
+    _models, status = available_models(
+        "anthropic", api_key="sk-ant", client=client, cache_dir=tmp_path, want_id="claude-fable-5-1"
+    )
+
+    assert status == "ok"
+    assert len(client.calls) == 1
+
+
 def test_a_failed_want_id_refetch_keeps_the_document_and_reports_stale(tmp_path) -> None:
     _plant_anthropic_document(tmp_path, age_s=22 * 3600, ids=["claude-opus-5"])
     client = _StubClient([httpx.ConnectError("offline")])

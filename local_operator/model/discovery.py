@@ -53,7 +53,7 @@ from local_operator.model.catalogue import (
     invalidate,
     read_listing,
 )
-from local_operator.model.ids import normalised_id
+from local_operator.model.ids import id_spellings, normalised_id
 from local_operator.model.registry import ModelInfo, static_models
 from local_operator.providers.registry import (
     PROVIDER_REGISTRY,
@@ -1394,13 +1394,29 @@ def _status_of(listing: Listing, live_rows: list[DiscoveredModel]) -> ListingSta
 
 
 def _lists_id(rows: list[DiscoveredModel], model_id: str) -> bool:
-    """Whether ``model_id`` is in ``rows``, exactly or under the normalised spelling.
+    """Whether ``rows`` already accounts for ``model_id`` under ANY known spelling.
 
-    The same two-step match ``configure._info_from_discovery`` performs, so the
-    miss that triggers a refetch here is the miss that would have cost the
-    caller its answer.
+    This answers "could a refetch plausibly list this id?", not "will the lookup
+    find a row?" — the two differ, and conflating them put a synchronous listing
+    fetch on every process start. Anthropic's ``/v1/models`` lists dated
+    snapshots only (``claude-sonnet-4-5-20250929``) while its API accepts the
+    undated alias, and ``claude-sonnet-4-5`` is a common configured id. Matched
+    exactly or normalised, the alias was a miss against a document that DID
+    list its snapshot, so every process older than ``MISS_REFETCH_MIN_AGE_S``
+    paid a blocking round trip on boot for a document the refetch could not
+    improve — indefinitely, since the refetched document lacked the alias too.
+
+    So a row counts as a hit when any of its :func:`id_spellings` (the id as
+    given, date-stripped, dotted) coincides with any of the wanted id's, after
+    normalisation. That covers both directions — an alias whose snapshot is
+    listed, and a snapshot whose alias is listed (the aggregators' habit) — so
+    neither direction can refetch for a row the provider spells differently.
+    The rewrites are the conservative ones ``prices._lookup`` already trusts.
     """
     if any(row.id == model_id for row in rows):
         return True
-    wanted = normalised_id(model_id)
-    return any(normalised_id(row.id) == wanted for row in rows)
+    wanted = {normalised_id(spelling) for spelling in id_spellings(model_id)}
+    return any(
+        not wanted.isdisjoint(normalised_id(spelling) for spelling in id_spellings(row.id))
+        for row in rows
+    )
