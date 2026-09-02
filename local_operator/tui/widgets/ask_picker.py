@@ -42,7 +42,7 @@ Two things it does that no other picker in this app does:
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field, replace
 
 from rich.cells import cell_len
@@ -484,6 +484,17 @@ class _CardLayout:
     #: reproduces it (``show_descriptions=False``, no grants, the middle row's
     #: prose gone), and no change here does.
     show_descriptions: bool
+
+    #: STEP 1 (line-granular windowing, unused until step 2): the first line
+    #: index of every row in the OMP-style line list, ``lineStartByRow``
+    #: (``ask-dialog.ts:868-887``). Length ``row_count + 1``; the last entry is
+    #: ``len(line_list)``. Computed here so the paint, the thumb and
+    #: :meth:`_move_to` can switch to lines in step 2 without changing the plan.
+    line_start_by_row: tuple[int, ...] = ()
+    #: STEP 1 (unused until step 2): visual LINES the option-list viewport will
+    #: draw once windowing moves to lines. ``len(line_list) > body_line_budget``
+    #: becomes the windowing condition (OMP's ``#shouldRenderScrollbar``).
+    body_line_budget: int = 0
 
 
 class AskPickerScreen(Container):
@@ -1742,6 +1753,56 @@ class AskPickerScreen(Container):
                 plan = replace(plan, show_position=False)
         return plan
 
+    def _cap_for_row(self, index: int) -> int:
+        """Visual-line cap for row ``index``'s description in the line list.
+
+        :data:`DEFAULT_DESC_CAP` (2) for every row, LIFTED to
+        :data:`REVEAL_MAX_ROWS` (8) for the SELECTED row while ``ctrl+e`` is on.
+        This is the ENTIRE reveal (§4): the selected row grows in place inside
+        the one scrolling viewport rather than opening a competing block, so
+        there is no second mechanism to fight the scroll (AGENTS.md:595). OMP
+        has no analogue — its descriptions are always 2 lines — so the lift is
+        ours, expressed as one number the line list reads.
+        """
+        if self.state.revealed and index == self.state.selected:
+            return REVEAL_MAX_ROWS
+        return DEFAULT_DESC_CAP
+
+    def _build_line_list(
+        self, rows: Iterable[int], width: int
+    ) -> tuple[list[tuple[int, str]], tuple[int, ...]]:
+        """The OMP-style line list and its ``lineStartByRow`` map.
+
+        Every row contributes, in order, its LABEL line (one — labels are
+        truncated here, never wrapped, §2.5) then up to :meth:`_cap_for_row`
+        description lines. This is ``renderRowLabel``'s output shape
+        (``ask-dialog.ts:329-341``) in this card's cell model: a flat list of
+        ``(row_index, kind)`` pairs whose length is the list's full visual
+        height, plus ``line_start_by_row[i]`` = the first line index of row
+        ``i`` (``ask-dialog.ts:872``, ``lineStartByRow.push(allLines.length)``
+        before each row). The last map entry is ``len(line_list)``.
+
+        The sole source of truth for the cursor-visibility math
+        (:meth:`_move_to`), the thumb's ``total`` (§5) and the visible-row
+        resolution. Cheap: :meth:`_description_lines` is memoised, so this is
+        ``O(row_count)`` slicing over cached wraps.
+
+        ``kind`` is ``"label"`` or ``"desc"`` \u2014 the paint reads it to draw a
+        row line versus a description line, and a partial row at a viewport edge
+        keeps whichever of its lines fall inside the window.
+        """
+        line_list: list[tuple[int, str]] = []
+        line_start_by_row: list[int] = []
+        for index in rows:
+            line_start_by_row.append(len(line_list))
+            line_list.append((index, "label"))
+            cap = self._cap_for_row(index)
+            desc = self._description_lines(index, width)
+            for _ in desc[:cap]:
+                line_list.append((index, "desc"))
+        line_start_by_row.append(len(line_list))
+        return line_list, tuple(line_start_by_row)
+
     def _allocate(
         self,
         width: int,
@@ -1789,6 +1850,7 @@ class AskPickerScreen(Container):
             # No rows at all is a card that cannot be drawn, and drawing it
             # anyway is the clip itself (round 4, R15).
             first = question[:1] if budget >= 1 else ()
+            line_list, line_start_by_row = self._build_line_list(range(self.row_count), width)
             return _CardLayout(
                 width=width,
                 question=tuple(first),
@@ -1801,6 +1863,8 @@ class AskPickerScreen(Container):
                 page=0,
                 show_position=False,
                 show_footer=budget >= 2,
+                line_start_by_row=line_start_by_row,
+                body_line_budget=0,
             )
         # The footer, the first line of the question, and one option row: the
         # three lines the card cannot say anything useful without. The question
@@ -1970,6 +2034,15 @@ class AskPickerScreen(Container):
         space_below = remaining - 1 >= spacer_floor
         if space_below:
             remaining -= 1
+        # STEP 1 (line-granular windowing, unused until step 2): after step 8
+        # the whole of ``remaining`` is what the option-list viewport gets, in
+        # visual lines. The line list is every row at its 2-line clamp (the
+        # selected row lifted to REVEAL_MAX_ROWS while ``ctrl+e`` is on, §4);
+        # the viewport windows it. Computed here so the paint can switch to
+        # lines in step 2 without moving the plan. The OLD row-granular step 9
+        # below still owns the paint for now.
+        body_line_budget = max(0, remaining)
+        _, line_start_by_row = self._build_line_list(range(self.row_count), width)
         rows = 1 + extra
         # The descriptions' FIRST lines are bought last and all at once: a list
         # where only some entries have any prose under them reads as broken
@@ -2026,6 +2099,8 @@ class AskPickerScreen(Container):
             page=page,
             show_position=position,
             show_footer=True,
+            line_start_by_row=line_start_by_row,
+            body_line_budget=body_line_budget,
         )
 
     def _window(self, page: int | None = None) -> list[int]:
