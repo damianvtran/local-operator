@@ -20,6 +20,7 @@ from local_operator.harness.types import (
     StreamEndEvent,
     StreamEvent,
     StreamTextDelta,
+    StreamToolCallDelta,
     StreamUsageEvent,
     TextContent,
     ToolCall,
@@ -33,17 +34,32 @@ MODEL = ModelSpec(provider="test", model_id="m", context_window=100_000)
 
 
 class RecordingStream:
-    """Answers every request with fixed events; keeps the requests."""
+    """Answers every request with fixed events; keeps the requests.
 
-    def __init__(self, events: list[StreamEvent] | None = None) -> None:
+    ``scripted`` answers request N with ``scripted[N]`` instead (the last
+    script repeats), for the tests that need the second request to differ
+    from the first — the bare-tool-call retry.
+    """
+
+    def __init__(
+        self,
+        events: list[StreamEvent] | None = None,
+        *,
+        scripted: list[list[StreamEvent]] | None = None,
+    ) -> None:
         self.events = events if events is not None else [StreamTextDelta(delta="answer.")]
+        self.scripted = scripted
         self.requests: list[ChatRequest] = []
 
     def __call__(self, request: ChatRequest, signal: AbortSignal | None):
         self.requests.append(request)
+        if self.scripted is not None:
+            events = self.scripted[min(len(self.requests) - 1, len(self.scripted) - 1)]
+        else:
+            events = self.events
 
         async def gen():
-            for event in self.events:
+            for event in events:
                 yield event
 
         return gen()
@@ -107,8 +123,10 @@ async def test_complete_aside_sends_the_live_context_and_no_tools(tmp_path) -> N
     The aside sends the SAME live tool schema a working turn sends, not ``[]``:
     the tools block is the front of every provider's cache prefix, so dropping
     it would push the aside off the turn's cached prefix and force a full
-    re-process (the regression this fixes). ``tool_choice="none"`` is what keeps
-    "reads the turn, calls nothing" true even though the tools are present.
+    re-process (the regression this fixes). ``tool_choice="none"`` states the
+    "reads the turn, calls nothing" intent; the OpenAI and Gemini wires carry
+    it literally, and on Anthropic — where it would break the messages cache —
+    the session enforces it by never executing a tool-call delta instead.
     """
     tools = [_tool("bash"), _tool("read")]
     stream = RecordingStream()
@@ -205,6 +223,112 @@ async def test_complete_aside_reports_what_it_spent(tmp_path) -> None:
     await session.complete_aside([Message.user("why?")], on_usage=seen.append)
 
     assert [(u.input_tokens, u.output_tokens) for u in seen] == [(1200, 40)]
+    await session.dispose()
+
+
+#: A model that answered by reaching for a tool. On Anthropic the aside's wire
+#: ``tool_choice`` is the turn's ``auto`` (the messages-level cache is keyed on
+#: it), so this CAN come back; the session is what keeps it inert.
+_BARE_TOOL_CALL: list[StreamEvent] = [
+    StreamToolCallDelta(index=0, id="call_1", name="read"),
+    StreamToolCallDelta(index=0, argument_delta='{"path": "x"}'),
+    StreamUsageEvent(usage=Usage(input_tokens=1000, output_tokens=20)),
+    StreamEndEvent(stop_reason="toolUse"),
+]
+
+
+@pytest.mark.asyncio
+async def test_complete_aside_retries_a_bare_tool_call_without_tools(tmp_path) -> None:
+    """Tool call and no text -> one retry with ``tools=[]``, and its text wins.
+
+    The retry is off the cache prefix by construction (the tools block is the
+    front of it), so it must be BOUNDED to this case: exactly one extra
+    request, never a loop. Both requests' usage is reported, because both were
+    paid for. Nothing executes and nothing joins the history either way.
+    """
+    tools = [_tool("bash"), _tool("read")]
+    stream = RecordingStream(
+        scripted=[
+            _BARE_TOOL_CALL,
+            [
+                StreamTextDelta(delta="because."),
+                StreamUsageEvent(usage=Usage(input_tokens=1100, output_tokens=5)),
+                StreamEndEvent(stop_reason="stop"),
+            ],
+        ]
+    )
+    session = make_session(tmp_path, stream, tools=tools)
+    session._context.messages.append(Message.user("port it"))
+    before = list(session._context.messages)
+    deltas: list[str] = []
+    seen: list[Usage] = []
+
+    answer = await session.complete_aside(
+        [Message.user("why?")], on_delta=deltas.append, on_usage=seen.append
+    )
+
+    assert answer == "because."
+    assert deltas == ["because."]
+    assert len(stream.requests) == 2
+    first, retry = stream.requests
+    assert first.tools == session._context.tools and first.tool_choice == "none"
+    assert retry.tools == [] and retry.tool_choice == "none"
+    # The retry is the same request minus the tools: same history, same system.
+    assert [m.text for m in retry.messages] == [m.text for m in first.messages]
+    assert retry.system_blocks == first.system_blocks
+    assert [u.input_tokens for u in seen] == [1000, 1100]
+    assert session._context.messages == before
+    assert session._transcript.entries() == []
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_complete_aside_retry_is_bounded_to_one(tmp_path) -> None:
+    """A second bare tool call is NOT retried again: the answer is empty and
+    the caller sees it, rather than an unbounded loop off the cache prefix."""
+    stream = RecordingStream(scripted=[_BARE_TOOL_CALL])
+    session = make_session(tmp_path, stream, tools=[_tool("read")])
+
+    answer = await session.complete_aside([Message.user("why?")])
+
+    assert answer == ""
+    assert len(stream.requests) == 2
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_complete_aside_keeps_text_beside_an_inert_tool_call(tmp_path) -> None:
+    """Text plus a tool call is an answer: the text is returned, the call is
+    dropped unread, and there is no retry (the text is what was asked for)."""
+    stream = RecordingStream(
+        [
+            StreamTextDelta(delta="let me check "),
+            StreamToolCallDelta(index=0, id="call_1", name="read"),
+            StreamTextDelta(delta="— it was the sed step."),
+            StreamEndEvent(stop_reason="toolUse"),
+        ]
+    )
+    session = make_session(tmp_path, stream, tools=[_tool("read")])
+
+    answer = await session.complete_aside([Message.user("why?")])
+
+    assert answer == "let me check — it was the sed step."
+    assert len(stream.requests) == 1
+    assert session._transcript.entries() == []
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_complete_aside_empty_text_without_a_tool_call_is_not_retried(tmp_path) -> None:
+    """An empty answer that was NOT a tool call (a refusal, a length stop) is
+    the provider's answer; retrying it would only pay the full prefix twice."""
+    stream = RecordingStream([StreamEndEvent(stop_reason="refusal")])
+    session = make_session(tmp_path, stream, tools=[_tool("read")])
+
+    answer = await session.complete_aside([Message.user("why?")])
+
+    assert answer == ""
+    assert len(stream.requests) == 1
     await session.dispose()
 
 

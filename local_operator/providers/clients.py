@@ -1980,9 +1980,42 @@ class AnthropicClient:
                 for tool in request.tools
             ]
             # Safe default: unmapped values fall back to auto (PR-22).
+            #
+            # ``none`` is DELIBERATELY sent as ``auto`` on this wire, and only
+            # here. Anthropic's cache hierarchy is tools -> system -> messages,
+            # and per the prompt-caching docs ("What invalidates the cache")
+            # ``tool_choice`` is rendered into the MESSAGES level: a request
+            # whose ``tool_choice`` differs from the one that wrote the prefix
+            # keeps the tools+system head warm and re-writes every message
+            # block. The callers that send a non-empty tool list with
+            # ``tool_choice="none"`` — ``Session.complete_aside`` (``/btw`` and
+            # the ``/loop`` judge) and ``Session.advise_compaction`` — exist to
+            # ride the working turn's cached prefix, and the turn sends
+            # ``{"type": "auto"}``. Measured live (``scripts/
+            # measure_aside_tool_choice_cache.py``): with ``none`` a ~35k-token
+            # aside read only the ~1k head from cache and wrote the other ~34k;
+            # with ``auto`` it read the whole conversation and wrote only its
+            # appended question. Across the fleet that difference was a quarter
+            # of all daily cache-write tokens.
+            #
+            # The "reads the turn, calls nothing" contract those callers promise
+            # is therefore NOT enforced on the wire for Anthropic. It is
+            # enforced by the callers: both consume only ``StreamTextDelta`` /
+            # ``StreamUsageEvent`` and never execute a ``StreamToolCallDelta``,
+            # so a ``tool_use`` block in the answer is inert (the model is also
+            # told in the appended prompt to answer in text). ``complete_aside``
+            # retries once WITHOUT tools when the answer was a tool call and
+            # nothing else, which is the only way the mapping is observable.
+            #
+            # The no-tools callers (naming, compaction summary, server operator)
+            # send ``tools=[]`` and never reach this branch, so they carry no
+            # ``tool_choice`` key at all, exactly as before. The OpenAI and
+            # Gemini builders keep a literal ``none``: neither documents a
+            # cache penalty for it, and Gemini's mode MUST stay ``NONE`` because
+            # its default with tools present is to allow calls.
             body["tool_choice"] = {
                 "auto": {"type": "auto"},
-                "none": {"type": "none"},
+                "none": {"type": "auto"},
                 "required": {"type": "any"},
             }.get(request.tool_choice, {"type": "auto"})
         effort = _reasoning_effort(request)

@@ -10,6 +10,7 @@ arm) live Anthropic `claude-opus-4-8` calls on the configured OAuth credential.
 | `replay-severance.txt` | Counterfactual replay: passes, severance rate, and replay cost for recency vs task-aware preserve at three triggers |
 | `token-benchmark.txt` | Cache-aware token AND dollar accounting, advisor-off vs advisor-on, swept over cadence / floor / trigger / accuracy / cache-hit rate |
 | `cache-integrity.txt` | 15 checks that nothing except a real compaction pass breaks the prompt cache |
+| `aside-tool-choice-measurement.txt` | Live re-measurement of the aside/advisor shape at ~37k tokens: `tool_choice: none` vs `auto` reads the prefix equally well, and the fleet's head-only cache events are better explained by TTL expiry (2026-09-01) |
 
 All four are the verbatim stdout of committed scripts, so they are
 re-derivable without a paid run (only the first needs a credential):
