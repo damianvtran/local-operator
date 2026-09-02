@@ -381,3 +381,38 @@ async def test_a_dropped_connection_still_says_reconnecting(tmp_path, monkeypatc
         takeover_factory=lambda: asyncio.sleep(0, result=None),
     )
     assert remote._unavailable_reason() == "session owner is reconnecting"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mid_turn", [False, True])
+async def test_a_deliberate_stop_ends_the_turn_in_both_states(
+    tmp_path, monkeypatch, mid_turn: bool
+) -> None:
+    """A stop ends the turn whether or not one was in flight.
+
+    Round-4 MAJOR-3/D4-1: the deliberate-stop branch returned ABOVE the block
+    that ends the turn, and every other writer of ``_streaming`` is fed by the
+    owner whose socket just closed — so a viewer stopped MID-TURN reported
+    streaming forever. The spinner never stopped, and the next message routed
+    into the steer branch, was dropped, and was receipted as "sends when this
+    step finishes" for a step that had ended. Both states are parameterised
+    because only the idle one was covered, which is why this survived.
+    """
+    from local_operator.mobile.attach_client import STOPPED_REASON
+
+    monkeypatch.setattr(remote_module, "find_owner_record", lambda *args: (None, None))
+    remote = RemoteSession(
+        config_dir=tmp_path,
+        session_id="s1",
+        takeover_factory=lambda: asyncio.sleep(0, result=None),
+    )
+    remote._streaming = mid_turn
+    remote._on_disconnected(STOPPED_REASON)
+    if remote._recovery_task is not None:
+        await asyncio.wait_for(remote._recovery_task, timeout=5)
+
+    assert remote.is_streaming is False
+    # The honest refusal lives on the prompt path; ending the turn is what
+    # lets a message reach it instead of the silent steer queue.
+    with pytest.raises(ConnectionError, match="stopped"):
+        await remote.prompt("the message typed after the stop")

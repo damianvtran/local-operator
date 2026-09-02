@@ -108,6 +108,13 @@ _EVENT_QUEUE_MAX = 64
 # rather than a one-line receipt: they reply with a ``result`` frame so the
 # invoker renders the outcome locally instead of the owner's transcript
 # printing it.
+#: How long ``announce_stop`` will wait for its frame to be handed to the
+#: transport on the thread-hosted path. Bounds a courtesy write against a
+#: stalled viewer: the caller is the TUI's event loop during a /stop, so this
+#: is a frozen-UI budget, not a delivery guarantee. A viewer that misses the
+#: frame degrades to the pre-announcement behaviour; the stop is unaffected.
+_ANNOUNCE_WRITE_TIMEOUT_S = 0.25
+
 _PAYLOAD_OPS = {"slash_result", "cancel_subagents"}
 
 
@@ -394,19 +401,48 @@ class RuntimeServer:
             # to the viewer ahead of the EOF it must explain.
             self._write_now(frame)
             return
+        # The THREAD-HOSTED path, which is the one production takes: the TUI
+        # hosts its registrant with `.start()`, and the caller is a coroutine
+        # on the TUI's own event loop. Awaiting a drain here froze that loop
+        # for up to two seconds against a viewer whose receive window was full
+        # (round-4 MINOR-3, the #401 class) — on a path whose whole contract
+        # is that announcing must never make a stop slower.
+        #
+        # The same reasoning the inline branch rests on applies once the write
+        # is on the right thread: ``write`` only buffers, and a transport
+        # closed afterwards still flushes what it holds. So hand the write to
+        # the runtime's loop and wait only for it to have BEEN WRITTEN, with a
+        # bound far below any user-perceptible pause. Missing that bound costs
+        # a viewer its explanation, never the stop.
+        written = threading.Event()
+
+        def _write_and_signal() -> None:
+            try:
+                self._write_now(frame)
+            finally:
+                written.set()
+
         try:
-            asyncio.run_coroutine_threadsafe(self._broadcast(frame), loop).result(timeout=2.0)
-        except Exception:  # noqa: BLE001 — announcing is best-effort
-            logger.debug("stop announcement did not reach viewers", exc_info=True)
+            loop.call_soon_threadsafe(_write_and_signal)
+        except RuntimeError:
+            # Loop already closing: nothing is listening that could care.
+            return
+        if not written.wait(timeout=_ANNOUNCE_WRITE_TIMEOUT_S):
+            logger.debug("stop announcement did not reach viewers before the teardown")
 
     def _write_now(self, frame: dict[str, Any]) -> None:
         """Buffer one frame to every viewer without awaiting a drain.
 
-        Deliberately skips ``conn.send_lock``: this runs on the owner loop, so
-        no other coroutine can be mid-write at this instant, and taking the
-        lock would require awaiting — the thing the caller cannot do. A
-        partially-written frame from a concurrent send is impossible for the
-        same reason.
+        PRECONDITION: must run ON the runtime's event loop. Both callers
+        satisfy it — the in-process branch is already there, and the
+        thread-hosted branch hands this to the loop with
+        ``call_soon_threadsafe`` — and it is what makes skipping
+        ``conn.send_lock`` sound: no other coroutine can be mid-write at that
+        instant, so a partially-written frame is impossible, and taking the
+        lock would require awaiting, which the synchronous caller cannot do.
+        Called from any other thread the lock-free write would be unsafe
+        (round-4 NIT-2: the guarantee belongs to the call site, not the
+        method, and saying so is what stops the next reuse from breaking it).
         """
         for conn in list(self._clients.values()):
             try:

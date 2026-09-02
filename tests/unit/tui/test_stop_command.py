@@ -665,7 +665,9 @@ async def test_arm_listing_at_80_columns_never_wraps_a_row(monkeypatch: pytest.M
 
 
 @pytest.mark.asyncio
-async def test_owner_local_stop_announces_to_viewers_before_teardown() -> None:
+async def test_owner_local_stop_announces_to_viewers_before_teardown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Bare ``/stop`` in the OWNER's own window announces the deliberate stop.
 
     Round-3 BLOCKER-1: the control-op dispatch was the only emitter, so an
@@ -675,7 +677,7 @@ async def test_owner_local_stop_announces_to_viewers_before_teardown() -> None:
     announcement must be written BEFORE ``_mobile_teardown`` closes those
     sockets, which is why it is written inline rather than scheduled.
     """
-    from local_operator.mobile.attach_client import STOPPED_REASON, AttachClient
+    from local_operator.mobile.attach_client import AttachClient
     from local_operator.session.runtime.server import RuntimeServer
     from tests.unit.session.runtime.test_server import FakeHandle, _wait_record
 
@@ -683,29 +685,45 @@ async def test_owner_local_stop_announces_to_viewers_before_teardown() -> None:
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
         await _booted(app, pilot, session)
+        # `.start()`, not `start_in_process()`: those are the two branches of
+        # `announce_stop`, split on `_on_owner_loop()`, and the TUI hosts its
+        # registrant in a THREAD. The in-process branch is a path production
+        # never takes (round-4 MINOR-4).
         server = RuntimeServer(FakeHandle(), kind="tui")
-        await server.start_in_process()
+        server.start()
         app._mobile_registrant = server
         # A REAL attached viewer, so the frame travels the real socket the
         # teardown is about to close — the ordering under test.
         record = await _wait_record()
-        seen: list[str] = []
         client = AttachClient(
             on_projection=lambda _p: None,
-            on_disconnected=seen.append,
+            on_disconnected=lambda _r: None,
         )
         await client.connect(record, record.session_id)
         for _ in range(6):
             await pilot.pause()
+        # Spy the WRITE, not the viewer's disconnect: the frame reaching the
+        # transport BEFORE the teardown is the property under test and it is
+        # deterministic, whereas the EOF that follows crosses a real socket
+        # from a real thread and would make this a timing race. Delivery on
+        # this path is covered by the real-socket evidence on the PR.
+        original_write = RuntimeServer._write_now
+        wrote: list[dict[str, object]] = []
+
+        def _spy(self: RuntimeServer, frame: dict[str, object]) -> None:
+            wrote.append(frame)
+            original_write(self, frame)
+
+        monkeypatch.setattr(RuntimeServer, "_write_now", _spy)
         app._run_slash_command("/stop")
-        for _ in range(80):
+        for _ in range(200):
             await pilot.pause()
             await asyncio.sleep(0.02)
-            if seen:
+            if wrote:
                 break
-        # The viewer classifies the disconnect as a deliberate stop, which is
-        # what suppresses its owner-death takeover.
-        assert seen == [STOPPED_REASON]
+        # Exactly one announcement, naming the stop, on the production path.
+        assert [f["op"] for f in wrote] == ["stopping"]
+        client.close()
         # The registrant is torn down by the same path; announcing first is
         # the whole point, so the frame must already be out by now.
         assert app._mobile_registrant is None
@@ -728,7 +746,7 @@ async def test_announce_stop_is_safe_without_viewers_or_registrant() -> None:
         app._mobile_registrant = None
         app._announce_stop_to_viewers()  # no registrant at all
         server = RuntimeServer(FakeHandle(), kind="tui")
-        await server.start_in_process()
+        server.start()  # the thread-hosted branch production uses
         app._mobile_registrant = server
         app._announce_stop_to_viewers()  # registrant, zero viewers
         server.close()

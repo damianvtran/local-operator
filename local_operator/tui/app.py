@@ -1884,6 +1884,9 @@ class OperatorApp(App[None]):
         #: Cleared the moment another session transition starts.
         self._stopped_session_id = ""
         self._watched_stop_notice_shown = False
+        #: Whether THIS app issued the stop it is about to be told about, so
+        #: the notice can attribute it correctly (see _paint_watched_stop_notice).
+        self._issued_own_stop = False
         #: True between a first-run "no hosting configured" boot failure and the
         #: `/login` that resolves it. While set, a successful login reloads the
         #: session (there is none yet) rather than only re-polling the splash.
@@ -3097,6 +3100,14 @@ class OperatorApp(App[None]):
         session_id = getattr(session, "session_id", "") if session is not None else ""
         if session_id:
             self._stopped_session_id = session_id
+        # The turn ended with the session. The facade already marked it
+        # aborted; the BAND is this app's own state and nothing else will
+        # retire it, so a viewer stopped mid-turn would otherwise spin
+        # forever — the same measured bug the owner's own /stop path calls
+        # `_dismiss_working_block` for (round-4 MAJOR-3/D4-1).
+        self._dismiss_working_block()
+        self._retire_live_tool_cards()
+        self._refresh_working_activity()
         self._paint_watched_stop_notice()
 
     def _paint_watched_stop_notice(self) -> None:
@@ -3110,7 +3121,14 @@ class OperatorApp(App[None]):
         self._watched_stop_notice_shown = True
         resume = self._stopped_session_id
         way_back = f"; /resume {resume} reopens it" if resume else ""
-        self._system_notice(f"this session was stopped from another terminal{way_back}", "warning")
+        # "from another terminal" is true — and useful — only when someone
+        # ELSE ended the session. On the self-stop routes this notice lands
+        # two rows under the user's own `stopping …` receipt, so the pair read
+        # as a contradiction: you did it, then someone else did (round-4
+        # U4-1). The sentence is already true without the clause, and without
+        # it matches the wording the owner's own /stop path uses.
+        origin = "" if self._issued_own_stop else " from another terminal"
+        self._system_notice(f"this session was stopped{origin}{way_back}", "warning")
 
     async def _adopt_takeover_session(self, session: Any) -> None:
         """Become the owner after the remote facade wins the transcript lease.
@@ -10863,7 +10881,16 @@ class OperatorApp(App[None]):
                 async with self._turn_provider_lock:
                     await session.prompt(text, images, **echo.prompt_kwargs())
             except Exception as error:  # surface, never crash the app
-                self._append_block(NoticeBlock(str(error), "error"))
+                # A message typed into a STOPPED viewer gets the same sentence
+                # the owner's own path gives, not the facade's bare clause:
+                # the dropped text and the way back are exactly what the user
+                # needs, and this refusal is what remains on screen after the
+                # stop notice scrolls off (round-4 D4-2).
+                if self._stopped_session_id and "stopped" in str(error):
+                    text_line, kind = self._no_session_notice(unsent=True)
+                    self._append_block(NoticeBlock(text_line, kind))
+                else:
+                    self._append_block(NoticeBlock(str(error), "error"))
                 # A prompt that failed never announced itself, so its echo
                 # entry has no event coming. Left standing it would swallow
                 # the next identical prompt's event; `_discard_user_echo` is
@@ -13273,6 +13300,9 @@ class OperatorApp(App[None]):
         owner) and this follower observes the disconnect the way it observes
         any owner loss.
         """
+        # Attribution for the notice the announcement will trigger: this app
+        # asked for the stop, so it must not be told a stranger did it (U4-1).
+        self._issued_own_stop = True
         request = getattr(session, "request_stop", None)
         if not callable(request):
             self._system_notice(
@@ -13507,6 +13537,10 @@ class OperatorApp(App[None]):
         from local_operator.session.runtime import control
 
         root = config_dir()
+        # This app asked for the stop — including its own session, stopped
+        # last below — so the notice the announcement triggers must not
+        # attribute it to another terminal (U4-1).
+        self._issued_own_stop = True
         outcomes = await control.stop_all(own_pid=os.getpid(), only_pids=listed, _root=root)
         # Anything that did NOT stop cleanly gets its own line, because the
         # grouped count cannot say WHICH agent was refused or had to be

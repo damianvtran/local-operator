@@ -763,18 +763,35 @@ class RemoteSession:
             self._deliberate_stop = True
         if self._deliberate_stop:
             self._owner_ready.set()  # prompts route to the stopped notice
+            # A stop ENDS the turn, exactly as a death does. Without this the
+            # facade reports is_streaming forever — nothing else can clear it,
+            # because every other writer of that flag is fed by the owner
+            # whose socket just closed — so the spinner never stops and the
+            # next message routes into the steer branch, is dropped on the
+            # floor, and is receipted as "sends when this step finishes" for a
+            # step that ended (round-4 MAJOR-3/D4-1). The honest refusal lives
+            # on the prompt path, and this is what lets a message reach it.
+            self._end_turn_locally()
             self._notify_stopped()
             return
         self._recovering = True
         self._owner_ready.clear()
-        # A killed owner factually aborted the in-flight turn. Mark it through
-        # the normal event path; no card/banner or attach vocabulary appears.
-        if self._streaming:
-            self._emit_or_buffer(
-                AgentEndEvent(aborted=True, generation=self._generation, error=None)
-            )
-            self._streaming = False
+        self._end_turn_locally()
         self._recovery_task = asyncio.create_task(self._recover_owner())
+
+    def _end_turn_locally(self) -> None:
+        """End an in-flight turn the owner can no longer end itself.
+
+        Both terminal outcomes need it and neither can get it from the owner:
+        a killed owner factually aborted the turn, and a stopped one ended the
+        whole session under it. Marked through the normal event path so no
+        card/banner or attach vocabulary appears — the transcript reads as an
+        ordinary aborted turn, which is what it is.
+        """
+        if not self._streaming:
+            return
+        self._emit_or_buffer(AgentEndEvent(aborted=True, generation=self._generation, error=None))
+        self._streaming = False
 
     async def _session_was_stopped(self) -> bool:
         """True when the disconnect's cause is a DELIBERATE stop, not owner death.
