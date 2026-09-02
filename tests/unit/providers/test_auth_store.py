@@ -1574,6 +1574,7 @@ class TestUsageAwareFirstPick:
         fable: float | None = None,
         age_ms: int = 0,
         resets_in_ms: int | None = None,
+        via: str = "preflight",
     ) -> None:
         """Write one account's report the way the preflight writes it.
 
@@ -1581,11 +1582,22 @@ class TestUsageAwareFirstPick:
         and same limit shape (shared 5h/7d rows, an optional fable-scoped
         weekly) as ``fetch_anthropic_oauth`` produces, so the test exercises
         the exact read path a live cache would.
+
+        ``via="warmer"`` writes the SAME numbers the way ``/usage`` and the
+        TUI's background warm do instead: one per-provider-set row keyed by
+        ``provider_cache_key`` whose reports carry ``identity``. That is the
+        only shape on disk when ``retry.usageAwareFallback`` is off (the
+        shipped default), so the pick must read it too. The row is merged
+        with any sibling already there, as the warmer's union write would.
         """
         import time
 
         from local_operator.providers.usage import UsageAmount, UsageLimit, UsageReport
-        from local_operator.providers.usage_cache import account_preflight_key
+        from local_operator.providers.usage_cache import (
+            account_preflight_key,
+            fingerprint_accounts,
+            provider_cache_key,
+        )
 
         limits = [
             UsageLimit(
@@ -1615,6 +1627,16 @@ class TestUsageAwareFirstPick:
             for limit in limits:
                 limit.resets_at_ms = now + resets_in_ms
         report = UsageReport(provider="anthropic", fetched_at=now - age_ms, limits=limits)
+        if via == "warmer":
+            report.identity = row.data["email"]
+            key = provider_cache_key("anthropic", fingerprint_accounts(["the-whole-set"]))
+            siblings = [
+                r
+                for r in (cache.get(key, include_expired=True) or [])
+                if r.identity != report.identity
+            ]
+            cache.set(key, "anthropic", [*siblings, report], expires_at_ms=now + 60_000)
+            return
         key = account_preflight_key("anthropic", row.data["email"])
         cache.set(key, "anthropic", [report], expires_at_ms=now + 60_000)
 
@@ -1668,6 +1690,69 @@ class TestUsageAwareFirstPick:
             assert order == self._order(store, f"session-{i}")
             assert set(order[:2]) == {rows[0].id, rows[1].id}
             assert order[2:] == [rows[2].id, rows[3].id]
+
+    def test_the_warmer_row_ranks_when_no_preflight_row_exists(self, tmp_path: Any) -> None:
+        """(a, stock config) ``retry.usageAwareFallback`` ships OFF, so on a
+        default install the preflight never writes a ``:pf:`` row and the
+        only usage on disk is the per-provider payload ``/usage`` and the
+        background warmer keep fresh. Reading only the preflight row made the
+        pick a silent no-op there (review round 1, F1); the same skew as (a)
+        written in the warmer's shape must rank identically."""
+        store, rows, cache = self._store(tmp_path)
+        used = [0.65, 0.92, 0.99, 0.06, 0.29]
+        for row, fraction in zip(rows, used):
+            self._cache_report(cache, row, five_hour=fraction, via="warmer")
+
+        winners = {self._order(store, f"session-{i}")[0] for i in range(40)}
+        assert winners == {rows[3].id}
+        assert self._order(store, "session-0") == [
+            rows[3].id,
+            rows[4].id,
+            rows[0].id,
+            rows[1].id,
+            rows[2].id,
+        ]
+
+    def test_the_newer_of_preflight_and_warmer_reports_wins(self, tmp_path: Any) -> None:
+        """Both sources can name the same account; whichever was fetched
+        last is the truth. Neither namespace is privileged -- a preflight row
+        from an hour ago must not outrank a warm row from a minute ago, and
+        vice versa."""
+        store, rows, cache = self._store(tmp_path, 2)
+        # rows[0]: preflight says nearly empty (stale), warmer says nearly full (fresh).
+        self._cache_report(cache, rows[0], five_hour=0.05, age_ms=10 * 60_000)
+        self._cache_report(cache, rows[0], five_hour=0.95, via="warmer")
+        # rows[1]: warmer says nearly full (stale), preflight says nearly empty (fresh).
+        self._cache_report(cache, rows[1], five_hour=0.95, age_ms=10 * 60_000, via="warmer")
+        self._cache_report(cache, rows[1], five_hour=0.05)
+        for i in range(20):
+            assert self._order(store, f"session-{i}") == [rows[1].id, rows[0].id]
+
+    def test_a_preflight_row_is_never_mistaken_for_a_warmer_row(self, tmp_path: Any) -> None:
+        """The warmer scan walks every row under the provider; the ``:pf:``
+        rows live under the same prefix and must be skipped there, or a
+        preflight report (which carries no ``identity``) could never match
+        and a future one that did would be counted twice."""
+        from local_operator.providers.usage import UsageReport
+        from local_operator.providers.usage_cache import account_preflight_key
+
+        store, rows, cache = self._store(tmp_path, 2)
+        # A preflight row for rows[0] that ALSO carries an identity naming
+        # rows[1]: if the scan read it, rows[1] would inherit rows[0]'s numbers.
+        self._cache_report(cache, rows[0], five_hour=0.95)
+        key = account_preflight_key("anthropic", rows[0].data["email"])
+        poisoned = cache.get(key, include_expired=True)
+        assert poisoned
+        poisoned[0].identity = rows[1].data["email"]
+        cache.set(key, "anthropic", poisoned, expires_at_ms=poisoned[0].fetched_at + 60_000)
+        assert isinstance(poisoned[0], UsageReport)
+
+        now_ms = store._now_ms()
+        assert (
+            store._cached_remaining_fraction(rows[1], "anthropic", "claude-opus-5", now_ms) is None
+        )
+        seen = store._cached_remaining_fraction(rows[0], "anthropic", "claude-opus-5", now_ms)
+        assert seen is not None and abs(seen - 0.05) < 1e-9
 
     def test_all_equal_is_exactly_the_hash_order(self, tmp_path: Any) -> None:
         """(b, degenerate) A uniform pool must reproduce the pre-existing order

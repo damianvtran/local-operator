@@ -1255,7 +1255,11 @@ class RetrySettings:
     #: the reports the preflight and ``/usage`` already cached) and it can
     #: only reorder a pool of equally valid accounts, never remove one. The
     #: opt-out exists for an operator who wants the pure hash spread back --
-    #: a single-account pool or a deliberately partitioned one.
+    #: a single-account pool or a deliberately partitioned one. It reaches
+    #: the store through ``SessionStreamFn`` alone, which is the only place
+    #: a session id ever accompanies a resolve; the ranking never runs on a
+    #: session-less resolve, so a store built outside a session (login CLI,
+    #: MCP auth) has nothing for the flag to switch off.
     usage_aware_account_pick: bool = True
     fallback_chains: Mapping[str, Sequence[Any]] = dataclasses.field(default_factory=dict)
 
