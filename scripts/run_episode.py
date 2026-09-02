@@ -90,6 +90,7 @@ from local_operator.evaluation.runner.episode import (
     EpisodeRunner,
     EpisodeSpec,
 )
+from local_operator.evaluation.runner.route_ids import fold_model_id
 from local_operator.evaluation.runner.secrets import (
     EnvSecretResolver,
     MissingSecret,
@@ -143,10 +144,16 @@ def _parse_route(value: str) -> tuple[str, str]:
 
 
 def _route_identity(provider: str, model: str) -> RouteIdentity:
-    # ``StrictIdentifier`` forbids ``/``; an OpenRouter model id such as
-    # ``deepseek/deepseek-v4`` is carried with the slash folded so the sealed
-    # route stays a valid identifier while remaining recognisable.
-    folded = model.replace("/", ":")
+    """The sealed route. ``model_id`` is the LOSSLESS fold of the provider's id.
+
+    ``StrictIdentifier`` forbids ``/``, which every OpenRouter id carries.
+    ``route_ids.fold_model_id`` is reversible (``unfold_model_id``), so the
+    sealed identity still means exactly one model -- comparability depends
+    on that -- and ``run`` also records the raw id in the manifest metadata
+    (``route_model_id``) so nobody has to decode by hand.
+    """
+
+    folded = fold_model_id(model)
     return RouteIdentity(provider_id=provider, route_id=f"{provider}:{folded}", model_id=folded)
 
 
@@ -540,7 +547,12 @@ async def run(args: argparse.Namespace) -> int:
         max_steps=args.max_steps,
         metadata={
             "harness_version": _harness_version(),
+            # The unfolded route, verbatim, beside the folded identity the
+            # manifest seals: ``route_model_id`` is the exact id the provider
+            # was asked for.
             "route": f"{provider}/{model}",
+            "route_provider_id": provider,
+            "route_model_id": model,
             "script": "scripts/run_episode.py",
         },
     )

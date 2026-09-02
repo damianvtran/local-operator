@@ -62,6 +62,7 @@ def _fresh_import_modules(module: str) -> set[str]:
         "local_operator.evaluation.runner.secrets",
         "local_operator.evaluation.runner.rescue_sweep",
         "local_operator.evaluation.runner.durable_root",
+        "local_operator.evaluation.runner.route_ids",
     ],
 )
 def test_runner_core_does_not_import_the_application(module: str) -> None:

@@ -24,6 +24,7 @@ from typing import Any
 import pytest
 
 from local_operator.evaluation.evidence.verify import verify_bundle
+from local_operator.evaluation.runner.route_ids import fold_model_id, unfold_model_id
 from tests.unit.evaluation.adapters.osworld import fixtures, spawn_helpers
 from tests.unit.evaluation.adapters.osworld.test_build_and_scripts import (  # noqa: F401
     durable_path,
@@ -105,7 +106,7 @@ def test_script_runs_one_spawned_episode_to_a_sealed_bundle(
             "--task-id",
             "task_plain",
             "--route",
-            "test/fake-model",
+            "test/fake/model:free",
             "--run-root",
             str(run_root),
             "--secret-env",
@@ -134,6 +135,15 @@ def test_script_runs_one_spawned_episode_to_a_sealed_bundle(
     assert bundle.is_relative_to(run_root / "evidence")
     report = verify_bundle(bundle)
     assert report.valid, [issue.code for issue in report.issues]
+    # The sealed route is the lossless fold of the model id, and the exact id
+    # rides the manifest metadata beside it, so the route can be read back
+    # without decoding.
+    manifest = report.manifest
+    assert manifest is not None
+    assert manifest.requested_route.model_id == fold_model_id("fake/model:free")
+    assert unfold_model_id(manifest.requested_route.model_id) == "fake/model:free"
+    assert manifest.metadata["route_model_id"] == "fake/model:free"
+    assert manifest.metadata["route_provider_id"] == "test"
     # The spawned worker published real frames into the parent's root.
     assert any(p.is_file() for p in (run_root / "artifacts").iterdir())
     # A clean episode retired its own descriptor: the inbox is empty.

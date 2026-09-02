@@ -193,6 +193,14 @@ Exit 0 only on `completed`; 1 on any other terminal; 2 when a secret is
 missing (named on stderr, value never printed) or the run root is volatile.
 Run the leak audit before and after.
 
+The sealed `requested_route.model_id` is a **lossless fold** of the model id
+(`RouteIdentity` fields cannot carry `/`): `_` → `__`, `/` → `_s`, anything
+else outside `[A-Za-z0-9.:-]` → `_x<hh>` per UTF-8 byte, so
+`deepseek/deepseek-v4-flash-vision-exp` seals as
+`deepseek_sdeepseek-v4-flash-vision-exp` and `runner.route_ids.unfold_model_id`
+recovers it exactly. The manifest metadata also carries the raw id as
+`route_model_id`, so a reader never has to decode by hand.
+
 ## Teardown and rescue
 
 `cleanup` reports `succeeded` only on **positive** evidence: `terminate`
