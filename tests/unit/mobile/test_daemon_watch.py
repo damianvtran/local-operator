@@ -8,10 +8,10 @@ import asyncio
 
 import pytest
 
-from local_operator.mobile import registry
 from local_operator.mobile.daemon import MobileDaemon, SessionEntry
-from local_operator.mobile.registrant import Registrant
 from local_operator.mobile.types import SessionProjection
+from local_operator.session.runtime import registry
+from local_operator.session.runtime.server import RuntimeServer
 
 
 class FakeHandle:
@@ -79,7 +79,7 @@ async def _wait_record() -> registry.SessionRecord:
 @pytest.mark.asyncio
 async def test_first_subscriber_sends_watch_and_last_out_sends_unwatch() -> None:
     handle = FakeHandle()
-    registrant = Registrant(handle, kind="tui")
+    registrant = RuntimeServer(handle, kind="tui")
     registrant.start()
     try:
         record = await _wait_record()

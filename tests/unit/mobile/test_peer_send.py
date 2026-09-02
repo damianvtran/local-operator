@@ -231,8 +231,61 @@ def test_the_core_stays_import_light() -> None:
             imported.update(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom) and node.module:
             imported.add(node.module)
-    assert not any(name.startswith("local_operator.session") for name in imported), imported
+
+    # ``local_operator.session.runtime.*`` is EXEMPT, and the exemption does not
+    # weaken this guard. The registry this module imports is the same
+    # stdlib-only record layer it always used — it merely moved from
+    # ``mobile/registry.py`` into the session runtime package, whose ``types``
+    # and ``registry`` modules are import-light by contract precisely because
+    # they sit on the CLI startup path (see session/runtime/types.py and
+    # tests/unit/test_import_graph.py). What this test actually exists to
+    # forbid is the heavyweight Session graph, so that is now asserted by
+    # name rather than inferred from a path prefix that stopped tracking it.
+    heavy = {
+        "local_operator.session.session",
+        "local_operator.session_factory",
+    }
+    assert not (imported & heavy), imported
+    assert not any(
+        name.startswith("local_operator.session")
+        and not name.startswith("local_operator.session.runtime")
+        for name in imported
+    ), imported
     assert not any(name.startswith("local_operator.tui") for name in imported), imported
+
+
+def test_the_core_really_does_not_load_the_session_graph() -> None:
+    """The static check above reads imports; this one measures what loading
+    the module actually costs, in a FRESH interpreter.
+
+    The AST check can only see this file's own import statements, so it would
+    miss a heavyweight module pulled in transitively by something it imports —
+    which is exactly the regression the docstring's promise is about. Run in a
+    subprocess because pytest has already imported half the tree in-process.
+    """
+    import json
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    repo = Path(__file__).resolve().parents[3]
+    probe = (
+        "import json, importlib, sys; "
+        "importlib.import_module('local_operator.mobile.peer_send'); "
+        "print(json.dumps(sorted(sys.modules)))"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, text=True, cwd=str(repo)
+    )
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    modules = set(json.loads(proc.stdout.strip().splitlines()[-1]))
+
+    for heavy in ("local_operator.session.session", "local_operator.session_factory"):
+        assert heavy not in modules, f"{heavy} is back on the peer-send import path"
+    # pydantic is the tell that the harness's model layer arrived; textual is
+    # the TUI. A `send` tool import must pay for neither.
+    for heavy in ("pydantic", "textual"):
+        assert not any(m == heavy or m.startswith(heavy + ".") for m in modules), heavy
 
 
 def test_registry_scan_sees_a_published_record(tmp_path) -> None:

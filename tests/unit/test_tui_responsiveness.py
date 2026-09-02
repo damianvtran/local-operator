@@ -425,14 +425,14 @@ async def test_remote_connect_replay_does_not_stall_the_loop(tmp_path: Path) -> 
 
     await build()
 
-    from local_operator.mobile.registrant import Registrant
     from local_operator.session.remote import RemoteSession
-    from tests.unit.mobile.test_registrant import FakeHandle
+    from local_operator.session.runtime.server import RuntimeServer
+    from tests.unit.session.runtime.test_server import FakeHandle
     from tests.unit.session.test_remote import _wait_record
 
     monkeypatch_env(tmp_path)
     handle = FakeHandle()
-    registrant = Registrant(handle, kind="tui")
+    registrant = RuntimeServer(handle, kind="tui")
     registrant.start()
     remote = None
     try:
@@ -495,14 +495,14 @@ async def test_reconnect_gap_replay_does_not_stall_the_loop(tmp_path: Path) -> N
     await build()
     assert (tmp_path / "sessions" / "s1" / "transcript.jsonl").stat().st_size > 60 * 1024 * 1024
 
-    from local_operator.mobile.registrant import Registrant
     from local_operator.session.remote import RemoteSession
-    from tests.unit.mobile.test_registrant import FakeHandle
+    from local_operator.session.runtime.server import RuntimeServer
+    from tests.unit.session.runtime.test_server import FakeHandle
     from tests.unit.session.test_remote import _wait_record
 
     monkeypatch_env(tmp_path)
     handle = FakeHandle()
-    registrant = Registrant(handle, kind="tui")
+    registrant = RuntimeServer(handle, kind="tui")
     registrant.start()
     remote = None
     try:
@@ -527,7 +527,7 @@ async def test_reconnect_gap_replay_does_not_stall_the_loop(tmp_path: Path) -> N
 
         recorder = StallRecorder()
         await recorder.start()
-        replacement = Registrant(handle, kind="tui")
+        replacement = RuntimeServer(handle, kind="tui")
         replacement.start()
         try:
             deadline = asyncio.get_running_loop().time() + 60
@@ -1344,10 +1344,10 @@ async def test_relay_frame_during_threaded_replay_is_not_double_painted(tmp_path
         MessageStartEvent,
         TextContent,
     )
-    from local_operator.mobile.registrant import Registrant
     from local_operator.session.remote import RemoteSession
+    from local_operator.session.runtime.server import RuntimeServer
     from local_operator.session.transcript import Transcript
-    from tests.unit.mobile.test_registrant import FakeHandle
+    from tests.unit.session.runtime.test_server import FakeHandle
     from tests.unit.session.test_remote import _wait_record
 
     (tmp_path / "sessions" / "s1").mkdir(parents=True)
@@ -1365,7 +1365,7 @@ async def test_relay_frame_during_threaded_replay_is_not_double_painted(tmp_path
     await build()
 
     handle = FakeHandle()
-    registrant = Registrant(handle, kind="tui")
+    registrant = RuntimeServer(handle, kind="tui")
     registrant.start()
     remote = None
     try:

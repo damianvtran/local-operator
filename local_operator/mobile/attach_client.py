@@ -1,6 +1,7 @@
 """The attach client: a follower terminal's half of the control socket.
 
-Every interactive ``lop`` process hosts a :class:`~local_operator.mobile.registrant.Registrant`
+Every interactive ``lop`` process hosts a session runtime
+(:class:`~local_operator.session.runtime.server.RuntimeServer`)
 whose loopback socket is the phone's window onto the session. This module is
 the SAME socket seen from a second terminal: ``/resume`` of a session another
 process owns dials that owner and renders its projection repaints, steering
@@ -42,7 +43,6 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable
 
-from local_operator.mobile.registry import scan
 from local_operator.mobile.types import (
     PROTOCOL_VERSION,
     ContinuationCommand,
@@ -50,6 +50,7 @@ from local_operator.mobile.types import (
     SessionRecord,
     _projection_from_json,
 )
+from local_operator.session.runtime.registry import scan
 
 #: How long to wait for an ack/error matching a request id. Mirrors the
 #: daemon's ``request`` timeout: long enough for a turn-boundary op (prompt
@@ -530,7 +531,7 @@ async def continue_command(
             await asyncio.create_subprocess_exec(
                 sys.executable,
                 "-m",
-                "local_operator.mobile.child",
+                "local_operator.session.runtime.process",
                 env=env,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,

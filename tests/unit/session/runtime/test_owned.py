@@ -22,8 +22,8 @@ from local_operator.harness.types import (
     NoticeEvent,
     SteeringDeliveredEvent,
 )
-from local_operator.mobile import owned as owned_mod
-from local_operator.mobile.owned import OwnedSessionHandle
+from local_operator.session.runtime import owned as owned_mod
+from local_operator.session.runtime.owned import OwnedSessionHandle
 
 
 class FakeSession:

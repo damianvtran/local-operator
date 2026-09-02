@@ -305,7 +305,7 @@ def service_action(action: str) -> dict[str, object]:
 def status(port: int = DEFAULT_PORT) -> dict[str, object]:
     """What a human (or `lop mobile status`) needs: install state, live
     health, gate state, registered sessions, log path."""
-    from local_operator.mobile import registry
+    from local_operator.session.runtime import registry
 
     probe = health(port)
     records = registry.scan()
