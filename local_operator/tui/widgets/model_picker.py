@@ -304,6 +304,13 @@ class ModelPicker(Static):
         self._query = ""
         self._open = False
         self._status = ""
+        # Whether this open has painted a status row (anything but the protected
+        # persistent hint). Once it has, the row is kept — blank — until close:
+        # the app paints `checking providers…` on the keystroke and clears it
+        # when the live list lands, and letting the row collapse shrank the card
+        # by one line and dropped everything above it while the user was
+        # reading. A blank dim row is less motion than a reflow.
+        self._status_row_held = False
         # A closed picker takes no layout space at all; `visible: hidden` would
         # reserve the rows and leave a hole above the input.
         self.display = False
@@ -405,6 +412,7 @@ class ModelPicker(Static):
         self._matches = []
         self._selected = 0
         self._window_start = 0
+        self._status_row_held = False
         self._hovered = None
         # A stationary pointer gets no mouse-move after this surface leaves;
         # the style observer updates OSC 22 before `display` hides the node.
@@ -639,9 +647,12 @@ class ModelPicker(Static):
         elif total > end - start:
             bits.append(f"{end - start} of {total}")
         bits.extend(status)
+        ordinary = list(bits)
+        if status:
+            self._status_row_held = True
         if persistent:
             bits.append(persistent)
-        if not bits:
+        if not bits and not self._status_row_held:
             return []
 
         dim = Style(
@@ -650,9 +661,10 @@ class ModelPicker(Static):
         )
         available = max(1, width - _GUTTER_CELLS - _EDGE_MARGIN)
         rows: list[Text] = []
-        ordinary = bits[:-1] if persistent else bits
+        # The held row renders as an empty string, which `_pad_to` fills, so the
+        # card keeps its height when a status clause comes and goes.
         for text in [
-            *([" · ".join(ordinary)] if ordinary else []),
+            *([" · ".join(ordinary)] if ordinary or self._status_row_held else []),
             *([persistent] if persistent else []),
         ]:
             row = Text(" " * _GUTTER_CELLS, style=dim)
@@ -672,7 +684,7 @@ class ModelPicker(Static):
         # instruction gets a dedicated second row so wider catalogues cannot
         # crowd it out non-monotonically.
         persistent = any(part.startswith(PERSIST_HINT_PREFIX) for part in self._status.split(" · "))
-        status_rows = 2 if persistent else (1 if self._status else 0)
+        status_rows = 2 if persistent else (1 if self._status or self._status_row_held else 0)
         return max(
             1,
             min(MAX_VISIBLE_ROWS, screen_height // _SCREEN_HEIGHT_FRACTION) - status_rows,

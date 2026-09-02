@@ -373,9 +373,9 @@ def test_the_status_line_surfaces_what_the_catalogue_does_not_know() -> None:
     """A failed provider is exactly when a user hunting for a model released
     this morning needs telling, rather than concluding it is not real."""
     picker = ModelPicker(lambda row: None)
-    picker.set_rows(_rows(), status="live list unavailable: anthropic — showing cached")
+    picker.set_rows(_rows(), status="stale list: anthropic")
     picker.open("")
-    assert "live list unavailable: anthropic" in picker.render_text(90).plain
+    assert "stale list: anthropic" in picker.render_text(90).plain
 
 
 def test_the_footer_names_stale_providers_and_stays_silent_for_cached_ones() -> None:
@@ -386,14 +386,44 @@ def test_the_footer_names_stale_providers_and_stays_silent_for_cached_ones() -> 
     assert _catalogue_status({"anthropic": "cached", "openrouter": "ok"}) == ""
     assert (
         _catalogue_status({"xai": "stale", "anthropic": "stale", "openrouter": "cached"})
-        == "live list unavailable: anthropic, xai — showing cached"
+        == "stale list: anthropic, xai"
     )
     assert (
         _catalogue_status({"anthropic": "stale", "radient": "empty"})
-        == "live list unavailable: anthropic — showing cached · no live list: radient"
+        == "stale list: anthropic · no live list: radient"
     )
     # Unauthenticated is counted by the access note, not here.
     assert _catalogue_status({"google": "unauthenticated"}) == ""
+
+
+def test_the_stale_clause_fits_beside_the_access_note_at_the_reference_width() -> None:
+    """The access note leads the footer and leaves 39 cells for this clause at
+    100 columns (73-cell picker, 2 gutter, 1 margin, 28-cell note, 3-cell seam).
+    The first spelling was 54 cells and truncation ate the half that said the
+    rows were still usable."""
+    from local_operator.tui.app import _catalogue_status
+
+    clause = _catalogue_status({"anthropic": "stale", "xai": "stale", "openrouter": "ok"})
+    assert cell_len(clause) <= 39, clause
+
+
+def test_every_provider_stale_collapses_to_a_nameless_clause() -> None:
+    """Offline fails every listed provider at once; five names fit no picker
+    width the app renders, and naming only helps when the failure is partial."""
+    from local_operator.tui.app import _catalogue_status
+
+    everyone = {p: "stale" for p in ("anthropic", "google", "mistral", "openai", "xai")}
+    assert _catalogue_status(everyone) == "stale list: all providers"
+    # A provider that never produced a listing is not one of "all providers".
+    assert _catalogue_status({**everyone, "ollama": "static", "zai": "unauthenticated"}) == (
+        "stale list: all providers"
+    )
+    # One stale provider is always named: "all providers" would say less.
+    assert _catalogue_status({"anthropic": "stale"}) == "stale list: anthropic"
+    # Empty is a listing too, so stale + empty is partial and keeps the names.
+    assert _catalogue_status({"anthropic": "stale", "xai": "stale", "radient": "empty"}) == (
+        "stale list: anthropic, xai · no live list: radient"
+    )
 
 
 def test_an_empty_result_says_so_rather_than_rendering_nothing() -> None:
@@ -511,7 +541,7 @@ async def test_large_degraded_catalogue_leads_with_current_family_and_status() -
     picker.set_rows(
         [*bulk, *siblings, current],
         current=current.selector,
-        status="live model list unavailable: provider timeout",
+        status="stale list: all providers — provider timeout",
     )
 
     class _Host(App[None]):
@@ -534,7 +564,7 @@ async def test_large_degraded_catalogue_leads_with_current_family_and_status() -
 
     assert first[0].selector == current.selector
     assert all(row.provider == "anthropic" for row in first)
-    assert "live model list unavailable" in painted, painted
+    assert "stale list: all providers" in painted, painted
 
 
 def test_a_row_shows_the_display_name_beside_the_selector() -> None:
@@ -601,3 +631,25 @@ def test_the_name_never_grows_as_the_window_narrows() -> None:
         row = picker.render_text(width).plain.splitlines()[0]
         painted.append(len(row.partition("(")[2].partition(")")[0]))
     assert painted == sorted(painted, reverse=True), list(zip(widths, painted))
+
+
+def test_the_status_row_is_kept_once_painted_so_the_card_does_not_reflow() -> None:
+    """The app paints `checking providers…` on the keystroke and clears it when
+    the live list lands. Letting the row collapse shrank the card by a line and
+    dropped everything above it while the user was reading; a blank row is less
+    motion than a reflow. A fresh open starts without the row again."""
+    picker = ModelPicker(lambda row: None)
+    picker.set_rows(_rows(), status="checking providers… · d in /model saves this")
+    picker.open("")
+    with_status = picker.render_text(90).plain.split("\n")
+    picker.set_rows(_rows(), status="d in /model saves this")
+    settled = picker.render_text(90).plain.split("\n")
+    assert len(settled) == len(with_status), (with_status, settled)
+    assert settled[-2].strip() == "", settled
+    assert settled[-1].strip() == "d in /model saves this", settled
+    # Never painted a status this open → no held row.
+    picker.close()
+    picker.set_rows(_rows(), status="d in /model saves this")
+    picker.open("")
+    fresh = picker.render_text(90).plain.split("\n")
+    assert len(fresh) == len(settled) - 1, fresh

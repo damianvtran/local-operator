@@ -278,6 +278,20 @@ if TYPE_CHECKING:  # keeps the provider graph off the TUI's runtime import path
 #: notice), where "press d" alone would name a key that does nothing yet.
 PERSIST_HINT = "d in /model saves this for new sessions"
 
+#: Lead of the `/model` footer clause for a provider whose live refresh FAILED
+#: and whose rows are therefore an older document. One constant because the
+#: clause is composed at two sites (`_catalogue_status` per provider, and the
+#: `live_catalogue` exception path for all of them) and a reader who sees both
+#: across two sessions must meet one vocabulary. Kept short on purpose: the
+#: access note leads the footer and leaves ~39 cells for this clause at 100
+#: columns (see `_catalogue_status`).
+STALE_LIST_LABEL = "stale list:"
+
+#: Discovery statuses that mean "this provider produced a listing" (live or
+#: stored). The complement — ``static`` and ``unauthenticated`` — never asked
+#: the network, so they are not part of "every provider is stale".
+LISTED_STATUSES = frozenset({"ok", "cached", "stale", "empty"})
+
 #: Marks a cost figure RESTORED from a resumed conversation rather than accrued
 #: this session. The restored number is a floor — only the last reported turn's
 #: usage survives in a priceable form — and it lands in the same cell a real
@@ -13943,10 +13957,17 @@ class OperatorApp(App[None]):
             entries, statuses = await self._providers.live_catalogue(ttl_s=PICKER_TTL_S)
         except Exception as error:  # noqa: BLE001 — a picker must not take the app down
             rows, note = self._catalogue_rows(self._providers.static_catalogue())
+            # Same label `_catalogue_status` uses for a failed refresh, so the two
+            # ways a live list can fail read as one vocabulary; the exception took
+            # every provider down together, which is that function's collapsed
+            # spelling, and the reason trails because it is what truncation may
+            # lose without changing the sentence's meaning.
             self._editor().model_picker.set_rows(
                 rows,
                 current=self._current_selector(),
-                status=_status_line(note, f"live model list unavailable: {error}", PERSIST_HINT),
+                status=_status_line(
+                    note, f"{STALE_LIST_LABEL} all providers — {error}", PERSIST_HINT
+                ),
             )
             return
         rows, note = self._catalogue_rows(entries)
@@ -20425,12 +20446,34 @@ def _catalogue_status(statuses: dict[str, str]) -> str:
     are the ones the picker now hides, and `_catalogue_rows` already counts them
     — two footers counting one fact ("3 provider(s) need a login · 42 hidden")
     reads as two separate problems.
+
+    Wording is budgeted, not just chosen. The footer truncates at the picker's
+    width and the access note (``2 hidden — /login <provider>``, 28 cells) leads
+    it, which leaves 39 cells for this clause at a 100-column terminal. The
+    first spelling, ``live list unavailable: anthropic, xai — showing cached``,
+    was 54: the ellipsis ate the trailing ``showing cached``, the only part
+    saying the rows below are still usable, and what survived read as "these
+    providers are down". ``stale list:`` parallels ``no live list:`` so the two
+    failure clauses read as siblings, and it carries the rows-are-usable meaning
+    in the label itself (there IS a list) rather than in a tail that dies first.
+
+    When every provider that produced a listing is stale — the offline case,
+    which fails them all at once — the names are dropped: five names fit no
+    picker width the app renders, and naming only helps when the failure is
+    partial ("anthropic is down, the rest are fine"). A single stale provider
+    is always named, since "all providers" would then be less informative
+    than the name.
     """
     stale = sorted(p for p, s in statuses.items() if s == "stale")
     empty = sorted(p for p, s in statuses.items() if s == "empty")
+    # ``static`` (no listing endpoint) and ``unauthenticated`` (never asked)
+    # produced no listing, so they do not count toward "every provider".
+    listed = sum(1 for s in statuses.values() if s in LISTED_STATUSES)
     bits: list[str] = []
-    if stale:
-        bits.append(f"live list unavailable: {', '.join(stale)} — showing cached")
+    if len(stale) > 1 and len(stale) == listed:
+        bits.append(f"{STALE_LIST_LABEL} all providers")
+    elif stale:
+        bits.append(f"{STALE_LIST_LABEL} {', '.join(stale)}")
     if empty:
         bits.append(f"no live list: {', '.join(empty)}")
     return " · ".join(bits)

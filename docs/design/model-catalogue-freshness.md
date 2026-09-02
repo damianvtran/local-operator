@@ -418,11 +418,16 @@ the keystroke with the footer clause `checking providers…`.
   within the last quarter hour", which is not something the user needs to
   read; the existing docstring's "a footer that always says something is a
   footer nobody reads" applies.
-- `"stale"` → `live list unavailable: anthropic, xai — showing cached`.
+- `"stale"` → `stale list: anthropic, xai`; when every provider that produced
+  a listing is stale (offline), `stale list: all providers`. The label is
+  budgeted for the 39 cells left beside the access note at 100 columns and
+  parallels `no live list:` (design review round 1, D1/D2).
 - `"empty"` → `no live list: …` (unchanged).
 
-Nothing new animates; the widget API (`ModelPicker.set_rows`,
-`model_picker.py:312`) is untouched. This footer wording is a user-visible
+The widget API (`ModelPicker.set_rows`, `model_picker.py:312`) is untouched;
+`ModelPicker` now keeps its status row (blank) once one has painted in an
+open, so `checking providers…` clearing on settle no longer shrinks the card
+by a row and moves the transcript above it (design review round 1, D3). This footer wording is a user-visible
 string change and needs the designer round with before/after stills of the
 open picker in the `stale` state (use `FakeProviderController.live_catalogue`
 in `tests/unit/tui/test_app_pilot.py:3672` to force statuses, then
@@ -529,8 +534,8 @@ and a `calls` list in the thunk; `test_discovery.py` uses `_StubClient` /
 - `test_the_picker_asks_for_a_fifteen_minute_listing` — the pilot's
   `FakeProviderController.live_catalogue(self, *, ttl_s=None)` records
   `ttl_s`; assert `== PICKER_TTL_S`.
-- `test_model_picker.py`: footer renders `live list unavailable: …` for
-  `stale` and nothing for `cached`.
+- `test_model_picker.py`: footer renders `stale list: …` for `stale` and
+  nothing for `cached`; every-provider-stale collapses to `all providers`.
 
 Real-execution evidence for the PR (per the operator's standing rule): with
 `anthropic.listing.json` and `models-dev.listing.json` deleted, boot `lop`
