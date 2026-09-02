@@ -24,16 +24,28 @@ filesystem mtime, so two builds of one tree seconds apart produce different
 archive hashes. Comparing a rebuild's hash against the recorded one will always
 mismatch, on a perfectly clean release. Do not read that as tampering.
 
-Audit a release this way instead, in order of strength:
+**Before rebuilding anything, copy the retained artifact aside.**
+`pnpm build:zip` writes to `extension/local-operator-extension.zip` and deletes
+any file already there, which is the same path the uploaded artifact sits at.
+That file is gitignored and the store will not give it back, so a rebuild run
+without this step destroys the only evidence the audit depends on:
+
+```console
+$ cp extension/local-operator-extension.zip /tmp/uploaded-<version>.zip
+```
+
+Audit a release this way, in order of strength:
 
 1. **`extension/` tree hash** — `git rev-parse <commit>:extension`. This is the
    field that deterministically pins the build input, and it is the one to
-   trust when asking "what source produced this release?"
-2. **Extracted contents** — rebuild, then `unzip` both archives and `diff -r`
-   the directories. Byte-identical contents with differing archive hashes is the
-   expected result, because only zip metadata differs.
-3. **Archive SHA-256** — use it only to confirm a *retained copy* of the
-   uploaded artifact is the one that was uploaded, never against a rebuild.
+   trust when asking "what source produced this release?" It requires no
+   rebuild and cannot destroy anything.
+2. **Extracted contents** — with the copy safely aside, rebuild, then `unzip`
+   both archives to separate directories and `diff -r` them. Byte-identical
+   contents with differing archive hashes is the expected result, because only
+   zip metadata differs.
+3. **Archive SHA-256** — use it only to confirm the *copy you set aside* is the
+   file that was uploaded, never against a rebuild.
 
 Making `build:zip` deterministic would collapse these three into one hash
 comparison; that is tracked as a follow-up (see the note under v0.1.5).
@@ -63,7 +75,10 @@ comparison; that is tracked as a follow-up (see the note under v0.1.5).
 above. "Pending review" is a snapshot from the submission date; Chrome review
 usually resolves within days, so if that date is well in the past, assume the
 row is stale and re-check before relying on it. Append the approval timestamp
-and promote this heading when it lands.
+and promote this heading when it lands. Calling that API **by hand** needs a
+temporary IAM grant that must be revoked afterwards — read the warning under
+"Release-automation verification" before you do, or just dispatch the workflow,
+which needs no grant at all.
 
 **Follow-up: make `build:zip` deterministic.** `build.mjs` invokes `zip` without
 normalising timestamps, which is why the archive hash above cannot be
@@ -153,6 +168,8 @@ after, and diff to prove the revert — do not rely on remembering.
 | Item ID | `omibaecbjdhgbbcedbnnnmjpmopfheof` |
 | Listing URL | https://chromewebstore.google.com/detail/local-operator/omibaecbjdhgbbcedbnnnmjpmopfheof |
 | Source commit | `5cbb91e1` (`feat: Local Operator browser extension and browser bridge`) |
+| `extension/` tree hash | `2d6fa2b3d0665a241071fa8e74e91184530d5be3` (derived from the source commit while backfilling this entry) |
+| Bridge protocol version | `PROTO_VERSION = 1` (at `5cbb91e1`) |
 | Artifact SHA-256 | *never recorded — see note below* |
 | Artifact size | ~31 KB (the only surviving fingerprint, from the original checklist) |
 | Submission route | Manual dashboard upload (first publication) |
