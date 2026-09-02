@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import httpx
 
+from local_operator.compaction.tokens import messages_tokens_upper_bound
 from local_operator.harness.types import (
     AgentTool,
     ChatRequest,
@@ -647,6 +648,108 @@ def _sampling_params(request: ChatRequest, *, top_p_key: str = "top_p") -> dict[
     }
 
 
+#: Tokens held back from the window when sizing the output ask, on top of the
+#: prompt estimate. Covers the two things the estimate below cannot see: the
+#: provider's own per-request overhead (chat templates, injected tool preambles,
+#: role scaffolding — none of it in our message list) and the drift of a local
+#: estimate against the provider's real tokenizer. ``messages_tokens_upper_bound``
+#: over-estimates prose by 3.5-4.5x, so on a large prompt this margin is noise;
+#: it matters on a SMALL prompt against a small window, where the bound is tight
+#: and a few hundred tokens of unseen scaffolding is the whole error budget.
+OUTPUT_CLAMP_SAFETY_MARGIN = 2_048
+
+#: Floor for a clamped output ask. Without it a nearly-full context computes a
+#: zero or negative cap, and both are worse than the overflow being fixed: zero
+#: is rejected outright by several gateways, and a negative number is a 400 with
+#: a far less legible message than the one this clamp exists to prevent. A model
+#: that cannot be given at least this much room is in a situation compaction has
+#: to resolve, so the request is still SENT — asking for a small completion lets
+#: the provider answer (or return its own honest context error) instead of
+#: failing here on a number we invented.
+MIN_OUTPUT_TOKENS = 512
+
+
+def _effective_max_tokens(request: ChatRequest) -> int:
+    """The output cap to put on the wire, clamped to fit inside the window.
+
+    Providers count ``prompt + max_tokens`` against the context window AT
+    ADMISSION, before a single token is generated, so the output reservation is
+    not free headroom — it is input capacity spent in advance. A listing that
+    advertises a large completion cap therefore silently shrinks the usable
+    prompt by exactly that amount.
+
+    That is not hypothetical. OpenRouter advertises ``meta/muse-spark-1.3`` as
+    ``context_length: 1048576`` with ``top_provider.max_completion_tokens:
+    943718`` (0.9 of the window), which reaches the spec as
+    ``max_output_tokens`` and goes out verbatim as ``max_tokens``. The provider
+    then admits only ~104,858 tokens of prompt — 10% of a 1M model — and a real
+    session died at ~113k input with ``requested about 1057079 tokens (102961 of
+    text input, 10400 of tool input, 943718 in the output)``. 82 models in the
+    live OpenRouter catalogue advertise exactly this 0.9 ratio (``x-ai/grok-4.6``
+    at 500000/450000, ``x-ai/grok-4.20`` at 2000000/1800000), so this is latent
+    for a large slice of the catalogue rather than one bad row.
+
+    Compaction cannot rescue it: the trigger is a FRACTION of the window (~838k
+    at the default 0.8), far above where the 400 lands, and a compacted prompt
+    still carries the same reservation. The clamp has to live here, at body-build
+    time, because this is the first point that knows both the window and the
+    actual prompt — the spec knows the window and never sees the messages.
+
+    The estimate deliberately uses :func:`messages_tokens_upper_bound` rather
+    than the precise memoized :func:`estimate_messages_tokens`. It is a rigorous
+    OVER-estimate that never loads tiktoken, and over-estimating the prompt
+    shrinks the ask, which is the safe direction: erring high costs a little
+    output headroom, erring low re-opens the 400. It also keeps a ~84 ms /
+    ~43.6 MB tokenizer load off a path that runs on every single request.
+
+    System blocks and tool schemas are charged too, not just messages. The 400
+    above itemised **10,400 tokens of tool input** separately, and a system
+    prompt plus JSON tool schemas is routinely tens of thousands of tokens — a
+    term this size is the difference between a clamp that fits and one that
+    overflows by exactly the part it forgot to count.
+
+    The clamp only ever LOWERS the ask. That is what preserves
+    ``Session.ERRAND_MAX_TOKENS``: a deliberate small ``request.max_tokens``
+    (1024 for auto-naming) stays 1024 rather than being raised to fill the
+    window. Returns ``0`` when neither the request nor the spec asks for a cap,
+    which every call site already spells as "omit the key".
+    """
+    requested = request.max_tokens or request.model.max_output_tokens
+    if not requested or requested <= 0:
+        # No cap asked for anywhere: the caller omits the key entirely and lets
+        # the provider apply its own default. Clamping a value nobody set would
+        # turn an absent key into a present one and CAP a model that currently
+        # has no ceiling — strictly worse than the status quo.
+        return 0
+
+    window = request.model.context_window
+    if not window or window <= 0:
+        # An unknown window (the -1/0 sentinels the registry still produces for
+        # an unlisted model) gives nothing to clamp against. Arithmetic on it
+        # would invent a limit from a number that means "no data".
+        return requested
+
+    prompt = messages_tokens_upper_bound(request.messages)
+    for block in request.system_blocks:
+        prompt += len(block) if block.isascii() else 4 * len(block)
+    for tool in request.tools:
+        # Same one-byte-per-token bound the message estimator uses. The schema is
+        # serialized because that is what goes on the wire; ``default=str`` keeps
+        # a non-JSON-serialisable default in a schema from raising inside a body
+        # builder, where an exception would fail the turn over an estimate.
+        schema = json.dumps(tool.parameters, default=str, sort_keys=True)
+        text = tool.name + tool.description + schema
+        prompt += len(text) if text.isascii() else 4 * len(text)
+
+    available = window - prompt - OUTPUT_CLAMP_SAFETY_MARGIN
+    if available >= requested:
+        # The overwhelmingly common case: an ordinary prompt against a sanely
+        # advertised cap. Anthropic (1M/128k) and OpenAI (272k/128k) specs come
+        # out of here byte-identical to what they sent before this clamp existed.
+        return requested
+    return max(MIN_OUTPUT_TOKENS, available)
+
+
 def _reasoning_effort(request: ChatRequest) -> str | None:
     """The effort level to send, or ``None`` when the key must not appear.
 
@@ -1182,7 +1285,7 @@ class OpenAICompatClient:
             body["tool_choice"] = {"auto": "auto", "none": "none", "required": "required"}.get(
                 request.tool_choice, "auto"
             )
-        max_tokens = request.max_tokens or request.model.max_output_tokens
+        max_tokens = _effective_max_tokens(request)
         if max_tokens and max_tokens > 0:
             body["max_tokens"] = max_tokens
         body.update(_sampling_params(request))
@@ -1294,7 +1397,7 @@ class OpenAICompatClient:
             body["tool_choice"] = {"auto": "auto", "none": "none", "required": "required"}.get(
                 request.tool_choice, "auto"
             )
-        max_tokens = request.max_tokens or request.model.max_output_tokens
+        max_tokens = _effective_max_tokens(request)
         if max_tokens and max_tokens > 0:
             body["max_output_tokens"] = max_tokens
         body.update(_sampling_params(request))
@@ -2106,7 +2209,7 @@ class AnthropicClient:
             "model": request.model.model_id,
             "stream": True,
             "messages": messages,
-            "max_tokens": request.max_tokens or request.model.max_output_tokens,
+            "max_tokens": _effective_max_tokens(request),
         }
         # The identity block is PREPENDED, not appended, because Anthropic checks
         # the first block specifically. It is a constant, so it makes ideal
@@ -2406,7 +2509,7 @@ class GoogleClient:
                 "parts": [{"text": block} for block in request.system_blocks]
             }
         generation_config: dict[str, Any] = {}
-        max_tokens = request.max_tokens or request.model.max_output_tokens
+        max_tokens = _effective_max_tokens(request)
         if max_tokens and max_tokens > 0:
             generation_config["maxOutputTokens"] = max_tokens
         generation_config.update(_sampling_params(request, top_p_key="topP"))

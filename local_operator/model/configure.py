@@ -1057,7 +1057,11 @@ def _info_from_discovery(
     putting that on the import path would cost every CLI invocation.
     """
     try:
-        from local_operator.model.discovery import DEFAULT_TIMEOUT_S, available_models
+        from local_operator.model.discovery import (
+            DEFAULT_TIMEOUT_S,
+            available_models,
+            sane_listing_max_tokens,
+        )
 
         secret, is_oauth, account_id = _catalogue_credential(provider)
         rows, status = available_models(
@@ -1095,7 +1099,13 @@ def _info_from_discovery(
     if row.context_window > 0:
         info.context_window = row.context_window
     if row.max_tokens > 0:
-        info.max_tokens = row.max_tokens
+        # Same guard as the discovery merge, applied here because this is the
+        # OTHER path a listing's numbers reach a ``ModelInfo`` by — a row from
+        # `available_models` that is written straight onto the info rather than
+        # reconciled by `_merge_one`. Judged against the window this info now
+        # carries (the row's if it supplied one), so both paths reduce an
+        # implausible cap identically. See `sane_listing_max_tokens`.
+        info.max_tokens = sane_listing_max_tokens(row.max_tokens, info.context_window or 0)
     if row.input_price > 0:
         info.input_price = row.input_price
     if row.output_price > 0:
@@ -1175,6 +1185,12 @@ def _remaining_budget(started: float) -> float:
 def _fill_from_row(info: ModelInfo, row: "DiscoveredModel") -> ModelInfo:
     """``info`` with its HOLES filled from a second-hand catalogue row.
 
+    .. note::
+       ``sane_listing_max_tokens`` is imported lazily below for the same reason
+       every other reference to ``model.discovery`` in this module is: that
+       module pulls httpx and the provider registry, and this file is on the
+       CLI's import path.
+
     Shared by the price-catalogue and aggregator legs, which have the same
     contract: every field is taken ONLY where the direct sources left one. The
     provider's own answer is authoritative where it exists and can legitimately
@@ -1186,6 +1202,8 @@ def _fill_from_row(info: ModelInfo, row: "DiscoveredModel") -> ModelInfo:
     one. ``supports_prompt_cache`` is inferred from a quoted cache-read price,
     the same inference :func:`_info_from_discovery` makes and only ever widening.
     """
+    from local_operator.model.discovery import sane_listing_max_tokens
+
     info = info.model_copy(deep=True)
     if not (info.input_price or info.output_price):
         info.input_price = row.input_price
@@ -1212,7 +1230,10 @@ def _fill_from_row(info: ModelInfo, row: "DiscoveredModel") -> ModelInfo:
     # UNKNOWN_MAX_OUTPUT (8192), which truncates a long answer with no error.
     # ``None`` and ``-1`` are both "no data" here, same as the window.
     if not (info.max_tokens and info.max_tokens > 0) and row.max_tokens > 0:
-        info.max_tokens = row.max_tokens
+        # Guarded like the other two listing paths: this row is second-hand
+        # catalogue data (models.dev, or an aggregator's document), so it can
+        # carry the same window-fraction formula a provider listing does.
+        info.max_tokens = sane_listing_max_tokens(row.max_tokens, info.context_window or 0)
     return info
 
 

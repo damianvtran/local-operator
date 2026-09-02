@@ -3799,3 +3799,63 @@ async def test_session_stream_hint_is_per_conversation_not_per_stream_fn(
         m == {"type": "ephemeral", "ttl": "1h"} for m in _cache_markers(bodies[2])
     )
     assert parent._context_tokens_hint == 300_000
+
+
+# -- the muse-spark overflow, end to end ---------------------------------------
+
+
+#: OpenRouter's listing entry for ``meta/muse-spark-1.3``, trimmed to the fields
+#: the resolver reads. The two numbers are verbatim from the live catalogue on
+#: 2026-09-02 and are the whole bug: ``max_completion_tokens`` is exactly 0.9 of
+#: ``context_length``, and providers count prompt + max_tokens against the window
+#: at admission, so the advertised cap alone consumes 90% of the model.
+_MUSE_SPARK_LISTING_ENTRY = {
+    "id": "meta/muse-spark-1.3",
+    "name": "Meta: Muse Spark 1.3",
+    "context_length": 1_048_576,
+    "top_provider": {"context_length": 1_048_576, "max_completion_tokens": 943_718},
+    "pricing": {"prompt": "0.00000125", "completion": "0.00000425"},
+    "architecture": {"input_modalities": ["text"]},
+}
+
+
+def test_muse_spark_listing_no_longer_overflows_its_window(monkeypatch) -> None:
+    """The reported incident, reproduced through the REAL resolver.
+
+    A session on ``openrouter/meta/muse-spark-1.3`` died with HTTP 400::
+
+        This endpoint's maximum context length is 1048576 tokens. However, you
+        requested about 1057079 tokens (102961 of text input, 10400 of tool
+        input, 943718 in the output).
+
+    The 943718 was never generated text — it is the ``max_tokens`` the harness
+    put on the wire, copied from the listing through ``DiscoveredModel`` and
+    ``ModelSpec``. Compaction could not rescue it: the trigger is a fraction of
+    the window (~838k at the default 0.8), far above where the 400 lands.
+
+    This pins the whole chain — listing entry, spec, wire body — rather than any
+    single link, because each one alone looked reasonable.
+    """
+    from local_operator.model.discovery import _row_from_openai_entry
+    from local_operator.providers.clients import OpenAICompatClient
+
+    row = _row_from_openai_entry(_MUSE_SPARK_LISTING_ENTRY)
+    assert row is not None
+    # The listing really does advertise this, and the parser really does read it.
+    assert row.context_window == 1_048_576
+
+    info = ModelInfo(
+        id=row.id,
+        name=row.name,
+        description="live",
+        context_window=row.context_window,
+        max_tokens=row.max_tokens,
+    )
+    spec = build_model_spec("openrouter", "meta/muse-spark-1.3", info=info)
+
+    # ~113k tokens of prompt: the size the real session failed at.
+    request = ChatRequest(model=spec, messages=[Message.user("word " * 120_000)])
+    body = OpenAICompatClient("https://openrouter.ai/api/v1")._build_body(request)
+
+    prompt_tokens = len("word " * 120_000) // 4
+    assert body["max_tokens"] + prompt_tokens < spec.context_window

@@ -3924,3 +3924,138 @@ async def test_anthropic_usage_without_cache_creation_object_leaves_split_zero()
     assert usage.cache_write_tokens == 40
     assert usage.cache_write_5m_tokens == 0
     assert usage.cache_write_1h_tokens == 0
+
+
+# --- output-cap clamp -------------------------------------------------------
+#
+# Regression cover for the muse-spark 400: a listing that advertises 0.9 of the
+# window as its completion cap reserves that much input capacity at admission,
+# so the request overflows the window before a token is generated. See
+# ``_effective_max_tokens``.
+
+#: The wire key each client spells the output cap with. The Responses body and
+#: the chat/completions body differ, and Google nests its own under
+#: ``generationConfig`` (already unwrapped by ``_bodies``).
+MAX_TOKEN_KEYS = [
+    ("openai-completions", "max_tokens"),
+    ("openai-responses", "max_output_tokens"),
+    ("anthropic", "max_tokens"),
+    ("google", "maxOutputTokens"),
+]
+
+
+def _muse_spark_spec() -> ModelSpec:
+    """The real muse-spark shape: 1M window, 943718 advertised output cap."""
+    return ModelSpec(
+        provider="openrouter",
+        model_id="meta/muse-spark-1.3",
+        context_window=1_048_576,
+        max_output_tokens=943_718,
+    )
+
+
+@pytest.mark.parametrize("wire,key", MAX_TOKEN_KEYS)
+def test_output_cap_clamped_so_prompt_plus_output_fits_window(wire: str, key: str) -> None:
+    """The reported 400: 943718 of reserved output against a 1M window left only
+    ~104k of prompt, and a real session died at ~113k of input. Every wire must
+    now ask for an amount that fits BESIDE the prompt it is sending."""
+    spec = _muse_spark_spec()
+    # ~113k tokens of prompt — the size the real session failed at.
+    request = ChatRequest(model=spec, messages=[Message.user("word " * 120_000)])
+
+    body = _bodies(request)[wire]
+
+    assert body[key] < spec.max_output_tokens
+    # The whole point: admission counts prompt + max_tokens against the window.
+    assert body[key] + len("word " * 120_000) // 4 < spec.context_window
+
+
+@pytest.mark.parametrize("wire,key", MAX_TOKEN_KEYS)
+def test_output_cap_unchanged_for_a_sanely_advertised_model(wire: str, key: str) -> None:
+    """The safeguard must not cost the models that work today anything. An
+    Anthropic-shaped spec (1M window, 128k cap) on an ordinary prompt sends the
+    spec's number byte-for-byte, because the clamp only ever lowers."""
+    spec = ModelSpec(
+        provider="anthropic",
+        model_id="claude-opus-5",
+        context_window=1_000_000,
+        max_output_tokens=128_000,
+    )
+    request = ChatRequest(model=spec, messages=[Message.user("hi")])
+
+    assert _bodies(request)[wire][key] == 128_000
+
+
+@pytest.mark.parametrize("wire,key", MAX_TOKEN_KEYS)
+def test_explicit_small_max_tokens_is_still_honoured(wire: str, key: str) -> None:
+    """``Session.ERRAND_MAX_TOKENS`` (1024, auto-naming) is a DELIBERATE ceiling.
+    The clamp lowers an ask that does not fit; it must never raise one that
+    does, or a title errand would start billing a full-window completion."""
+    spec = ModelSpec(
+        provider="anthropic",
+        model_id="claude-opus-5",
+        context_window=1_000_000,
+        max_output_tokens=128_000,
+    )
+    request = ChatRequest(model=spec, messages=[Message.user("hi")], max_tokens=1024)
+
+    assert _bodies(request)[wire][key] == 1024
+
+
+@pytest.mark.parametrize("wire,key", MAX_TOKEN_KEYS)
+def test_output_cap_floors_rather_than_collapsing_on_a_full_context(wire: str, key: str) -> None:
+    """A nearly-full context must still ask for a usable completion. Zero is
+    rejected outright by several gateways and a negative number is a 400 with a
+    far less legible message than the overflow this clamp exists to prevent."""
+    spec = ModelSpec(
+        provider="openrouter",
+        model_id="tiny",
+        context_window=10_000,
+        max_output_tokens=8_000,
+    )
+    request = ChatRequest(model=spec, messages=[Message.user("word " * 20_000)])
+
+    from local_operator.providers.clients import MIN_OUTPUT_TOKENS
+
+    assert _bodies(request)[wire][key] == MIN_OUTPUT_TOKENS
+
+
+def test_system_blocks_and_tools_are_charged_against_the_window() -> None:
+    """The reported 400 itemised **10,400 tokens of tool input** separately, so
+    tools are a real term. A clamp that counted only ``messages`` would leave
+    exactly that much of the overflow in place."""
+    spec = _muse_spark_spec()
+    tool = AgentTool(
+        name="write",
+        description="x" * 40_000,
+        parameters={"type": "object", "properties": {"content": {"type": "string"}}},
+        execute=lambda ctx, **kw: ToolResult(),  # type: ignore[arg-type,return-value]
+    )
+    messages = [Message.user("word " * 100_000)]
+
+    bare = _bodies(ChatRequest(model=spec, messages=messages))["openai-completions"]
+    with_extras = _bodies(
+        ChatRequest(
+            model=spec,
+            messages=messages,
+            system_blocks=["s" * 40_000],
+            tools=[tool],
+        )
+    )["openai-completions"]
+
+    assert with_extras["max_tokens"] < bare["max_tokens"]
+
+
+def test_no_cap_anywhere_leaves_the_key_absent() -> None:
+    """A spec with no cap must stay uncapped. Clamping a value nobody set would
+    turn an absent key into a present one and put a ceiling on a model that
+    currently has none."""
+    spec = ModelSpec(
+        provider="openrouter", model_id="x", context_window=100_000, max_output_tokens=0
+    )
+    request = ChatRequest(model=spec, messages=[Message.user("hi")])
+
+    body = _bodies(request)
+    assert "max_tokens" not in body["openai-completions"]
+    assert "max_output_tokens" not in body["openai-responses"]
+    assert "maxOutputTokens" not in body["google"]
