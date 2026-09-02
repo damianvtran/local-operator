@@ -66,6 +66,14 @@ PERSIST_HINT_PREFIX = "d in /model"
 MAX_VISIBLE_ROWS = 14
 _SCREEN_HEIGHT_FRACTION = 3
 
+#: The seam the app joins footer clauses with (``_status_line``) and the one the
+#: footer puts between its own count and the status, so the whole line reads as
+#: one run of clauses rather than two kinds of separator.
+_SEAM = " · "
+
+#: Where a footer clause's first value ends — see `_fit_clauses`.
+_FIRST_VALUE_END = re.compile(r", | — ")
+
 #: Below this width the numbers are dropped and the row is just the selector.
 #: Two columns of metadata in 40 cells leaves nothing for the id, which is the
 #: part being chosen.
@@ -304,6 +312,16 @@ class ModelPicker(Static):
         self._query = ""
         self._open = False
         self._status = ""
+        # Whether this open has painted a status row (anything but the protected
+        # persistent hint). Once it has, the row is kept — blank — until close:
+        # the app paints `checking providers…` on the keystroke and clears it
+        # when the live list lands, and letting the row collapse shrank the card
+        # by one line and dropped everything above it while the user was
+        # reading. A blank dim row is less motion than a reflow. Set on paint by
+        # `_footer_rows`, which `render_text` reaches as well as `_repaint` —
+        # so a bare `render_text` call (the unit tests do this) holds the row
+        # too; only `close()` releases it.
+        self._status_row_held = False
         # A closed picker takes no layout space at all; `visible: hidden` would
         # reserve the rows and leave a hole above the input.
         self.display = False
@@ -405,6 +423,7 @@ class ModelPicker(Static):
         self._matches = []
         self._selected = 0
         self._window_start = 0
+        self._status_row_held = False
         self._hovered = None
         # A stationary pointer gets no mouse-move after this surface leaves;
         # the style observer updates OSC 22 before `display` hides the node.
@@ -626,7 +645,7 @@ class ModelPicker(Static):
         """
         total = len(self._matches)
         start, end, _ = self.visible_window()
-        status = [part for part in self._status.split(" · ") if part]
+        status = [part for part in self._status.split(_SEAM) if part]
         persistent = next(
             (part for part in status if part.startswith(PERSIST_HINT_PREFIX)),
             "",
@@ -639,9 +658,12 @@ class ModelPicker(Static):
         elif total > end - start:
             bits.append(f"{end - start} of {total}")
         bits.extend(status)
+        ordinary = list(bits)
+        if status:
+            self._status_row_held = True
         if persistent:
             bits.append(persistent)
-        if not bits:
+        if not bits and not self._status_row_held:
             return []
 
         dim = Style(
@@ -650,13 +672,14 @@ class ModelPicker(Static):
         )
         available = max(1, width - _GUTTER_CELLS - _EDGE_MARGIN)
         rows: list[Text] = []
-        ordinary = bits[:-1] if persistent else bits
+        # The held row renders as an empty string, which `_pad_to` fills, so the
+        # card keeps its height when a status clause comes and goes.
         for text in [
-            *([" · ".join(ordinary)] if ordinary else []),
-            *([persistent] if persistent else []),
+            *([_fit_clauses(ordinary, available)] if ordinary or self._status_row_held else []),
+            *([truncate_cells(persistent, available)] if persistent else []),
         ]:
             row = Text(" " * _GUTTER_CELLS, style=dim)
-            row.append(truncate_cells(text, available), style=dim)
+            row.append(text, style=dim)
             rows.append(_pad_to(row, width, dim))
         return rows
 
@@ -671,8 +694,8 @@ class ModelPicker(Static):
         # Catalogue status occupies footer chrome. The persistent-default
         # instruction gets a dedicated second row so wider catalogues cannot
         # crowd it out non-monotonically.
-        persistent = any(part.startswith(PERSIST_HINT_PREFIX) for part in self._status.split(" · "))
-        status_rows = 2 if persistent else (1 if self._status else 0)
+        persistent = any(part.startswith(PERSIST_HINT_PREFIX) for part in self._status.split(_SEAM))
+        status_rows = 2 if persistent else (1 if self._status or self._status_row_held else 0)
         return max(
             1,
             min(MAX_VISIBLE_ROWS, screen_height // _SCREEN_HEIGHT_FRACTION) - status_rows,
@@ -756,6 +779,38 @@ class ModelPicker(Static):
         start, end, _ = self.visible_window()
         index = start + y
         return index if start <= index < end else None
+
+
+def _fit_clauses(clauses: list[str], width: int) -> str:
+    """Join footer clauses into ``width`` cells, cutting at a seam before a label.
+
+    Plain ``truncate_cells`` on the joined line is right when the cut lands
+    inside a list of values — ``stale list: anthropic…`` still says which list
+    is stale and names one provider. It is wrong when the cut lands between a
+    label and its first value: the three-clause composite (access note, stale,
+    empty) at 100 columns rendered ``… · no live list:…``, a label with no
+    payload and a dangling colon that reads as a rendering glitch. A trailing
+    clause that cannot keep its label and first value whole is dropped, and
+    so is everything after it; the seam is the cut, not the colon. Whatever
+    survives then takes the plain cell cut, so every line that fitted before
+    this rule renders exactly as it did. The leading clause is never dropped
+    — a footer has to say something.
+
+    "First value" is the text up to the first ``, `` (a provider list) or
+    `` — `` (the reason behind ``stale list: all providers``, the instruction
+    behind ``2 hidden``): the parts that already die first under truncation.
+    Never called with the persistent hint, which has its own row.
+    """
+    kept = list(clauses)
+    while len(kept) > 1 and cell_len(_SEAM.join(kept)) > width:
+        head = _FIRST_VALUE_END.split(kept[-1], maxsplit=1)[0]
+        # A head shorter than its clause is followed by the ellipsis, which
+        # `truncate_cells` charges to the same budget.
+        tail = 0 if head == kept[-1] else cell_len("…")
+        if cell_len(_SEAM.join([*kept[:-1], head])) + tail <= width:
+            break
+        kept.pop()
+    return truncate_cells(_SEAM.join(kept), width)
 
 
 def _pad_to(row: Text, width: int, style: Style) -> Text:

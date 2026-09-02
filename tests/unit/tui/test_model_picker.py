@@ -14,6 +14,7 @@ from textual.app import App, ComposeResult
 
 from local_operator.tui.widgets.command_picker import slash_argument
 from local_operator.tui.widgets.model_picker import (
+    MAX_VISIBLE_ROWS,
     ModelPicker,
     ModelRow,
     format_price_pair,
@@ -370,12 +371,89 @@ def test_an_overflowing_list_says_how_much_it_is_hiding() -> None:
 
 
 def test_the_status_line_surfaces_what_the_catalogue_does_not_know() -> None:
-    """A cached or failed provider is exactly when a user hunting for a model
-    released last week needs telling, rather than concluding it is not real."""
+    """A failed provider is exactly when a user hunting for a model released
+    this morning needs telling, rather than concluding it is not real."""
     picker = ModelPicker(lambda row: None)
-    picker.set_rows(_rows(), status="cached: anthropic")
+    picker.set_rows(_rows(), status="stale list: anthropic")
     picker.open("")
-    assert "cached: anthropic" in picker.render_text(90).plain
+    assert "stale list: anthropic" in picker.render_text(90).plain
+
+
+def test_a_footer_clause_that_cannot_keep_its_first_value_is_dropped_at_the_seam() -> None:
+    """The three-clause composite (access note, stale, empty) at 100 columns
+    used to render ``… · no live list:…`` — a label whose only payload died,
+    leaving a dangling colon that read as a glitch. The cut moves to the seam
+    before that clause. Lines that fitted before, and cuts that land inside a
+    list of names, render exactly as they did."""
+    note = "2 hidden — /login <provider>"
+    picker = ModelPicker(lambda row: None)
+    picker.set_rows(_rows(), status=f"{note} · stale list: anthropic · no live list: radient")
+    picker.open("")
+    # 73-cell picker at a 100-column terminal, as the captured frames were.
+    footer = picker.render_text(73).plain.split("\n")[-1].strip()
+    assert footer == f"{note} · stale list: anthropic", footer
+    assert "no live list" not in footer
+    # Wide enough → every clause, untouched.
+    assert picker.render_text(90).plain.split("\n")[-1].strip() == (
+        f"{note} · stale list: anthropic · no live list: radient"
+    )
+    # A cut inside the provider list keeps the label and first name (the
+    # 60-column frame from design round 1), not the seam rule.
+    picker.set_rows(_rows(), status=f"{note} · stale list: anthropic, xai")
+    assert picker.render_text(56).plain.split("\n")[-1].strip() == (
+        f"{note} · stale list: anthropic…"
+    )
+    # The leading clause is never dropped, however narrow.
+    picker.set_rows(_rows(), status=note)
+    assert picker.render_text(24).plain.split("\n")[-1].strip() == "2 hidden — /login <p…"
+
+
+def test_the_footer_names_stale_providers_and_stays_silent_for_cached_ones() -> None:
+    """`stale` is a failed refresh; `cached` is "listed within the picker's
+    fifteen-minute TTL", which is not worth a line nobody would read."""
+    from local_operator.tui.app import _catalogue_status
+
+    assert _catalogue_status({"anthropic": "cached", "openrouter": "ok"}) == ""
+    assert (
+        _catalogue_status({"xai": "stale", "anthropic": "stale", "openrouter": "cached"})
+        == "stale list: anthropic, xai"
+    )
+    assert (
+        _catalogue_status({"anthropic": "stale", "radient": "empty"})
+        == "stale list: anthropic · no live list: radient"
+    )
+    # Unauthenticated is counted by the access note, not here.
+    assert _catalogue_status({"google": "unauthenticated"}) == ""
+
+
+def test_the_stale_clause_fits_beside_the_access_note_at_the_reference_width() -> None:
+    """The access note leads the footer and leaves 39 cells for this clause at
+    100 columns (73-cell picker, 2 gutter, 1 margin, 28-cell note, 3-cell seam).
+    The first spelling was 54 cells and truncation ate the half that said the
+    rows were still usable."""
+    from local_operator.tui.app import _catalogue_status
+
+    clause = _catalogue_status({"anthropic": "stale", "xai": "stale", "openrouter": "ok"})
+    assert cell_len(clause) <= 39, clause
+
+
+def test_every_provider_stale_collapses_to_a_nameless_clause() -> None:
+    """Offline fails every listed provider at once; five names fit no picker
+    width the app renders, and naming only helps when the failure is partial."""
+    from local_operator.tui.app import _catalogue_status
+
+    everyone = {p: "stale" for p in ("anthropic", "google", "mistral", "openai", "xai")}
+    assert _catalogue_status(everyone) == "stale list: all providers"
+    # A provider that never produced a listing is not one of "all providers".
+    assert _catalogue_status({**everyone, "ollama": "static", "zai": "unauthenticated"}) == (
+        "stale list: all providers"
+    )
+    # One stale provider is always named: "all providers" would say less.
+    assert _catalogue_status({"anthropic": "stale"}) == "stale list: anthropic"
+    # Empty is a listing too, so stale + empty is partial and keeps the names.
+    assert _catalogue_status({"anthropic": "stale", "xai": "stale", "radient": "empty"}) == (
+        "stale list: anthropic, xai · no live list: radient"
+    )
 
 
 def test_an_empty_result_says_so_rather_than_rendering_nothing() -> None:
@@ -493,7 +571,7 @@ async def test_large_degraded_catalogue_leads_with_current_family_and_status() -
     picker.set_rows(
         [*bulk, *siblings, current],
         current=current.selector,
-        status="live model list unavailable: provider timeout",
+        status="stale list: all providers — provider timeout",
     )
 
     class _Host(App[None]):
@@ -516,7 +594,7 @@ async def test_large_degraded_catalogue_leads_with_current_family_and_status() -
 
     assert first[0].selector == current.selector
     assert all(row.provider == "anthropic" for row in first)
-    assert "live model list unavailable" in painted, painted
+    assert "stale list: all providers" in painted, painted
 
 
 def test_a_row_shows_the_display_name_beside_the_selector() -> None:
@@ -583,3 +661,76 @@ def test_the_name_never_grows_as_the_window_narrows() -> None:
         row = picker.render_text(width).plain.splitlines()[0]
         painted.append(len(row.partition("(")[2].partition(")")[0]))
     assert painted == sorted(painted, reverse=True), list(zip(widths, painted))
+
+
+def test_the_status_row_is_kept_once_painted_so_the_card_does_not_reflow() -> None:
+    """The app paints `checking providers…` on the keystroke and clears it when
+    the live list lands. Letting the row collapse shrank the card by a line and
+    dropped everything above it while the user was reading; a blank row is less
+    motion than a reflow. A fresh open starts without the row again."""
+    picker = ModelPicker(lambda row: None)
+    picker.set_rows(_rows(), status="checking providers… · d in /model saves this")
+    picker.open("")
+    with_status = picker.render_text(90).plain.split("\n")
+    picker.set_rows(_rows(), status="d in /model saves this")
+    settled = picker.render_text(90).plain.split("\n")
+    assert len(settled) == len(with_status), (with_status, settled)
+    assert settled[-2].strip() == "", settled
+    assert settled[-1].strip() == "d in /model saves this", settled
+    # Never painted a status this open → no held row.
+    picker.close()
+    picker.set_rows(_rows(), status="d in /model saves this")
+    picker.open("")
+    fresh = picker.render_text(90).plain.split("\n")
+    assert len(fresh) == len(settled) - 1, fresh
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("height", [12, 30, 45])
+async def test_the_held_row_is_paid_for_out_of_the_row_budget_when_mounted(height: int) -> None:
+    """The unmounted test above cannot reach `_row_budget`'s held-row term: with
+    no screen it short-circuits to `MAX_VISIBLE_ROWS`. Mounted, the budget is
+    a third of the screen, and the held blank row must come out of that third —
+    otherwise the card grows a line on settle and pushes the composer, which is
+    the reflow the hold exists to prevent. Pinned at three heights because the
+    cap switches between the screen fraction and `MAX_VISIBLE_ROWS` at 45."""
+    hint = "d in /model saves this"
+    bulk = [
+        ModelRow("openrouter", f"vendor/model-{index}", connected=True, aggregated=True)
+        for index in range(60)
+    ]
+    picker = ModelPicker(lambda row: None)
+    picker.set_rows(bulk, status=f"checking providers… · {hint}")
+
+    class _Host(App[None]):
+        CSS = "ModelPicker { width: 100%; }"
+
+        def compose(self) -> ComposeResult:
+            yield picker
+
+    cap = min(MAX_VISIBLE_ROWS, height // 3)
+    app = _Host()
+    async with app.run_test(size=(100, height)) as pilot:
+        await pilot.pause()
+        picker.open("")
+        await pilot.pause()
+        checking = picker.render_text(100).plain.split("\n")
+        checking_budget = picker._row_budget()
+        heights: list[int] = []
+        budgets: list[int] = []
+        for status in (hint, "", "stale list: anthropic"):
+            picker.set_rows(bulk, status=status)
+            await pilot.pause()
+            heights.append(len(picker.render_text(100).plain.split("\n")))
+            budgets.append(picker._row_budget())
+
+    # The card never changes height across the app's real settle sequence and
+    # never exceeds the screen-fraction cap.
+    assert heights == [len(checking)] * 3, (len(checking), heights)
+    assert len(checking) <= cap, (len(checking), cap)
+    # Two footer rows while the hint is present (`checking…` and hint-only
+    # alike), and once the hint goes the held blank row — or the clause that
+    # replaces it — still costs one: without the hold the empty-status state
+    # would get its row back and the card would grow by a line.
+    assert checking_budget == max(1, cap - 2), (checking_budget, cap)
+    assert budgets == [cap - 2, cap - 1, cap - 1], (cap, budgets)

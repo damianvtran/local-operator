@@ -33,11 +33,16 @@ reason the user cannot act on. Model catalogues change on the order of days,
 so the payload is cached on disk with a TTL and a stale entry is preferred to
 no entry:
 
-1. Fresh cache (< TTL)            -> use it, no network.
-2. Stale or missing               -> fetch, rewrite the cache, use it.
-3. Fetch fails but a stale cache exists -> use the stale copy. A window that
+1. Fresh cache (< soft TTL)       -> use it, no network.
+2. Ageing cache (soft <= age < hard TTL) -> use it NOW, and refresh it in a
+   background thread (stale-while-revalidate). The calling path pays nothing;
+   the NEXT call sees the new document. This is what keeps "a model released
+   today is offered today" true without putting a request on a session start
+   or a TUI repaint. See :func:`read_listing` and :func:`_schedule_revalidate`.
+3. Expired or missing (>= hard TTL) -> fetch synchronously, rewrite, use it.
+4. Fetch fails but a stale cache exists -> use the stale copy. A window that
    is a week old is enormously better than pretending a 1M model holds 128k.
-4. Fetch fails with no cache      -> return None; the caller keeps its static
+5. Fetch fails with no cache      -> return None; the caller keeps its static
    fallbacks. A session MUST still start with no network.
 
 The cache holds the RAW payload under a key the caller chooses, so mapping stays
@@ -47,10 +52,12 @@ without either overwriting the other.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import os
 import tempfile
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -58,10 +65,32 @@ from typing import Any, Callable
 
 logger = logging.getLogger("local_operator.model.catalogue")
 
-#: How long a cached catalogue is considered fresh. Model listings move on the
-#: order of days; an hour would re-fetch constantly for no new information and
-#: a week would hide a genuinely new model for too long.
+#: The HARD TTL: how old a document may be before a read blocks on a fetch.
+#: Model listings move on the order of days; a week would hide a genuinely new
+#: model for too long, and anything shorter puts a synchronous request on the
+#: boot path more often for no new information. Also the width of the in-process
+#: memo bucket in ``configure._resolve_model_info_cached``, so keep the name.
 DEFAULT_TTL_S = 24 * 60 * 60
+
+#: The SOFT TTL: age past which a served document is ALSO refreshed in the
+#: background. An hour bounds "released today, offered today" for the next call
+#: without putting a request on the calling path; below it a listing endpoint
+#: would be asked repeatedly for information that changes on the order of days.
+#: The incident this exists for: a 22h-old Anthropic document (inside the hard
+#: TTL, so never refetched) hid a model published that morning from ``/model``
+#: and from the cost band for a whole working day.
+SOFT_TTL_S = 60 * 60
+
+#: A document younger than this that lacks a requested id is believed: the id is
+#: genuinely unknown, not newly released. Bounds the miss-triggered refetch
+#: (see ``discovery.available_models(want_id=...)``) so a typo cannot refetch on
+#: every resolution — one refetch per key per ten minutes, however many ids miss.
+MISS_REFETCH_MIN_AGE_S = 10 * 60
+
+#: Per-process floor between background attempts on one key, so an offline
+#: machine does not spawn a thread every time a stale document is served. The
+#: sync miss path is unaffected: it has its own stale-beats-absent rule.
+REVALIDATE_BACKOFF_S = 5 * 60
 
 
 def default_cache_dir() -> Path:
@@ -75,6 +104,22 @@ def default_cache_dir() -> Path:
 #: and :func:`_cache_path` each appended ``.models``. One pattern matches both,
 #: and neither can match a current ``<key>.json`` whose key ends in ``.listing``.
 _LEGACY_DOCUMENT_GLOB = "*.models.json"
+
+#: A temp file :func:`_write_cache` was renaming into place when its process
+#: died. ``mkstemp`` names them ``<key>.json.<random>.tmp`` and every key this
+#: module writes ends in ``.listing``, so the pattern cannot match another
+#: writer's temp file in the shared directory (``update.py`` names its own
+#: ``pypi-local-operator.json.<random>.tmp`` there and owns that cleanup).
+_STRANDED_TEMP_GLOB = "*.listing.json.*.tmp"
+
+#: How old a stranded temp file must be before the sweep takes it. A listing
+#: write is a few milliseconds of ``json.dump`` on a ~190 KB document, so a
+#: temp file that has sat for minutes is not an in-flight write by a peer
+#: process or a sibling thread; it is a corpse. Generous rather than tight,
+#: because deleting a live temp file out from under a writer would turn its
+#: rename into a stranded document, which is the failure this sweep exists to
+#: reclaim, not to cause.
+_STRANDED_TEMP_MIN_AGE_S = 5 * 60
 
 
 def _cache_path(key: str, cache_dir: Path | None) -> Path:
@@ -108,6 +153,39 @@ def purge_legacy_documents(cache_dir: Path | None = None) -> None:
     except OSError as exc:  # pragma: no cover - read-only or unreadable cache dir
         # Reclaiming disk is never worth failing a session start over.
         logger.debug("could not purge legacy catalogue documents: %s", exc)
+
+
+def purge_stranded_temp_files(cache_dir: Path | None = None) -> None:
+    """Delete temp files a killed writer never renamed into place.
+
+    :func:`_write_cache` cleans up after itself on every failure it can SEE, but
+    the background revalidation thread is a daemon (:func:`_schedule_revalidate`)
+    and a short ``lop --model ...`` run exits while that thread may still be
+    inside ``json.dump``: the interpreter tears the thread down with no
+    ``finally`` run, and a ~190 KB ``<key>.listing.json.<random>.tmp`` stays
+    beside the document for good. The document itself is never harmed — the
+    rename never happened — but each such exit leaks one file, and a cache with
+    no index has no other way to notice it.
+
+    Age-gated on mtime (:data:`_STRANDED_TEMP_MIN_AGE_S`), because the same
+    name shape is what a peer process or sibling thread is writing RIGHT NOW;
+    an orphan is told from an in-flight write only by how long it has sat.
+    Stateless and idempotent like :func:`purge_legacy_documents`, and every
+    failure is swallowed: a stat that races the writer's own rename must not
+    fail the read that swept.
+    """
+    directory = cache_dir or default_cache_dir()
+    cutoff = time.time() - _STRANDED_TEMP_MIN_AGE_S
+    try:
+        for stranded in directory.glob(_STRANDED_TEMP_GLOB):
+            try:
+                if stranded.stat().st_mtime < cutoff:
+                    stranded.unlink(missing_ok=True)
+            except OSError:
+                # Renamed or removed between the glob and the stat: not ours.
+                continue
+    except OSError as exc:  # pragma: no cover - read-only or unreadable cache dir
+        logger.debug("could not purge stranded catalogue temp files: %s", exc)
 
 
 def _read_cache(path: Path) -> tuple[dict[str, Any] | None, float]:
@@ -313,22 +391,195 @@ class _ListingFetchLease:
             pass
 
 
-def cached_listing(
+@dataclasses.dataclass(frozen=True)
+class Listing:
+    """What :func:`read_listing` found, and how.
+
+    ``fetched`` is how a live answer is told from a cached one — the whole
+    difference between discovery's ``"ok"`` and ``"cached"`` statuses. It used
+    to be smuggled out of the fetch thunk through a ``nonlocal`` flag, which
+    could not express "the fetch was attempted and FAILED" (the ``"stale"``
+    status): a thunk that raises never gets to set anything. ``failed`` carries
+    that now. ``refreshing`` says a background revalidation was scheduled by
+    THIS call, which tests use to join it and callers may use to annotate.
+    """
+
+    payload: dict[str, Any] | None
+    #: ``inf`` when there is no usable document.
+    age_s: float
+    #: A live fetch produced ``payload`` on this call.
+    fetched: bool = False
+    #: A live fetch was attempted on this call and raised; ``payload`` is the
+    #: stale document (or ``None`` when there was none to fall back on).
+    failed: bool = False
+    #: A background revalidation thread was started by this call.
+    refreshing: bool = False
+
+
+#: Background revalidations in flight in THIS process, keyed by document PATH
+#: (not by key: two cache directories are two documents). A second read of the
+#: same ageing document must not start a second thread; the cross-process lease
+#: already dedupes between processes but not between the threads of one, and
+#: the TUI resolves the same provider from the picker worker and the 1 Hz cost
+#: poll at once.
+_revalidating: set[str] = set()
+#: ``time.monotonic()`` of the last background attempt per document, for the backoff.
+_last_attempt: dict[str, float] = {}
+#: Live revalidation threads, so tests can join them instead of sleeping.
+_threads: dict[str, threading.Thread] = {}
+_revalidate_lock = threading.Lock()
+
+
+def _revalidation_threads() -> list[threading.Thread]:
+    """The background revalidations currently alive — a TEST hook.
+
+    AGENTS.md forbids waiting on the clock for asynchronous work; a test that
+    wants to see the rewritten document joins these instead.
+    """
+    with _revalidate_lock:
+        return [thread for thread in _threads.values() if thread.is_alive()]
+
+
+def _in_flight_revalidation(path: Path) -> threading.Thread | None:
+    """This process's live background thread for ``path``, if one is running.
+
+    Lets a synchronous reader that lost the lease tell its own thread from a
+    peer process: the former can be joined (bounded), the latter only watched.
+    """
+    with _revalidate_lock:
+        thread = _threads.get(str(path))
+    return thread if thread is not None and thread.is_alive() else None
+
+
+def _schedule_revalidate(
+    key: str, fetch: Callable[[], dict[str, Any]], cache_dir: Path | None
+) -> bool:
+    """Refresh ``key`` off the calling path. True when a thread was started.
+
+    Plain ``threading.Thread``, not the asyncio loop: this module is synchronous
+    and is entered from the CLI, the server, ``asyncio.to_thread`` workers and
+    ``run_in_executor`` threads alike, so there is no loop to hand the work to
+    that every caller has. ``refresh_model_info_background`` in ``configure`` is
+    the same shape one layer up. Daemon, so a short-lived ``lop --model ...``
+    process is not held open by a listing fetch: a daemon killed mid-write leaves
+    nothing half-written (``_write_cache`` is mkstemp+rename) and at worst a lease
+    that lapses in ``_LISTING_LEASE_S`` — the existing crash contract.
+
+    Two dedupes. In-process: a key already in flight, or attempted within
+    ``REVALIDATE_BACKOFF_S``, gets no new thread — an offline machine serving a
+    stale document on every repaint must not spawn a thread per repaint.
+    Cross-process: the thread takes the same ``_ListingFetchLease`` as the sync
+    path and, unlike it, simply EXITS when a peer holds it; there is nothing to
+    wait for because the caller already has its answer.
+    """
+    path = _cache_path(key, cache_dir)
+    slot = str(path)
+    now = time.monotonic()
+    with _revalidate_lock:
+        if slot in _revalidating:
+            return False
+        last = _last_attempt.get(slot)
+        if last is not None and now - last < REVALIDATE_BACKOFF_S:
+            return False
+        _revalidating.add(slot)
+        _last_attempt[slot] = now
+
+    def run() -> None:
+        lease = _ListingFetchLease(path)
+        try:
+            if not lease.acquire():
+                return
+            try:
+                fresh = fetch()
+            except Exception as exc:  # noqa: BLE001 - the stale document stays
+                logger.debug("background %s revalidation failed: %s", key, exc)
+                return
+            _write_cache(path, fresh)
+        finally:
+            lease.release()
+            with _revalidate_lock:
+                _revalidating.discard(slot)
+                _threads.pop(slot, None)
+
+    thread = threading.Thread(target=run, name=f"catalogue-revalidate:{key}", daemon=True)
+    with _revalidate_lock:
+        _threads[slot] = thread
+    thread.start()
+    return True
+
+
+def peek_listing(key: str, *, cache_dir: Path | None = None) -> Listing:
+    """The document on disk, read-only: no fetch, no revalidation, no sweep.
+
+    For a fetch thunk that wants to send ``If-None-Match``: it reads the previous
+    payload's stored ETag through this and, on a 304, hands the same payload
+    back so ``_write_cache`` re-stamps ``fetched_at`` — which is exactly
+    "validated just now". Kept separate from :func:`read_listing` so the thunk
+    cannot recurse into the reader that is calling it.
+    """
+    payload, age = _read_cache(_cache_path(key, cache_dir))
+    return Listing(payload=payload, age_s=age)
+
+
+def read_listing(
     key: str,
     fetch: Callable[[], dict[str, Any]],
     *,
+    soft_ttl_s: float = SOFT_TTL_S,
     ttl_s: float = DEFAULT_TTL_S,
     cache_dir: Path | None = None,
-) -> dict[str, Any] | None:
-    """A provider's ``list_models()`` payload, from cache when fresh.
+    refetch_if: Callable[[dict[str, Any], float], bool] | None = None,
+    revalidate: Callable[[], dict[str, Any]] | None = None,
+) -> Listing:
+    """A provider's ``list_models()`` payload, stale-while-revalidate.
 
     ``key`` names the document, not the provider: the caller owns the naming, so
     two differently-shaped listings for one provider cannot land on one file.
 
     ``fetch`` returns the payload as a plain dict (``model_dump()`` of the
-    client's response). Returns None only when there is no cache AND the fetch
-    failed, which is the one case where the caller must keep its static
+    client's response). ``payload`` is None only when there is no cache AND the
+    fetch failed, which is the one case where the caller must keep its static
     fallbacks.
+
+    ``revalidate`` is the thunk the BACKGROUND refresh runs; it defaults to
+    ``fetch``. They differ in budget, not in what they fetch: ``fetch`` runs on
+    the calling path and carries the caller's ceiling (2 s from a repaint), while
+    the background thread is off-path and may take the provider's full default.
+    A background thunk that inherited the on-path budget failed every time on a
+    link slower than that budget, backed off five minutes, and the document only
+    ever advanced through the 24 h synchronous path — the pre-revalidation
+    behaviour, silently restored.
+
+    State machine, by document age:
+
+    * ``age < soft_ttl_s`` — served, nothing else happens.
+    * ``soft_ttl_s <= age < ttl_s`` — served IMMEDIATELY, and a background
+      refresh is scheduled (:func:`_schedule_revalidate`). The calling path never
+      waits on the network for a document it already has.
+    * ``age >= ttl_s`` or no document — the synchronous fetch, under the
+      cross-process lease. This is the offline/cold contract and is unchanged.
+
+    ``soft_ttl_s >= ttl_s`` disables the background state entirely, which is
+    how :func:`cached_listing` keeps its original three-state behaviour.
+
+    ``refetch_if(payload, age_s)`` lets the caller declare a document inside
+    the TTL EXPIRED anyway — discovery's "the id I am about to resolve is not
+    in this document and the document is old enough to predate it" rule. It is
+    a predicate here rather than a second call after the fact because the two
+    would race: a document in the soft window has ALREADY had a background
+    refresh scheduled by the time a caller could inspect it, and a synchronous
+    refetch behind that loses the lease to its own process's thread, waits on
+    it, and cannot tell the result apart from a plain cache hit. Deciding
+    before either path starts means one fetch, on the calling thread, with a
+    ``fetched``/``failed`` flag that means what it says.
+
+    That closes the race within ONE call; across two it can still happen (call
+    A schedules the refresh, call B is declared expired a moment later and
+    loses the lease to A's thread). B then JOINS that thread for at most
+    ``_LISTING_LEASE_WAIT_S`` and serves the document it left — a bounded wait
+    that ends the instant the refresh lands or fails, rather than the mtime
+    poll a foreign lease holder gets. Rare (two ids, one missing, resolved
+    within seconds of each other) and bounded, so the paint path stays bounded.
 
     A cross-process fetch lease guards the miss path: several lop sessions
     cold-starting together all miss in the same instant, and without the
@@ -341,10 +592,16 @@ def cached_listing(
     # which document names went dead, and a dead name has no reader left to
     # notice it. Costs one directory read once the sweep has nothing to match.
     purge_legacy_documents(cache_dir)
+    purge_stranded_temp_files(cache_dir)
     path = _cache_path(key, cache_dir)
     payload, age = _read_cache(path)
     if payload is not None and age < ttl_s:
-        return payload
+        if refetch_if is None or not refetch_if(payload, age):
+            refreshing = False
+            if age >= soft_ttl_s:
+                refreshing = _schedule_revalidate(key, revalidate or fetch, cache_dir)
+            return Listing(payload=payload, age_s=age, refreshing=refreshing)
+        logger.debug("%s catalogue (%.0fs old) declared expired by its reader", key, age)
 
     # CROSS-PROCESS FETCH LEASE (see the class docstring): the winner fetches
     # and writes; losers give the winner a brief window, re-read, and serve
@@ -352,10 +609,25 @@ def cached_listing(
     # stale-beats-absent rule. Every failure degrades to fetching.
     lease = _ListingFetchLease(path)
     if not lease.acquire():
-        lease.await_peer_briefly()
+        own = _in_flight_revalidation(path)
+        if own is not None:
+            # The holder is THIS process's background thread (call A served the
+            # soft-window document and scheduled it; call B, moments later, was
+            # declared expired by `refetch_if` for an id the document lacks).
+            # Joining it is strictly better than polling the document's mtime:
+            # the same ceiling, but it returns the instant the thread finishes —
+            # including when its fetch FAILED, where the poll would have spun
+            # the whole window waiting for a rename that is never coming.
+            # Serving disk without waiting was the other option, and it is
+            # wrong here: the caller's memo pins whatever this returns for the
+            # day, so an id the refresh is about to land would stay missing
+            # until midnight — the incident this trigger exists to prevent.
+            own.join(timeout=_LISTING_LEASE_WAIT_S)
+        else:
+            lease.await_peer_briefly()
         payload, age = _read_cache(path)
         if payload is not None:
-            return payload
+            return Listing(payload=payload, age_s=age)
         # No document even after the peer's window: fall through and fetch.
         # The lease is lost or stale; a cold machine must still start.
 
@@ -367,13 +639,30 @@ def cached_listing(
             # Stale beats absent: the numbers are days old at worst, whereas
             # the static fallback is wrong by nearly a factor of six.
             logger.debug("using stale %s catalogue (%.0fs old): %s", key, age, exc)
-            return payload
+            return Listing(payload=payload, age_s=age, failed=True)
         logger.debug("no %s catalogue available: %s", key, exc)
-        return None
+        return Listing(payload=None, age_s=float("inf"), failed=True)
 
     _write_cache(path, fresh)
     lease.release()
-    return fresh
+    return Listing(payload=fresh, age_s=0.0, fetched=True)
+
+
+def cached_listing(
+    key: str,
+    fetch: Callable[[], dict[str, Any]],
+    *,
+    ttl_s: float = DEFAULT_TTL_S,
+    cache_dir: Path | None = None,
+) -> dict[str, Any] | None:
+    """The original three-state reader, kept for callers that want no threads.
+
+    Equivalent to :func:`read_listing` with the soft TTL pinned to the hard one:
+    fresh is served, expired is fetched synchronously, and nothing runs in the
+    background. Callers that want stale-while-revalidate use :func:`read_listing`
+    and read the ``Listing`` flags.
+    """
+    return read_listing(key, fetch, soft_ttl_s=ttl_s, ttl_s=ttl_s, cache_dir=cache_dir).payload
 
 
 def invalidate(key: str, *, cache_dir: Path | None = None) -> None:

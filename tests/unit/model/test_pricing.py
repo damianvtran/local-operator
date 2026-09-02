@@ -18,6 +18,7 @@ import pytest
 from local_operator.harness.types import Usage
 from local_operator.model.configure import (
     _from_aggregator_catalogue,
+    _from_price_catalogue,
     calculate_cost,
     cost_for_usage,
     invalidate_model_info_cache,
@@ -155,6 +156,12 @@ def test_current_generation_claude_is_priced(
 # ---------------------------------------------------------------------------
 # The catalogue fallback (a placeholder self-heals)
 # ---------------------------------------------------------------------------
+#
+# Leg 2 of resolution is the provider-neutral models.dev catalogue
+# (`_from_price_catalogue`), NOT the OpenRouter listing: a user signed in only to
+# Anthropic must get correct prices for a model released this morning without
+# another aggregator's document being fresh. Leg 3 (`_from_aggregator_catalogue`)
+# survives for an aggregator's OWN ids only.
 
 
 def _catalogue(*rows: DiscoveredModel):
@@ -165,8 +172,13 @@ def _catalogue(*rows: DiscoveredModel):
     )
 
 
+def _price_catalogue(row: DiscoveredModel | None):
+    """Patch the models.dev lookup to answer with exactly ``row``."""
+    return patch("local_operator.model.prices.price_catalogue_row", return_value=row)
+
+
 def test_zero_priced_registry_row_falls_back_to_the_catalogue() -> None:
-    """A direct provider's placeholder is healed by the aggregator's price.
+    """A direct provider's placeholder is healed by the neutral catalogue's price.
 
     This is the mechanism that stops the placeholder class of bug recurring: a
     row added tomorrow with `0.0` starts costing correctly instead of silently
@@ -176,31 +188,100 @@ def test_zero_priced_registry_row_falls_back_to_the_catalogue() -> None:
     """
     placeholder = ModelInfo(id="claude-nova-6", name="claude-nova-6", description="")
     row = DiscoveredModel(
-        id="anthropic/claude-nova-6",
+        id="claude-nova-6",
         name="Claude Nova 6",
         input_price=7.0,
         output_price=35.0,
         cache_read_price=0.7,
+        cache_write_price=8.75,
     )
-    with _catalogue(row):
-        healed = _from_aggregator_catalogue("anthropic", "claude-nova-6", placeholder)
+    with _price_catalogue(row):
+        healed = _from_price_catalogue("anthropic", "claude-nova-6", placeholder)
     assert (healed.input_price, healed.output_price) == (7.0, 35.0)
     assert healed.cache_reads_price == 0.7
     assert healed.supports_prompt_cache is True
 
 
-def test_catalogue_fallback_matches_a_dotted_version_spelling() -> None:
-    """`claude-opus-4-5-20251101` finds `anthropic/claude-opus-4.5`.
+def test_the_write_price_reaches_model_info() -> None:
+    """`cache_writes_price` is the catalogue's number, not the input price.
 
-    Providers and aggregators disagree about punctuation systematically, not per
-    model. Without the rewrite every dated Claude snapshot — the spelling
-    Anthropic's own docs use — would stay unpriced.
+    The input-price stand-in under-states an Anthropic 5m write by 20%; both
+    consumers used to substitute it because `DiscoveredModel` had no write price.
     """
-    placeholder = ModelInfo(id="claude-opus-9-5-20991231", name="x", description="")
-    row = DiscoveredModel(id="anthropic/claude-opus-9.5", name="", input_price=4.0)
-    with _catalogue(row):
-        healed = _from_aggregator_catalogue("anthropic", "claude-opus-9-5-20991231", placeholder)
-    assert healed.input_price == 4.0
+    placeholder = ModelInfo(id="claude-fable-5-1", name="x", description="")
+    row = DiscoveredModel(
+        id="claude-fable-5-1",
+        input_price=10.0,
+        output_price=50.0,
+        cache_read_price=0.25,
+        cache_write_price=12.5,
+    )
+    with _price_catalogue(row):
+        healed = _from_price_catalogue("anthropic", "claude-fable-5-1", placeholder)
+    assert healed.cache_writes_price == 12.5, "the input price was substituted for the write"
+
+
+def test_the_input_price_fallback_survives_a_listing_with_no_write_price() -> None:
+    """A catalogue that quotes a read price and no write price still gets the floor."""
+    placeholder = ModelInfo(id="gpt-9", name="x", description="")
+    row = DiscoveredModel(id="gpt-9", input_price=2.0, output_price=8.0, cache_read_price=0.2)
+    with _price_catalogue(row):
+        healed = _from_price_catalogue("openai", "gpt-9", placeholder)
+    assert healed.cache_writes_price == 2.0
+
+
+def test_a_direct_provider_is_priced_from_the_neutral_catalogue_not_openrouter() -> None:
+    """Zero OpenRouter requests on an Anthropic-only install.
+
+    The provider's own listing answers unpriced (as Anthropic's does), models.dev
+    prices it, and the aggregator listing is never consulted for a direct id.
+    """
+    invalidate_model_info_cache()
+    unpriced = DiscoveredModel(id="claude-nova-6", context_window=1_000_000, max_tokens=128_000)
+    priced = DiscoveredModel(
+        id="claude-nova-6",
+        input_price=7.0,
+        output_price=35.0,
+        cache_read_price=0.7,
+        cache_write_price=8.75,
+    )
+    consulted: list[str] = []
+
+    def listing(provider_id, **kwargs):
+        consulted.append(provider_id)
+        return [unpriced], "ok"
+
+    with (
+        patch("local_operator.model.discovery.available_models", side_effect=listing),
+        _price_catalogue(priced),
+    ):
+        info = resolve_model_info("anthropic", "claude-nova-6")
+    invalidate_model_info_cache()
+
+    assert (info.input_price, info.output_price) == (7.0, 35.0)
+    assert info.cache_writes_price == 8.75
+    assert info.context_window == 1_000_000, "the provider's own limit wins over the catalogue"
+    assert consulted == ["anthropic"], f"OpenRouter was consulted for a direct id: {consulted}"
+
+
+def test_openrouter_ids_still_fall_back_to_their_own_listing() -> None:
+    """Leg 3 is for an aggregator's own ids, and nothing else."""
+    placeholder = ModelInfo(id="some/model", name="x", description="")
+    row = DiscoveredModel(id="some/model", input_price=9.0, output_price=27.0)
+    with _catalogue(row) as listing:
+        healed = _from_aggregator_catalogue("openrouter", "some/model", placeholder)
+    assert healed.input_price == 9.0
+    assert listing.call_args.kwargs["want_id"] == "some/model"
+
+
+def test_the_aggregator_leg_refuses_a_direct_provider() -> None:
+    """The namespace map that priced `anthropic/*` from OpenRouter is gone."""
+    placeholder = ModelInfo(id="claude-nova-6", name="x", description="")
+    row = DiscoveredModel(id="anthropic/claude-nova-6", input_price=7.0)
+    with _catalogue(row) as listing:
+        untouched = _from_aggregator_catalogue("anthropic", "claude-nova-6", placeholder)
+    assert untouched.input_price == 0.0
+    listing.assert_not_called()
 
 
 def test_catalogue_fallback_supplies_a_missing_context_window() -> None:
@@ -213,15 +294,15 @@ def test_catalogue_fallback_supplies_a_missing_context_window() -> None:
     """
     bare = ModelInfo(id="gpt-9", name="gpt-9", description="", context_window=-1, max_tokens=-1)
     row = DiscoveredModel(
-        id="openai/gpt-9",
+        id="gpt-9",
         name="",
         input_price=2.0,
         output_price=8.0,
         context_window=400_000,
         max_tokens=64_000,
     )
-    with _catalogue(row):
-        healed = _from_aggregator_catalogue("openai", "gpt-9", bare)
+    with _price_catalogue(row):
+        healed = _from_price_catalogue("openai", "gpt-9", bare)
     assert (healed.context_window, healed.max_tokens) == (400_000, 64_000)
 
 
@@ -240,14 +321,14 @@ def test_catalogue_fallback_never_overrides_a_window_we_already_have() -> None:
         max_tokens=64_000,
     )
     row = DiscoveredModel(
-        id="anthropic/claude-opus-4.5",
+        id="claude-opus-4.5",
         name="",
         input_price=5.0,
         context_window=1_000_000,
         max_tokens=128_000,
     )
-    with _catalogue(row):
-        untouched = _from_aggregator_catalogue("anthropic", "claude-opus-4-5-20251101", described)
+    with _price_catalogue(row):
+        untouched = _from_price_catalogue("anthropic", "claude-opus-4-5-20251101", described)
     assert (untouched.context_window, untouched.max_tokens) == (200_000, 64_000)
     assert untouched.input_price == 5.0, "the price hole was still filled"
 
@@ -255,19 +336,17 @@ def test_catalogue_fallback_never_overrides_a_window_we_already_have() -> None:
 def test_catalogue_fallback_leaves_an_unknown_model_alone() -> None:
     """No match means no price, not a plausible neighbour's price."""
     placeholder = ModelInfo(id="claude-nova-6", name="x", description="")
-    row = DiscoveredModel(id="anthropic/claude-opus-5", name="", input_price=5.0)
-    with _catalogue(row):
-        untouched = _from_aggregator_catalogue("anthropic", "claude-nova-6", placeholder)
+    with _price_catalogue(None):
+        untouched = _from_price_catalogue("anthropic", "claude-nova-6", placeholder)
     assert (untouched.input_price, untouched.output_price) == (0.0, 0.0)
 
 
-def test_catalogue_fallback_skips_the_aggregators_themselves() -> None:
-    """An OpenRouter model is already priced by its own listing; no second leg."""
-    placeholder = ModelInfo(id="some/model", name="x", description="")
-    with _catalogue(DiscoveredModel(id="some/model", name="", input_price=9.0)) as listing:
-        untouched = _from_aggregator_catalogue("openrouter", "some/model", placeholder)
-    assert untouched.input_price == 0.0
-    listing.assert_not_called()
+def test_catalogue_fallback_ignores_a_stub_with_no_cost_and_no_limit() -> None:
+    """A plan-catalogue stub answers neither question this leg is here for."""
+    placeholder = ModelInfo(id="k3", name="x", description="")
+    with _price_catalogue(DiscoveredModel(id="k3", name="Kimi K3")):
+        untouched = _from_price_catalogue("kimi", "k3", placeholder)
+    assert untouched == placeholder
 
 
 def test_a_priced_row_never_reaches_the_aggregator_leg() -> None:
@@ -369,20 +448,25 @@ def test_the_two_listing_legs_share_one_ceiling_rather_than_summing() -> None:
             clock[0] += spent  # leg 1 blocks for nearly the whole ceiling
         return [], "ok"
 
+    def price_leg(provider, model_id, *, timeout, **kwargs):
+        seen.append(timeout)
+        return None
+
     with (
         patch("local_operator.model.discovery.available_models", side_effect=slow),
+        patch("local_operator.model.prices.price_catalogue_row", side_effect=price_leg),
         patch("local_operator.model.configure.time.monotonic", side_effect=lambda: clock[0]),
     ):
         invalidate_model_info_cache()
         resolve_model_info("anthropic", "claude-nova-6")
     invalidate_model_info_cache()
 
-    assert len(seen) == 2, f"expected the provider leg then the aggregator leg, got {seen}"
-    provider_leg, aggregator_leg = seen
+    assert len(seen) == 2, f"expected the provider leg then the price-catalogue leg, got {seen}"
+    provider_leg, price_leg_budget = seen
     assert provider_leg == DEFAULT_TIMEOUT_S, "a blocking resolve must keep the full ceiling"
-    assert aggregator_leg is not None
-    assert spent + aggregator_leg <= DEFAULT_TIMEOUT_S + 0.01, (
-        f"leg 1 spent {spent}s and leg 2 was still granted {aggregator_leg}s, "
+    assert price_leg_budget is not None
+    assert spent + price_leg_budget <= DEFAULT_TIMEOUT_S + 0.01, (
+        f"leg 1 spent {spent}s and leg 2 was still granted {price_leg_budget}s, "
         f"over the {DEFAULT_TIMEOUT_S}s ceiling"
     )
 
