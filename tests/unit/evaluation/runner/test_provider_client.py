@@ -17,7 +17,7 @@ import base64
 import hashlib
 import json
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Callable
 
 import pytest
 
@@ -473,7 +473,7 @@ class RecordingStream:
     the episode turns and the compaction summary the client buys.
     """
 
-    def __init__(self, reply: Any, *, summary: str = "SUMMARY") -> None:
+    def __init__(self, reply: str | Callable[[Any], str], *, summary: str = "SUMMARY") -> None:
         self.reply = reply
         self.summary = summary
         self.requests: list[Any] = []

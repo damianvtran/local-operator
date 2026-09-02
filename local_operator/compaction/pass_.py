@@ -176,7 +176,7 @@ async def run_compaction_pass(
     # (5) Summarise per strategy.
     strategy = resolve_strategy(settings, model)
     preserve_data: dict[str, Any] | None = None
-    summary: str
+    summary = ""
     if strategy == "snapcompact":
         try:
             from . import snapcompact

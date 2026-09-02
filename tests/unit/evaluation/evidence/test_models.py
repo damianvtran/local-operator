@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+from typing import Any
 
 import pytest
 from pydantic import ValidationError
@@ -377,7 +378,7 @@ def test_truncation_reason_requires_a_truncated_step() -> None:
     """A reason on a step that did not truncate would claim a stop that never
     happened; the model refuses it so no writer can record one."""
 
-    base = dict(
+    base: dict[str, Any] = dict(
         step_id="step",
         action_batch_id="batch",
         receipt_id=DIGEST,
