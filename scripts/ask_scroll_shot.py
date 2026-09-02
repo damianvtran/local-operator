@@ -31,30 +31,54 @@ QUESTION = AskQuestion(
     id="rollout",
     question="Which rollout should the stale-row migration take?",
     options=[
-        AskOption(label="Drop the rows outright",
-                  description="Nothing reads the column any more, so the fastest path is to drop the rows and move on."),
-        AskOption(label="Backfill from the audit log",
-                  description="Slower, but it keeps history intact by replaying every recorded mutation."),
-        AskOption(label="Dual-write for a week",
-                  description="Safest of the options; needs a follow-up MR to remove the shim once traffic settles."),
-        AskOption(label="Leave them and add a filter",
-                  description="Cheapest, but it hides the problem behind a query filter instead of fixing it."),
-        AskOption(label="Archive to cold storage",
-                  description="Move the rows to the archive table and keep a pointer for any late audit request."),
-        AskOption(label="Soft-delete with a tombstone",
-                  description="Flag the rows deleted and let the nightly compaction reap them out of band."),
-        AskOption(label="Partition and detach",
-                  description="Detach the stale partition so the drop is instant and the table stays online."),
-        AskOption(label="Migrate to the new schema",
-                  description="Fold the cleanup into the pending schema migration so it ships in one change."),
-        AskOption(label="Export then truncate",
-                  description="Dump the rows to object storage first, then truncate the table in a single step."),
-        AskOption(label="Rewrite via a shadow table",
-                  description="Build a clean shadow table and swap it in once the row copy has caught up."),
-        AskOption(label="Throttle a background delete",
-                  description="Delete in small batches on a background worker to avoid a long lock on the table."),
-        AskOption(label="Defer to the next release",
-                  description="Do nothing now and revisit once the read path that once used the column is gone."),
+        AskOption(
+            label="Drop the rows outright",
+            description="Nothing reads the column any more, so the fastest path is to drop the rows and move on.",  # noqa: E501
+        ),
+        AskOption(
+            label="Backfill from the audit log",
+            description="Slower, but it keeps history intact by replaying every recorded mutation.",
+        ),
+        AskOption(
+            label="Dual-write for a week",
+            description="Safest of the options; needs a follow-up MR to remove the shim once traffic settles.",  # noqa: E501
+        ),
+        AskOption(
+            label="Leave them and add a filter",
+            description="Cheapest, but it hides the problem behind a query filter instead of fixing it.",  # noqa: E501
+        ),
+        AskOption(
+            label="Archive to cold storage",
+            description="Move the rows to the archive table and keep a pointer for any late audit request.",  # noqa: E501
+        ),
+        AskOption(
+            label="Soft-delete with a tombstone",
+            description="Flag the rows deleted and let the nightly compaction reap them out of band.",  # noqa: E501
+        ),
+        AskOption(
+            label="Partition and detach",
+            description="Detach the stale partition so the drop is instant and the table stays online.",  # noqa: E501
+        ),
+        AskOption(
+            label="Migrate to the new schema",
+            description="Fold the cleanup into the pending schema migration so it ships in one change.",  # noqa: E501
+        ),
+        AskOption(
+            label="Export then truncate",
+            description="Dump the rows to object storage first, then truncate the table in a single step.",  # noqa: E501
+        ),
+        AskOption(
+            label="Rewrite via a shadow table",
+            description="Build a clean shadow table and swap it in once the row copy has caught up.",  # noqa: E501
+        ),
+        AskOption(
+            label="Throttle a background delete",
+            description="Delete in small batches on a background worker to avoid a long lock on the table.",  # noqa: E501
+        ),
+        AskOption(
+            label="Defer to the next release",
+            description="Do nothing now and revisit once the read path that once used the column is gone.",  # noqa: E501
+        ),
     ],
     recommended=2,
 )
