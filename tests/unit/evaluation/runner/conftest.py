@@ -54,6 +54,7 @@ from local_operator.evaluation.receipts import (
 from local_operator.evaluation.runner.episode import EpisodeConfig, EpisodeSpec
 from local_operator.evaluation.runner.model import (
     CompactionRecord,
+    DecisionRejected,
     EpisodeTurn,
     ModelDecision,
     ModelUsage,
@@ -333,6 +334,19 @@ class ScriptedModel:
         if self.error is not None:
             raise self.error
         kind = self.script[self.calls] if self.calls < len(self.script) else "finish"
+        if kind == "reject":
+            # A billed call whose reply failed parsing -- what the provider
+            # client raises for the first paid episode's ``frame_id "1"``.
+            # Counted as a call so the script advances to the corrected reply.
+            self.calls += 1
+            raise DecisionRejected(
+                "Your previous reply was rejected: action references unknown frame_id '1'",
+                route=self.route,
+                usage=ModelUsage(input_tokens=10, output_tokens=5),
+                cost_micros=7,
+                provider_request_id=f"rejected-{self.calls}",
+                prompt_cache_key="lop-eval-test",
+            )
         compaction = None
         if self.calls in self.compact_on:
             compaction = CompactionRecord(
