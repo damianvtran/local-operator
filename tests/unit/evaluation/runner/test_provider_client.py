@@ -650,9 +650,13 @@ async def test_provider_client_folds_summary_usage_into_the_decision(tmp_path: P
     from local_operator.compaction.thresholds import CompactionSettings
 
     stream = RecordingStream(_wait_reply, summary="what happened so far")
-    # A tiny window so the token threshold trips on the third turn, forcing a
-    # context-full summary rather than only a frame prune.
-    spec = ModelSpec(provider="provider", model_id="model", context_window=600)
+    # A small window so the token threshold trips on the third turn, forcing a
+    # context-full summary rather than only a frame prune. The window is large
+    # enough that the summary plus the kept window fits the recovery band --
+    # a threshold pass must now FIT, not merely run, so a window too small for
+    # the compacted form refuses the request instead (that case has its own
+    # test, ``test_context_unrecoverable_raises_when_nothing_fits``).
+    spec = ModelSpec(provider="provider", model_id="model", context_window=20_000)
     client = ProviderModelClient(
         stream,
         route=ROUTE,
@@ -662,7 +666,7 @@ async def test_provider_client_folds_summary_usage_into_the_decision(tmp_path: P
         # rule, which makes no provider call); pin context-full because THIS
         # test is about the billed summary call being folded in.
         compaction=CompactionSettings(
-            strategy="context-full", keep_recent_tokens=60, threshold_percent=0.5
+            strategy="context-full", keep_recent_tokens=1200, threshold_percent=0.4
         ),
         keep_recent_frames=3,
         rebuild_every_frames=8,
@@ -670,10 +674,21 @@ async def test_provider_client_folds_summary_usage_into_the_decision(tmp_path: P
 
     history: list[EpisodeTurn] = []
     decisions = []
+    from local_operator.evaluation.runner.provider_client import (
+        ContextUnrecoverableError,
+    )
+
     for sequence in range(6):
         current = _framed_observation(tmp_path, sequence, text=f"screen {sequence} " + "x " * 60)
         history.append(EpisodeTurn(observation=current))
-        decision = await client.decide(current, tuple(history))
+        try:
+            decision = await client.decide(current, tuple(history))
+        except ContextUnrecoverableError:
+            # The tiny window (a 300-token band) cannot hold a context-full
+            # summary plus the kept frames, so the client eventually refuses
+            # the request the provider would reject. The fold under test here
+            # already happened on the first compacting decision before that.
+            break
         decisions.append(decision)
         history[-1] = history[-1].model_copy(update={"batch": decision.action_batch})
 
@@ -729,7 +744,13 @@ async def test_threshold_rebuild_creates_headroom_so_appends_resume(
         context_scale=context_scale,
         report_context_until=report_until,
     )
-    spec = ModelSpec(provider="provider", model_id="model", context_window=30_000)
+    # 60k: wide enough that the engine's own snapcompact archive budget (half
+    # the window) leaves real headroom under the threshold, so a threshold
+    # rebuild buys several appends. At 30k the archive replay is ITSELF ~15k
+    # against a 24k threshold -- the pass cannot create headroom, and the
+    # honest outcomes there (bounded requests, sparse rebuilds, refusal when
+    # nothing fits) are the boundedness tests' business, not this one's.
+    spec = ModelSpec(provider="provider", model_id="model", context_window=60_000)
     client = ProviderModelClient(
         stream,
         route=ROUTE,
@@ -755,10 +776,9 @@ async def test_threshold_rebuild_creates_headroom_so_appends_resume(
             for a, b in zip(stream.requests[index - 1].messages, stream.requests[index].messages)
         )
     ]
-    # The first rebuild is the frame budget (turn 11) or, when the provider's
-    # inflated figure gets there first, the threshold a little earlier; every
-    # later one must be separated from the previous by several plain appends.
-    assert 8 <= rebuilds[0] <= 11
+    # The first rebuild is the frame budget (turn 11); every later one must be
+    # separated from the previous by several plain appends.
+    assert rebuilds[0] == 11
     assert len(rebuilds) >= 2
     gaps = [b - a for a, b in zip(rebuilds, rebuilds[1:])]
     assert min(gaps) >= 4, (rebuilds, gaps)
@@ -773,75 +793,122 @@ async def test_threshold_rebuild_creates_headroom_so_appends_resume(
 
 
 @pytest.mark.asyncio
-async def test_stall_is_judged_at_the_provider_price_not_the_local_ruler(tmp_path: Path) -> None:
-    """A provider that bills images well above the local ruler (1.5x here)
-    can keep the compacted residual over the line even when the ruler says
-    it cleared the recovery band; the stall rule must price the residual the
-    way the next bill will, or the pass re-fires every other turn."""
+async def test_context_unrecoverable_raises_when_nothing_fits(tmp_path: Path) -> None:
+    """A window so small the compacted form cannot fit: after pruning, summarising and
+    shedding every stale observation it may, the rebuilt prefix still exceeds the recovery band,
+    so the client refuses the request rather than send one the provider will reject
+    (``ContextUnrecoverableError``), which the runner turns into a harness error the bundle
+    records -- never a rejected request."""
 
     from local_operator.compaction.thresholds import CompactionSettings
+    from local_operator.evaluation.runner.provider_client import (
+        ContextUnrecoverableError,
+    )
 
-    stream = RecordingStream(_wait_reply, report_context=True, context_scale=1.5)
-    spec = ModelSpec(provider="provider", model_id="model", context_window=30_000)
+    stream = RecordingStream(_wait_reply)
+    # A window smaller than the current observation's own frame plus text: after
+    # shedding every stale observation, the current one still cannot fit, so no
+    # summary can help. ``keep_recent_tokens=0`` means the pass keeps no tail.
+    spec = ModelSpec(provider="provider", model_id="model", context_window=1_000)
     client = ProviderModelClient(
         stream,
         route=ROUTE,
         model_spec=spec,
         artifact_root=tmp_path,
-        compaction=CompactionSettings(keep_recent_tokens=2000),
+        compaction=CompactionSettings(keep_recent_tokens=0, threshold_percent=0.5),
+        keep_recent_frames=3,
+        rebuild_every_frames=8,
     )
-
-    history: list[EpisodeTurn] = []
-    for sequence in range(24):
-        current = _framed_observation(tmp_path, sequence, text=f"screen {sequence} " + "x " * 800)
-        history.append(EpisodeTurn(observation=current))
-        decision = await client.decide(current, tuple(history))
-        history[-1] = history[-1].model_copy(update={"batch": decision.action_batch})
-
-    rebuilds = [
-        index
-        for index in range(1, len(stream.requests))
-        if not all(
-            a is b
-            for a, b in zip(stream.requests[index - 1].messages, stream.requests[index].messages)
-        )
-    ]
-    # Priced at the ruler this was [8, 12, 14, 16, 18, 20, 22]: a rebuild
-    # every other turn with the stall never declared.
-    gaps = [b - a for a, b in zip(rebuilds, rebuilds[1:])]
-    assert max(gaps) >= 8, (rebuilds, gaps)
+    history = _turns(_framed_observation(tmp_path, 0))
+    with pytest.raises(ContextUnrecoverableError):
+        await client.decide(history[0].observation, history)
 
 
 @pytest.mark.asyncio
-async def test_a_pass_that_cannot_clear_the_line_stalls_the_threshold_trigger(
-    tmp_path: Path,
-) -> None:
-    """The reviewer's scenario: a window so small that the compacted form of
-    the history (archive + kept window) is itself above the threshold. Then
-    no pass can create headroom, and re-firing on every turn is a cache miss
-    per turn for nothing. The engine's ``RECOVERY_BAND`` rule decides the
-    pass stalled; the client then falls back to the frame cadence alone.
-    """
+async def test_boundedness_priced_context_never_exceeds_the_window(tmp_path: Path) -> None:
+    """The reviewer's provider-faithful probe (per-image addend billing, 5,000/frame,
+    128k window, ~4k-token observations): the priced size of every request must stay
+    within the window, AND the rebuild count stays sparse. The stall latch that was
+    removed for M2 let this grow to 1.28-1.37x; it must not."""
 
     from local_operator.compaction.thresholds import CompactionSettings
 
-    stream = RecordingStream(_wait_reply, report_context=True)
-    spec = ModelSpec(provider="provider", model_id="model", context_window=6_000)
+    class FaithfulStream:
+        """Reports ``context_tokens`` as local estimate + a per-image ADDEND
+        (Anthropic-style frame billing), so the client's ``max(provider,
+        local)`` trigger and the request's own priced size are
+        provider-faithful. The addend is the engine's own formula for the
+        spec's family (``frame_token_estimate_for``) minus the local ruler's
+        flat 1,200 -- exactly the correction the client prices its shed band
+        with, so the fake bills the way the client predicts."""
+
+        def __init__(self, per_image: int | None = None) -> None:
+            from local_operator.compaction.snapcompact import frame_token_estimate_for
+            from local_operator.compaction.tokens import IMAGE_TOKEN_ESTIMATE
+
+            # Default to the engine's family formula for the spec under test
+            # (``provider/model`` is an unknown family, so the safe ceiling's
+            # per-frame figure applies) minus the ruler's flat 1,200.
+            self.per_image = (
+                frame_token_estimate_for("provider", "model") - IMAGE_TOKEN_ESTIMATE
+                if per_image is None
+                else per_image
+            )
+            self.requests: list[Any] = []
+            self.priced: list[int] = []
+
+        def __call__(self, request: Any, signal: Any) -> AsyncIterator[Any]:
+            from local_operator.compaction.tokens import estimate_messages_tokens
+
+            images = sum(
+                1
+                for message in request.messages
+                for block in message.content
+                if block.type == "image"
+            )
+            priced = estimate_messages_tokens(request.messages) + images * self.per_image
+            self.priced.append(priced)
+            self.requests.append(request)
+            oid = next(
+                line.split(": ", 1)[1]
+                for line in request.messages[-1].content[0].text.splitlines()
+                if line.startswith("Observation ID: ")
+            )
+            text = json.dumps(
+                {"actions": [{"kind": "wait", "observation_id": oid, "duration_ms": 1}]}
+            )
+            usage = Usage(input_tokens=10, output_tokens=5, usd_cost=0.001, context_tokens=priced)
+
+            async def events() -> AsyncIterator[Any]:
+                yield StreamTextDelta(delta=text)
+                yield StreamEndEvent(stop_reason="stop", usage=usage)
+
+            return events()
+
+    window = 128_000
+    stream = FaithfulStream()
+    spec = ModelSpec(provider="provider", model_id="model", context_window=window)
     client = ProviderModelClient(
         stream,
         route=ROUTE,
         model_spec=spec,
         artifact_root=tmp_path,
-        compaction=CompactionSettings(keep_recent_tokens=300),
+        compaction=CompactionSettings(keep_recent_tokens=20_000),
     )
 
     history: list[EpisodeTurn] = []
-    for sequence in range(24):
-        current = _framed_observation(tmp_path, sequence, text=f"screen {sequence} " + "x " * 60)
+    for sequence in range(48):
+        current = _framed_observation(tmp_path, sequence, text=f"screen {sequence} " + "x " * 900)
         history.append(EpisodeTurn(observation=current))
         decision = await client.decide(current, tuple(history))
         history[-1] = history[-1].model_copy(update={"batch": decision.action_batch})
 
+    peak = max(stream.priced)
+    assert peak <= window, f"priced context exceeded the window: {peak} ({peak / window:.2f}x)"
+    assert all(priced <= window for priced in stream.priced), [
+        priced / window for priced in stream.priced
+    ]
+    # Rebuilds stay sparse: a frame cadence plus the occasional threshold pass, never per turn.
     rebuilds = [
         index
         for index in range(1, len(stream.requests))
@@ -850,12 +917,163 @@ async def test_a_pass_that_cannot_clear_the_line_stalls_the_threshold_trigger(
             for a, b in zip(stream.requests[index - 1].messages, stream.requests[index].messages)
         )
     ]
-    # Before the stall rule this was every turn from 7 to 23. Now the first
-    # snapcompact that fails to clear the band stalls the trigger and the
-    # frame cadence takes over: a long run of plain appends must follow.
     gaps = [b - a for a, b in zip(rebuilds, rebuilds[1:])]
-    assert max(gaps) >= 8, (rebuilds, gaps)
-    assert len(rebuilds) <= 6, rebuilds
+    assert len(rebuilds) <= 12, rebuilds
+    assert max(gaps) >= 4, (rebuilds, gaps)
+
+
+@pytest.mark.asyncio
+async def test_boundedness_tight_window_stays_under_with_a_priced_shed(tmp_path: Path) -> None:
+    """The same provider-faithful drive at a 24k window on an ANTHROPIC large
+    model (5,000 tokens/frame): the local ruler alone would let the shed stop
+    while the provider still billed over the window (per-frame addend: 3 frames
+    at 1,200 each locally is 3,600, but the provider bills them at 5,000 each),
+    so the shed's band must be judged at the provider's per-frame price. Every
+    request stays within the window; when even the kept window cannot fit, the
+    client refuses (``ContextUnrecoverableError``) rather than send a rejected
+    request."""
+
+    from local_operator.compaction.thresholds import CompactionSettings
+    from local_operator.evaluation.runner.provider_client import (
+        ContextUnrecoverableError,
+    )
+
+    class FaithfulStream:
+        def __init__(self) -> None:
+            from local_operator.compaction.snapcompact import frame_token_estimate_for
+            from local_operator.compaction.tokens import IMAGE_TOKEN_ESTIMATE
+
+            # The fake bills the way the client's shed band predicts: the engine's
+            # family formula for the spec (Anthropic large: 5,000/frame) minus the
+            # ruler's flat 1,200. That makes the assertion self-consistent (the
+            # client bounds the value the fake bills), and the local-ruler mutation
+            # still fails because it under-prices frames.
+            self.per_image = (
+                frame_token_estimate_for("anthropic", "claude-fable-5") - IMAGE_TOKEN_ESTIMATE
+            )
+            self.requests: list[Any] = []
+            self.priced: list[int] = []
+
+        def __call__(self, request: Any, signal: Any) -> AsyncIterator[Any]:
+            from local_operator.compaction.tokens import estimate_messages_tokens
+
+            images = sum(
+                1
+                for message in request.messages
+                for block in message.content
+                if block.type == "image"
+            )
+            priced = estimate_messages_tokens(request.messages) + images * self.per_image
+            self.priced.append(priced)
+            self.requests.append(request)
+            oid = next(
+                line.split(": ", 1)[1]
+                for line in request.messages[-1].content[0].text.splitlines()
+                if line.startswith("Observation ID: ")
+            )
+            text = json.dumps(
+                {"actions": [{"kind": "wait", "observation_id": oid, "duration_ms": 1}]}
+            )
+            usage = Usage(input_tokens=10, output_tokens=5, usd_cost=0.001, context_tokens=priced)
+
+            async def events() -> AsyncIterator[Any]:
+                yield StreamTextDelta(delta=text)
+                yield StreamEndEvent(stop_reason="stop", usage=usage)
+
+            return events()
+
+    window = 24_000
+    stream = FaithfulStream()
+    spec = ModelSpec(provider="anthropic", model_id="claude-fable-5", context_window=window)
+    client = ProviderModelClient(
+        stream,
+        route=ROUTE,
+        model_spec=spec,
+        artifact_root=tmp_path,
+        compaction=CompactionSettings(keep_recent_tokens=20_000),
+    )
+
+    history: list[EpisodeTurn] = []
+    refused_at: int | None = None
+    for sequence in range(48):
+        current = _framed_observation(tmp_path, sequence, text=f"screen {sequence} " + "x " * 900)
+        history.append(EpisodeTurn(observation=current))
+        try:
+            decision = await client.decide(current, tuple(history))
+        except ContextUnrecoverableError:
+            refused_at = sequence
+            break
+        history[-1] = history[-1].model_copy(update={"batch": decision.action_batch})
+
+    peak = max(stream.priced)
+    assert peak <= window, f"priced context exceeded the window: {peak} ({peak / window:.2f}x)"
+    assert all(priced <= window for priced in stream.priced), [
+        (i, p / window) for i, p in enumerate(stream.priced)
+    ]
+    # Either the episode ran bounded to the end, or it refused once the kept
+    # window itself could not fit -- never an over-window request.
+    assert refused_at is None or peak <= window
+
+
+@pytest.mark.asyncio
+async def test_frameless_benchmark_stays_bounded_with_no_frames_to_shed(tmp_path: Path) -> None:
+    """A text-only benchmark (no ImageContent ever) has no frames for the shed or the
+    cadence to fire on; with the stall latch removed, the threshold trigger is the only
+    bound and it must hold (the priced context stays well under the window)."""
+
+    from local_operator.compaction.thresholds import CompactionSettings
+
+    class TextStream:
+        def __init__(self) -> None:
+            self.requests: list[Any] = []
+            self.priced: list[int] = []
+
+        def __call__(self, request: Any, signal: Any) -> AsyncIterator[Any]:
+            from local_operator.compaction.tokens import estimate_messages_tokens
+
+            priced = estimate_messages_tokens(request.messages)
+            self.priced.append(priced)
+            self.requests.append(request)
+            oid = next(
+                line.split(": ", 1)[1]
+                for line in request.messages[-1].content[0].text.splitlines()
+                if line.startswith("Observation ID: ")
+            )
+            text = json.dumps(
+                {"actions": [{"kind": "wait", "observation_id": oid, "duration_ms": 1}]}
+            )
+            usage = Usage(input_tokens=10, output_tokens=5, usd_cost=0.001, context_tokens=priced)
+
+            async def events() -> AsyncIterator[Any]:
+                yield StreamTextDelta(delta=text)
+                yield StreamEndEvent(stop_reason="stop", usage=usage)
+
+            return events()
+
+    window = 128_000
+    stream = TextStream()
+    spec = ModelSpec(provider="provider", model_id="model", context_window=window)
+    client = ProviderModelClient(
+        stream,
+        route=ROUTE,
+        model_spec=spec,
+        artifact_root=tmp_path,
+        compaction=CompactionSettings(keep_recent_tokens=20_000),
+    )
+
+    history: list[EpisodeTurn] = []
+    for sequence in range(48):
+        current = _framed_observation(tmp_path, sequence, text=f"state {sequence} " + "x " * 900)
+        current = current.model_copy(update={"frames": ()})
+        history.append(EpisodeTurn(observation=current))
+        decision = await client.decide(current, tuple(history))
+        history[-1] = history[-1].model_copy(update={"batch": decision.action_batch})
+
+    peak = max(stream.priced)
+    assert (
+        peak <= window
+    ), f"frameless priced context exceeded the window: {peak} ({peak / window:.2f}x)"
+    assert all(priced <= window for priced in stream.priced)
 
 
 @pytest.mark.asyncio

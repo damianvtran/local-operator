@@ -606,6 +606,21 @@ class EpisodeRunner:
         except _EvidenceFailure:
             raise
         except BaseException as error:
+            from local_operator.evaluation.runner.provider_client import (
+                ContextUnrecoverableError,
+            )
+
+            # The client could not fit the context into the window even after
+            # pruning, summarising, and shedding stale observations. That is
+            # the harness's limit, not a provider outage, so it must NOT be
+            # re-classified as a provider failure: let it propagate so
+            # ``_finalize_failure`` records it as a harness (adapter) error
+            # and seals unscored — the honest outcome the evidence model
+            # supports. A scored truncation is not representable here (the
+            # last step's event was already written), and the verifier's
+            # one-step-per-batch rule forbids amending it.
+            if isinstance(error, ContextUnrecoverableError):
+                raise
             raise _ProviderFailure(_diagnostic(error)) from error
         if decision.compaction is not None:
             # Declared BEFORE the request triple: the client rebuilt its

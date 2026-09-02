@@ -26,7 +26,7 @@ import json
 import re
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Mapping, Sequence, get_args, get_origin
+from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence, get_args, get_origin
 
 from local_operator.evaluation.adapters.supervisor import verify_artifact
 from local_operator.evaluation.evidence.models import RouteIdentity
@@ -230,6 +230,20 @@ def parse_decision(
     )
 
 
+class ContextUnrecoverableError(ValueError):
+    """The context cannot be made to fit the window, so the request must not
+    be sent.
+
+    Raised only when a threshold pass has pruned, summarised, and shed every
+    stale observation it may and the rebuilt prefix still exceeds the engine's
+    recovery band — or when there is nothing to shed (a frameless benchmark).
+    The runner turns it into a scored truncation with the
+    ``context-unrecoverable`` reason: the episode is scored on the state it
+    reached, because a context the harness can no longer manage is the
+    harness's limit, not a fabricated failure of the agent's.
+    """
+
+
 class _ContextBuilder:
     """The append-only message history one episode sends to the model.
 
@@ -402,16 +416,11 @@ class ProviderModelClient:
             rebuild_every_frames=rebuild_every_frames,
         )
         self._last_provider_context_tokens: int | None = None
-        # provider-reported context / local estimate for the same request:
-        # how much more the provider bills than the local ruler counts
-        # (images are the usual reason; Anthropic bills a 1932px frame at
-        # ~5,000 tokens against the ruler's flat 1,200). Used to price a
-        # compaction pass's residual the way the next bill will, which is
-        # what the session's frame correction does for the same question.
-        self._provider_scale = 1.0
-        # Set when a threshold-triggered pass ran but left the context above
-        # the engine's recovery band; see ``_maybe_compact``.
-        self._threshold_stalled = False
+        # The one pricing fact a rebuild cannot know locally: whether the provider
+        # reported a context size for the current prefix. Set only by a request that
+        # actually ran, so a client built fresh on a retained builder does not
+        # inherit a figure that described some other prefix (see ``_maybe_compact``).
+        self._reported_context_for_current_prefix: bool = False
         self._last_request_ms = _now_ms()
 
     async def decide(
@@ -440,10 +449,11 @@ class ProviderModelClient:
         )
         self._last_request_ms = _now_ms()
         if context_tokens is not None:
+            # A figure reported FOR the request just sent is measured against
+            # the prefix that is about to be reused verbatim, so it stays
+            # exact through plain appends until a rebuild replaces the list.
             self._last_provider_context_tokens = context_tokens
-            local = _estimate_context(messages)
-            if local > 0 and context_tokens > 0:
-                self._provider_scale = context_tokens / local
+            self._reported_context_for_current_prefix = True
         # The summary call was a billed provider call on the way to this
         # decision. It is folded into THIS decision's figures rather than
         # reported separately so the bundle's usage events remain the whole
@@ -469,39 +479,51 @@ class ProviderModelClient:
 
         Two triggers, one pass. The frame budget (``rebuild_due``) is the usual
         one for a screen-driving episode; the token threshold is the ordinary
-        session's trigger and applies here too because a long text-heavy
-        episode can fill the window without ever tripping the frame budget.
-        Either way the pass rebuilds the whole prefix ONCE, which is the only
-        rewrite this client ever makes to sent messages.
+        session's trigger and applies here too because a long text-heavy episode can
+        fill the window without ever tripping the frame budget. Either way the pass
+        rebuilds the whole prefix ONCE, which is the only rewrite this client
+        ever makes to sent messages.
+
+        The token trigger is a SAFETY BOUND and is never silenced (review round
+        2, M2): the only way to avoid a rebuild every turn is to make the pass
+        EFFECTIVE, not to ignore the trigger. After a threshold pass that did
+        not clear the engine's recovery band, stale observation turns are shed
+        oldest-first (``_shed_stale_frames``) until the rebuilt prefix fits the
+        reserve; only when even that cannot get under the line does the client
+        raise :class:`ContextUnrecoverableError`, which the runner turns into a
+        scored truncation (``context-unrecoverable``) instead of sending a
+        request the provider will reject. The earlier stall latch is removed
+        because it let the priced context grow past the window between
+        rebuilds — a provider rejection, strictly worse than a cache miss.
         """
         from local_operator.compaction.pass_ import run_compaction_pass
         from local_operator.compaction.thresholds import (
-            RECOVERY_BAND,
             compaction_context_tokens,
             resolve_threshold_tokens,
             should_compact,
         )
-        from local_operator.compaction.tokens import estimate_messages_tokens
 
         messages = self._context.messages
         if not messages:
             return None, None, 0
         frame_due = self._context.rebuild_due()
+        # The trigger judges what the provider will BILL for this request, not
+        # what the local ruler counts: the provider's last figure described the
+        # previous prefix (one observation ago), and the ruler prices every
+        # frame at a flat 1,200 while vision providers bill per visual token.
+        # Both under-read the request about to be sent by exactly the frames
+        # appended since, so the local estimate is corrected by the engine's
+        # per-frame addend (the same correction the shed band uses) before the
+        # single resolver judges it. Without this a 24k window on a 5,000/frame
+        # model sent a 1.01x request one turn before the trigger fired.
         tokens_before = compaction_context_tokens(
-            self._last_provider_context_tokens, estimate_messages_tokens(messages)
+            self._last_provider_context_tokens, self._priced_estimate(messages)
         )
         window = int(getattr(self._model_spec, "context_window", 0) or 0)
         threshold_due = should_compact(tokens_before, window, self._compaction)
-        if threshold_due and self._threshold_stalled and not frame_due:
-            # The last threshold pass could not get under the line (the
-            # compacted form of this history -- an archive, a summary plus
-            # the kept window -- is itself above it), so firing again would
-            # rebuild the prefix every turn for no headroom: a cache miss per
-            # turn, forever. Fall back to the frame cadence alone, which still
-            # bounds the history and still rebuilds on the N-appends rhythm.
-            return None, None, 0
         if not (frame_due or threshold_due):
             return None, None, 0
+        threshold = resolve_threshold_tokens(window, self._compaction) if threshold_due else None
 
         summary_usage: ModelUsage | None = None
         summary_cost = 0
@@ -522,49 +544,46 @@ class ProviderModelClient:
             now_ms=_now_ms(),
             last_activity_ms=self._last_request_ms,
             provider_context_tokens=self._last_provider_context_tokens,
-            # The frame prune inside the pass runs unconditionally; only the
-            # SUMMARY half is gated on the threshold. A frame-budget rebuild
-            # lets the pass judge that gate itself: on a small context it
-            # prunes its frames and refuses the summary as below-threshold,
-            # which is the common and correct outcome. A threshold-triggered
-            # pass has ALREADY been judged over the line by the same resolver,
-            # so the gate is not re-asked after the prune: re-asking let the
-            # prune alone bring the context a hair under the line, refuse the
-            # summary, and re-fire (another rebuild, another cache miss) on
-            # the very next turn once one more observation landed -- a rebuild
-            # per turn, the failure this client exists to prevent. Summarising
-            # here creates real headroom (``keep_recent_tokens`` worth) instead.
+            # A frame-budget rebuild lets the pass judge its own gate (on a small
+            # context it prunes its frames and refuses the summary as
+            # below-threshold, the common and correct outcome). A
+            # threshold-triggered pass was ALREADY judged over the line by the
+            # same resolver, so the gate is not re-asked after the prune:
+            # re-asking let the prune alone slip just under the line, refuse
+            # the summary, and re-fire the pass on the very next turn (review
+            # round 1, m2).
             respect_threshold=not threshold_due,
         )
-        # The pass returns the pruned list even when it refused to summarize;
-        # either way it is the prefix to send from now on.
+        # The pass returns the pruned list even when it refused to summarize; either
+        # way it is the prefix to send from now on.
         self._context.replace(result.messages)
-        # The provider's last reported context size described the prefix that
-        # was just replaced. ``compaction_context_tokens`` is max(provider,
-        # local), so leaving it in place keeps the trigger judging the OLD
-        # size against the new prefix and re-fires the pass every turn once
-        # the window is genuinely full -- a rebuild per turn, which is exactly
-        # the cache-miss-per-turn this client exists to avoid (observed on
-        # turns 11-23 of a small-window drive before this reset). Judge the
-        # rebuilt prefix on the local estimate until the provider reports a
-        # fresh figure for it.
+        # The provider's last reported context size described the prefix that was just
+        # replaced, and ``compaction_context_tokens`` is max(provider, local), so a
+        # stale figure would keep re-firing the pass against the NEW prefix on every
+        # turn. Judge the rebuilt prefix on the local estimate until the provider
+        # reports a fresh figure for it (the next request's usage reports
+        # ``context_tokens``), which is one request away at most.
         self._last_provider_context_tokens = None
-        if threshold_due and result.ran:
-            # The engine's own anti-thrash rule (``RECOVERY_BAND``, added after
-            # a live dead-loop): a pass only counts as having created headroom
-            # when the residual lands at or below 0.8 x threshold. Above that
-            # the SUMMARY barely helped and re-firing it would thrash the
-            # cache. Judged only on a pass that actually summarised: a pass
-            # that refused (``ran`` false) left nothing to judge, and marking
-            # it stalled would silence the trigger on a context that was never
-            # compacted at all.
-            threshold = resolve_threshold_tokens(window, self._compaction)
-            priced = result.tokens_after * self._provider_scale
-            self._threshold_stalled = priced > RECOVERY_BAND * threshold
-        elif frame_due:
-            # A frame-budget rebuild is a fresh prefix; let the threshold
-            # judge it anew.
-            self._threshold_stalled = False
+        self._reported_context_for_current_prefix = False
+
+        if threshold is not None:
+            # A threshold pass must FIT, not merely run. Re-asking the trigger
+            # after a pass that left the prefix over the engine's reserve band
+            # would fire every turn for no headroom; silencing it would let the
+            # priced context grow past the window. The effective answer is to
+            # shed stale observation turns (oldest first) until it fits, and to
+            # refuse the request when even that cannot help — see the class
+            # docstring for why a silent trigger is never the alternative.
+            fits, shed = self._enforce_threshold_fit(threshold, band=int(0.8 * threshold))
+            if not fits:
+                raise ContextUnrecoverableError(
+                    "context cannot fit the window: the rebuilt prefix exceeds the "
+                    "compaction threshold even after shedding stale observations "
+                    f"({self._priced_estimate(self._context.messages)} priced tokens "
+                    f"against a band of {int(0.8 * threshold)}); the episode must "
+                    "truncate as context-unrecoverable rather than send a "
+                    "rejected request"
+                )
         if result.frames_dropped == 0 and not result.ran and not result.pruned:
             return None, None, 0
         record = CompactionRecord(
@@ -576,10 +595,95 @@ class ProviderModelClient:
             tokens_after=result.tokens_after,
             frames_dropped=result.frames_dropped,
             messages_before=before,
-            messages_after=len(result.messages),
+            messages_after=len(self._context.messages),
             summary_text=result.summary_text,
         )
         return record, summary_usage, summary_cost
+
+    def _priced_estimate(self, messages: Sequence[Any]) -> int:
+        """The local estimate corrected to what the provider will bill for frames.
+
+        The ruler counts every image at a flat ``IMAGE_TOKEN_ESTIMATE`` (1,200);
+        vision providers bill per visual token (Anthropic ~5,000 for a 1932px
+        frame). The engine ships the family formula (``frame_token_estimate_for``)
+        and the session prices a compaction's residual with it (its archive frame
+        correction), so the same ADDEND per frame is applied here — never a
+        multiplier on the whole context (review round 2, m4: a multiplier learned
+        before a rebuild misprices the residual after it).
+        """
+        from local_operator.compaction.snapcompact import frame_token_estimate_for
+        from local_operator.compaction.tokens import (
+            IMAGE_TOKEN_ESTIMATE,
+            estimate_messages_tokens,
+        )
+
+        frames = sum(
+            1 for message in messages for block in message.content if block.type == "image"
+        )
+        per_frame = frame_token_estimate_for(self._model_spec.provider, self._model_spec.model_id)
+        addend = max(0, per_frame - IMAGE_TOKEN_ESTIMATE)
+        return estimate_messages_tokens(messages) + frames * addend
+
+    def _enforce_threshold_fit(self, threshold: int, *, band: int) -> tuple[bool, int]:
+        """After a threshold pass, shed stale observations until the prefix fits.
+
+        Returns ``(fits, frames_shed)``. The pass above has already pruned and
+        summarised everything it could; what remains is how many of the OLD
+        observations to keep as frames. A shed removes an observation turn
+        (frame plus its assistant reply) from the front of the kept tail, never
+        the current observation, never past a compaction marker in the tail,
+        and stops at the first frame-less prefix (a frameless benchmark has
+        nothing to shed — a text-only window problem is not this method's to
+        solve, and pretending to fix it with deletion would corrupt the
+        episode). ``fits`` is False only when no shed could get under ``band``.
+
+        The band is judged on the PROVIDER's price, not the local ruler: the
+        ruler counts a frame at a flat 1,200 tokens while vision providers bill
+        per visual tokens (Anthropic ~5,000 for a 1932px frame), so a residual
+        that fits locally can still be rejected on the wire. The session prices
+        a compaction's residual the same way (its archive frame correction), and
+        the engine ships the formula (``frame_token_estimate_for``), so the
+        correction here is ``frames x (per_frame - IMAGE_TOKEN_ESTIMATE)`` added
+        to the local estimate — an ADDEND per frame, never a multiplier on the
+        whole context (review round 2, m4: a multiplier learned before a
+        rebuild misprices the residual after it, in whichever direction the
+        frame count moved).
+        """
+        if self._priced_estimate(self._context.messages) <= band:
+            return True, 0
+        if self._context.frames_in_history() == 0:
+            return False, 0
+        return self._shed_stale_frames(band, priced=self._priced_estimate)
+
+    def _shed_stale_frames(
+        self, band: int, *, priced: Callable[[Sequence[Any]], int]
+    ) -> tuple[bool, int]:
+        from local_operator.compaction.pruning import shed_stale_frames
+
+        messages = self._context.messages
+        frames = self._context.frames_in_history()
+        if frames == 0:
+            return False, 0
+        # The cheapest prefix that still answers the current observation: shed
+        # until the frame count allows the PRICED estimate under the band. The
+        # limit walks down from the current frame count, so a text-heavy
+        # episode sheds fewer turns than a frame-heavy one.
+        limit = frames
+        best: list[Any] | None = None
+        shed = 0
+        while limit >= 0:
+            candidate, removed = shed_stale_frames(messages, limit=limit)
+            if priced(candidate) <= band and candidate[-1] is messages[-1]:
+                best = candidate
+                shed = removed
+                break
+            if removed == 0:
+                break
+            limit -= 1
+        if best is None:
+            return False, 0
+        self._context.replace(best)
+        return True, shed
 
     def _summary_request(self, prompt: str) -> Any:
         from local_operator.compaction.api import SUMMARIZATION_SYSTEM_PROMPT

@@ -689,3 +689,49 @@ def test_episode_config_declares_no_frame_policy_it_cannot_enforce(tmp_path: Pat
     assert "keep_recent_frames" not in {field.name for field in fields(EpisodeConfig)}
     with pytest.raises(TypeError):
         build_config(tmp_path, keep_recent_frames=5)
+
+
+@pytest.mark.asyncio
+async def test_context_unrecoverable_seals_as_a_harness_error_not_a_provider_one(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """When the client cannot fit the context into the window even after
+    shedding every stale observation, it refuses rather than send a request
+    the provider will reject. The runner records that as a harness (adapter)
+    error and seals UNSCORED -- honestly, with a valid bundle -- because a
+    scored truncation is not representable: the last executed step's event was
+    already written, and the verifier's one-step-per-batch rule forbids a
+    corrective re-write (checked against the real verifier; see the PR thread).
+    It must not be reclassified as a provider failure, which would blame an
+    outage that did not happen."""
+
+    from local_operator.evaluation.runner.provider_client import (
+        ContextUnrecoverableError,
+    )
+
+    class RefusingModel:
+        async def decide(self, observation: Any, history: Any) -> Any:
+            raise ContextUnrecoverableError("context cannot fit the window")
+
+    adapter = FakeAdapter(tmp_path, episode_id)
+    runner = EpisodeRunner(
+        build_spec(episode_id),
+        build_config(tmp_path),
+        selector=selector(tmp_path),
+        model=RefusingModel(),
+        launch=lambda _: adapter,
+        rescue=_rescue_ok,
+    )
+
+    outcome = await runner.run()
+
+    assert outcome.status == "failed"
+    assert outcome.score is not None and outcome.score.status == "unscored"
+    root = outcome.bundle_root
+    assert root is not None
+    report = verify_bundle(root)
+    assert report.valid, [issue.code for issue in report.issues]
+    errors = payloads(root, ErrorPayload)
+    assert len(errors) == 1
+    assert errors[0].category == "adapter"
+    assert errors[0].diagnostic_code == "contextunrecoverableerror"
