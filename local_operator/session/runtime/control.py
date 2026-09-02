@@ -344,35 +344,36 @@ def _process_started_at(pid: int) -> float | None:
 
 
 def _identity_by_record(record: SessionRecord) -> tuple[bool, str]:
-    """Identity from the RECORD FIELDS alone — no socket, no clock.
+    """Identity from the record plus what the OS says about that pid.
 
-    The record the runtime wrote says: this pid, this session, this kind,
-    this cwd, this port/key. A process at that pid that serves the SAME
-    session on the SAME port with the SAME key is the owner beyond pid-reuse
-    doubt, because the port+key are chosen at spawn and recycled-pid
-    coincidence across three independent fields is not a real shape.
+    Admissible ONLY under ``--force`` AND only when the socket was SILENT
+    (the caller gates both): the socket answer is the load-bearing proof
+    everywhere else, and this fallback exists for the one shape the socket
+    cannot reach — a heartbeating-but-starved process (a TUI burning 100%
+    CPU in a tight tool-error loop, its socket loop queued behind the
+    runaway) that the refusal rule would otherwise hold forever.
 
-    Admissible ONLY under ``--force`` (the caller's explicit opt-in): the
-    socket identity is the load-bearing proof everywhere else, and this
-    fallback exists for the one shape the socket cannot reach — a
-    heartbeating-but-starved process (a TUI burning 100% CPU in a tight
-    tool-error loop, its socket loop queued behind the loop) that the
-    refusal rule would otherwise hold forever. ``kind == "tui"`` is the
-    load-bearing case; a ``daemon``-kind runtime starves the same way but
-    has no terminal to lose, so the SIGTERM is safe there too once identity
-    is proven from the record.
+    What is actually checked — stated precisely, because the next person to
+    widen this will trust this paragraph. NOTHING here asks the process what
+    session it serves; that question is the socket's, and a socket that
+    answers a DIFFERENT session is a live stranger that stays refused rather
+    than reaching this function at all. The control key is likewise never
+    verified against the process. Three facts must all hold:
 
-    Two facts must BOTH hold, and neither is optional:
-
-    1. The record on disk still names this pid and session (``_same_uid``).
-    2. The pid still HOLDS the port the record claims, and its heartbeat is
-       fresh. A starved runtime keeps heartbeating (the heartbeat thread is
-       SIGSTOP-immune and independent of the socket loop), so a fresh
-       heartbeat is precisely what separates "alive but not answering" from
-       "record outlived its process". Without this, --force degenerates into
-       "signal whatever holds this pid": a stale record whose pid a stranger
-       inherited passed check 1 alone and SIGTERMed an unrelated process in
-       testing — the exact pid-reuse accident the ladder exists to prevent.
+    1. ``_same_uid`` — the record on disk is ours and still names this pid
+       and session. Self-consistent by construction: it compares the record
+       against the same file, so it adds no evidence about the PROCESS. It
+       is an authorization and freshness check, not an identity proof.
+    2. A heartbeat fresher than the timeout, and the pid still HOLDING the
+       recorded control port. A starved runtime keeps heartbeating (that
+       thread is independent of the socket loop), which is what separates
+       "alive but not answering" from "record outlived its process".
+    3. The process did not start AFTER the record's last heartbeat. This is
+       the clause that carries the weight: (1) and (2) together are still
+       satisfiable by a stranger that inherited a dead lop's pid AND its
+       ephemeral port inside the heartbeat window, which is a real accident
+       rather than a hypothetical — it was reproduced deterministically
+       against unrelated processes (round-3 Q3-1).
     """
     if not _same_uid(record):
         return False, "the record on disk no longer names this pid and session"
@@ -383,10 +384,29 @@ def _identity_by_record(record: SessionRecord) -> tuple[bool, str]:
     if age > HEARTBEAT_TIMEOUT_S:
         return False, (
             f"its record stopped heartbeating {int(age)}s ago, so the pid may "
-            f"belong to another process now — identity cannot be confirmed"
+            f"belong to another process now; identity cannot be confirmed"
         )
     if not _pid_holds_port(record):
         return False, "the pid no longer holds the control port its record claims"
+    # Third clause, and the one that closes the actual accident: a stranger
+    # can inherit BOTH a dead lop's pid and its ephemeral port inside the
+    # heartbeat window — ports are recycled alongside pids, so the port check
+    # bounds that window rather than closing it, and QA killed unrelated
+    # processes four times over deterministically on the two clauses alone
+    # (round-3 Q3-1). A process that started AFTER the record's last
+    # heartbeat cannot be the process that wrote it, whatever pid and port it
+    # now holds. Measured not to cost the case --force exists for: on a
+    # genuinely starved runtime the start time precedes the heartbeat, so the
+    # legitimate target is still admitted.
+    started = _process_started_at(record.pid)
+    if started is None:
+        return False, "could not read the process start time; identity cannot be confirmed"
+    if started > record.heartbeat_at + 1.0:
+        return (
+            False,
+            "the process started after the record's last heartbeat "
+            "(the pid was reused); identity cannot be confirmed",
+        )
     return True, ""
 
 
@@ -411,7 +431,17 @@ def _pid_holds_port(record: SessionRecord) -> bool:
         ).stdout
     except (OSError, subprocess.SubprocessError):
         return False
-    return f":{record.control_port}" in out
+    # Anchored: lsof prints "TCP 127.0.0.1:53213 (LISTEN)", so an unanchored
+    # ``":5321" in out`` matches every PREFIX of a real listening port. Parse
+    # the address column and compare the port as an integer instead — this
+    # function is the load-bearing half of a fix for a bug that killed an
+    # unrelated process, so a loose match here is exactly the wrong economy.
+    for line in out.splitlines():
+        for field in line.split():
+            _, sep, port = field.rpartition(":")
+            if sep and port.isdigit() and int(port) == record.control_port:
+                return True
+    return False
 
 
 async def _identity_by_start_time(record: SessionRecord) -> tuple[bool, str]:
@@ -600,7 +630,9 @@ async def _await_pid_exit(pid: int, timeout_s: float) -> bool:
     return not registry.pid_alive(pid)
 
 
-def _stopped_line(record: SessionRecord, method: Method, wakes: int) -> str:
+def _stopped_line(
+    record: SessionRecord, method: Method, wakes: int, *, forced: bool = False
+) -> str:
     """The one human receipt line every front end paints for one stop.
 
     ``socket`` reads as a plain "stopped"; the signal rungs SAY so —
@@ -608,14 +640,20 @@ def _stopped_line(record: SessionRecord, method: Method, wakes: int) -> str:
     reports an escalated stop as a graceful one hides the one fact the
     user would act on next time (that runtime was not answering its
     socket). ``sigkill`` gets its own verb: state was orphaned.
+
+    ``forced`` names the proof that authorised the signal. A forced stop is
+    the one outcome whose receipt has to say the socket proof was bypassed
+    and identity came from the record instead, so the transcript records
+    which evidence the kill rested on (round-3 D3-4).
     """
     name = record.conversation_name or record.session_id
     verb = "killed" if method == "sigkill" else "stopped"
     rung = " (sigterm)" if method == "sigterm" else ""
+    proof = " (--force: identity confirmed from its record)" if forced else ""
     wakes_part = (
         f" — {wakes} wake{'s' if wakes != 1 else ''} dormant until you reopen it" if wakes else ""
     )
-    return f'{verb} "{name}"{rung}{wakes_part}'
+    return f'{verb} "{name}"{rung}{proof}{wakes_part}'
 
 
 async def _graceful_stop(record: SessionRecord, timeout_s: float) -> bool:
@@ -729,25 +767,43 @@ async def stop_session(
     # runtime is never asked to prove itself and a wedged one cannot
     # fast-path to a signal it did not earn.
     confirmed, why_not = await _confirmed_session_id(record)
-    if not confirmed and why_not == _SOCKET_SILENT:
+    # Whether the SOCKET was silent, remembered before the rungs below
+    # overwrite ``why_not`` with their own reasons. Both fallback proofs are
+    # gated on this and not on "unconfirmed": a socket that ANSWERED naming a
+    # different session is a live stranger, and no weaker evidence may
+    # override it (round-3 BLOCKER-2).
+    socket_silent = not confirmed and why_not == _SOCKET_SILENT
+    if socket_silent:
         # Alive but silent: the wedged case. The socket cannot vouch for
         # it, so fall back to the start-time proof — still a proof, still
         # refusing when it cannot be made. A socket that ANSWERED with a
         # different session id never reaches here: that is a live stranger
         # and stays refused.
         confirmed, why_not = await _identity_by_start_time(record)
-    if not confirmed and force:
-        # --force: the one identity the socket cannot give (a starved
-        # process that never services its loop) is read from the record's
-        # own fields — port, key, session, kind — which a recycled pid
-        # cannot collide on. Gated on the caller's explicit opt-in and
-        # named in the receipt, because the refusal rule this bypasses is
-        # the one that keeps a wrong pid alive.
-        # Off the loop: this forks ``lsof`` and the TUI runs the ladder on
-        # its event loop, the same constraint the ``ps`` probe above carries.
+    forced = False
+    if not confirmed and force and socket_silent:
+        # --force reads identity from the record's own fields for the one
+        # case the socket cannot answer: a process so starved it never
+        # services its loop.
+        #
+        # Gated on SILENCE, exactly like the start-time rung above, and for
+        # the same reason. A socket that ANSWERED "I serve session X, not Y"
+        # is a live stranger telling you to your face that it is not your
+        # target — the strongest negative the ladder can obtain — and record
+        # fields are strictly weaker evidence that the very record in
+        # question trivially satisfies. This needs no attacker to go wrong:
+        # ``session_id`` reaches the record only on the 15 s heartbeat, so
+        # after /resume there is a window where the record still names the
+        # PREVIOUS session while the process serves the new one, and a user
+        # who re-ran with --force as the refusal invites would kill the
+        # conversation that replaced it (round-3 BLOCKER-2).
+        #
+        # Off the loop: this forks ``lsof`` and ``ps``, and the TUI runs the
+        # ladder on its event loop — the constraint the probes above carry.
         confirmed, why_not = await asyncio.to_thread(_identity_by_record, record)
         if confirmed:
             why_not = ""
+            forced = True
     if not confirmed:
         method = "refused"
         return StopOutcome(
@@ -769,7 +825,7 @@ async def stop_session(
             session_id=record.session_id,
             name=name,
             method=method,
-            line=_stopped_line(record, method, wakes),
+            line=_stopped_line(record, method, wakes, forced=forced),
             wakes_dormant=wakes,
         )
 
@@ -784,7 +840,7 @@ async def stop_session(
         session_id=record.session_id,
         name=name,
         method=method,
-        line=_stopped_line(record, method, wakes),
+        line=_stopped_line(record, method, wakes, forced=forced),
         wakes_dormant=wakes,
     )
 
