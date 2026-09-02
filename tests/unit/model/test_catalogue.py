@@ -1644,3 +1644,53 @@ def test_the_background_refresh_runs_the_revalidate_thunk_not_the_on_path_one(
         "anthropic.listing", on_path, cache_dir=tmp_path, revalidate=off_path
     )
     assert listing.fetched is True and ran == ["fetch"]
+
+
+# -- stranded temp files ------------------------------------------------------
+
+
+def test_purge_removes_stranded_temp_files_older_than_the_gate_only(tmp_path) -> None:
+    """A daemon revalidation thread killed at interpreter exit mid-`json.dump`
+    leaves `<key>.listing.json.<random>.tmp` that nothing else reclaims. Only
+    OLD ones go: a young one is a peer's in-flight write, and deleting it would
+    strand that peer's rename."""
+    import os
+
+    old = tmp_path / "anthropic.listing.json.abc123.tmp"
+    young = tmp_path / "openrouter.listing.json.def456.tmp"
+    foreign = tmp_path / "pypi-local-operator.json.ghi789.tmp"  # update.py's, not ours
+    document = tmp_path / "anthropic.listing.json"
+    for path in (old, young, foreign, document):
+        path.write_text("{", encoding="utf-8")
+    stale_mtime = time.time() - catalogue._STRANDED_TEMP_MIN_AGE_S - 60
+    os.utime(old, (stale_mtime, stale_mtime))
+    os.utime(foreign, (stale_mtime, stale_mtime))
+
+    catalogue.purge_stranded_temp_files(tmp_path)
+    catalogue.purge_stranded_temp_files(tmp_path)  # idempotent
+
+    assert not old.exists()
+    assert young.exists(), "an in-flight peer write must not be deleted"
+    assert foreign.exists(), "another writer's temp files are its own business"
+    assert document.exists()
+
+
+def test_read_listing_sweeps_stranded_temp_files(tmp_path, _no_backoff_state) -> None:
+    import os
+
+    _plant(tmp_path, "anthropic.listing", _payload(), age_s=10)
+    stranded = tmp_path / "anthropic.listing.json.zzz.tmp"
+    stranded.write_text("{", encoding="utf-8")
+    stale_mtime = time.time() - catalogue._STRANDED_TEMP_MIN_AGE_S - 60
+    os.utime(stranded, (stale_mtime, stale_mtime))
+
+    catalogue.read_listing(
+        "anthropic.listing", lambda: pytest.fail("no fetch expected"), cache_dir=tmp_path
+    )
+    assert not stranded.exists()
+
+
+def test_purge_stranded_is_safe_when_the_cache_dir_does_not_exist(tmp_path) -> None:
+    missing = tmp_path / "never-created"
+    catalogue.purge_stranded_temp_files(missing)  # must not raise
+    assert not missing.exists()

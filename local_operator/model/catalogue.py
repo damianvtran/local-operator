@@ -105,6 +105,22 @@ def default_cache_dir() -> Path:
 #: and neither can match a current ``<key>.json`` whose key ends in ``.listing``.
 _LEGACY_DOCUMENT_GLOB = "*.models.json"
 
+#: A temp file :func:`_write_cache` was renaming into place when its process
+#: died. ``mkstemp`` names them ``<key>.json.<random>.tmp`` and every key this
+#: module writes ends in ``.listing``, so the pattern cannot match another
+#: writer's temp file in the shared directory (``update.py`` names its own
+#: ``pypi-local-operator.json.<random>.tmp`` there and owns that cleanup).
+_STRANDED_TEMP_GLOB = "*.listing.json.*.tmp"
+
+#: How old a stranded temp file must be before the sweep takes it. A listing
+#: write is a few milliseconds of ``json.dump`` on a ~190 KB document, so a
+#: temp file that has sat for minutes is not an in-flight write by a peer
+#: process or a sibling thread; it is a corpse. Generous rather than tight,
+#: because deleting a live temp file out from under a writer would turn its
+#: rename into a stranded document, which is the failure this sweep exists to
+#: reclaim, not to cause.
+_STRANDED_TEMP_MIN_AGE_S = 5 * 60
+
 
 def _cache_path(key: str, cache_dir: Path | None) -> Path:
     """The document for ``key``; the key is the WHOLE stem, suffix added once.
@@ -137,6 +153,39 @@ def purge_legacy_documents(cache_dir: Path | None = None) -> None:
     except OSError as exc:  # pragma: no cover - read-only or unreadable cache dir
         # Reclaiming disk is never worth failing a session start over.
         logger.debug("could not purge legacy catalogue documents: %s", exc)
+
+
+def purge_stranded_temp_files(cache_dir: Path | None = None) -> None:
+    """Delete temp files a killed writer never renamed into place.
+
+    :func:`_write_cache` cleans up after itself on every failure it can SEE, but
+    the background revalidation thread is a daemon (:func:`_schedule_revalidate`)
+    and a short ``lop --model ...`` run exits while that thread may still be
+    inside ``json.dump``: the interpreter tears the thread down with no
+    ``finally`` run, and a ~190 KB ``<key>.listing.json.<random>.tmp`` stays
+    beside the document for good. The document itself is never harmed — the
+    rename never happened — but each such exit leaks one file, and a cache with
+    no index has no other way to notice it.
+
+    Age-gated on mtime (:data:`_STRANDED_TEMP_MIN_AGE_S`), because the same
+    name shape is what a peer process or sibling thread is writing RIGHT NOW;
+    an orphan is told from an in-flight write only by how long it has sat.
+    Stateless and idempotent like :func:`purge_legacy_documents`, and every
+    failure is swallowed: a stat that races the writer's own rename must not
+    fail the read that swept.
+    """
+    directory = cache_dir or default_cache_dir()
+    cutoff = time.time() - _STRANDED_TEMP_MIN_AGE_S
+    try:
+        for stranded in directory.glob(_STRANDED_TEMP_GLOB):
+            try:
+                if stranded.stat().st_mtime < cutoff:
+                    stranded.unlink(missing_ok=True)
+            except OSError:
+                # Renamed or removed between the glob and the stat: not ours.
+                continue
+    except OSError as exc:  # pragma: no cover - read-only or unreadable cache dir
+        logger.debug("could not purge stranded catalogue temp files: %s", exc)
 
 
 def _read_cache(path: Path) -> tuple[dict[str, Any] | None, float]:
@@ -524,6 +573,7 @@ def read_listing(
     # which document names went dead, and a dead name has no reader left to
     # notice it. Costs one directory read once the sweep has nothing to match.
     purge_legacy_documents(cache_dir)
+    purge_stranded_temp_files(cache_dir)
     path = _cache_path(key, cache_dir)
     payload, age = _read_cache(path)
     if payload is not None and age < ttl_s:
