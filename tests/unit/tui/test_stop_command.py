@@ -612,3 +612,41 @@ async def test_tui_handle_stop_op_acks_and_ends_the_session(kill_spy) -> None:
         assert reply is not None and reply.get("op") == "ack", reply
         assert app._session is None and session.disposed
         assert kill_spy == []
+
+
+@pytest.mark.asyncio
+async def test_arm_listing_at_80_columns_never_wraps_a_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The painted block's height equals its row count — no wrapped
+    continuation can clip the instruction off the block (D2-1/U2-2).
+
+    The acceptance test the round-2 design finding shipped: a name longer
+    than the row budget at 80 columns truncates inside its own row, every
+    painted row is one block row, and the repeat instruction is the block's
+    last line.
+    """
+    long_name = "Investigating the flaky analytics recorder test on main"  # 55 cells
+    targets = [_record(101, "Auditing merged MRs"), _record(102, long_name)]
+    monkeypatch.setattr(control, "_stop_targets", lambda root, own_pid=None: targets)
+    session = FakeSession()
+    session.set_conversation_name(long_name)  # the own row is the worst case
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(80, 30)) as pilot:
+        await _booted(app, pilot, session)
+        app._run_slash_command("/stop all")
+        for _ in range(30):
+            await pilot.pause()
+            if app._stop_all_listing is not None:
+                break
+        block = app._stop_all_listing
+        assert block is not None
+        # No row exceeds the block's own body budget: every painted row is
+        # one line, so the block's pinned height equals its text rows and the
+        # last line (the instruction) is always painted.
+        from local_operator.tui.widgets.transcript import NoticeBlock as NB
+
+        budget = NB.body_budget(80 - 1)
+        for line in block._text.split("\n"):
+            assert len(line) <= budget, (line, len(line), budget)
+        assert block._text.split("\n")[-1].startswith("repeat /stop all")
+        assert "…" in block._text  # the long name really was truncated
+        assert "(this one, last)" in block._text.split("\n")[-2]

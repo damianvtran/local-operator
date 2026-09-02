@@ -8245,10 +8245,14 @@ class OperatorApp(App[None]):
         cannot work, and by :meth:`_request_relaunch`, which must not stash
         a ``--resume`` id that the next process would reject.
         """
+        # A session that was /stop'd still has a resumable transcript on
+        # disk; `_stopped_session_id` carries it, so the Ctrl+C ladder and
+        # the exit block name the way back instead of going silent at the
+        # moment a kill-switch user most needs it.
         session = self._session
-        if session is None:
-            return ""
-        session_id = getattr(session, "session_id", "")
+        session_id = (
+            getattr(session, "session_id", "") if session is not None else self._stopped_session_id
+        )
         if not session_id:
             return ""
         from local_operator.paths import config_dir
@@ -13100,6 +13104,11 @@ class OperatorApp(App[None]):
         # twice and paint two receipts.
         self._session = None
         resumable_id = getattr(session, "session_id", "") or ""
+        # Set here, beside the detach: between this and the receipt below, a
+        # prompt or second /stop hits `_no_session_notice` with no session
+        # and no stopped id and answers "session is still starting…" — the
+        # boot wording — for a session the user just stopped on purpose.
+        self._stopped_session_id = resumable_id
         name = getattr(session, "conversation_name", "") or resumable_id
         wakes = self._mark_own_wakes_dormant(session)
         # Retire any paint the dying session already queued: its
@@ -13144,7 +13153,6 @@ class OperatorApp(App[None]):
         # does exactly this; `/resume` re-adopts and republishes. It is also
         # what a peer's stop ladder observes as "landed" (`_await_stopped`).
         self._mobile_teardown()
-        self._stopped_session_id = resumable_id
         self._approval = None
         self._refresh_working_activity()
         if self._status is not None:
@@ -13394,7 +13402,13 @@ class OperatorApp(App[None]):
             own_name = getattr(own, "conversation_name", "") or getattr(own, "session_id", "")
             rows.append((own_pid, own_name, " (this one, last)"))
         pid_w = max(len(str(pid)) for pid, _name, _tag in rows)
-        budget = max(0, self._transcript_view().size.width - NoticeBlock.GLYPH_COLS)
+        # The budget the BLOCK paints at, not the view's: the transcript's
+        # one-cell left padding sits between the view width and the block
+        # width, and the notice's own fold (glyph gutter, floor) lives in
+        # ``NoticeBlock.body_budget`` — a caller-side approximation missed
+        # by exactly those cells and the listing's instruction row wrapped
+        # off the painted block (D2-1).
+        budget = NoticeBlock.body_budget(max(0, self._transcript_view().size.width - 1))
         lines = [f"will stop {total} session{'s' if total != 1 else ''}:"]
         for pid, name, tag in rows:
             lead = f"  pid {pid:>{pid_w}}  "

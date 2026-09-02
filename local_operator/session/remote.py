@@ -84,6 +84,11 @@ from local_operator.session.protocol import CompactionOutcome
 from local_operator.session.transcript import Transcript
 from local_operator.session_lease import SessionLeaseHeldError
 
+#: Indirection so tests monkeypatch ``remote_module.find_owner_record``
+#: and the recovery loop reads the patched callable — a direct import binding
+#: would shadow the patch and the loop would scan the real registry forever.
+_find_owner_record = find_owner_record
+
 logger = logging.getLogger(__name__)
 
 #: User-facing refusal for a routed slash submitted while the owner is being
@@ -159,6 +164,15 @@ class RemoteSession:
         self._session_id = session_id
         self._takeover_factory = takeover_factory
         self._client: AttachClient | None = None
+        #: True once THIS follower asked the owner to stop the session
+        #: (``request_stop`` acked) or the wire evidence says the session was
+        #: deliberately ended (the owner served the stop and unpublished).
+        #: Owner loss after THAT is the request landing, not a death:
+        #: ``_recover_owner`` must not take over the conversation a stop
+        #: just ended (it would republish a live record for a stopped
+        #: session, and its next prompt would be refused against the
+        #: ``stopped_at`` marker the stop stamped).
+        self._deliberate_stop = False
         # The projection callback authenticates the welcome identity only. Full
         # TUI semantics come exclusively from the canonical v5 state stream.
         self._frontend_future: asyncio.Future[FrontendSync] | None = None
@@ -730,6 +744,14 @@ class RemoteSession:
     def _on_disconnected(self, _reason: str) -> None:
         if self._disposed or self._recovering:
             return
+        # A disconnect that follows OUR stop request (or arrives after the
+        # owner already unpublishes) is the deliberate-stop landing: the
+        # session ended on purpose, so there is no owner to recover and no
+        # transcript lease to win. Stay a viewer showing the cold session —
+        # the same shape bare /stop leaves an owner in. The record scan in
+        # `_recover_owner` would otherwise rediscover nothing and take over.
+        if self._deliberate_stop:
+            return
         self._recovering = True
         self._owner_ready.clear()
         # A killed owner factually aborted the in-flight turn. Mark it through
@@ -741,12 +763,64 @@ class RemoteSession:
             self._streaming = False
         self._recovery_task = asyncio.create_task(self._recover_owner())
 
+    async def _session_was_stopped(self) -> bool:
+        """True when the disconnect's cause is a DELIBERATE stop, not owner death.
+
+        Two shapes, one meaning — the session ended on purpose, so there is
+        nothing to recover:
+
+        1. This follower issued the stop itself (``_deliberate_stop``, set in
+           ``request_stop`` before the op is sent).
+        2. Someone ELSE stopped the session (another TUI's ``/stop all``, a
+           shell ``lop stop``) while this follower watched: the stop stamps
+           ``stopped_at`` on the wake-index entry (a durable, transcript-
+           derived marker — survives the owner's exit, readable before any
+           reconnect), and the owner never rediscovers. Both conditions
+           together are the deliberate-stop wire shape: a dead owner leaves
+           the marker absent, a stopped one leaves it set.
+        """
+        if self._deliberate_stop:
+            return True
+        from local_operator.wakes import store as wake_store
+
+        entry = await asyncio.to_thread(
+            wake_store.read_entry, self._config_dir, self._session_id
+        )
+        if entry is None or not entry.get("stopped_at"):
+            return False
+        # The marker says stopped; confirm nobody re-opened it in the
+        # meantime (an open clears ``stopped_at``). If an owner is live and
+        # reachable, this is a re-open — recover normally.
+        record, _ = await asyncio.to_thread(
+            _find_owner_record, self._config_dir, self._session_id
+        )
+        return record is None
+
     async def _recover_owner(self) -> None:
+        if self._deliberate_stop:
+            # The disconnect came from the stop this follower issued (or that
+            # landed while it watched): the session is cold, not orphaned.
+            # Nothing to recover — the transcript stays on screen and
+            # /resume (or a peer's /resume) is the way back. A takeover here
+            # would win the lease, republish a live record for a session the
+            # user just stopped, and let a later `lop stop --all` SIGTERM
+            # this terminal for a record it never made.
+            self._owner_ready.set()  # prompts route to the stopped notice
+            return
         delay = 0.1
         try:
             while not self._disposed:
+                # A stop by someone else while we watched: the transcript's
+                # ``stopped_at`` marker plus no live owner is the deliberate
+                # shape. Read it once at the top of each pass — cheap (one
+                # small file, threaded) and it is what keeps the takeover
+                # from resurrecting a session a kill switch just ended.
+                if not self._deliberate_stop and await self._session_was_stopped():
+                    self._deliberate_stop = True
+                    self._owner_ready.set()  # prompts route to the stopped notice
+                    return
                 record, _ = await asyncio.to_thread(
-                    find_owner_record, self._config_dir, self._session_id
+                    _find_owner_record, self._config_dir, self._session_id
                 )
                 if (
                     record is not None
@@ -1118,12 +1192,17 @@ class RemoteSession:
             asyncio.create_task(self._client.abort())
 
     async def request_stop(self) -> str:
-        """Forward the viewer's bare ``/stop`` to the owner (graceful rung).
+        """Stop the session this follower is watching — deliberately.
 
-        Async where ``abort`` is fire-and-forget because the caller wants the
-        owner's ack to paint a receipt; a stop whose receipt cannot say the
-        owner accepted would be indistinguishable from a dropped keypress.
+        Marks the intent BEFORE the op is sent: the owner's graceful stop
+        closes this very socket, and the disconnect handler must read that
+        EOF as the stop landing, not as owner death to recover from. A
+        marker set here covers the follower's own ``/stop``; the wire
+        variant (another process stopped the owner while this follower
+        watched) is inferred in ``_recover_owner`` from the owner never
+        rediscoverable AND the transcript's ``stopped_at`` marker.
         """
+        self._deliberate_stop = True
         if self._client is None:
             raise ConnectionError("not attached")
         return await self._client.request_stop()

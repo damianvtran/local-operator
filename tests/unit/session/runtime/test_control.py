@@ -21,6 +21,8 @@ exercised through the monkeypatched seams the runtime cannot avoid exposing
 
 from __future__ import annotations
 
+import asyncio
+import os
 from pathlib import Path
 from typing import Any
 
@@ -349,3 +351,38 @@ async def test_old_runtime_unknown_op_is_a_miss_not_a_failure() -> None:
         assert reply is not None and reply.get("op") == "error"
     finally:
         server.close()
+
+
+@pytest.mark.asyncio
+async def test_force_escalates_past_a_fresh_heartbeat_on_record_identity(no_signals) -> None:
+    """A heartbeating-but-socket-silent process (a starved TUI burning 100%
+    CPU) is refused without --force and stopped with it: the record's own
+    fields (pid, session, port, key) prove identity past the refusal rule."""
+    server, record = await _serve()
+    try:
+        # Starve the socket: SIGSTOP the server's loop thread shape is
+        # infeasible in-process; instead make the socket silent by stopping
+        # the server but keeping its record live and the pid alive. The
+        # heartbeat stays fresh (the fixture's pid_alive returns True), so
+        # without force the refusal names the wait; with force the record
+        # fields carry identity.
+        # Close the server and let its async unpublish LAND before the
+        # republish, or the close's cleanup deletes the file we just wrote.
+        server.close()
+        await asyncio.sleep(0.3)
+        target = _record_for(record, pid=os.getpid())  # the runner's pid, alive
+        registry.publish(target)
+        refused = await control.stop_session(target, timeout_s=1.0, _root=registry.run_dir())
+        assert refused.method == "refused"
+        assert "must lapse" in refused.line  # the named wait (U2-3)
+        assert no_signals[0] == []
+        stopped = await control.stop_session(
+            target, timeout_s=1.0, force=True, _root=registry.run_dir()
+        )
+        # The ladder signalled (the spy saw it) and the outcome names the
+        # rung; the process is the runner, so pid_alive stays True and the
+        # ladder reports the rung it reached, not a lie.
+        assert stopped.method in ("sigterm", "sigkill")
+        assert no_signals[0] != []  # signals WERE sent — the force gate opened
+    finally:
+        pass

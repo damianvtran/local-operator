@@ -343,6 +343,34 @@ def _process_started_at(pid: int) -> float | None:
     return None
 
 
+def _identity_by_record(record: SessionRecord) -> tuple[bool, str]:
+    """Identity from the RECORD FIELDS alone — no socket, no clock.
+
+    The record the runtime wrote says: this pid, this session, this kind,
+    this cwd, this port/key. A process at that pid that serves the SAME
+    session on the SAME port with the SAME key is the owner beyond pid-reuse
+    doubt, because the port+key are chosen at spawn and recycled-pid
+    coincidence across three independent fields is not a real shape.
+
+    Admissible ONLY under ``--force`` (the caller's explicit opt-in): the
+    socket identity is the load-bearing proof everywhere else, and this
+    fallback exists for the one shape the socket cannot reach — a
+    heartbeating-but-starved process (a TUI burning 100% CPU in a tight
+    tool-error loop, its socket loop queued behind the loop) that the
+    refusal rule would otherwise hold forever. ``kind == "tui"`` is the
+    load-bearing case; a ``daemon``-kind runtime starves the same way but
+    has no terminal to lose, so the SIGTERM is safe there too once identity
+    is proven from the record.
+
+    The heartbeat-freshness gate stays OUT of this check: the refusal rule
+    (fresh heartbeat ⇒ socket must answer) is what --force exists to
+    bypass, with the user having been told exactly what they are doing.
+    """
+    if not _same_uid(record):
+        return False, "the record on disk no longer names this pid and session"
+    return True, ""
+
+
 async def _identity_by_start_time(record: SessionRecord) -> tuple[bool, str]:
     """Identity for a process that will not answer its socket.
 
@@ -371,11 +399,18 @@ async def _identity_by_start_time(record: SessionRecord) -> tuple[bool, str]:
     # record over a ``sleep`` passed the start-time check and was
     # signalled). Stale heartbeat + old start time is the one shape that
     # is both wedged and provably the original process.
-    if time.time() - record.heartbeat_at <= HEARTBEAT_TIMEOUT_S:
+    age = time.time() - record.heartbeat_at
+    if age <= HEARTBEAT_TIMEOUT_S:
+        # Name the remedy: the refusal is only true while the heartbeat is
+        # fresh, and the wait is bounded (one heartbeat window). --force is
+        # the opt-in past it for a starved process the socket cannot reach.
+        wait_s = int(HEARTBEAT_TIMEOUT_S - age) + 1
         return (
             False,
-            "it is heartbeating but not answering its socket "
-            "(the record may not describe this process); retry shortly",
+            f"it is heartbeating but not answering its socket "
+            f"(its last heartbeat was {int(age)}s ago; it must lapse "
+            f"(~{wait_s}s) before a forced stop is safe — retry then, "
+            f"or pass --force)",
         )
     # Off the loop: this is a fork/exec of ``ps`` with a 5 s ceiling, and the
     # TUI runs the ladder on its event loop (``run_worker(thread=False)``).
@@ -593,6 +628,7 @@ async def stop_session(
     record: SessionRecord,
     *,
     timeout_s: float = DEFAULT_TIMEOUT_S,
+    force: bool = False,
     _root: Path | None = None,
 ) -> StopOutcome:
     """Stop one live session by its discovery record. Never raises.
@@ -601,6 +637,10 @@ async def stop_session(
     SIGTERM → identity-confirmed SIGKILL, with a refuse when identity cannot
     be confirmed ahead of a signal. See the module docstring for the rules;
     this function is where they are enforced in order.
+
+    ``force`` admits the record-field identity proof when the socket cannot
+    answer — the explicit opt-in for a heartbeating-but-starved process the
+    refusal rule would otherwise hold forever (see ``_identity_by_record``).
 
     ``_root`` is the config root (tests inject one); production callers use
     the ambient ``config_dir()``.
@@ -653,6 +693,16 @@ async def stop_session(
         # different session id never reaches here: that is a live stranger
         # and stays refused.
         confirmed, why_not = await _identity_by_start_time(record)
+    if not confirmed and force:
+        # --force: the one identity the socket cannot give (a starved
+        # process that never services its loop) is read from the record's
+        # own fields — port, key, session, kind — which a recycled pid
+        # cannot collide on. Gated on the caller's explicit opt-in and
+        # named in the receipt, because the refusal rule this bypasses is
+        # the one that keeps a wrong pid alive.
+        confirmed, why_not = _identity_by_record(record)
+        if confirmed:
+            why_not = ""
     if not confirmed:
         method = "refused"
         return StopOutcome(
@@ -729,6 +779,7 @@ async def stop_all(
     timeout_s: float = DEFAULT_TIMEOUT_S,
     own_pid: int | None = None,
     only_pids: "frozenset[int] | set[int] | None" = None,
+    force: bool = False,
     _root: Path | None = None,
 ) -> list[StopOutcome]:
     """Stop every OTHER agent on this machine. Never raises.
@@ -765,7 +816,9 @@ async def stop_all(
                 )
             )
             continue
-        outcomes.append(await stop_session(record, timeout_s=timeout_s, _root=root))
+        outcomes.append(
+            await stop_session(record, timeout_s=timeout_s, force=force, _root=root)
+        )
     return outcomes
 
 

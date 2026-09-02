@@ -204,9 +204,12 @@ def candidate_lines(
     # A prefix that already ends in its own separator (``pid=``) is joined
     # tight; a bare flag name takes the space a shell command needs.
     gap = "" if prefix.endswith("=") else " "
+    pid_w = max(len(str(rec.pid)) for rec in candidates)
     for rec in candidates:
         name = rec.conversation_name or rec.session_id
-        lines.append(f"{indent}{prefix}{gap}{rec.pid}  {name}  ({rec.model_label})")
+        lines.append(
+            f"{indent}{prefix}{gap}{rec.pid:>{pid_w}}  {name}  ({rec.model_label})"
+        )
     return lines
 
 

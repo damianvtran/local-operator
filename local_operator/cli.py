@@ -520,6 +520,16 @@ def build_cli_parser() -> argparse.ArgumentParser:
         metavar="SECONDS",
         help="graceful-op wait per session before escalating (default 10)",
     )
+    stop_parser.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "after the socket times out, escalate to signals using the "
+            "record's own fields as identity — for a heartbeating-but-"
+            "starved process the socket cannot reach (use after the plain "
+            "stop refused with a fresh heartbeat)"
+        ),
+    )
 
     # Exec command for single execution mode
     # PyPI upgrade. Not ``lop-update`` (hyphen), which archives local git
@@ -1553,6 +1563,11 @@ def stop_command(args: argparse.Namespace) -> int:
         # waiting on stdin nobody is watching, or worse, read the piped body
         # the user meant for something else.
         targets = control._stop_targets(config_dir(), own_pid=None)
+        # An empty machine is a no-op in every mode (D2-3): check before
+        # the TTY gate so a pipe without --yes still exits 0, not the refusal.
+        if not targets:
+            print("no sessions to stop")
+            return 0
         if not args.yes:
             if not sys.stdin.isatty():
                 _peer_red(
@@ -1561,17 +1576,20 @@ def stop_command(args: argparse.Namespace) -> int:
                 return 1
             # The listing is the confirmation, as in the TUI: consent to
             # "every session" is only informed when the user can see which.
-            if not targets:
-                print("no sessions to stop")
-                return 0
             print(f"will stop {len(targets)} session{'s' if len(targets) != 1 else ''}:")
             for line in candidate_lines(targets, indent="  ", prefix="pid"):
                 print(line)
             count = len(targets)
-            answer = input(
-                f"stop {'all ' if count != 1 else ''}{count} lop session"
-                f"{'s' if count != 1 else ''} on this machine? [y/N] "
-            )
+            try:
+                answer = input(
+                    f"stop {'all ' if count != 1 else ''}{count} lop session"
+                    f"{'s' if count != 1 else ''} on this machine? [y/N] "
+                )
+            except EOFError:
+                # Ctrl+D: not a yes. A traceback would exit 1 with noise and
+                # nothing stopped; a clean abort says the same thing plainly.
+                print("aborted")
+                return 1
             if answer.strip().lower() not in ("y", "yes"):
                 print("aborted")
                 return 1
@@ -1580,6 +1598,7 @@ def stop_command(args: argparse.Namespace) -> int:
                 own_pid=None,
                 timeout_s=timeout_s,
                 only_pids={rec.pid for rec in targets},
+                force=args.force,
                 _root=config_dir(),
             )
         )
@@ -1595,7 +1614,9 @@ def stop_command(args: argparse.Namespace) -> int:
         _peer_red(error or "no target resolved")
         return 1
 
-    outcome = asyncio.run(control.stop_session(record, timeout_s=timeout_s, _root=config_dir()))
+    outcome = asyncio.run(
+        control.stop_session(record, timeout_s=timeout_s, force=args.force, _root=config_dir())
+    )
     return _report_stops([outcome], args.json)
 
 

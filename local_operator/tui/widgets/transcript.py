@@ -1161,6 +1161,22 @@ class NoticeBlock(TranscriptBlock):
     #: uniform, and a copied notice is the sentence rather than ``  · `` and it.
     GLYPH_COLS = SPINE_INDENT + 2
 
+    @classmethod
+    def body_budget(cls, width: int) -> int:
+        """The text-column width a notice wraps at when painted ``width``
+        cells wide: the block's own fold (``_build``) minus the hanging
+        glyph field. Callers sizing a multi-line notice's content (the
+        ``/stop all`` arm listing truncates to this) MUST read the budget
+        from here rather than re-deriving it from a parent's size — the
+        transcript's one-cell left padding and the fold's own clamp live
+        here, and a caller-side approximation misses by exactly that much
+        (seen live: the listing's instruction row wrapped and then clipped
+        off the block at 80 columns)."""
+        # ``_build`` folds at ``max(width - 2, 12)``; the hanging glyph
+        # field takes GLYPH_COLS of that, floored at the build's own 8-cell
+        # minimum.
+        return max(max(width - 2, 12) - cls.GLYPH_COLS, 8)
+
     def copy_gutter(self, index: int) -> int:
         return self.GLYPH_COLS
 
@@ -1277,7 +1293,7 @@ class NoticeBlock(TranscriptBlock):
         indent = " " * SPINE_INDENT
         hanging = " " * (SPINE_INDENT + 2)
         width = max((self.size.width or 80) - 2, 12)
-        body = max(width - cell_len(hanging), 8)
+        body = self.body_budget(self.size.width or 80)
         rows = self._rows(body)
         centred = self.has_class(BOOT_COLUMN_CLASS)
         line = Text(no_wrap=True, overflow="ellipsis")
