@@ -607,16 +607,53 @@ async def test_the_question_and_every_option_and_description_are_drawn() -> None
 @pytest.mark.asyncio
 async def test_a_recommendation_is_marked_and_preselected() -> None:
     """Preselected as well as marked: the point of recommending is that Enter
-    alone should take it."""
+    alone should take it.
+
+    Authored at index 1, asserted at 0: ``_question`` builds a real
+    ``AskQuestion``, so the model has already hoisted the recommended option to
+    the top of ``options`` by the time the card sees it. The row Enter takes is
+    still the one the model recommended.
+    """
     app = _AskHost([_question(recommended=1)])
     async with app.run_test(size=(100, 30)) as pilot:
         screen = await app.open_picker()
         await pilot.pause()
-        assert screen.selected_index == 1
-        assert RECOMMENDED_TAG in "\n".join(screen.render_lines_for_test())
+        assert screen.selected_index == 0
+        lines = screen.render_lines_for_test()
+        assert RECOMMENDED_TAG in "\n".join(lines)
+        # The hoisted option is the FIRST row drawn, not merely the selected
+        # index: on a surface with no recommended marker, order is the message.
+        assert "Backfill from the audit log" in next(
+            line for line in lines if "Backfill from the audit log" in line or "Drop them" in line
+        )
         await pilot.press("enter")
         await pilot.pause()
     assert app.answered == [{"stale": ["Backfill from the audit log"]}]
+
+
+@pytest.mark.asyncio
+async def test_a_mid_list_recommendation_is_the_row_the_card_opens_on() -> None:
+    """End to end from authored index to what Enter answers: the model put its
+    recommendation third of four, and the user is offered it first without
+    moving the cursor."""
+    app = _AskHost(
+        [
+            _question(
+                labels=("Drop them", "Backfill", "Dual-write", "Add a filter"),
+                descriptions=("cheapest", "keeps history", "safest", "hides it"),
+                recommended=2,
+            )
+        ]
+    )
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+        assert screen.selected_index == 0
+        text = "\n".join(screen.render_lines_for_test())
+        assert text.index("Dual-write") < text.index("Drop them") < text.index("Backfill")
+        await pilot.press("enter")
+        await pilot.pause()
+    assert app.answered == [{"stale": ["Dual-write"]}]
 
 
 @pytest.mark.asyncio
