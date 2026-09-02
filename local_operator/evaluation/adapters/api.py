@@ -692,6 +692,28 @@ class EvaluationAdapter(Protocol):
     async def close(self, params: CloseParams) -> AckResult: ...
 
 
+@runtime_checkable
+class RescuableAdapter(Protocol):
+    """An adapter that can accept the rescue handoff.
+
+    Deliberately SEPARATE from ``EvaluationAdapter`` rather than a tenth method
+    on it. ``EvaluationAdapter`` is ``runtime_checkable`` and gates every
+    handshake in ``load_selected_adapter``, so adding ``begin_rescue`` there
+    would refuse an otherwise valid adapter at hello -- breaking ordinary
+    episodes for a capability only ever used during teardown, and doing so on
+    an existing installed wheel. Rescue is genuinely optional at load time and
+    mandatory only once a rescue is actually requested, which is exactly the
+    shape of a second protocol the worker checks at that moment.
+
+    ``begin_rescue`` is the only call carrying the descriptor's infra values
+    together with freshly resolved secrets, so it is the sole opportunity a
+    rescue worker (which enters at HANDSHAKEN and never runs prepare or
+    reset_start) has to build a teardown provider.
+    """
+
+    async def begin_rescue(self, params: BeginRescueParams) -> AckResult: ...
+
+
 def observation_content_id(observation: Observation) -> Digest:
     """Identify adapter content while excluding its self-asserted identifier."""
 
