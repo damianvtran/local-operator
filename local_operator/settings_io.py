@@ -246,9 +246,19 @@ SECTIONS: tuple[Section, ...] = (
     # NEW_LAUNCH: they are the session's identity, not a knob it re-reads.
     Section(
         "providers",
-        "Provider wire protocol",
+        # Titled for the WIRE FORMAT, not the word "provider" (design review
+        # round 1, D4): the pane one column to the right is headed `providers`
+        # and lists the user's credentials, so two adjacent things called
+        # "provider" meant two entirely different concepts. This also makes the
+        # header agree with its rows instead of colliding with the pane.
+        #
+        # NOT the designer's other suggestion, "OpenAI API surface": that was
+        # right when this section held one row, but M6 moved the Anthropic
+        # cache-TTL key in beside it, so an OpenAI-specific title would now
+        # mislabel half the section.
+        "Wire protocol",
         Scope.LIVE,
-        "Which API surface a direct provider connection uses.",
+        "How direct provider connections are made: API surface and cache TTL.",
     ),
     # LIVE: every ``retry.*`` key routes through ``RetrySettings.from_settings``
     # PER CALL on the mapping ``SessionStreamFn`` holds, and the config watcher
@@ -302,10 +312,20 @@ SECTIONS: tuple[Section, ...] = (
         Scope.LIVE,
         "Where /fork opens the branched conversation.",
     ),
+    # The GATE comes first, then the knobs it gates (design review round 1,
+    # D3). Whether each tool is offered at all is decided when the tool
+    # inventory is built, so these two flags cannot be LIVE — but reading order
+    # is the hierarchy the user sees, and putting the master switches after
+    # four tuning knobs left someone scanning for "is web search on?" finding
+    # the answer next to the retired-keys graveyard.
+    Section(
+        "web_tools",
+        "Web tools",
+        Scope.NEW_SESSIONS,
+        "Whether the search and fetch tools are offered to the model.",
+    ),
     # LIVE: both tools build their settings from config on EVERY call
-    # (``web_search/tool.py``, ``web_fetch/tool.py``). Whether the tools are
-    # OFFERED at all is decided when the tool inventory is built, so the two
-    # ``enabled`` flags live in ``web_tools`` below rather than here.
+    # (``web_search/tool.py``, ``web_fetch/tool.py``).
     Section(
         "web_search",
         "Web search",
@@ -317,12 +337,6 @@ SECTIONS: tuple[Section, ...] = (
         "Web fetch",
         Scope.LIVE,
         "Limits and rendering for the fetch tool.",
-    ),
-    Section(
-        "web_tools",
-        "Web tools",
-        Scope.NEW_SESSIONS,
-        "Whether the search and fetch tools are offered to the model.",
     ),
     Section(
         "retired",
@@ -423,7 +437,13 @@ SETTINGS: tuple[Setting, ...] = (
     Setting(
         key="providers.anthropic.cache_ttl_1h_min_context_tokens",
         path=("providers", "anthropic", "cache_ttl_1h_min_context_tokens"),
-        section="model",
+        # LIVE, not NEW_LAUNCH (review round 2, M6). `_client_for` reads this
+        # off the same mapping `apply_settings` rebinds, and the session rebinds
+        # on ANY `retry.*` change — so under NEW_LAUNCH the notice told the user
+        # a key needed a `/new` while a neighbouring edit had already moved it.
+        # Applying it live is harmless (it only affects the next client build),
+        # so the honest label is the cheaper of the two fixes.
+        section="providers",
         label="Anthropic 1h cache above (tokens)",
         kind=Kind.INT,
         default=150_000,

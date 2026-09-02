@@ -65,7 +65,7 @@ async def test_a_change_from_another_process_is_announced_once_with_its_keys(
         await pilot.pause()
         notices = [n for n in _notices(app) if "config.yml changed" in n]
         assert notices == [
-            "config.yml changed: compaction.threshold_percent, retry.maxRetries — applied"
+            "config.yml changed: applied: compaction.threshold_percent, retry.maxRetries"
         ]
 
 
@@ -84,8 +84,9 @@ async def test_a_non_live_key_is_named_as_taking_effect_on_new(monkeypatch, tmp_
         await pilot.pause()
         notices = [n for n in _notices(app) if "config.yml changed" in n]
         assert notices == [
-            "config.yml changed: compaction.enabled — applied; "
-            "tool_approval_mode takes effect on /new"
+            "config.yml changed: applied: compaction.enabled; "
+            "tool_approval_mode takes effect on /new; "
+            "tool approvals now auto — every tool runs without asking"
         ]
 
 
@@ -116,7 +117,10 @@ async def test_a_lone_approval_mode_change_from_another_pane_is_announced(
         process_watcher(tmp_path).poll_now()
         await pilot.pause()
         notices = [n for n in _notices(app) if "config.yml changed" in n]
-        assert notices == ["config.yml changed: tool_approval_mode takes effect on /new"]
+        assert notices == [
+            "config.yml changed: tool_approval_mode takes effect on /new; "
+            "tool approvals now auto — every tool runs without asking"
+        ]
 
 
 @pytest.mark.asyncio
@@ -193,7 +197,7 @@ async def test_a_theme_written_by_another_process_is_applied_here(monkeypatch, t
         process_watcher(tmp_path).poll_now()
         await pilot.pause()
         assert theme_mod.current_theme() == target
-        assert any("tui.theme — applied" in n for n in _notices(app))
+        assert any("applied: tui.theme" in n for n in _notices(app))
     theme_mod.set_theme(before)
 
 
@@ -246,3 +250,119 @@ async def test_unmount_unsubscribes_the_app(monkeypatch, tmp_path) -> None:
         assert len(watcher._listeners) == 1
     assert watcher._listeners == []
     assert app._unsubscribe_config_watch is None
+
+
+@pytest.mark.asyncio
+async def test_a_new_launch_key_asks_for_a_relaunch_not_a_new(monkeypatch, tmp_path) -> None:
+    """Design review round 1, D1: `/new` does not re-exec, so it cannot adopt
+    a NEW_LAUNCH key. Saying `/new` sent the user to do something that would
+    not work and gave them no second message when it did not."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    ConfigManager(tmp_path).set_config_value("hosting", "")
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await _adopted(app, pilot)
+        _write_elsewhere(tmp_path, "hosting", "openrouter")
+        process_watcher(tmp_path).poll_now()
+        await pilot.pause()
+        notices = [n for n in _notices(app) if "config.yml changed" in n]
+        assert notices == ["config.yml changed: hosting needs a relaunch"]
+
+
+@pytest.mark.asyncio
+async def test_a_retired_key_is_not_promised_to_take_effect(monkeypatch, tmp_path) -> None:
+    """Design review round 1, D1, sharpest edge: the `retired` section is
+    documented as "read but no longer do anything", and the notice was telling
+    the user one of those keys would take effect on `/new`."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    ConfigManager(tmp_path).set_config_value("hosting", "")
+    retired = [s for s in settings_io.SETTINGS if s.section == "retired"]
+    assert retired, "the retired section is empty; this test has nothing to pin"
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await _adopted(app, pilot)
+        _write_elsewhere(tmp_path, retired[0].key, 4321)
+        process_watcher(tmp_path).poll_now()
+        await pilot.pause()
+        notices = [n for n in _notices(app) if "config.yml changed" in n]
+        assert notices == [f"config.yml changed: {retired[0].key} is retired and does nothing"]
+        assert "takes effect" not in notices[0]
+
+
+@pytest.mark.asyncio
+async def test_the_approval_mode_notice_names_the_mode_and_warns(monkeypatch, tmp_path) -> None:
+    """Design review round 1, D2.
+
+    Asserts the two things the frame made obvious: the line says WHICH way the
+    switch went, and it renders at the same severity as the local receipt for
+    the identical transition rather than as dim grey routine info.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    ConfigManager(tmp_path).set_config_value("hosting", "")
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await _adopted(app, pilot)
+        _write_elsewhere(tmp_path, "tool_approval_mode", "auto")
+        process_watcher(tmp_path).poll_now()
+        await pilot.pause()
+        blocks = [b for b in app.query(NoticeBlock) if "config.yml changed" in (b.text() or "")]
+        assert blocks, "no config-change notice was emitted"
+        text = blocks[-1].text() or ""
+        assert "now auto" in text and "without asking" in text, text
+        # Asserted on the rendered token, not a bespoke attribute: this is
+        # what actually decides the ink, and `info` maps to "dim".
+        assert blocks[-1]._token == "warning", f"rendered in {blocks[-1]._token!r} ink, not warning"
+
+        # And the cached default follows, so a later bare `/approvals` does not
+        # report a value a new session would not boot with (QA round 2, Q1).
+        assert app._approvals_default_auto is True
+
+
+@pytest.mark.asyncio
+async def test_new_reloads_the_launch_config_so_the_notice_promise_is_true(
+    monkeypatch, tmp_path
+) -> None:
+    """`/new` must adopt a NEW_SESSIONS key written by another process.
+
+    Design review round 1 (D1) and QA round 2 (Q1) both drove this path and
+    found the session rebuilt from the launch-time `ConfigManager` the factory
+    closed over, so the value the notice promised would "take effect on /new"
+    did not. The notice is the reason this matters: the harness tells the user
+    to run `/new`, and `tool_approval_mode` is among the keys it says that
+    about.
+
+    Built the way `cli.py:3004` builds it — `on_config_changed=<manager>.reload`
+    with the factory closing over that same instance — because the defect only
+    exists in that arrangement; a factory that re-reads config per call would
+    pass while production still failed.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    launch_manager = ConfigManager(tmp_path)
+    launch_manager.set_config_value("hosting", "anthropic")
+    built: list[str] = []
+
+    async def resume_factory(resume_id):
+        built.append(str(launch_manager.get_config_value("hosting")))
+        return await _factory(FakeSession())
+
+    app = OperatorApp(
+        lambda: _factory(FakeSession()),
+        resume_factory=resume_factory,
+        on_config_changed=launch_manager.reload,
+    )
+    async with app.run_test(size=(100, 24)) as pilot:
+        await _adopted(app, pilot)
+        _write_elsewhere(tmp_path, "hosting", "openrouter")
+
+        app._cmd_new(lambda body, kind="info": None)
+        for _ in range(400):
+            if built:
+                break
+            await pilot.pause()
+        await pilot.pause()
+
+    assert built, "/new never rebuilt the session"
+    assert built[-1] == "openrouter", (
+        f"/new built with {built[-1]!r}: the launch-time config manager was not reloaded, "
+        "so the value the notice promised would take effect did not"
+    )

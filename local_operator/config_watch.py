@@ -355,6 +355,13 @@ class ConfigWatcher:
         self._values = parsed
 
     def _tick(self, source: Literal["disk", "local"] = "disk") -> ConfigChange | None:
+        # Stat FIRST, then re-read in ``_parse``. A write landing between the
+        # two stores a fingerprint that does not describe the bytes just
+        # adopted (review round 2, N4) — but that is self-correcting rather
+        # than a lost update: the stored fingerprint then matches neither the
+        # old nor the new file, so the very next tick sees a mismatch and
+        # re-parses. The content adopted is always at least as new as the
+        # fingerprint, never older, which is the direction that matters.
         fingerprint = self._stat()
         if fingerprint == self._fingerprint:
             return None
@@ -418,11 +425,33 @@ class ConfigWatcher:
                 type(loaded).__name__,
             )
             return None
-        values = loaded.get("values")
-        if not isinstance(values, Mapping):
-            # A file with a mapping top level but no usable ``values`` reads
-            # as "nothing set", which ``_load_config`` resolves to the
-            # defaults; so does this.
+        if "values" in loaded:
+            values = loaded.get("values")
+            if not isinstance(values, Mapping):
+                # PRESENT but not a mapping — `values: 3`, or the mis-indented
+                # or truncated edit that leaves a scalar behind. This is NOT
+                # "nothing set" (review round 2, M5): substituting `{}` here
+                # back-fills the whole default set, which is then adopted and
+                # fanned out as a real change, resetting every running session
+                # to defaults from one hand-edit typo.
+                #
+                # An earlier comment justified the `{}` by saying `_load_config`
+                # resolves this shape the same way. It does not: `ConfigManager`
+                # raises `TypeError` on the identical file. The mirrored write
+                # guard, `_require_readable_config`, does deliberately pass this
+                # shape — but its docstring says why that is safe THERE ("it
+                # fails later in the write with its bytes intact"), and the
+                # watcher has no later step to fail at. It adopts. So this is
+                # the one place the mirror must diverge: unreadable, keep the
+                # last good snapshot.
+                logger.debug(
+                    "config.yml 'values' is %s, not a mapping; keeping the last good settings",
+                    type(values).__name__,
+                )
+                return None
+        else:
+            # ABSENT `values` genuinely reads as "nothing set", which
+            # `_load_config` resolves to the defaults; so does this.
             values = {}
         return _with_defaults(values)
 

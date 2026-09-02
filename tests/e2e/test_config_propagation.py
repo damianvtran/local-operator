@@ -123,7 +123,7 @@ async def test_a_config_edit_from_another_process_reaches_the_running_session(
                     await pilot.pause()
                     notices = [block.text() or "" for block in app.query(NoticeBlock)]
                     assert any(
-                        "config.yml changed: compaction.threshold_percent — applied" in text
+                        "config.yml changed: applied: compaction.threshold_percent" in text
                         for text in notices
                     ), notices
     finally:

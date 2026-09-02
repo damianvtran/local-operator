@@ -33,7 +33,11 @@ from local_operator.harness.types import (
     StreamEndEvent,
     StreamTextDelta,
 )
-from local_operator.model.configure import SessionStreamFn, _openai_api_mode
+from local_operator.model.configure import (
+    SessionStreamFn,
+    _anthropic_cache_ttl_1h_min_context_tokens,
+    _openai_api_mode,
+)
 from local_operator.providers.failover import RetrySettings
 from local_operator.session.session import Session
 from local_operator.session.transcript import Transcript
@@ -48,12 +52,31 @@ def _fresh_registry():
     _reset_for_tests()
 
 
+class FakeAuthStore:
+    """Just enough auth store to observe the PUSHED setting.
+
+    ``retry.usageAwareAccountPick`` is the one ``retry.*`` key the cascade does
+    not read back off the settings mapping: the real ``AuthStore`` copies it
+    into ``_usage_aware_pick`` when the stream fn pushes it. A probe that read
+    the mapping instead would pass while the cascade still used the old value,
+    which is precisely the gap review round 2 (B1) found — so the double keeps
+    its own copy, exactly as the real store does.
+    """
+
+    def __init__(self) -> None:
+        self._usage_aware_pick = True  # the real store defaults ON
+
+    def configure_usage_aware_pick(self, enabled: bool) -> None:
+        self._usage_aware_pick = bool(enabled)
+
+
 class RebindableStream:
     """A stream fn exposing the two things ``_apply_config_change`` reads."""
 
     def __init__(self, settings: dict[str, Any]) -> None:
         self._settings: Any = settings
         self.applied: list[Any] = []
+        self.auth_store = FakeAuthStore()
 
     @property
     def routing_settings(self):
@@ -62,6 +85,13 @@ class RebindableStream:
     def apply_settings(self, values) -> None:
         self.applied.append(values)
         self._settings = values
+        # Mirrors the real ``SessionStreamFn.apply_settings``, which re-pushes
+        # this one key rather than relying on the rebind.
+        from local_operator.providers.failover import RetrySettings
+
+        self.auth_store.configure_usage_aware_pick(
+            RetrySettings.from_settings(values).usage_aware_account_pick
+        )
 
     def __call__(self, request: ChatRequest, signal: AbortSignal | None):
         async def gen():
@@ -128,7 +158,11 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
     ),
     "compaction.auto_continue": (False, lambda s, w: compaction_of(s).auto_continue),
     "compaction.mid_turn_enabled": (False, lambda s, w: compaction_of(s).mid_turn_enabled),
-    # -- providers: the wire surface the NEXT client build reads ---------------
+    # -- providers: read off the rebound mapping at the NEXT client build ------
+    "providers.anthropic.cache_ttl_1h_min_context_tokens": (
+        999_999,
+        lambda s, w: _anthropic_cache_ttl_1h_min_context_tokens(s.routing_settings),
+    ),
     # Observed through the same function the client builder calls, not through
     # the raw mapping: what makes this key live is that ``_openai_api_mode``
     # reads the REBOUND settings, so that is what must move.
@@ -137,6 +171,8 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
         lambda s, w: _openai_api_mode(s.routing_settings),
     ),
     # -- failover: what RetrySettings.from_settings reads off the stream --------
+    # NOTE the odd one out below: `retry.usageAwareAccountPick` is observed on
+    # the auth STORE, not the mapping, because the store holds its own copy.
     "retry.enabled": (False, lambda s, w: RetrySettings.from_settings(s.routing_settings).enabled),
     "retry.maxRetries": (
         3,
@@ -169,6 +205,15 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
     "retry.fallbackChains": (
         {"default": ["zai/glm-5.3"]},
         lambda s, w: dict(RetrySettings.from_settings(s.routing_settings).fallback_chains),
+    ),
+    # Observed on the auth STORE, deliberately (review round 2, B1). Every
+    # other `retry.*` key is live because `from_settings` re-reads the mapping
+    # per call; this one is pushed into the store, which then owns the value.
+    # Probing the mapping here would have passed while the cascade kept using
+    # the stale flag — the exact false-green the finding described.
+    "retry.usageAwareAccountPick": (
+        False,
+        lambda s, w: s._stream_fn.auth_store._usage_aware_pick,
     ),
     # -- subagents ---------------------------------------------------------------
     "subagents.max_running": (3, lambda s, w: s.jobs.max_running),
@@ -308,13 +353,29 @@ async def test_a_non_live_key_does_not_quietly_apply_to_a_running_session(tmp_pa
     session = make_session(tmp_path, stream, compaction_settings=CompactionSettings())
     watcher = ConfigWatcher(config_dir)
     subscribe(session, watcher)
-    try:
-        before = (
+
+    def observe() -> tuple[Any, ...]:
+        """Everything a non-LIVE key must NOT move.
+
+        `retry.max_retries` is excluded deliberately: the co-write below moves
+        it on purpose, so including it would make every case fail. The provider
+        readers ARE included — without them the guard could not see M6, whose
+        whole shape is a `providers.*` value riding along on the mapping rebind
+        that a `retry.*` edit triggers. Observed through the same functions the
+        client builder calls, not off the raw mapping.
+        """
+        retry = RetrySettings.from_settings(session.routing_settings)
+        return (
             compaction_of(session).model_dump(),
-            dict(RetrySettings.from_settings(session.routing_settings).__dict__),
+            {k: v for k, v in retry.__dict__.items() if k != "max_retries"},
             session.jobs.max_running,
-            len(stream.applied),
+            _openai_api_mode(session.routing_settings),
+            _anthropic_cache_ttl_1h_min_context_tokens(session.routing_settings),
+            stream.auth_store._usage_aware_pick,
         )
+
+    try:
+        before = observe()
         # A value that differs from whatever is stored, typed to the setting.
         # Branched rather than built as a dict literal: a dict evaluates EVERY
         # value eagerly, so the INT arm ran `int("ask")` for an ENUM key.
@@ -339,18 +400,27 @@ async def test_a_non_live_key_does_not_quietly_apply_to_a_running_session(tmp_pa
         else:
             pytest.skip(f"{key}: no probe value for {setting.kind}")
 
+        # Written TOGETHER with a LIVE `retry.*` key, in one tick (review round
+        # 2, M6). Writing the non-LIVE key alone was the guard's blind spot:
+        # the session rebinds the whole settings mapping when a `retry.*` key
+        # moves, so a non-LIVE key sharing that mapping applies as a side
+        # effect of its neighbour — invisible to a case that only ever changes
+        # one key. The co-write reproduces the real shape (a `/settings` page
+        # or an editor saving several keys at once) and is strictly stronger:
+        # anything the single write caught, this catches too.
         write_from_another_process(config_dir, key, probe)
+        live_probe = 1 + int(RetrySettings.from_settings(session.routing_settings).max_retries)
+        write_from_another_process(config_dir, "retry.maxRetries", live_probe)
         change = watcher.poll_now()
         assert (
             change is not None and key in change.changed_keys
         ), f"{key}: the watcher did not see the write, so this test proved nothing"
-
-        after = (
-            compaction_of(session).model_dump(),
-            dict(RetrySettings.from_settings(session.routing_settings).__dict__),
-            session.jobs.max_running,
-            len(stream.applied),
+        assert "retry.maxRetries" in change.changed_keys, (
+            "the co-written LIVE key did not land in the same tick, so the "
+            "mapping-rebind path this case exists to exercise never fired"
         )
+
+        after = observe()
         if key in _NON_LIVE_KEYS_ALLOWED_TO_APPLY:
             return
         assert after == before, (

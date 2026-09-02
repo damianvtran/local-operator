@@ -9022,7 +9022,16 @@ class Session:
         # therefore does not propagate, exactly as before this PR; registering
         # those keys is a separate change with its own scope decision, not
         # something to smuggle in behind a condition nobody could reach.
-        if any(key.startswith("retry.") or key == "providers.openai.api" for key in changed):
+        #
+        # ``providers.`` covers the whole prefix rather than naming
+        # ``providers.openai.api`` alone (review round 2, M6). Every key under
+        # it is read off the mapping this rebinds — the OpenAI wire surface at
+        # client build, the Anthropic cache TTL at the same point — so naming
+        # one key meant the OTHER moved only as a side effect of a neighbouring
+        # ``retry.*`` edit landing in the same tick, which is both arbitrary
+        # and the thing that made its NEW_LAUNCH label a lie. They are all in
+        # the LIVE ``providers`` section now, so the trigger matches the scope.
+        if any(key.startswith("retry.") or key.startswith("providers.") for key in changed):
             apply_settings = getattr(self._stream_fn, "apply_settings", None)
             if callable(apply_settings):
                 apply_settings(values)

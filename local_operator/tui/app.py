@@ -5428,6 +5428,21 @@ class OperatorApp(App[None]):
             self._system_notice("new session unavailable: no session-capable launcher", "warning")
             return
         self._session_factory = lambda: self._resume_factory(None)  # type: ignore[misc]
+        # Reload the launch-time config manager BEFORE the rebuild, for the
+        # same load-bearing reason `_leave_setup_state_and_boot` documents: the
+        # factory closes over a manager captured at launch, so without this the
+        # "new" session boots on the values the process started with.
+        #
+        # Design review round 1 (D1) / QA round 2 (Q1) drove the real path and
+        # proved the gap: an out-of-process write to `hosting` followed by
+        # `/new` built with the OLD value. That was survivable while nothing
+        # said otherwise, but the config-change notice now tells the user in so
+        # many words that a NEW_SESSIONS key "takes effect on /new" — including
+        # `tool_approval_mode`, where believing it and being wrong is a safety
+        # problem. Making the promise true is the honest fix; wording around it
+        # would leave `/new` quietly serving stale settings.
+        if self._on_config_changed is not None:
+            self._on_config_changed()
         notice("starting a new session…")
         self._run_session_transition(self._reload_session())
 
@@ -12815,19 +12830,74 @@ class OperatorApp(App[None]):
             return
         from local_operator import settings_io
 
+        # Partitioned by the ACTUAL scope, three ways (design review round 1,
+        # D1). The registry has three scopes and `/settings` renders all three,
+        # but this line used to test one bit — `is LIVE` — and told the user
+        # everything else "takes effect on /new". That was false in two
+        # directions at once: a NEW_LAUNCH key (`hosting`, `model_name`) needs a
+        # relaunch, not a `/new`, and a `retired` key does nothing at all, so
+        # the harness was promising that a key it documents as inert would
+        # start working. The two surfaces contradicting each other is what made
+        # it obvious; a promise the harness cannot keep costs it the credibility
+        # of the live half too.
         scope_of = {section.name: section.scope for section in settings_io.SECTIONS}
         live: list[str] = []
-        deferred: list[str] = []
+        new_sessions: list[str] = []
+        relaunch: list[str] = []
+        retired: list[str] = []
         for key in changed:
             setting = settings_io.resolve_key(key)
-            scope = scope_of.get(setting.section) if setting is not None else None
-            (live if scope is settings_io.Scope.LIVE else deferred).append(key)
+            section = setting.section if setting is not None else None
+            scope = scope_of.get(section) if section is not None else None
+            if section == "retired":
+                retired.append(key)
+            elif scope is settings_io.Scope.LIVE:
+                live.append(key)
+            elif scope is settings_io.Scope.NEW_LAUNCH:
+                relaunch.append(key)
+            else:
+                new_sessions.append(key)
         parts: list[str] = []
         if live:
-            parts.append(f"{', '.join(live)} — applied")
-        if deferred:
-            parts.append(f"{', '.join(deferred)} takes effect on /new")
-        self._system_notice("config.yml changed: " + "; ".join(parts))
+            # "applied:" leads rather than trailing as "— applied" (design
+            # review round 1, D5). The suffix form put the verdict at the end of
+            # an unbounded key list, so in a ~10-column band it wrapped onto its
+            # own line behind a dangling em-dash that read as truncation. This
+            # also front-loads the answer to "did it take effect?" instead of
+            # burying it after up to six key names.
+            parts.append(f"applied: {', '.join(live)}")
+        if new_sessions:
+            parts.append(f"{', '.join(new_sessions)} takes effect on /new")
+        if relaunch:
+            parts.append(f"{', '.join(relaunch)} needs a relaunch")
+        if retired:
+            parts.append(f"{', '.join(retired)} is retired and does nothing")
+        # The approval mode names its VALUE and raises the severity (design
+        # review round 1, D2). "changed" is not actionable for a two-valued
+        # safety switch: the user in the other pane cannot tell whether
+        # approvals were tightened or loosened, and "every tool now runs
+        # without asking" is the fact worth interrupting someone for. The local
+        # receipt for the identical transition is already amber, so leaving the
+        # REMOTE one — where the user did not act and has no other cue — as dim
+        # grey inverted the priority.
+        kind = "info"
+        if "tool_approval_mode" in changed:
+            values = getattr(change, "values", {})
+            mode = str(values.get("tool_approval_mode", "")).strip().lower()
+            if mode == "auto":
+                parts.append("tool approvals now auto — every tool runs without asking")
+                kind = "warning"
+            elif mode == "ask":
+                parts.append("tool approvals now ask — tools prompt before running")
+                kind = "warning"
+            # The running session's gate deliberately does NOT move here: the
+            # key is NEW_SESSIONS and cell A4 of QA round 2 pins that. Only the
+            # cached default is refreshed, so a later bare `/approvals` reports
+            # what a new session would actually boot with instead of the value
+            # this process read at mount.
+            if mode in ("auto", "ask"):
+                self._approvals_default_auto = mode == "auto"
+        self._system_notice("config.yml changed: " + "; ".join(parts), kind)
 
         if any(key.startswith("display.") for key in changed):
             try:

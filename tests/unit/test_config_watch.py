@@ -27,6 +27,7 @@ from local_operator.config_watch import (
     existing_watcher,
     process_watcher,
 )
+from local_operator.providers.failover import RetrySettings
 from tests.unit.harness.test_comms import ChangeSignal, wait_for
 
 
@@ -160,6 +161,68 @@ def test_every_shape_the_write_guard_rejects_is_kept_out_of_the_snapshot(
     (tmp_path / "config.yml").write_bytes(content.encode("latin-1"))
     assert watcher.poll_now() is None
     assert watcher.values["retry"]["maxRetries"] == 3
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "values: 3\n",  # truncated edit leaves a scalar
+        "values: a string\n",
+        "values: [a, b]\n",  # mis-indented edit leaves a list
+    ],
+)
+def test_a_values_block_that_is_not_a_mapping_keeps_the_last_good_snapshot(
+    tmp_path, body: str
+) -> None:
+    """The shape the write guard PASSES but the watcher must still refuse.
+
+    Review round 2, M5. ``_require_readable_config`` lets this through on
+    purpose — a write that fails later still has its bytes intact — but the
+    watcher has no later step to fail at, so substituting ``{}`` here
+    back-filled the entire default set, adopted it, and fanned it out as a
+    genuine change: one mis-indented hand-edit silently reset every running
+    session to defaults while announcing nine changed keys.
+
+    The divergence from the write guard is the point of this test, so it
+    asserts all three halves: the snapshot survives, nothing is delivered, and
+    the file is still not moved aside (the watcher never writes).
+    """
+    _write(tmp_path, "retry.maxRetries", 3)
+    watcher = ConfigWatcher(tmp_path)
+    watcher.poll_now()
+    delivered: list[ConfigChange] = []
+    watcher.subscribe(delivered.append)
+
+    (tmp_path / "config.yml").write_text(body)
+
+    assert watcher.poll_now() is None
+    assert not delivered, f"a malformed edit was announced as a change: {delivered}"
+    assert watcher.values["retry"]["maxRetries"] == 3
+    assert not list(tmp_path.glob("*.bad*")), "the watcher moved the user's file aside"
+
+
+def test_an_absent_values_block_is_genuinely_empty_and_does_reset_to_defaults(
+    tmp_path,
+) -> None:
+    """The other side of M5's line, so the fix cannot over-reach.
+
+    ``values:`` absent (or an explicitly empty mapping) really does mean
+    "nothing set" — that is what ``_load_config`` resolves to defaults — so it
+    must still be adopted. Pinned next to the test above because the two are
+    one decision: refusing BOTH would make a legitimately-emptied config
+    un-followable.
+    """
+    _write(tmp_path, "retry.maxRetries", 3)
+    watcher = ConfigWatcher(tmp_path)
+    watcher.poll_now()
+
+    (tmp_path / "config.yml").write_text("other: 1\n")
+
+    change = watcher.poll_now()
+    assert change is not None and "retry.maxRetries" in change.changed_keys
+    # Read off the dataclass rather than hardcoded, so a change to the
+    # product default does not turn this into a false failure.
+    assert watcher.values["retry"]["maxRetries"] == RetrySettings().max_retries
 
 
 def test_a_deleted_file_keeps_the_snapshot_and_sees_its_return(tmp_path) -> None:
