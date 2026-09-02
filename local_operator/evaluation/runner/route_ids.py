@@ -28,7 +28,9 @@ import re
 
 _PASSTHROUGH = re.compile(r"[A-Za-z0-9.:-]")
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$")
-_MAX_IDENTIFIER = 128
+# ``StrictIdentifier``'s own length cap, public so a caller composing a
+# longer identifier out of a folded id can check the composite too.
+MAX_IDENTIFIER = 128
 
 
 def fold_model_id(model_id: str) -> str:
@@ -53,23 +55,34 @@ def fold_model_id(model_id: str) -> str:
         # provider ships such an id. Refuse rather than invent a prefix that
         # the decoder would then have to guess about.
         raise ValueError(f"model id {model_id!r} cannot start with {model_id[0]!r}")
-    if len(folded) > _MAX_IDENTIFIER:
-        raise ValueError(f"model id {model_id!r} folds to more than {_MAX_IDENTIFIER} characters")
+    if len(folded) > MAX_IDENTIFIER:
+        raise ValueError(f"model id {model_id!r} folds to more than {MAX_IDENTIFIER} characters")
     return folded
 
 
 def unfold_model_id(folded: str) -> str:
-    """Recover the exact model id ``fold_model_id`` encoded."""
+    """Recover the exact model id ``fold_model_id`` encoded.
+
+    Raises ``ValueError("malformed escape …")`` for anything the encoder could
+    not have produced, including a ``_x`` byte run that is not valid UTF-8.
+    """
 
     out: list[str] = []
     pending = bytearray()
     index = 0
+
+    def flush() -> None:
+        if pending:
+            try:
+                out.append(pending.decode("utf-8"))
+            except UnicodeDecodeError:
+                raise ValueError(f"malformed escape: invalid UTF-8 run in {folded!r}") from None
+            pending.clear()
+
     while index < len(folded):
         char = folded[index]
         if char != "_":
-            if pending:
-                out.append(pending.decode("utf-8"))
-                pending.clear()
+            flush()
             out.append(char)
             index += 1
             continue
@@ -84,11 +97,8 @@ def unfold_model_id(folded: str) -> str:
             continue
         else:
             raise ValueError(f"malformed escape at offset {index} in {folded!r}")
-        if pending:
-            out.append(pending.decode("utf-8"))
-            pending.clear()
+        flush()
         out.append(decoded)
         index += width
-    if pending:
-        out.append(pending.decode("utf-8"))
+    flush()
     return "".join(out)

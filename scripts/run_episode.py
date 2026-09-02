@@ -54,6 +54,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 import uuid
 from dataclasses import asdict
 from pathlib import Path
@@ -90,7 +91,7 @@ from local_operator.evaluation.runner.episode import (
     EpisodeRunner,
     EpisodeSpec,
 )
-from local_operator.evaluation.runner.route_ids import fold_model_id
+from local_operator.evaluation.runner.route_ids import MAX_IDENTIFIER, fold_model_id
 from local_operator.evaluation.runner.secrets import (
     EnvSecretResolver,
     MissingSecret,
@@ -100,6 +101,9 @@ from local_operator.evaluation.runner.secrets import (
 EXIT_OK = 0
 EXIT_EPISODE = 1
 EXIT_PREFLIGHT = 2
+# Diagnostic prefixes (``_diagnostic`` renders ``<TypeName>: ...``) that mean
+# a secret stopped the run before allocation; both are name-only by contract.
+_SECRET_DIAGNOSTICS = ("MissingSecret:", "UnusableSecret:")
 
 # Names the OSWorld adapter (and any adapter following its contract) declares
 # as secrets when it is asked ``inspect_requirements``. The runner resolves
@@ -154,7 +158,15 @@ def _route_identity(provider: str, model: str) -> RouteIdentity:
     """
 
     folded = fold_model_id(model)
-    return RouteIdentity(provider_id=provider, route_id=f"{provider}:{folded}", model_id=folded)
+    route_id = f"{provider}:{folded}"
+    if len(route_id) > MAX_IDENTIFIER:
+        # ``fold_model_id`` bounds the folded id alone; the composite route id
+        # shares the same 128-character StrictIdentifier cap.
+        raise SystemExit(
+            f"route {provider}/{model} folds to a {len(route_id)}-character route id; "
+            f"the limit is {MAX_IDENTIFIER}"
+        )
+    return RouteIdentity(provider_id=provider, route_id=route_id, model_id=folded)
 
 
 def _digest(value: str) -> str:
@@ -189,6 +201,27 @@ def _harness_git_revision() -> str:
 
 
 def _harness_version() -> str:
+    """The version of the code that is RUNNING, not of the last install.
+
+    ``importlib.metadata.version`` reports whatever the editable install was
+    last registered at, which on a development checkout lags the tree by any
+    number of releases (a 0.44.31 head sealed ``0.43.5``). When this script
+    runs from a checkout the source of truth is that checkout's
+    ``pyproject.toml``; the install metadata is only the fallback for a wheel
+    install, where the two cannot disagree.
+    """
+
+    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    if pyproject.is_file():
+        import tomllib
+
+        try:
+            with pyproject.open("rb") as handle:
+                declared = tomllib.load(handle)["project"]["version"]
+            if isinstance(declared, str) and declared:
+                return declared
+        except (OSError, KeyError, TypeError, ValueError):
+            pass
     from importlib.metadata import PackageNotFoundError, version
 
     try:
@@ -221,7 +254,7 @@ def _budget(
     three things that bound a paid episode's damage.
     """
 
-    now_ms = int(__import__("time").time() * 1000)
+    now_ms = int(time.time() * 1000)
     capped: dict[str, int] = {
         "provider_usd_micros": max_usd_micros,
         "wall_milliseconds": max_wall_ms,
@@ -329,13 +362,23 @@ def build_spec(
     )
 
 
-def build_config(run_root: Path, *, max_steps: int, max_cycle_usd_micros: int | None) -> Any:
-    """Roots under ONE durable directory; timeouts sized for a real worker."""
+def build_config(
+    run_root: Path, *, episode_id: str, max_steps: int, max_cycle_usd_micros: int | None
+) -> Any:
+    """Roots under ONE durable directory; timeouts sized for a real worker.
+
+    The rescue root is PER EPISODE (``<run-root>/rescue/<episode_id>``) so
+    that ``<run-root>/rescue`` is a real inbox: ``sweep_rescue_root`` globs
+    ``<root>/*/rescue.json``, and the README tells the operator to sweep the
+    ``rescue/`` directory. Persisting one level up (``rescue/rescue.json``)
+    made the documented sweep report ``[]`` over a live descriptor -- the
+    leaked-instance scenario the sweep exists to catch.
+    """
 
     refuse_volatile_root(run_root, label="run root")
     evidence = run_root / "evidence"
     artifacts = run_root / "artifacts"
-    rescue = run_root / "rescue"
+    rescue = run_root / "rescue" / episode_id
     for path in (evidence, artifacts, rescue):
         path.mkdir(mode=0o700, parents=True, exist_ok=True)
     return EpisodeConfig(
@@ -515,7 +558,10 @@ async def run(args: argparse.Namespace) -> int:
 
     try:
         config = build_config(
-            args.run_root, max_steps=args.max_steps, max_cycle_usd_micros=max_cycle
+            args.run_root,
+            episode_id=episode_id,
+            max_steps=args.max_steps,
+            max_cycle_usd_micros=max_cycle,
         )
     except VolatileRootError as error:
         print(str(error), file=sys.stderr)
@@ -553,6 +599,11 @@ async def run(args: argparse.Namespace) -> int:
             "route": f"{provider}/{model}",
             "route_provider_id": provider,
             "route_model_id": model,
+            # Which model client produced the decisions. A ``scripted-finish``
+            # bundle verifies exactly like a real one; this stamp plus the
+            # runner's ``synthetic_model`` label are what keep it from being
+            # read as a result.
+            "model_client": args.model_client,
             "script": "scripts/run_episode.py",
         },
     )
@@ -583,6 +634,9 @@ async def run(args: argparse.Namespace) -> int:
         selector=selector,
         model=model_client,
         secrets=resolver,
+        # Anything but the real provider client seals ``synthetic_model``
+        # rather than ``reportable``.
+        synthetic_model=args.model_client != "provider",
         launch=AdapterSupervisor.launch,
     )
     try:
@@ -592,11 +646,12 @@ async def run(args: argparse.Namespace) -> int:
             auth_store.close()
 
     print(json.dumps(_outcome_json(outcome), indent=2, sort_keys=True))
-    if outcome.status == "failed_pre_bundle" and (outcome.diagnostic or "").startswith(
-        "MissingSecret"
-    ):
-        # The runner's diagnostic already names only the ref.
-        print(outcome.diagnostic, file=sys.stderr)
+    diagnostic = outcome.diagnostic or ""
+    if outcome.status == "failed_pre_bundle" and diagnostic.startswith(_SECRET_DIAGNOSTICS):
+        # The runner's diagnostic already names only the ref; both a missing
+        # and an unusable (over-long) secret are the operator's to fix before
+        # anything can run, hence the preflight exit code.
+        print(diagnostic, file=sys.stderr)
         return EXIT_PREFLIGHT
     return EXIT_OK if outcome.status == "completed" else EXIT_EPISODE
 
