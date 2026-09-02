@@ -39,6 +39,7 @@ from typing import (
     Callable,
     Generic,
     Literal,
+    Mapping,
     Protocol,
     Sequence,
     runtime_checkable,
@@ -374,16 +375,28 @@ class WakeSchedulerProtocol(Protocol):
 
 @runtime_checkable
 class PeerArrivalProtocol(Protocol):
-    """A wakeable signal that an inbound peer message (``lop send``) landed.
+    """A wakeable signal that a message FOR THE MODEL landed mid-turn.
 
-    Exists so a blocking tool can park on peer arrival WITHOUT importing the
+    Named for its first producer (an inbound peer message, ``lop send``) but
+    the contract is wider: every path that parks something for the model to
+    read at the next injection boundary marks it — a mailbox delivery, a
+    scheduled wake firing while a turn is busy, and a ``hub`` note or
+    question queued as an aside. They share one signal because a parked
+    ``wait`` cares about exactly one thing, "is there something new to read",
+    and a path left out of this set is a message the waiting model does not
+    see until its budget expires (up to an hour now, review round 1 of the
+    sized-waits change). :meth:`arrivals` keeps the kinds apart so the wake
+    can tell the model WHY it woke instead of blaming every wake on a peer.
+
+    Exists so a blocking tool can park on this WITHOUT importing the
     session. ``wait`` is the only consumer today and the only one that should
     be: it is a read-only sleep, so waking it early costs nothing, and the
-    message it wakes for is already in the session's journal by then. Do NOT
-    reuse this to preempt a MUTATING tool — mailbox delivery is
-    non-interrupting by contract (``guides/peer-messaging/GUIDE.md``), and
-    cancelling a ``bash`` mid-side-effect to hand the model "skipped" is a
-    price only a human pressing Esc gets to charge.
+    message it wakes for is already in the session's journal or queues by
+    then. Do NOT reuse this to preempt a MUTATING tool — mailbox delivery and
+    courtesy wakes are non-interrupting by contract
+    (``guides/peer-messaging/GUIDE.md``, ``Session._has_urgent_steering``),
+    and cancelling a ``bash`` mid-side-effect to hand the model "skipped" is
+    a price only a human pressing Esc gets to charge.
 
     Threading: the session's implementation sets the event on the loop that
     owns the session, because every registrant path hops there first
@@ -394,7 +407,7 @@ class PeerArrivalProtocol(Protocol):
     """
 
     def event(self) -> asyncio.Event:
-        """An Event set on each inbound peer message.
+        """An Event set on each inbound message.
 
         Never cleared by the producer. Consumers snapshot :meth:`count` before
         parking and compare after waking, which is what makes a message that
@@ -403,7 +416,17 @@ class PeerArrivalProtocol(Protocol):
         ...
 
     def count(self) -> int:
-        """Monotonic count of peer messages delivered to this session."""
+        """Monotonic count of inbound messages delivered to this session."""
+        ...
+
+    def arrivals(self) -> Mapping[str, int]:
+        """Monotonic per-kind counts summing to :meth:`count`.
+
+        Kinds are the producer's vocabulary (``peer_message``, ``wake``,
+        ``hub_message``); a consumer that snapshots this before parking can
+        name every kind that landed while it slept, which is how ``wait``
+        reports "a scheduled wake fired" rather than a generic wake-up.
+        """
         ...
 
 

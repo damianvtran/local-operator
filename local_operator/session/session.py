@@ -265,13 +265,20 @@ class _PeerArrival:
     would drop exactly that message, and the resulting lost wakeup would delay
     delivery by a whole turn while looking intermittent. Do not "simplify"
     this to a bare Event.
+
+    Three producers share it (see ``PeerArrivalProtocol``): the peer receive
+    path, the busy-turn wake delivery, and a child's ``hub`` note. The
+    per-kind tally exists only so the woken tool can say which one it was;
+    every kind still bumps the single ``count`` the consumer compares, so
+    adding a kind never needs a consumer change.
     """
 
-    __slots__ = ("_event", "_count")
+    __slots__ = ("_event", "_count", "_arrivals")
 
     def __init__(self) -> None:
         self._event = asyncio.Event()
         self._count = 0
+        self._arrivals: dict[str, int] = {}
 
     def event(self) -> asyncio.Event:
         return self._event
@@ -279,10 +286,16 @@ class _PeerArrival:
     def count(self) -> int:
         return self._count
 
-    def mark(self) -> None:
-        """Record an arrival and wake anything parked on it."""
+    def arrivals(self) -> Mapping[str, int]:
+        # A copy: the consumer keeps its snapshot across an await, and the
+        # producer keeps incrementing the live dict underneath it.
+        return dict(self._arrivals)
+
+    def mark(self, kind: str = PEER_MESSAGE_MESSAGE_TYPE) -> None:
+        """Record an arrival of ``kind`` and wake anything parked on it."""
 
         self._count += 1
+        self._arrivals[kind] = self._arrivals.get(kind, 0) + 1
         self._event.set()
 
 
@@ -5490,6 +5503,18 @@ class Session:
             return message
 
         self._aside_thunks.append(_wrapped)
+        # Every aside is a ``hub`` message for this session's model (a child's
+        # unprompted "I am blocked" to its parent, or a parent's note/question
+        # to a child), and the injection boundary that materializes it is
+        # exactly where a parked `wait` returns to. Without this mark the
+        # note sits in the thunk list until the wait's budget expires, and a
+        # child that speaks up early — which its system prompt tells it to —
+        # goes unheard for up to an hour. AFTER the append: the woken tool
+        # returns into _drain_asides, which must find the thunk already there.
+        # A thunk that later withdraws itself (StaleAside) still woke the
+        # wait, which is harmless — the still-running payload just gets
+        # re-issued — and cheaper than teaching the tool about withdrawal.
+        self._peer_arrival.mark(HUB_MESSAGE_TYPE)
 
     async def _todo_continuation(self) -> list[AgentMessage]:
         """The loop's follow-up hook: re-assert open todos at the yield boundary.
@@ -8085,6 +8110,8 @@ class Session:
             catchup.details["text"] = self._append_busy_resume_note(str(catchup.details["text"]))
             self._courtesy_wake_count += 1
             self._steering_queue.put_nowait(catchup)
+            # Same wake-a-parked-`wait` mark as _deliver_wake, same ordering.
+            self._peer_arrival.mark(WAKE_PROMPT_MESSAGE_TYPE)
             return
         self._spawn_background(self._prompt_messages([catchup]))
 
@@ -8764,6 +8791,17 @@ class Session:
             # of (see _has_urgent_steering).
             self._courtesy_wake_count += 1
             self._steering_queue.put_nowait(wake_message)
+            # Courtesy toward a MUTATING tool, not toward a parked `wait`. A
+            # wake is the user's "remind me", and the agent parked for the
+            # very reason the reminder exists; without this mark a wake
+            # firing inside a long wait is read only when the budget expires
+            # (up to an hour), which is a missed reminder. `wait` returns
+            # with the job still running and the wake text lands at the
+            # boundary the queue above was already headed for. AFTER the
+            # put, for the same lost-wakeup reason receive_peer_message marks
+            # last: the woken tool returns into a drain, and the drain must
+            # find the message already queued.
+            self._peer_arrival.mark(WAKE_PROMPT_MESSAGE_TYPE)
             return
         self._spawn_background(self._prompt_messages([wake_message]))
 
