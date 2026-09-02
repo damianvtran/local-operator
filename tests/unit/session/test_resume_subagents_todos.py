@@ -792,14 +792,23 @@ async def test_live_progress_never_schedules_the_roster_writer(tmp_path, monkeyp
     updates.clear()  # discard the join-time source reconciliation
 
     report = parent.jobs._progress_fn(job_id)
-    started = asyncio.get_running_loop().time()
     for index in range(60):
         report(f"boundary {index}")
     assert updates == []  # publication waits for the one 50 ms coalescer
     assert parent._subagent_roster_generation == generation
     assert parent._subagent_roster_writer is None
+    # The COALESCE is the property under test: 60 progress reports produce one
+    # publication, not 60. Its deadline lives in this wait — a slower host makes
+    # the wait take longer, never makes it publish twice.
+    #
+    # A second wall-clock assertion on the same elapsed time used to follow, and
+    # it measured the HOST rather than the code: `wait_for` already raises at the
+    # same 0.25 s bound, so it could only fire when the loop was descheduled
+    # between satisfying the predicate and reading the clock. On a contended
+    # machine that is routine — it failed 10/40 on an unmodified tree here,
+    # every one of them latency-shaped — so it reported scheduler pressure as a
+    # coalescing regression. Batching is asserted by the count below.
     await wait_for(lambda: bool(updates), timeout=0.25)
-    assert asyncio.get_running_loop().time() - started <= 0.25
     assert len(updates) == 1
     assert updates[0].changes["jobs"][0]["latest_details"] == {"progress": "boundary 59"}
     subscription.unsubscribe()
