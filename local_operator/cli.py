@@ -1567,7 +1567,11 @@ def stop_command(args: argparse.Namespace) -> int:
             print(f"will stop {len(targets)} session{'s' if len(targets) != 1 else ''}:")
             for line in candidate_lines(targets, indent="  ", prefix="pid"):
                 print(line)
-            answer = input(f"stop all {len(targets)} lop sessions on this machine? [y/N] ")
+            count = len(targets)
+            answer = input(
+                f"stop {'all ' if count != 1 else ''}{count} lop session"
+                f"{'s' if count != 1 else ''} on this machine? [y/N] "
+            )
             if answer.strip().lower() not in ("y", "yes"):
                 print("aborted")
                 return 1
