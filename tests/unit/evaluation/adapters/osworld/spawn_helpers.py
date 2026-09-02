@@ -2,7 +2,8 @@
 
 These follow the established ``adapters/test_launch.py`` and
 ``runner/test_episode_subprocess.py`` pattern: build a genuine copied
-interpreter, install the REAL adapter wheel into its site-packages (so
+interpreter (``tests.unit.evaluation.copied_interpreter``, shared by all
+three), install the REAL adapter wheel into its site-packages (so
 ``distribution_digest`` verifies the real RECORD), write a real
 ``adapter-release.json`` and ``tasks/`` corpus into a workspace, and compute
 the three digests the selector pins. Only the model is scripted; the worker,
@@ -18,11 +19,9 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import shutil
 import subprocess
 import sys
-import sysconfig
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -32,59 +31,15 @@ from local_operator.evaluation.adapters.api import (
     AdapterSelector,
 )
 from local_operator.evaluation.adapters.discovery import workspace_digest
+from tests.unit.evaluation.copied_interpreter import (
+    copied_interpreter,
+    site_packages_of,
+)
 
 # tests/unit/evaluation/adapters/osworld/spawn_helpers.py -> repo root is 5
 # parents up (osworld -> adapters -> evaluation -> unit -> tests -> root).
 ADAPTER_SRC = Path(__file__).resolve().parents[5] / "benchmarks" / "osworld_v2_adapter"
 WHEEL_NAME = "lop_osworld_v2_adapter-0.1.0-py3-none-any.whl"
-
-
-def real_interpreter(venv: Path) -> Path:
-    """Copy a working interpreter so its content can be pinned per test run.
-
-    Follows ``test_episode_subprocess._real_interpreter``: candidates are
-    tried in turn because not every interpreter can host a ``--copies`` venv.
-    Failing loudly (not skipping) keeps a host with no usable interpreter
-    from silently dropping the only real-spawn coverage.
-    """
-
-    candidates = [
-        os.path.realpath(sys.executable),
-        shutil.which("python3") or "",
-        sys.base_prefix + "/bin/python3",
-    ]
-    failures: list[str] = []
-    for base in candidates:
-        if not base or not os.path.exists(base):
-            continue
-        shutil.rmtree(venv, ignore_errors=True)
-        try:
-            subprocess.run(
-                [base, "-m", "venv", "--without-pip", "--copies", str(venv)],
-                check=True,
-                capture_output=True,
-            )
-        except (OSError, subprocess.CalledProcessError) as error:
-            failures.append(f"{base}: venv creation failed ({error})")
-            continue
-        executable = next(
-            (
-                item
-                for item in sorted((venv / "bin").glob("python3.*"))
-                if item.is_file() and not item.is_symlink()
-            ),
-            None,
-        )
-        if executable is None:
-            failures.append(f"{base}: produced no copied executable")
-            continue
-        probe = subprocess.run(
-            [str(executable), "-I", "-c", "print('ok')"], capture_output=True, text=True
-        )
-        if probe.returncode == 0:
-            return executable
-        failures.append(f"{base}: copied interpreter did not run ({probe.stderr[-200:]})")
-    raise AssertionError("no usable copied interpreter on this host: " + "; ".join(failures))
 
 
 def build_adapter_wheel(out_dir: Path) -> Path:
@@ -234,20 +189,12 @@ def build_spawnable_adapter(
     the property that makes the spawned tests evidence rather than decoration.
     """
 
-    executable = real_interpreter(tmp_path / "venv")
-    site = next(executable.parent.parent.glob("lib/python*/site-packages"))
-
     # The copied venv has neither local_operator nor pydantic, and the worker
-    # imports both before it can answer a handshake. A .pth pointing at this
-    # interpreter's real roots is the mechanism test_launch.py established.
-    repo_root = Path(__file__).resolve().parents[5]
-    import pydantic
-
-    purelib = sysconfig.get_paths().get("purelib")
-    roots = [str(repo_root), str(Path(pydantic.__file__).resolve().parent.parent)]
-    if purelib:
-        roots.append(purelib)
-    (site / "_local_operator_repo.pth").write_text("\n".join(roots) + "\n")
+    # imports both before it can answer a handshake; ``copied_interpreter``
+    # writes the .pth pointing at this interpreter's real roots and proves
+    # the copy can import through it before handing it back.
+    executable = copied_interpreter(tmp_path / "venv")
+    site = site_packages_of(executable)
 
     package_digest = install_adapter_into_site(site, wheel)
     release_digest = release_digest_for(package_digest, tasks)
