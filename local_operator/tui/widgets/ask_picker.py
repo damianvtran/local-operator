@@ -225,9 +225,14 @@ CHECK_OFF = "[ ] "
 #: toggles): this card's rows are left-aligned labels with nothing at the right
 #: edge to keep stable, and a persistent column would shift the approval gate's
 #: byte-identical frame one column. So the thumb is painted only while the list
-#: windows (``page < row_count``), cutting that frame's rows to ``width - 1`` —
-#: a state no pinned golden reaches, since those all sit at ``page ==
-#: row_count`` (the approval gate never windows above ~44 columns).
+#: windows — keyed on ``layout.show_position`` (see the paint site), NOT on a
+#: fresh ``page < row_count``: those two diverge at tight heights where the D1
+#: collapse drops the position row while the list is still windowed (100x16, 22
+#: options: ``page < row_count`` but ``show_position`` False), and painting a
+#: thumb with no count beside it would split the one overflow signal in two.
+#: It cuts the windowed frame's rows to ``width - 1`` — a state no pinned
+#: golden reaches, since those all sit at ``page == row_count`` (the approval
+#: gate never windows above ~44 columns).
 SCROLLBAR_TRACK = "│"
 SCROLLBAR_THUMB = "█"
 

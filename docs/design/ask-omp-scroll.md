@@ -180,10 +180,13 @@ The approval card has four rows (three consequences + no free-text) and windows
 only below ~44 columns, which agrees with `ask-long-descriptions.md:68-70`
 (consequences wrap `[1,1,1]` down to 44 columns). Every pinned golden is at a
 width where `page == row_count`, so the thumb is never drawn on a frame anyone
-has written down. The guard `page < row_count` is exactly the condition
-`show_position` already uses (`:1936`, `page = row_count if descriptions else
-rows`; the position line is bought only on `page < row_count`), so the thumb
-and the count appear and disappear together — one overflow signal, two
+has written down. The thumb is keyed on `show_position`, NOT on a fresh
+`page < row_count` — an implementation refinement over this section's original
+claim that the two are equivalent. They are NOT: at tight heights the D1
+collapse in `_layout` drops the position row while the list is still windowed
+(measured at 100x16, 22 options: `page < row_count` is True but `show_position`
+is False). Keying the thumb on `show_position` keeps the thumb
+and the count appearing and disappearing together — one overflow signal, two
 renderings, never one without the other.
 
 usage_panel reserves its gutter unconditionally because toggling it would
