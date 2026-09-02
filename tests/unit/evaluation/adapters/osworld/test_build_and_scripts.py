@@ -449,12 +449,13 @@ async def test_sweep_unlinks_only_descriptors_whose_rescue_completed(tmp_path: P
         )
         return _Aggregate(False, (receipt,))
 
-    def resolve(names: Any) -> Any:
-        from local_operator.evaluation.adapters.api import ResolvedSecret
+    class _Resolver:
+        def resolve(self, names: Any) -> Any:
+            from local_operator.evaluation.adapters.api import ResolvedSecret
 
-        return tuple(ResolvedSecret(name=n, value="v") for n in names)
+            return tuple(ResolvedSecret(name=n, value="v") for n in names)
 
-    entries = await sweep.sweep_rescue_root(root, resolve, rescue=fake_rescue)
+    entries = await sweep.sweep_rescue_root(root, _Resolver(), rescue=fake_rescue)
     assert [(e.episode_id, e.complete, e.codes) for e in entries] == [
         ("ep-complete", True, ("instance-terminated",)),
         ("ep-stuck", False, ("terminate-unconfirmed",)),
@@ -474,13 +475,16 @@ async def test_sweep_reports_a_missing_secret_and_keeps_the_descriptor(tmp_path:
     )
     persist_rescue(root / "ep-needs-key", with_ref)
 
-    def resolve(names: Any) -> Any:
-        raise sweep.MissingSecret(names[0])
+    from local_operator.evaluation.runner.secrets import MissingSecret
+
+    class _Resolver:
+        def resolve(self, names: Any) -> Any:
+            raise MissingSecret(names[0])
 
     async def never(descriptor: Any, *, secrets: Any) -> Any:  # pragma: no cover
         raise AssertionError("rescue must not run without its secrets")
 
-    entries = await sweep.sweep_rescue_root(root, resolve, rescue=never)
+    entries = await sweep.sweep_rescue_root(root, _Resolver(), rescue=never)
     assert len(entries) == 1
     assert entries[0].complete is False
     assert entries[0].error == "missing secret AWS_SECRET_ACCESS_KEY"

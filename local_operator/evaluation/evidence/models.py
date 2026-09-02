@@ -113,6 +113,10 @@ ReportabilityLabel = Literal[
     "unscored",
     "infrastructure_failure",
     "cancelled",
+    # The decisions came from a scripted or otherwise non-provider model
+    # client (a plumbing proof, a replay), so the score grades nothing. The
+    # bundle is still fully verifiable; it is simply not a result.
+    "synthetic_model",
 ]
 ComparabilityLabel = Literal[
     "comparable",
