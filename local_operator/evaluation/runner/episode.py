@@ -44,6 +44,7 @@ from local_operator.evaluation.adapters.api import (
     PrepareParams,
     RescueDescriptor,
     ResetStartParams,
+    ResolvedSecret,
     ScopedInfraValue,
     ScoreParams,
     SecretRef,
@@ -52,6 +53,7 @@ from local_operator.evaluation.adapters.supervisor import (
     AdapterSupervisor,
     HostVerifier,
     VerifiedAdapterSession,
+    discard_rescue,
     persist_rescue,
     run_rescue,
     verify_artifact,
@@ -116,6 +118,10 @@ from local_operator.evaluation.runner.guards import (
 )
 from local_operator.evaluation.runner.model import EpisodeModelClient, EpisodeTurn
 from local_operator.evaluation.runner.responder import NullUserResponder, UserResponder
+from local_operator.evaluation.runner.secrets import (
+    SecretResolver,
+    StaticSecretResolver,
+)
 
 # Cleanup kinds are a closed vocabulary in ``lifecycle.CleanupAction``. A worker
 # session is the one resource the parent always knows exists before the adapter
@@ -241,6 +247,7 @@ class EpisodeRunner:
         model: EpisodeModelClient,
         responder: UserResponder | None = None,
         redactions: RedactionSet | None = None,
+        secrets: SecretResolver | None = None,
         launch: Any = AdapterSupervisor.launch,
         rescue: Any = run_rescue,
     ) -> None:
@@ -250,6 +257,13 @@ class EpisodeRunner:
         self._model = model
         self._responder = responder or NullUserResponder()
         self._redactions = redactions or RedactionSet.from_resolved_values(())
+        # ``None`` means "this episode has no secrets to resolve", which is only
+        # true when the spec declares no refs. An empty static resolver makes a
+        # spec that DOES declare refs fail as ``MissingSecret`` before any
+        # allocation, rather than silently sending the worker nothing and
+        # letting the adapter fail closed after it has already been launched.
+        self._secrets = secrets or StaticSecretResolver({})
+        self._resolved_secrets: tuple[ResolvedSecret, ...] = ()
         self._launch = launch
         self._rescue = rescue
 
@@ -341,6 +355,24 @@ class EpisodeRunner:
             InspectRequirementsParams(),
             timeout=self._config.prepare_timeout,
         )
+
+        # Secrets are resolved HERE -- after the handshake, before the
+        # provisional descriptor and before ``prepare`` -- for two reasons.
+        # First, a missing credential must fail before anything is allocated:
+        # ``reset_start`` is the side-effect boundary, and a worker that has
+        # to fail closed itself has already been launched and had its rescue
+        # inbox entry written. Failing here surfaces as ``failed_pre_bundle``
+        # with a diagnostic naming the REF, never a value. Second, every
+        # resolved value must be in the redaction set before
+        # ``EvidenceWriter.create`` (``_run_with_bundle``) so the writer
+        # canaries every artifact and event against them from its first byte;
+        # a value that is resolved after the writer opens is one the bundle
+        # could carry.
+        self._resolved_secrets = self._secrets.resolve([ref.name for ref in self._spec.secret_refs])
+        if self._resolved_secrets:
+            self._redactions = self._redactions.with_values(
+                secret.value for secret in self._resolved_secrets
+            )
 
         # STAGE 1 of two-stage rescue persistence.
         #
@@ -521,6 +553,10 @@ class EpisodeRunner:
                 # verifies against, which is what keeps "where the adapter wrote"
                 # and "where the parent reads" a single parent-chosen value.
                 artifact_root=str(self._config.artifact_root),
+                # The same values ``_launch_and_prepare`` resolved and canaried.
+                # They cross only this private pipe; the descriptor on disk
+                # carries the refs, and rescue re-resolves at rescue time.
+                secrets=self._resolved_secrets,
             ),
             timeout=self._config.reset_timeout,
         )
@@ -1011,6 +1047,13 @@ class EpisodeRunner:
         rescue_complete: bool | None = None
         if cleanup_result.rescue_required or self._rescue_required:
             rescue_complete = await self._attempt_rescue()
+        else:
+            # Every declared action confirmed on the live session: this episode
+            # owns nothing any more, so its descriptor leaves the rescue inbox.
+            # Only this branch holds that confirmation; a rescued episode's
+            # descriptor is retired by the rescue path (or the sweep) on a
+            # complete aggregate, never here on hope.
+            self._retire_descriptor()
         self._append_receipt(
             "cleanup",
             CleanupPayload(
@@ -1146,10 +1189,30 @@ class EpisodeRunner:
         if descriptor is None:
             return False
         try:
-            aggregate = await self._rescue(descriptor)
+            # The rescue worker is a fresh process with nothing but the
+            # descriptor; it needs the credentials again to tear down. These
+            # are the values resolved at launch, so an in-process rescue never
+            # re-reads the store mid-failure.
+            aggregate = await self._rescue(descriptor, secrets=self._resolved_secrets)
         except BaseException:
             return False
-        return bool(aggregate.complete)
+        complete = bool(aggregate.complete)
+        if complete:
+            self._retire_descriptor()
+        return complete
+
+    def _retire_descriptor(self) -> None:
+        """Unlink this episode's ``rescue.json``; only confirmed-clean callers."""
+
+        if self._descriptor is None:
+            return
+        try:
+            discard_rescue(self._config.rescue_root)
+        except OSError:
+            # A descriptor that could not be unlinked is re-rescued by the next
+            # sweep (``instance-absent``) -- harmless, and strictly better than
+            # failing an already-clean episode over inbox hygiene.
+            pass
 
     def _build_manifest(self, handshake: Handshake, plan: CleanupPlan) -> EvidenceManifest:
         spec = self._spec

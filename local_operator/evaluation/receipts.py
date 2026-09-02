@@ -583,6 +583,20 @@ class RedactionSet:
             tuple(sorted(hex_variants, key=lambda value: (-len(value), value))),
         )
 
+    def with_values(self, values: Iterable[str]) -> "RedactionSet":
+        """A new set canarying this set's plaintexts plus ``values``.
+
+        The runner resolves an episode's secrets AFTER it has been handed a
+        redaction set (the preflight canaries) and BEFORE it opens the
+        evidence writer, so it needs to widen the set rather than replace it.
+        Rebuilding from the union of plaintexts, rather than concatenating the
+        derived tuples, keeps every encoded variant consistent with the one
+        construction path and lets ``from_resolved_values`` keep enforcing
+        ``MAX_CANARIES`` over the combined total.
+        """
+
+        return self.from_resolved_values((*self._plaintext_canaries, *values))
+
     def __repr__(self) -> str:
         return f"RedactionSet(count={len(self._plaintext_canaries)})"
 
