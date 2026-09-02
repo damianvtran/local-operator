@@ -102,6 +102,21 @@ class Task010:
         return compare_images_with_llm("a.png", "b.png")
 """
 
+# compare_pdf_answers wraps _compare_answers_with_llm (metrics/pdf.py) with
+# no _with_llm suffix of its own; unused in the pinned corpus but a judge
+# entry point all the same.
+JUDGED_VIA_PDF = """
+from desktop_env.evaluators import metrics
+
+class Task012:
+    id = "task_judged_pdf"
+    instruction = "Fill the form."
+    config = []
+
+    def evaluate(self, env):
+        return metrics.compare_pdf_answers("a.pdf", {"rules": []})
+"""
+
 # A non-judge metric from the same package must NOT trip detection.
 METRICS_NOT_JUDGED = """
 from desktop_env.evaluators import metrics

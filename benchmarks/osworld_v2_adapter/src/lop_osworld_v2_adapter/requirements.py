@@ -90,9 +90,11 @@ _JUDGE_INFRA = (
 # import of the two judge modules. Every symbol here is a judge entry point
 # by construction of the pinned upstream; the set is closed and pinned with
 # it. ``_with_llm`` covers the five metric names and any sibling added
-# under the same convention.
+# under the same convention. ``compare_pdf_answers`` (metrics/pdf.py) calls
+# ``_compare_answers_with_llm`` for ``llm_match`` rules without the suffix
+# in its own name; no pinned task uses it, but it is a judge entry point.
 _JUDGE_MODULES = frozenset({"model_client", "llm_metrics"})
-_JUDGE_SYMBOLS = frozenset({"generate_text", "generate_json"})
+_JUDGE_SYMBOLS = frozenset({"generate_text", "generate_json", "compare_pdf_answers"})
 _JUDGE_SYMBOL_SUFFIX = "_with_llm"
 
 

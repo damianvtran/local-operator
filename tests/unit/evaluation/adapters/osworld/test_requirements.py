@@ -119,6 +119,7 @@ def test_judged_via_metrics_reexport_is_detected() -> None:
 
     assert _JUDGE <= _names(fixtures.JUDGED_VIA_REEXPORT)
     assert _JUDGE <= _names(fixtures.JUDGED_VIA_BARE_NAME)
+    assert _JUDGE <= _names(fixtures.JUDGED_VIA_PDF)
 
 
 def test_a_non_judge_metric_from_the_same_package_is_not_judged() -> None:
@@ -141,7 +142,35 @@ def test_judge_detection_over_the_pinned_corpus_matches_the_call_surface() -> No
     tasks = sorted(glob.glob(str(root / "gated" / "tasks" / "task_*.py")))
     if len(tasks) != 108:  # pragma: no cover - inputs root absent on CI
         pytest.skip("pinned OSWorld corpus not present")
-    truth_re = re.compile(r"generate_text|generate_json|llm_metrics|model_client|_with_llm")
+    # Truth is derived from UPSTREAM, not from the detector's own symbol
+    # list: every public function defined in the two judge modules, plus any
+    # metric elsewhere whose body calls one of them (compare_pdf_answers),
+    # plus the two module names. A symbol both the detector and this test
+    # forgot cannot hide.
+    evaluators = root / "prepared" / "desktop_env" / "evaluators"
+    judge_defs: set[str] = set()
+    for module in ("model_client.py", "metrics/llm_metrics.py"):
+        judge_defs |= set(re.findall(r"^def (\w+)\(", (evaluators / module).read_text(), re.M))
+    # The judge's CALL SURFACE is its public names plus the one private
+    # metric the package re-exports (``_compare_answers_with_llm``,
+    # metrics/__init__.py:198). Other private helpers (``_to_int``,
+    # ``_pick``) are generic names tasks legitimately define for themselves.
+    judge_defs = {
+        d for d in judge_defs if not d.startswith("_") or d == "_compare_answers_with_llm"
+    } - {"main"}
+    # Metrics elsewhere that wrap a judge function (metrics/pdf.py's
+    # compare_pdf_answers -> _compare_answers_with_llm).
+    wrappers: set[str] = set()
+    for path in (evaluators / "metrics").glob("*.py"):
+        if path.name == "llm_metrics.py":
+            continue
+        text = path.read_text()
+        for match in re.finditer(r"^def (\w+)\((?:.|\n)*?(?=^def |\Z)", text, re.M):
+            if any(re.search(rf"\b{d}\(", match.group(0)) for d in judge_defs):
+                wrappers.add(match.group(1))
+    assert "compare_pdf_answers" in wrappers
+    names = sorted(judge_defs | wrappers | {"llm_metrics", "model_client"})
+    truth_re = re.compile(r"\b(" + "|".join(names) + r")\b")
     detected: set[str] = set()
     truth: set[str] = set()
     for path in tasks:
