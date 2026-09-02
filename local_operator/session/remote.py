@@ -62,7 +62,11 @@ from local_operator.harness.types import (
     Usage,
     WakeDeliveredEvent,
 )
-from local_operator.mobile.attach_client import AttachClient, find_owner_record
+from local_operator.mobile.attach_client import (
+    STOPPED_REASON,
+    AttachClient,
+    find_owner_record,
+)
 from local_operator.mobile.types import (
     ContinuationCommand,
     PendingRequest,
@@ -83,11 +87,6 @@ from local_operator.session.naming import ConversationName
 from local_operator.session.protocol import CompactionOutcome
 from local_operator.session.transcript import Transcript
 from local_operator.session_lease import SessionLeaseHeldError
-
-#: Indirection so tests monkeypatch ``remote_module.find_owner_record``
-#: and the recovery loop reads the patched callable — a direct import binding
-#: would shadow the patch and the loop would scan the real registry forever.
-_find_owner_record = find_owner_record
 
 logger = logging.getLogger(__name__)
 
@@ -750,7 +749,15 @@ class RemoteSession:
         # transcript lease to win. Stay a viewer showing the cold session —
         # the same shape bare /stop leaves an owner in. The record scan in
         # `_recover_owner` would otherwise rediscover nothing and take over.
+        # The owner announced the stop on the wire before closing (the
+        # ``stopping`` frame the client turns into this reason). That covers
+        # the cases the local flag cannot: another TUI's /stop all, or a shell
+        # `lop stop`, hitting a session THIS viewer merely watches — including
+        # a session with no wakes, which leaves no on-disk marker to consult.
+        if _reason == STOPPED_REASON:
+            self._deliberate_stop = True
         if self._deliberate_stop:
+            self._owner_ready.set()  # prompts route to the stopped notice
             return
         self._recovering = True
         self._owner_ready.clear()
@@ -783,17 +790,13 @@ class RemoteSession:
             return True
         from local_operator.wakes import store as wake_store
 
-        entry = await asyncio.to_thread(
-            wake_store.read_entry, self._config_dir, self._session_id
-        )
+        entry = await asyncio.to_thread(wake_store.read_entry, self._config_dir, self._session_id)
         if entry is None or not entry.get("stopped_at"):
             return False
         # The marker says stopped; confirm nobody re-opened it in the
         # meantime (an open clears ``stopped_at``). If an owner is live and
         # reachable, this is a re-open — recover normally.
-        record, _ = await asyncio.to_thread(
-            _find_owner_record, self._config_dir, self._session_id
-        )
+        record, _ = await asyncio.to_thread(find_owner_record, self._config_dir, self._session_id)
         return record is None
 
     async def _recover_owner(self) -> None:
@@ -820,7 +823,7 @@ class RemoteSession:
                     self._owner_ready.set()  # prompts route to the stopped notice
                     return
                 record, _ = await asyncio.to_thread(
-                    _find_owner_record, self._config_dir, self._session_id
+                    find_owner_record, self._config_dir, self._session_id
                 )
                 if (
                     record is not None

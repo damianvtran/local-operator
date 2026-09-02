@@ -876,6 +876,14 @@ class RuntimeServer:
             request_stop = getattr(h, "request_stop", None)
             if not callable(request_stop):
                 raise ValueError("this owner cannot stop itself gracefully")
+            # Tell every attached viewer the disconnect they are about to see
+            # is DELIBERATE, before the session goes away. Without this a
+            # follower cannot distinguish a stop from owner death and its
+            # recovery takes over the session a user just ended — republishing
+            # a live record for a cold session (U2-4). Announced BEFORE the
+            # hook runs because the hook's own teardown closes these sockets.
+            # An old viewer ignores the unknown frame, so this stays additive.
+            await self._broadcast({"op": "stopping", "session_id": self._record.session_id})
             result = request_stop()
             if inspect.isawaitable(result):
                 result = await result

@@ -213,7 +213,54 @@ async def test_owner_death_without_stopped_marker_still_takes_over(tmp_path, mon
         session_id="s1",
         takeover_factory=lambda: asyncio.sleep(0, result=winner),
     )
+    # The callback is what ENDS the recovery loop: without it the loop
+    # disposes each winner and retries forever (the real app always installs
+    # one at adoption), so the sibling tests above install it too.
+    adopted: list[Any] = []
+
+    async def adopt(local):  # noqa: ANN001
+        adopted.append(local)
+        await remote.dispose()
+
+    remote.set_takeover_callback(adopt)
     remote._on_disconnected("owner exited")
     if remote._recovery_task is not None:
-        await remote._recovery_task
+        await asyncio.wait_for(remote._recovery_task, timeout=5)
+    assert adopted == [winner]
     assert remote._takeover_target is winner
+
+
+@pytest.mark.asyncio
+async def test_wire_stopping_frame_prevents_takeover_without_any_wake_entry(
+    tmp_path, monkeypatch
+) -> None:
+    """The owner's ``stopping`` announcement is what makes the wire case work
+    for a session with NO wakes.
+
+    The on-disk ``stopped_at`` marker only exists when a session HAS
+    schedules (``write_entry``'s empty-schedules contract removes the file),
+    so a wakeless session stopped by another process leaves nothing to read.
+    The owner therefore announces the stop before closing, and the client
+    surfaces it as ``STOPPED_REASON`` — the only evidence available here.
+    """
+    from local_operator.mobile.attach_client import STOPPED_REASON
+
+    assert not (tmp_path / "wakes").exists()  # no marker to fall back on
+
+    async def takeover():
+        raise AssertionError("takeover must not run after an announced stop")
+
+    monkeypatch.setattr(remote_module, "find_owner_record", lambda *args: (None, None))
+    remote = RemoteSession(
+        config_dir=tmp_path,
+        session_id="s1",
+        takeover_factory=takeover,
+    )
+    remote._on_disconnected(STOPPED_REASON)
+    if remote._recovery_task is not None:
+        await asyncio.wait_for(remote._recovery_task, timeout=5)
+    assert remote._deliberate_stop is True
+    assert remote._takeover_target is None
+    # The viewer stays usable: a prompt resolves against the stopped notice
+    # instead of blocking forever on an owner that will never return.
+    assert remote._owner_ready.is_set()

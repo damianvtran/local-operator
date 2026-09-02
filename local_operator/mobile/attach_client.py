@@ -58,6 +58,10 @@ from local_operator.session.runtime.registry import scan
 #: surfaces as an error rather than a hang.
 ACK_TIMEOUT_S = 15.0
 
+#: Disconnect reason marking a DELIBERATE stop, as opposed to owner death.
+#: Consumers compare against this exact string to decide whether to recover.
+STOPPED_REASON = "owner stopped the session"
+
 
 def find_owner_record(config_dir: Path, session_id: str) -> tuple[SessionRecord | None, int | None]:
     """Locate the discovery record of the live process hosting ``session_id``.
@@ -276,6 +280,15 @@ class AttachClient:
                     self._frontend_sequence = sequence
                     if self._on_frontend_update is not None:
                         self._on_frontend_update(data)
+                elif op == "stopping":
+                    # The owner is ending this session ON PURPOSE (a /stop
+                    # anywhere: this viewer, another TUI's /stop all, a shell
+                    # lop stop). Carried in the disconnect reason rather than a
+                    # new callback because every consumer already reads that
+                    # string, and the EOF it precedes is moments away — a
+                    # viewer that mistakes it for owner death takes over a
+                    # session the user just ended (U2-4).
+                    reason = STOPPED_REASON
                 elif op in ("ack", "error", "result"):
                     future = self._pending.pop(frame.get("req"), None)
                     if future is not None and not future.done():

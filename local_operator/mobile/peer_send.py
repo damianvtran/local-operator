@@ -207,9 +207,7 @@ def candidate_lines(
     pid_w = max(len(str(rec.pid)) for rec in candidates)
     for rec in candidates:
         name = rec.conversation_name or rec.session_id
-        lines.append(
-            f"{indent}{prefix}{gap}{rec.pid:>{pid_w}}  {name}  ({rec.model_label})"
-        )
+        lines.append(f"{indent}{prefix}{gap}{rec.pid:>{pid_w}}  {name}  ({rec.model_label})")
     return lines
 
 

@@ -816,9 +816,7 @@ async def stop_all(
                 )
             )
             continue
-        outcomes.append(
-            await stop_session(record, timeout_s=timeout_s, force=force, _root=root)
-        )
+        outcomes.append(await stop_session(record, timeout_s=timeout_s, force=force, _root=root))
     return outcomes
 
 
