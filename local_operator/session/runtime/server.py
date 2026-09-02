@@ -15,8 +15,9 @@ attached) hosts one of these. It does three things:
    host-provided :class:`SessionHandle`.
 
 This was ``mobile/registrant.py`` and the class was ``Registrant``. Nothing
-about it is phone-specific except the projection fold (which PR 2 makes an
-injected collaborator): the phone daemon, an attach terminal, and — later —
+about it is phone-specific except the projection fold, which is an injected
+:class:`ProjectionSink` collaborator built lazily on the first daemon dial
+when none is supplied: the phone daemon, an attach terminal, and — later —
 wakes and background automations are all VIEWERS of one session runtime.
 ``Registrant`` remains as an alias at the bottom of this module and at the old
 import path, so no call site had to change in the move.
@@ -216,14 +217,52 @@ class SessionHandle(Protocol):
     #   lacking it answers "this session cannot receive peer messages".
 
 
+class ProjectionSink(Protocol):
+    """What the runtime needs from a projection collaborator.
+
+    The phone renders from a :class:`SessionProjection` snapshot that the
+    runtime broadcasts on change; :class:`ProjectionFold` is the production
+    implementation. The runtime only ever READS ``projection`` (to serialize
+    a frame) and calls ``set_pending`` (the reduced-handle bridge for gate
+    cards), so that is the whole contract — narrow enough that a test can
+    hand in a stub and a future runtime with no phone can hand in nothing.
+    """
+
+    @property
+    def projection(self) -> SessionProjection: ...
+
+    def set_pending(self, pending: Any) -> None: ...
+
+
 class RuntimeServer:
     """One per interactive process. Construct, ``start()``, ``close()``."""
 
-    def __init__(self, handle: SessionHandle, *, kind: str = "tui") -> None:
+    def __init__(
+        self,
+        handle: SessionHandle,
+        *,
+        kind: str = "tui",
+        projection_sink: ProjectionSink | None = None,
+    ) -> None:
         self._handle = handle
         seed = handle.session_projection_seed
         seed.kind = kind
-        self._fold = ProjectionFold(seed)
+        # The projection fold is an OPTIONAL, injected collaborator. A caller
+        # that already owns a fold may hand it in and the runtime uses it
+        # as-is — only tests do today; every production constructor call
+        # (the TUI at ``tui/app.py``, the owned-session process) passes none.
+        # Given none, nothing is built until a client that consumes
+        # projection semantics (the mobile daemon) actually dials, so a
+        # runtime that only ever serves a follower terminal or fires a wake
+        # constructs no fold at all. Welcomes and repaints before that moment
+        # serialize the seed directly: the seed IS the object the handle's
+        # own fold mutates, so the bytes on the wire are identical either
+        # way. See ``_ensure_projection_sink``.
+        self._projection_sink: ProjectionSink | None = projection_sink
+        #: How many times this runtime built a fold on its own. Observable
+        #: for tests and for the "did a headless runtime pay for a fold?"
+        #: question; 0 after a lifetime with no daemon client is the claim.
+        self.projection_sinks_built: int = 0
         self._record = SessionRecord(
             pid=os.getpid(),
             kind=kind,  # type: ignore[arg-type]
@@ -556,6 +595,11 @@ class RuntimeServer:
             wants_frontend=wants_frontend,
         )
         self._clients[id(writer)] = conn
+        if kind == "daemon":
+            # The daemon is the one client that renders projections (attach
+            # clients read the welcome for identity only), so its arrival is
+            # when a lazily-built fold earns its keep.
+            self._ensure_projection_sink()
         await self._push_to(conn)  # the welcome: a full projection, unprompted
         if conn.wants_frontend:
             subscribe_frontend = getattr(self._handle, "subscribe_frontend", None)
@@ -637,8 +681,9 @@ class RuntimeServer:
     def attach_clients(self) -> int:
         """How many attach (follower terminal) connections are live.
 
-        The child reaper's front-end count: an attached TUI is a front end
-        exactly like a phone, so it must hold the child in ACTIVE."""
+        Term 3 of the runtime's residency predicate (``process._should_exit``):
+        an interactive viewer holds the runtime warm; ``daemon`` clients never
+        do. Also the attach-cap count."""
         return sum(1 for c in self._clients.values() if c.kind == "attach")
 
     async def _on_request(self, frame: dict[str, Any], conn: _ClientConn) -> None:
@@ -1037,7 +1082,9 @@ class RuntimeServer:
         """
         from local_operator.mobile.projection import cap_projection_frame
 
-        data, degraded = cap_projection_frame(self._fold.projection)
+        sink = self._projection_sink
+        projection = sink.projection if sink is not None else self._handle.session_projection_seed
+        data, degraded = cap_projection_frame(projection)
         if degraded and not self._frame_cap_warned:
             self._frame_cap_warned = True
             logger.warning(
@@ -1081,9 +1128,35 @@ class RuntimeServer:
 
     # -- host-facing helpers ----------------------------------------------------
 
+    def _ensure_projection_sink(self) -> ProjectionSink:
+        """Return the sink, building the default :class:`ProjectionFold` on
+        first need. Idempotent; the counter records only builds this runtime
+        performed itself, never an injected sink."""
+        sink = self._projection_sink
+        if sink is None:
+            sink = ProjectionFold(self._handle.session_projection_seed)
+            self._projection_sink = sink
+            self.projection_sinks_built += 1
+            logger.info(
+                "session runtime: built projection fold for session %s",
+                self._record.session_id,
+            )
+        return sink
+
+    @property
+    def projection_sink(self) -> ProjectionSink | None:
+        """The sink in use, or ``None`` while no consumer has needed one."""
+        return self._projection_sink
+
     @property
     def fold(self) -> ProjectionFold:
-        return self._fold
+        """The default fold, built on demand. Handles that reach for this want
+        the full :class:`ProjectionFold` surface (subagent details, todos);
+        an injected sink that is not one is a programming error here."""
+        sink = self._ensure_projection_sink()
+        if not isinstance(sink, ProjectionFold):
+            raise TypeError("an injected projection sink is not a ProjectionFold")
+        return sink
 
     def set_pending(self, pending: Any | None) -> None:
         """Set mobile pending state and canonical gate state for reduced hosts.
@@ -1091,7 +1164,7 @@ class RuntimeServer:
         Production TUI handles publish directly when their real widget mounts;
         this bridge keeps owned/reduced handles on the same contract.
         """
-        self._fold.set_pending(pending)
+        self._ensure_projection_sink().set_pending(pending)
         frontend = getattr(self._handle, "_frontend", None)
         mutate = getattr(frontend, "mutate", None)
         if callable(mutate):

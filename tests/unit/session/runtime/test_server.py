@@ -960,3 +960,109 @@ async def test_absent_client_field_means_daemon() -> None:
         wd2.close()
     finally:
         runtime.close()
+
+
+# --- ProjectionSink: injected, lazily built, never for a fold-free runtime ---
+
+
+@pytest.mark.asyncio
+async def test_attach_only_runtime_builds_no_projection_fold() -> None:
+    """A headless runtime serving only follower terminals pays nothing to
+    fold: the welcome serializes the seed directly, and no ProjectionFold is
+    constructed for the whole lifetime of the connection."""
+    handle = FakeHandle()
+    runtime = RuntimeServer(handle, kind="daemon")
+    assert runtime.projection_sink is None
+    runtime.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        reader, writer = await _dial(record, client="attach")
+        # Repaints still flow (the seed is the host's own mutable object).
+        handle._projection.conversation_name = "renamed"
+        runtime._schedule_push()
+        frame = await _until(reader, "projection")
+        assert frame["data"]["conversation_name"] == "renamed"
+        assert frame["data"]["session_id"] == "s1"
+        assert runtime.projection_sink is None
+        assert runtime.projection_sinks_built == 0
+    finally:
+        if writer is not None:
+            writer.close()
+        runtime.close()
+    assert runtime.projection_sinks_built == 0
+
+
+@pytest.mark.asyncio
+async def test_daemon_dial_builds_the_default_fold_once() -> None:
+    """The mobile daemon is the projection consumer; its first dial builds
+    the fold, a redial reuses it, and its frames carry the folded state."""
+    from local_operator.mobile.projection import ProjectionFold
+
+    handle = FakeHandle()
+    runtime = RuntimeServer(handle, kind="daemon")
+    runtime.start()
+    first = second = None
+    try:
+        record = await _wait_record()
+        _, first = await _dial(record)
+        assert isinstance(runtime.projection_sink, ProjectionFold)
+        assert runtime.projection_sinks_built == 1
+        sink = runtime.projection_sink
+        reader, second = await _dial(record)  # daemon redial evicts the first
+        assert runtime.projection_sink is sink
+        assert runtime.projection_sinks_built == 1
+        # A fold mutation reaches the daemon's frame.
+        runtime.set_pending(PendingRequest(request_id="r1", kind="approval", title="write /tmp/x"))
+        frame = await _until(reader, "projection")
+        assert frame["data"]["pending"]["request_id"] == "r1"
+    finally:
+        for w in (first, second):
+            if w is not None:
+                w.close()
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_injected_sink_is_used_as_is() -> None:
+    """A host that already owns a fold hands it in; the runtime builds none
+    of its own and serializes the injected projection."""
+    from local_operator.mobile.projection import ProjectionFold
+
+    handle = FakeHandle()
+    fold = ProjectionFold(handle.session_projection_seed)
+    fold.projection.model_label = "injected/model"
+    runtime = RuntimeServer(handle, kind="tui", projection_sink=fold)
+    assert runtime.projection_sink is fold
+    assert runtime.fold is fold
+    runtime.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        reader, writer = await _dial(record)
+        runtime._schedule_push()
+        frame = await _until(reader, "projection")
+        assert frame["data"]["model_label"] == "injected/model"
+        assert runtime.projection_sinks_built == 0
+    finally:
+        if writer is not None:
+            writer.close()
+        runtime.close()
+
+
+def test_fold_property_rejects_a_foreign_sink() -> None:
+    class Stub:
+        def __init__(self, projection: SessionProjection) -> None:
+            self.projection = projection
+
+        def set_pending(self, pending: Any) -> None:
+            self.projection.pending = pending
+
+    handle = FakeHandle()
+    runtime = RuntimeServer(
+        handle, kind="tui", projection_sink=Stub(handle.session_projection_seed)
+    )
+    runtime.set_pending(None)  # routed to the stub, no fold built
+    assert runtime.projection_sinks_built == 0
+    with pytest.raises(TypeError):
+        _ = runtime.fold

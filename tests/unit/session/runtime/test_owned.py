@@ -772,3 +772,38 @@ async def test_attach_seeds_streaming_from_flag_for_mid_turn_subscriber() -> Non
     session.is_streaming = True
     handle.subscribe(lambda: None)
     assert handle._fold.projection.streaming is True
+
+
+# --- next_wake_due_at: the reaper's warmth signal ----------------------------
+
+
+def test_next_wake_due_at_reads_the_live_scheduler() -> None:
+    from types import SimpleNamespace
+
+    from local_operator.harness.wake import WakeSchedule
+
+    loop = asyncio.new_event_loop()
+    try:
+        scheduler = SimpleNamespace(
+            disposed=False,
+            schedules=(
+                WakeSchedule(id="a", message="x", next_due_at=5_000, created_at=0),
+                WakeSchedule(id="b", message="y", next_due_at=2_000, created_at=0),
+            ),
+        )
+        session = SimpleNamespace(
+            session_id="s", wake_scheduler=scheduler, subscribe=lambda h: None
+        )
+        handle = OwnedSessionHandle.__new__(OwnedSessionHandle)
+        handle._session = session  # type: ignore[attr-defined]
+        handle._loop = loop  # type: ignore[attr-defined]
+        assert handle.next_wake_due_at() == 2_000
+        scheduler.schedules = ()
+        assert handle.next_wake_due_at() is None
+        scheduler.schedules = (WakeSchedule(id="a", message="x", next_due_at=5_000, created_at=0),)
+        scheduler.disposed = True
+        assert handle.next_wake_due_at() is None, "a disposed scheduler can no longer fire"
+        handle._session = SimpleNamespace(session_id="s")  # type: ignore[attr-defined]
+        assert handle.next_wake_due_at() is None
+    finally:
+        loop.close()
