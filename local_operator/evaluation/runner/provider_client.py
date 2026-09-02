@@ -561,6 +561,7 @@ class ProviderModelClient:
         # ``context_tokens``), which is one request away at most.
         self._last_provider_context_tokens = None
 
+        shed = 0
         if threshold is not None:
             # A threshold pass must FIT, not merely run. Re-asking the trigger
             # after a pass that left the prefix over the engine's reserve band
@@ -584,7 +585,13 @@ class ProviderModelClient:
                     "observation turn(s) that shedding could not fit under it; the "
                     "episode ends as a harness error rather than send a rejected request"
                 )
-        if result.frames_dropped == 0 and not result.ran and not result.pruned:
+        # A shed-only rebuild is still a rebuild: when the pass itself refused
+        # (``nothing-to-summarize`` — the kept window was the whole tail) but
+        # the shed removed turns, previously sent messages vanish from the next
+        # request, and a ``context_compaction`` event is the only honest trace
+        # of that (review round 4, m8). Returning nothing here would hide it
+        # behind a bare ``message_count`` drop.
+        if shed == 0 and result.frames_dropped == 0 and not result.ran and not result.pruned:
             return None, None, 0
         record = CompactionRecord(
             strategy=result.strategy or "prune",
@@ -592,7 +599,11 @@ class ProviderModelClient:
             # the figure its trigger judges); the bundle wants the size of the
             # context the model last saw, so the pre-pass estimate is recorded.
             tokens_before=tokens_before,
-            tokens_after=result.tokens_after,
+            # After a shed the pass's own figure describes a prefix that no
+            # longer exists; measure what is actually being sent.
+            tokens_after=(
+                _estimate_context(self._context.messages) if shed else result.tokens_after
+            ),
             frames_dropped=result.frames_dropped,
             messages_before=before,
             messages_after=len(self._context.messages),

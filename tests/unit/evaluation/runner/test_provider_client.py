@@ -1108,6 +1108,59 @@ async def test_shed_actually_sheds_and_a_mid_size_window_runs_to_the_end(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_a_shed_only_rebuild_is_declared_as_a_compaction(tmp_path: Path) -> None:
+    """Review round 4, m8: on a 16k window with ~4.3k-token observations and
+    ``keep_recent_tokens=12000`` the kept window is the whole tail, so the
+    threshold pass refuses (``nothing-to-summarize``) and the shed alone
+    rebuilds the prefix. Every such rebuild — a previously sent message absent
+    from the next request — must come back with a ``CompactionRecord`` (the
+    runner turns each one into a ``context_compaction`` event, proved in
+    ``test_context_compaction_event_is_recorded_and_verifies``); a rebuild
+    whose only trace is a ``message_count`` drop is hidden from the bundle.
+    The record's ``tokens_after`` measures the prefix actually sent, not the
+    pass's pre-shed figure."""
+
+    from local_operator.compaction.thresholds import CompactionSettings
+    from local_operator.compaction.tokens import estimate_messages_tokens
+
+    stream = RecordingStream(_wait_reply)
+    spec = ModelSpec(provider="provider", model_id="model", context_window=16_000)
+    client = ProviderModelClient(
+        stream,
+        route=ROUTE,
+        model_spec=spec,
+        artifact_root=tmp_path,
+        compaction=CompactionSettings(keep_recent_tokens=12_000),
+    )
+
+    history: list[EpisodeTurn] = []
+    rebuilds = 0
+    undeclared = 0
+    shed_records = []
+    for sequence in range(24):
+        current = _framed_observation(tmp_path, sequence, text=f"screen {sequence} " + "x " * 900)
+        history.append(EpisodeTurn(observation=current))
+        decision = await client.decide(current, tuple(history))
+        if sequence:
+            previous, now = stream.requests[-2].messages, stream.requests[-1].messages
+            vanished = any(all(old is not new for new in now) for old in previous)
+            if vanished:
+                rebuilds += 1
+                if decision.compaction is None:
+                    undeclared += 1
+                elif decision.compaction.messages_after < decision.compaction.messages_before:
+                    shed_records.append(
+                        (decision.compaction.tokens_after, estimate_messages_tokens(now))
+                    )
+        history[-1] = history[-1].model_copy(update={"batch": decision.action_batch})
+
+    assert rebuilds >= 10, rebuilds
+    assert undeclared == 0, f"{undeclared} of {rebuilds} rebuilds carried no CompactionRecord"
+    assert shed_records, "the shape never reached a shed-only rebuild"
+    assert all(recorded == sent for recorded, sent in shed_records), shed_records[:3]
+
+
+@pytest.mark.asyncio
 async def test_frameless_benchmark_stays_bounded_with_no_frames_to_shed(tmp_path: Path) -> None:
     """A text-only benchmark (no ImageContent ever) has no frames for the shed or the
     cadence to fire on; with the stall latch removed, the threshold trigger is the only
