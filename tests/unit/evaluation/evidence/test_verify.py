@@ -13,6 +13,7 @@ from local_operator.evaluation.evidence.models import (
     BudgetCommitmentPayload,
     CancelPayload,
     CleanupPayload,
+    ContextCompactionPayload,
     EnvironmentStepPayload,
     EventRecord,
     FinalizationIntent,
@@ -378,6 +379,140 @@ def test_semantic_graph_rejects_duplicate_and_out_of_order_receipts(
         writer.append("model_response", response, monotonic_ns=5, wall_time_ms=5)
     report = verify_bundle(root)
     assert "receipt_binding_invalid" in {issue.code for issue in report.issues}
+
+
+def _request_triple(writer: EvidenceWriter, request_id: str, *, at: int) -> None:
+    writer.append(
+        "model_request",
+        ModelRequestPayload(
+            request_id=request_id,
+            requested_route=ROUTE,
+            tool_schema_digest=DIGEST,
+            input_tokens=1,
+            message_count=1,
+            tool_count=0,
+        ),
+        monotonic_ns=at,
+        wall_time_ms=at,
+    )
+    writer.append(
+        "model_response",
+        ModelResponsePayload(
+            request_id=request_id,
+            provider_request_id="provider-request",
+            requested_route=ROUTE,
+            served_route=ROUTE,
+            stop_reason="end",
+            output_tokens=1,
+            reasoning_tokens=0,
+            tool_call_count=0,
+        ),
+        monotonic_ns=at + 1,
+        wall_time_ms=at + 1,
+    )
+    writer.append(
+        "usage_cost",
+        UsageCostPayload(request_id=request_id, input_tokens=1, output_tokens=1, cost_microusd=1),
+        monotonic_ns=at + 2,
+        wall_time_ms=at + 2,
+    )
+
+
+def _compaction(compaction_id: str, previous: str | None) -> ContextCompactionPayload:
+    return ContextCompactionPayload(
+        compaction_id=compaction_id,
+        previous_request_id=previous,
+        strategy="context-full",
+        tokens_before=10,
+        tokens_after=5,
+        frames_dropped=1,
+        messages_before=4,
+        messages_after=2,
+    )
+
+
+def test_compaction_between_closed_requests_verifies_and_counts(tmp_path: Path) -> None:
+    root = tmp_path / "bundle"
+    with EvidenceWriter.create(root, manifest(), RedactionSet.from_resolved_values(())) as writer:
+        _append_authority(writer)
+        _request_triple(writer, "request-0", at=1)
+        writer.append(
+            "context_compaction",
+            _compaction("compaction-0", "request-0"),
+            monotonic_ns=4,
+            wall_time_ms=4,
+        )
+        _request_triple(writer, "request-1", at=5)
+    report = verify_bundle(root)
+    assert report.valid, [issue.code for issue in report.issues]
+    assert report.counters is not None and report.counters.compactions == 1
+    assert [event.kind for event in report.events][2:] == [
+        "model_request",
+        "model_response",
+        "usage_cost",
+        "context_compaction",
+        "model_request",
+        "model_response",
+        "usage_cost",
+    ]
+
+
+def test_compaction_event_inside_a_request_triple_is_invalid(tmp_path: Path) -> None:
+    """A rebuild mid-request would mean the recorded request is not the one
+    the model saw, so the verifier refuses a compaction that does not sit
+    between one request's usage receipt and the next request."""
+
+    root = tmp_path / "bundle"
+    with EvidenceWriter.create(root, manifest(), RedactionSet.from_resolved_values(())) as writer:
+        _append_authority(writer)
+        writer.append(
+            "model_request",
+            ModelRequestPayload(
+                request_id="request-0",
+                requested_route=ROUTE,
+                tool_schema_digest=DIGEST,
+                input_tokens=1,
+                message_count=1,
+                tool_count=0,
+            ),
+            monotonic_ns=1,
+            wall_time_ms=1,
+        )
+        writer.append(
+            "context_compaction", _compaction("compaction-0", None), monotonic_ns=2, wall_time_ms=2
+        )
+    assert "receipt_binding_invalid" in codes(root)
+
+    # A duplicate compaction id, and one naming a request that never closed.
+    root = tmp_path / "duplicate"
+    with EvidenceWriter.create(root, manifest(), RedactionSet.from_resolved_values(())) as writer:
+        _append_authority(writer)
+        _request_triple(writer, "request-0", at=1)
+        writer.append(
+            "context_compaction",
+            _compaction("compaction-0", "request-0"),
+            monotonic_ns=4,
+            wall_time_ms=4,
+        )
+        writer.append(
+            "context_compaction",
+            _compaction("compaction-0", "request-0"),
+            monotonic_ns=5,
+            wall_time_ms=5,
+        )
+    assert "receipt_binding_invalid" in codes(root)
+
+    root = tmp_path / "unknown-previous"
+    with EvidenceWriter.create(root, manifest(), RedactionSet.from_resolved_values(())) as writer:
+        _append_authority(writer)
+        _request_triple(writer, "request-0", at=1)
+        writer.append(
+            "context_compaction",
+            _compaction("compaction-0", "request-9"),
+            monotonic_ns=4,
+            wall_time_ms=4,
+        )
+    assert "receipt_binding_invalid" in codes(root)
 
 
 def test_semantic_graph_rejects_broken_observation_action_step_links(

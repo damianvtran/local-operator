@@ -25,6 +25,7 @@ from local_operator.evaluation.evidence.models import (
     ArtifactRef,
     BudgetCommitmentPayload,
     CleanupPayload,
+    ContextCompactionPayload,
     EnvironmentStepPayload,
     EventRecord,
     EvidenceArtifactRef,
@@ -379,6 +380,7 @@ def _counters(events: tuple[EventRecord, ...]) -> EvidenceCounters:
         model_response_count=kinds["model_response"],
         action_batch_count=kinds["action_batch"],
         environment_step_count=kinds["environment_step"],
+        compactions=kinds["context_compaction"],
         input_tokens=totals["input_tokens"],
         output_tokens=totals["output_tokens"],
         reasoning_tokens=totals["reasoning_tokens"],
@@ -413,6 +415,7 @@ def _verify_semantics(
     next_observation_sequence = 0
     exchanges: set[str] = set()
     last_exchange: str | None = None
+    compactions: set[str] = set()
     lifecycle: dict[str, LifecycleTransitionPayload] = {}
     last_state_id: str | None = None
     finalization_starts: list[FinalizationStartPayload] = []
@@ -434,6 +437,7 @@ def _verify_semantics(
         ModelRequestPayload,
         ModelResponsePayload,
         UsageCostPayload,
+        ContextCompactionPayload,
         ObservationPayload,
         ActionBatchPayload,
         EnvironmentStepPayload,
@@ -554,6 +558,23 @@ def _verify_semantics(
             ):
                 issues.error("receipt_binding_invalid", location)
             usage.add(payload.request_id)
+        elif isinstance(payload, ContextCompactionPayload):
+            # A compaction rebuilds the context BETWEEN requests: it must sit
+            # after the previous request's usage receipt and before the next
+            # request opens, never inside a request/response/usage triple —
+            # a rebuild mid-request would mean the recorded request was not
+            # the one the model saw. ``previous_request_id`` names the request
+            # whose context it rebuilt, so it must be a closed one.
+            if (
+                payload.compaction_id in compactions
+                or set(requests) != usage
+                or (
+                    payload.previous_request_id is not None
+                    and payload.previous_request_id not in usage
+                )
+            ):
+                issues.error("receipt_binding_invalid", location)
+            compactions.add(payload.compaction_id)
         elif isinstance(payload, ObservationPayload):
             if terminal_output_resolved:
                 issues.error("finalization_invalid", location)
