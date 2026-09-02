@@ -21,6 +21,7 @@ import asyncio
 import re
 import time
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -843,6 +844,63 @@ def test_scroll_page_is_the_keyboards_way_in_and_reaches_what_the_wheel_does() -
     assert panel.scroll_page(down=False) is False
     assert panel.scroll_page(down=True) is True
 
+    # FORWARD reaches everything too, which is not implied by the sweep above.
+    # Paging forward moves the window the other way from the overlay it has to
+    # step around, so a step sized against the CURRENT window lands past rows
+    # the destination will cover and nothing ever paints them: measured at
+    # budget 8, the jump 51 -> 43 stepped 8 while 6 rows were visible and rows
+    # 8-9 fell in the gap. The two directions have to agree about which rows
+    # exist.
+    panel._scroll_back_rows = panel._max_scroll_back()
+    seen = set()
+    for _ in range(400):
+        seen.update(panel.render_lines_for_test())
+        if not panel.scroll_page(down=True):
+            break
+    blob = "\n".join(seen)
+    assert {i for i in range(200) if f"ROW-{i:03d}" in blob} == set(range(200))
+    assert panel._scroll_back_rows == 0
+
+
+@pytest.mark.parametrize("budget", [1, 2, 3])
+def test_a_one_row_budget_still_shows_the_answer_not_just_a_marker(budget: int) -> None:
+    """At the smallest sizes CONTENT wins the last row, not the marker.
+
+    ``_fit()`` returns 1 for 4 to 7 rows above the dock, and for 8 or 10 with a
+    notice showing, so this is a short terminal or a full dock rather than a
+    hypothetical. The overlay is drawn OVER the window's top rows, so an
+    overlay as large as the budget covers every row it names — measured before
+    the fix, budget 1 painted ``↑ 60 earlier lines · scroll`` and nothing else
+    at every offset, which is the defect this work exists to remove, sharpened.
+    """
+    panel = AsidePanel()
+    panel.display = True
+    panel._turns = [
+        AsideTurn(
+            question="why?", answer="\n".join(f"ROW-{i:03d}" for i in range(59)), state="done"
+        )
+    ]
+
+    with patch.object(AsidePanel, "_fit", return_value=(budget + 6, 0, budget)):
+        seen: set[str] = set()
+        for offset in range(panel._max_scroll_back() + 1):
+            panel._scroll_back_rows = offset
+            rendered = panel.render_lines_for_test()
+            body = rendered[2:-2]
+            assert len(body) == budget, "the card must paint exactly its budget"
+            # A row of the EXCHANGE, never a marker on its own. At the very top
+            # of a one-row window that row is the question itself, which is
+            # content the reader asked for; the failure being guarded is a card
+            # whose only row describes the text instead of showing any.
+            assert any(
+                "ROW-" in line or line.startswith("▌") for line in body
+            ), f"only a marker at offset {offset}: {body}"
+            seen.update(rendered)
+
+        # And every row is still reachable at these sizes.
+        blob = "\n".join(seen)
+        assert {i for i in range(59) if f"ROW-{i:03d}" in blob} == set(range(59))
+
 
 def test_copy_text_takes_the_whole_exchange_off_the_dataclass() -> None:
     """The copy payload is the TEXT, not the painted rows.
@@ -873,6 +931,37 @@ def test_copy_text_takes_the_whole_exchange_off_the_dataclass() -> None:
     assert panel.fork_messages() == [("first?", panel._turns[0].answer)]
 
     assert AsidePanel().copy_text() == ""
+
+
+def test_copy_text_drops_failed_and_cancelled_turns_on_their_STATE() -> None:
+    """A turn that streamed text and then failed must not be copied as an answer.
+
+    Filtering on ``turn.answer`` rather than on ``turn.state`` looks equivalent
+    and is not: a failed turn KEEPS whatever streamed before it died, so the
+    text test copies words the model never stood behind, formatted exactly like
+    words it did. ``fork_messages`` drops the same turns for the same reason.
+    """
+    panel = AsidePanel()
+    panel.display = True
+    panel._turns = [
+        AsideTurn(question="ok?", answer="a good answer", state="done"),
+        AsideTurn(
+            question="failed?",
+            answer="partial text before it died",
+            state="error",
+            error="provider exploded",
+        ),
+        AsideTurn(question="superseded?", answer="half a thought", state="cancelled"),
+        AsideTurn(question="live?", answer="still arriving", state="running"),
+    ]
+
+    payload = panel.copy_text()
+    assert "a good answer" in payload
+    assert "still arriving" in payload
+    assert "partial text before it died" not in payload
+    assert "half a thought" not in payload
+    assert "provider exploded" not in payload
+    assert "failed?" not in payload and "superseded?" not in payload
 
 
 def test_the_footer_advertises_copy_beside_fork() -> None:

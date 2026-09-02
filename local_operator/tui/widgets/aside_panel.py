@@ -436,9 +436,20 @@ class AsidePanel(Static):
         half an exchange is not one; the clipboard is the user's own scratch
         space, they can see the answer is still arriving, and this is the one
         way out that works while ``^f`` is refused mid-stream.
+
+        Filtered on STATE, not on whether text happens to be present. A turn
+        that streamed a few sentences and then failed still HOLDS those
+        sentences, and copying them hands the user text the model never stood
+        behind, formatted exactly like an answer it did — the reason
+        :meth:`fork_messages` drops the same turns, and the reason ``error``
+        keeps its cause in its own field rather than in ``answer``. Cancelled
+        turns go for the same reason: the user moved on, and the card marks
+        them ``(superseded)`` on screen while the clipboard could not.
         """
         blocks: list[str] = []
         for turn in self._turns:
+            if turn.state not in ("done", "running"):
+                continue
             answer = turn.answer.strip()
             if not answer:
                 continue
@@ -505,17 +516,53 @@ class AsidePanel(Static):
         if len(flat.lines) <= budget:
             return False
         before = self._scroll_back_rows
-        self._scroll_by(-self._visible(flat, budget) if down else self._visible(flat, budget))
+        if down:
+            # FORWARD steps by what the DESTINATION will show, not by what the
+            # current window shows. The two differ: the overlay covers rows at
+            # the window's TOP, so paging back leaves the covered rows below
+            # the new window's top and the next step re-reads them — backward
+            # self-corrects. Forward moves the top the other way, so a step
+            # measured here lands past rows the destination will cover, and
+            # they are never painted at any offset. Measured at budget 8 the
+            # jump 51 -> 43 stepped 8 while 6 rows were visible, and rows 8-9
+            # fell in the gap. Paging must be reversible or the two directions
+            # disagree about which rows exist.
+            self._scroll_by(-self._step_to(flat, budget))
+        else:
+            self._scroll_by(self._visible(flat, budget))
         return self._scroll_back_rows != before
 
-    def _visible(self, flat: _FlatBody, budget: int) -> int:
-        """Rows of the exchange the current window actually shows to the reader.
+    def _step_to(self, flat: _FlatBody, budget: int) -> int:
+        """Rows to move FORWARD so the destination window abuts this one.
+
+        Solved by trying the candidate step and asking what the window there
+        would show, rather than by inverting the arithmetic: the overlay's size
+        depends on which turn the destination's top lands in, so the step and
+        its own consequence are mutually defined. Two passes settle it — the
+        first guesses with this window's overlay, the second corrects with the
+        destination's — and the result is clamped so a step can never exceed
+        the window's own span and skip rows outright.
+        """
+        step = self._visible(flat, budget)
+        for _ in range(2):
+            probe = max(0, self._scroll_back_rows - step)
+            candidate = self._visible(flat, budget, back=probe)
+            if candidate >= step:
+                break
+            step = candidate
+        return max(1, step)
+
+    def _visible(self, flat: _FlatBody, budget: int, back: int | None = None) -> int:
+        """Rows of the exchange a window actually shows to the reader.
 
         The window spans ``budget`` rows, but its first rows are covered by the
         overlay, and a covered row has not been read. Paging by this number is
         what makes the keyboard reach every row the wheel reaches.
+
+        ``back`` measures a window the reader is not at yet, which is how the
+        forward step is sized against its own destination.
         """
-        rows, first, end, _ = self._window(flat, budget)
+        rows, first, end, _ = self._window(flat, budget, back=back)
         covered = sum(1 for row, source in zip(rows, flat.lines[first:end]) if row is not source)
         return max(1, (end - first) - covered)
 
@@ -622,9 +669,13 @@ class AsidePanel(Static):
         flat = _FlatBody()
         for index, turn in enumerate(self._turns):
             # The blank that separates turns belongs BETWEEN them, so it leads
-            # every turn but the first. `_window` strips it again if a window
-            # happens to open on it: a blank leading the card reads as the
-            # exchange having started and then said nothing.
+            # every turn but the first. A window CAN open on one, and it is
+            # left in place: that only happens when a turn is above the window,
+            # which is exactly when the marker is drawn over the top row, so
+            # the blank separates the marker from the exchange instead of
+            # leading it. Stripping it would cost a budget row the window
+            # cannot win back, which is what made the card's height vary with
+            # scroll position.
             rows: list[Text] = [] if index == 0 else [Text()]
             question = self._question_rows(turn.question, width, dim, fg)
             head_start = len(flat.lines) + len(rows)
@@ -635,7 +686,9 @@ class AsidePanel(Static):
             flat.owners.extend([index] * len(rows))
         return flat
 
-    def _window(self, flat: _FlatBody, budget: int) -> tuple[list[Text], int, int, int]:
+    def _window(
+        self, flat: _FlatBody, budget: int, back: int | None = None
+    ) -> tuple[list[Text], int, int, int]:
         """``(rows to paint, first content row, one past the last, questions above)``.
 
         The whole scroll model in one place, so the painter, the clamp and the
@@ -661,15 +714,27 @@ class AsidePanel(Static):
         Overlaying costs nothing in reachability, which is the property this
         whole change exists for: a covered row is one the window has not
         finished passing, and one more step of the gesture moves it down out of
-        the overlay. At the last step the overlay is EMPTY — the window starts
-        at row 0, so no question sits above it to pin and no marker is drawn —
-        so no row ends its travel underneath one.
+        the overlay. That holds ONLY while the overlay is strictly smaller than
+        the budget, which is why it is clamped to ``budget - 1`` below rather
+        than left to the arithmetic. An overlay that filled the budget would
+        paint a marker over every row it names, at every offset — measured at
+        budget 1 that is a card showing ``↑ 60 earlier lines · scroll`` and
+        nothing else, forever, which is a sharper version of the defect this
+        whole change exists to remove. At the last step the overlay is empty:
+        the window starts at row 0, so no question sits above it to pin and no
+        marker is drawn.
+
+        Budget 1 and 2 are REACHABLE, not theoretical — ``_fit()`` yields 1 for
+        4 to 7 rows above the dock, and for 8 or 10 with a notice showing. A
+        short terminal or a full dock lands there, and the card must still show
+        the reader a row of their answer.
         """
         total = len(flat.lines)
         # Clamped HERE and not only in `_scroll_by`, because the exchange can
         # shrink under a parked reader: `settle_answer` replaces a streamed
         # answer with the authoritative text, which is routinely shorter.
-        back = min(self._scroll_back_rows, max(0, total - budget))
+        offset = self._scroll_back_rows if back is None else back
+        back = min(offset, max(0, total - budget))
         end = total - back
         first = max(0, end - budget)
 
@@ -722,6 +787,15 @@ class AsidePanel(Static):
         # a wrapped question loses its tail before the content loses a row, and
         # the content always keeps at least one. The pinned rows kept are the
         # FIRST ones, which carry the `▌` mark and the start of the question.
+        #
+        # CONTENT WINS THE LAST ROW. The marker goes before the pin, because a
+        # marker with nothing under it is a card that describes its content
+        # instead of showing any, while a pinned question with nothing under it
+        # at least paints a row the reader asked for. Below budget 2 neither
+        # fits and the card is bare content — which is what it did before this
+        # change and the right answer at that size.
+        if len(marker) >= budget:
+            marker = []
         pinned = pinned[: max(0, budget - len(marker) - 1)]
         # Pinned UNCONDITIONALLY while the window opens inside a turn, even at
         # the offsets where the overlay then covers the last of that turn's own
