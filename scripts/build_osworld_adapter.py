@@ -85,6 +85,44 @@ class VerificationFailed(Exception):
     """An input does not match the pin. The message names the path."""
 
 
+def _volatile_roots() -> tuple[Path, ...]:
+    """Directories the OS may purge under a live run."""
+
+    roots = [Path("/tmp"), Path("/private/tmp"), Path("/var/tmp"), Path("/private/var/tmp")]
+    tmpdir = os.environ.get("TMPDIR")
+    if tmpdir:
+        roots.append(Path(tmpdir))
+    out: list[Path] = []
+    for root in roots:
+        try:
+            out.append(root.resolve())
+        except OSError:
+            out.append(root)
+    return tuple(out)
+
+
+def refuse_volatile_root(inputs_root: Path) -> None:
+    """Fail fast if the inputs root lives somewhere the OS may purge.
+
+    This turns the docstring's warning into a check. A previous paid pilot
+    lost its prepared checkout, its 4.2 GB of assets and its output directory
+    to a ``/private/tmp`` sweep mid-episode, and the EC2 instance kept
+    billing. The roots are compared RESOLVED so ``/tmp -> /private/tmp`` on
+    macOS cannot slip past a prefix check on the spelled path.
+    """
+
+    try:
+        resolved = inputs_root.resolve()
+    except OSError:
+        resolved = inputs_root
+    for volatile in _volatile_roots():
+        if resolved == volatile or volatile in resolved.parents:
+            raise VerificationFailed(
+                f"inputs root {inputs_root} resolves under {volatile}, which the OS may purge "
+                "mid-run; use a durable location such as ~/worktrees/osworld"
+            )
+
+
 def _release_digest(
     *, version: str, package_digest: str, benchmark_release: str, task_manifest_sha256: str
 ) -> str:
@@ -274,6 +312,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     inputs_root = Path(os.path.expanduser(str(args.inputs_root)))
     try:
+        refuse_volatile_root(inputs_root)
         facts = verify_inputs(inputs_root, pin)
     except VerificationFailed as error:
         print(f"build_osworld_adapter: verification failed: {error}", file=sys.stderr)

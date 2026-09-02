@@ -39,6 +39,18 @@ RELEASE = "osworld-v2-2026.08.08"
 COMMIT = "d578d2d4e0dc82b43e270fdaa7fa89d9708cd154"
 
 
+@pytest.fixture(autouse=True)
+def _durable_tmp(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """pytest's ``tmp_path`` lives under ``$TMPDIR``, which the build script
+    now refuses as an inputs root. Point ``TMPDIR`` somewhere the volatile-root
+    check does not cover so the happy-path tests exercise verification, not
+    the refusal; the refusal has its own test against a literal ``/tmp``."""
+
+    durable = tmp_path / "durable-tmpdir"
+    durable.mkdir()
+    monkeypatch.setenv("TMPDIR", str(durable))
+
+
 def runner_descriptor(tmp_path: Path, episode_id: str, *, secret_refs: Any = ()) -> Any:
     from local_operator.evaluation.adapters.api import RescueDescriptor
 
@@ -235,6 +247,48 @@ def test_a_missing_task_and_a_wrong_count_both_fail(tmp_path: Path, capsys: Any)
     pin.write_text(json.dumps(payload))
     assert _run(root, pin, tmp_path / "w2") == build.EXIT_VERIFY
     assert "pin says 108" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("volatile", ["/tmp/osworld-inputs", "/private/tmp/osworld-inputs"])
+def test_an_inputs_root_under_tmp_is_refused_before_verification(
+    tmp_path: Path, capsys: Any, volatile: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The documented constraint is enforced: a purge of /tmp destroyed a paid
+    pilot's inputs mid-run. Refused BEFORE any manifest is read, so a root that
+    does not even exist under /tmp still fails on the location, not on a
+    missing file."""
+
+    _root, pin = _fixture_inputs(tmp_path)
+    out = tmp_path / "workspace"
+    assert (
+        build.main(
+            [
+                "--benchmark-release",
+                RELEASE,
+                "--out",
+                str(out),
+                "--inputs-root",
+                volatile,
+                "--release-pin",
+                str(pin),
+            ]
+        )
+        == build.EXIT_VERIFY
+    )
+    err = capsys.readouterr().err
+    assert "OS may purge" in err
+    assert not out.exists()
+
+
+def test_a_root_under_tmpdir_is_refused_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TMPDIR", str(tmp_path / "scratch"))
+    (tmp_path / "scratch").mkdir()
+    with pytest.raises(build.VerificationFailed, match="OS may purge"):
+        build.refuse_volatile_root(tmp_path / "scratch" / "inputs")
+    # A sibling of the volatile root is fine.
+    build.refuse_volatile_root(tmp_path / "elsewhere")
 
 
 def test_a_wrong_prepared_commit_fails(tmp_path: Path, capsys: Any) -> None:
