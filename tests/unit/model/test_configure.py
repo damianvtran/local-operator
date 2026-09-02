@@ -877,7 +877,7 @@ async def test_reserve_on_the_sticky_account_keeps_the_session_there(tmp_path) -
             assert stream._route_state.active is None
             assert notices == [
                 "info:anthropic quota low (8% remaining) — staying on this account to keep "
-                "the prompt cache warm; new sessions will prefer other accounts"
+                "the prompt cache warm"
             ]
 
             # Steady state is silent, and the session still does not move.
@@ -1020,6 +1020,129 @@ async def test_reserve_on_the_sticky_account_is_silent_after_the_walk_settles(
         selected = await store.get_oauth_access("anthropic", "session-a")
         assert selected is not None and selected.credential_id == warm.id
         assert store._active_demotions("anthropic") == set()
+    finally:
+        await stream.close()
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_walks_on_one_stream_fn_each_keep_their_own_boundary_sticky(
+    tmp_path,
+) -> None:
+    """Review F2: the boundary sticky is walk-local, not stream-fn state.
+
+    A child session runs on its PARENT's stream fn (``harness/subagent.py``),
+    so two boundary walks can interleave on one instance. Shape: no sticky
+    yet; the parent's walk hash-picks A (reserve) and its resolve pins the
+    session to A, then suspends in the usage fetch. The child's walk enters
+    meanwhile, reads the store sticky — now A, the parent's fresh pick — and
+    judges A warm. Held on the instance, that reading leaked into the parent's
+    walk when it resumed: A compared equal to "its" boundary sticky, so the
+    parent settled on a reserve account it had every reason to leave. Kept
+    per walk, the parent still sees ``None`` (nothing was warm when it began),
+    demotes the fresh pick and moves to B."""
+    store = AuthStore(tmp_path / "auth.db")
+    low = store.upsert_credential("anthropic", _oauth("oauth-a", "account-a"))
+    healthy = store.upsert_credential("anthropic", _oauth("oauth-b", "account-b"))
+    session = _session_hashing_to_first_row(2)
+    stream = create_stream_fn(
+        store,
+        {"retry": {"usageAwareFallback": True, "usageReservePercent": 10}},
+        session_id=session,
+    )
+    parent_model = ModelSpec(provider="anthropic", model_id="claude-opus-5")
+    child_model = ModelSpec(provider="anthropic", model_id="claude-sonnet-5")
+    parent_suspended = asyncio.Event()
+    child_done = asyncio.Event()
+    probed: list[str] = []
+
+    async def usage_for_access(_client, _provider, *, access_token="", **_kwargs):
+        probed.append(access_token)
+        if len(probed) == 1:
+            # The parent's first probe: park it until the child's whole walk
+            # has run, so the child's reading of the sticky is the one the
+            # parent would have inherited from a shared attribute.
+            parent_suspended.set()
+            await child_done.wait()
+        return _anthropic_usage(95.0 if access_token == "oauth-a" else 20.0)
+
+    try:
+        with patch("local_operator.providers.usage.fetch_usage", side_effect=usage_for_access):
+            parent = asyncio.create_task(stream.preflight_usage(parent_model))
+            await parent_suspended.wait()
+            # The parent's resolve has pinned the session to its fresh pick.
+            assert store.session_credential_id("anthropic", session) == low.id
+
+            # The child opens its own boundary on the shared stream fn.
+            stream.begin_message()
+            await stream.preflight_usage(child_model)
+            child_done.set()
+            await parent
+
+        # The parent judged A against ITS boundary reading (None): a fresh
+        # pick in reserve, so it was demoted and the walk moved on to B.
+        selected = await store.get_oauth_access("anthropic", session)
+        assert selected is not None and selected.credential_id == healthy.id
+        assert store._active_demotions("anthropic") == {low.id}
+        assert not store.is_blocked(low.id, "anthropic")
+        assert probed == ["oauth-a", "oauth-a", "oauth-b"]
+    finally:
+        await stream.close()
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_a_warm_stay_keeps_the_current_effort(tmp_path) -> None:
+    """Review F4: staying on the warm account must not take the same-provider
+    lower-effort hop the chain offers. Anthropic drops the cached message
+    prefix when the thinking parameters change, so the hop would rewrite the
+    very conversation the stay exists to keep warm — the last-account branch
+    still takes it (``test_usage_reserve_can_reduce_effort_without_blocking_account``),
+    because there nothing else can serve and the per-request saving wins."""
+    store = AuthStore(tmp_path / "auth.db")
+    warm = store.upsert_credential("anthropic", _oauth("oauth-a", "account-a"))
+    store.upsert_credential("anthropic", _oauth("oauth-b", "account-b"))
+    stream = create_stream_fn(
+        store,
+        {
+            "retry": {
+                "usageAwareFallback": True,
+                "usageReservePercent": 10,
+                "fallbackChains": {
+                    "default": [
+                        {"provider": "anthropic", "model": "claude-opus-5", "effort": "low"}
+                    ]
+                },
+            }
+        },
+        session_id="session-a",
+    )
+    notices: list[str] = []
+    stream.set_notice_handler(lambda text, kind: notices.append(f"{kind}:{text}"))
+    model = ModelSpec(
+        provider="anthropic",
+        model_id="claude-opus-5",
+        reasoning=True,
+        reasoning_effort="high",
+    )
+    store.pin_session_credential("anthropic", "session-a", warm.id)
+
+    async def usage_for_access(_client, _provider, *, access_token=None, **_kwargs):
+        return _anthropic_usage(95.0 if access_token == "oauth-a" else 20.0)
+
+    try:
+        with patch("local_operator.providers.usage.fetch_usage", side_effect=usage_for_access):
+            await stream.preflight_usage(model)
+
+        selected = await store.get_oauth_access("anthropic", "session-a")
+        assert selected is not None and selected.credential_id == warm.id
+        # No effort route activated: the request goes out at the effort the
+        # conversation is cached under.
+        assert stream._route_state.active is None
+        assert notices == [
+            "info:anthropic quota low (5% remaining) — staying on this account to keep "
+            "the prompt cache warm"
+        ]
     finally:
         await stream.close()
         store.close()

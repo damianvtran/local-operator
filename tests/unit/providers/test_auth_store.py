@@ -1466,6 +1466,36 @@ class TestADemotionNeverMovesASessionOffItsStickyAccount:
         assert [r.id for r in order] == [a.id, b.id]
         assert store._active_demotions("anthropic") == set()
 
+    async def test_an_all_demoted_tier_clears_both_marks_through_resolve(
+        self, tmp_path: Any
+    ) -> None:
+        """Review F3: the same rule seen from ``_resolve``, where the tier
+        filter runs first. Sticky on A, A and B both demoted (an outage, not a
+        verdict about either account). The exemption used to hand the cascade
+        ``[A]`` alone, ``_selection_order`` read that one-row tier as "all
+        demoted" and cleared only A's mark — B stayed demoted, and every other
+        session's fresh pick then skewed onto A for the rest of the TTL. The
+        all-demoted judgement runs on the RAW rows so both marks clear
+        together, exactly as they did before the exemption existed, and the
+        sticky session still lands on A."""
+        store, a, b = self._pool(tmp_path)
+        store.pin_session_credential("anthropic", "s1", a.id)
+        store.deprioritize_credential("anthropic", a.id)
+        store.deprioritize_credential("anthropic", b.id)
+
+        access = await store.get_oauth_access("anthropic", "s1")
+        assert access is not None and access.credential_id == a.id
+        assert store._active_demotions("anthropic") == set()
+
+        # With the marks gone, a non-sticky session spreads by hash again
+        # rather than being funnelled onto the sticky's account.
+        picks = set()
+        for session in ("s2", "s3", "s4", "s5", "s6", "s7"):
+            other = await store.get_oauth_access("anthropic", session, read_only=True)
+            assert other is not None
+            picks.add(other.credential_id)
+        assert picks == {a.id, b.id}
+
     def test_the_sticky_sorts_first_even_while_demoted(self, tmp_path: Any) -> None:
         """The ordering half agrees with the tier-filter half: a demoted sticky
         is not sorted last either, or the two would disagree on the second

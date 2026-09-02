@@ -1003,6 +1003,21 @@ class AuthStore:
         # the net has already fired -- that is what suppressed this filter.
         demoted = set() if ignore_demotions else self._active_demotions(provider)
         if demoted:
+            # Every row in THIS tier is demoted: yield the tier so the cascade
+            # moves on to whatever comes next -- another tier, the env var, or
+            # the resolver -- and, if nothing else serves, the second pass at
+            # the end of :meth:`_resolve` clears the marks together and
+            # re-resolves (the sticky then wins as usual). Judged on the RAW
+            # rows, BEFORE the sticky exemption below, and it has to be: run
+            # after it, an all-demoted tier with a sticky inside came back as
+            # the one sticky row, ``_selection_order`` read that one-row tier
+            # as "all demoted" and cleared only the sticky's mark -- an
+            # outage's marks then decayed asymmetrically and every other
+            # session's fresh pick skewed onto the sticky's account for the
+            # rest of the TTL. The stale-marks rule is about the tier, and
+            # stickiness must not change what "the whole tier" means.
+            if all(r.id in demoted for r in rows):
+                return []
             # The session's STICKY row survives the drop (a BLOCKED sticky does
             # not: the block filter above ran first and blocks are verdicts
             # that the account cannot serve). A demotion is a preference about
@@ -1029,13 +1044,7 @@ class AuthStore:
             # resolve moments ago (a fresh pick) and wants the next resolve to
             # move must release the pin first (``release_session_credential``).
             sticky_id = self.session_credential_id(provider, session_id)
-            remaining = [r for r in rows if r.id not in demoted or r.id == sticky_id]
-            if remaining:
-                return remaining
-            # Every row in THIS tier is demoted: yield the tier so the cascade
-            # moves on to whatever comes next -- another tier, the env var, or
-            # the resolver.
-            return []
+            return [r for r in rows if r.id not in demoted or r.id == sticky_id]
         return rows
 
     # -- the cascade ---------------------------------------------------------

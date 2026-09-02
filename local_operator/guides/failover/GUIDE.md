@@ -37,7 +37,11 @@ no session. An account that just failed on a provider-side fault is *demoted*
 (sorted last), never removed — a 500 is not the account's fault, so it stays
 available as a last resort. A demotion never applies to the account a session
 is already sticky to: it steers *new* picks, and a session's warm prompt cache
-lives on its current account (see "Quota reserve" below).
+lives on its current account (see "Quota reserve" below). Because the marks
+are process-wide, this also means *another* session's 500 on account A no
+longer moves a session that is sticky to A — only that session's **own** 500
+does, since `rotate_sibling` clears its sticky for a server fault before the
+mark is consulted.
 
 When a request fails on quota, `_recover_quota_blocked` (in
 `providers/failover.py`) probes the *other* accounts' own usage before the chain
@@ -70,15 +74,20 @@ counts as **low**. Three rules that are easy to get backwards:
 - **Low is a preference for new picks, never an eviction.** The provider's
   prompt cache is per account, so a session already transacting on a low
   account **stays there** — it is told once (`quota low (N% remaining) —
-  staying on this account to keep the prompt cache warm; new sessions will
-  prefer other accounts`) and keeps spending that account down to zero. Moving
-  it would rewrite its whole conversation prefix at cache-write price on an
+  staying on this account to keep the prompt cache warm`) and keeps spending
+  that account down to zero, at its current effort (a same-provider
+  lower-effort hop would invalidate the cached conversation too). Moving it
+  would rewrite its whole conversation prefix at cache-write price on an
   account that has never seen it; on a multi-account host that rewrite was
-  measured at ~38% of all cache writes. The low account is demoted for
-  *other* sessions' first picks (and for a session that only just landed on
-  it with nothing cached), and the reactive 429 path keeps the same promise
-  (`rotate_sibling`: "sticky preserved"). Only a **depleted** verdict (0%
-  remaining) moves a running session, because then the rewrite is unavoidable.
+  measured at ~38% of all cache writes. The reactive 429 path keeps the same
+  promise (`rotate_sibling`: "sticky preserved"). Only a **depleted** verdict
+  (0% remaining) moves a running session, because then the rewrite is
+  unavoidable. A *new* session that lands on the low account with nothing
+  cached still moves off it: its own boundary walk demotes the row and
+  re-picks. That is per session, not a standing preference — the demotion
+  written by the walk is short-lived, and the stay branch writes none — so
+  new sessions do not yet *avoid* a low account up front; that needs the
+  usage-ranked first pick (`retry.usageAwareAccountPick`), a separate change.
 - Low quota can select a **lower-effort route on the same provider** without
   blocking the account. Dropping from high to low effort on the model the user
   chose is cheaper than leaving for another vendor, so the reserve buys a

@@ -1665,15 +1665,6 @@ class SessionStreamFn:
         self._primary_selector: str | None = None
         self._usage_checked_selector: str | None = None
         self._usage_checked_at = 0.0
-        # The credential this session was sticky to when the CURRENT boundary
-        # walk began — i.e. the account whose prompt cache holds this
-        # conversation. Captured by ``preflight_usage`` ahead of its first
-        # resolve, because every resolve in the walk re-pins the session, so
-        # the store's live sticky stops answering "where is my cache warm?"
-        # after the first hop. Read by ``_apply_account_health`` to decide
-        # whether a reserve verdict is about a warm account (stay) or a fresh
-        # pick (move on).
-        self._boundary_sticky_id: int | None = None
         # Quota is re-probed at EVERY user-message boundary, but the user only
         # needs to hear about a CHANGE in quota standing — not the same "quota
         # low"/"quota exhausted" line echoed on every message they send while
@@ -2455,7 +2446,17 @@ class SessionStreamFn:
         # ``_apply_account_health``); against any other row it is a fresh pick
         # the walk may still move. ``None`` on a session's very first boundary
         # — nothing is warm anywhere, so every row is a fresh pick.
-        self._boundary_sticky_id = self._auth_store.session_credential_id(
+        #
+        # A LOCAL, threaded through ``_apply_account_health`` like the memos
+        # above, never an attribute: this stream fn is shared by a parent and
+        # its child sessions (``harness/subagent.py`` hands the child the
+        # parent's stream fn), and a mid-turn ``/model`` probe can re-enter
+        # here while a walk is suspended at an ``await``. A second entrant
+        # would re-read the store sticky — by then the first walk's fresh pick,
+        # since every resolve re-pins — and an attribute would hand that pick
+        # back to the first walk as "warm", settling it on a reserve account it
+        # meant to move off.
+        boundary_sticky_id = self._auth_store.session_credential_id(
             model.provider, self._session_id
         )
         while True:
@@ -2494,6 +2495,7 @@ class SessionStreamFn:
                             attempted_ids,
                             quota_cache,
                             usage_memo,
+                            boundary_sticky_id,
                         ):
                             continue
                         return
@@ -2646,6 +2648,7 @@ class SessionStreamFn:
                             attempted_ids,
                             quota_cache,
                             usage_memo,
+                            boundary_sticky_id,
                         ):
                             continue
                         return
@@ -2667,7 +2670,7 @@ class SessionStreamFn:
                         # rotation, which spammed the transcript on every
                         # boundary. Rotate silently.
                         continue
-                    if access.credential_id != self._boundary_sticky_id:
+                    if access.credential_id != boundary_sticky_id:
                         # Reserve on a FRESH pick: steer new picks elsewhere.
                         # Same rule and reasoning as the account-scope path in
                         # ``_apply_account_health``.
@@ -2682,8 +2685,7 @@ class SessionStreamFn:
                         selector,
                         f"model:{health.state}",
                         f"{model.provider} {condition}{remaining} for {model.model_id} "
-                        "— staying on this account to keep the prompt cache warm; "
-                        "new sessions will prefer other accounts",
+                        "— staying on this account to keep the prompt cache warm",
                         "info",
                     )
                     await self._route_state.clear_settled("primary model still has quota")
@@ -2744,6 +2746,7 @@ class SessionStreamFn:
                 attempted_ids,
                 quota_cache,
                 usage_memo,
+                boundary_sticky_id,
             ):
                 continue
             return
@@ -2760,6 +2763,7 @@ class SessionStreamFn:
         attempted_ids: set[int],
         quota_cache: dict[str, str] | None = None,
         usage_memo: "dict[str, UsageReport | None] | None" = None,
+        boundary_sticky_id: int | None = None,
     ) -> bool:
         """Act on a low/depleted account-scope verdict.
 
@@ -2772,6 +2776,11 @@ class SessionStreamFn:
         ``usage_memo`` is the same walk's per-account report memo, threaded
         for the same reason one level down: the fallback chain may list this
         walk's own provider, whose accounts have already been read.
+        ``boundary_sticky_id`` is the credential the session was sticky to
+        when the walk BEGAN — the account its prompt cache is warm on — and
+        is walk-local for the reason ``preflight_usage`` gives where it reads
+        it; the default ``None`` (nothing warm) is only for callers outside a
+        walk.
 
         The binding windows that produced ``health`` can be scoped to a model
         tier while the shared windows still hold quota (Anthropic's
@@ -2846,14 +2855,14 @@ class SessionStreamFn:
         # preserved"), applied to the preflight.
         #
         # "Already transacting on" is the sticky captured BEFORE this
-        # boundary's walk started (``_boundary_sticky_id``): the walk's own
+        # boundary's walk started (``boundary_sticky_id``): the walk's own
         # resolves re-pin the session as they go, so a row the walk only just
         # landed on is a FRESH pick with nothing cached, and demoting it to
         # keep walking (below) is still right. Both callers of this method
         # arrive with a row the walk resolved — the boundary probe and a
         # blocked-row recovery — so the fresh-pick branch is reachable from
         # both.
-        on_warm_account = access.credential_id == self._boundary_sticky_id
+        on_warm_account = access.credential_id == boundary_sticky_id
         if not siblings and health.state == "reserve":
             # Last account on this provider, still holding spendable quota.
             # Crossing the reserve threshold used to hop to the next chain
@@ -2866,6 +2875,7 @@ class SessionStreamFn:
                 fallback,
                 f"{model.provider} {condition}{remaining} — continuing until "
                 f"{model.provider} quota is exhausted",
+                keep_effort=False,
             )
             return False
 
@@ -2930,6 +2940,7 @@ class SessionStreamFn:
                     attempted_ids,
                     quota_cache,
                     usage_memo,
+                    boundary_sticky_id,
                 )
 
         if not siblings and fallback is None:
@@ -2980,11 +2991,16 @@ class SessionStreamFn:
             # lone-account rule because that one must also hold when nothing
             # is cached yet. This is the branch the rotation below used to
             # take for every low account, warm or not.
+            #
+            # ``keep_effort``: the whole point of staying is the warm cache,
+            # and a same-provider effort hop would spend part of it — see
+            # ``_settle_on_reserve_account``.
             await self._settle_on_reserve_account(
                 model,
                 fallback,
                 f"{model.provider} {condition}{remaining} — staying on this account to "
-                "keep the prompt cache warm; new sessions will prefer other accounts",
+                "keep the prompt cache warm",
+                keep_effort=True,
             )
             return False
 
@@ -3049,21 +3065,37 @@ class SessionStreamFn:
         )
         return False
 
-    async def _settle_on_reserve_account(self, model: ModelSpec, fallback: Any, text: str) -> None:
+    async def _settle_on_reserve_account(
+        self, model: ModelSpec, fallback: Any, text: str, *, keep_effort: bool
+    ) -> None:
         """Keep serving on an account that is low but still holds quota.
 
         Shared by the two account-scope reasons to stay — the LAST account on
         the provider, and the account this session's prompt cache is warm on
-        — so they cannot drift apart. A same-provider lower-effort hop is
-        still taken first when the chain offers one: it reduces token spend
-        without abandoning remaining quota or the account's warm cache.
-        Otherwise one ``account:reserve`` line per transition (the
-        ``account:`` scope token keeps it distinct from the model-tier branch
-        that shares this selector), and the route settles on the primary.
+        — so they cannot drift apart. One ``account:reserve`` line per
+        transition (the ``account:`` scope token keeps it distinct from the
+        model-tier branch that shares this selector), and the route settles on
+        the primary. The two stays alias on that token on purpose: both mean
+        "low, still serving here", and a session that crosses from one to the
+        other (a sibling blocked or unblocked while this account stays low)
+        is not owed a second line for the same standing.
+
+        ``keep_effort`` decides whether a same-provider lower-effort hop the
+        chain offers is taken first. On the LAST account it is (``False``):
+        nothing else can serve, so trading a one-off cache rewrite for a
+        lower per-request spend on every request until the window resets
+        is the better side of the bargain. On the WARM account it is not
+        (``True``): the session is staying precisely to keep its cache, and
+        Anthropic invalidates cached message prefixes when the thinking
+        parameters change (system and tools stay cached; the conversation
+        does not) — the same reason the auto-effort is frozen per tool loop
+        (``_message_effort``). A hop here would rewrite the very prefix the
+        stay exists to protect, and a healthy sibling is available, so the
+        spend argument is weaker too.
         """
         from local_operator.providers.failover import parse_selector
 
-        if fallback is not None:
+        if fallback is not None and not keep_effort:
             fallback_provider, _model_id = parse_selector(fallback.selector)
             if fallback_provider == model.provider:
                 await self._route_state.activate(fallback, text, quota=True)
@@ -3087,8 +3119,8 @@ class SessionStreamFn:
         since ``attempted_ids`` already holds it, the walk would end there
         with the session left on the reserve account it meant to leave.
         Releasing is safe precisely because this row is NOT the boundary's
-        original sticky (``_boundary_sticky_id``): nothing of this
-        conversation is cached on it yet.
+        original sticky (the walk-local ``boundary_sticky_id``): nothing of
+        this conversation is cached on it yet.
         """
         self._auth_store.deprioritize_credential(model.provider, credential_id)
         self._auth_store.release_session_credential(model.provider, self._session_id)
