@@ -28,9 +28,10 @@ INFEASIBLE-TASK EXCLUSION: the runner returns on a ``finish`` batch WITHOUT
 calling ``execute`` (episode.py:531-534), so the adapter never sees the
 terminal action and cannot push ``DONE``/``FAIL`` into OSWorld's
 ``action_history``, which ``evaluate()`` reads to score ``infeasible`` tasks.
-An agent that correctly declares such a task infeasible would score 0. The adapter
-EXCLUDES infeasible tasks rather than fabricate a FAIL the agent never sent —
-that would be score fraud. See README.md "Known scope limitations".
+An agent that correctly declares such a task infeasible would score 0. The
+adapter therefore EXCLUDES infeasible tasks rather than fabricate a FAIL the
+agent never sent — that would be score fraud. See README.md "Known scope
+limitations".
 """
 
 from __future__ import annotations
