@@ -27,6 +27,25 @@ reference implementation (``omp``'s ``/btw`` with ``b branch to chat``) draws
 the line in the same place; it branches the session where this appends,
 because this app has no session branch tree to cut.
 
+There is a second door, and it opens somewhere else. The copy key
+(:data:`ASIDE_COPY_KEY`) lifts the exchange to the CLIPBOARD, which is outside
+the session entirely — nothing joins the context and nothing joins the
+transcript, so the claim above ("reads the conversation and never writes to
+it") is untouched by it. It is stated here because a reader who finds two keys
+under a sentence saying "the one door" will assume the sentence is stale. The
+distinction is the whole point of having both: fork is how the user chooses to
+put the exchange ON the record, copy is how they keep a sentence without doing
+that, and copy is the only one of the two that works while the answer is still
+streaming.
+
+**The card scrolls in ROWS.** It used to scroll in whole turns, which meant a
+turn was the smallest thing any gesture could address and an answer taller than
+the card had a middle no gesture could reach at all — 191 of 200 rows at 80x24,
+with nothing on screen admitting the text had been cut. The wheel is still the
+card's own gesture; the keyboard path is a chord the app binds
+(:meth:`AsidePanel.scroll_page`), because this card takes no focus and so can
+hold no bindings of its own.
+
 **No trace means no trace on dismissal either.** Esc discards the exchange, so
 reopening the aside opens an empty one. A surface that says "off the record"
 and then hands back what you discarded is lying about which of the two it is.
@@ -144,6 +163,20 @@ QUESTION_MARK = "▌"
 #: text column with the gutter reserved for the speaker.
 ANSWER_INDENT = "  "
 
+#: The key the FOOTER advertises for copying the exchange out. The binding
+#: itself is the app's (the card is ``can_focus = False`` and holds none), so
+#: this constant exists to stop the label and the binding drifting apart — a
+#: footer naming a key that does nothing is worse than no footer, because the
+#: user stops trusting the row that also tells them how to leave.
+#:
+#: ``ctrl+r`` and not the reference implementation's bare ``c``: a printable
+#: character can never reach app level here, because the composer holds focus
+#: by contract and Textual's ``TextArea`` consumes the character first — the
+#: "only act on an empty draft" guard that makes a bare letter work there is
+#: unreachable once the letter is already in the buffer. ``ctrl+y`` was the
+#: other candidate and is taken by ``TextArea``'s Redo.
+ASIDE_COPY_KEY = "ctrl+r"
+
 #: Failure marker. The app-wide warning glyph rather than the words "aside
 #: failed" — the card is titled ``Aside``, the row is in danger ink, and the
 #: position is under the question, so a fourteen-cell prefix restates three
@@ -190,6 +223,28 @@ class AsideBody:
 
     lines: list[Text] = field(default_factory=list)
     hidden_turns: int = 0
+
+
+@dataclass
+class _FlatBody:
+    """Every row of the exchange in one list, plus who owns each row.
+
+    The card scrolls in ROWS, so the row list is the thing it windows over and
+    the turn structure survives only as an index beside it. It has to survive:
+    a window that opens inside an answer must still show the question that
+    produced it (see :meth:`AsidePanel._window`), and after the rows are
+    flattened there is nothing in a row itself that says which question that
+    was.
+    """
+
+    lines: list[Text] = field(default_factory=list)
+    #: Per ROW, the index of the turn it belongs to.
+    owners: list[int] = field(default_factory=list)
+    #: Per TURN, the half-open row span of its QUESTION — the rows pinned when
+    #: a window opens mid-answer. Excludes the blank that separates turns:
+    #: that blank belongs between two turns, and leading the card with it reads
+    #: as the exchange having started and then said nothing.
+    heads: list[tuple[int, int]] = field(default_factory=list)
 
 
 class AsidePanel(Static):
@@ -264,7 +319,7 @@ class AsidePanel(Static):
         """Show an EMPTY aside. Reopening never restores a dismissed exchange."""
         self._turns = []
         self._notice = ""
-        self._scroll_back = 0
+        self._scroll_back_rows = 0
         self._generation += 1
         self.display = True
         self._repaint()
@@ -274,7 +329,7 @@ class AsidePanel(Static):
         self._generation += 1
         self._turns = []
         self._notice = ""
-        self._scroll_back = 0
+        self._scroll_back_rows = 0
         self.display = False
 
     def ask(self, question: str) -> int:
@@ -289,7 +344,10 @@ class AsidePanel(Static):
             if turn.state == "running":
                 turn.state = "cancelled"
         self._notice = ""
-        self._scroll_back = 0
+        # Zero is the TAIL in either unit, which is why all three reset sites
+        # kept their line through the turns-to-rows change: "snap to the
+        # newest" is what they mean and the offset counts back FROM the newest.
+        self._scroll_back_rows = 0
         self._turns.append(AsideTurn(question=question))
         self.display = True
         self._repaint()
@@ -302,12 +360,31 @@ class AsidePanel(Static):
     def append_answer(self, generation: int, delta: str) -> None:
         if not self.accepts(generation) or not delta:
             return
+        # Measured BEFORE the delta lands, and only while the reader is parked
+        # away from the tail. The offset counts back FROM the tail, so rows
+        # arriving at the tail slide the window forward under a reader who is
+        # holding still: measured, a reader parked 120 rows back watched their
+        # top row walk from ANSWER-ROW-067 to ANSWER-ROW-127 across 60 deltas
+        # while the offset itself never changed. Holding the NUMBER still is
+        # not the rule — holding the ROWS still is.
+        anchored = len(self._flat_body().lines) if self._scroll_back_rows else 0
         self._turns[-1].answer += delta
-        # NOT reset here. `ask` already put the reader on the new question, so
-        # the only way `_scroll_back` is non-zero mid-answer is that they
-        # wheeled back on purpose — and snapping them forward on every delta is
-        # the same bug the transcript had, in this card's units. They re-acquire
-        # by wheeling back down to the tail.
+        if anchored:
+            # NOT reset, and now not drifted either. `ask` already put the
+            # reader on the new question, so the only way the offset is
+            # non-zero mid-answer is that they wheeled back on purpose — and
+            # dragging them forward on every delta is the same bug the
+            # transcript had, in this card's units. They re-acquire by
+            # wheeling back down to the tail.
+            #
+            # Under the old TURN-index model this whole branch was dead within
+            # one answer: a streaming answer is one turn, so max scroll-back
+            # was 0 and the offset could not be non-zero to begin with. In rows
+            # the state is real for the first time, which is why the rule the
+            # comment above protects needed code behind it and not just a
+            # comment. Clamped by `_window`, so a shrinking settle cannot strand
+            # the offset past the top.
+            self._scroll_back_rows += len(self._flat_body().lines) - anchored
         self._repaint()
 
     def settle_answer(self, generation: int, answer: str) -> None:
@@ -344,6 +421,30 @@ class AsidePanel(Static):
         """
         return [(turn.question, turn.answer) for turn in self._turns if turn.forkable]
 
+    def copy_text(self) -> str:
+        """The exchange as plain text, for the clipboard. ``""`` if empty.
+
+        Off the DATACLASS, exactly as :meth:`fork_messages` is, and never off
+        the painted rows — the rows are the windowed subset the reader can
+        already see, and they carry the card's chrome, which is the thing
+        ``Chrome.ALLOW_SELECT`` exists to keep out of the clipboard. A copy key
+        that returned the screen would fail on precisely the long answer that
+        makes someone reach for it.
+
+        Includes a RUNNING turn's partial answer, unlike ``fork_messages``.
+        Forking refuses a half exchange because it writes to the record and
+        half an exchange is not one; the clipboard is the user's own scratch
+        space, they can see the answer is still arriving, and this is the one
+        way out that works while ``^f`` is refused mid-stream.
+        """
+        blocks: list[str] = []
+        for turn in self._turns:
+            answer = turn.answer.strip()
+            if not answer:
+                continue
+            blocks.append(f"{turn.question.strip()}\n\n{answer}")
+        return "\n\n".join(blocks)
+
     # -- mouse ----------------------------------------------------------------
     # Every gesture is STOPPED, because the card floats over the transcript:
     # left to bubble, one scroll would move both the aside and the chat behind
@@ -353,11 +454,16 @@ class AsidePanel(Static):
     # A click is stopped and nothing more. The card owns no input by contract
     # (the one composer is pointed at it), so there is no hit area to offer.
     #
-    # The WHEEL is the one gesture that acts. Scroll KEYS were rejected because
-    # ↑/↓ belong to the focused composer's prompt history and the aside's whole
-    # premise is that the user keeps typing there — but the wheel costs no key,
-    # and without it the ``↑ N earlier questions`` marker names content with no
-    # way to reach it.
+    # The WHEEL is the one gesture the CARD itself binds. Scroll KEYS were
+    # rejected here because ↑/↓ belong to the focused composer's prompt history
+    # and the aside's whole premise is that the user keeps typing there — that
+    # still holds, and it is why the keyboard path is a chord bound at APP level
+    # (:meth:`scroll_page`) rather than a binding on this card, which is
+    # ``can_focus = False`` and would never receive one anyway.
+    #
+    # One row per wheel event, because a row is now the unit: the card used to
+    # step whole TURNS, which is why an answer taller than the card had a middle
+    # no gesture could reach.
     def on_click(self, event) -> None:  # noqa: ANN001 - Textual event type
         event.stop()
 
@@ -369,17 +475,68 @@ class AsidePanel(Static):
         event.stop()
         self._scroll_by(1)
 
+    def scroll_page(self, *, down: bool) -> bool:
+        """Page the body from the KEYBOARD; ``True`` if the window moved.
+
+        ``TodoPanel.scroll_expanded``'s shape, for its reason: the card is
+        non-focusable, so a focus-then-arrow gesture cannot reach it and the
+        content its own ``↑ … · scroll`` marker names would be MOUSE-ONLY — the
+        wheel is not delivered under ``tmux set -g mouse off``, on terminals
+        with mouse reporting disabled, under ``screen(1)`` or on non-SGR
+        terminals. It drives the same :meth:`_scroll_by` the wheel drives so the
+        two gestures cannot diverge.
+
+        ``down`` is toward the NEWEST rows, matching the wheel's sense of the
+        word and ``TodoPanel``'s.
+
+        A page is the rows the card is SHOWING, not the rows it budgeted for.
+        The two differ here: the window's top rows are OVERLAID by the marker
+        and the pinned question (:meth:`_window`), so paging by ``_fit()[2]``
+        would step over exactly the rows the overlay was covering — which are
+        the rows this gesture exists to reach, and measured through the real
+        app it left 42 of 200 rows visible to the wheel and not to the key.
+        ``usage_panel.py:797-801`` hit the same trap on its block headings and
+        wrote the rule down; do not "simplify" this to the budget.
+        """
+        if not self.is_open:
+            return False
+        flat = self._flat_body()
+        budget = self._fit()[2]
+        if len(flat.lines) <= budget:
+            return False
+        before = self._scroll_back_rows
+        self._scroll_by(-self._visible(flat, budget) if down else self._visible(flat, budget))
+        return self._scroll_back_rows != before
+
+    def _visible(self, flat: _FlatBody, budget: int) -> int:
+        """Rows of the exchange the current window actually shows to the reader.
+
+        The window spans ``budget`` rows, but its first rows are covered by the
+        overlay, and a covered row has not been read. Paging by this number is
+        what makes the keyboard reach every row the wheel reaches.
+        """
+        rows, first, end, _ = self._window(flat, budget)
+        covered = sum(1 for row, source in zip(rows, flat.lines[first:end]) if row is not source)
+        return max(1, (end - first) - covered)
+
     def _scroll_by(self, delta: int) -> None:
-        """Move back from the tail, CLAMPED — the newest turn is home."""
-        target = max(0, min(self._max_scroll_back(), self._scroll_back + delta))
-        if target == self._scroll_back:
+        """Move back from the tail by ROWS, CLAMPED — the newest row is home."""
+        target = max(0, min(self._max_scroll_back(), self._scroll_back_rows + delta))
+        if target == self._scroll_back_rows:
             return
-        self._scroll_back = target
+        self._scroll_back_rows = target
         self._repaint()
 
     def _max_scroll_back(self) -> int:
-        """How many whole turns are droppable off the head at this size."""
-        return max(0, len(self._turn_groups()) - 1)
+        """Rows the window can walk back before its top IS the exchange's top.
+
+        Rows and not turns. ``len(turn_groups) - 1`` was the defect: with one
+        turn it is 0, so a 200-row answer in a 16-row card had every gesture
+        clamped at home and 184 rows addressable by nothing. Total rows minus
+        the budget is the offset at which the window's top is row 0, which is
+        what "as far back as there is anything to go" actually means.
+        """
+        return max(0, len(self._flat_body().lines) - self._fit()[2])
 
     # -- geometry -------------------------------------------------------------
     def _screen_size(self) -> tuple[int, int]:
@@ -440,35 +597,154 @@ class AsidePanel(Static):
         self._repaint()
 
     # -- rendering ------------------------------------------------------------
-    def _turn_groups(self) -> list[list[Text]]:
-        """The exchange as one row group per turn, newest last.
+    def _flat_body(self) -> _FlatBody:
+        """Every row of the exchange, newest last, with its turn beside it.
 
-        Grouped rather than flattened because the card sheds whole TURNS when
-        it overflows (see :meth:`_body`) — cutting by row left the top of the
-        card showing a mid-sentence continuation at the answer indent with no
-        question above it, which reads as the start of a new answer.
+        Flat rather than grouped by turn, which is the change this card needed.
+        Grouping existed because the card shed whole TURNS when it overflowed,
+        and that was chosen over a row cut for a real reason: a row cut "left
+        the top of the card showing a mid-sentence continuation at the answer
+        indent with no question above it, which reads as the start of a new
+        answer". But shedding whole turns made a turn the smallest addressable
+        unit, so an answer taller than the card had a middle no gesture could
+        reach at all.
+
+        The reason the turn cut was chosen is honoured WITHOUT the turn being
+        the unit: :meth:`_window` cuts by row and pins the owning question, so
+        a fragment still never appears without the question that produced it.
+        That is why ``heads`` is carried here — it is the only thing left that
+        knows which question a row belongs to once the rows are one list.
         """
         width = self._content_width()
         fg = Style(color=theme_mod.semantic_color("fg"))
         dim = Style(color=theme_mod.semantic_color("dim"))
         danger = Style(color=theme_mod.semantic_color("danger"))
-        groups: list[list[Text]] = []
+        flat = _FlatBody()
         for index, turn in enumerate(self._turns):
+            # The blank that separates turns belongs BETWEEN them, so it leads
+            # every turn but the first. `_window` strips it again if a window
+            # happens to open on it: a blank leading the card reads as the
+            # exchange having started and then said nothing.
             rows: list[Text] = [] if index == 0 else [Text()]
-            rows.extend(self._question_rows(turn.question, width, dim, fg))
+            question = self._question_rows(turn.question, width, dim, fg)
+            head_start = len(flat.lines) + len(rows)
+            rows.extend(question)
+            flat.heads.append((head_start, head_start + len(question)))
             rows.extend(self._answer_rows(turn, width, fg, dim, danger))
-            groups.append(rows)
-        return groups
+            flat.lines.extend(rows)
+            flat.owners.extend([index] * len(rows))
+        return flat
+
+    def _window(self, flat: _FlatBody, budget: int) -> tuple[list[Text], int, int, int]:
+        """``(rows to paint, first content row, one past the last, questions above)``.
+
+        The whole scroll model in one place, so the painter, the clamp and the
+        keyboard page can never disagree about what is on screen.
+
+        Two things come out of the BUDGET rather than out of the card's height,
+        because the card may never grow past ``_fit()`` (see its docstring):
+        the overflow marker, and the owning question pinned above a window that
+        opens mid-answer.
+
+        They OVERLAY the window's top rows rather than pushing them down, and
+        that is deliberate. Reserving budget for them instead — moving the top
+        down by as many rows as they cost — cannot fill the budget exactly at
+        every offset: stepping the top past a turn boundary changes the number
+        of pinned rows at the same time as the content count, so the total
+        jumps from under to over with no offset in between. Measured on 8 short
+        turns, that left the card alternating between 21 and 22 rows as the
+        reader scrolled, and the card is sized to its content (``_repaint``),
+        so a card that changes height with scroll position moves the text being
+        read. Overlaying is exactly ``budget`` rows at every offset by
+        construction.
+
+        Overlaying costs nothing in reachability, which is the property this
+        whole change exists for: a covered row is one the window has not
+        finished passing, and one more step of the gesture moves it down out of
+        the overlay. At the last step the overlay is EMPTY — the window starts
+        at row 0, so no question sits above it to pin and no marker is drawn —
+        so no row ends its travel underneath one.
+        """
+        total = len(flat.lines)
+        # Clamped HERE and not only in `_scroll_by`, because the exchange can
+        # shrink under a parked reader: `settle_answer` replaces a streamed
+        # answer with the authoritative text, which is routinely shorter.
+        back = min(self._scroll_back_rows, max(0, total - budget))
+        end = total - back
+        first = max(0, end - budget)
+
+        owner = flat.owners[first]
+        head_start, head_end = flat.heads[owner]
+        pinned = flat.lines[head_start : min(head_end, first)]
+        # Questions above the window are whole questions the reader has walked
+        # past; the one being pinned is not among them, because part of it is
+        # on screen. Counted from the TOP only — the old count added the turns
+        # hidden BELOW the window too, so a card scrolled to the oldest
+        # question announced "5 earlier questions" under an arrow pointing up
+        # at nothing.
+        hidden_turns = owner
+        width = self._content_width()
+        dim = Style(color=theme_mod.semantic_color("dim"))
+
+        marker: list[Text] = []
+        if hidden_turns:
+            noun = "question" if hidden_turns == 1 else "questions"
+            label = f"↑ {hidden_turns} earlier {noun} · scroll"
+        else:
+            label = ""
+            # Rows above the window, LESS the question rows the overlay
+            # re-shows (those are on screen), PLUS the rows the overlay covers
+            # — which cancels to ``first + 1``, the whole overlay being one
+            # marker row plus exactly the pinned rows it accounts for. Only
+            # when the window has somewhere above it to be: at ``first == 0``
+            # the exchange starts on screen, the overlay is empty, and a marker
+            # there would hide the question it exists to keep visible while
+            # claiming a row was withheld that the reader is looking at.
+            withheld = first + 1 if first else 0
+            if withheld > 0:
+                # LINES, where the multi-turn marker says questions. The
+                # question count is the better unit when whole questions are
+                # above (see `AsideBody`), but here it is zero, which is
+                # exactly why this card used to say nothing at all and let a
+                # truncated answer read as a complete one. What the reader
+                # wants to know inside one answer is how much of it they are
+                # missing, and only a row count answers that. It states the
+                # quantity for the reason the subagent page states its own:
+                # "⟨expand⟩ alone does not distinguish two more lines from
+                # fifty, and that is the whole difference between clicking and
+                # not bothering" (`subagent_view.py`).
+                noun = "line" if withheld == 1 else "lines"
+                label = f"↑ {withheld} earlier {noun} · scroll"
+        if label:
+            marker = [Text(truncate_cells(label, width), style=dim)]
+
+        # Shed rather than overflow, in the order that keeps the card readable:
+        # a wrapped question loses its tail before the content loses a row, and
+        # the content always keeps at least one. The pinned rows kept are the
+        # FIRST ones, which carry the `▌` mark and the start of the question.
+        pinned = pinned[: max(0, budget - len(marker) - 1)]
+        # Pinned UNCONDITIONALLY while the window opens inside a turn, even at
+        # the offsets where the overlay then covers the last of that turn's own
+        # rows and the question is left with nothing under it. That frame is
+        # imperfect and it is the better of the two available: the alternative
+        # is dropping the pin, which puts a bare continuation at the answer
+        # indent under the marker — the exact misreading ("the start of a new
+        # answer") the turn-grouped cut was chosen to prevent. A question whose
+        # answer is one scroll step below it is a frame in transit; an
+        # unattributed fragment is a frame that lies about whose words it is.
+        overlay_rows = [*marker, *pinned]
+        rows = [*overlay_rows, *flat.lines[first:end][len(overlay_rows) :]]
+        return rows, first, end, hidden_turns
 
     def _body(self) -> AsideBody:
-        """The visible rows: the tail of the exchange, cut on turn boundaries.
+        """The visible rows: a ROW window onto the tail of the exchange.
 
         Tail-anchored rather than paged, and that is the difference between
         this card and the usage card. A quota table is a reference document the
         reader navigates; an aside is a conversation, whose interesting end is
-        always the newest turn. ``_scroll_back`` lets the WHEEL walk back
-        through the earlier ones without taking ↑/↓ from the composer, which is
-        holding focus so the user can keep talking.
+        always the newest turn. The wheel and the app's chord walk
+        ``_scroll_back_rows`` back from that tail without taking ↑/↓ from the
+        composer, which is holding focus so the user can keep talking.
         """
         width = self._content_width()
         dim = Style(color=theme_mod.semantic_color("dim"))
@@ -476,38 +752,8 @@ class AsidePanel(Static):
             return AsideBody(
                 [Text(truncate_cells("Ask anything about this session.", width), style=dim)]
             )
-
-        groups = self._turn_groups()
-        budget = self._fit()[2]
-        # Walk back from the newest turn, taking whole turns while they fit.
-        # One row of the budget is held back for the marker whenever anything
-        # is dropped, so the reader is told what is above rather than shown a
-        # conversation that begins nowhere.
-        end = len(groups) - min(self._scroll_back, max(0, len(groups) - 1))
-        first = end - 1
-        total = len(groups[first])
-        while first > 0 and total + len(groups[first - 1]) <= budget - 1:
-            first -= 1
-            total += len(groups[first])
-        window = [list(group) for group in groups[first:end]]
-        # The blank row that separates turns belongs BETWEEN them. On the first
-        # visible group it is a blank leading the card, which reads as the
-        # exchange having started and then said nothing.
-        if window and window[0] and not window[0][0].plain:
-            window[0] = window[0][1:]
-        lines = [row for group in window for row in group]
-        hidden = first + (len(groups) - end)
-        if hidden == 0:
-            return AsideBody(lines[-budget:] if len(lines) > budget else lines)
-        noun = "question" if hidden == 1 else "questions"
-        head = Text(truncate_cells(f"↑ {hidden} earlier {noun} · scroll", width), style=dim)
-        # A single turn taller than the whole card is the one case a turn
-        # boundary cannot resolve: keep its question pinned as the first row so
-        # the fragment underneath has an owner, then take the newest rows.
-        keep = max(1, budget - 1)
-        if len(lines) > keep:
-            lines = [lines[0], *lines[-(keep - 1) :]] if keep > 1 else [lines[0]]
-        return AsideBody([head, *lines], hidden)
+        rows, _, _, hidden_turns = self._window(self._flat_body(), self._fit()[2])
+        return AsideBody(rows, hidden_turns)
 
     def _question_rows(
         self, question: str, width: int, mark_style: Style, text_style: Style
@@ -620,6 +866,22 @@ class AsidePanel(Static):
         # of the exit — the composer's placeholder used to repeat it, which read
         # as repetition once the two surfaces became one column a row apart.
         hints = [("esc", "discard, back to the chat")]
+        if self._turns:
+            # Copy sits NEXT TO fork, and that adjacency is the point: the two
+            # keys are the only ways text leaves this card, and they differ in
+            # exactly the thing the card's title promises. `^f` writes the
+            # exchange into the context and the transcript; `ctrl+r` writes it
+            # to the clipboard, which is outside the session, so the off-the-
+            # record contract survives. A user who can only see `^f` has to
+            # break that contract to keep a sentence. Advertised rather than
+            # left as a hidden chord for the same reason the reference
+            # implementation puts `c copy` in its own footer, beside branch.
+            #
+            # Shown whenever there is a turn, NOT gated on `_can_fork`: copy
+            # works while the answer is still streaming, which is precisely
+            # when `^f` is refused, so borrowing fork's condition would hide
+            # the key in the window where it is the only one that works.
+            hints.append((ASIDE_COPY_KEY, "copy"))
         if self._can_fork:
             hints.append(("^f", "fork into the chat"))
         # "again" only once there IS a first time. On a card the user has just

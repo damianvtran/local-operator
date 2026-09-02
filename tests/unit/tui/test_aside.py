@@ -18,6 +18,7 @@ halves of that sentence. A change that makes either fail is a change to what
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from typing import Any
 
@@ -25,7 +26,12 @@ import pytest
 
 from local_operator.harness.types import Message, Usage
 from local_operator.tui.app import RESIZE_REFIT_DELAY_S, OperatorApp
-from local_operator.tui.widgets.aside_panel import AsidePanel, AsideTurn
+from local_operator.tui.widgets.aside_panel import (
+    ASIDE_COPY_KEY,
+    PANEL_HEIGHT_MARGIN,
+    AsidePanel,
+    AsideTurn,
+)
 from local_operator.tui.widgets.editor import (
     ASIDE_PLACEHOLDER,
     DEFAULT_PLACEHOLDER,
@@ -662,13 +668,21 @@ def test_a_failed_aside_is_never_forkable() -> None:
     assert "provider exploded" in "\n".join(panel.render_lines_for_test())
 
 
-def test_a_long_exchange_cuts_on_a_turn_boundary_and_counts_questions() -> None:
-    """The newest turn is what is being read; the rest announces itself.
+def test_a_long_exchange_pins_the_owning_question_and_counts_questions() -> None:
+    """The newest rows are what is being read; the rest announces itself.
 
-    Cut on TURNS, not rows: a row-cut left the card opening on a mid-sentence
-    continuation at the answer indent with no question above it, which reads
-    as the start of a new answer. And counted in questions, because a user
-    remembers asking three things and never counted the rows they wrapped to.
+    The cut is by ROW — cutting on turn boundaries made a turn the smallest
+    addressable unit, so an answer taller than the card had a middle no gesture
+    could reach. What the boundary cut was protecting is kept: the window pins
+    the question that OWNS its rows, so the card never opens on a mid-sentence
+    continuation at the answer indent with no question above it, which reads as
+    the start of a new answer.
+
+    Counted in questions here, because whole questions are above the window and
+    a user remembers asking three things without counting the rows they wrapped
+    to. Inside one answer there is no question to count and the marker switches
+    to lines; that is
+    ``test_one_long_answer_states_the_rows_it_withheld``.
     """
     panel = AsidePanel()
     panel.display = True
@@ -678,9 +692,214 @@ def test_a_long_exchange_cuts_on_a_turn_boundary_and_counts_questions() -> None:
     ]
     rendered = panel.render_lines_for_test()
 
-    assert any("earlier questions" in line for line in rendered)
-    # The visible exchange starts at a question, never mid-answer.
-    assert rendered[3].startswith("▌ question 5?")
+    assert any("↑ 4 earlier questions · scroll" in line for line in rendered)
+    # The newest question and its whole answer are on screen, which is where a
+    # reader who has not scrolled should be.
+    assert any(line.startswith("▌ question 5?") for line in rendered)
+
+    # Scrolled back INTO question 4's answer, that question is pinned above the
+    # fragment rather than leaving it unattributed.
+    panel._scroll_by(8)
+    rendered = panel.render_lines_for_test()
+    assert rendered[3].startswith("▌ question 4?")
+    assert rendered[4].strip() == "line"
+
+
+def test_one_long_answer_states_the_rows_it_withheld() -> None:
+    """A single turn taller than the card must ADMIT the cut, in lines.
+
+    This is the defect the card shipped with: with one turn the question count
+    is zero, so the marker was skipped entirely and a truncated answer read as
+    a complete one. The count is in lines because there is no question above to
+    count, and it states a quantity rather than a bare "…more" — two more lines
+    and fifty are a different decision about whether to go looking.
+    """
+    panel = AsidePanel()
+    panel.display = True
+    panel._turns = [
+        AsideTurn(question="why?", answer="\n".join(f"row {i}" for i in range(200)), state="done")
+    ]
+
+    rendered = panel.render_lines_for_test()
+    marker = [line for line in rendered if "earlier" in line]
+    assert marker and "line" in marker[0] and "question" not in marker[0]
+    assert re.search(r"↑ \d+ earlier lines · scroll", marker[0])
+    # The owning question is pinned under it, so the fragment has an owner.
+    assert any(line.startswith("▌ why?") for line in rendered)
+
+    # At the top of the exchange there is nothing withheld and no marker.
+    panel._scroll_back_rows = panel._max_scroll_back()
+    assert not any("earlier" in line for line in panel.render_lines_for_test())
+
+
+def test_every_row_of_a_long_answer_is_reachable_by_scrolling() -> None:
+    """The fix: the scroll unit is a ROW, so no row is unaddressable.
+
+    Under the turn-index model ``_max_scroll_back`` was ``len(turns) - 1``,
+    which is 0 for one turn — 184 of 200 rows could not be reached by any
+    gesture. Drives the same entry point the wheel handlers do.
+    """
+    panel = AsidePanel()
+    panel.display = True
+    panel._turns = [
+        AsideTurn(
+            question="why?",
+            answer="\n".join(f"ROW-{i:03d}" for i in range(200)),
+            state="done",
+        )
+    ]
+
+    seen: set[str] = set()
+    for _ in range(400):
+        seen.update(panel.render_lines_for_test())
+        before = panel._scroll_back_rows
+        panel._scroll_by(1)
+        if panel._scroll_back_rows == before:
+            break
+
+    blob = "\n".join(seen)
+    assert {i for i in range(200) if f"ROW-{i:03d}" in blob} == set(range(200))
+    # And the card never grew to do it: one height at every offset.
+    heights = set()
+    for offset in range(panel._max_scroll_back() + 1):
+        panel._scroll_back_rows = offset
+        heights.add(len(panel._compose_rows()) + panel._fit()[1])
+    assert len(heights) == 1
+    assert max(heights) <= panel._fit()[0] - PANEL_HEIGHT_MARGIN
+
+
+def test_a_reader_scrolled_back_is_not_dragged_by_a_streaming_answer() -> None:
+    """The anchor rule, testable for the first time.
+
+    Under the turn-index model a streaming answer was one turn, so max
+    scroll-back was 0 and a reader could not BE scrolled back inside it — the
+    state ``append_answer``'s comment protects was unreachable. In rows it is
+    real, and holding the offset number still is not enough: the offset counts
+    back from the tail, so rows arriving at the tail slide the window forward
+    under a reader who is holding still.
+    """
+    panel = AsidePanel()
+    panel.display = True
+    generation = panel.ask("why?")
+    for index in range(200):
+        panel.append_answer(generation, f"ROW-{index:03d}\n")
+
+    panel._scroll_by(120)
+    parked = [line for line in panel.render_lines_for_test() if "ROW-" in line]
+    for index in range(200, 260):
+        panel.append_answer(generation, f"ROW-{index:03d}\n")
+
+    assert [line for line in panel.render_lines_for_test() if "ROW-" in line] == parked
+
+    # A reader AT the tail still follows the stream — that is the other half of
+    # the rule, and a fix that pinned everyone would break it.
+    following = AsidePanel()
+    following.display = True
+    generation = following.ask("why?")
+    for index in range(50):
+        following.append_answer(generation, f"ROW-{index:03d}\n")
+    assert "ROW-049" in "\n".join(following.render_lines_for_test())
+    for index in range(50, 90):
+        following.append_answer(generation, f"ROW-{index:03d}\n")
+    assert "ROW-089" in "\n".join(following.render_lines_for_test())
+    assert following._scroll_back_rows == 0
+
+
+def test_scroll_page_is_the_keyboards_way_in_and_reaches_what_the_wheel_does() -> None:
+    """``scroll_page`` pages by the rows SHOWN, not by the budget.
+
+    The card overlays its marker and pinned question on the window's top rows,
+    so a page of ``_fit()[2]`` would step over exactly the rows the overlay was
+    covering. Returns False rather than moving when there is nothing to scroll;
+    the caller discards it, so this is a signal and not a receipt.
+    """
+    closed = AsidePanel()
+    assert closed.scroll_page(down=False) is False
+
+    short = AsidePanel()
+    short.display = True
+    short._turns = [AsideTurn(question="q?", answer="one line", state="done")]
+    assert short.scroll_page(down=False) is False
+
+    panel = AsidePanel()
+    panel.display = True
+    panel._turns = [
+        AsideTurn(
+            question="why?",
+            answer="\n".join(f"ROW-{i:03d}" for i in range(200)),
+            state="done",
+        )
+    ]
+
+    seen: set[str] = set()
+    for _ in range(400):
+        seen.update(panel.render_lines_for_test())
+        if not panel.scroll_page(down=False):
+            break
+    blob = "\n".join(seen)
+    assert {i for i in range(200) if f"ROW-{i:03d}" in blob} == set(range(200))
+
+    # Clamped at the top, and it says so rather than moving.
+    assert panel.scroll_page(down=False) is False
+    assert panel.scroll_page(down=True) is True
+
+
+def test_copy_text_takes_the_whole_exchange_off_the_dataclass() -> None:
+    """The copy payload is the TEXT, not the painted rows.
+
+    The rows are the windowed subset the reader can already see and they carry
+    the card's chrome — a copy key that returned the screen would fail on
+    exactly the long answer that makes someone reach for it. Includes a running
+    turn, which is the window where ``^f`` is refused.
+    """
+    panel = AsidePanel()
+    panel.display = True
+    panel._turns = [
+        AsideTurn(
+            question="first?", answer="\n".join(f"ROW-{i:03d}" for i in range(200)), state="done"
+        ),
+        AsideTurn(question="second?", answer="still arriving", state="running"),
+    ]
+
+    payload = panel.copy_text()
+    for index in range(200):
+        assert f"ROW-{index:03d}" in payload
+    assert "still arriving" in payload
+    assert "first?" in payload and "second?" in payload
+    # No chrome: no title, no rule, no hint row, no overflow marker, no spine.
+    for chrome in ("Aside", "off the record", "esc discard", "─", "▌", "↑ "):
+        assert chrome not in payload
+    # Fork still refuses the half exchange it always refused.
+    assert panel.fork_messages() == [("first?", panel._turns[0].answer)]
+
+    assert AsidePanel().copy_text() == ""
+
+
+def test_the_footer_advertises_copy_beside_fork() -> None:
+    """Copy is discoverable, because the alternative is forking to keep a line.
+
+    The two keys differ in the thing the card's title promises: ``^f`` writes
+    the exchange onto the record, ``ctrl+r`` writes it to the clipboard and
+    leaves the record alone. Copy shows whenever there is a turn, NOT on
+    fork's condition — it works while the answer streams, which is when ``^f``
+    is refused.
+    """
+    panel = AsidePanel()
+    panel.display = True
+    panel.open()
+    assert f"{ASIDE_COPY_KEY} copy" not in panel.render_lines_for_test()[-1]
+
+    generation = panel.ask("why?")
+    panel.append_answer(generation, "still streaming")
+    footer = panel.render_lines_for_test()[-1]
+    assert f"{ASIDE_COPY_KEY} copy" in footer
+    assert "^f" not in footer
+
+    panel.settle_answer(generation, "settled")
+    panel.set_fork_available(True)
+    footer = panel.render_lines_for_test()[-1]
+    assert footer.index(ASIDE_COPY_KEY) < footer.index("^f")
+    assert footer.startswith("esc discard, back to the chat")
 
 
 def test_the_wheel_walks_back_through_earlier_questions() -> None:
