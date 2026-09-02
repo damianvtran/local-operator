@@ -1392,6 +1392,13 @@ class Session:
             # is actually serving requests, the session persists that fact and
             # emits the event a front end repaints its model display from.
             route_bridge(self._on_route_settled)
+        # Deliberately NO bridge for the prompt-cache TTL hint, unlike the two
+        # above: the stream fn is SHARED with subagents, so a registered reader
+        # is last-writer-wins — constructing a child overwrote the parent's
+        # reader for good and downgraded every later parent request to 5m
+        # (review F8). The hint rides each request instead, stamped by its
+        # owner: the loop reads ``get_context_tokens_hint`` for turn calls and
+        # the session's direct calls stamp ``_context_tokens_hint`` themselves.
         self._tools = list(tools)
         self._transcript = transcript
         self._session_id = session_id or transcript.directory.name
@@ -1624,6 +1631,22 @@ class Session:
         # ``Transcript.usages_since_compaction`` and ``_last_reported_usage``).
         self._last_usage: Usage | None = _last_reported_usage(
             [_parsed_usage(payload) for payload in transcript.usages_since_compaction()]
+        )
+        # The per-conversation prompt-cache TTL hint (see
+        # ``ChatRequest.context_tokens_hint``): the provider-reported context
+        # size of THIS session's last turn call, excluding isolated errands
+        # (their tiny prefix is not this conversation) and one-shots that do
+        # not carry the conversation (their prompt is a different, write-once
+        # prefix — see ``_one_shot_complete``). Moves in lockstep with
+        # ``_last_usage`` (see ``_note_usage``) so a hint is never staler than
+        # the compaction trigger's figure, and is stamped per request by the
+        # call's owner: the loop seeds its run from it and then prefers its
+        # own in-run counts; asides and the advisor stamp it directly. Seeded
+        # from the transcript's last usage so a RESUMED large session starts on
+        # its real size instead of re-deriving it through the client's byte
+        # estimate. ``None`` until the first provider call reports one.
+        self._context_tokens_hint: int | None = (
+            self._last_usage.context_tokens if self._last_usage is not None else None
         )
         self._last_activity_ms: int = 0  # epoch ms; drives idle-flush pruning
         self._generation = 0  # monotonic turn counter for agent_start/end
@@ -4216,6 +4239,27 @@ class Session:
 
     # -- context accounting ---------------------------------------------------
 
+    def _note_usage(self, messages: Sequence[AgentMessage]) -> None:
+        """Adopt the newest provider usage in ``messages`` as this
+        conversation's latest reading — ONE place for both the compaction
+        trigger's figure (``_last_usage``) and the prompt-cache TTL hint.
+
+        Both the post-run scan and the mid-turn boundary hook go through
+        here, so the hint can never lag the usage the way it did when only
+        the turn boundary moved it (review F9): the hint is what the next
+        request of THIS turn (an aside, the advisor) and the NEXT turn's
+        first call are stamped with. The hint only ADVANCES on a reported
+        count — a wire that omits ``context_tokens`` keeps the previous
+        figure rather than blanking it and sending a large context out at
+        the 5m TTL by the byte estimate.
+        """
+        for message in reversed(messages):
+            if isinstance(message, Message) and message.usage is not None:
+                self._last_usage = message.usage
+                if message.usage.context_tokens:
+                    self._context_tokens_hint = int(message.usage.context_tokens)
+                return
+
     def restored_usage(self) -> Usage | None:
         """The provider's own last reading for THIS conversation, or ``None``.
 
@@ -4691,6 +4735,12 @@ class Session:
                 # waiting for another user message. The loop keeps the turn-start
                 # snapshot as a fallback if this host resolver ever fails.
                 get_system_blocks=self._system_blocks,
+                # Cross-turn seed for the prompt-cache TTL hint: the loop stamps
+                # it on the run's first request and then prefers the counts its
+                # own calls report. Lives here — not on the shared stream fn —
+                # so a subagent's calls cannot contaminate this session's hint;
+                # see ``LoopConfig.get_context_tokens_hint``.
+                get_context_tokens_hint=lambda: self._context_tokens_hint,
                 convert_to_llm=self._render_history,
                 stream_fn=self._stream_fn,
                 get_steering_messages=self._drain_steering,
@@ -4776,11 +4826,9 @@ class Session:
                 if is_todo_end and self._job_id is not None and self._subagent_comms is not None:
                     self._subagent_comms.notify_detail_persisted(self._job_id)
 
-            # Track the latest provider usage for compaction trigger math.
-            for message in reversed(new_messages):
-                if isinstance(message, Message) and message.usage is not None:
-                    self._last_usage = message.usage
-                    break
+            # Track the latest provider usage for compaction trigger math (and
+            # the TTL hint that rides with it).
+            self._note_usage(new_messages)
             self._last_activity_ms = int(time.time() * 1000)
             # The run just completed provider round-trips; the idle flush
             # measures provider-cache age from this stamp, not turn
@@ -5622,6 +5670,14 @@ class Session:
         # was looking at when they typed the command, rather than a rewritten
         # head they never saw.
         await self._drain_pending_fork()
+        # The post-run usage scan has not happened yet — the boundary
+        # snapshot carries the assistant message that just finished, whose
+        # usage is the provider's ground truth for the trigger math below AND
+        # for the prompt-cache TTL hint a mid-turn aside or advisor call is
+        # stamped with. Unconditional, ahead of the compaction gate: the hint
+        # must track the conversation's size even for a host that switched
+        # mid-turn compaction off.
+        self._note_usage(messages)
         try:
             from local_operator.compaction.api import CompactionSettings
         except ImportError:
@@ -5632,13 +5688,6 @@ class Session:
         # (on), same posture as _resolve_strategy's capability probes.
         if not settings.enabled or not getattr(settings, "mid_turn_enabled", True):
             return None
-        # The post-run usage scan has not happened yet — the boundary
-        # snapshot carries the assistant message that just finished, whose
-        # usage is the provider's ground truth for the trigger math.
-        for message in reversed(messages):
-            if isinstance(message, Message) and message.usage is not None:
-                self._last_usage = message.usage
-                break
         # Cheap pre-gate: when the provider just reported its context size and
         # that figure already fails the trigger, skip the full plan — the
         # plan renders the whole history to prove the same thing, and this
@@ -7247,6 +7296,16 @@ class Session:
             tools=[],
             tool_choice="none",
             replayable=True,
+            # ``0`` is a DELIBERATE hint, not a missing one: this prompt is a
+            # fresh write-once system+transcript prefix, not the turn's cached
+            # prefix, so a 1h entry (2x write rate) buys nothing — it is never
+            # replayed except a stall retry. Inheriting the session's large
+            # pre-compaction count here would send a transcript-sized prompt
+            # out at the 1h rate for several dollars of pure overpayment per
+            # compaction. The stream fn passes the request's hint through
+            # untouched, and the Anthropic client treats 0 as below any
+            # threshold.
+            context_tokens_hint=0,
         )
         parts: list[str] = []
         async for event in self._stream_fn(request, None):
@@ -7322,6 +7381,10 @@ class Session:
             # read rather than a full re-process. tool_choice stays "none".
             tools=list(self._context.tools),
             tool_choice="none",
+            # Same prefix as the turn, so the same TTL: the session stamps its
+            # own hint here because the shared stream fn holds none (a child
+            # would overwrite it — see ``ChatRequest.context_tokens_hint``).
+            context_tokens_hint=self._context_tokens_hint,
         )
         parts: list[str] = []
         async for event in self._stream_fn(request, None):
@@ -7402,6 +7465,9 @@ class Session:
             tool_choice="none",
             replayable=True,
             isolated=False,
+            # Append-only on the turn's prefix, so it shares the turn's TTL;
+            # stamped here for the reason ``complete_aside`` gives.
+            context_tokens_hint=self._context_tokens_hint,
         )
         parts: list[str] = []
         async for event in self._stream_fn(request, None):

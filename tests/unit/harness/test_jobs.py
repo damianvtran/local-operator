@@ -164,6 +164,42 @@ def test_accumulate_usage_leaves_reported_dollar_none_when_unreported() -> None:
     assert len(job.usage.cost_components) == 2
 
 
+def test_accumulate_usage_folds_cache_write_ttl_split() -> None:
+    """The 5m/1h cache-write split folds wherever ``cache_write_tokens`` does
+    (review F4) — otherwise the job aggregate's split reads as the FIRST
+    child call's value only, and a per-rate price split silently
+    mis-reports from its first reader."""
+    from local_operator.harness.subagent import _accumulate_usage
+
+    class _Job:
+        def __init__(self, usage=None) -> None:
+            self.usage = usage
+
+    job = _Job()
+    _accumulate_usage(
+        job,
+        Usage(
+            input_tokens=1,
+            cache_write_tokens=1_000,
+            cache_write_5m_tokens=1_000,
+            cache_write_1h_tokens=0,
+        ),
+    )
+    _accumulate_usage(
+        job,
+        Usage(
+            input_tokens=1,
+            cache_write_tokens=3_000,
+            cache_write_5m_tokens=0,
+            cache_write_1h_tokens=3_000,
+        ),
+    )
+    assert job.usage is not None
+    assert job.usage.cache_write_tokens == 4_000
+    assert job.usage.cache_write_5m_tokens == 1_000
+    assert job.usage.cache_write_1h_tokens == 3_000
+
+
 def _task_row(
     job_id: str,
     *,

@@ -4096,9 +4096,15 @@ async def test_click_selects_a_row_without_arming_a_text_selection() -> None:
         before = view._selected
 
         body = view._body
-        # A row several lines down in the body, resolved to a settable row.
+        # Aim at the first selectable row that is NOT the cursor's, looked up
+        # from the painted rows rather than a fixed body line: the list is one
+        # line per row and grows whenever a setting is added, so a hard-coded
+        # offset silently lands on a section header (which `on_click` rightly
+        # ignores) and the assertion below reads as a product regression.
+        target = next(i for i, row in enumerate(view._rows) if row.selectable and i != before)
         x = body.region.x + 6
-        y = body.region.y + 5
+        y = body.region.y + target - body.scroll_offset.y
+        assert body.region.contains(x, y), "target row is not on screen"
         await pilot._post_mouse_events(
             [events.MouseDown, events.MouseUp, events.Click], offset=(x, y), button=1
         )

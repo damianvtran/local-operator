@@ -209,6 +209,28 @@ async def test_complete_aside_reports_what_it_spent(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_complete_aside_carries_the_conversations_context_hint(tmp_path) -> None:
+    """An aside rides the turn's cached prefix, so it must carry the turn's
+    ``context_tokens_hint`` — stamped by the SESSION, because the shared
+    stream fn holds no per-conversation memory (review F8). The hint here is
+    the one the turn's last call reported, not a figure set by hand."""
+    stream = RecordingStream(
+        [
+            StreamUsageEvent(usage=Usage(input_tokens=200_000, context_tokens=200_000)),
+            StreamEndEvent(stop_reason="stop"),
+        ]
+    )
+    session = make_session(tmp_path, stream)
+    await session.prompt("work")
+    assert stream.requests[0].context_tokens_hint is None  # nothing reported yet
+
+    await session.complete_aside([Message.user("why?")])
+
+    assert stream.requests[1].context_tokens_hint == 200_000
+    await session.dispose()
+
+
+@pytest.mark.asyncio
 async def test_adopt_aside_writes_to_both_the_context_and_the_transcript(tmp_path) -> None:
     """Forking is the door out, so it has to land where a resume will find it."""
     session = make_session(tmp_path, RecordingStream())

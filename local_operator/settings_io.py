@@ -374,6 +374,20 @@ SETTINGS: tuple[Setting, ...] = (
             Choice("chat_completions", "chat_completions", "explicit compatibility opt-out"),
         ),
     ),
+    Setting(
+        key="providers.anthropic.cache_ttl_1h_min_context_tokens",
+        path=("providers", "anthropic", "cache_ttl_1h_min_context_tokens"),
+        section="model",
+        label="Anthropic 1h cache above (tokens)",
+        kind=Kind.INT,
+        default=150_000,
+        help=(
+            "Context size from which Anthropic requests use the 1-hour prompt-cache "
+            "TTL (2x write cost, survives idle gaps over 5 minutes). 0 disables."
+        ),
+        minimum=0,
+        maximum=10_000_000,
+    ),
     # -- failover -----------------------------------------------------------
     Setting(
         key="retry.enabled",
