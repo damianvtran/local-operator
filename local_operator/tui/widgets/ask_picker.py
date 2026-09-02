@@ -169,6 +169,16 @@ MIN_TRANSCRIPT_ROWS = 4
 #: R9-R11, measured on the composited screen rather than the card's own text).
 MIN_BODY_ROWS = 3
 
+#: Max wrapped lines the QUESTION header may occupy, mirroring OMP's
+#: ``MAX_HEADER_ROWS`` (ask-dialog.ts:62). A question longer than this is
+#: truncated to ``cap - 1`` whole lines plus a ``…``-marked line, so a long
+#: question cannot starve the option list of its budget and leave a cut
+#: description unreachable by any gesture (GAP D7). The ordering "question
+#: outranks options" (the safety property, ``_layout`` steps 1-2) is unchanged;
+#: this only bounds how many rows the question may TAKE before the options
+#: start competing for what is left.
+MAX_QUESTION_ROWS = 4
+
 #: The cursor glyph, matching the ``/resume`` and command pickers. A caret plus
 #: a tinted label rather than a reversed row: an inverted block reads as a
 #: selection the user made rather than the position they are on.
@@ -1326,12 +1336,30 @@ class AskPickerScreen(Container):
         return max(1, width - ASK_PADDING_CELLS * 2)
 
     def _question_lines(self, width: int) -> list[str]:
-        """The question, wrapped. Never truncated: it is what is being asked.
+        """The question, wrapped and bounded to :data:`MAX_QUESTION_ROWS`.
 
         Wrapping makes the header's height depend on content, which is why the
         row budget below is computed from this rather than from a constant.
+
+        Bounded (not "never truncated") so a long question cannot consume the
+        whole body and leave the option list a 1-2 line viewport in which a cut
+        description is unreachable by any gesture (GAP D7; OMP's
+        ``MAX_HEADER_ROWS``, ask-dialog.ts:62,153-159). The cut is MARKED, like
+        every other abbreviation this card makes, so the reader can tell the
+        question continues. The ordering that makes the question outrank the
+        options (the safety property, ``_layout`` steps 1-2) is untouched: this
+        bounds how many rows the question may take, not whether it is shown
+        first. The mark matches the budget-cut idiom ``_allocate`` already uses
+        for a question the body cannot fit, so the two truncation paths read
+        identically.
         """
-        return wrap_cells(self.question.question, width) or [""]
+        lines = wrap_cells(self.question.question, width) or [""]
+        if len(lines) <= MAX_QUESTION_ROWS:
+            return lines
+        kept = lines[: MAX_QUESTION_ROWS - 1]
+        tail = truncate_cells(lines[MAX_QUESTION_ROWS - 1], max(1, width - 2))
+        tail = tail[:-1].rstrip() if tail.endswith("…") else tail
+        return [*kept, f"{tail} …"]
 
     def _description_indent(self) -> int:
         """Cells a description line is inset by, so it sits under the LABEL.
