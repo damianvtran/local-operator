@@ -79,10 +79,10 @@ schedule its own follow-ups.
   plus a roster — you launch by name with `/team`. Peek at, steer, pause, or
   cancel any worker mid-flight.
 - **Sessions that talk to each other.** Any `lop` session on your machine can
-  message any other with `lop send` or the agent's own `send` tool, so two
-  sessions working in different repos can hand off, ask permission, or claim a
-  shared resource between themselves. Loopback and same-account only, with no
-  multiplexer and no cloud service involved.
+  message any other with `lop send` or the agent's own `send` tool, so the
+  session running your migration can tell the one holding the deploy slot to
+  wait, and hear back, without you carrying messages between terminals.
+  Same-account and on-machine only: no multiplexer, no cloud.
 - **A session you can leave and come back to.** Transcripts persist,
   `/resume` picks up where you left off, and context compaction runs itself
   before the window fills, so long sessions don't fall off a cliff.
@@ -377,16 +377,19 @@ before enabling project-supplied servers.
 
 ## ↔ Cross-Session Communication
 
-Subagents are a tree: one manager, workers it spawned, one shared transcript.
-This is the other shape. Two `lop` sessions you started yourself, in different
-repos, that have never seen each other's context, can talk directly. No cmux,
-no multiplexer, no network, no cloud service in the middle.
+Subagents are a tree: workers your agent spawned, that it owns and that end
+when their work does. This is the other shape. Two `lop` sessions you started
+yourself, in different repos, with no parent between them and no shared
+context, can message each other directly. One can tell another to hold off on a
+deploy, hand over a finished branch, or claim a shared resource, without you
+relaying it between terminals. No cmux, no multiplexer, no cloud service in the
+middle.
 
 <p align="center">
   <img src="./static/tui-peer-message.png" alt="A lop session receiving an inbound peer message card from another session named 'Audit custom fields on profiles E2E' (pid 50793), which announces it is taking the user-dashboard QA and prod deploy slot for MR !1356 and asks the receiver to object now if it has an in-flight QA validation; below it the receiving session's own send tool card replies 'No objection — go ahead', followed by its wait, bash, and hub peek receipts" width="720">
 </p>
 
-<p align="center"><i>Two independent sessions negotiating a shared deploy slot. One claims it, asks for objections, and the other checks its own work and clears it. No human in the loop.</i></p>
+<p align="center"><i>Two independent sessions negotiating a shared deploy slot. One claims it and asks for objections; the other checks its own in-flight work and clears it. No human in the loop.</i></p>
 
 **Find out what is running.** `lop sessions` is the directory of every session
 on the machine:
@@ -402,20 +405,20 @@ The table shows `STATE` (`live`, `wedged`, or `stale`), `PID`, `KIND`
 (phys footprint on macOS, where RSS under-reports because memory is compressed;
 Pss on Linux), shown as `—` when it cannot be measured, never as zero. A large
 `HB_AGE` on a `live` row is your early warning that a session is going wedged.
-`--json` adds each session's `cwd`.
+`--json` also carries each session's `cwd` and `session_id`, which the table
+omits.
 
 **Two entry points, one wire.** From a shell you use `lop send`; from inside a
 session the agent uses its own `send` tool, which lands as an auditable card in
 its transcript. They share targeting and delivery, and differ only in the
 default: the shell command drops to the mailbox unless you ask otherwise, while
-an agent's send wakes an idle peer, because a hand-off nobody reads until later
-is not a hand-off.
+an agent's send wakes an idle peer.
 
 ```bash
 lop sessions
 lop send "release cutter" "gates are green, ready for review"
 lop send "release cutter" --wake "the deploy finished; verify prod"
-lop send --pid 12345 --now "hold off, the schema changed"
+lop send "ingest refactor" --now "hold off, the schema changed"
 git log -1 --stat | lop send "release cutter"      # body from stdin
 ```
 
@@ -425,10 +428,9 @@ model reads it on the next turn, leaving an idle session idle. A running
 `bash`, `eval`, or MCP call is never cut short. `--wake` adds "and start a turn
 now if it is idle". `--now` (or `--steer`) injects mid-turn to redirect a
 session that is actively working, and opens a turn if it is idle so the message
-is never dropped. One exception to the non-interrupting default is worth
-knowing: a session parked in a blocking `wait` returns early, reports that its
-job is still running, and reads the message at that turn boundary instead of
-after the full wait budget.
+is never dropped. One exception: a session parked in a blocking `wait` returns
+early, reports that its job is still running, and reads the message at that
+turn boundary instead of after the full wait budget.
 
 **Targeting is a substring, and it refuses to guess.** Pass `--pid` for an
 exact process or `--session` for an exact id; otherwise the positional target
@@ -436,9 +438,10 @@ is matched case-insensitively against the conversation name, then the session
 id, then the cwd basename. Only `live` sessions are eligible. When a substring
 matches several of them, `lop send` prints the candidates and exits non-zero
 asking you to disambiguate with `--pid` rather than delivering to the wrong
-session.
+session. A target that has gone `wedged` says so immediately instead of hanging
+on the dial.
 
-**You can see all of it.** A delivered message appears in the target's
+**Every delivery leaves a receipt.** A delivered message appears in the target's
 transcript as an inbound card reading `↔ peer message from "<conversation>"
 (pid N, <model>)`, distinct from your own turns, in the TUI and on the phone
 surface alike. The sender gets the receiving side's own words back, so it knows
@@ -451,10 +454,13 @@ record under a `0700` directory and answers on an authenticated loopback
 server, so the trust boundary is your OS account and there is no remote or
 cross-user path.
 
-Worth knowing before you rely on it: interactive and daemon-owned sessions
-receive, a headless `exec` session may not, a session running a `lop` older
-than this feature answers with a clear "cannot receive peer messages" error
-instead of crashing, and bodies are capped at 256 KB.
+Worth knowing before you rely on it:
+
+- Interactive and daemon-owned sessions receive; a headless `exec` session may
+  not.
+- A session running a version of `lop` older than this feature answers with a
+  clear "cannot receive peer messages" error instead of crashing.
+- Message bodies are capped at 256 KB.
 
 ## ⚙️ Headless & Server Modes
 
