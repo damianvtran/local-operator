@@ -14,6 +14,7 @@ from textual.app import App, ComposeResult
 
 from local_operator.tui.widgets.command_picker import slash_argument
 from local_operator.tui.widgets.model_picker import (
+    MAX_VISIBLE_ROWS,
     ModelPicker,
     ModelRow,
     format_price_pair,
@@ -378,6 +379,35 @@ def test_the_status_line_surfaces_what_the_catalogue_does_not_know() -> None:
     assert "stale list: anthropic" in picker.render_text(90).plain
 
 
+def test_a_footer_clause_that_cannot_keep_its_first_value_is_dropped_at_the_seam() -> None:
+    """The three-clause composite (access note, stale, empty) at 100 columns
+    used to render ``… · no live list:…`` — a label whose only payload died,
+    leaving a dangling colon that read as a glitch. The cut moves to the seam
+    before that clause. Lines that fitted before, and cuts that land inside a
+    list of names, render exactly as they did."""
+    note = "2 hidden — /login <provider>"
+    picker = ModelPicker(lambda row: None)
+    picker.set_rows(_rows(), status=f"{note} · stale list: anthropic · no live list: radient")
+    picker.open("")
+    # 73-cell picker at a 100-column terminal, as the captured frames were.
+    footer = picker.render_text(73).plain.split("\n")[-1].strip()
+    assert footer == f"{note} · stale list: anthropic", footer
+    assert "no live list" not in footer
+    # Wide enough → every clause, untouched.
+    assert picker.render_text(90).plain.split("\n")[-1].strip() == (
+        f"{note} · stale list: anthropic · no live list: radient"
+    )
+    # A cut inside the provider list keeps the label and first name (the
+    # 60-column frame from design round 1), not the seam rule.
+    picker.set_rows(_rows(), status=f"{note} · stale list: anthropic, xai")
+    assert picker.render_text(56).plain.split("\n")[-1].strip() == (
+        f"{note} · stale list: anthropic…"
+    )
+    # The leading clause is never dropped, however narrow.
+    picker.set_rows(_rows(), status=note)
+    assert picker.render_text(24).plain.split("\n")[-1].strip() == "2 hidden — /login <p…"
+
+
 def test_the_footer_names_stale_providers_and_stays_silent_for_cached_ones() -> None:
     """`stale` is a failed refresh; `cached` is "listed within the picker's
     fifteen-minute TTL", which is not worth a line nobody would read."""
@@ -653,3 +683,54 @@ def test_the_status_row_is_kept_once_painted_so_the_card_does_not_reflow() -> No
     picker.open("")
     fresh = picker.render_text(90).plain.split("\n")
     assert len(fresh) == len(settled) - 1, fresh
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("height", [12, 30, 45])
+async def test_the_held_row_is_paid_for_out_of_the_row_budget_when_mounted(height: int) -> None:
+    """The unmounted test above cannot reach `_row_budget`'s held-row term: with
+    no screen it short-circuits to `MAX_VISIBLE_ROWS`. Mounted, the budget is
+    a third of the screen, and the held blank row must come out of that third —
+    otherwise the card grows a line on settle and pushes the composer, which is
+    the reflow the hold exists to prevent. Pinned at three heights because the
+    cap switches between the screen fraction and `MAX_VISIBLE_ROWS` at 45."""
+    hint = "d in /model saves this"
+    bulk = [
+        ModelRow("openrouter", f"vendor/model-{index}", connected=True, aggregated=True)
+        for index in range(60)
+    ]
+    picker = ModelPicker(lambda row: None)
+    picker.set_rows(bulk, status=f"checking providers… · {hint}")
+
+    class _Host(App[None]):
+        CSS = "ModelPicker { width: 100%; }"
+
+        def compose(self) -> ComposeResult:
+            yield picker
+
+    cap = min(MAX_VISIBLE_ROWS, height // 3)
+    app = _Host()
+    async with app.run_test(size=(100, height)) as pilot:
+        await pilot.pause()
+        picker.open("")
+        await pilot.pause()
+        checking = picker.render_text(100).plain.split("\n")
+        checking_budget = picker._row_budget()
+        heights: list[int] = []
+        budgets: list[int] = []
+        for status in (hint, "", "stale list: anthropic"):
+            picker.set_rows(bulk, status=status)
+            await pilot.pause()
+            heights.append(len(picker.render_text(100).plain.split("\n")))
+            budgets.append(picker._row_budget())
+
+    # The card never changes height across the app's real settle sequence and
+    # never exceeds the screen-fraction cap.
+    assert heights == [len(checking)] * 3, (len(checking), heights)
+    assert len(checking) <= cap, (len(checking), cap)
+    # Two footer rows while the hint is present (`checking…` and hint-only
+    # alike), and once the hint goes the held blank row — or the clause that
+    # replaces it — still costs one: without the hold the empty-status state
+    # would get its row back and the card would grow by a line.
+    assert checking_budget == max(1, cap - 2), (checking_budget, cap)
+    assert budgets == [cap - 2, cap - 1, cap - 1], (cap, budgets)

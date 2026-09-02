@@ -288,8 +288,12 @@ PERSIST_HINT = "d in /model saves this for new sessions"
 STALE_LIST_LABEL = "stale list:"
 
 #: Discovery statuses that mean "this provider produced a listing" (live or
-#: stored). The complement — ``static`` and ``unauthenticated`` — never asked
-#: the network, so they are not part of "every provider is stale".
+#: stored). The complement — ``static`` and ``unauthenticated`` — produced no
+#: listing, so they are not part of "every provider is stale". ``static`` is
+#: not only "has no listing endpoint": discovery also reports it for a provider
+#: whose fetch failed with no stored document to fall back on. Excluding that
+#: case only makes the offline collapse fire sooner, which is the right
+#: direction.
 LISTED_STATUSES = frozenset({"ok", "cached", "stale", "empty"})
 
 #: Marks a cost figure RESTORED from a resumed conversation rather than accrued
@@ -20466,8 +20470,9 @@ def _catalogue_status(statuses: dict[str, str]) -> str:
     """
     stale = sorted(p for p, s in statuses.items() if s == "stale")
     empty = sorted(p for p, s in statuses.items() if s == "empty")
-    # ``static`` (no listing endpoint) and ``unauthenticated`` (never asked)
-    # produced no listing, so they do not count toward "every provider".
+    # ``static`` (no listing endpoint, or a failed fetch with nothing stored)
+    # and ``unauthenticated`` produced no listing, so they do not count toward
+    # "every provider".
     listed = sum(1 for s in statuses.values() if s in LISTED_STATUSES)
     bits: list[str] = []
     if len(stale) > 1 and len(stale) == listed:
