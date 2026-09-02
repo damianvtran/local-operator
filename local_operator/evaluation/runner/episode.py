@@ -108,6 +108,7 @@ from local_operator.evaluation.receipts import (
     reconcile_budget,
 )
 from local_operator.evaluation.runner.guards import (
+    RECENT_TURNS_WINDOW,
     EpisodeGuard,
     GuardInput,
     GuardVerdict,
@@ -177,10 +178,12 @@ class EpisodeConfig:
     ``guards`` are the episode guards (``runner.guards``) evaluated after every
     executed step; a firing guard truncates exactly as ``max_steps`` does, so
     the episode is still scored on the state it reached. ``None`` means
-    :func:`default_guards`; an empty tuple disables them. ``keep_recent_frames``
-    and ``max_cycle_cost_micros`` are recorded here so the manifest metadata can
-    carry the episode's context and cost policy; the model client is what reads
-    the frame policy.
+    :func:`default_guards`; an empty tuple disables them.
+    ``max_cycle_cost_micros`` feeds the default cost-rate guard's absolute cap.
+    The frame policy (``keep_recent_frames``) is deliberately NOT here: the
+    model client owns its context and is built before the runner
+    (``create_provider_model_client(keep_recent_frames=...)``), so a copy on
+    this config would be a second declaration the runner could not enforce.
     """
 
     evidence_root: Path
@@ -194,7 +197,6 @@ class EpisodeConfig:
     cleanup_timeout: float = 60.0
     ask_deadline_ms: int = 60_000
     handshake_timeout: float = 30.0
-    keep_recent_frames: int = 3
     max_cycle_cost_micros: int | None = None
     guards: tuple[EpisodeGuard, ...] | None = None
 
@@ -802,7 +804,7 @@ class EpisodeRunner:
         """
         if not self._guards:
             return None
-        recent = (*self._turns[-16:], EpisodeTurn(observation=latest))
+        recent = (*self._turns[-RECENT_TURNS_WINDOW:], EpisodeTurn(observation=latest))
         snapshot = GuardInput(
             steps_taken=self._steps_taken,
             model_cycles=self._model_cycles,

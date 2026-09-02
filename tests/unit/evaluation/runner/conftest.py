@@ -374,6 +374,16 @@ def _batch(current: Observation, kind: str) -> ActionBatch:
                 "question": "What next?",
             }
         ]
+    elif kind == "type":
+        # A real action: waits are transparent to the floundering guards, so
+        # a test that wants a guard to fire must act.
+        actions = [
+            {
+                "kind": "type",
+                "observation_id": current.observation_id,
+                "text": "hello",
+            }
+        ]
     else:
         actions = [
             {

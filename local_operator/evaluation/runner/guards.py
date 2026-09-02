@@ -26,7 +26,7 @@ from typing import Any, Literal, Mapping, Protocol, Sequence, runtime_checkable
 
 from pydantic import ConfigDict, Field
 
-from local_operator.evaluation.protocol import AskUserAction, ProtocolModel
+from local_operator.evaluation.protocol import AskUserAction, ProtocolModel, WaitAction
 from local_operator.evaluation.receipts import (
     BudgetAuthorization,
     BudgetResource,
@@ -37,6 +37,7 @@ from local_operator.evaluation.receipts import (
 from local_operator.evaluation.runner.model import EpisodeTurn
 
 __all__ = [
+    "RECENT_TURNS_WINDOW",
     "AskLoopGuard",
     "BudgetCapGuard",
     "CostRateGuard",
@@ -84,6 +85,12 @@ class GuardVerdict(ProtocolModel):
 
 
 CONTINUE = GuardVerdict(kind="continue", code="ok", detail="no guard fired")
+
+#: How many of the newest turns the runner snapshots into
+#: ``GuardInput.recent_turns``. A guard that needs to see more turns than
+#: this can never fire, so the turn-window guards validate their parameters
+#: against it at construction rather than silently going inert.
+RECENT_TURNS_WINDOW = 16
 
 
 @runtime_checkable
@@ -156,6 +163,14 @@ class CostRateGuard:
     ratio needs two full windows so a cheap first turn cannot trip it; the
     absolute cap is optional because a sane value depends on the model's
     price, which is the episode config's to know.
+
+    The ratio check needs REPORTED cost. A provider that reports no
+    ``usd_cost`` folds in as 0 (the evidence payload has no "unknown"
+    encoding), and a free tier is genuinely 0; either way a zero previous
+    window has no rate to exceed. Rather than silently returning the generic
+    continue, the guard says so in its verdict (``code="cost-unreported"``)
+    so a reader of the guard's decisions can see the ratio check was skipped,
+    and only ``max_cycle_cost_micros`` remains in force.
     """
 
     def __init__(
@@ -185,7 +200,16 @@ class CostRateGuard:
             return CONTINUE
         recent = sum(costs[-self._window :])
         previous = sum(costs[-2 * self._window : -self._window])
-        if previous > 0 and recent > self._ratio * previous:
+        if previous <= 0:
+            return GuardVerdict(
+                kind="continue",
+                code="cost-unreported",
+                detail=(
+                    f"the previous {self._window} cycles reported no cost, so the"
+                    " cost-rate ratio cannot be judged; only the per-cycle cap applies"
+                ),
+            )
+        if recent > self._ratio * previous:
             return GuardVerdict(
                 kind="truncate",
                 code="cost-spike",
@@ -207,22 +231,51 @@ def _decided(turns: Sequence[EpisodeTurn]) -> list[EpisodeTurn]:
     return [turn for turn in turns if turn.batch is not None]
 
 
+def _is_waiting(turn: EpisodeTurn) -> bool:
+    """A batch made only of ``wait`` actions.
+
+    Waiting is NOT acting. ``wait`` is the one legal way the protocol gives a
+    model to let a slow page or app finish loading (bounded at ``MAX_WAIT_MS``
+    per action, so a 25 s load is legitimately five 5 s waits on a static
+    screen), and both floundering guards would otherwise read that as the
+    model repeating itself while the screen does not move. So a wait-only
+    batch counts neither as a repeat nor as an action that should have changed
+    the screen; it is transparent to both guards.
+    """
+    return turn.batch is not None and all(
+        isinstance(action, WaitAction) for action in turn.batch.actions
+    )
+
+
+def _acted(turns: Sequence[EpisodeTurn]) -> list[EpisodeTurn]:
+    """Decided turns whose batch actually acted (non-empty, not wait-only)."""
+    return [
+        turn
+        for turn in turns
+        if turn.batch is not None and turn.batch.actions and not _is_waiting(turn)
+    ]
+
+
 class RepeatedBatchGuard:
     """Truncate when the last ``repeats`` batches are canonically identical.
 
     Identical bytes, not "similar": the model issuing the exact same action
     list on consecutive turns is doing nothing new. Batches are compared by
     their canonical JSON with the observation id removed -- the id changes
-    every turn by construction, so with it every batch is unique.
+    every turn by construction, so with it every batch is unique. Wait-only
+    batches are transparent (see :func:`_is_waiting`): they neither count as
+    a repeat nor break a run of repeats around them.
     """
 
     def __init__(self, repeats: int = 4) -> None:
         if repeats < 2:
             raise ValueError("repeats must be at least 2")
+        if repeats > RECENT_TURNS_WINDOW:
+            raise ValueError(f"repeats must not exceed RECENT_TURNS_WINDOW ({RECENT_TURNS_WINDOW})")
         self._repeats = repeats
 
     def evaluate(self, snapshot: GuardInput) -> GuardVerdict:
-        decided = _decided(snapshot.recent_turns)
+        decided = _acted(snapshot.recent_turns)
         if len(decided) < self._repeats:
             return CONTINUE
         tail = decided[-self._repeats :]
@@ -255,28 +308,47 @@ class NoChangeGuard:
     the adapter already computed and the runner already verified, so this
     costs no bytes. An observation with no frames cannot be judged and does
     not count; a text-only benchmark never trips this guard.
+
+    Wait-only batches are not actions (see :func:`_is_waiting`): a model
+    waiting on a static screen is loading, not floundering. Waits interleaved
+    with real actions do not reset the count either -- if the screen stayed
+    byte-identical through ``repeats`` real actions and whatever waits sat
+    between them, the actions changed nothing.
     """
 
     def __init__(self, repeats: int = 6) -> None:
         if repeats < 2:
             raise ValueError("repeats must be at least 2")
+        if repeats + 1 > RECENT_TURNS_WINDOW:
+            raise ValueError(
+                f"repeats + 1 must not exceed RECENT_TURNS_WINDOW ({RECENT_TURNS_WINDOW})"
+            )
         self._repeats = repeats
 
     def evaluate(self, snapshot: GuardInput) -> GuardVerdict:
         turns = list(snapshot.recent_turns)
-        # The frame produced by turn i's batch is turn i+1's observation, so
-        # ``repeats`` acted-upon turns need ``repeats + 1`` observations.
-        if len(turns) < self._repeats + 1:
+        # Walk back from the newest observation until ``repeats`` acting turns
+        # are in the span. The frame produced by turn i's batch is turn i+1's
+        # observation, so the span always includes one observation beyond the
+        # last acting turn (the current, undecided one at the end).
+        start = None
+        acting = 0
+        for index in range(len(turns) - 2, -1, -1):
+            turn = turns[index]
+            if turn.batch is None:
+                return CONTINUE
+            if turn.batch.actions and not _is_waiting(turn):
+                acting += 1
+                if acting == self._repeats:
+                    start = index
+                    break
+        if start is None:
             return CONTINUE
-        window = turns[-(self._repeats + 1) :]
         digests: list[tuple[str, ...]] = []
-        for turn in window:
+        for turn in turns[start:]:
             if not turn.observation.frames:
                 return CONTINUE
             digests.append(tuple(frame.artifact.sha256 for frame in turn.observation.frames))
-        acted = window[:-1]
-        if any(turn.batch is None or not turn.batch.actions for turn in acted):
-            return CONTINUE
         if len(set(digests)) == 1:
             return GuardVerdict(
                 kind="truncate",
@@ -297,6 +369,8 @@ class AskLoopGuard:
     def __init__(self, asks: int = 3) -> None:
         if asks < 1:
             raise ValueError("asks must be positive")
+        if asks > RECENT_TURNS_WINDOW:
+            raise ValueError(f"asks must not exceed RECENT_TURNS_WINDOW ({RECENT_TURNS_WINDOW})")
         self._asks = asks
 
     def evaluate(self, snapshot: GuardInput) -> GuardVerdict:

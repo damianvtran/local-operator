@@ -26,6 +26,7 @@ from local_operator.evaluation.receipts import (
     CappedAllowance,
 )
 from local_operator.evaluation.runner.guards import (
+    RECENT_TURNS_WINDOW,
     AskLoopGuard,
     BudgetCapGuard,
     CostRateGuard,
@@ -87,8 +88,9 @@ def _batch(current: Observation, actions: Sequence[dict[str, Any]]) -> ActionBat
     )
 
 
-WAIT = {"kind": "wait", "duration_ms": 1}
+WAIT = {"kind": "wait", "duration_ms": 5000}
 CLICK = {"kind": "click", "frame_id": "frame-0", "x": 1, "y": 1}
+TYPE = {"kind": "type", "text": "hello"}
 ASK = {"kind": "ask_user", "request_id": "ask-1", "question": "what?"}
 
 
@@ -140,8 +142,21 @@ def test_cost_rate_needs_two_full_windows_then_fires_on_a_spike() -> None:
     assert guard.evaluate(_snapshot(recent_costs_micros=(1, 1, 1, 2, 2, 2))).kind == "continue"
     verdict = guard.evaluate(_snapshot(recent_costs_micros=(1, 1, 1, 3, 3, 3)))
     assert verdict.kind == "truncate" and verdict.code == "cost-spike"
-    # A zero-cost previous window cannot be "exceeded by ratio".
-    assert guard.evaluate(_snapshot(recent_costs_micros=(0, 0, 0, 5, 5, 5))).kind == "continue"
+
+
+def test_cost_rate_says_so_when_cost_is_unreported() -> None:
+    """A zero previous window (unreported cost, or a free tier) has no rate to
+    exceed. The guard must not silently continue as if it had judged; it
+    names the skip so the ratio check's inertness is visible."""
+
+    guard = CostRateGuard(window=3, ratio=2.0)
+    verdict = guard.evaluate(_snapshot(recent_costs_micros=(0, 0, 0, 5, 5, 5)))
+    assert verdict.kind == "continue"
+    assert verdict.code == "cost-unreported"
+    assert "reported no cost" in verdict.detail
+    # The absolute cap still applies without reported ratio data.
+    capped = CostRateGuard(window=3, ratio=2.0, max_cycle_cost_micros=4)
+    assert capped.evaluate(_snapshot(recent_costs_micros=(0, 0, 0, 5, 5, 5))).kind == "truncate"
 
 
 def test_cost_rate_absolute_cap_fires_on_one_expensive_cycle() -> None:
@@ -153,12 +168,12 @@ def test_cost_rate_absolute_cap_fires_on_one_expensive_cycle() -> None:
 
 def test_repeated_batch_ignores_the_observation_id_and_the_undecided_turn() -> None:
     guard = RepeatedBatchGuard(repeats=3)
-    same = _turns([[WAIT], [WAIT], [WAIT], None])
+    same = _turns([[CLICK], [CLICK], [CLICK], None])
     verdict = guard.evaluate(_snapshot(recent_turns=same))
     assert verdict.kind == "truncate" and verdict.code == "repeated-batch"
-    varied = _turns([[WAIT], [WAIT], [CLICK], None])
+    varied = _turns([[CLICK], [CLICK], [TYPE], None])
     assert guard.evaluate(_snapshot(recent_turns=varied)).kind == "continue"
-    short = _turns([[WAIT], [WAIT], None])
+    short = _turns([[CLICK], [CLICK], None])
     assert guard.evaluate(_snapshot(recent_turns=short)).kind == "continue"
 
 
@@ -172,6 +187,39 @@ def test_no_change_needs_identical_frames_after_non_empty_batches() -> None:
     # No frames at all: a text-only benchmark can never trip this guard.
     blind = _turns([[CLICK], [CLICK], None])
     assert guard.evaluate(_snapshot(recent_turns=blind)).kind == "continue"
+
+
+def test_waiting_on_a_static_screen_is_loading_not_floundering() -> None:
+    """The review's reproduction (M1): a model issuing ``wait`` on a static
+    screen -- a page or app still loading, the protocol's one legal way to
+    wait -- must not be scored as repeating itself or as acting to no effect.
+    Seven wait-only turns on one frame digest trip neither default guard."""
+
+    static = ["a" * 64] * 8
+    loading = _turns([[WAIT]] * 7 + [None], digests=static)
+    assert RepeatedBatchGuard().evaluate(_snapshot(recent_turns=loading)).kind == "continue"
+    assert NoChangeGuard().evaluate(_snapshot(recent_turns=loading)).kind == "continue"
+    # A batch mixing a wait with a real action IS acting.
+    mixed = _turns([[CLICK, WAIT]] * 7 + [None], digests=static)
+    assert RepeatedBatchGuard().evaluate(_snapshot(recent_turns=mixed)).code == "repeated-batch"
+    assert NoChangeGuard().evaluate(_snapshot(recent_turns=mixed)).code == "no-change"
+
+
+def test_waits_are_transparent_to_a_run_of_real_actions() -> None:
+    """Waits interleaved with identical real actions neither break the
+    repeat count nor reset the no-change span: the actions changed nothing
+    whatever waits sat between them."""
+
+    interleaved = _turns([[CLICK], [WAIT], [CLICK], [WAIT], [CLICK], None])
+    verdict = RepeatedBatchGuard(repeats=3).evaluate(_snapshot(recent_turns=interleaved))
+    assert verdict.code == "repeated-batch"
+
+    static = ["a" * 64] * 6
+    still = _turns([[CLICK], [WAIT], [CLICK], [WAIT], [CLICK], None], digests=static)
+    assert NoChangeGuard(repeats=3).evaluate(_snapshot(recent_turns=still)).code == "no-change"
+    # Two real actions plus waits is below a repeats=3 span.
+    fewer = _turns([[CLICK], [WAIT], [WAIT], [CLICK], None], digests=static[:5])
+    assert NoChangeGuard(repeats=3).evaluate(_snapshot(recent_turns=fewer)).kind == "continue"
 
 
 def test_ask_loop_counts_consecutive_ask_batches_only() -> None:
@@ -212,6 +260,11 @@ def test_default_guards_composition_and_config_knob() -> None:
         lambda: RepeatedBatchGuard(repeats=1),
         lambda: NoChangeGuard(repeats=1),
         lambda: AskLoopGuard(asks=0),
+        # A guard needing more turns than the runner snapshots could never
+        # fire; it is refused at construction rather than left inert.
+        lambda: RepeatedBatchGuard(repeats=RECENT_TURNS_WINDOW + 1),
+        lambda: NoChangeGuard(repeats=RECENT_TURNS_WINDOW),
+        lambda: AskLoopGuard(asks=RECENT_TURNS_WINDOW + 1),
     ],
 )
 def test_degenerate_guard_parameters_are_rejected(factory: Any) -> None:

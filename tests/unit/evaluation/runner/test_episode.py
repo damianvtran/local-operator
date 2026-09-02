@@ -573,7 +573,7 @@ async def test_guard_truncation_seals_scored_with_reason(tmp_path: Path, episode
         build_spec(episode_id),
         build_config(tmp_path, max_steps=10, guards=(RepeatedBatchGuard(repeats=2),)),
         selector=selector(tmp_path),
-        model=ScriptedModel(["step"] * 8),
+        model=ScriptedModel(["type"] * 8),
         launch=lambda _: adapter,
         rescue=_rescue_ok,
     )
@@ -590,6 +590,30 @@ async def test_guard_truncation_seals_scored_with_reason(tmp_path: Path, episode
     assert len(steps) == 2
     assert [step.truncated for step in steps] == [False, True]
     assert [step.truncation_reason for step in steps] == [None, "repeated-batch"]
+
+
+@pytest.mark.asyncio
+async def test_a_waiting_model_runs_to_the_step_cap_under_default_guards(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """End to end for M1: a model that only waits (a slow load) reaches
+    ``max_steps`` under the DEFAULT guards rather than being cut off as
+    ``repeated-batch``; the truncation it gets is the honest step cap."""
+
+    adapter = FakeAdapter(tmp_path, episode_id)
+    runner = _runner(
+        tmp_path, episode_id, adapter=adapter, model=ScriptedModel(["step"] * 12), max_steps=8
+    )
+
+    outcome = await runner.run()
+
+    assert outcome.status == "completed"
+    root = outcome.bundle_root
+    assert root is not None
+    assert verify_bundle(root).valid
+    steps = payloads(root, EnvironmentStepPayload)
+    assert len(steps) == 8
+    assert steps[-1].truncation_reason == "max-steps"
 
 
 @pytest.mark.asyncio
@@ -651,3 +675,17 @@ async def test_ask_answer_rides_on_the_asking_turn(tmp_path: Path, episode_id: s
     assert second[0].ask_answer == "go left"
     assert second[0].batch is not None
     assert second[1].ask_answer is None
+
+
+def test_episode_config_declares_no_frame_policy_it_cannot_enforce(tmp_path: Path) -> None:
+    """The frame policy lives on the model client, which is built before the
+    runner. A ``keep_recent_frames`` on the config was a knob a caller could
+    set to 5 and get 3 (review round 1, m1); the config refuses it outright."""
+
+    from dataclasses import fields
+
+    from local_operator.evaluation.runner.episode import EpisodeConfig
+
+    assert "keep_recent_frames" not in {field.name for field in fields(EpisodeConfig)}
+    with pytest.raises(TypeError):
+        build_config(tmp_path, keep_recent_frames=5)
