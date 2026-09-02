@@ -75,7 +75,9 @@ Deliberately LEFT on ``_AskHost``, having been checked rather than assumed:
 from __future__ import annotations
 
 import asyncio
+import inspect
 import itertools
+import textwrap
 
 import pytest
 from rich.cells import cell_len
@@ -4212,6 +4214,158 @@ async def test_a_silent_viewport_clip_is_caught(monkeypatch: pytest.MonkeyPatch)
             " the D8 guard would not have caught the regression",
             _prefix_reach(card.render_lines_for_test(), full),
             sel_lines,
+        )
+
+
+def _selected_label_line(card: AskPickerScreen) -> "Text":
+    """The selected row's LABEL line as styled ``Text`` — its first drawn line.
+
+    Read from ``_card_text()`` (styled) rather than ``render_lines_for_test``
+    (plain), because the D8-blocker regression is as much about STYLE — the
+    cursor and number stripped, the label recoloured to ``muted`` — as about the
+    false ``…``. The label is the row's first rendered line, so it is the first
+    ``_card_text`` line whose ``_line_rows`` entry is the selected row.
+    """
+    lines = card._card_text().split("\n")
+    for text, row in zip(lines, card._line_rows):
+        if row == card.state.selected:
+            return text
+    raise AssertionError("selected row's label line not found in the drawn card")
+
+
+@pytest.mark.asyncio
+async def test_a_clipped_selected_row_keeps_its_label_intact_in_the_default_view() -> None:
+    """D8 BLOCKER regression guard (``af77527d``): the clipped-row marker must
+    NEVER corrupt a LABEL line, only a description line.
+
+    The D8 fix (``_mark_clipped``, ``24e5841e``) stamps ``…`` on the last VISIBLE
+    line of a row the viewport clips below. Its first form fired UNCONDITIONALLY
+    on that last line — including when the last visible line was the row's LABEL
+    (``body_line_budget == 1``, the whole option list is one line per row). On
+    the SELECTED row that stripped the ``❯`` cursor glyph, stripped the ``1.``
+    number gutter, recoloured the accent-hue label to ``muted`` as if it were
+    unselected prose, and stamped a FALSE ``…`` on a label that fits whole — the
+    very row ``_scroll_offset_for_cursor`` pins to the top for the user to
+    answer. This is a DEFAULT-VIEW corruption (no reveal), reachable at ordinary
+    sizes (~90-120 cols x 20-24 rows), and the reveal-only D8 guard could not see
+    it.
+
+    The fix adds the ``on_description`` condition: mark only when the last visible
+    line sits PAST the row's label line. This pins the property on drawn INK and
+    STYLE at 100x22 with a seeded transcript (so the dock is the real one and the
+    body budget is genuinely 1):
+
+    - the label keeps its ``❯`` cursor glyph and its ``1.`` number;
+    - the label is NOT marked ``…`` (it fits whole — nothing is being cut ON it);
+    - the label text keeps the selection accent hue, not ``muted`` (it was not
+      repainted as unselected prose).
+
+    Proven able to go red by
+    :func:`test_an_unconditional_clip_marker_corrupts_the_label`.
+    """
+    size = (100, 22)
+    app, card = await _real_app_card(size, [_long_description_question()])
+    async with app.run_test(size=size) as pilot:
+        await _show(app, pilot, card)
+        # The regime the bug lived in: the selected row's span exceeds the body,
+        # so its description is clipped and only its label fits.
+        layout = card._layout()
+        selected = card.state.selected
+        width = layout.content_width if hasattr(layout, "content_width") else layout.width
+        assert len(card._reveal_wrap(selected, width)) > layout.description_rows.get(selected, 0), (
+            size,
+            "the selected row must be clipped for this guard to mean anything",
+        )
+        assert layout.body_line_budget <= 2, (
+            size,
+            "expected a tight body",
+            layout.body_line_budget,
+        )
+
+        label = _selected_label_line(card)
+        plain = _strip_scrollbar_cell(label.plain).rstrip()
+        # (1) the cursor glyph and the number survive.
+        assert "❯" in plain, (size, "the selected row lost its cursor glyph", repr(plain))
+        assert f"{selected + 1}." in plain, (size, "the selected row lost its number", repr(plain))
+        # (2) no FALSE ellipsis on a label that fits whole.
+        assert not plain.endswith("…"), (
+            size,
+            "a whole label was falsely marked as cut",
+            repr(plain),
+        )
+        # (3) the label text keeps the selection hue, not muted — it was not
+        # repainted as unselected prose. Read the style at the label's first
+        # word, past the cursor and number gutter.
+        first_word = next(
+            (frag for frag in plain.split() if frag not in ("❯", f"{selected + 1}.")), ""
+        )
+        assert first_word, (size, "no label word to measure", repr(plain))
+        colour_at = label.plain.index(first_word)
+        style = _style_at(label, colour_at)
+        label_colour = style.color.triplet.hex if style.color and style.color.triplet else None
+        assert label_colour != theme_mod.semantic_color("muted"), (
+            size,
+            "the selected label was recoloured to muted (unselected prose)",
+            label_colour,
+        )
+
+
+@pytest.mark.asyncio
+async def test_an_unconditional_clip_marker_corrupts_the_label() -> None:
+    """The red half of the D8-blocker guard: restore the pre-fix UNCONDITIONAL
+    ``_mark_clipped`` call and confirm the label is corrupted.
+
+    The fix is one term — ``and on_description`` — in ``_card_text``'s decision to
+    stamp the clip marker. This reintroduces the blocker by source-transforming
+    ``_card_text`` to drop that term (the pre-``af77527d`` behaviour) and rebinding
+    it on the class, then rendering the same 100x22 default frame the green guard
+    pins. The label then loses its cursor, its number, its hue, and gains a false
+    ``…`` — every corruption the green guard forbids. Asserted so the green guard
+    is a real guard and not a restatement of current behaviour.
+
+    Source-transform rather than a lambda because the guard is an inline
+    condition with no method seam; the transform ASSERTS the term was present and
+    removed, so a rename of the condition fails this test loudly rather than
+    silently testing nothing.
+    """
+    import local_operator.tui.widgets.ask_picker as ask_picker_module
+
+    source = inspect.getsource(AskPickerScreen._card_text)
+    assert "and on_description" in source, (
+        "the on_description guard term is gone — re-derive this red-half against"
+        " the current clip-marker condition"
+    )
+    buggy_source = textwrap.dedent(source.replace("and on_description:", ":"))
+    # Compile against the widget module's own globals so the rebuilt method sees
+    # the same helpers (Text, Style, cell_len, theme, …) the original closes over.
+    namespace = dict(ask_picker_module.__dict__)
+    exec(buggy_source, namespace)  # noqa: S102 - controlled source, test-only
+    buggy_card_text = namespace["_card_text"]
+
+    size = (100, 22)
+    app, card = await _real_app_card(size, [_long_description_question()])
+    async with app.run_test(size=size) as pilot:
+        await _show(app, pilot, card)
+        original = AskPickerScreen._card_text
+        AskPickerScreen._card_text = buggy_card_text  # type: ignore[assignment]
+        try:
+            card._repaint()
+            await pilot.pause()
+            label = _selected_label_line(card)
+        finally:
+            AskPickerScreen._card_text = original  # type: ignore[assignment]
+
+        plain = _strip_scrollbar_cell(label.plain).rstrip()
+        selected = card.state.selected
+        # The corruptions the green guard forbids, now all present — proving it
+        # catches this exact regression.
+        cursor_gone = "❯" not in plain
+        number_gone = f"{selected + 1}." not in plain
+        false_mark = plain.endswith("…")
+        assert cursor_gone and number_gone and false_mark, (
+            "restoring the unconditional _mark_clipped call did not corrupt the"
+            " label; the green guard would not have caught the blocker",
+            repr(plain),
         )
 
 
