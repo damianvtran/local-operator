@@ -1343,6 +1343,12 @@ def _price(value: float | None, definition: ProviderDefinition) -> float:
     ``-1`` is the unknown sentinel the picker blanks. Zero is preserved only for
     providers that need no credential — a local Ollama really is free per token,
     and blanking that would hide the one thing that makes it interesting.
+
+    NOT the same ``-1.0`` as ``model.prices._STATED_ZERO``, which means the
+    opposite — "models.dev stated this price and it is zero". That marker is
+    module-private to ``prices`` and stripped back to ``0.0`` before any row
+    reaches here, so the two never meet; they would collide silently if either
+    one's reach were widened, hence the note on both.
     """
     if value is not None and value > 0:
         return float(value)

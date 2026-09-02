@@ -61,6 +61,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import math
 import time
 from collections.abc import Iterable, Mapping
 from pathlib import Path
@@ -266,15 +267,43 @@ def _usable(payload: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
     return providers if isinstance(providers, Mapping) else None
 
 
+def _stated_price(value: object) -> float | None:
+    """``value`` as a price models.dev actually STATED, or ``None``.
+
+    Deliberately not :func:`_positive_float`, which collapses "stated zero",
+    "absent" and "malformed" into the same ``0.0`` — this module's whole
+    ranking turns on keeping the first apart from the other two. A bool is an
+    int subclass and a ``True`` price is nonsense; a negative or non-finite
+    number is not a price any vendor can charge, so both read as UNSTATED and
+    the chain keeps looking rather than recording a zero the vendor never said.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    if not math.isfinite(number) or number < 0:
+        return None
+    return number
+
+
 def _row(model_id: str, entry: Mapping[str, Any]) -> DiscoveredModel:
     """One projected entry as the struct every other resolution leg speaks.
 
-    A ``cost`` mapping that quotes numeric ``input`` and ``output`` at exactly
-    zero is marked with :data:`_STATED_ZERO` so the chain can tell "the vendor
-    said free" apart from "nobody said anything" — the struct itself cannot
-    (see the marker's comment). Anything else — a missing or empty ``cost``,
-    or a ``cost`` without numeric ``input`` and ``output`` — stays ``0.0``
-    and therefore "unanswered": only a STATED price stops the chain.
+    Two facts live in a ``cost`` mapping and the chain needs them apart:
+
+    * **models.dev STATED a price** — both ``input`` and ``output`` are real
+      numbers. That alone is what stops the chain (see :func:`_priced`): a
+      quoted price is an answer whatever its value.
+    * **the stated price is ZERO** — both of those numbers are exactly ``0``.
+      Only then is the row marked with :data:`_STATED_ZERO`, because only then
+      does the struct lose the fact: a ``DiscoveredModel`` spells "free" and
+      "unknown" the same way (``0.0``), so a symmetric zero would otherwise
+      read as "nobody said anything" and fall through to the secondary.
+
+    An ASYMMETRIC row (``input: 0, output: 15``) is stated but not zero, so it
+    keeps its numbers and stops the chain on the ordinary positive-leg test —
+    marking it would flatten a real $15 output price to free. Anything else —
+    a missing or empty ``cost``, or one without numeric ``input`` and
+    ``output`` — stays ``0.0`` and therefore "unanswered".
     """
     cost = entry.get("cost")
     cost = cost if isinstance(cost, Mapping) else {}
@@ -282,13 +311,9 @@ def _row(model_id: str, entry: Mapping[str, Any]) -> DiscoveredModel:
     limit = limit if isinstance(limit, Mapping) else {}
     cache_read = _positive_float(cost.get("cache_read"))
     name = entry.get("name")
-    stated_zero = (
-        all(
-            isinstance(cost.get(k), (int, float)) and not isinstance(cost.get(k), bool)
-            for k in ("input", "output")
-        )
-        and _positive_float(cost.get("input")) == 0.0
-    )
+    stated_input = _stated_price(cost.get("input"))
+    stated_output = _stated_price(cost.get("output"))
+    stated_zero = stated_input == 0.0 and stated_output == 0.0
     input_price = _positive_float(cost.get("input"))
     output_price = _positive_float(cost.get("output"))
     return DiscoveredModel(
@@ -338,11 +363,21 @@ def _lookup(providers: Mapping[str, Any], provider: str, model_id: str) -> Disco
 #: the struct; the marker lets the chain tell the two apart internally and is
 #: stripped by :func:`_unmark` before a row leaves this module. Module-private:
 #: no caller ever sees a negative price.
+#:
+#: NOT the same ``-1.0`` as ``providers.controller._price``'s UNKNOWN sentinel,
+#: which the picker renders blank. The two spell opposite facts — "the vendor
+#: stated zero" here, "nobody knows" there — and they never meet, because
+#: :func:`_unmark` strips this one before any row reaches that function. Widen
+#: either one's reach and they collide silently, so keep them apart.
 _STATED_ZERO = -1.0
 
 
 def _stated_zero(row: DiscoveredModel | None) -> bool:
-    """Whether ``row`` carries the marker — i.e. models.dev said 0/0 on purpose."""
+    """Whether ``row`` carries the marker — i.e. models.dev said 0/0 on purpose.
+
+    Both legs, because :func:`_row` only marks a row whose stated ``input`` and
+    ``output`` are BOTH zero; a half-marked row cannot be constructed.
+    """
     return row is not None and row.input_price == _STATED_ZERO and row.output_price == _STATED_ZERO
 
 
@@ -350,9 +385,13 @@ def _unmark(row: DiscoveredModel | None) -> DiscoveredModel | None:
     """The chain's exit: a stated-zero marker back to the ``0.0`` the struct speaks.
 
     ``price_row`` and ``price_catalogue_row`` both return through this so the
-    marker cannot leak to a caller. ``0.0`` renders ``free`` in the picker
-    exactly where the registry's zero does, which is what a vendor that quotes
-    $0 is telling the user anyway.
+    marker cannot leak to a caller. ``0.0`` is the same zero the registry uses,
+    and the picker renders it ``free`` where the provider needs no credential
+    and BLANK everywhere else — ``providers.controller._price`` maps ``0.0`` to
+    its own ``-1.0`` unknown marker for any provider that wants an API key, so
+    unknown stays distinct from free. Blank is the right answer there: it is
+    what a credentialled provider showed before this chain existed, and it
+    beats printing a third party's rate for the vendor's own endpoint.
     """
     if _stated_zero(row):
         assert row is not None  # for the type checker; ``_stated_zero`` implies it
@@ -361,17 +400,27 @@ def _unmark(row: DiscoveredModel | None) -> DiscoveredModel | None:
 
 
 def _priced(row: DiscoveredModel | None) -> bool:
-    """Whether a row answers the MONEY question — INCLUDING a stated zero.
+    """Whether a row answers the MONEY question — i.e. models.dev STATED a price.
 
-    A models.dev row whose ``cost`` mapping quotes numeric ``input`` and
-    ``output`` is an ANSWER even when both are ``0`` (the vendor bills nothing,
-    or bills by plan credits — ``zai/glm-4.7-flash``, ``kimi-for-coding/k3``):
-    the chain stops there and the OpenRouter secondary, which prices the same
-    weights hosted by a third party, must NOT get to invent a USD rate. Only a
-    row that is absent — no entry, or no ``cost`` mapping at all
-    (``google/gemma-4-31b-it``) — leaves the money question open. For an
-    OpenRouter row, which passes through :func:`openrouter_lookup` unchanged,
-    no marker exists and this is the ordinary "any positive leg" test: a
+    The chain exits on "stated", not on "non-zero" and not on "zero": a quoted
+    price is an answer whatever its value, and the OpenRouter secondary — which
+    prices the same weights hosted by a THIRD party — must never overwrite one.
+    The two shapes a stated price takes are tested separately here because the
+    struct records them differently:
+
+    * a positive leg (``2.5/15``, and also the asymmetric ``0/15``) survives
+      into the struct as itself, so the ordinary positive-leg test finds it;
+    * a symmetric zero (``zai/glm-4.7-flash``, ``kimi-for-coding/k3``: free, or
+      billed in plan credits) cannot, so :func:`_row` marks it and
+      :func:`_stated_zero` reads the marker back.
+
+    Those two are exhaustive over stated prices: :func:`_stated_price` refuses
+    negatives and non-finite values, so a stated row always has a positive leg
+    or is marked. Only an ABSENT price — no entry, or no ``cost`` mapping
+    (``google/gemma-4-31b-it``) — leaves the money question open.
+
+    An OpenRouter row passes through :func:`openrouter_lookup` unchanged and
+    carries no marker, so for it this is the plain positive-leg test: a
     zero-priced OpenRouter route is not trusted to price the vendor's own API.
     """
     return row is not None and (row.input_price > 0 or row.output_price > 0 or _stated_zero(row))

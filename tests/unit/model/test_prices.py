@@ -559,6 +559,79 @@ def test_a_stated_zero_never_reaches_the_openrouter_leg(tmp_path, openrouter) ->
     assert openrouter.calls == [], "a stated zero answers the chain before the secondary"
 
 
+@pytest.mark.parametrize(
+    ("cost", "expected"),
+    [
+        # A cached-input-free or promotional tier: input costs nothing, output
+        # is billed normally.
+        ({"input": 0, "output": 15}, (0.0, 15.0)),
+        ({"input": 0.0, "output": 2.5}, (0.0, 2.5)),
+        # The mirror shape: an input-billed model whose output is not charged.
+        ({"input": 15, "output": 0}, (15.0, 0.0)),
+    ],
+)
+def test_an_asymmetric_stated_price_keeps_its_numbers(cost, expected) -> None:
+    """Stated-but-not-zero is an ordinary priced answer, NOT a stated zero.
+
+    The two facts ``_row`` reads out of a ``cost`` mapping are different
+    predicates: "models.dev stated a price" (both legs numeric — stops the
+    chain) and "the stated price is zero" (both legs zero — needs the marker
+    because the struct cannot carry it). Conflating them flattens a row like
+    ``{input: 0, output: 15}`` to free and throws the real $15 away, which is
+    exactly what the marker's first cut did. models.dev publishes no such row
+    today, so only a test pins the boundary.
+    """
+    body = json.loads(json.dumps(_MODELS_DEV_BODY))
+    body["zai"]["models"]["glm-4.7-flash"]["cost"] = dict(cost)
+    # The trap: a third-party host prices the same open weights. It must not be
+    # consulted at all, because models.dev already answered.
+    sibling = DiscoveredModel(id="z-ai/glm-4.7-flash", input_price=0.06, output_price=0.40)
+
+    row = price_row("zai", "glm-4.7-flash", models_dev=_providers(body), openrouter=[sibling])
+
+    assert row is not None
+    assert (row.input_price, row.output_price) == expected
+    assert row.context_window == 200_000, "the native limits ride along with the stated price"
+
+
+@pytest.mark.parametrize("cost", [{"input": 0, "output": 15}, {"input": 15, "output": 0}])
+def test_an_asymmetric_stated_price_never_reaches_the_openrouter_leg(
+    tmp_path, openrouter, cost
+) -> None:
+    """The resolver path for the same shapes: a stated price of any value stops
+    the chain, so the secondary document is never even read."""
+    body = json.loads(json.dumps(_MODELS_DEV_BODY))
+    body["zai"]["models"]["glm-4.7-flash"]["cost"] = dict(cost)
+    _plant(tmp_path, project(body, _ETAG))
+    openrouter.rows.append(
+        DiscoveredModel(id="z-ai/glm-4.7-flash", input_price=0.06, output_price=0.40)
+    )
+
+    row = price_catalogue_row("zai", "glm-4.7-flash", cache_dir=tmp_path)
+
+    assert row is not None
+    assert (row.input_price, row.output_price) == (
+        float(cost["input"]),
+        float(cost["output"]),
+    )
+    assert openrouter.calls == [], "a stated price answers the chain before the secondary"
+
+
+def test_a_negative_stated_price_is_not_a_price_at_all() -> None:
+    """A negative number is not a rate any vendor charges, so it reads as
+    UNSTATED rather than as a stated zero: the chain keeps looking and the
+    secondary answers. Pins the boundary the ``_stated_price`` guard draws \u2014
+    without it, ``-5`` would mark the row and print free."""
+    body = json.loads(json.dumps(_MODELS_DEV_BODY))
+    body["zai"]["models"]["glm-4.7-flash"]["cost"] = {"input": -5, "output": -5}
+    sibling = DiscoveredModel(id="z-ai/glm-4.7-flash", input_price=0.06, output_price=0.40)
+
+    row = price_row("zai", "glm-4.7-flash", models_dev=_providers(body), openrouter=[sibling])
+
+    assert row is not None
+    assert (row.input_price, row.output_price) == (0.06, 0.40)
+
+
 def test_an_absent_cost_is_a_miss_and_falls_through(tmp_path) -> None:
     """``google/gemma-4-31b-it``: models.dev has the row with limits but NO
     ``cost`` mapping — genuinely unanswered, so the secondary may fill it.
