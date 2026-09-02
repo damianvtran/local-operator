@@ -100,7 +100,7 @@ async def measure(
         result = {
             "height": len(lines),
             "grants": [layout.description_rows.get(i, 0) for i in range(card.row_count)],
-            "reveal_rows": layout.reveal_rows,
+            "body_line_budget": layout.body_line_budget,
             "show_title": layout.show_title,
             "descriptions": layout.show_descriptions,
             "offers_e": card._reveal_hint() is not None,
@@ -137,7 +137,7 @@ async def main() -> None:
     for key, value in out.items():
         print(
             f"{key:40s} h={value['height']:2d} grants={value['grants']} "
-            f"rev={value['reveal_rows']} ^e={'Y' if value['offers_e'] else '-'} "
+            f"blb={value['body_line_budget']} ^e={'Y' if value['offers_e'] else '-'} "
             f"reach={value['reach']}/{value['full']}"
         )
 

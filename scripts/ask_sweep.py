@@ -99,10 +99,10 @@ async def measure(
         result = {
             "height": len(lines),
             "grants": [layout.description_rows.get(i, 0) for i in range(card.row_count)],
-            "reveal_rows": layout.reveal_rows,
+            "body_line_budget": layout.body_line_budget,
             "show_title": layout.show_title,
             "descriptions": layout.show_descriptions,
-            "page": layout.page,
+            "show_position": layout.show_position,
             "offers_e": card._reveal_hint() is not None,
             "hint": card._reveal_hint(),
             "revealed": card.state.revealed,
