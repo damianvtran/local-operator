@@ -1892,6 +1892,15 @@ class Session:
         #: is no catch-up pending, so the shim is then a pure passthrough.
         self._resume_catchup_ids: set[str] = set()
         self._load_wake_schedules()
+        # Rebuild this session's wake-index entry from the transcript on EVERY
+        # open. The index (``local_operator.wakes.store``) is a derived file
+        # that a supervisor and the picker read without opening the session;
+        # rewriting it here is what makes it self-healing — a deleted, stale
+        # or corrupt entry is repaired the next time the session is built,
+        # and an empty schedule list removes it. Runs before the catch-up
+        # snapshot only because ``load()`` has already re-armed overdue rows,
+        # so what lands on disk is the post-load truth.
+        self._rebuild_wake_index_entry()
         self._prepare_missed_wake_catchup()
         # The conversation's title is restored from the SAME transcript the
         # history came from, and for the same reason: a resumed session is the
@@ -8068,10 +8077,82 @@ class Session:
         )
 
     async def _persist_wake_schedules(self, schedules: list[WakeSchedule]) -> None:
+        """The ONE writer of schedule state: transcript first, then the
+        derived index, then the install-on-demand hook.
+
+        Order is the contract. The transcript ``wake_schedules`` entry is the
+        source of truth and is the only step allowed to fail this coroutine:
+        the scheduler's ``update()`` awaits it before re-arming, so a failed
+        append means the in-memory schedules never diverge from disk. The
+        index write and the install hook run *after* it and are wrapped so
+        they can never turn a persisted schedule into a raised exception —
+        the index is rebuilt on the next open regardless, and a supervisor
+        that failed to install costs nothing that was not already lost (the
+        live session still fires its own wakes).
+        """
         await self._transcript.append_custom(
             WAKE_SCHEDULES_CUSTOM_TYPE,
             {"schedules": [schedule.model_dump() for schedule in schedules]},
         )
+        self._write_wake_index_entry(schedules, clear=())
+        if schedules:
+            self._ensure_wake_supervisor()
+
+    def _rebuild_wake_index_entry(self) -> None:
+        """Open-time rewrite of the index entry from the scheduler's adopted
+        rows. Clears ``stopped_at``: a stopped session's wakes are dormant
+        only until someone opens it again, and opening is exactly this."""
+        self._write_wake_index_entry(list(self._wake.schedules), clear=("stopped_at",))
+
+    def _write_wake_index_entry(
+        self, schedules: list[WakeSchedule], *, clear: tuple[str, ...]
+    ) -> None:
+        """Best-effort index write. Swallows everything: see
+        :meth:`_persist_wake_schedules` for why a failure here must not
+        propagate.
+
+        The imports are function-local for the reason every other one in
+        this file is: they keep this module's own import cheap and cannot
+        form a top-level cycle if ``wakes.store`` ever grows one. The rule
+        that matters more — the store never imports the session, because the
+        supervisor and the picker read it without a harness — is NOT
+        enforced by this; ``tests/unit/test_import_graph.py`` is what pins
+        that direction."""
+        try:
+            from local_operator.paths import config_dir
+            from local_operator.wakes import store as wake_store
+
+            root = config_dir()
+            # An empty list means "remove the entry", and removal needs
+            # nothing from the old file — so skip the read. This is the open
+            # path for every session without wakes (including every subagent
+            # child), and the directory should not be touched twice for a
+            # file that almost never exists.
+            existing = wake_store.read_entry(root, self._session_id) if schedules else None
+            wake_store.write_entry(
+                root,
+                self._session_id,
+                cwd=self._cwd,
+                schedules=schedules,
+                preserve=existing,
+                clear=clear,
+            )
+        except Exception:  # noqa: BLE001 — the index is derived; the transcript already has it
+            logger.warning("could not update the wake index entry", exc_info=True)
+
+    def _ensure_wake_supervisor(self) -> None:
+        """Install-on-demand chokepoint (design §4.2a). Best-effort; the hook
+        itself promises never to raise, and this guard is belt-and-braces
+        for the same reason the index write has one."""
+        try:
+            from local_operator.paths import config_dir
+            from local_operator.wakes.install import ensure_supervisor_installed
+
+            outcome = ensure_supervisor_installed(config_dir())
+            if not outcome.installed:
+                logger.debug("wake supervisor not installed: %s", outcome.reason)
+        except Exception:  # noqa: BLE001
+            logger.warning("wake supervisor install hook failed", exc_info=True)
 
     # -- subagent roster (resume basis) --------------------------------------
 
