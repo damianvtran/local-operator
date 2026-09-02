@@ -1540,12 +1540,27 @@ class TestUsageAwareFirstPick:
     against a temp usage cache carrying synthetic reports.
     """
 
-    @staticmethod
-    def _store(tmp_path: Any, count: int = 5) -> "tuple[AuthStore, list[Any], Any]":
+    @pytest.fixture(autouse=True)
+    def _close_stores(self) -> Iterator[None]:
+        """Release every store ``_store`` opened once the test is over.
+
+        Each store holds two sqlite connections (auth + usage cache, the
+        latter with WAL sidecars), and a helper that never closed them leaked
+        ~3 fds per test. Under macOS's default ``ulimit -n 256`` that made an
+        xdist worker running this file flaky with ``Errno 24`` (review round
+        2, F6). ``AuthStore.close`` closes the cache it was handed too.
+        """
+        self._opened: list[AuthStore] = []
+        yield
+        for store in self._opened:
+            store.close()
+
+    def _store(self, tmp_path: Any, count: int = 5) -> "tuple[AuthStore, list[Any], Any]":
         from local_operator.providers.usage_cache import UsageCacheStore
 
         cache = UsageCacheStore(tmp_path / "usage_cache.db")
         store = AuthStore(db_path=tmp_path / "auth.db", usage_cache=cache)
+        self._opened.append(store)
         rows = [
             store.upsert_credential(
                 "anthropic",
