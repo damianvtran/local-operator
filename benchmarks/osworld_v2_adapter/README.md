@@ -166,11 +166,15 @@ module besides `provider_client.py` allowed near the store.
 real provider-backed model client, real credential store, sealed bundle — and
 prints the `EpisodeOutcome` as JSON. It is an operator script, not a CLI
 surface. Its `--run-root` must be durable (it refuses `/tmp`, `$TMPDIR` and
-friends); `evidence/`, `artifacts/` and `rescue/` are created under it.
+friends); `evidence/`, `artifacts/` and `rescue/<episode-id>/` are created
+under it, so `<run-root>/rescue` is the inbox the sweep command below reads.
 
 Secrets: every ref the task needs is either on `--secret-env NAME` (read from
 the script's own environment, and only the names listed) or resolved from the
-credential store (`~/.local-operator/credentials.env`, or `--config-dir`).
+credential store's file (`~/.local-operator/credentials.env`, or
+`--config-dir`) — the store resolver deliberately does NOT fall back to the
+process environment, so a name absent from the file is missing even if the
+shell happens to export it.
 Both the AWS pair and the model client come from that same store, so a paid
 episode needs no environment variables at all:
 
@@ -190,8 +194,14 @@ python ~/local-operator/scripts/run_episode.py \
 ```
 
 Exit 0 only on `completed`; 1 on any other terminal; 2 when a secret is
-missing (named on stderr, value never printed) or the run root is volatile.
-Run the leak audit before and after.
+missing or unusable (named on stderr, value never printed) or the run root is
+volatile. Run the leak audit before and after.
+
+`--model-client scripted-finish` (with `--no-store`) exercises the plumbing —
+spawn, secrets, frames, seal — with no provider call. Such a bundle verifies
+like any other but seals `reportability_label: synthetic_model` (never
+`reportable`) and carries `model_client` in its manifest metadata; it is not
+a result and cannot be mistaken for one.
 
 The sealed `requested_route.model_id` is a **lossless fold** of the model id
 (`RouteIdentity` fields cannot carry `/`): `_` → `__`, `/` → `_s`, anything
@@ -221,11 +231,12 @@ makes that a guarantee rather than a convention. A test statically scans
 the pinned upstream for any method that reaches `run_instances`/
 `terminate_instances`/`create_image` and asserts it is sealed.
 
-If the parent dies mid-episode, `rescue.json` in the rescue root names the
-episode's refs. Sweep them all:
+If the parent dies mid-episode, `<rescue root>/<episode-id>/rescue.json`
+names the episode's refs (for `run_episode.py` the rescue root is
+`<run-root>/rescue`). Sweep them all:
 
 ```sh
-python ~/local-operator/scripts/osworld_rescue_sweep.py --rescue-root <rescue root>
+python ~/local-operator/scripts/osworld_rescue_sweep.py --rescue-root <run-root>/rescue
 ```
 
 It spawns the exact pinned worker per descriptor, re-resolves the descriptor's
