@@ -6,8 +6,11 @@ build or from copy that no longer matches the manifest.
 ## Live session status (2026-09-02) — where we actually are
 
 The extension is **published**. The first-publication gates described in the
-previous revision of this section (business verification, trader declaration)
-are cleared; do not re-litigate them.
+previous revision of this section (Radient, Inc. business verification and the
+EEA trader declaration) were cleared as of 2026-09-02. They are not routine
+re-checks — but they can reopen if the account owner, legal entity, or
+declaration details change, so re-verify on any such change rather than assuming
+them settled forever.
 
 - **v0.1.0 is live** on the Chrome Web Store at 100% deployment, item
   `omibaecbjdhgbbcedbnnnmjpmopfheof`.

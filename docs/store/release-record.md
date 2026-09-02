@@ -10,31 +10,66 @@ entry except to append its approval timestamp or a post-release incident note �
 the value of this file is that it says what was actually shipped, not what we
 intended to ship.
 
-## Why a release can only be reproduced from these fields
+## How to audit a release from these fields
 
 The store package is not committed (`extension/local-operator-extension.zip` is
 in `.gitignore`), so the artifact cannot be recovered from the repository. It is
-reproduced by checking out the recorded source commit and running
-`pnpm --dir extension build:zip`; the recorded SHA-256 is what proves the
-rebuild matches what was uploaded. Recording only the version would not be
+rebuilt by checking out the recorded source commit and running
+`pnpm --dir extension build:zip`. Recording only the version would not be
 enough — `main` moves, and a version number does not pin a tree.
+
+**The archive SHA-256 identifies the uploaded file; it is NOT reproducible.**
+`build.mjs` shells out to `zip`, which stamps every entry with its current
+filesystem mtime, so two builds of one tree seconds apart produce different
+archive hashes. Comparing a rebuild's hash against the recorded one will always
+mismatch, on a perfectly clean release. Do not read that as tampering.
+
+Audit a release this way instead, in order of strength:
+
+1. **`extension/` tree hash** — `git rev-parse <commit>:extension`. This is the
+   field that deterministically pins the build input, and it is the one to
+   trust when asking "what source produced this release?"
+2. **Extracted contents** — rebuild, then `unzip` both archives and `diff -r`
+   the directories. Byte-identical contents with differing archive hashes is the
+   expected result, because only zip metadata differs.
+3. **Archive SHA-256** — use it only to confirm a *retained copy* of the
+   uploaded artifact is the one that was uploaded, never against a rebuild.
+
+Making `build:zip` deterministic would collapse these three into one hash
+comparison; that is tracked as a follow-up (see the note under v0.1.5).
 
 ---
 
-## v0.1.5 — submitted 2026-09-02, pending review
+## v0.1.5 — submitted 2026-09-02, pending review as of 2026-09-02
 
 | Field | Value |
 | --- | --- |
-| Extension version | 0.1.5 |
+| Extension version | 0.1.5 (submitted; **not yet the approved version**) |
 | Item ID | `omibaecbjdhgbbcedbnnnmjpmopfheof` |
+| Listing URL | https://chromewebstore.google.com/detail/local-operator/omibaecbjdhgbbcedbnnnmjpmopfheof |
 | Source commit | `37289774` (`chore(release): bump version to 0.44.38`) |
-| `extension/` tree hash | `9fe12bde271cc84f060922d8d254d22d046b7e6a` |
-| Artifact SHA-256 | `724f3f91117f166263c462801a9a73c27d0a4787bd4e5c5dcb6374a2d56d2d0a` |
+| `extension/` tree hash | `9fe12bde271cc84f060922d8d254d22d046b7e6a` (the deterministic input pin — see the audit note above) |
+| Artifact SHA-256 | `724f3f91117f166263c462801a9a73c27d0a4787bd4e5c5dcb6374a2d56d2d0a` (uploaded file only; not reproducible) |
 | Artifact size | 45,262 bytes, 12 files, no source maps |
 | Bridge protocol version | `PROTO_VERSION = 1` |
 | Submission route | **Manual dashboard upload** |
-| Store state at submission | `PENDING_REVIEW`, 100% deployment |
-| Previously published | v0.1.0, still live at 100% during review |
+| Store state | `PENDING_REVIEW`, 100% deployment |
+| State last checked | 2026-09-02 |
+| Approval timestamp | *pending — append when review completes* |
+| Previously published | v0.1.0, live at 100% during review |
+
+**Refresh the state rows** with a `fetchStatus` call — the same read-only API
+`extension/scripts/chrome-web-store.sh` uses — rather than trusting the values
+above. "Pending review" is a snapshot from the submission date; Chrome review
+usually resolves within days, so if that date is well in the past, assume the
+row is stale and re-check before relying on it. Append the approval timestamp
+and promote this heading when it lands.
+
+**Follow-up: make `build:zip` deterministic.** `build.mjs` invokes `zip` without
+normalising timestamps, which is why the archive hash above cannot be
+regenerated. Normalising mtimes and passing `-X` (verified locally to produce
+identical hashes across repeated builds) would make a rebuild hash-comparable
+and let this record drop the three-step audit procedure for a single check.
 
 **Why this one was uploaded by hand.** 0.1.5 adds the `tabGroups` permission,
 which 0.1.0 did not request. Permission justifications exist only in the
@@ -90,15 +125,23 @@ release can use it. All checks passed.
   Developer Dashboard → Account, and a read-only `fetchStatus` call made as that
   service account returned HTTP 200 with the correct item ID. This is the one
   link that cannot be checked from configuration alone, because it lives only in
-  the dashboard.
+  the dashboard. **Reproducing this call requires a temporary
+  `roles/iam.serviceAccountTokenCreator` grant that MUST be revoked immediately
+  afterwards — see the warning below before running it.**
 
-The `fetchStatus` test required temporarily granting a human
-`roles/iam.serviceAccountTokenCreator` on the service account, since the
-principalSet binding deliberately lets only GitHub Actions mint a token. The
-grant was removed immediately and the resulting IAM policy was diffed against
-the pre-test policy to confirm it was byte-identical. **Do not leave that role
-in place**: a standing human token-creator binding would defeat the reason this
-release path uses workload identity federation instead of a stored key.
+**Warning — read before calling `fetchStatus` by hand.** A human cannot mint a
+token for the publishing service account by design: the only binding on it is
+`roles/iam.workloadIdentityUser` for the GitHub principalSet, so nobody at a
+keyboard can produce a store credential. Testing the call therefore requires
+temporarily granting yourself `roles/iam.serviceAccountTokenCreator`. When this
+audit did that, the grant was removed immediately and the resulting IAM policy
+was diffed against a pre-test capture to confirm it was byte-identical.
+
+**Never leave that role in place.** A standing human token-creator binding
+defeats the entire reason this release path uses workload identity federation
+instead of a stored key: it recreates the durable human-usable credential that
+WIF exists to eliminate. Capture the policy before granting, revoke straight
+after, and diff to prove the revert — do not rely on remembering.
 
 ---
 
@@ -108,15 +151,22 @@ release path uses workload identity federation instead of a stored key.
 | --- | --- |
 | Extension version | 0.1.0 |
 | Item ID | `omibaecbjdhgbbcedbnnnmjpmopfheof` |
+| Listing URL | https://chromewebstore.google.com/detail/local-operator/omibaecbjdhgbbcedbnnnmjpmopfheof |
 | Source commit | `5cbb91e1` (`feat: Local Operator browser extension and browser bridge`) |
+| Artifact SHA-256 | *never recorded — see note below* |
+| Artifact size | ~31 KB (the only surviving fingerprint, from the original checklist) |
 | Submission route | Manual dashboard upload (first publication) |
 | Store state | `PUBLISHED`, 100% deployment |
+| State last checked | 2026-09-02 |
 
 First publication, gated on Radient, Inc. business verification and the EEA
 trader declaration rather than on anything in the package. Declared the original
 seven permissions plus `<all_urls>` — `tabGroups` did not yet exist.
 
 Artifact SHA-256 was not recorded at the time; this file was created during the
-0.1.5 release. The artifact is reproducible from the source commit, but a
-rebuild today is not byte-verifiable against what was uploaded. This gap is
-exactly what the fields above exist to prevent.
+0.1.5 release. The approximate size above is the only surviving fingerprint. The
+source commit still pins the tree, so the contents can be rebuilt and inspected,
+but nothing ties them to the specific file that was uploaded. This gap is
+exactly what the fields above exist to prevent — note that even a recorded
+SHA-256 would only have identified the uploaded artifact, not enabled a
+hash-comparable rebuild, until `build:zip` is made deterministic.
