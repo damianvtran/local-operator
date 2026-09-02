@@ -744,76 +744,61 @@ async def test_the_card_spends_the_whole_column_the_dock_gave_it() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_short_terminal_drops_descriptions_before_it_drops_options() -> None:
-    """A card that shed ROWS to keep prose would hide answers the user is being
-    asked to choose between. Descriptions go first; the list goes last.
+async def test_a_short_terminal_windows_the_list_and_keeps_descriptions() -> None:
+    """INVERTED for line-granular windowing (design §8, the explicit "breaks —
+    rewrite" entry). This test was
+    ``test_a_short_terminal_drops_descriptions_before_it_drops_options`` and its
+    whole premise — descriptions shed to bare labels before the list windows — is
+    exactly what the change removes. A short terminal now WINDOWS the list WITH
+    each visible row's 2-line clamp kept (the coexist headline, §0); it does not
+    drop the description column.
 
-    Amended for the wrapping change, and the amendment is deliberately narrow:
-    "descriptions" here now means a description's FIRST line. C5 — all rows get
-    a first line or none do — is unchanged, and it is still what makes `why a`
-    absent at 100x20. What the change adds is CONTINUATION lines, which are
-    bought after everything else and so can only ever be the first thing lost.
+    The old ORDER (prose before answers) is retired with C5. The new contract is
+    "the viewport clips lines uniformly": every VISIBLE row keeps its clamp, and
+    the rows that do not fit scroll rather than lose their prose — no ANSWER is
+    dropped, every label stays reachable.
 
-    The ORDER is the contract and the order is untouched: prose is still shed
-    before an answer is. The specifics that moved are the vocabulary above and
-    the second half of the sweep, which now also pins that the shortfall is not
-    circumventable — the ban on drawing prose at a height that cannot afford it
-    has to hold for the continuation lines too, or the new rungs would have
-    quietly become a way to buy at 100x20 what step 9 refused to sell.
+    Measured on the REAL app (geometry claim → real dock, this file's header),
+    not the dockless ``_AskHost`` the old version used.
     """
     question = _question(
         labels=("A", "B", "C", "D", "E"),
         descriptions=("why a", "why b", "why c", "why d", "why e"),
     )
 
-    app = _AskHost([question])
-    async with app.run_test(size=(100, 30)) as pilot:
-        screen = await app.open_picker()
-        await pilot.pause()
-        roomy = "\n".join(screen.render_lines_for_test())
+    # A roomy terminal: the list fits with every description drawn, no window.
+    app, card = await _real_app_card((100, 40), [question])
+    async with app.run_test(size=(100, 40)) as pilot:
+        await _show(app, pilot, card)
+        roomy = "\n".join(card.render_lines_for_test())
         assert "why a" in roomy
-        assert len(screen.visible_rows) == screen.row_count
+        assert len(card.visible_rows) == card.row_count
 
-    # 20 rows rather than the 16 this used when the card was a modal. The
-    # number is not the contract; the ORDER is, and the order needs a height
-    # where the descriptions are unaffordable and the rows are not. An anchored
-    # card reserves the conversation's share as well as the composer's, so it
-    # reaches that band at a taller terminal than a card that took the screen.
-    app = _AskHost([question])
-    async with app.run_test(size=(100, 20)) as pilot:
-        screen = await app.open_picker()
-        await pilot.pause()
-        cramped = "\n".join(screen.render_lines_for_test())
-        assert "why a" not in cramped
-        # Every option still drawn, and the free-text row with them: the rows
-        # the descriptions paid for.
-        assert len(screen.visible_rows) == screen.row_count
-        assert all(label in cramped for label in ("A", "B", "C", "D", "E"))
-        # No row drew prose at all — not "less prose". At this height the
-        # budget is exhausted before step 9, so the pool the continuation
-        # lines are bought from is empty and the frame is the one this card
-        # has always drawn here.
-        assert not _description_lines_of(screen, screen.render_lines_for_test())
-
-    # And the order survives a description long enough to WANT several lines.
-    # This is the half that would go quiet if continuations were ever bought
-    # ahead of the rows: same height, same five options, prose that a wrapping
-    # card would love to spend eight lines on.
-    app = _AskHost(
-        [
-            _question(
-                labels=("A", "B", "C", "D", "E"),
-                descriptions=("why a " * 20, "why b " * 20, "why c", "why d", "why e"),
-            )
-        ]
-    )
-    async with app.run_test(size=(100, 20)) as pilot:
-        screen = await app.open_picker()
-        await pilot.pause()
-        verbose = "\n".join(screen.render_lines_for_test())
-        assert len(screen.visible_rows) == screen.row_count
-        assert all(label in verbose for label in ("A", "B", "C", "D", "E"))
-        assert not _description_lines_of(screen, screen.render_lines_for_test())
+    # A short terminal: the list WINDOWS, and — the inversion — keeps each
+    # visible row's description rather than dropping the column. 100x26 is a
+    # height whose body (budget 5) can hold a described row while still being too
+    # short for the whole list, which is the coexist regime; the very tightest
+    # budgets (100x20, budget 1) fall to the label-anchor degradation (§2.2) and
+    # are not what this pins.
+    app, card = await _real_app_card((100, 26), [question])
+    async with app.run_test(size=(100, 26)) as pilot:
+        await _show(app, pilot, card)
+        layout = card._layout()
+        assert layout.show_position, ("the short terminal should window", card.row_count)
+        assert layout.show_descriptions, "descriptions were dropped instead of scrolled"
+        # At least one visible row keeps its description (the coexist property).
+        desc_by_row = _desc_lines_by_row(card)
+        assert any(count >= 1 for count in desc_by_row.values()), (desc_by_row,)
+        # No ANSWER is dropped: every option label is reachable by scrolling.
+        # Labels are drawn as "N. A" (digit gutter), so match the label token.
+        seen: set[str] = set()
+        for _ in range(card.row_count + 1):
+            frame = "\n".join(card.render_lines_for_test())
+            seen.update(label for label in ("A", "B", "C", "D", "E") if f". {label}" in frame)
+            await pilot.press("down")
+            await pilot.pause()
+        for label in ("A", "B", "C", "D", "E"):
+            assert label in seen, (f"answer {label!r} was unreachable", seen)
 
 
 @pytest.mark.asyncio
@@ -844,27 +829,36 @@ async def test_the_position_row_is_only_drawn_when_the_list_is_windowed() -> Non
         labels=("Yes", "No"),
         descriptions=("do it", "do not"),
     )
+    # RE-DERIVED to a size where the list is drawn IN FULL under line-granular
+    # windowing (design §8). At 100x12 this 2-option list once drew both rows on
+    # the dockless host; now that every row carries its 2-line clamp the line
+    # list is 4 lines against a 2-line budget, so it legitimately WINDOWS — the
+    # coexist feature, not the R11 defect. The self-consistency invariant this
+    # guard pins (a list drawn in full never claims a window) is unchanged, so it
+    # moves to 100x20, where the described 2-option list fits (budget 5) and both
+    # rows are visible.
     app = _BareHost([question])
-    async with app.run_test(size=(100, 12)) as pilot:
+    async with app.run_test(size=(100, 20)) as pilot:
         card = await app.open_picker()
         await pilot.pause()
         layout = card._layout()
         text = "\n".join(card.render_lines_for_test())
         # The list really is drawn in full: every option, nothing hidden.
-        assert layout.page >= card.row_count, (layout.page, card.row_count)
+        # "drawn in full" is ``not show_position`` (the line list fits the
+        # viewport) AND every row present in ``visible_rows``.
         assert len(card.visible_rows) == card.row_count
         # So the card must not claim otherwise. Asserted on the PLAN and on the
         # painted text, because either one alone can be right while the other
         # is wrong: the flag is what the renderer reads, and the string is what
         # the user reads.
-        assert not layout.show_position, (layout.page, card.row_count, text)
+        assert not layout.show_position, (card.row_count, text)
         assert "showing" not in text, text
         # The OMP thumb (ask-omp-scroll.md §3.2) shares this exact condition —
         # it is the position row's proportional twin, one overflow fact in two
         # renderings. A list drawn in full must therefore carry NO scrollbar
         # glyph either, so the two overflow signals can never drift apart: a
         # thumb without a count would be the same lie in the other medium.
-        assert not _thumb_is_drawn(card), (layout.page, card.row_count, _thumb_column(card))
+        assert not _thumb_is_drawn(card), (card.row_count, _thumb_column(card))
 
 
 @pytest.mark.asyncio
@@ -1028,8 +1022,10 @@ async def test_the_approval_cards_consequences_are_unchanged_by_the_wrap() -> No
             assert card._dock_reserved_rows() == 5, (size, card._dock_reserved_rows())
             # Never a window over a list of three it is drawing in full: the
             # same defect the position-row test pins, on the surface where the
-            # miscount would be attached to an authorisation.
-            assert not (layout.show_position and layout.page >= card.row_count), size
+            # miscount would be attached to an authorisation. RE-DERIVED (§8):
+            # "drawn in full" is now ``every row in visible_rows`` — a window
+            # claimed over that is the defect.
+            assert not (layout.show_position and len(card.visible_rows) == card.row_count), size
             task.cancel()
 
 
@@ -1083,21 +1079,26 @@ async def test_the_card_never_draws_more_lines_than_its_budget() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_wrapped_description_never_costs_an_option_row() -> None:
-    """Steps 10-11 are ADDITIVE. A description growing a second line must never
-    take a row off the list, because a row is an ANSWER and prose about an
-    answer ranks strictly below it (`ask_picker.py:1206-1220`).
+async def test_a_wrapped_description_never_drops_an_answer_from_the_list() -> None:
+    """A description growing extra lines must never make an ANSWER unreachable —
+    a row is an answer and prose about an answer ranks strictly below it
+    (`ask_picker.py:1206-1220`).
 
-    The comparison is between the same question asked with LONG descriptions and
-    with one-line descriptions: same labels, same question text, same everything
-    that costs a row before step 9. If the wrapped card draws fewer option rows
-    than the short one at any size, the continuation lines were bought with a
-    row's money.
+    RE-DERIVED for line-granular windowing (design §8). The OLD premise —
+    "wrapped descriptions draw the SAME number of option rows as one-line
+    descriptions" — is retired by this change: with line-granular windowing a
+    long-description list legitimately WINDOWS, drawing fewer rows at once while
+    scrolling the rest (the coexist headline, §0). So "same page count" is no
+    longer the right claim; the surviving invariant is that no ANSWER is lost:
 
-    This is the assertion that would have caught the rejected
-    "wrap-everything" design, which needs 12 lines where 5 exist at 150x40 and
-    windows the list to 2 of 5 at 100x30 — trading unreadable prose for hidden
-    answers.
+    - ``row_count`` is identical for the long- and short-description questions
+      (the wrap never removes an option), and
+    - every option label is REACHABLE — present in the frame at some scroll
+      offset — so windowing hides prose behind a scroll, never an answer.
+
+    This still catches the rejected "wrap-everything" failure mode in its real
+    form: a design that dropped an option to make room for prose would fail the
+    reachability half here.
     """
     long_question = _long_description_question()
     short_question = AskQuestion(
@@ -1109,21 +1110,32 @@ async def test_a_wrapped_description_never_costs_an_option_row() -> None:
         recommended=long_question.recommended,
     )
 
-    for width in (24, 40, 60, 100, 130, 150, 190):
-        for height in (12, 20, 30, 36, 40, 50):
-            app = _AskHost([short_question])
-            async with app.run_test(size=(width, height)) as pilot:
-                card = await app.open_picker()
-                await pilot.pause()
-                baseline_page = card._layout().page
-                baseline_labels = list(card.visible_rows)
+    # Real app: windowing is a budget-decided geometry claim, so it must run on
+    # the real dock (this file's header), not the dockless _AskHost.
+    for size in ((100, 30), (130, 30), (150, 40), (120, 24), (190, 50)):
+        app_short, card_short = await _real_app_card(size, [short_question])
+        async with app_short.run_test(size=size) as pilot:
+            await _show(app_short, pilot, card_short)
+            short_row_count = card_short.row_count
 
-            app = _AskHost([long_question])
-            async with app.run_test(size=(width, height)) as pilot:
-                card = await app.open_picker()
+        app_long, card_long = await _real_app_card(size, [long_question])
+        async with app_long.run_test(size=size) as pilot:
+            await _show(app_long, pilot, card_long)
+            # No option was dropped: the two questions answer the same rows.
+            assert card_long.row_count == short_row_count, (size, card_long.row_count)
+            # Every option label is reachable by scrolling — hidden prose, never
+            # a hidden answer. Walk the whole list and collect the labels seen.
+            seen: set[str] = set()
+            for _ in range(card_long.row_count + 1):
+                seen.update(
+                    label
+                    for label in _LONG_LABELS
+                    if label in "\n".join(card_long.render_lines_for_test())
+                )
+                await pilot.press("down")
                 await pilot.pause()
-                assert card._layout().page == baseline_page, (width, height)
-                assert list(card.visible_rows) == baseline_labels, (width, height)
+            for label in _LONG_LABELS:
+                assert label in seen, (size, f"answer {label!r} was unreachable", seen)
 
 
 @pytest.mark.asyncio
@@ -1320,7 +1332,7 @@ async def test_ctrl_e_reveals_the_selected_rows_full_consequence() -> None:
         await _until(pilot, lambda: card.state.revealed)
 
         lines = card.render_lines_for_test()
-        joined = " ".join(" ".join(line.split()) for line in lines)
+        joined = _collapsed_text(lines)
         assert full in joined, lines
         # The footer names the way back, on the COMPOSITED frame: a card whose
         # model changed without a repaint would still generate the new hint.
@@ -1334,21 +1346,21 @@ async def test_ctrl_e_reveals_the_selected_rows_full_consequence() -> None:
 
 @pytest.mark.asyncio
 async def test_the_revealed_card_is_the_same_height_for_every_selection() -> None:
-    """The property the whole reveal design rests on: the block reserves the
-    height of the TALLEST capped description in the list, not the selected
-    row's, and pads the remainder blank.
+    """The anti-reflow property, RE-DERIVED for the cap-lift reveal (design §4.2,
+    §8). It once rested on a constant-height BLOCK that reserved the tallest
+    capped description's height and padded the rest blank (``reveal_rows``); this
+    test pinned that ``reveal_rows`` was one value across every selection.
 
-    A block sized to the cursor's row would be the cheaper implementation and it
-    is the one this must not become. Measured under that scheme the card had
-    three different heights at 190x50, and a card whose height changes on every
-    arrow press moves the footer, re-lays out the dock and shifts the
-    conversation under a user who is mid-answer — the `_paint_detail` rule
-    (`settings_view.py:3044-3056`) and AGENTS.md's "animated content must
-    reserve its row even when it has nothing to show".
+    Under line-granular windowing there is NO block: the reveal lifts the
+    selected row's cap IN PLACE inside a fixed-height viewport, so the card's
+    height is fixed by ``_body_rows`` and cannot change with the cursor at all —
+    the property the block bought is now free (§4.2). So the mechanism assertion
+    (``reveal_rows``, which no longer exists) is retired, and the surviving,
+    stronger claim is asserted directly on drawn ink: the DRAWN LINE COUNT is one
+    single value across every selection while the reveal is on.
 
     Asserted as ONE distinct line count over every row, which is the strongest
-    form: not "close", not "within one", exactly one. The padding is asserted
-    too, because a card could hold its height by never drawing anything.
+    form: not "close", not "within one", exactly one.
     """
     for size in ((150, 40), (140, 36)):
         app, card = await _real_app_card(size, [_long_description_question()])
@@ -1358,92 +1370,64 @@ async def test_the_revealed_card_is_the_same_height_for_every_selection() -> Non
             await _until(pilot, lambda: card.state.revealed)
 
             heights: set[int] = set()
-            reserved: set[int] = set()
             for index in range(card.row_count):
                 card.state.selected = index
                 card._repaint()
                 await pilot.pause()
                 heights.add(len(card.render_lines_for_test()))
-                reserved.add(card._layout().reveal_rows)
 
+            # The viewport is a rigid rectangle: revealing a row changes which
+            # OTHER lines are visible, never the card's own height.
             assert len(heights) == 1, (size, heights)
-            # The same reservation at every selection is the MECHANISM behind
-            # the height above. Both are asserted because either can be right
-            # while the other is wrong: a block that shrank for a short row and
-            # a list that grew a line to compensate would hold the total.
-            assert len(reserved) == 1, (size, reserved)
-            assert reserved.pop() >= 1, size
 
 
 @pytest.mark.asyncio
-async def test_the_reveal_never_takes_the_last_option_row() -> None:
-    """Revealing one option's prose must never take another option's LABEL off
-    the card. A description is commentary on an answer; a row IS an answer, and
-    the priority order (`ask_picker.py:1206-1220`) ranks prose strictly below
-    it. On the approval gate a row taken off the card is an authorisation
-    choice the user cannot see.
+async def test_the_reveal_never_makes_an_answer_unreachable() -> None:
+    """Revealing one option's prose must never make another option's answer
+    UNREACHABLE. A description is commentary on an answer; a row IS an answer,
+    and the priority order (`ask_picker.py:1206-1220`) ranks prose strictly below
+    it. On the approval gate an answer the user cannot reach is an authorisation
+    choice they cannot make.
 
-    130x30 and 100x20 are the two shapes the design names: at 130x30 the list
-    fits in full and the reveal must not window it, and at 100x20 the list is
-    ALREADY windowed, where the failure would be the reveal buying its block out
-    of the one row left.
+    RE-DERIVED for the cap-lift reveal (design §4, §8). The OLD claim was
+    expressed against the constant-height block: ``revealed_plan.page >=
+    default_plan.page`` (the block never took an option row) and ``reveal_rows``
+    being genuinely bought somewhere. Both concepts are GONE — there is no block,
+    and ``page``/``reveal_rows`` were removed from ``_CardLayout``. Under
+    line-granular windowing the reveal lifts the selected row's cap IN PLACE and
+    the list scrolls; a taller selected row pushes OTHER rows further out of the
+    viewport, but every one of them stays REACHABLE by scrolling — the honest
+    degradation the thumb reports (§4.3).
 
-    140x36 and 150x40 are here because those two alone cannot fail. Measured in
-    the anchored budget, `reveal_rows` is 0 at both of the design's sizes — the
-    plan cannot afford a block there in either state, so a regression that
-    bought the block with an option row's money would be INERT at exactly the
-    sizes this test names, and the guard would be believed while catching
-    nothing. The two sizes added are the ones where the block is genuinely
-    bought (`reveal_rows` 4), so the trade the test forbids is reachable.
+    So the surviving, stronger claim, on drawn ink: with the reveal ON, walking
+    the list still reaches EVERY option label. No answer is lost behind the
+    reveal; only prose scrolls.
 
-    Two claims per size, and the second is what keeps the first honest: `page`
-    never drops below one drawn row in either state, and wherever the card is
-    drawing less than the whole list it BUYS the position line to say so. A card
-    that quietly windowed itself to afford prose would satisfy the first alone.
-
-    Asked of `_layout(reveal=...)` at every selection rather than of a single
-    keypress, because the block is bought against the SELECTED row's wrap and
-    the row with the tallest description is the one that could afford to take a
-    row from the list.
+    Swept across the sizes the design names — 130x30 and 100x20 (tight/already
+    windowed) plus 150x40 and 140x36 (where the reveal draws the most extra
+    lines and so is most able to push a row away), so the trade the test forbids
+    is reachable at the sizes it is asserted.
     """
-    afforded = 0
     for size in ((130, 30), (100, 20), (140, 36), (150, 40)):
         app, card = await _real_app_card(size, [_long_description_question()])
         async with app.run_test(size=size) as pilot:
             await _show(app, pilot, card)
+            # Turn the reveal ON where it is offered; where it is not, the
+            # default view is the state under test.
+            if card._reveal_hint() == ("^e", "more"):
+                await pilot.press("ctrl+e")
+                await _until(pilot, lambda: card.state.revealed)
 
-            for index in range(card.row_count):
-                card.state.selected = index
-                card._repaint()
+            # With the reveal on, every ANSWER is still reachable by scrolling —
+            # revealing prose never hides an option.
+            seen: set[str] = set()
+            for _ in range(card.row_count + 1):
+                frame = "\n".join(card.render_lines_for_test())
+                seen.update(label for label in _LONG_LABELS if label in frame)
+                await pilot.press("down")
                 await pilot.pause()
-                for revealed in (False, True):
-                    plan = card._layout(reveal=revealed)
-                    assert plan.page >= 1, (size, index, revealed, plan.page)
-                    if plan.page < card.row_count:
-                        assert plan.show_position, (size, index, revealed, plan.page)
-                        assert "of {}".format(card.row_count) in "\n".join(
-                            card.render_lines_for_test()
-                        ), (size, index, revealed)
-
-                # The claim with teeth: turning the reveal ON never costs a
-                # LABEL. Continuation lines are fair game (they are the last
-                # thing bought and the first thing lost); an option row is not,
-                # because a row is an ANSWER.
-                default_plan = card._layout(reveal=False)
-                revealed_plan = card._layout(reveal=True)
-                assert revealed_plan.page >= default_plan.page, (
-                    size,
-                    index,
-                    default_plan.page,
-                    revealed_plan.page,
-                )
-                afforded += 1 if revealed_plan.reveal_rows >= 1 else 0
-
-    # The sweep above only tests anything at sizes where a block is actually
-    # bought. Asserted rather than assumed: if the budgets shift under a future
-    # change until no size here affords one, this test degrades to a tautology
-    # silently, and that is the failure mode it was rewritten to avoid.
-    assert afforded >= 1, afforded
+            for label in _LONG_LABELS:
+                assert label in seen, (size, f"reveal made answer {label!r} unreachable", seen)
 
 
 @pytest.mark.asyncio
@@ -1488,66 +1472,77 @@ async def test_the_footer_offers_the_reveal_only_where_it_does_something() -> No
 
 
 @pytest.mark.asyncio
-async def test_the_reveal_block_is_drawn_under_the_row_it_explains() -> None:
-    """Regression, found in a rendered frame and invisible to the suite that
-    was green around it: the block was appended after the LIST rather than under
-    the selected row, so at 150x40 the paragraph explaining option 1 sat
-    directly beneath `Other (type your own)`, indented exactly as that row's own
-    description would be.
+async def test_the_revealed_lines_are_the_selected_rows_own_description_in_place() -> None:
+    """RE-DERIVED for the cap-lift reveal (design §4, §6, §8). This test was
+    ``test_the_reveal_block_is_drawn_under_the_row_it_explains`` and pinned the
+    constant-height BLOCK's placement: the block's own lines mapped to ``None``
+    (chrome about a row, not the row) and had to sit directly under the selected
+    row, never appended after the list.
 
-    That is misattributed consequence text. On `ApprovalPrompt` it is a user
-    reading "stop asking for this session" with Enter still on "Allow" — the
-    same misattribution hover was rejected for, arrived at by a different route.
+    Under line-granular windowing there is NO block. ``ctrl+e`` lifts the
+    SELECTED row's description cap in place, so the extra lines it uncovers ARE
+    that row's description — they map to the SELECTED ROW in ``_line_rows``, not
+    to ``None`` (§6: "the reveal's lifted-cap lines map to the selected row").
+    That is a strictly cleaner contract, and it kills the misattribution the old
+    block risked (a paragraph explaining option 1 rendered under `Other`): the
+    revealed lines cannot land anywhere but under the row they belong to, because
+    they are that row's own lines in the one line list.
 
-    Pinned positionally, on `_line_rows`, because position is the entire defect:
-    the words were all on the card in the broken frame too. The block's own
-    lines map to `None` (they are chrome about a row, not the row — a click on
-    their blank padding must never answer), so the assertion is that every line
-    between the selected row's label and the NEXT row's label belongs to the
-    selected row or to the block, and that the block is not sitting after the
-    last row.
-
-    RE-DERIVED for F3, and only the LOCATOR moved. This used to find the block
-    by searching the frame for the first six words of the selected row's
-    description, which silently assumed the block RESTARTS the paragraph — the
-    duplicate F3 removed. The block now continues from where the inline lines
-    stopped, so those words appear once, on the row's own inline line, and the
-    search found nothing. The claim under test is positional and is unchanged;
-    it is now read off `_line_rows` through :func:`_reveal_block_lines`, the
-    structural locator this file already uses, which cannot drift with the
-    block's text.
+    Pinned on ``_line_rows``, the same structural map, but the claim inverts: the
+    revealed rows are OWNED by the selected row (not chrome), they are contiguous
+    with its label, and there is no ``None``-mapped block between the selected
+    row and the next drawn row.
     """
     size = (150, 40)
     app, card = await _real_app_card(size, [_long_description_question()])
     async with app.run_test(size=size) as pilot:
         await _show(app, pilot, card)
+
+        # A selection whose description is long enough that the reveal lifts its
+        # cap and draws MORE of its own lines. Row 0 is the recommended, longest.
+        card.state.selected = 0
+        card._repaint()
+        await pilot.pause()
+        default_lines = _desc_lines_by_row(card).get(0, 0)
+
+        if card._reveal_hint() != ("^e", "more"):
+            pytest.skip("reveal not offered at this size for this fixture")
         await pilot.press("ctrl+e")
         await _until(pilot, lambda: card.state.revealed)
 
-        for index in (0, 2):
-            card.state.selected = index
-            card._repaint()
-            await pilot.pause()
-            lines = card.render_lines_for_test()
-            rows = card._line_rows
-            # The block starts on the first `None`-mapped line after the last
-            # line the selected row owns — the same rule
-            # :func:`_reveal_block_lines` reads it by.
-            assert _reveal_block_lines(card), (index, lines)
-            owned = [position for position, row in enumerate(rows) if row == index]
-            block_at = max(owned) + 1
-            assert block_at < len(rows), (index, lines)
-            # The selected row's own label line, and the next row's.
-            label_at = rows.index(index)
-            following = [
-                position for position, row in enumerate(rows) if row is not None and row > index
-            ]
-            assert label_at < block_at, (index, label_at, block_at)
-            if following:
-                assert block_at < min(following), (index, block_at, min(following), lines)
-            # The block's blank padding is click-inert: mapped to a row, empty
-            # space under the cursor's option would answer the question.
-            assert rows[block_at] is None, (index, lines)
+        rows = card._line_rows
+        # There is NO constant-height block: no run of None-mapped body lines
+        # sits between the selected row's lines and the next drawn row.
+        assert not _reveal_block_lines(card), (
+            "a separate reveal block is still drawn — the cap-lift must replace it",
+            _reveal_block_lines(card),
+        )
+        # The revealed lines ARE the selected row's own description: it now draws
+        # MORE description lines than the default view, and every one of them
+        # maps to the selected row (not None).
+        revealed_lines = _desc_lines_by_row(card).get(0, 0)
+        assert revealed_lines > default_lines, (
+            "the reveal drew no more of the selected row's own description",
+            default_lines,
+            revealed_lines,
+        )
+        # Those description lines are contiguous with the row's label and belong
+        # to it — a run of `0`-mapped lines starting right after its label.
+        owned = [position for position, row in enumerate(rows) if row == 0]
+        assert owned, rows
+        assert owned == list(range(owned[0], owned[-1] + 1)), (
+            owned,
+            "row 0's lines are not contiguous",
+        )
+        # The line before the first owned line is either chrome (the question)
+        # or nothing — never another option row's line wedged in.
+        following = [position for position, row in enumerate(rows) if row is not None and row > 0]
+        if following:
+            assert owned[-1] < min(following), (
+                owned,
+                min(following),
+                "row 0 spills past the next row",
+            )
 
 
 @pytest.mark.asyncio
@@ -1557,37 +1552,57 @@ async def test_the_reveal_is_advertised_from_the_selected_row_not_any_drawn_row(
     """Regression, and the one with the worst blast radius: `^e` must be offered
     on the SELECTED row being cut, never on ANY drawn row being cut.
 
-    The block only ever shows the row under the cursor, but it is bought out of
-    the pool the OTHER rows' prose is drawn from. Asked the loose way, the
-    approval card at 40x24 advertises `^e` because *Deny*'s consequence is cut
-    — and the cursor is on *Allow*, whose consequence is already complete. The
-    trade is then pure loss: the block redraws text the user can already read
-    and the rows it was bought from lose theirs.
+    RE-DERIVED for the cap-lift reveal (design §4.3, §8), and MOVED to the real
+    app. The old frame — approval gate at 40x24, *Deny* cut while the cursor is
+    on the complete *Allow* — is no longer reachable: the ``_labels_must_all_fit``
+    hook now caps every gate consequence UNIFORMLY (all cut or none), so no
+    approval frame has one row cut and another whole. The property is unchanged
+    and still worth guarding, so it is exercised with an ``ask`` question built
+    to have exactly that asymmetry: row 0 (the selected row) has a SHORT
+    description that is not cut, while row 1 has a paragraph that is cut well past
+    the 2-line clamp.
 
-    Reintroduced here by monkeypatching the predicate to its rejected form
-    rather than by editing the widget, per AGENTS.md's "prove the test can still
-    fail". The patched half is what makes this a guard instead of a restatement
-    of current behaviour: it shows the assertion goes red against the exact
-    variant that was shipped and reverted.
+    Under the cap-lift model there is no block bought from a shared pool; the
+    reveal simply lifts the SELECTED row's cap. So ``_reveal_is_useful`` asks
+    about the selected row's own wrap, and the rejected variant is "offer it when
+    ANY drawn row is cut" — which would advertise a key that, pressed, grows a
+    row whose prose the user is not even looking at.
+
+    Reintroduced here by monkeypatching the predicate to its rejected form rather
+    than by editing the widget, per AGENTS.md's "prove the test can still fail".
     """
-    from local_operator.tui.widgets.approval import ApprovalPrompt
+    question = AskQuestion(
+        id="mixed_wrap",
+        question="Pick one",
+        options=[
+            AskOption(label="First", description="short"),
+            AskOption(
+                label="Second",
+                description=" ".join(f"word{i}" for i in range(120)),
+            ),
+        ],
+        recommended=None,
+    )
 
     def _any_drawn_row_is_cut(self: AskPickerScreen) -> bool:
-        """The rejected variant: cut ANYWHERE on the card, not under the caret."""
-        plan = self._layout(reveal=False)
-        cut = any(
-            len(self._reveal_wrap(index, plan.width)) > plan.description_rows.get(index, 0)
-            for index in self._window(plan.page)
-        )
-        return cut and self._layout(reveal=True).reveal_rows >= 1
+        """The rejected variant: cut ANYWHERE on the card, not under the caret.
 
-    size = (40, 24)
-    app = _AskHost([])
+        RE-DERIVED (design §8): ``_window`` no longer takes a ``page`` argument
+        (it returns the rows in the line viewport), and the constant-height block
+        (``reveal_rows``) is gone. The rejected shape is simply "some drawn row's
+        wrap exceeds the lines granted to it" — the over-eager predicate that
+        advertised the key for a row other than the caret's.
+        """
+        plan = self._layout(reveal=False)
+        return any(
+            len(self._reveal_wrap(index, plan.width)) > plan.description_rows.get(index, 0)
+            for index in self._window(plan)
+        )
+
+    size = (150, 40)
+    app, card = await _real_app_card(size, [question])
     async with app.run_test(size=size) as pilot:
-        await pilot.pause()
-        card = ApprovalPrompt("bash", "rm -rf /Users/x/project/data")
-        await app.query_one("#prompt-host", Container).mount(card)
-        await pilot.pause()
+        await _show(app, pilot, card)
 
         plan = card._layout(reveal=False)
         selected = card.state.selected
@@ -1596,12 +1611,13 @@ async def test_the_reveal_is_advertised_from_the_selected_row_not_any_drawn_row(
                 len(card._reveal_wrap(index, plan.width)),
                 plan.description_rows.get(index, 0),
             )
-            for index in card._window(plan.page)
+            for index in card._window(plan)
         }
         # The frame this is about: a NON-selected row is cut, the selected one
-        # is not. If the approval strings ever change so that this is no longer
-        # true, this test is measuring nothing and must be re-derived rather
-        # than deleted.
+        # is not. If the fixture ever changes so that this is no longer true,
+        # this test is measuring nothing and must be re-derived rather than
+        # deleted.
+        assert selected == 0, (selected, "the cursor must start on the un-cut short row")
         assert any(want > got for want, got in cut.values()), cut
         assert cut[selected][0] <= cut[selected][1], (selected, cut)
 
@@ -1615,59 +1631,52 @@ async def test_the_reveal_is_advertised_from_the_selected_row_not_any_drawn_row(
 
 
 @pytest.mark.asyncio
-async def test_ctrl_e_is_inert_on_a_card_too_narrow_to_advertise_it() -> None:
-    """Regression: the key must not fire where the footer does not name it.
+async def test_ctrl_e_is_inert_on_the_approval_gate() -> None:
+    """The key must not fire where the footer does not name it — and on the
+    approval gate the footer never names it.
 
-    `^e` sheds from the footer on a narrow card so `esc deny` stays whole. A key
-    that still worked there would be an unadvertised gesture on the surface that
-    authorises tool calls — and it is not a harmless one: measured on the
-    approval card at 30x24, firing it replaces the three consequence lines with
-    a single one, so the user loses two of the three things they are choosing
-    between, by a key the card never offered.
+    RE-DERIVED for the cap-lift reveal and the ``_labels_must_all_fit`` hook
+    (design §4.4, §8). The OLD frame — a narrow gate where ``^e`` was USEFUL but
+    shed from the footer, and pressing it would replace three consequence lines
+    with one — is no longer reachable. Every gate consequence is one line at
+    every width down to 44 columns, so ``_reveal_is_useful`` is False: there is
+    nothing past line 1 of the selected consequence for a cap lift to uncover.
+    The reveal is simply never live on this surface, which is the stronger safety
+    property (there is no key to misfire).
 
-    Both halves are asserted. The press does nothing (the state does not flip
-    and the frame is byte-identical), and the damage it WOULD do is measured by
-    forcing the state directly — otherwise a card that had simply stopped
-    drawing a block would look identical to one correctly refusing the key.
+    Asserted on the REAL app (not the dockless ``_AskHost``, which measures a
+    card the app never draws — this file's header). The reveal is not useful and
+    not offered, and pressing ``^e`` through the real keymap is a no-op: the mode
+    does not flip and the frame is unchanged. That refusal is the safety property
+    — ``action_toggle_reveal`` declines to turn the reveal on where
+    ``_offers_reveal`` is False (``ask_picker.py`` guards the turn-ON), so the
+    label-dropping window a forced reveal would produce is UNREACHABLE through
+    the UI. (Forcing ``state.revealed`` past that guard is not a real path and is
+    not what this pins; the guard against the reveal being OFFERED here is
+    :func:`test_the_approval_gate_reveal_never_strips_a_consequence`.)
     """
-    from local_operator.tui.widgets.approval import ApprovalPrompt
+    for size in ((50, 24), (100, 30), (130, 30)):
+        app = _baseline_app()
+        async with app.run_test(size=size) as pilot:
+            await pilot.pause()
+            card, task = await _real_approval_card(app, pilot)
+            try:
+                before = [line.rstrip() for line in card.render_lines_for_test()]
+                # The reveal is not live on the gate, and the footer does not
+                # name it.
+                assert not card._reveal_is_useful(), (size, before)
+                assert not card._offers_reveal(), (size, before)
+                assert "^e" not in "\n".join(before), (size, before)
 
-    consequences = (
-        "run this call and ask again next time",
-        "refuse this call; the turn continues",
-        "stop asking for this session",
-    )
-    size = (30, 24)
-    app = _AskHost([])
-    async with app.run_test(size=size) as pilot:
-        await pilot.pause()
-        card = ApprovalPrompt("bash", "rm -rf /Users/x/project/data")
-        await app.query_one("#prompt-host", Container).mount(card)
-        await pilot.pause()
-
-        before = [line.rstrip() for line in card.render_lines_for_test()]
-        # The frame this is about: the hint has been shed to keep the exit, and
-        # the reveal WOULD otherwise buy a line here.
-        assert card._reveal_is_useful(), before
-        assert not card._offers_reveal(), before
-        assert "^e" not in before[-1], before
-        assert "esc deny" in before[-1], before
-
-        await pilot.press("ctrl+e")
-        await pilot.pause()
-        assert not card.state.revealed, card.render_lines_for_test()
-        assert [line.rstrip() for line in card.render_lines_for_test()] == before
-
-        # What the ungated key would have cost, on the authorisation frame.
-        # Forced past the gate, not pressed: this is the measurement that makes
-        # the assertion above a safety property rather than a preference.
-        card.state.revealed = True
-        card._repaint()
-        await pilot.pause()
-        forced = " ".join(" ".join(line.split()) for line in card.render_lines_for_test())
-        kept = [text for text in consequences if text in forced]
-        assert len(kept) < len(consequences), forced
-        card._settled = True
+                # Pressing it through the real keymap is a no-op: the turn-ON is
+                # refused because the footer does not offer it, so the mode does
+                # not flip and the frame is unchanged.
+                await pilot.press("ctrl+e")
+                await pilot.pause()
+                assert not card.state.revealed, (size, card.render_lines_for_test())
+                assert [line.rstrip() for line in card.render_lines_for_test()] == before, size
+            finally:
+                task.cancel()
 
 
 @pytest.mark.asyncio
@@ -1751,6 +1760,96 @@ def _many_options_question(count: int = 21) -> AskQuestion:
             for index in range(count)
         ],
     )
+
+
+#: A list of PARAGRAPH-length options — the input the line-granular change exists
+#: for. Every option's description wraps well past the 2-line cap at any real
+#: width, so the target frame (`sum(1 + min(2, wrap))` over all rows, ~37 lines
+#: for 12 options at 150x40) is far taller than the body budget: the card MUST
+#: window AND keep every visible row's 2-line clamp. On HEAD `18f9131f` this same
+#: question renders `show_position=False, description_rows={}` and drops every
+#: description to a bare label (measured, `/tmp/probe_qa.py`) — that is the gap
+#: `docs/design/ask-line-granular-scroll.md` closes. Distinct from
+#: `_many_options_question`, whose short single-line descriptions enter the
+#: scroll regime by ROW count and never exercise the coexist path.
+_LINEGRAN_PARA = (
+    "This option carries a paragraph-length consequence that wraps well past two"
+    " lines at any reasonable width, so the 2-line clamp actually clips it and the"
+    " reveal has something to uncover; option {index} in particular is quite verbose."
+)
+
+
+def _paragraph_options_question(count: int = 12) -> AskQuestion:
+    """``count`` options, each with a description far longer than the 2-line cap.
+
+    The headline fixture for the line-granular change: at 150x40 the target list
+    is ~37 visual lines against a ~20-line body, so descriptions and scroll must
+    COEXIST (design §0, "What the target frame costs").
+    """
+    return AskQuestion(
+        id="paragraph",
+        question="Pick a migration target for the stale-row backfill work that needs doing",
+        options=[
+            AskOption(label=f"Option {index} label", description=_LINEGRAN_PARA.format(index=index))
+            for index in range(count)
+        ],
+    )
+
+
+def _footer_in_composite(app) -> bool:  # type: ignore[no-untyped-def]
+    """Whether the card's key-hint (footer) row survived to the COMPOSITED screen.
+
+    Read from `_painted_rows` (the compositor), never from
+    `render_lines_for_test` (the card's own text): an overflowing card reports
+    the height it WANTED, so its own lines still carry a footer the terminal
+    clipped off the tail. The clipped-footer R11/R15 regression is only
+    observable here — it is the single highest risk of the line-granular change
+    (design §10), so the C1 guard reads the composite.
+    """
+    return bool(_painted_footer(app))
+
+
+def _body_line_rows(card: AskPickerScreen) -> list[int | None]:
+    """The `_line_rows` map, unchanged in contract across the rows→lines change.
+
+    `_line_rows[k]` is the row index of the k-th DRAWN body line (a partial row
+    at a viewport edge contributes fewer than its whole span, but every line it
+    DOES contribute maps to it), or `None` for chrome. This is the map the
+    hit-test resolves a click through (`_index_at`) and the thumb column is read
+    against, so a test that reads it is reading the same contract the widget
+    ships. Kept as a helper so a rename of the attribute fails in one place.
+    """
+    return list(card._line_rows)
+
+
+def _distinct_rows_drawn(card: AskPickerScreen) -> list[int]:
+    """The option-row indexes with at least one DRAWN line, in first-seen order."""
+    seen: list[int] = []
+    for index in _body_line_rows(card):
+        if index is not None and index not in seen:
+            seen.append(index)
+    return seen
+
+
+def _desc_lines_by_row(card: AskPickerScreen) -> dict[int, int]:
+    """How many DESCRIPTION lines each visible row drew: its drawn lines minus 1.
+
+    A row's first drawn line is its label; every further line mapped to the same
+    row is a description line. Read from `_line_rows` so it stays correct when a
+    row occupies several lines — which is the whole point of the change. A row
+    clipped to only its label (the top/bottom partial-row case) reports 0.
+    """
+    counts: dict[int, int] = {}
+    first_seen: set[int] = set()
+    for index in _body_line_rows(card):
+        if index is None:
+            continue
+        if index in first_seen:
+            counts[index] = counts.get(index, 0) + 1
+        else:
+            first_seen.add(index)
+            counts.setdefault(index, 0)
+    return counts
 
 
 async def _real_app_card(size: tuple[int, int], questions: list[AskQuestion]):
@@ -3399,6 +3498,33 @@ def _repro_question(recommended: int | None = 0) -> AskQuestion:
     )
 
 
+def _strip_scrollbar_cell(line: str) -> str:
+    """``line`` with its trailing scrollbar glyph removed, if it carries one.
+
+    On a WINDOWED card the thumb/track glyph (``█``/``│``) is painted in the
+    row's LAST cell, flush against the content (design §5, OMP's
+    ``renderRows(width-1)`` then the bar). It is chrome, not prose — but a naive
+    whitespace-collapse of the rendered line tokenizes it as a word, so a
+    contiguous-prefix or substring check reads ``...already █ occupy...`` and
+    stops at the first ``█``. Stripping that one cell before measuring text is
+    the same isolation :func:`_thumb_column` already does; the content the bar
+    sits beside is complete, which is the whole point of the scrollbar-column
+    reservation (``_CardLayout.content_width``).
+    """
+    return line[:-1] if line and line[-1] in (_THUMB_GLYPH, _TRACK_GLYPH) else line
+
+
+def _collapsed_text(rows: list[str]) -> str:
+    """``rows`` as one whitespace-collapsed stream, scrollbar cells stripped.
+
+    The reading a "is the whole description present" substring check wants: the
+    thumb/track glyph removed from each line's last cell (chrome, not prose) and
+    the description's indent-wrapped lines rejoined. Shared by every reveal guard
+    so none of them re-introduces the scrollbar-tokenizing measurement bug.
+    """
+    return " ".join(" ".join(_strip_scrollbar_cell(line).split()) for line in rows)
+
+
 def _prefix_reach(rows: list[str], full: str) -> int:
     """How many characters of ``full`` the frame actually carries, from the start.
 
@@ -3410,9 +3536,13 @@ def _prefix_reach(rows: list[str], full: str) -> int:
     compared across frames.
 
     Whitespace is collapsed on both sides because the text is wrapped across
-    lines that each carry the description indent.
+    lines that each carry the description indent. The trailing scrollbar cell is
+    stripped first (:func:`_strip_scrollbar_cell`) so the thumb glyph is never
+    mistaken for a word that breaks the prose stream — the measurement bug that
+    made a windowed reveal look truncated when the reserved-column fix had in
+    fact kept its tail.
     """
-    joined = " ".join(" ".join(line.split()) for line in rows)
+    joined = " ".join(" ".join(_strip_scrollbar_cell(line).split()) for line in rows)
     low, high = 0, len(full)
     while low < high:
         mid = (low + high + 1) // 2
@@ -3485,20 +3615,23 @@ def _fingerprint(card: AskPickerScreen) -> list[str]:
 
 
 def _thumb_column(card: AskPickerScreen) -> list[str]:
-    """The rightmost cell of every OPTION-ROW line, in window order.
+    """The rightmost cell of every DRAWN BODY (viewport) line, top to bottom.
+
+    RE-DERIVED for line-granular windowing (design §8): the thumb now spans the
+    full ``body_line_budget`` viewport, one cell per VISUAL LINE — label lines
+    AND description lines alike — not per option row. Every one of those lines
+    maps to a real row in ``_line_rows`` (a partial row's visible lines map to
+    it too), while the header, spacers, position row and footer map to ``None``.
+    So filtering to non-``None`` lines yields exactly the viewport lines the bar
+    is painted over, which is what this returns.
 
     Read from the DRAWN frame through `_line_rows` — the same map the hit-test
     resolves a click through — never from an internal flag. A previous suite was
     green while a feature was dead because it checked intentions instead of ink
     (BLOCKER 1, `_prose_by_row`); the thumb is checked the same way. The thumb is
-    painted over the last column of each windowed option row (`_paint_scrollbar`,
-    row cut to `width-1` then the glyph appended), so this column IS the track:
-    `█` where the thumb sits, `│` on the bare track, and anything else where no
-    scrollbar is drawn at all.
-
-    Lines that map to no row (`None`: header, spacers, the position row, the
-    footer, the reveal block) are skipped, so what comes back is exactly the
-    `page` drawn option rows, top to bottom.
+    painted over the last column of each viewport line (row cut to `width-1` then
+    the glyph appended), so this column IS the track: `█` where the thumb sits,
+    `│` on the bare track, and anything else where no scrollbar is drawn at all.
     """
     lines = card.render_lines_for_test()
     column: list[str] = []
@@ -3510,9 +3643,37 @@ def _thumb_column(card: AskPickerScreen) -> list[str]:
     return column
 
 
+def _line_list_len(card: AskPickerScreen) -> int:
+    """Total visual lines in the card's line list — the thumb's ``total`` (§5).
+
+    Read from ``line_start_by_row[-1]`` (the map's last entry is the list's full
+    length, ``ask_picker.py`` ``_build_line_list``), so a test can pass the same
+    ``total`` the widget's own thumb arithmetic uses to ``_scrollbar_thumb``
+    without reaching into the paint. Under line-granular windowing the thumb is
+    ``_scrollbar_thumb(len(line_list), body_line_budget)``, both in VISUAL LINES,
+    replacing the old ``(row_count, page)`` row counts.
+    """
+    return card._layout().line_start_by_row[-1]
+
+
 def _thumb_is_drawn(card: AskPickerScreen) -> bool:
     """Whether any scrollbar glyph reached the card's rightmost column."""
     return any(cell in (_THUMB_GLYPH, _TRACK_GLYPH) for cell in _thumb_column(card))
+
+
+def _selected_row_lines(card: AskPickerScreen) -> list[str]:
+    """The DRAWN lines belonging to the selected row, label + description.
+
+    Read through ``_line_rows`` (the line→row map), the same structural locator
+    the hit-test and thumb use. Under the cap-lift reveal the selected row's
+    description lines ARE its own lines in the one line list (§6) — there is no
+    separate block — so this is how a test reads "the revealed text" now that
+    :func:`_reveal_block_lines` (the old block locator) always returns empty.
+    """
+    selected = card.state.selected
+    return [
+        line for row, line in zip(card._line_rows, card.render_lines_for_test()) if row == selected
+    ]
 
 
 def _thumb_span(card: AskPickerScreen) -> tuple[int | None, int]:
@@ -3613,7 +3774,7 @@ async def test_ctrl_e_is_live_at_the_sizes_the_user_reported() -> None:
             # At 190x50 the reveal is COMPLETE, and that is pinned per size so
             # it cannot silently regress to 150x40's partial behaviour (D5).
             if size == (190, 50):
-                joined = " ".join(" ".join(line.split()) for line in after)
+                joined = _collapsed_text(after)
                 assert full in joined, (size, after)
 
             # The way back is advertised, and the conversation the question is
@@ -3624,176 +3785,93 @@ async def test_ctrl_e_is_live_at_the_sizes_the_user_reported() -> None:
 
 
 @pytest.mark.asyncio
-async def test_the_reveal_stays_live_when_the_default_view_stops_capping(
+async def test_the_reveal_goes_dead_when_the_default_view_stops_capping(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The red half of the guard above, per AGENTS.md's "prove the test can
-    still fail".
+    """The red half of the reveal-live guard, RE-DERIVED for line-granular
+    windowing (design §4.3, §8), per AGENTS.md's "prove the test can still fail".
 
-    `DEFAULT_DESC_CAP` is what makes `^e` affordable: the pool stops eating the
-    budget step 7a needs, which is the mechanism behind D2. Raised back out of
-    the way — which is HEAD's arithmetic exactly, since `min(n, 99) == n` for
-    every wrap this fixture produces — the key must go dead again, reproducing
-    `ade5cace`.
+    `DEFAULT_DESC_CAP` is what makes `^e` useful: the DEFAULT view caps each row
+    at 2 description lines, so a longer description has more to uncover. Lift the
+    cap out of the way and the default view stops capping — every row draws its
+    whole wrap (viewport-clipped, not pool-limited, under the new model), so
+    `_reveal_is_useful` is False and the key goes dead. This is D2 reproduced:
+    where the default view already shows everything of the selected row it can,
+    the reveal must NOT be offered.
 
-    Patched as the module constant rather than by editing the widget. If this
-    stops going red, either the cap is no longer what buys the reveal (in which
-    case the guard above is measuring something else and must be re-derived) or
-    the reveal is being offered where it does nothing.
+    Patched as the module constant rather than by editing the widget. Measured
+    with `DEFAULT_DESC_CAP` = 99 through the real app: at 190x50, 150x40 and
+    150x50 the selected row's default grant equals its full wrap (6/6, 8/8,
+    8/8), so `_reveal_is_useful` is False and `^e` is withheld everywhere.
 
-    RE-DERIVED, and the 150x40 leg REMOVED rather than repaired (QA round 2).
-    This test was red at HEAD `819427f8` on that leg, and the red is the fix
-    working — verified here rather than taken from the coder's report.
-    Measured with `DEFAULT_DESC_CAP` patched to 99, through the real app:
-
-        size     grants (uncapped)     wrap lines   ^e      reach before -> after
-        190x50   {0:6, 1:4, 2:3, 3:1}  6            DEAD    1023 (complete)
-        150x40   {0:7, 1:1, 2:1, 3:1}  8            live     950 -> 1023
-
-    The premise of the 150x40 leg was that lifting the cap lets the pool draw
-    option 1 IN FULL, so the key has nothing left to uncover. That is true at
-    190x50, where the wrap is 6 lines and the uncapped grant is 6 — the row is
-    complete and `^e` is correctly refused. It is NOT true at 150x40: the wrap
-    is **8** lines there against a grant of **7**, so the row is genuinely one
-    line short, the key honestly changes the frame, and the reveal completes the
-    text (950 -> 1023 characters). Offering `^e` on a row that really is cut is
-    the predicate behaving correctly, not D2 returning.
-
-    So the size was dropped from the claim, not the claim from the test. What
-    the guard still pins is the real mechanism — where the pool CAN draw a
-    description in full, the key goes dead — and 190x50 is the size at which
-    this fixture reaches that state. A second leg is added below it that keeps
-    150x40 under test from the other direction: with the cap lifted the key is
-    still live there AND still honest, which is what stops this from being a
-    silent loss of coverage.
+    THE MECHANISM CHANGED from the old version: it once split into a "dead at
+    190x50 / live at 150x40" pair because the row-granular pool completed the row
+    at some sizes and not others. Under line-granular windowing the cap-lift and
+    the default cap are the SAME mechanism read at two values, so lifting the
+    default cap makes the reveal uniformly dead — there is no size where an
+    uncapped default view still leaves the selected row cut. The guard pins that
+    uniform death, and that pressing the dead key changes nothing.
     """
     import local_operator.tui.widgets.ask_picker as ask_picker_module
 
     monkeypatch.setattr(ask_picker_module, "DEFAULT_DESC_CAP", 99)
 
-    # The size at which the uncapped pool genuinely completes the selected row.
-    size = (190, 50)
-    app, card = await _real_app_card(size, [_repro_question()])
-    async with app.run_test(size=size) as pilot:
-        await _show(app, pilot, card)
+    for size in ((190, 50), (150, 40), (150, 50)):
+        app, card = await _real_app_card(size, [_repro_question()])
+        async with app.run_test(size=size) as pilot:
+            await _show(app, pilot, card)
 
-        # HEAD's frame: the pool has spent the budget, so the key is
-        # withheld and the footer never names it.
-        assert card._reveal_hint() is None, (size, card._layout().description_rows)
-        assert "^e" not in _painted_footer(app), (size, _painted_footer(app))
+            # The uncapped default view: the key is withheld and the footer never
+            # names it, because there is nothing left of the selected row to show.
+            assert card._reveal_hint() is None, (size, card._layout().description_rows)
+            assert "^e" not in _painted_footer(app), (size, _painted_footer(app))
+            assert not card._reveal_is_useful(), (size, card._layout().description_rows)
 
-        # The reason it is withheld, asserted so this cannot pass for the
-        # wrong reason (a card that refused the key while still cutting the
-        # row would be D2 all over again).
-        plan = card._layout(reveal=False)
-        selected = card.state.selected
-        assert len(card._reveal_wrap(selected, plan.width)) <= plan.description_rows.get(
-            selected, 0
-        ), (size, plan.description_rows)
+            # The reason it is withheld, asserted so this cannot pass for the
+            # wrong reason: the default view already draws as much of the selected
+            # row as the revealed one would (the two plans agree on the row).
+            selected = card.state.selected
+            default = card._layout(reveal=False)
+            revealed = card._layout(reveal=True)
+            assert card._visible_row_lines(revealed, selected) <= card._visible_row_lines(
+                default, selected
+            ), (size, "the uncapped view still left the row cut")
 
-        # And pressing it changes nothing, which is D2 stated as the user
-        # experiences it rather than as a predicate.
-        before = _fingerprint(card)
-        await pilot.press("ctrl+e")
-        for _ in range(4):
-            await pilot.pause()
-        assert _fingerprint(card) == before, (size, "expected the dead reveal")
-
-    # 150x40, the leg this test used to make the opposite claim about: the
-    # uncapped pool does NOT complete the row here, so the key stays live and
-    # must still be honest about it.
-    size = (150, 40)
-    app, card = await _real_app_card(size, [_repro_question()])
-    async with app.run_test(size=size) as pilot:
-        await _show(app, pilot, card)
-
-        plan = card._layout(reveal=False)
-        selected = card.state.selected
-        # The premise, measured: 8 wrap lines against a 7-line grant.
-        assert len(card._reveal_wrap(selected, plan.width)) > plan.description_rows.get(
-            selected, 0
-        ), (size, plan.description_rows)
-        assert card._reveal_hint() == ("^e", "more"), (size, plan.description_rows)
-
-        full = " ".join(_REPRO_DESCRIPTIONS[0].split())
-        before = _fingerprint(card)
-        await pilot.press("ctrl+e")
-        await _until(pilot, lambda: card.state.revealed)
-
-        after = _fingerprint(card)
-        # It uncovers real text rather than merely toggling, and it finishes
-        # the paragraph — the live-and-honest state, not D2.
-        assert _prefix_reach(after, full) > _prefix_reach(before, full), (size, "no new text")
-        assert full in " ".join(" ".join(line.split()) for line in after), (size, after)
+            # And pressing the dead key changes nothing — D2 as the user
+            # experiences it rather than as a predicate.
+            before = _fingerprint(card)
+            await pilot.press("ctrl+e")
+            for _ in range(4):
+                await pilot.pause()
+            assert _fingerprint(card) == before, (size, "expected the dead reveal")
 
 
 @pytest.mark.asyncio
-async def test_the_reveal_never_strips_the_other_rows_prose() -> None:
-    """BLOCKER 1: `^e` must not buy its block with the description COLUMN.
+async def test_the_reveal_never_makes_another_rows_prose_unreachable() -> None:
+    """BLOCKER 1, RE-DERIVED for the cap-lift reveal (design §4.3, §8). The old
+    defect was `^e` buying a block with the description COLUMN — flipping
+    `show_descriptions` False for ALL rows, so pressing it replaced three rows of
+    prose with one. Measured at `819427f8`: `150x40 before {0:2,1:2,2:2,3:1} ->
+    after {}` — all prose gone.
 
-    `_reveal_is_useful` (ask_picker.py:~2841) asks only whether the SELECTED
-    row is cut. It does not model `show_descriptions` flipping False for ALL
-    rows when the reveal is paid for — so the card can advertise a key whose
-    effect is to replace three rows of prose with one, and it does.
+    Under line-granular windowing that trade CANNOT arise: there is no shared
+    block pool and no all-or-nothing column decision (C5 retired, §3.4). The
+    reveal lifts only the SELECTED row's cap; a taller selected row pushes OTHER
+    rows further out of the viewport, but their prose is not STRIPPED — it scrolls
+    off, and the thumb says so (§4.3). Measured on the same fixture now: `150x40
+    before {0:2,1:2,2:2,3:1} -> after {0:8,1:2}` (rows 2,3 scrolled off, row 0
+    grew), and scrolling reaches every row's prose again.
 
-    Reproduced at HEAD `819427f8` on the ask card, deterministically, through
-    the real app with the user's own question:
+    So the re-derived claim, on DRAWN TEXT (never on flags — `_prose_by_row`
+    reads what the user can actually read, the whole point of BLOCKER 1):
 
-        150x40  before {0:2, 1:2, 2:2, 3:1}  ->  after {}   ALL prose gone
-        190x50  before {0:2, 1:2, 2:2, 3:1}  ->  after {0:2, 1:2, 2:2, 3:1}  ok
-
-    and across a 121-configuration sweep (widths 60-190 x heights 20-60),
-    **33 of the 99 cases where `^e` was offered and pressed** turned the
-    description column off entirely. It is not a corner: every height in
-    34/36/40/44 at every width from 60 to 190 does it.
-
-    This is the same trade `_reveal_is_useful`'s OWN docstring records as
-    rejected at 44x30 — "pressing it replaced three consequences with one that
-    was already complete" — reappearing one level up. Step 7a protects option
-    LABELS (`test_the_reveal_never_takes_the_last_option_row`) and nothing
-    protects the prose beside them.
-
-    THE ASSERTION IS ON DRAWN TEXT, not on flags, and that is the point.
-    `layout.show_descriptions` and `description_rows` are the card's
-    INTENTIONS; a guard reading them would have to know which value is the bad
-    one. `_prose_by_row` reads what the user can actually read, so the claim is
-    simply: a row that had prose before the press still has prose after it.
-
-    Scoped to rows OTHER than the selected one. The selected row is allowed to
-    change — that is what the key is for — and the trade is honest where the
-    user's own row is what grows.
+    - the description COLUMN is not flipped off — every row that stays VISIBLE
+      after the reveal still draws its prose (no row on screen loses its column);
+    - and no answer's prose is made UNREACHABLE — scrolling the revealed list
+      reaches every row's description again.
 
     The approval-gate leg lives in
-    :func:`test_the_approval_gate_reveal_never_strips_a_consequence`, which is
-    a separate claim on a separate surface and must fail with its own name.
-
-    PROVED RED, per AGENTS.md's "prove the test can still fail" — against the
-    real pre-fix commit rather than by monkeypatch, and the difference matters
-    enough to record. Run at `819427f8` in a throwaway worktree WITH ITS OWN
-    venv (`uv venv` + `uv pip install -e .`, verified loading
-    `/tmp/lo-prefix/local_operator/...` and not the shared tree, per the
-    measurement warning this file's round notes carry), this test fails with:
-
-        ctrl+e stripped the description column from rows [1, 2, 3]
-
-    — which is the blocker verbatim. The approval-gate sibling passes there,
-    correctly: the defect is reachable on the ask card and not on the gate's
-    own frames, which is why the two are separate tests.
-
-    A monkeypatch red-half was written first and DELETED, because it could not
-    honestly go red. Three variants were tried against the fixed tree and all
-    three failed to reintroduce the defect: rewriting the `_CardLayout` that
-    `_layout` returns (the renderers re-derive the plan, so the reservation is
-    already taken), reporting a larger `row_count` to make `affords_column`'s
-    guard unreachable (`IndexError` — the renderers iterate rows by that same
-    property), and lengthening `_reveal_wrap` to drive step 7a's search ceiling
-    up (`affords_column` still refuses every candidate that would cost the
-    column). Keeping a green "red-half" that proves nothing is worse than not
-    having one; the pre-fix run above is the stronger evidence anyway, since it
-    exercises the shipped defect rather than a reconstruction of it.
-
-    That third result is worth keeping in view: the constraint holds against an
-    adversarial input to the very term it is computed from.
+    :func:`test_the_approval_gate_reveal_never_strips_a_consequence`.
     """
     size = (150, 40)
     app, card = await _real_app_card(size, [_repro_question()])
@@ -3801,7 +3879,6 @@ async def test_the_reveal_never_strips_the_other_rows_prose() -> None:
         await _show(app, pilot, card)
 
         before = _prose_by_row(card)
-        selected = card.state.selected
         # The frame this is about: several rows are drawing prose, and the key
         # is on offer. If a future change makes either untrue this test is
         # measuring nothing and must be re-derived rather than deleted.
@@ -3813,14 +3890,26 @@ async def test_the_reveal_never_strips_the_other_rows_prose() -> None:
         await _until(pilot, lambda: card.state.revealed)
         await _settle(app, pilot)
 
+        # (1) The column is not flipped off: every row still VISIBLE after the
+        # reveal draws its prose (excluding the selected row, which grew, and
+        # rows scrolled out of the viewport, which are covered by (2)).
         after = _prose_by_row(card)
-        stripped = sorted(index for index in before if index != selected and index not in after)
-        assert not stripped, (
+        for index, lines in after.items():
+            assert lines, (size, index, "a visible row lost its description column", after)
+
+        # (2) No answer's prose is made unreachable: scroll the revealed list and
+        # every row that had prose before is reached again.
+        reachable = set(after)
+        for _ in range(card.row_count + 1):
+            reachable.update(_prose_by_row(card))
+            await pilot.press("down")
+            await pilot.pause()
+        missing = sorted(index for index in before if index not in reachable)
+        assert not missing, (
             size,
-            f"ctrl+e stripped the description column from rows {stripped}",
+            f"the reveal made rows {missing} prose unreachable even by scrolling",
             before,
-            after,
-            _fingerprint(card),
+            reachable,
         )
 
 
@@ -3834,38 +3923,25 @@ async def test_the_reveal_never_shows_less_than_the_default_view() -> None:
     is a key that is live, advertised, redraws the frame, and leaves the user
     with LESS of the paragraph than they had before pressing it.
 
-    Filed as **D6** against the BLOCKER 1 fix (QA round 2). The `column_reserve`
-    that stops the block stripping the description column can shrink the block
-    below the lines the selected row was already granted, and the block then
-    repeats text the row is still showing while the row itself gives up a line
-    to pay for it. Measured at 140x34 through the real app with
-    `scripts/ask_user_repro.py`'s question:
+    Filed as **D6** against the BLOCKER 1 fix, and RE-DERIVED for the cap-lift
+    reveal (design §4, §8). The old defect was block-shaped: the constant-height
+    block could shrink below the lines the selected row was already granted and
+    repeat text while the row gave up a line to pay for it. There is no block
+    now — the reveal lifts the selected row's cap IN PLACE — so the specific
+    mechanism is retired, but the PROPERTY is exactly as important and is kept:
+    pressing ``^e`` must never leave the user with LESS of the selected row's
+    paragraph than the default view showed. A reveal that is a net loss of text
+    on the row it explains is the same broken promise whatever draws it.
 
-        before ^e:  reveal_rows=0  grants {0:2, 1:1, 2:1, 3:1}  reach 246/1023
-        after  ^e:  reveal_rows=1  grants {0:1, 1:1, 2:1, 3:1}  reach 130/1023
-
-    — option 1 loses its second line to buy a one-line block that restates the
-    first, so the frame moves, the footer says `^e less`, and 116 characters
-    the user could read a moment ago are gone. The description COLUMN survives
-    (which is what the fix was for, and it works), so
-    :func:`test_the_reveal_never_strips_the_other_rows_prose` stays green and
-    cannot see this.
-
-    It is a BAND, not one size. Swept across widths 100-190 x heights 26-50,
-    **10 of the 120 configurations that offer the key** lose text, and they are
-    every width at height **34** — the row count where the block can afford
-    exactly one line after the reserve:
-
-        100x34  162 -> 90    110x34  179 -> 99    120x34  201 -> 109
-        130x34  222 -> 119   140x34  246 -> 130   150x34  260 -> 140
-        160x34  278 -> 150   170x34  303 -> 160   180x34  326 -> 170
-        190x34  339 -> 179
-
-    The loss grows with width (72 characters at 100 columns, 160 at 190),
-    because a wider card fits more text on the line it gives up.
+    Measured across the sizes swept below (both windowing and non-windowing),
+    the reveal reaches ``>=`` as much of the selected row after the press as
+    before — the reach is read with the scrollbar cell stripped
+    (:func:`_prefix_reach`), so a windowed frame's thumb glyph is never mistaken
+    for lost text (the measurement bug the reserved-column fix at 7538f42b
+    exposed).
 
     Asserted as `>=` rather than `>`: a reveal that changes nothing is a
-    separate defect with its own guard, and folding the two would make this one
+    separate concern with its own guard, and folding the two would make this one
     fail for a reason it is not about.
     """
     full = " ".join(_REPRO_DESCRIPTIONS[0].split())
@@ -3890,6 +3966,20 @@ async def test_the_reveal_never_shows_less_than_the_default_view() -> None:
     )
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "GAP D7 (pre-existing, architect ruling pending): at canary 100x30 the"
+        " 592-char QUESTION wraps to 7 lines and leaves body_line_budget=2, so"
+        " option 1's description is cut (reaches 65/434) and ^e is REFUSED — a"
+        " 2-line viewport can show nothing more via the cap-lift, and offering the"
+        " key would be a dead-key lie. Identical pre/post the thumb-column fix"
+        " (7538f42b); this is a reveal-reachability-at-extreme-tight-sizes question"
+        " (should the question yield rows to the reveal, or is refusing ^e correct"
+        " when the card is simply too short?), NOT a windowing regression. Routed"
+        " to the architect. Do NOT green by relaxing."
+    ),
+)
 @pytest.mark.asyncio
 async def test_a_cut_description_is_never_unreachable_by_every_gesture() -> None:
     """The original truncation report, as a property: text the card withholds
@@ -3902,23 +3992,29 @@ async def test_a_cut_description_is_never_unreachable_by_every_gesture() -> None
     could uncover it? If so, the user is back where the report started —
     looking at a paragraph that stops, with nothing to press.
 
-    Filed as **D7** against the BLOCKER 1 fix (QA round 2), alongside D6. The
-    fix's `column_reserve` makes the block unaffordable at sizes where it used
-    to fit, and `_reveal_is_useful`'s new refusal then withholds the key rather
-    than offering a smaller block. Where the selected row is genuinely cut,
-    that turns a partial reveal into no reveal at all.
+    Filed as **D7** against the BLOCKER 1 fix, and STILL OPEN under line-granular
+    windowing (qa-linegran certification of 7538f42b). Its manifestation narrowed
+    to a single reachable case: **canary 100x30**. There the 592-character
+    QUESTION wraps to 7 lines, leaving ``body_line_budget = 2``; option 1's
+    description needs more, so it is cut (reaches 65/434 characters), and
+    ``_reveal_is_useful`` correctly refuses ``^e`` because the 2-line viewport
+    cannot draw a third line of the row even with the cap lifted (§4.3's
+    label-anchor degradation). So the cut text is unreachable by every gesture —
+    the reveal cannot help, and the question has already taken the rows the prose
+    would need.
 
-    Measured with `_long_description_question` (the canary fixture) through the
-    real app, over widths 100-190 x heights 26-50: **36 of 130 sizes** leave
-    the selected row cut with `^e` refused. At 100x30 the card shows 1 of
-    option 1's 434 characters and offers nothing. Before the fix the key was
-    live at that size.
+    This is NOT the thumb-column truncation defect (fixed at 7538f42b): it is
+    identical before and after that fix, because it is about the QUESTION
+    out-competing the description for a tiny budget, not about the scrollbar. The
+    architect is to rule whether refusing ``^e`` is correct when the card is
+    simply too short, or whether the question should yield rows to the reveal at
+    extreme sizes. Kept RED (xfail-strict) rather than relaxed, per the D5
+    "silent truncation pinned as correct" discipline: greening it would hide the
+    exact class of bug the whole feature exists to prevent.
 
-    Both fixtures are swept because they have opposite shapes and the file's
-    own notes record that the shape decides whether the reveal is live: the
-    canary carries a 592-character QUESTION that steals the rows the pool would
-    spend on prose, the repro question is one line. A guard written against
-    either alone has been wrong before.
+    Both fixtures are swept because they have opposite shapes: the canary carries
+    a 592-character QUESTION that steals the budget the prose would need, the
+    repro question is one line and does not bite.
     """
     unreachable: list[str] = []
 
@@ -3962,32 +4058,31 @@ async def test_the_approval_gate_reveal_never_strips_a_consequence() -> None:
     an authorisation surface losing two of three consequences behind a key the
     card itself advertised.
 
-    Two states are covered, because the gate has two real geometries and they
-    disagree about `^e`:
+    RE-DERIVED for the cap-lift reveal and the ``_labels_must_all_fit`` hook
+    (design §4.4, §8; the manager-approved safety amendment). The MECHANISM that
+    protects the gate changed, so the test's mechanism changes with it:
 
-    - **over a seeded conversation** (dock 5), where all three consequences are
-      drawn and the key is correctly refused. The claim is that it STAYS
-      refused: a change that offered it here would be offering the bad trade;
-    - **in the BOOT layout** (dock 8, empty transcript), where the card is
-      already label-only and `^e` IS offered at 100x30 and 130x30. The claim is
-      that pressing it does not remove a consequence that was on screen.
+    - the OLD model let ``^e`` be OFFERED on the boot-layout gate (dock 8), and
+      the guard was "pressing it does not strip a consequence that was on
+      screen";
+    - the NEW model NEVER offers ``^e`` on the gate. Every consequence is one
+      line at every width down to 44 columns, so ``_reveal_is_useful`` is False
+      (there is nothing past line 1 of the selected consequence to uncover), and
+      the ``_labels_must_all_fit`` hook keeps every LABEL visible by dropping the
+      description cap rather than windowing. So "strip a consequence with ``^e``"
+      is unreachable by construction — there is no key to press.
 
-    The boot leg is not a hypothetical: an approval can be the first thing a
-    session shows. `_seed_conversation`'s docstring records that the boot layout
-    is a genuinely different budget (the transcript's padding changes), and this
-    file has a history of measuring only the seeded one.
-
-    NOT REPRODUCED HERE, and said plainly rather than asserted away: the
-    reviewer's report has `^e` at 130x30 under the real app leaving only
-    Allow's consequence. Swept across widths 40-190 x heights 20-50, both
-    transcript states, and three command lengths — 112 approval configurations —
-    the gate never once lost a consequence it had drawn. Where `^e` is offered
-    on this surface the card is ALREADY label-only, so there is no consequence
-    left to lose. The guard is kept because the property is the one that
-    matters and the ask card proves the mechanism is real; it is honest about
-    covering a state the reviewer's exact repro did not reach.
+    The re-derived claim, over BOTH real geometries (seeded dock 5 and boot dock
+    8) at the three reported sizes: ``^e`` is never offered, and every
+    consequence the gate DOES draw is one line (never cut, so nothing is being
+    withheld). The seeded gate draws all three; the tight boot gate may drop to
+    bare labels (the fit-hook), which drops NO answer — the labels are all there,
+    guarded separately by
+    :func:`test_the_boot_approval_gate_never_scrolls_a_label_off`.
     """
-    for turns, expect_hint in ((6, False), (0, True)):
+    from local_operator.tui.widgets.approval import ApprovalPrompt
+
+    for turns in (6, 0):
         for size in ((100, 30), (130, 30), (150, 40)):
             app = _baseline_app()
             async with app.run_test(size=size) as pilot:
@@ -3996,40 +4091,21 @@ async def test_the_approval_gate_reveal_never_strips_a_consequence() -> None:
                 app._approvals_default_auto = False
                 if turns:
                     await _seed_conversation(app, pilot)
-                from local_operator.tui.widgets.approval import ApprovalPrompt
 
                 task = asyncio.create_task(app.request_tool_approval("bash", _APPROVAL_TARGET))
                 await _until(pilot, lambda: bool(app.screen.query(ApprovalPrompt)))
                 card = app.screen.query_one(ApprovalPrompt)
                 await _settle(app, pilot)
 
-                before = _prose_by_row(card)
-                if card._reveal_hint() != ("^e", "more"):
-                    # The seeded gate draws every consequence and refuses the
-                    # key. Pinned rather than skipped: this is the good state,
-                    # and a change that started offering `^e` over drawn
-                    # consequences is the defect arriving on this surface.
-                    assert sorted(before) == [0, 1, 2], (turns, size, before)
-                    task.cancel()
-                    continue
+                # The key is NEVER offered on the gate — so no ``^e`` press can
+                # strip a consequence, in either layout, at any pinned size.
+                assert card._reveal_hint() is None, (turns, size, card._reveal_hint())
+                assert not card._reveal_is_useful(), (turns, size, "gate found the reveal useful")
 
-                await pilot.press("ctrl+e")
-                await _until(pilot, lambda: card.state.revealed)
-                await _settle(app, pilot)
-
-                after = _prose_by_row(card)
-                selected = card.state.selected
-                stripped = sorted(
-                    index for index in before if index != selected and index not in after
-                )
-                assert not stripped, (
-                    turns,
-                    size,
-                    f"ctrl+e stripped consequences from rows {stripped}",
-                    before,
-                    after,
-                    _fingerprint(card),
-                )
+                # Every consequence the gate draws is a single, complete line —
+                # nothing is being withheld behind a key that is not there.
+                for index, lines in _prose_by_row(card).items():
+                    assert len(lines) == 1, (turns, size, index, lines)
                 task.cancel()
 
 
@@ -4091,16 +4167,27 @@ async def test_the_default_view_caps_prose_so_the_list_stays_scannable() -> None
 
 
 @pytest.mark.asyncio
-async def test_the_uncapped_default_view_rebuilds_the_wall(
+async def test_an_uncapped_view_windows_instead_of_building_a_wall(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The red half of the scannability guard.
+    """The red half of the scannability guard, RE-DERIVED for line-granular
+    windowing (design §3.4, §8).
 
-    With the cap lifted the 190x50 card returns to HEAD's 24 rows and its
-    6/4/3 grants — the exact frame in `docs/design/ask-scannable-card.md` §1.1
-    that the user rejected. Both halves of the guard above are asserted to go
-    red, because they are separate claims: a change could restore the height
-    while holding the per-row cap, or vice versa.
+    The OLD red-half lifted ``DEFAULT_DESC_CAP`` to 99 and asserted the 190x50
+    card rebuilt HEAD's 24-row WALL (grants 6/4/3, >18 lines) — the frame the
+    user rejected. Under line-granular windowing that wall CANNOT be rebuilt: the
+    body is a fixed-height viewport (``body_line_budget``), so even with the cap
+    lifted the card draws no more than its budget of lines and WINDOWS the rest
+    (measured: cap 99 at 190x50 grants 6/4/4 but draws only 18 lines with
+    ``show_position`` True, not a 24-row wall). The anti-wall property moved from
+    the per-row cap to the viewport clip — which is exactly the C1 line-budget
+    invariant (:func:`test_the_card_never_draws_more_lines_than_its_body_budget_in_lines`).
+
+    So the re-derived red-half proves the mechanism the way it now works: with
+    the cap lifted, the per-row GRANT exceeds the default cap (the uncapped view
+    really is uncapped), the card still WINDOWS instead of walling, and the drawn
+    line count never exceeds the body budget. A regression that let the wall back
+    (drawing past the budget) would fail the last assertion.
     """
     import local_operator.tui.widgets.ask_picker as ask_picker_module
 
@@ -4108,9 +4195,19 @@ async def test_the_uncapped_default_view_rebuilds_the_wall(
     app, card = await _real_app_card((190, 50), [_repro_question()])
     async with app.run_test(size=(190, 50)) as pilot:
         await _show(app, pilot, card)
-        grants = card._layout().description_rows
-        assert any(granted > DEFAULT_DESC_CAP for granted in grants.values()), grants
-        assert len(card.render_lines_for_test()) > 18, _fingerprint(card)
+        layout = card._layout()
+        grants = layout.description_rows
+        # The view really is uncapped: some row's grant exceeds the default cap.
+        assert any(granted > 2 for granted in grants.values()), grants
+        # But the wall is not rebuilt: the card windows the overflow instead of
+        # drawing past its budget.
+        assert layout.show_position, ("the uncapped view must window, not wall", grants)
+        budget = card._body_rows(len(card._question_lines(layout.width)))
+        assert len(card.render_lines_for_test()) <= budget, (
+            "the uncapped view drew past its body budget — the wall is back",
+            len(card.render_lines_for_test()),
+            budget,
+        )
 
 
 @pytest.mark.asyncio
@@ -4418,17 +4515,23 @@ async def test_the_cap_leaves_the_approval_gate_byte_identical() -> None:
             width = card._layout().width
             golden = ["─" * width if line == "─" else line for line in body]
             assert _fingerprint(card) == golden, (size, _fingerprint(card))
-            # The gate does not window at this size — `page == row_count`, so the
-            # OMP thumb (ask-omp-scroll.md §3.2) is never painted here and no
-            # column is stolen from a consequence. Added so a future change that
-            # lengthens a consequence or adds an option — and thus starts
-            # windowing the approval gate — fails HERE with a readable cause
-            # rather than as a mystery one-column shift on the golden above.
-            assert card._layout().page == card.row_count, (
+            # The gate does not window at this size, so the OMP thumb
+            # (ask-omp-scroll.md §3.2) is never painted here and no column is
+            # stolen from a consequence. RE-DERIVED to VISUAL LINES (design §8):
+            # ``page == row_count`` is gone; "does not window" is now
+            # ``len(line_list) <= body_line_budget`` AND ``not show_position``.
+            # Added so a future change that lengthens a consequence or adds an
+            # option — and thus starts windowing the approval gate — fails HERE
+            # with a readable cause rather than as a mystery one-column shift on
+            # the golden above.
+            layout = card._layout()
+            assert layout.line_start_by_row[-1] <= layout.body_line_budget, (
                 size,
-                card._layout().page,
-                card.row_count,
+                "the approval gate's line list overflowed its viewport — it is windowing",
+                layout.line_start_by_row[-1],
+                layout.body_line_budget,
             )
+            assert not layout.show_position, (size, "the approval gate is windowing")
             # The dock the frame was measured in, pinned with it. Without this
             # the golden could go on agreeing with a card measured in the wrong
             # budget — which is the exact way this test passed while wrong.
@@ -4532,13 +4635,19 @@ async def test_the_cap_leaves_the_short_description_card_byte_identical() -> Non
             layout = card._layout()
             golden = ["─" * layout.width if line == "─" else line for line in body]
             assert _fingerprint(card) == golden, (size, _fingerprint(card))
-            # Neither pinned size windows — `page == row_count`, so the OMP thumb
-            # (ask-omp-scroll.md §3.2) is not drawn and the golden above shifts by
-            # no column. Added alongside the approval-gate assertion so a future
-            # change that started windowing this card (and cut a row to `width-1`
-            # under a thumb) fails here with a readable cause rather than as an
-            # unexplained one-cell diff on the golden.
-            assert layout.page == card.row_count, (size, layout.page, card.row_count)
+            # Neither pinned size windows, so the OMP thumb (ask-omp-scroll.md
+            # §3.2) is not drawn and the golden above shifts by no column.
+            # RE-DERIVED to VISUAL LINES (design §8): "does not window" is now
+            # ``len(line_list) <= body_line_budget`` AND ``not show_position``.
+            # Added so a future change that started windowing this card (and cut a
+            # row to `width-1` under a thumb) fails here with a readable cause
+            # rather than as an unexplained one-cell diff on the golden.
+            assert layout.line_start_by_row[-1] <= layout.body_line_budget, (
+                size,
+                layout.line_start_by_row[-1],
+                layout.body_line_budget,
+            )
+            assert not layout.show_position, (size, "the short-description card is windowing")
             # The dock the frame was measured in, pinned with it — the term
             # that was silently 0 before.
             assert card._dock_reserved_rows() == 5, (size, card._dock_reserved_rows())
@@ -4553,24 +4662,25 @@ async def test_the_cap_leaves_the_short_description_card_byte_identical() -> Non
 
 
 @pytest.mark.asyncio
-async def test_the_short_card_falls_back_to_labels_when_the_real_dock_is_tight() -> None:
-    """The frame `_AskHost` was hiding: 100x30 has no room for the prose at all.
+async def test_the_short_card_windows_with_descriptions_when_the_real_dock_is_tight() -> None:
+    """RE-DERIVED for line-granular windowing (design §8, the headline §0). This
+    test was ``..._falls_back_to_labels_when_the_real_dock_is_tight`` and pinned
+    the OLD behaviour: at 100x30 the ``ask`` card dropped the description column
+    entirely and drew bare labels, because the row-granular allocator bought
+    descriptions all-or-nothing and a list that had to window got none.
 
-    Filed as part of BLOCKER 2's fallout. `test_the_cap_leaves_the_short_
-    description_card_byte_identical` claimed this size drew the full 2-line
-    rhythm, because it measured a 0-row dock. With the app's real 5-row dock the
-    same question at the same size drops the description column entirely and
-    moves the badge onto the label line.
+    That is exactly the gap the change closes. At 100x30 the same question now
+    WINDOWS WITH its descriptions kept (the coexist frame the user asked for):
+    the first rows show their 2-line clamp, a thumb is painted, a ``showing 1–3
+    of 5`` position row appears, and the remaining answers are reachable by
+    scrolling. Descriptions are shed behind a scroll, never ANSWERS — the design
+    §1.3 "prose before answers" rule is preserved by making the prose scroll
+    rather than vanish.
 
-    That frame is not a defect — design §1.3 says a card too short for prose
-    sheds prose before it sheds ANSWERS, and all five rows are still here with
-    their digit keys. It was simply never pinned, so a regression that dropped
-    an option row at this size, or that lost the badge on the fallback path,
-    had nothing to fail.
-
-    Pinned as the exact frame for the same reason the sibling goldens are: the
-    failure mode is the allocator spending rows differently on a card whose
-    height is already right, which no substring assertion can see.
+    Pinned on DRAWN INK rather than an exact golden: the frame now carries thumb
+    glyphs whose column depends on width arithmetic, and the robust claim is the
+    behavioural one — windows, keeps descriptions, keeps the badge, loses no
+    answer.
     """
     question = AskQuestion(
         id="rollout",
@@ -4585,18 +4695,11 @@ async def test_the_short_card_falls_back_to_labels_when_the_real_dock_is_tight()
         ],
         recommended=1,
     )
-    body = [
-        "the agent needs your decision",
-        "─",
-        "Which rollout should the stale-row migration take?",
-        "",
-        "  1. Drop the rows",
-        f"❯ 2. Backfill from the audit log  · {RECOMMENDED_TAG}",
-        "  3. Dual-write for a week",
-        "  4. Leave them and add a filter",
-        "  5. Other (type your own)",
-        "",
-        "↑↓ move · 1-9 jump · enter answer · ^e more · esc skip",
+    labels = [
+        "Drop the rows",
+        "Backfill from the audit log",
+        "Dual-write for a week",
+        "Leave them and add a filter",
     ]
 
     size = (100, 30)
@@ -4604,16 +4707,33 @@ async def test_the_short_card_falls_back_to_labels_when_the_real_dock_is_tight()
     async with app.run_test(size=size) as pilot:
         await _show(app, pilot, card)
         layout = card._layout()
-        golden = ["─" * layout.width if line == "─" else line for line in body]
-        assert _fingerprint(card) == golden, (size, _fingerprint(card))
-        # The description column really is off, and every ANSWER survived it.
-        # Both halves matter: prose before answers is the rule being kept.
-        assert not layout.show_descriptions, layout
-        assert layout.page >= card.row_count, (layout.page, card.row_count)
-        # The badge survives onto the label line rather than vanishing with the
-        # prose it usually rides on. This is the `~ask_picker.py:2401` fallback
-        # call site, and nothing else in this file pinned that it draws at all.
-        assert RECOMMENDED_TAG in _fingerprint(card)[5], _fingerprint(card)
+        # It WINDOWS — the described list is taller than the tight body — and the
+        # description column is ON (the coexist change): both halves are the
+        # inversion of the old "drops to labels" claim.
+        assert layout.show_position, (size, "expected the tight card to window")
+        assert layout.show_descriptions, (size, "descriptions were dropped instead of scrolled")
+        assert _thumb_is_drawn(card), (size, "no thumb on a windowed card")
+        # The first visible rows keep their 2-line clamp — descriptions coexist
+        # with the scroll rather than vanishing.
+        desc_by_row = _desc_lines_by_row(card)
+        clamped = [r for r in _distinct_rows_drawn(card) if desc_by_row.get(r, 0) >= 1]
+        assert len(clamped) >= 2, (
+            size,
+            "descriptions did not coexist with the scroll",
+            desc_by_row,
+        )
+        # The recommendation badge still draws (it rides the selected row's
+        # description, which is now on screen).
+        assert RECOMMENDED_TAG in "\n".join(_fingerprint(card)), _fingerprint(card)
+        # Every ANSWER survives — reachable by scrolling, none dropped.
+        seen: set[str] = set()
+        for _ in range(card.row_count + 1):
+            frame = "\n".join(card.render_lines_for_test())
+            seen.update(label for label in labels if label in frame)
+            await pilot.press("down")
+            await pilot.pause()
+        for label in labels:
+            assert label in seen, (size, f"answer {label!r} was unreachable", seen)
 
 
 @pytest.mark.asyncio
@@ -4744,61 +4864,35 @@ async def test_a_reordering_card_is_caught(monkeypatch: pytest.MonkeyPatch) -> N
 
 @pytest.mark.asyncio
 async def test_the_reveal_says_so_when_it_is_still_holding_text_back() -> None:
-    """D5, FIXED at `819427f8` — flipped from `xfail(strict)` to a live guard.
+    """D5 — a reveal holding text back must MARK the cut, never drop it silently.
 
     The reveal is the card's answer to "the prose does not fit". Where even the
-    reveal cannot fit it, the card must say so — that is the same discipline
-    the question's own tail and every granted description line already follow
-    (`_description_text`, `ask_picker.py:2463-2481`): mark the cut, never drop
-    text in silence.
+    reveal cannot fit it (the description wraps past ``REVEAL_MAX_ROWS`` = 8
+    lines), the card must say so — the same discipline the question's own tail
+    and every granted description line already follow (`_description_text`): mark
+    the cut, never drop text in silence.
 
-    Filed by QA against the capped tree as an open defect and carried here as
-    `xfail(strict)`. Measured then, with the user's own question, option 1
-    (1023 characters):
+    RE-DERIVED for the cap-lift reveal (design §4, §8). The claim is unchanged,
+    but the LOCATOR moved from the constant-height block (`_reveal_block_lines`,
+    which no longer exists) to the SELECTED ROW's own drawn description lines
+    (`_selected_row_lines`), since the cap lift makes the revealed text that
+    row's own lines in place (§6).
 
-        size     lines needed   reveal_rows   reached   marked `…`
-        190x50   6              6             1023      n/a (complete)
-        150x40   8              6              838      NO
-        130x30   9              6              735      NO
-
-    At 150x40 the block's last line ended `...in practice the ALTERs are
-    metadata-only in SQLite and` — mid-sentence, no marker — and the closing
-    clause was unreachable by any gesture the card offers.
-
-    RE-DERIVED at `819427f8`, where the claim now passes at BOTH legs, so the
-    strict xfail had itself become the failing test. Re-measured through the
-    real app:
-
-        size     reached / 1023   complete   marked `…`
-        190x50   1023             yes        n/a
-        160x40   1023             yes        n/a
-        150x40   1023             yes        n/a   <- was 838/NO
-        140x34    886             no         YES
-        130x30    586             no         YES   <- was 735/NO
-        120x30    530             no         YES
-        100x40    696             no         YES
-
-    Two separate things changed and only one of them is the fix. 130x30 is the
-    fix: the block is still short of the text and now MARKS it. 150x40 is no
-    longer a cut at all — the reveal completes the paragraph there — so its old
-    premise (`reached < len(full)`) is obsolete, and asserting it would pin a
-    truncation the card no longer has.
-
-    So the guard now DERIVES which sizes are still cut instead of hardcoding a
-    list, and asserts the property on those. That is deliberately not a
-    hardcoded swap of 150x40 for 140x34: the set of cutting sizes is a function
-    of the wrap arithmetic, and a future change that shifts the boundary should
-    move this test's coverage with it rather than leave it asserting about a
-    size that has become complete. The sizes swept span both sides of the
-    boundary, and both sides are asserted — complete frames must NOT carry a
-    stray marker, cut frames must.
+    Swept over NON-WINDOWING sizes (tall terminals, height 50) so the only reason
+    a line is cut is the ``REVEAL_MAX_ROWS`` cap the reveal itself imposes — NOT
+    the separate windowed-thumb-column truncation defect qa-linegran filed
+    (:func:`test_a_windowed_reveal_still_reaches_the_whole_description`), which
+    would otherwise confound "did the reveal mark its own cap-cut" with "did the
+    thumb eat the tail". The sweep spans both sides of the cap boundary: wide
+    terminals complete the paragraph (must NOT mark), narrow ones cut it at 8
+    lines (must mark).
     """
     full = " ".join(_REPRO_DESCRIPTIONS[0].split())
 
     cut_sizes: list[tuple[int, int]] = []
     complete_sizes: list[tuple[int, int]] = []
 
-    for size in ((190, 50), (150, 40), (140, 34), (130, 30), (120, 30)):
+    for size in ((190, 50), (150, 50), (100, 50), (90, 50), (80, 50)):
         app, card = await _real_app_card(size, [_repro_question()])
         async with app.run_test(size=size) as pilot:
             await _show(app, pilot, card)
@@ -4806,30 +4900,39 @@ async def test_the_reveal_says_so_when_it_is_still_holding_text_back() -> None:
                 continue
             await pilot.press("ctrl+e")
             await _until(pilot, lambda: card.state.revealed)
+            # These sizes do not window — the cut is the reveal's own cap, not
+            # the thumb-column defect. Guarded so a future budget shift that
+            # starts windowing one of them fails here readably rather than
+            # silently confounding the two truncation sources.
+            assert not _thumb_is_drawn(card), (size, "this leg must not window")
 
             reached = _prefix_reach(_fingerprint(card), full)
-            # Asked of the BLOCK, never of the whole card. The other rows'
-            # inline descriptions are cut at the 2-line cap and correctly
-            # marked `…`, so a whole-card check would pass on markers that
-            # belong to different text entirely.
-            block = _reveal_block_lines(card)
-            assert block, (size, "no reveal block to measure", _fingerprint(card))
-            marked = any(line.endswith("…") for line in block)
+            # Asked of the SELECTED ROW's own lines, never the whole card. Other
+            # rows' inline descriptions are cut at the 2-line cap and correctly
+            # marked, so a whole-card check would pass on markers that belong to
+            # different text entirely.
+            sel_lines = _selected_row_lines(card)
+            assert sel_lines, (size, "no selected-row lines to measure", _fingerprint(card))
+            marked = any(line.rstrip().endswith("…") for line in sel_lines)
 
             if reached < len(full):
                 cut_sizes.append(size)
-                # THE CLAIM: a block holding text back says so.
+                # THE CLAIM: a reveal holding text back says so.
                 assert marked, (
                     size,
                     f"reveal reached {reached}/{len(full)} chars and marked nothing",
-                    block,
+                    sel_lines,
                 )
             else:
                 complete_sizes.append(size)
                 # The other direction, which is a real failure mode of a
-                # marker-based fix: a block that says it is holding text back
+                # marker-based fix: a reveal that says it is holding text back
                 # when it is not is the same lie inverted.
-                assert not marked, (size, "complete reveal marked a cut it does not have", block)
+                assert not marked, (
+                    size,
+                    "complete reveal marked a cut it does not have",
+                    sel_lines,
+                )
 
     # The sweep must actually exercise both sides. If a future change makes
     # every size complete this test becomes vacuous, and that should fail
@@ -4841,75 +4944,60 @@ async def test_the_reveal_says_so_when_it_is_still_holding_text_back() -> None:
 @pytest.mark.asyncio
 async def test_a_silently_truncated_reveal_is_caught(monkeypatch: pytest.MonkeyPatch) -> None:
     """The red half of the D5 guard above, per AGENTS.md's "prove the test can
-    still fail" — and the half the original `xfail` never had.
+    still fail".
 
-    An `xfail(strict)` proves a test is red; it does not prove the test would
-    go GREEN for the right reason, nor that it can go red again once fixed. Now
-    that D5 is fixed, the guard needs the ordinary proof.
+    RE-DERIVED for the cap-lift reveal (design §4, §8). D5's SHAPE is unchanged —
+    a description handed to the paint ALREADY cut to the cap, so the drawing code
+    cannot tell a finished description from an abandoned one and the `…` never
+    fires — but the marking path moved. The old defect lived in `_reveal_wrap`
+    feeding a block; there is no block now, and the cut is marked where
+    `_description_lines`' full (uncapped) wrap is compared against the lines
+    actually drawn. So the reproduction patches `_description_lines` to return a
+    PRE-CUT list (sliced to `REVEAL_MAX_ROWS`): the drawing code then compares the
+    cut against itself, exactly the D5 shape, and the marker disappears.
 
-    Reintroduces the defect at runtime by restoring `_reveal_wrap` to its
-    pre-fix SHAPE: hand the block a list already cut to the number of rows it
-    can draw, so the wrap and the grant are the same length,
-    `_reveal_text`'s `len(wrapped) > len(kept)` test is false, and the `…` never
-    fires. Patched on the class rather than in the widget file — the coder owns
-    that file, and the measurement warning applies (the editable install maps
-    `local_operator` to the shared tree, so a sibling worktree would load the
-    same package; monkeypatch is the reliable isolation here).
+    Patched on the class, not in the widget file — the coder owns `ask_picker.py`,
+    and the editable install maps `local_operator` to the shared tree, so
+    monkeypatch is the reliable isolation.
 
-    The cut is expressed as `REVEAL_MAX_ROWS` rather than the `DESC_MAX_ROWS`
-    the defect was originally filed against, because that constant no longer
-    exists at `819427f8`. What is being reproduced is the SHAPE of D5 — a
-    pre-truncated wrap the block cannot see past — not one retired name.
-
-    The SIZE is chosen so the pre-truncation is the ONLY thing hiding the cut,
-    and that took measuring twice. At 130x30 the block draws 5 rows against a
-    9-line wrap, so `remaining` runs out first and the marker still fires
-    through the other arm of `_reveal_text`'s test — the patch is invisible
-    there and the test would pass for the wrong reason. The frame that works is
-    the one where `reveal_rows` is exactly `REVEAL_MAX_ROWS` (8) against a
-    9-line wrap: the cap is what binds, so cutting the wrap to 8 makes wrap and
-    grant equal and the marker genuinely disappears.
-
-    **130x44**, re-measured after the BLOCKER 1 fix landed. The `column_reserve`
-    that fix added moved this frame: before it, 130x36 was cap-bound; after it,
-    the smallest cap-bound frames are 130x44 and 140x44 (swept across widths
-    100-190 x heights 28-54). The size is asserted below rather than assumed,
-    so a further allocator change fails here with a readable number instead of
-    silently testing nothing.
+    Run at a NON-WINDOWING size (tall terminal) so the cut is the reveal's own
+    cap and the marker's absence is unambiguously the injected defect — not the
+    separate windowed-thumb-column truncation (qa-linegran's filed defect), which
+    would hide text with or without this patch and confound the proof. Asserted
+    on the SELECTED ROW's own drawn lines (`_selected_row_lines`), the cap-lift
+    reveal's in-place text.
     """
 
-    def _pre_fix_reveal_wrap(self: AskPickerScreen, index: int, width: int) -> list[str]:
-        """D5's wrap: already cut, so the block cannot tell it is short."""
-        if index == self.other_row:
-            return []
-        wrap = self._description_lines(index, width)[:REVEAL_MAX_ROWS]
-        return wrap if any(wrap) else []
+    original = AskPickerScreen._description_lines
 
-    monkeypatch.setattr(AskPickerScreen, "_reveal_wrap", _pre_fix_reveal_wrap)
+    def _pre_cut_description_lines(self: AskPickerScreen, index: int, width: int) -> list[str]:
+        """D5's shape: the wrap arrives already cut, so the paint cannot tell it
+        is short and the `…` marker never fires."""
+        return original(self, index, width)[:REVEAL_MAX_ROWS]
+
+    monkeypatch.setattr(AskPickerScreen, "_description_lines", _pre_cut_description_lines)
 
     full = " ".join(_REPRO_DESCRIPTIONS[0].split())
-    size = (130, 44)
+    size = (90, 50)
     app, card = await _real_app_card(size, [_repro_question()])
     async with app.run_test(size=size) as pilot:
         await _show(app, pilot, card)
         assert card._reveal_hint() == ("^e", "more"), (size, card._layout())
         await pilot.press("ctrl+e")
         await _until(pilot, lambda: card.state.revealed)
-
-        # The frame the patch needs: the CAP is what binds, not `remaining`.
-        # Without this the test could pass at a size where the block was short
-        # for a different reason and the marker fired anyway.
-        assert card._layout().reveal_rows == REVEAL_MAX_ROWS, (size, card._layout().reveal_rows)
+        # This leg must not window, or the thumb-column defect would hide text
+        # independently of the patch and the proof would be confounded.
+        assert not _thumb_is_drawn(card), (size, "this leg must not window")
 
         reached = _prefix_reach(_fingerprint(card), full)
-        block = _reveal_block_lines(card)
+        sel_lines = _selected_row_lines(card)
         # The defect, exactly as filed: short of the text and silent about it.
         assert reached < len(full), (size, reached, len(full))
-        assert block, (size, "no reveal block to measure", _fingerprint(card))
-        assert not any(line.endswith("…") for line in block), (
+        assert sel_lines, (size, "no selected-row lines to measure", _fingerprint(card))
+        assert not any(line.rstrip().endswith("…") for line in sel_lines), (
             size,
             "expected the silent truncation",
-            block,
+            sel_lines,
         )
 
 
@@ -4930,24 +5018,23 @@ async def test_the_thumb_appears_only_when_the_list_windows() -> None:
     that hide part of the list — and disappear, leaving no track behind, the
     moment the whole list fits.
 
-    The one-for-one with ``show_position`` is the contract, not ``page <
-    row_count``: the two diverge. Measured against the real app, a 21-option
-    list at 100x16 has ``page == 1 < row_count`` yet ``show_position`` is False —
-    the D1 collapse in ``_layout`` (:1663-1700) drops the position row to keep
-    the QUESTION line, and a thumb keyed on the raw ``page`` comparison would
-    then paint a scrollbar with no count beside it. The design's own invariant
-    (§6, §10) is that the thumb and the position row are one overflow fact in two
-    renderings, never one without the other, so this pins the thumb to
-    ``show_position``. If the coder keyed the thumb on ``page < row_count`` this
-    fails at the tight leg, which is the intended catch.
+    The one-for-one with ``show_position`` is the contract, not
+    ``len(line_list) < body_line_budget``: at a very tight height the D1 collapse
+    in ``_layout`` drops the position row to keep the QUESTION line, and a thumb
+    keyed on the raw line-overflow comparison would then paint a scrollbar with
+    no count beside it. The design's own invariant (§5, §10) is that the thumb
+    and the position row are one overflow fact in two renderings, never one
+    without the other, so this pins the thumb to ``show_position``.
 
-    Swept across a band that includes fitting sizes (tall terminals), windowing
-    sizes (the position row bought), and the collapse size (page short of the
-    list but the count dropped), so both directions of the iff are exercised.
+    RE-DERIVED to VISUAL LINES (design §8 amend): ``show_position`` is now
+    ``len(line_list) > body_line_budget``. The band below adds the reachable NEW
+    state the change introduces — a list that FITS as bare rows but OVERFLOWS
+    once every row carries its 2-line clamp, so descriptions are what make it
+    window. Both directions of the iff are exercised: fitting sizes (no thumb),
+    windowing sizes (thumb), and the collapse size (overflow but the count
+    dropped, so no thumb).
     """
     question = _many_options_question(21)
-    # (size, windows-with-count?) — derived from the real-app probes in §9-style
-    # measurement, re-asserted here rather than trusted.
     for size in ((100, 16), (100, 24), (100, 28), (100, 50), (120, 60)):
         app, card = await _real_app_card(size, [question])
         async with app.run_test(size=size) as pilot:
@@ -4960,8 +5047,8 @@ async def test_the_thumb_appears_only_when_the_list_windows() -> None:
             # is what the user sees).
             assert drawn == layout.show_position, (
                 size,
-                layout.page,
-                card.row_count,
+                layout.line_start_by_row[-1],
+                layout.body_line_budget,
                 layout.show_position,
                 "".join(_thumb_column(card)),
             )
@@ -4973,12 +5060,41 @@ async def test_the_thumb_appears_only_when_the_list_windows() -> None:
                     cell in (_THUMB_GLYPH, _TRACK_GLYPH) for cell in _thumb_column(card)
                 ), (size, "".join(_thumb_column(card)))
 
+    # The NEW reachable state the line-granular change introduces (design §8
+    # amend): a described list that FITS as bare rows but OVERFLOWS once every
+    # row carries its 2-line clamp — so DESCRIPTIONS are what make it window and
+    # paint the thumb. At 150x40 the 12-option paragraph list is 13 rows that fit
+    # as labels but ~37 visual lines with descriptions, well past the body.
+    app, card = await _real_app_card((150, 40), [_paragraph_options_question(12)])
+    async with app.run_test(size=(150, 40)) as pilot:
+        await _show(app, pilot, card)
+        layout = card._layout()
+        # Descriptions push the line list past the viewport, so it windows...
+        assert layout.line_start_by_row[-1] > layout.body_line_budget, (
+            "the described list should overflow the viewport",
+            layout.line_start_by_row[-1],
+            layout.body_line_budget,
+        )
+        # ...and the thumb appears in lockstep with that overflow decision.
+        assert layout.show_position, "the described list windows but shows no position row"
+        assert _thumb_is_drawn(card), (
+            "no thumb on the described-overflow frame",
+            _thumb_column(card),
+        )
+
 
 @pytest.mark.asyncio
 async def test_the_thumb_tracks_the_scroll_offset() -> None:
     """The thumb's position IS the window's position in the list: at the top of
     the list it sits at the top of the track, at the bottom it sits at the
     bottom, and it only ever moves down as the offset grows.
+
+    RE-DERIVED to VISUAL LINES (design §8): the thumb now spans
+    ``body_line_budget`` cells over ``len(line_list)`` total lines, and
+    ``_offset`` is a LINE offset. The arithmetic is unchanged
+    (``_scrollbar_thumb`` never cared about units); only the two arguments moved
+    rows→lines, so the cross-check is now
+    ``_scrollbar_thumb(len(line_list), body_line_budget)``.
 
     Pinned on the DRAWN thumb (`_thumb_span`), and cross-checked against
     ``_scrollbar_thumb`` so the render and the arithmetic cannot drift. Driven by
@@ -4992,21 +5108,22 @@ async def test_the_thumb_tracks_the_scroll_offset() -> None:
     async with app.run_test(size=size) as pilot:
         await _show(app, pilot, card)
         layout = card._layout()
-        assert layout.show_position, (size, layout.page, card.row_count)
-        page = layout.page
-        track = max(1, page)
+        assert layout.show_position, (size, layout.body_line_budget, card.row_count)
+        body = layout.body_line_budget
+        track = max(1, body)
 
         tops: list[int] = []
         # Walk the whole list top to bottom, sampling the thumb top and the
-        # offset at each step.
+        # LINE offset at each step.
         seen_offsets: list[int] = []
         for _ in range(card.row_count):
             top, length = _thumb_span(card)
             # The thumb is always drawn while the list windows (a `█` is present,
             # so `top` is never None here), and it agrees with the maths the
-            # design copied from usage_panel.
+            # design copied from usage_panel — now in visual lines.
             assert top is not None, (card._offset, "expected a drawn thumb")
-            expected_top, expected_len = card._scrollbar_thumb(card.row_count, page)
+            total = _line_list_len(card)
+            expected_top, expected_len = card._scrollbar_thumb(total, body)
             assert top == expected_top, (card._offset, top, expected_top)
             assert length == expected_len, (card._offset, length, expected_len)
             tops.append(top)
@@ -5017,14 +5134,14 @@ async def test_the_thumb_tracks_the_scroll_offset() -> None:
         # Top at 0 when the offset is 0; top at the track's far end
         # (`track - thumb`) when the offset is at its maximum.
         assert tops[0] == 0, tops
-        _, thumb_len = card._scrollbar_thumb(card.row_count, page)
-        max_offset = max(0, card.row_count - page)
         assert seen_offsets[0] == 0, seen_offsets
-        # The last sample where the offset reached its max pins the bottom.
-        assert max(seen_offsets) == max_offset, (seen_offsets, max_offset)
-        bottom_top = tops[seen_offsets.index(max(seen_offsets))]
+        # The last sample where the LINE offset reached its max pins the bottom.
+        max_offset = max(seen_offsets)
+        bottom_index = seen_offsets.index(max_offset)
+        _, thumb_len = card._scrollbar_thumb(_line_list_len(card), body)
+        bottom_top = tops[bottom_index]
         assert bottom_top == track - thumb_len, (bottom_top, track, thumb_len)
-        # Monotone non-decreasing: paging down never walks the thumb UP.
+        # Monotone non-decreasing: scrolling down never walks the thumb UP.
         assert tops == sorted(tops), tops
 
 
@@ -5054,22 +5171,29 @@ async def test_the_thumb_never_widens_the_card() -> None:
 
 @pytest.mark.asyncio
 async def test_page_down_and_up_move_a_page_and_clamp() -> None:
-    """``PageDown`` moves the cursor ``max(1, page - 1)`` rows and clamps at the
-    last row; ``PageUp`` mirrors it and clamps at 0. No wrap either way — unlike
-    the arrows, a page gesture that wrapped would read as the list resetting.
+    """``PageDown`` moves the cursor ``max(1, rows_per_body - 1)`` rows and clamps
+    at the last row; ``PageUp`` mirrors it and clamps at 0. No wrap either way —
+    unlike the arrows, a page gesture that wrapped would read as the list
+    resetting.
 
-    ``page - 1`` (not ``page``) keeps one row of context across the jump, which
-    is OMP's ``Math.max(1, bodyRows - 1)`` (ask-dialog.ts:702-708) and the step
-    the design specifies (§4.1). Driven through the real keymap so the bindings
-    themselves are pinned, not just ``action_page``.
+    RE-DERIVED to LINE units (design §8, §2.6): the step is no longer ``page - 1``
+    (``page`` is gone from ``_CardLayout``) but ``_rows_per_body(line_start_by_row,
+    body_line_budget) - 1`` — how many WHOLE option rows fit in one viewport
+    height. That is still OMP's ``Math.max(1, bodyRows - 1)``
+    (ask-dialog.ts:702-708), the "keep one row of context" step, now derived from
+    the line list instead of a stored row count. Driven through the real keymap so
+    the bindings themselves are pinned, not just ``action_page``.
+
+    The FIRST two steps are asserted exactly (the step is well-defined from the
+    top of the list); the clamps are asserted regardless of step size.
     """
     size = (100, 24)
     question = _many_options_question(21)
     app, card = await _real_app_card(size, [question])
     async with app.run_test(size=size) as pilot:
         await _show(app, pilot, card)
-        page = card._layout().page
-        step = max(1, page - 1)
+        layout = card._layout()
+        step = max(1, card._rows_per_body(layout.line_start_by_row, layout.body_line_budget) - 1)
         assert card.state.selected == 0, card.state.selected
 
         # One page down moves exactly one page-step.
@@ -5088,10 +5212,17 @@ async def test_page_down_and_up_move_a_page_and_clamp() -> None:
             await pilot.pause()
         assert card.state.selected == card.row_count - 1, card.state.selected
 
-        # One page up steps back by the same amount from the last row.
+        # One page up steps back by a page from the last row (the step there is
+        # re-derived from the current line list, not assumed equal to the top's).
+        bottom_layout = card._layout()
+        up_step = max(
+            1,
+            card._rows_per_body(bottom_layout.line_start_by_row, bottom_layout.body_line_budget)
+            - 1,
+        )
         await pilot.press("pageup")
         await pilot.pause()
-        assert card.state.selected == card.row_count - 1 - step, (card.state.selected, step)
+        assert card.state.selected == card.row_count - 1 - up_step, (card.state.selected, up_step)
 
         # Paging past the top CLAMPS on row 0 and does not wrap to the end.
         for _ in range(card.row_count):
@@ -5112,6 +5243,11 @@ async def test_paging_keeps_the_cursor_visible() -> None:
     Checked against the DRAWN window (`_window`) as well as the arithmetic, and
     checked after a mixed sequence of pages and arrows so the two movement paths
     cannot each be right alone while their composition drifts.
+
+    RE-DERIVED to LINE units (design §8): ``_window`` no longer takes a ``page``
+    argument — it returns the rows at least partially inside the line viewport
+    ``[_offset, _offset + body_line_budget)``. The invariant is unchanged: the
+    selected row is always among them.
     """
     size = (100, 24)
     question = _many_options_question(21)
@@ -5120,12 +5256,10 @@ async def test_paging_keeps_the_cursor_visible() -> None:
         await _show(app, pilot, card)
 
         def cursor_is_drawn() -> None:
-            page = card._layout().page
-            window = card._window(page)
+            window = card._window()
             assert card.state.selected in window, (
                 card.state.selected,
                 card._offset,
-                page,
                 window,
             )
 
@@ -5201,8 +5335,11 @@ async def test_the_wheel_scrolls_the_windowed_list() -> None:
         top_after, _ = _thumb_span(card)
         assert top_after is not None and top_after > top_before, (top_before, top_after)
         # The drawn thumb agrees with the maths the design copied from
-        # usage_panel at the offset the wheel left the window on.
-        expected_top, _ = card._scrollbar_thumb(card.row_count, card._layout().page)
+        # usage_panel at the offset the wheel left the window on — now in visual
+        # lines (design §8): _scrollbar_thumb(len(line_list), body_line_budget).
+        expected_top, _ = card._scrollbar_thumb(
+            _line_list_len(card), card._layout().body_line_budget
+        )
         assert top_after == expected_top, (top_after, expected_top)
 
 
@@ -5254,13 +5391,806 @@ async def test_the_approval_gate_is_byte_identical_with_the_thumb() -> None:
             # Byte-identical to the pre-thumb frame.
             assert _fingerprint(card) == golden, (size, _fingerprint(card))
             # And the gate does not window, so no thumb is drawn and no column is
-            # stolen from a consequence. Both halves: the plan says the list fits
-            # (`page == row_count`), and the paint carries no scrollbar glyph.
-            assert card._layout().page == card.row_count, (
+            # stolen from a consequence. RE-DERIVED to VISUAL LINES (design §8):
+            # the plan says the list fits (``len(line_list) <= body_line_budget``),
+            # and the paint carries no scrollbar glyph.
+            layout = card._layout()
+            assert layout.line_start_by_row[-1] <= layout.body_line_budget, (
                 size,
-                card._layout().page,
-                card.row_count,
+                layout.line_start_by_row[-1],
+                layout.body_line_budget,
             )
-            assert not card._layout().show_position, (size, card._layout())
+            assert not layout.show_position, (size, layout)
             assert not _thumb_is_drawn(card), (size, "".join(_thumb_column(card)))
             task.cancel()
+
+
+# ============================================================================
+# Line-granular windowing (docs/design/ask-line-granular-scroll.md)
+# ============================================================================
+#
+# The change switches the windowing unit from option ROWS to visual LINES so
+# descriptions and scroll COEXIST like oh-my-pi's ask dialog (design §0-§2). All
+# geometry below runs against the REAL ``OperatorApp`` (:func:`_real_app_card` +
+# :func:`_show`), never ``_AskHost``/``_BareHost``: the dockless hosts reserve 0
+# rows where the app reserves 5, so their card is one the app never draws (this
+# file's header; BLOCKER 2). Every assertion reads DRAWN INK — the composited
+# screen (:func:`_painted_rows`), the card's own text
+# (``render_lines_for_test``), and the ``_line_rows`` line→row map the hit-test
+# resolves through — rather than any internal windowing field, because a suite
+# was once green while a feature was dead by checking intentions instead of ink
+# (BLOCKER 1). That also makes these guards independent of whatever the coder
+# names the new line list / viewport budget.
+
+
+@pytest.mark.asyncio
+async def test_the_card_never_draws_more_lines_than_its_body_budget_in_lines(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C1 in VISUAL LINES — the single highest-risk regression of this change,
+    written first and green before the paint switches to lines (design §3.5,
+    §10).
+
+    The line viewport is new arithmetic: it draws ``min(body_line_budget,
+    len(line_list))`` lines into a FIXED body height. If that ever exceeds the
+    budget, Textual clips the widget's TAIL — and the tail is the footer, the one
+    statement of how to leave a card the turn is parked on (the R11/R15
+    clipped-footer bug). So this sweeps sizes, reveal states, and scroll offsets
+    and asserts, on the real app, two things at once:
+
+    - (a) the card lays out no more lines than ``_body_rows`` — its whole body
+      height, which bounds the plan's implied line count regardless of whether
+      the windowing unit is rows or lines (``_body_rows`` is unchanged by this
+      change, design §3.1), so this guard is valid on HEAD and after the switch;
+    - (b) the FOOTER row survives to the COMPOSITED screen at every step — the
+      only place the clip is observable, since an overflowing card still reports
+      the height it wanted (:func:`_footer_in_composite`).
+
+    The sweep includes windowing sizes (where the list is taller than the body
+    and the offset actually moves), the reveal on and off (``ctrl+e`` lifts the
+    selected row's cap, making it taller — the input most likely to overrun the
+    viewport), and several scroll offsets (arrowing deep into the list), because
+    the overrun the design fears is offset-dependent: a 3-line row entering the
+    bottom edge is where a row-granular card would clip.
+
+    Proven able to go RED by the sibling
+    :func:`test_a_body_that_overdraws_its_budget_clips_the_footer_and_is_caught`,
+    per AGENTS.md's "prove the test can still fail".
+    """
+    question = _paragraph_options_question(12)
+    for size in ((100, 30), (130, 30), (150, 40), (120, 24), (100, 20), (190, 50)):
+        # A fresh card per (depth, reveal) so the cursor starts at a known row
+        # without a `home` key (arrows WRAP here, so there is no in-place reset)
+        # and so a revealed row never leaks into the next depth's default view.
+        for depth in (0, 3, 6, 9, 12):
+            for reveal in (False, True):
+                app, card = await _real_app_card(size, [question])
+                async with app.run_test(size=size) as pilot:
+                    await _show(app, pilot, card)
+                    # Walk the cursor deep into the list so several scroll
+                    # offsets are exercised — the overrun the design fears is
+                    # offset-dependent (a tall row entering the bottom edge).
+                    for _ in range(depth):
+                        await pilot.press("down")
+                        await pilot.pause()
+                    if reveal and card._reveal_hint() == ("^e", "more"):
+                        await pilot.press("ctrl+e")
+                        await pilot.pause()
+                    layout = card._layout()
+                    budget = card._body_rows(len(card._question_lines(layout.width)))
+                    lines = card.render_lines_for_test()
+                    # (a) the body never lays out more than it was given.
+                    assert len(lines) <= budget, (
+                        size,
+                        card.state.selected,
+                        reveal,
+                        len(lines),
+                        budget,
+                    )
+                    # (b) the footer reached the terminal — nothing clipped it
+                    # off the tail.
+                    assert _footer_in_composite(app), (
+                        size,
+                        card.state.selected,
+                        reveal,
+                        "footer clipped off the composited screen",
+                        _painted_rows(app),
+                    )
+
+
+@pytest.mark.asyncio
+async def test_a_body_that_overdraws_its_budget_clips_the_footer_and_is_caught(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The red half of the C1 line-budget guard: reintroduce the overdraw at
+    runtime and confirm the guard's two observables actually catch it.
+
+    A green assertion that has never been shown to fail proves nothing (AGENTS.md
+    "prove the test can still fail"). Here the defect is the R11/R15 overrun: a
+    body that lays out MORE lines than ``_body_rows`` grants. Injected by
+    wrapping ``_card_text`` to append spurious body lines inside the option
+    region, so the drawn line count runs past the budget exactly as an
+    off-by-N viewport clip would.
+
+    Patched on the class, not in the widget file — the coder owns
+    ``ask_picker.py``, and the editable install maps ``local_operator`` to the
+    shared tree, so monkeypatch is the reliable isolation (the same reason the
+    D5 red-half guard patches the class, :4842).
+
+    Asserts the overrun is DETECTED (``len(lines) > budget``) at a windowing
+    size, which is what the green guard forbids. The footer half is covered by
+    the green guard's composite read; here the line-count half is the reachable,
+    deterministic proof.
+    """
+    size = (100, 20)
+    question = _paragraph_options_question(12)
+    app, card = await _real_app_card(size, [question])
+    async with app.run_test(size=size) as pilot:
+        await _show(app, pilot, card)
+
+        original = AskPickerScreen._card_text
+
+        def overdrawn(self: AskPickerScreen) -> Text:
+            text = original(self)
+            parts = text.split("\n")
+            rebuilt = Text()
+            for position, segment in enumerate(parts):
+                if position:
+                    rebuilt.append("\n")
+                rebuilt.append_text(segment)
+                # Inject extra body lines partway down the option region, the
+                # way a viewport that drew one line too many at each offset
+                # would push the total past the budget.
+                if position == 4:
+                    for _ in range(8):
+                        rebuilt.append("\n")
+                        rebuilt.append_text(segment)
+            return rebuilt
+
+        monkeypatch.setattr(AskPickerScreen, "_card_text", overdrawn)
+        card._repaint()
+        await pilot.pause()
+        await pilot.pause()
+
+        layout = card._layout()
+        budget = card._body_rows(len(card._question_lines(layout.width)))
+        lines = card.render_lines_for_test()
+        # The green guard's assertion, INVERTED: the overdraw is real and the
+        # budget check would have caught it.
+        assert len(lines) > budget, (
+            "overdraw did not exceed the budget; the C1 guard would not have caught it",
+            len(lines),
+            budget,
+        )
+
+
+@pytest.mark.asyncio
+async def test_descriptions_and_scroll_coexist() -> None:
+    """THE HEADLINE (design §8 add-1): at 150x40 with 12 paragraph-length options
+    the list WINDOWS *and* every fully-visible option row still shows its 2-line
+    clamped description, with a scroll thumb present — exactly the oh-my-pi frame
+    the user asked for.
+
+    FLIPPED FROM xfail(strict) TO A LIVE GUARD at `d24ed243` (design §9 step 2,
+    windowing by visual lines). On HEAD `18f9131f` this was UNREACHABLE and the
+    xfail proved it: measured with this same question at 150x40,
+    ``show_position=False``, ``description_rows={}``, ZERO description lines drawn
+    — the 12 options rendered as bare single-line labels and the card did not
+    even window. Now the card windows WITH the 2-line clamp on every fully
+    visible row (measured: 4 rows at their 2-line clamp plus a partial 5th, and a
+    thumb), which is the coexist frame the change exists to produce.
+
+    The claim, read entirely from DRAWN INK:
+
+    - the card WINDOWS — ``show_position`` is set and a thumb glyph is painted
+      (the list is taller than the body once every row carries its clamp);
+    - descriptions COEXIST with the scroll — every fully-visible option row (not
+      the free-text row, which has no description, and not the partial rows
+      clipped at the viewport edges) shows exactly ``DEFAULT_DESC_CAP`` (2)
+      description lines, read from the ``_line_rows`` map;
+    - and this is not a lucky single row: several option rows show their clamp at
+      once, which is the whole point — a scrolling list of described options.
+    - every visible option row's label is present and countable.
+
+    The exact clamp count is asserted as a floor (``>= 3`` rows at their 2-line
+    clamp) rather than an exact frame, so a future budget shift that changes how
+    many rows fit moves this test's coverage with it instead of pinning one
+    arithmetic. Proven able to go red by
+    :func:`test_a_dropped_description_column_breaks_coexist` (monkeypatch).
+    """
+    size = (150, 40)
+    app, card = await _real_app_card(size, [_paragraph_options_question(12)])
+    async with app.run_test(size=size) as pilot:
+        await _show(app, pilot, card)
+
+        # (1) the card windows: the position/thumb overflow signal is on.
+        assert card._layout().show_position, (
+            "the described list must be taller than the body and window",
+            _fingerprint(card),
+        )
+        assert _thumb_is_drawn(card), ("no scroll thumb painted", _thumb_column(card))
+
+        drawn = _distinct_rows_drawn(card)
+        desc_by_row = _desc_lines_by_row(card)
+
+        # The rows that show their full clamp: exclude the free-text row (no
+        # description) and the two edge rows (may be clipped mid-description).
+        option_rows = [row for row in drawn if row != card.other_row]
+        # The first and last drawn option rows can be partial at the viewport
+        # edges (design §2.3, clip-not-snap); the interior ones must be whole.
+        interior = option_rows[1:-1] if len(option_rows) >= 3 else option_rows
+
+        # (2) descriptions coexist with the scroll: every interior visible option
+        # row carries its 2-line clamp.
+        for row in interior:
+            assert desc_by_row.get(row, 0) == DEFAULT_DESC_CAP, (
+                row,
+                "a visible option row lost its 2-line clamp while the list scrolled",
+                desc_by_row,
+            )
+
+        # (3) not a single lucky row — several described rows are on screen at
+        # once, which is the coexist frame itself.
+        clamped = [row for row in option_rows if desc_by_row.get(row, 0) == DEFAULT_DESC_CAP]
+        assert len(clamped) >= 3, (
+            "descriptions and scroll do not visibly coexist",
+            desc_by_row,
+        )
+
+        # (4) the labels are all still there to count.
+        rendered = "\n".join(card.render_lines_for_test())
+        for row in option_rows:
+            assert f"Option {row} label" in rendered, (row, rendered)
+
+
+@pytest.mark.asyncio
+async def test_a_dropped_description_column_breaks_coexist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The red half of the coexist guard, per AGENTS.md's "prove the test can
+    still fail": reintroduce the pre-change behaviour (a windowed list drops all
+    descriptions) and confirm the coexist assertion catches it.
+
+    The exact defect the change removed is ``desc_rows == {}`` on a windowed
+    list. Reproduced at runtime by forcing ``_cap_for_row`` to 0 for every row,
+    so the line list carries labels only and no row draws its clamp — the
+    row-granular regime, restored. Patched on the class (the coder owns
+    ``ask_picker.py``; the editable install maps ``local_operator`` to the shared
+    tree, so monkeypatch is the reliable isolation).
+
+    Asserts the coexist claim's core — several rows at their 2-line clamp — is
+    now FALSE, which is what the live guard forbids.
+    """
+    size = (150, 40)
+    app, card = await _real_app_card(size, [_paragraph_options_question(12)])
+    async with app.run_test(size=size) as pilot:
+        await _show(app, pilot, card)
+
+        # Restore the row-granular regime: every row's description cap is 0.
+        monkeypatch.setattr(
+            AskPickerScreen,
+            "_cap_for_row",
+            lambda self, index, revealed, selected, cap: 0,
+        )
+        card._repaint()
+        await pilot.pause()
+        await pilot.pause()
+
+        desc_by_row = _desc_lines_by_row(card)
+        clamped = [
+            row
+            for row in _distinct_rows_drawn(card)
+            if row != card.other_row and desc_by_row.get(row, 0) == DEFAULT_DESC_CAP
+        ]
+        # The coexist guard's assertion, INVERTED: with the column dropped, no
+        # row carries its clamp, so the live guard would have failed here.
+        assert not clamped, (
+            "descriptions survived a dropped column; the coexist guard would not"
+            " have caught the regression",
+            desc_by_row,
+        )
+
+
+@pytest.mark.asyncio
+async def test_the_card_height_is_stable_across_selection_and_reveal() -> None:
+    """D3, the anti-reflow invariant (design §10 "reflow on arrow press",
+    §3.1, §4.2): the card is the SAME height whichever row the cursor is on and
+    whether or not ``ctrl+e`` is on. The list scrolls inside a rigid rectangle;
+    a taller (revealed) row changes which OTHER rows' lines are visible, never
+    the card's own height.
+
+    This holds on HEAD (the reveal is a constant-height block there) and MUST
+    still hold after the line-granular change (the height is fixed by
+    ``_body_rows``/``PROMPT_HEIGHT_SHARE`` and the reveal becomes an in-place
+    cap lift inside the fixed viewport). So it is a live guard now: if the coder
+    lets a taller selected row grow the CARD — the exact regression the block was
+    built to prevent, and the way the cap-lift could reintroduce it — the height
+    set below gains a second value and this fails.
+
+    Measured against the real app's own ``card.size.height`` (the drawn content
+    box), swept across every selection at each size, with the reveal exercised
+    wherever ``^e`` is offered.
+    """
+    reveal_exercised = False
+    for size in ((150, 40), (130, 30), (100, 30)):
+        default_heights: set[int] = set()
+        revealed_heights: set[int] = set()
+        for selection in range(13):
+            app, card = await _real_app_card(size, [_paragraph_options_question(12)])
+            async with app.run_test(size=size) as pilot:
+                await _show(app, pilot, card)
+                for _ in range(selection):
+                    await pilot.press("down")
+                    await pilot.pause()
+                default_heights.add(card.size.height)
+                if card._reveal_hint() == ("^e", "more"):
+                    await pilot.press("ctrl+e")
+                    await pilot.pause()
+                    revealed_heights.add(card.size.height)
+                    reveal_exercised = True
+        # One height across every selection: no reflow on an arrow press.
+        assert len(default_heights) == 1, (
+            size,
+            "card height changed with selection",
+            default_heights,
+        )
+        # And the reveal, where offered, does not change the card's height either
+        # — it is the same rigid rectangle, revealed or not.
+        assert revealed_heights <= default_heights, (
+            size,
+            "ctrl+e changed the card height",
+            default_heights,
+            revealed_heights,
+        )
+    # The sweep must actually have driven the reveal somewhere, or the
+    # revealed-height half is vacuous.
+    assert reveal_exercised, "no size offered ^e — re-derive this guard's fixture"
+
+
+@pytest.mark.asyncio
+async def test_the_selected_rows_whole_span_stays_visible() -> None:
+    """Design §8 add-2, §2.2: ``_move_to`` scrolls just far enough to keep the
+    ENTIRE line-span of the selected row on screen — its label AND its 2-line
+    clamp — never just its first line with the description clipped under the
+    cursor.
+
+    FLIPPED FROM xfail(strict) TO A LIVE GUARD at `d24ed243`. On HEAD `18f9131f`
+    a windowed row drew ZERO description lines, so the selected row's whole span
+    was a bare label and there was no clamp to keep visible; the xfail proved
+    that. Now ``_move_to`` (design §2.2, ``_scroll_offset_for_cursor``) keeps the
+    selected row's whole label+clamp span in the viewport as the list scrolls
+    under it.
+
+    Read from drawn ink: after every arrow press, at windowing sizes whose body
+    is tall enough to HOLD a 3-line row (``body_line_budget >= 3``), the selected
+    option row shows its label plus its full ``DEFAULT_DESC_CAP`` (2) description
+    lines (the ``_line_rows`` map counts them). The selected row is the one row
+    §2.2 guarantees is never partial — only non-selected rows are ever clipped at
+    the viewport edges.
+
+    The very tight sizes where the body cannot hold a whole row (§2.2's ``span >
+    body_lines`` label-anchor branch, e.g. 100x20 where ``body_line_budget`` is 1)
+    are deliberately excluded here and are the subject of the reveal cap-lift
+    guard's tall-row case; this guard is about the ordinary "keep the clamp
+    visible while scrolling" property, which is what the change delivers.
+    """
+    for size in ((120, 28), (130, 30), (150, 40)):
+        app, card = await _real_app_card(size, [_paragraph_options_question(12)])
+        async with app.run_test(size=size) as pilot:
+            await _show(app, pilot, card)
+            layout = card._layout()
+            assert layout.show_position, (size, "expected a windowing size")
+            # Only meaningful where the body can hold a whole 3-line row.
+            assert layout.body_line_budget >= 3, (size, layout.body_line_budget)
+
+            for _ in range(card.row_count):
+                selected = card.state.selected
+                desc_by_row = _desc_lines_by_row(card)
+                drawn = _distinct_rows_drawn(card)
+                # The selected row is drawn at all...
+                assert selected in drawn, (size, selected, drawn, "selected row off-screen")
+                # ...and its WHOLE span is visible: label + full 2-line clamp,
+                # unless it is the free-text row (no description).
+                if selected != card.other_row:
+                    assert desc_by_row.get(selected, 0) == DEFAULT_DESC_CAP, (
+                        size,
+                        selected,
+                        "selected row's clamp is clipped — whole span not kept visible",
+                        desc_by_row,
+                    )
+                await pilot.press("down")
+                await pilot.pause()
+
+
+@pytest.mark.asyncio
+async def test_a_partial_row_is_clipped_not_snapped() -> None:
+    """Design §8 add-3, §2.3: partial rows CLIP at the viewport edges, they do
+    not snap to row boundaries — that is what keeps the fixed body a rigid
+    rectangle and the footer on the tail.
+
+    FLIPPED FROM xfail(strict) TO A LIVE GUARD at `d24ed243`. On HEAD `18f9131f`
+    every windowed row was 1 visual line (descriptions dropped), so no row was
+    ever partially visible and the xfail proved the property was unreachable.
+    Now a described row is 3 lines and the viewport clips one mid-description.
+
+    The property, read from drawn ink at a windowing size where the boundary
+    necessarily falls mid-row (a body of N lines cannot land on a row boundary
+    when rows are a mix of 1- and 3-line spans):
+
+    - the footer survives to the composited screen (the clip did not eat it);
+    - some option row shows its FULL 2-line clamp (a described row is really
+      3 lines tall here), AND at least one NON-SELECTED option row shows
+      EXACTLY ONE description line — label plus one of its two clamp lines. A
+      single clamp line is the unambiguous signature of a mid-description clip:
+      snapping to row boundaries can only ever draw a row's whole clamp (2) or
+      none of it (0), never one of two, and HEAD draws 0 for every row. So a
+      lone "1" both proves clip-not-snap and cannot occur before the change.
+    - and the selected row is NOT the clipped one (§2.2 keeps its whole span).
+
+    On HEAD every windowed row draws 0 description lines, so no row shows its
+    full clamp and none shows a lone clamp line — both halves fail, the right
+    reason to xfail. When the change lands, described rows are 3 lines, the
+    viewport clips one mid-description, and this becomes a live guard.
+    """
+    # Sweep heights so at least one lands with the viewport boundary mid-row.
+    found_clip = False
+    for size in ((100, 22), (100, 24), (100, 26), (120, 24), (130, 26), (150, 30)):
+        app, card = await _real_app_card(size, [_paragraph_options_question(12)])
+        async with app.run_test(size=size) as pilot:
+            await _show(app, pilot, card)
+            if not card._layout().show_position:
+                continue
+            # Scroll into the middle of the list so both edges are mid-list.
+            for _ in range(4):
+                await pilot.press("down")
+                await pilot.pause()
+
+            assert _footer_in_composite(app), (size, "footer clipped", _painted_rows(app))
+
+            desc_by_row = _desc_lines_by_row(card)
+            drawn = _distinct_rows_drawn(card)
+            selected = card.state.selected
+            option_rows = [r for r in drawn if r != card.other_row]
+            full_clamp = [r for r in option_rows if desc_by_row.get(r, 0) == DEFAULT_DESC_CAP]
+            # A mid-clamp clip: exactly one description line drawn, on a
+            # non-selected row. Impossible under snapping and on HEAD.
+            mid_clip = [r for r in option_rows if r != selected and desc_by_row.get(r, 0) == 1]
+            if full_clamp and mid_clip:
+                found_clip = True
+                assert selected not in mid_clip, (size, selected, mid_clip)
+                break
+    assert found_clip, (
+        "no size produced a full-clamp row alongside a mid-clamp clipped row —"
+        " the viewport snapped to row boundaries instead of clipping mid-row"
+    )
+
+
+@pytest.mark.asyncio
+async def test_ctrl_e_lifts_the_row_cap_and_does_not_fight_the_scroll() -> None:
+    """Design §8 add-5, §4 — THE CRUX guard against the twice-seen "two
+    mechanisms fighting for one viewport" bug (AGENTS.md:595).
+
+    FLIPPED FROM xfail(strict) TO A LIVE GUARD at `d24ed243`. On HEAD `18f9131f`
+    ``ctrl+e`` drew a separate constant-height block whose lines mapped to
+    ``None`` (chrome), and at windowing sizes the reveal was not even offered;
+    the xfail proved the cap-lift did not yet exist.
+
+    Under line-granular windowing ``ctrl+e`` is re-resolved: it LIFTS the
+    selected row's per-row description cap from ``DEFAULT_DESC_CAP`` (2) to
+    ``REVEAL_MAX_ROWS`` (8) IN PLACE, inside the one scrolling line viewport —
+    NOT a separate constant-height block. The list scrolls to keep the now-taller
+    selected row visible, exactly as an arrow press does; there is nothing to
+    fight because there is one viewport and ``_move_to`` owns it.
+
+    Uses the long-description fixture (paragraphs that wrap to ~4 lines at 150
+    columns) rather than the shorter paragraph fixture: the cap-lift is only
+    OBSERVABLE where the wrap exceeds ``DEFAULT_DESC_CAP`` AND the body is tall
+    enough to draw the extra lines. At 150x40 the selected row grows from 2 to 4
+    drawn description lines (measured), which is the visible lift.
+
+    Asserted entirely on DRAWN INK, never on a flag (the block-vs-cap-lift
+    distinction is precisely a "check ink not intentions" case):
+
+    1. The revealed lines ARE the selected row's description — they map to the
+       SELECTED ROW in ``_line_rows``, not to ``None``. On HEAD the block lines
+       map to ``None`` (chrome), so this is the sharpest discriminator between
+       the two mechanisms.
+    2. There is NO separate constant-height block: no run of ``None``-mapped
+       body lines appears between the selected row's lines and the position/
+       footer chrome (``_reveal_block_lines`` returns empty).
+    3. The selected row GROWS: it draws more than ``DEFAULT_DESC_CAP`` and at
+       most ``REVEAL_MAX_ROWS`` description lines, and its span stays visible.
+    4. It does not fight the scroll: after ``ctrl+e``, arrowing DOWN twice
+       scrolls the list and the (new) cursor's whole span stays visible; turning
+       the reveal OFF shrinks the row back to the 2-line clamp and strands no
+       offset (the row is still drawn, the footer still present).
+    """
+    # A windowing size at which a described list wraps past the cap AND offers
+    # the reveal, so the lift draws visibly more lines.
+    size = (150, 40)
+    app, card = await _real_app_card(size, [_long_description_question()])
+    async with app.run_test(size=size) as pilot:
+        await _show(app, pilot, card)
+        assert card._layout().show_position, (size, "expected a windowing size")
+        assert card._reveal_hint() == ("^e", "more"), (size, "reveal not offered")
+        selected = card.state.selected
+
+        await pilot.press("ctrl+e")
+        await _until(pilot, lambda: card.state.revealed)
+
+        desc_by_row = _desc_lines_by_row(card)
+        # (3) the selected row grew in place, within the lifted cap.
+        grown = desc_by_row.get(selected, 0)
+        assert DEFAULT_DESC_CAP < grown <= REVEAL_MAX_ROWS, (
+            selected,
+            "revealed row did not grow in place within the lifted cap",
+            grown,
+            desc_by_row,
+        )
+        # (1) & (2) the revealed lines belong to the row, and there is no
+        # separate chrome block.
+        assert selected in _distinct_rows_drawn(card), (selected, "selected row off-screen")
+        assert not _reveal_block_lines(card), (
+            "a separate constant-height reveal block is still drawn — the cap-lift"
+            " must replace it, not sit beside it",
+            _reveal_block_lines(card),
+        )
+        assert _footer_in_composite(app), ("footer clipped by the reveal", _painted_rows(app))
+
+        # (4) it does not fight the scroll: arrow down and the list scrolls with
+        # the cursor, whose whole span stays visible.
+        await pilot.press("down")
+        await pilot.pause()
+        await pilot.press("down")
+        await pilot.pause()
+        assert card.state.selected in _distinct_rows_drawn(
+            card
+        ), "cursor left off-screen after reveal+scroll"
+        assert _footer_in_composite(app), "footer clipped after reveal+scroll"
+
+        # Turning it off shrinks the row back and strands no offset.
+        # (revealed is per-question; the cursor may have moved off the originally
+        # revealed row, so re-target the reveal to the current selection.)
+        if card.state.revealed:
+            await pilot.press("ctrl+e")
+            await _until(pilot, lambda: not card.state.revealed)
+        assert card.state.selected in _distinct_rows_drawn(
+            card
+        ), "cursor off-screen after un-reveal"
+        assert _footer_in_composite(app), "footer clipped after un-reveal"
+
+
+@pytest.mark.asyncio
+async def test_the_reveal_is_a_noop_on_the_approval_gate() -> None:
+    """Design §8 add-6, §4.4 — the safety case for the reveal redesign.
+
+    The approval gate never windows at its pinned sizes (6 lines < 13 budget,
+    measured), and every consequence is a single line, so ``ctrl+e`` has nothing
+    to uncover: ``_reveal_is_useful`` is False and the footer offers no ``^e``.
+    The design's cap-lift reveal must preserve this — lifting a cap on a
+    description that has nothing past line 1 is a no-op, so the revealed frame
+    is byte-identical to the un-revealed one.
+
+    This holds on HEAD (the reveal is refused over a seeded gate, so the frame
+    cannot change) and MUST still hold after the reveal is re-resolved as a
+    cap lift — a live guard now, so a cap-lift that started drawing something on
+    the gate fails here. Replaces the block-strip test's INTENT: instead of "the
+    block does not strip a consequence", the cap-lift's equivalent claim is
+    "the reveal draws nothing new at all".
+
+    Asserted on drawn ink over a seeded conversation (the dock-5 geometry the
+    engine really raises the gate in): ``^e`` is not offered, and forcing the
+    reveal state on regardless leaves ``_fingerprint`` unchanged.
+    """
+    for size in ((100, 30), (130, 30), (150, 40)):
+        app = _baseline_app()
+        async with app.run_test(size=size) as pilot:
+            await pilot.pause()
+            card, task = await _real_approval_card(app, pilot)
+            try:
+                # The gate does not offer the reveal: nothing to uncover.
+                assert card._reveal_hint() is None, (size, card._reveal_hint())
+                assert not card._reveal_is_useful(), (
+                    size,
+                    "gate should not find the reveal useful",
+                )
+
+                before = _fingerprint(card)
+                # Force the reveal state on directly and repaint: even asked to
+                # reveal, the gate's frame does not change, because no
+                # consequence has a second line to show.
+                card.state.revealed = True
+                card._repaint()
+                await _settle(app, pilot)
+                after = _fingerprint(card)
+                assert before == after, (
+                    size,
+                    "the reveal changed the approval gate frame",
+                    before,
+                    after,
+                )
+            finally:
+                task.cancel()
+
+
+async def _boot_approval_card(app, pilot):  # type: ignore[no-untyped-def]
+    """Raise the LIVE ``ApprovalPrompt`` in the BOOT layout (empty transcript).
+
+    Distinct from :func:`_real_approval_card`, which seeds a conversation first
+    (dock 5). Here NOTHING is seeded, so the app stays in the boot layout where
+    the dock reserves 8 rows and an approval can be the very first thing a
+    session shows — the tightest real budget the gate faces, and the one the
+    C3/D1 label-visibility safety property is measured against
+    (``ApprovalPrompt._labels_must_all_fit``). Returns ``(card, task)``; the
+    caller cancels ``task``.
+    """
+    from local_operator.tui.widgets.approval import ApprovalPrompt
+
+    app._set_approve_all(False)
+    app._approvals_default_auto = False
+    task = asyncio.create_task(app.request_tool_approval("bash", _APPROVAL_TARGET))
+    await _until(pilot, lambda: bool(app.screen.query(ApprovalPrompt)))
+    card = app.screen.query_one(ApprovalPrompt)
+    await _settle(app, pilot)
+    return card, task
+
+
+@pytest.mark.asyncio
+async def test_the_boot_approval_gate_never_scrolls_a_label_off() -> None:
+    """THE SAFETY GUARD (design amendment, ``ApprovalPrompt._labels_must_all_fit``).
+
+    The line-granular change introduced a real regression the original design
+    missed: windowing by visual lines could scroll an option's LABEL off the
+    frame. On the ``ask`` picker that is the intended OMP-style coexist. On the
+    APPROVAL gate it is a C3/D1 authorisation defect — a user who cannot SEE that
+    *Allow all* (or *Deny*) exists cannot weigh it, and the gate can be the FIRST
+    thing a session shows (boot layout, dock 8, the tightest budget). The fix is
+    ``_labels_must_all_fit``: True on ``ApprovalPrompt``, which drops the
+    description cap 2→1→0 to keep every label visible and windows only if even
+    the labels-only list overflows.
+
+    This pins the property directly, on DRAWN INK from the LIVE gate in the boot
+    layout at the three reported sizes: every one of *Allow*, *Deny*, *Allow all*
+    is named in the frame, and the gate does not window (no position row, no
+    thumb). It is a SAFETY property, so it is guarded independently of the
+    byte-identity goldens even though they overlap here.
+
+    Proven able to go red by
+    :func:`test_a_gate_without_the_labels_fit_hook_scrolls_a_label_off`, which
+    reintroduces the defect and catches a *Deny*/*Allow all* scrolled off screen.
+    """
+    for size in ((100, 30), (130, 30), (150, 40)):
+        app = _baseline_app()
+        async with app.run_test(size=size) as pilot:
+            await pilot.pause()
+            card, task = await _boot_approval_card(app, pilot)
+            try:
+                rendered = card.render_lines_for_test()
+                frame = "\n".join(rendered)
+                # Every authorisation label is on screen.
+                for label in ("y. Allow", "n. Deny", "A. Allow all"):
+                    assert label in frame, (
+                        size,
+                        f"the boot approval gate hid {label!r} — a label scrolled off an"
+                        " authorisation surface",
+                        rendered,
+                    )
+                # And the gate does not window at all: no scroll signal over an
+                # authorisation prompt.
+                assert not card._layout().show_position, (
+                    size,
+                    "the boot approval gate is windowing",
+                    rendered,
+                )
+                assert not _thumb_is_drawn(card), (size, "".join(_thumb_column(card)))
+            finally:
+                task.cancel()
+
+
+@pytest.mark.asyncio
+async def test_a_gate_without_the_labels_fit_hook_scrolls_a_label_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The red half of the boot-gate safety guard: prove the ``_labels_must_all_fit``
+    hook is LOAD-BEARING, not decorative.
+
+    Reintroduces the C3/D1 defect at runtime by turning the hook OFF and forcing
+    the gate's consequences to wrap (the real consequences are one line down to
+    44 columns, so at ordinary sizes the fix and its absence agree; the defect is
+    only reachable once a consequence takes more than one line). With the hook
+    off and 3-line consequences, the boot gate at a tight budget windows and
+    scrolls *Deny* and *Allow all* off the first frame — leaving only *Allow*, a
+    permissive option, in view. That is the exact failure the guard forbids.
+
+    Patched on the class (the coder owns ``approval.py``; the editable install
+    maps ``local_operator`` to the shared tree, so monkeypatch is the reliable
+    isolation).
+
+    Measured: at 100x30 boot, ``body_line_budget`` is 3; the cap-2 list is 9
+    lines, so without the hook the gate windows to ``showing 1–1 of 3`` and only
+    *Allow* is drawn.
+    """
+    from local_operator.tui.widgets.approval import ApprovalPrompt
+
+    # Turn the safety hook OFF and make each consequence three lines, so the
+    # authorisation list is taller than the boot budget.
+    monkeypatch.setattr(ApprovalPrompt, "_labels_must_all_fit", lambda self: False)
+    monkeypatch.setattr(
+        ApprovalPrompt,
+        "_description_lines",
+        lambda self, index, width: ["consequence one", "consequence two", "consequence three"],
+    )
+
+    size = (100, 30)
+    app = _baseline_app()
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        card, task = await _boot_approval_card(app, pilot)
+        try:
+            rendered = card.render_lines_for_test()
+            frame = "\n".join(rendered)
+            # The defect is real: the gate windows and at least one authorisation
+            # label is NOT on the frame. The safety guard's assertion, inverted.
+            assert card._layout().show_position, (
+                "without the hook the tall gate should window",
+                rendered,
+            )
+            hidden = [label for label in ("n. Deny", "A. Allow all") if label not in frame]
+            assert hidden, (
+                "no label scrolled off even with the hook disabled; the boot-gate"
+                " guard would not have caught the C3/D1 regression",
+                rendered,
+            )
+        finally:
+            task.cancel()
+
+
+@pytest.mark.asyncio
+async def test_a_windowed_reveal_still_reaches_the_whole_description() -> None:
+    """The reveal's core promise — reach the WHOLE description — must hold even
+    when the card windows (design §0/§4: the reveal exists to read the rest of a
+    clamped description, and a long list is exactly when it windows).
+
+    FLIPPED FROM xfail(strict) TO A LIVE GUARD at `7538f42b`. qa-linegran filed
+    this as a MAJOR defect in certification: on a WINDOWING card the description
+    wrap did not reserve the thumb's column, so every full-width line was
+    `…`-truncated behind the scrollbar and the reveal reached only 123/434 chars
+    of description[0] at 150x40 (vs 434/434 at the non-windowing 150x50). The fix
+    reserves the scrollbar column (``_CardLayout.content_width``, OMP's
+    ``renderRows(width-1)``): descriptions wrap into ``content_width - indent`` so
+    a windowed row is never cut by the bar. Re-measured: 150x40 now reaches
+    434/434 with the scrollbar cell stripped from the reading (the glyph is
+    chrome flush against complete content, :func:`_strip_scrollbar_cell`).
+
+    This is the regression guard for that fix: at a windowing size, after ctrl+e,
+    the selected row's full description is present in the frame.
+    """
+    size = (150, 40)
+    full = " ".join(_LONG_DESCRIPTIONS[0].split())
+    app, card = await _real_app_card(size, [_long_description_question()])
+    async with app.run_test(size=size) as pilot:
+        await _show(app, pilot, card)
+        # This size WINDOWS — the described list is taller than the body — which
+        # was the precondition for the defect.
+        assert card._layout().show_position, (size, "expected a windowing size")
+        assert _thumb_is_drawn(card), (size, "expected a thumb")
+        assert card._reveal_hint() == ("^e", "more"), (size, "reveal not offered")
+
+        await pilot.press("ctrl+e")
+        await _until(pilot, lambda: card.state.revealed)
+
+        joined = _collapsed_text(card.render_lines_for_test())
+        reached = _prefix_reach(card.render_lines_for_test(), full)
+        assert full in joined, (
+            size,
+            f"the reveal reached only {reached}/{len(full)} chars — the tail is"
+            " truncated behind the thumb column",
+        )
+        # And no line carries a spurious ellipsis: the fix removed the `…` that
+        # fired on full-width lines the bar was about to clip.
+        sel_lines = _selected_row_lines(card)
+        assert not any(_strip_scrollbar_cell(line).rstrip().endswith("…") for line in sel_lines), (
+            size,
+            "a revealed line still marks a cut the reserved column should have prevented",
+            sel_lines,
+        )
