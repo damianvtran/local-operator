@@ -494,3 +494,160 @@ async def test_pinned_route_stays_comparable(tmp_path: Path, episode_id: str) ->
     report = verify_bundle(root)
     assert report.outcome is not None
     assert report.outcome.comparable is True
+
+
+# ---------------------------------------------------------------------------
+# Managed context and guards
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_model_sees_each_prior_turn_with_its_batch(tmp_path: Path, episode_id: str) -> None:
+    """The runner hands the client the turns it took, each closed with the
+    batch that was executed on it, and the current turn still undecided."""
+
+    adapter = FakeAdapter(tmp_path, episode_id)
+    model = ScriptedModel(["step", "step", "finish"])
+    runner = _runner(tmp_path, episode_id, adapter=adapter, model=model)
+
+    await runner.run()
+
+    assert [len(history) for history in model.histories] == [1, 2, 3]
+    third = model.histories[2]
+    assert third[0].batch is not None and third[1].batch is not None
+    assert third[2].batch is None
+    assert third[0].observation.sequence == 0 and third[2].observation.sequence == 2
+    # The current observation is the last turn's.
+    assert third[2].observation is not None
+
+
+@pytest.mark.asyncio
+async def test_context_compaction_event_is_recorded_and_verifies(
+    tmp_path: Path, episode_id: str
+) -> None:
+    from local_operator.evaluation.evidence.models import (
+        ContextCompactionPayload,
+        ModelRequestPayload,
+    )
+
+    adapter = FakeAdapter(tmp_path, episode_id)
+    model = ScriptedModel(["step", "step", "finish"], compact_on=[1])
+    runner = _runner(tmp_path, episode_id, adapter=adapter, model=model)
+
+    outcome = await runner.run()
+
+    root = outcome.bundle_root
+    assert root is not None
+    report = verify_bundle(root)
+    assert report.valid, [issue.code for issue in report.issues]
+    assert report.counters is not None and report.counters.compactions == 1
+    kinds = _kinds(root)
+    index = kinds.index("context_compaction")
+    # Between the previous request's usage receipt and the next request.
+    assert kinds[index - 1] == "observation"
+    assert kinds[index - 2] == "environment_step"
+    assert kinds[index + 1] == "model_request"
+    assert kinds.count("context_compaction") == 1
+    compaction = payloads(root, ContextCompactionPayload)[0]
+    requests = payloads(root, ModelRequestPayload)
+    assert compaction.previous_request_id == requests[0].request_id
+    assert compaction.strategy == "context-full"
+    assert compaction.frames_dropped == 2
+    assert compaction.summary_artifact is not None
+    assert (root / "artifacts" / compaction.summary_artifact.sha256).read_bytes() == (
+        b"what happened so far"
+    )
+    assert all(request.prompt_cache_key == "lop-eval-test" for request in requests)
+
+
+@pytest.mark.asyncio
+async def test_guard_truncation_seals_scored_with_reason(tmp_path: Path, episode_id: str) -> None:
+    """A floundering guard stops the episode the way ``max_steps`` does: the
+    last step is truncated with the guard's code, the episode is SCORED on the
+    state reached, and the bundle verifies."""
+
+    from local_operator.evaluation.runner.guards import RepeatedBatchGuard
+
+    adapter = FakeAdapter(tmp_path, episode_id)
+    runner = EpisodeRunner(
+        build_spec(episode_id),
+        build_config(tmp_path, max_steps=10, guards=(RepeatedBatchGuard(repeats=2),)),
+        selector=selector(tmp_path),
+        model=ScriptedModel(["step"] * 8),
+        launch=lambda _: adapter,
+        rescue=_rescue_ok,
+    )
+
+    outcome = await runner.run()
+
+    assert outcome.status == "completed"
+    assert outcome.score is not None and outcome.score.status == "scored"
+    root = outcome.bundle_root
+    assert root is not None
+    report = verify_bundle(root)
+    assert report.valid, [issue.code for issue in report.issues]
+    steps = payloads(root, EnvironmentStepPayload)
+    assert len(steps) == 2
+    assert [step.truncated for step in steps] == [False, True]
+    assert [step.truncation_reason for step in steps] == [None, "repeated-batch"]
+
+
+@pytest.mark.asyncio
+async def test_max_steps_truncation_names_its_reason(tmp_path: Path, episode_id: str) -> None:
+    adapter = FakeAdapter(tmp_path, episode_id)
+    runner = _runner(
+        tmp_path, episode_id, adapter=adapter, model=ScriptedModel(["step"] * 6), max_steps=2
+    )
+
+    outcome = await runner.run()
+
+    root = outcome.bundle_root
+    assert root is not None
+    assert verify_bundle(root).valid
+    steps = payloads(root, EnvironmentStepPayload)
+    assert [step.truncation_reason for step in steps] == [None, "max-steps"]
+
+
+@pytest.mark.asyncio
+async def test_budget_cap_truncates_not_cancels(tmp_path: Path, episode_id: str) -> None:
+    """A reached provider-cost cap is enforced as a scored truncation, where
+    before it was only reported as an overrun after the fact."""
+
+    # ScriptedModel bills 7 micro-USD per cycle: two cycles reach the cap.
+    adapter = FakeAdapter(tmp_path, episode_id)
+    runner = EpisodeRunner(
+        build_spec(episode_id, caps={"provider_usd_micros": 14}),
+        build_config(tmp_path, max_steps=10),
+        selector=selector(tmp_path),
+        model=ScriptedModel(["step"] * 8),
+        launch=lambda _: adapter,
+        rescue=_rescue_ok,
+    )
+
+    outcome = await runner.run()
+
+    assert outcome.status == "completed"
+    assert outcome.score is not None and outcome.score.status == "scored"
+    root = outcome.bundle_root
+    assert root is not None
+    assert verify_bundle(root).valid
+    steps = payloads(root, EnvironmentStepPayload)
+    assert steps[-1].truncated is True
+    assert steps[-1].truncation_reason == "budget-cap"
+    assert len(steps) == 2
+
+
+@pytest.mark.asyncio
+async def test_ask_answer_rides_on_the_asking_turn(tmp_path: Path, episode_id: str) -> None:
+    adapter = FakeAdapter(tmp_path, episode_id)
+    model = ScriptedModel(["ask", "finish"])
+    runner = _runner(
+        tmp_path, episode_id, adapter=adapter, model=model, responder=RecordingResponder("go left")
+    )
+
+    await runner.run()
+
+    second = model.histories[1]
+    assert second[0].ask_answer == "go left"
+    assert second[0].batch is not None
+    assert second[1].ask_answer is None

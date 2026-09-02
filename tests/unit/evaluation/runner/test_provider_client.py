@@ -13,7 +13,10 @@ imported cleanly while being incapable of parsing any real reply.
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
+from pathlib import Path
 from typing import Any, AsyncIterator
 
 import pytest
@@ -26,6 +29,7 @@ from local_operator.evaluation.protocol import (
     Observation,
     TypeAction,
 )
+from local_operator.evaluation.runner.model import EpisodeTurn
 from local_operator.evaluation.runner.provider_client import (
     DecisionParseError,
     ProviderModelClient,
@@ -33,10 +37,12 @@ from local_operator.evaluation.runner.provider_client import (
     parse_decision,
 )
 from local_operator.harness.types import (
+    ImageContent,
     ModelSpec,
     StreamEndEvent,
     StreamTextDelta,
     StreamUsageEvent,
+    TextContent,
     Usage,
 )
 
@@ -128,9 +134,18 @@ class ScriptedStream:
         )
 
 
-def _client(stream: ScriptedStream) -> ProviderModelClient:
+def _client(stream: Any, tmp_path: Path | None = None, **overrides: Any) -> ProviderModelClient:
     spec = ModelSpec(provider="provider", model_id="model")
-    return ProviderModelClient(stream, route=ROUTE, model_spec=spec)
+    root = tmp_path if tmp_path is not None else Path("/nonexistent-artifact-root")
+    return ProviderModelClient(
+        stream, route=ROUTE, model_spec=spec, artifact_root=root, **overrides
+    )
+
+
+def _turns(*observations: Observation) -> list[EpisodeTurn]:
+    """A history whose last turn is the undecided current one."""
+
+    return [EpisodeTurn(observation=current) for current in observations]
 
 
 # ---------------------------------------------------------------------------
@@ -227,7 +242,7 @@ async def test_client_turns_a_streamed_reply_into_a_valid_action_batch() -> None
     current = observation()
     stream = ScriptedStream(finish_payload(current))
 
-    decision = await _client(stream).decide(current, [current])
+    decision = await _client(stream).decide(current, _turns(current))
 
     assert isinstance(decision.action_batch, ActionBatch)
     decision.action_batch.validate_for(current)
@@ -239,7 +254,7 @@ async def test_client_sends_the_system_prompt_as_a_cacheable_block() -> None:
     current = observation()
     stream = ScriptedStream(finish_payload(current))
 
-    await _client(stream).decide(current, [current])
+    await _client(stream).decide(current, _turns(current))
 
     request = stream.requests[0]
     assert len(request.system_blocks) == 1
@@ -256,7 +271,7 @@ async def test_system_prompt_states_the_schema_the_protocol_enforces() -> None:
     current = observation()
     stream = ScriptedStream(finish_payload(current))
 
-    await _client(stream).decide(current, [current])
+    await _client(stream).decide(current, _turns(current))
 
     prompt = stream.requests[0].system_blocks[0]
     # The discriminator key, and every finish literal the protocol accepts.
@@ -323,7 +338,7 @@ async def test_client_carries_provider_usage_and_cost_into_the_decision() -> Non
     )
     stream = ScriptedStream(finish_payload(current), usage=usage)
 
-    decision = await _client(stream).decide(current, [current])
+    decision = await _client(stream).decide(current, _turns(current))
 
     assert decision.usage.input_tokens == 1234
     assert decision.usage.output_tokens == 56
@@ -338,7 +353,7 @@ async def test_unreported_cost_is_zero_rather_than_a_guess() -> None:
     current = observation()
     stream = ScriptedStream(finish_payload(current), usage=Usage(input_tokens=5, output_tokens=5))
 
-    decision = await _client(stream).decide(current, [current])
+    decision = await _client(stream).decide(current, _turns(current))
 
     assert decision.cost_micros == 0
 
@@ -348,7 +363,7 @@ async def test_client_reports_the_provider_stop_reason() -> None:
     current = observation()
     stream = ScriptedStream(finish_payload(current), stop_reason="length")
 
-    decision = await _client(stream).decide(current, [current])
+    decision = await _client(stream).decide(current, _turns(current))
 
     assert decision.stop_reason == "length"
 
@@ -361,7 +376,7 @@ async def test_client_raises_on_an_unparseable_reply() -> None:
     stream = ScriptedStream("I'm afraid I can't do that.")
 
     with pytest.raises(DecisionParseError):
-        await _client(stream).decide(current, [current])
+        await _client(stream).decide(current, _turns(current))
 
 
 @pytest.mark.asyncio
@@ -371,7 +386,7 @@ async def test_client_carries_the_provider_request_id() -> None:
     current = observation()
     stream = ScriptedStream(finish_payload(current), provider_payload={"id": "chatcmpl-ABC123"})
 
-    decision = await _client(stream).decide(current, [current])
+    decision = await _client(stream).decide(current, _turns(current))
 
     assert decision.provider_request_id == "chatcmpl-ABC123"
 
@@ -383,7 +398,7 @@ async def test_an_over_length_provider_id_degrades_rather_than_truncating() -> N
     current = observation()
     stream = ScriptedStream(finish_payload(current), provider_payload={"id": "a" * 200})
 
-    decision = await _client(stream).decide(current, [current])
+    decision = await _client(stream).decide(current, _turns(current))
 
     assert decision.provider_request_id == "unknown"
 
@@ -395,6 +410,378 @@ async def test_an_unusable_provider_id_degrades_instead_of_failing() -> None:
     current = observation()
     stream = ScriptedStream(finish_payload(current), provider_payload={"id": "not a valid id!"})
 
-    decision = await _client(stream).decide(current, [current])
+    decision = await _client(stream).decide(current, _turns(current))
 
     assert decision.provider_request_id == "unknown"
+
+
+# ---------------------------------------------------------------------------
+# Managed context: append-only history, frames, rebuild cadence, cache key
+# ---------------------------------------------------------------------------
+
+
+def _png() -> bytes:
+    """A real 1x1 PNG so ``verify_artifact`` and any media check both accept it."""
+
+    from local_operator.compaction.png import encode_grayscale_png
+
+    return encode_grayscale_png(1, 1, b"\x00")
+
+
+def _publish_frame(root: Path, data: bytes, *, name: str | None = None) -> str:
+    digest = hashlib.sha256(data).hexdigest()
+    root.mkdir(parents=True, exist_ok=True)
+    (root / (name or digest)).write_bytes(data)
+    return digest
+
+
+def _framed_observation(root: Path, sequence: int, *, text: str = "a screen") -> Observation:
+    from local_operator.evaluation.protocol import (
+        ArtifactRef,
+        FrameGeometry,
+        FrameRef,
+        FrameSize,
+    )
+
+    data = _png()
+    digest = _publish_frame(root, data)
+    provisional = Observation(
+        task_id="task-1",
+        episode_id="episode-1",
+        sequence=sequence,
+        observation_id="provisional",
+        text=text,
+        frames=(
+            FrameRef(
+                frame_id=f"frame-{sequence}",
+                artifact=ArtifactRef(sha256=digest, media_type="image/png", byte_count=len(data)),
+                geometry=FrameGeometry(
+                    native=FrameSize(width=1, height=1),
+                    model_visible=FrameSize(width=1, height=1),
+                ),
+            ),
+        ),
+    )
+    return provisional.model_copy(update={"observation_id": observation_content_id(provisional)})
+
+
+class RecordingStream:
+    """A stream fn that answers every request with a scripted reply.
+
+    ``requests`` keeps every ``ChatRequest`` it saw, and the summary request
+    is told apart from a decision by its system block, so one fake serves both
+    the episode turns and the compaction summary the client buys.
+    """
+
+    def __init__(self, reply: Any, *, summary: str = "SUMMARY") -> None:
+        self.reply = reply
+        self.summary = summary
+        self.requests: list[Any] = []
+        self.summary_requests: list[Any] = []
+
+    def __call__(self, request: Any, signal: Any) -> AsyncIterator[Any]:
+        from local_operator.compaction.api import SUMMARIZATION_SYSTEM_PROMPT
+
+        if request.system_blocks and request.system_blocks[0] == SUMMARIZATION_SYSTEM_PROMPT:
+            self.summary_requests.append(request)
+            return self._events(self.summary, Usage(input_tokens=1000, output_tokens=50))
+        self.requests.append(request)
+        observation = request.messages[-1]
+        text = self.reply(observation) if callable(self.reply) else self.reply
+        return self._events(text, Usage(input_tokens=10, output_tokens=5, usd_cost=0.001))
+
+    async def _events(self, text: str, usage: Usage) -> AsyncIterator[Any]:
+        yield StreamTextDelta(delta=text)
+        yield StreamEndEvent(stop_reason="stop", usage=usage)
+
+
+def _shape(request: Any) -> list[tuple[str, tuple[str, ...]]]:
+    return [
+        (message.role, tuple(block.type for block in message.content))
+        for message in request.messages
+    ]
+
+
+async def _drive(
+    client: ProviderModelClient, root: Path, turns: int, *, text: str = "a screen"
+) -> list[EpisodeTurn]:
+    """Run ``turns`` decisions the way the runner does, closing each turn with
+    the batch the model chose before appending the next observation."""
+
+    history: list[EpisodeTurn] = []
+    for sequence in range(turns):
+        current = _framed_observation(root, sequence, text=f"{text} {sequence}")
+        history.append(EpisodeTurn(observation=current))
+        decision = await client.decide(current, tuple(history))
+        history[-1] = history[-1].model_copy(update={"batch": decision.action_batch})
+    return history
+
+
+def _wait_reply(observation_message: Any) -> str:
+    """Reply with a wait bound to whichever observation id the message names."""
+
+    text = observation_message.content[0].text
+    observation_id = next(
+        line.split(": ", 1)[1] for line in text.splitlines() if line.startswith("Observation ID: ")
+    )
+    return json.dumps(
+        {"actions": [{"kind": "wait", "observation_id": observation_id, "duration_ms": 1}]}
+    )
+
+
+@pytest.mark.asyncio
+async def test_provider_client_sends_frames_and_replays_its_own_batches(tmp_path: Path) -> None:
+    """The model sees a real screenshot and a real conversation, not one text
+    message per turn -- the released runner sent neither."""
+
+    stream = RecordingStream(_wait_reply)
+    client = _client(stream, tmp_path, keep_recent_frames=3, rebuild_every_frames=8)
+
+    await _drive(client, tmp_path, 3)
+
+    assert _shape(stream.requests[0]) == [("user", ("text", "image"))]
+    assert _shape(stream.requests[2]) == [
+        ("user", ("text", "image")),
+        ("assistant", ("text",)),
+        ("user", ("text", "image")),
+        ("assistant", ("text",)),
+        ("user", ("text", "image")),
+    ]
+    first_user = stream.requests[2].messages[0]
+    image = first_user.content[1]
+    assert isinstance(image, ImageContent)
+    assert base64.b64decode(image.data) == _png()
+    assert image.mime_type == "image/png"
+    # The assistant turns are the canonical batches the model itself returned.
+    replayed = json.loads(stream.requests[2].messages[1].content[0].text)
+    assert replayed["actions"][0]["kind"] == "wait"
+    assert "Task: task-1" in first_user.content[0].text
+    assert "Task:" not in stream.requests[2].messages[2].content[0].text
+
+
+@pytest.mark.asyncio
+async def test_provider_client_history_is_append_only_between_rebuilds(tmp_path: Path) -> None:
+    """Every request's prefix is the previous request's messages BY IDENTITY,
+    except at the one rebuild the frame budget schedules.
+
+    K=3 kept frames, F=8 slack: the rebuild fires on the first request whose
+    history holds more than 11 frames, i.e. turn index 11 (the 12th turn).
+    Every other turn appends without touching a sent message.
+    """
+
+    stream = RecordingStream(_wait_reply)
+    client = _client(stream, tmp_path, keep_recent_frames=3, rebuild_every_frames=8)
+
+    await _drive(client, tmp_path, 14)
+
+    rebuilds: list[int] = []
+    for index in range(1, len(stream.requests)):
+        previous = stream.requests[index - 1].messages
+        current = stream.requests[index].messages
+        prefix_identical = len(current) >= len(previous) and all(
+            a is b for a, b in zip(previous, current)
+        )
+        if not prefix_identical:
+            rebuilds.append(index)
+    assert rebuilds == [11], rebuilds
+    # After the rebuild only K frames survive and the rest carry the notice.
+    from local_operator.compaction.pruning import (
+        STALE_FRAME_NOTICE,
+        count_frame_messages,
+    )
+
+    rebuilt = stream.requests[11].messages
+    assert count_frame_messages(rebuilt) == 3
+    assert any(
+        isinstance(block, TextContent) and block.text == STALE_FRAME_NOTICE
+        for message in rebuilt
+        for block in message.content
+    )
+    # And the appends after it are again identity-preserving.
+    assert all(a is b for a, b in zip(stream.requests[12].messages, stream.requests[13].messages))
+    # The request-shape dump the PR body pastes.
+    shapes = [
+        (
+            index,
+            sum(1 for role, kinds in _shape(request) if "image" in kinds),
+            len(request.messages),
+        )
+        for index, request in enumerate(stream.requests)
+    ]
+    assert shapes[10] == (10, 11, 21)
+    assert shapes[11] == (11, 3, 23)
+
+
+@pytest.mark.asyncio
+async def test_provider_client_folds_summary_usage_into_the_decision(tmp_path: Path) -> None:
+    """The summary call is a billed provider call; the decision's usage is the
+    whole bill, and the compaction is reported so the runner declares it."""
+
+    from local_operator.compaction.thresholds import CompactionSettings
+
+    stream = RecordingStream(_wait_reply, summary="what happened so far")
+    # A tiny window so the token threshold trips on the third turn, forcing a
+    # context-full summary rather than only a frame prune.
+    spec = ModelSpec(provider="provider", model_id="model", context_window=600)
+    client = ProviderModelClient(
+        stream,
+        route=ROUTE,
+        model_spec=spec,
+        artifact_root=tmp_path,
+        # ``auto`` resolves to snapcompact for a vision model (the engine's
+        # rule, which makes no provider call); pin context-full because THIS
+        # test is about the billed summary call being folded in.
+        compaction=CompactionSettings(
+            strategy="context-full", keep_recent_tokens=60, threshold_percent=0.5
+        ),
+        keep_recent_frames=3,
+        rebuild_every_frames=8,
+    )
+
+    history: list[EpisodeTurn] = []
+    decisions = []
+    for sequence in range(6):
+        current = _framed_observation(tmp_path, sequence, text=f"screen {sequence} " + "x " * 60)
+        history.append(EpisodeTurn(observation=current))
+        decision = await client.decide(current, tuple(history))
+        decisions.append(decision)
+        history[-1] = history[-1].model_copy(update={"batch": decision.action_batch})
+
+    compacted = [d for d in decisions if d.compaction is not None]
+    assert compacted, "the token threshold never tripped"
+    first = compacted[0]
+    assert first.compaction is not None
+    assert first.compaction.strategy == "context-full"
+    assert first.compaction.summary_text == "what happened so far"
+    assert first.compaction.messages_after < first.compaction.messages_before
+    # 10 for the decision + 1000 for the summary; cost: the summary reported none.
+    assert first.usage.input_tokens == 1010
+    assert first.usage.output_tokens == 55
+    assert len(stream.summary_requests) >= 1
+    assert stream.summary_requests[0].replayable is True
+    uncompacted = decisions[0]
+    assert uncompacted.compaction is None and uncompacted.usage.input_tokens == 10
+    # The rebuilt prefix opens with the summary marker the session would render.
+    request_after = stream.requests[decisions.index(first)]
+    assert "<previous-context-summary>" in request_after.messages[0].content[0].text
+
+
+@pytest.mark.asyncio
+async def test_provider_client_records_the_cache_key_on_every_request(tmp_path: Path) -> None:
+    stream = RecordingStream(_wait_reply)
+    client = _client(stream, tmp_path, prompt_cache_key="lop-eval-episode-1")
+
+    history = await _drive(client, tmp_path, 2)
+    current = _framed_observation(tmp_path, 2)
+    history.append(EpisodeTurn(observation=current))
+    decision = await client.decide(current, tuple(history))
+
+    assert all(request.prompt_cache_key == "lop-eval-episode-1" for request in stream.requests)
+    assert decision.prompt_cache_key == "lop-eval-episode-1"
+    assert decision.context_tokens is not None and decision.context_tokens > 0
+
+
+@pytest.mark.asyncio
+async def test_provider_client_refuses_a_frame_whose_bytes_do_not_match(tmp_path: Path) -> None:
+    """A frame the runner would refuse to publish is one the model must not
+    see; the refusal surfaces as a provider failure rather than a blind turn."""
+
+    from local_operator.evaluation.adapters.supervisor import SupervisionError
+
+    current = _framed_observation(tmp_path, 0)
+    digest = current.frames[0].artifact.sha256
+    data = (tmp_path / digest).read_bytes()
+    (tmp_path / digest).write_bytes(data[:-1] + bytes([data[-1] ^ 0xFF]))
+    stream = RecordingStream(_wait_reply)
+
+    with pytest.raises(SupervisionError):
+        await _client(stream, tmp_path).decide(current, _turns(current))
+    assert stream.requests == []
+
+
+@pytest.mark.asyncio
+async def test_unchanged_observation_text_is_marked_not_repeated(tmp_path: Path) -> None:
+    # ``_drive`` suffixes the sequence into the text, so build the two
+    # literally-equal observations by hand.
+    fresh = RecordingStream(_wait_reply)
+    client = _client(fresh, tmp_path)
+    history: list[EpisodeTurn] = []
+    for sequence in range(2):
+        current = _framed_observation(tmp_path, sequence + 10, text="identical")
+        history.append(EpisodeTurn(observation=current))
+        decision = await client.decide(current, tuple(history))
+        history[-1] = history[-1].model_copy(update={"batch": decision.action_batch})
+
+    second_user = fresh.requests[1].messages[2].content[0].text
+    assert second_user.rstrip().endswith("(unchanged)")
+    assert "identical" in fresh.requests[1].messages[0].content[0].text
+
+
+@pytest.mark.asyncio
+async def test_ask_answer_reaches_the_model_with_the_next_observation(tmp_path: Path) -> None:
+    stream = RecordingStream(_wait_reply)
+    client = _client(stream, tmp_path)
+
+    first = _framed_observation(tmp_path, 0)
+    history = [EpisodeTurn(observation=first)]
+    decision = await client.decide(first, tuple(history))
+    history[-1] = history[-1].model_copy(
+        update={"batch": decision.action_batch, "ask_answer": "click the blue one"}
+    )
+    second = _framed_observation(tmp_path, 1)
+    history.append(EpisodeTurn(observation=second))
+    await client.decide(second, tuple(history))
+
+    assert (
+        "Answer from the user: click the blue one" in stream.requests[1].messages[2].content[0].text
+    )
+
+
+def test_create_provider_model_client_seals_fallback_and_mints_the_cache_key(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``forbid`` must switch the stream function's model fallback OFF through
+    the real ``retry.modelFallback`` setting, and the cache key must be the
+    per-episode session id."""
+
+    from local_operator.evaluation.runner import provider_client
+    from local_operator.model import configure
+
+    captured: dict[str, Any] = {}
+
+    def fake_create_stream_fn(
+        auth_store: Any, settings: Any, *, session_id: str | None = None
+    ) -> Any:
+        captured["settings"] = settings
+        captured["session_id"] = session_id
+        return object()
+
+    monkeypatch.setattr(configure, "create_stream_fn", fake_create_stream_fn)
+    client = provider_client.create_provider_model_client(
+        auth_store=object(),
+        settings={"retry": {"maxRetries": 2}},
+        route=ROUTE,
+        model_spec=ModelSpec(provider="provider", model_id="model"),
+        artifact_root=tmp_path,
+        episode_id="ep-42",
+        fallback_policy="forbid",
+    )
+
+    from local_operator.providers.failover import RetrySettings
+
+    resolved = RetrySettings.from_settings(captured["settings"])
+    assert resolved.model_fallback is False
+    assert resolved.max_retries == 2
+    assert captured["session_id"] == "lop-eval-ep-42"
+    assert client._prompt_cache_key == "lop-eval-ep-42"
+
+    provider_client.create_provider_model_client(
+        auth_store=object(),
+        settings=None,
+        route=ROUTE,
+        model_spec=ModelSpec(provider="provider", model_id="model"),
+        artifact_root=tmp_path,
+        episode_id="ep-43",
+        fallback_policy="allow_any",
+    )
+    assert RetrySettings.from_settings(captured["settings"]).model_fallback is True

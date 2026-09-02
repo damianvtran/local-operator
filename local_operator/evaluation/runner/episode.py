@@ -61,6 +61,7 @@ from local_operator.evaluation.evidence.models import (
     BudgetCommitmentPayload,
     CancelPayload,
     CleanupPayload,
+    ContextCompactionPayload,
     EnvironmentStepPayload,
     ErrorPayload,
     EvidenceManifest,
@@ -106,7 +107,13 @@ from local_operator.evaluation.receipts import (
     commit_budget,
     reconcile_budget,
 )
-from local_operator.evaluation.runner.model import EpisodeModelClient
+from local_operator.evaluation.runner.guards import (
+    EpisodeGuard,
+    GuardInput,
+    GuardVerdict,
+    default_guards,
+)
+from local_operator.evaluation.runner.model import EpisodeModelClient, EpisodeTurn
 from local_operator.evaluation.runner.responder import NullUserResponder, UserResponder
 
 # Cleanup kinds are a closed vocabulary in ``lifecycle.CleanupAction``. A worker
@@ -166,6 +173,14 @@ class EpisodeConfig:
     Timeouts are per adapter call. ``max_steps`` bounds the step loop; reaching
     it is a truncation, which is a normal scored outcome rather than a failure,
     so it must not be conflated with the budget's own limits.
+
+    ``guards`` are the episode guards (``runner.guards``) evaluated after every
+    executed step; a firing guard truncates exactly as ``max_steps`` does, so
+    the episode is still scored on the state it reached. ``None`` means
+    :func:`default_guards`; an empty tuple disables them. ``keep_recent_frames``
+    and ``max_cycle_cost_micros`` are recorded here so the manifest metadata can
+    carry the episode's context and cost policy; the model client is what reads
+    the frame policy.
     """
 
     evidence_root: Path
@@ -179,6 +194,9 @@ class EpisodeConfig:
     cleanup_timeout: float = 60.0
     ask_deadline_ms: int = 60_000
     handshake_timeout: float = 30.0
+    keep_recent_frames: int = 3
+    max_cycle_cost_micros: int | None = None
+    guards: tuple[EpisodeGuard, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -240,7 +258,16 @@ class EpisodeRunner:
         self._cleanup_plan: CleanupPlan | None = None
         self._lifecycle: EpisodeLifecycle | None = None
         self._rescue_required = False
-        self._transcript: list[Observation] = []
+        # Every turn taken, protocol-typed: the observation the model saw and,
+        # once known, the batch it chose. The model client renders these into
+        # whatever conversation it sends; the runner never does.
+        self._turns: list[EpisodeTurn] = []
+        self._guards: tuple[EpisodeGuard, ...] = (
+            default_guards(config) if config.guards is None else tuple(config.guards)
+        )
+        self._recent_costs: list[int] = []
+        self._truncation_reason: str | None = None
+        self._last_request_id: str | None = None
         self._usage_totals: dict[str, int] = {}
         self._provider_cost_micros = 0
         self._model_cycles = 0
@@ -527,7 +554,7 @@ class EpisodeRunner:
                 text_artifact=text_artifact,
             ),
         )
-        self._transcript.append(observation)
+        self._turns.append(EpisodeTurn(observation=observation))
 
     async def _step_loop(self) -> None:
         session = self._require_session()
@@ -540,6 +567,7 @@ class EpisodeRunner:
                 # as a new event, which is why it must be applied before the
                 # step is written -- see ``_execute_batch``.
                 self._truncated = True
+                self._truncation_reason = self._truncation_reason or "max-steps"
                 return
             decision = await self._decide(current)
             batch = decision.action_batch
@@ -564,7 +592,7 @@ class EpisodeRunner:
         """
 
         request_id = f"req-{self._model_cycles}-{uuid.uuid4().hex[:12]}"
-        message_count = len(self._transcript)
+        message_count = len(self._turns)
         # The provider is called BEFORE the request event is written, even
         # though the three events keep their required request/response/usage
         # order in the journal. A request written first would be left unclosed
@@ -572,11 +600,38 @@ class EpisodeRunner:
         # carry its response and usage before any terminal (verify.py:760) --
         # so recording it eagerly would make the failure path unsealable.
         try:
-            decision = await self._model.decide(observation, tuple(self._transcript))
+            decision = await self._model.decide(observation, tuple(self._turns))
         except _EvidenceFailure:
             raise
         except BaseException as error:
             raise _ProviderFailure(_diagnostic(error)) from error
+        if decision.compaction is not None:
+            # Declared BEFORE the request triple: the client rebuilt its
+            # context on the way to this request, so the compaction belongs
+            # between the previous request's usage receipt and this request
+            # (which is where the verifier requires it). The summary the model
+            # was handed is an artifact so a reader can see exactly what
+            # scaffolding the harness gave it.
+            record = decision.compaction
+            summary_artifact = None
+            if record.summary_text:
+                summary_artifact = self._publish(
+                    record.summary_text.encode("utf-8"), media_type="text/plain"
+                )
+            self._append(
+                "context_compaction",
+                ContextCompactionPayload(
+                    compaction_id=f"compaction-{self._model_cycles}-{uuid.uuid4().hex[:12]}",
+                    previous_request_id=self._last_request_id,
+                    strategy=record.strategy,
+                    tokens_before=record.tokens_before,
+                    tokens_after=record.tokens_after,
+                    frames_dropped=record.frames_dropped,
+                    messages_before=record.messages_before,
+                    messages_after=record.messages_after,
+                    summary_artifact=summary_artifact,
+                ),
+            )
         self._append(
             "model_request",
             ModelRequestPayload(
@@ -588,6 +643,8 @@ class EpisodeRunner:
                 input_tokens=decision.usage.input_tokens,
                 message_count=message_count,
                 tool_count=0,
+                prompt_cache_key=decision.prompt_cache_key,
+                context_tokens=decision.context_tokens,
             ),
         )
         self._append(
@@ -618,6 +675,8 @@ class EpisodeRunner:
             ),
         )
         self._model_cycles += 1
+        self._last_request_id = request_id
+        self._recent_costs.append(decision.cost_micros)
         self._served_routes.add(
             (
                 decision.route.provider_id,
@@ -674,7 +733,23 @@ class EpisodeRunner:
         self._append_batch(batch, terminal=None)
         self._steps_taken += 1
         self._guest_actions += len(batch.actions)
+        self._close_turn(batch)
         truncated = self._truncated or self._steps_taken >= self._config.max_steps
+        reason = self._truncation_reason
+        if truncated and reason is None:
+            reason = "max-steps"
+        if not truncated:
+            # Guards are evaluated HERE, on the post-step snapshot and before
+            # the step event is written, for the same reason ``max_steps`` is
+            # folded in on this line: truncation is recorded on the last step,
+            # and the verifier accepts a truncated last step as the terminal
+            # (verify.py's final-step rule). A guard checked at the loop head
+            # would fire one step too late, after a non-truncated step had
+            # already been written, leaving the bundle without a terminal.
+            verdict = self._evaluate_guards(result.observation)
+            if verdict is not None:
+                truncated = True
+                reason = verdict.code
         # The step event MUST precede its output observation: the verifier
         # expects the observation it just declared, and reversing the two makes
         # the observation unbound.
@@ -694,11 +769,55 @@ class EpisodeRunner:
                 # environment-initiated termination will be silently ignored.
                 terminated=False,
                 truncated=truncated,
+                truncation_reason=reason if truncated else None,
             ),
         )
         self._truncated = truncated
+        self._truncation_reason = reason if truncated else None
         self._last_step_terminated = truncated
         self._record_observation(result.observation)
+
+    def _close_turn(self, batch: ActionBatch, *, ask_answer: str | None = None) -> None:
+        """Attach the batch just executed to the turn it was decided on.
+
+        The batch is unknown when the turn's observation is recorded, so the
+        turn is completed here, before the next observation is appended; the
+        model client relies on seeing the batch on turn ``i`` when it renders
+        turn ``i+1``.
+        """
+        if not self._turns:
+            return
+        last = self._turns[-1]
+        update: dict[str, Any] = {"batch": batch}
+        if ask_answer is not None:
+            update["ask_answer"] = ask_answer
+        self._turns[-1] = last.model_copy(update=update)
+
+    def _evaluate_guards(self, latest: Observation) -> GuardVerdict | None:
+        """The first ``truncate`` verdict over the post-step snapshot, if any.
+
+        ``latest`` is the observation the step just produced; it is included
+        as an undecided turn so a frame-comparison guard sees the screen the
+        last action left behind, not only the screens that were acted on.
+        """
+        if not self._guards:
+            return None
+        recent = (*self._turns[-16:], EpisodeTurn(observation=latest))
+        snapshot = GuardInput(
+            steps_taken=self._steps_taken,
+            model_cycles=self._model_cycles,
+            provider_cost_micros=self._provider_cost_micros,
+            elapsed_ms=max(0, _now_ms() - self._started_ms),
+            usage_totals=dict(self._usage_totals),
+            recent_turns=recent,
+            recent_costs_micros=tuple(self._recent_costs[-32:]),
+            budget=self._spec.budget,
+        )
+        for guard in self._guards:
+            verdict = guard.evaluate(snapshot)
+            if verdict.kind == "truncate":
+                return verdict
+        return None
 
     async def _run_ask(self, batch: ActionBatch) -> None:
         """Answer an ask, then execute the ask batch like any other.
@@ -745,6 +864,10 @@ class EpisodeRunner:
         )
         self._last_exchange_id = exchange_id
         self._simulator_turns += 1
+        # The answer rides on the asking turn so the model client can deliver
+        # it with the observation that follows; ``_execute_batch`` then closes
+        # the turn with the batch itself.
+        self._close_turn(batch, ask_answer=answer)
         # The ask batch is then executed like any other batch: a lone
         # AskUserAction is a legal batch, and executing it is what produces the
         # observation carrying the answer's effect, which the model sees next.
