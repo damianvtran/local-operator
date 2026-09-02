@@ -112,6 +112,26 @@ class CompactionSettings(BaseModel):
     mid_turn_enabled: bool = Field(
         default=True, description="Allow threshold compaction at safe tool-loop boundaries."
     )
+    # ``None`` — not 0 — is the ordinary-session default, and the distinction
+    # is the whole feature. A chat session's images are attachments the user
+    # pasted: each one is distinct evidence and there is no "newer view of the
+    # same thing" to supersede it, so pruning them would throw away content.
+    # A screen-driving surface (the evaluation runner, a browser-driving
+    # session) sees the SAME surface again every turn, and there the old
+    # frames are dead weight: the old pilot measured 3 visible frames as the
+    # only configuration that scored above zero, and every-frame-kept as 0.0
+    # at $262. So the knob is opt-in per surface, and ``None`` means the frame
+    # prune is not even consulted — ``run_compaction_pass`` with the defaults
+    # is byte-identical to a pass without it, which a test pins.
+    keep_recent_frames: int | None = Field(
+        default=None,
+        description=(
+            "Screenshots kept verbatim across a compaction pass; older ones are"
+            " replaced by a short notice. None = never prune frames (ordinary"
+            " sessions, where images are distinct attachments). Screen-driving"
+            " surfaces opt in with a small count."
+        ),
+    )
 
     # --- Speculative compaction advisor (BETA, off by default) -------------
     #

@@ -37,15 +37,18 @@ from __future__ import annotations
 
 from typing import Any, Sequence
 
-from local_operator.harness.types import Message, TextContent
+from local_operator.harness.types import Content, ImageContent, Message, TextContent
 
 from .tokens import estimate_tokens, invalidate_message_cache
 
 __all__ = [
     "MIN_PRUNE_TOKENS",
+    "STALE_FRAME_NOTICE",
     "SUPERSEDED_NOTICE",
     "USELESS_NOTICE",
     "compute_suffix_tokens",
+    "count_frame_messages",
+    "prune_stale_frames",
     "prune_tool_outputs",
 ]
 
@@ -59,6 +62,96 @@ SUPERSEDED_NOTICE = "[Superseded by a newer result for the same resource]"
 
 #: Exact placeholder written over an elided useless tool result.
 USELESS_NOTICE = "[Uneventful result elided]"
+
+#: Exact placeholder written over a screenshot that a newer view of the same
+#: surface has superseded (see :func:`prune_stale_frames`).
+STALE_FRAME_NOTICE = "[screenshot omitted: superseded by a more recent view of the same surface]"
+
+
+def count_frame_messages(messages: Sequence[Message]) -> int:
+    """How many messages still carry at least one image block.
+
+    This is the unit :func:`prune_stale_frames` keeps and the unit a
+    screen-driving caller budgets its rebuild cadence in (one observation =
+    one message = one frame in the runner's history), so both count the same
+    thing.
+    """
+    return sum(1 for message in messages if _has_frame(message))
+
+
+def _has_frame(message: Message) -> bool:
+    return any(isinstance(block, ImageContent) for block in message.content)
+
+
+def _without_frames(content: Sequence[Content]) -> list[Content]:
+    """``content`` with every image replaced by ONE notice.
+
+    Consecutive images collapse into a single notice rather than one each: a
+    message that carried three views of a surface reads as "a screenshot was
+    here", not as three lines of the same boilerplate, and the point of the
+    prune is to spend fewer tokens on the past, not to spend them on notices.
+    """
+    out: list[Content] = []
+    for block in content:
+        if isinstance(block, ImageContent):
+            if out and isinstance(out[-1], TextContent) and out[-1].text == STALE_FRAME_NOTICE:
+                continue
+            out.append(TextContent(text=STALE_FRAME_NOTICE))
+        else:
+            out.append(block)
+    return out
+
+
+def prune_stale_frames(
+    messages: Sequence[Message], *, keep_recent_frames: int
+) -> tuple[list[Message], int]:
+    """Replace every image except those in the newest ``keep_recent_frames``
+    frame-bearing messages with :data:`STALE_FRAME_NOTICE`.
+
+    Returns ``(messages, frames_dropped)`` where ``messages`` is a NEW list:
+    messages that lose a frame are COPIED (``model_copy``) with the replaced
+    content, and every other message is reused by identity. That split is the
+    contract a prompt-cache-aware caller relies on. The session's tool-output
+    prune blanks in place because the session owns its messages outright; the
+    episode runner's history is a sent prefix whose identity IS the proof that
+    a message was not rewritten, so it must be able to tell "untouched" from
+    "rewritten" by ``is``. Copying the victims and reusing the rest gives it
+    that, and gives the session (which does not care) the same result.
+
+    No message is ever removed, so the user/assistant alternation and every
+    tool pairing survive. ``frames_dropped`` counts image blocks replaced, not
+    messages touched. ``keep_recent_frames`` counts frame-bearing MESSAGES
+    from the end, so a message with two frames costs one slot.
+
+    There is deliberately no cadence knob here: WHEN to prune is the caller's
+    decision (the runner rebuilds its whole prefix on a frame budget, the
+    session would do it inside a compaction pass) and encoding a frontier
+    here would make two callers disagree about it.
+    """
+    if keep_recent_frames < 0:
+        raise ValueError("keep_recent_frames must be non-negative")
+    # Walk from the end: the newest ``keep_recent_frames`` frame-bearing
+    # messages are kept verbatim, everything older loses its images.
+    remaining = keep_recent_frames
+    out: list[Message] = []
+    dropped = 0
+    for message in reversed(messages):
+        if not _has_frame(message):
+            out.append(message)
+            continue
+        if remaining > 0:
+            remaining -= 1
+            out.append(message)
+            continue
+        dropped += sum(1 for block in message.content if isinstance(block, ImageContent))
+        # A copy rather than in-place mutation, so the caller's identity test
+        # (see the docstring) holds; ``model_copy`` keeps the id, which is
+        # what the token-estimate cache is keyed on, so invalidate it.
+        replaced = message.model_copy(update={"content": _without_frames(message.content)})
+        invalidate_message_cache(replaced)
+        out.append(replaced)
+    out.reverse()
+    return out, dropped
 
 
 def compute_suffix_tokens(messages: Sequence[Message]) -> list[int]:

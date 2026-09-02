@@ -56,6 +56,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, TypeGuard
 
+from local_operator.compaction.marker import (
+    build_compaction_marker,
+    render_compaction_marker,
+    replayed_user_message,
+)
 from local_operator.compaction.tokens import IMAGE_TOKEN_ESTIMATE, approx_text_tokens
 from local_operator.harness.approval import ApprovalGate
 from local_operator.harness.comms import HUB_MESSAGE_TYPE, SubagentComms
@@ -882,18 +887,11 @@ def _stamped_todo_fingerprint(details: Mapping[str, Any]) -> tuple[tuple[str, st
     )
 
 
-def _replayed_user_message(content: list[Content], entry_id: str | None) -> Message:
-    """Build a replayed user message, preserving its transcript entry id.
-
-    A message rendered from a persisted entry MUST keep that entry's id:
-    ``first_kept_entry_id`` references it, so minting a fresh uuid here would
-    make replay unable to find the cut point. A message with no originating
-    entry keeps the model's default id.
-    """
-    message = Message(role="user", content=content)
-    if entry_id:
-        message.id = entry_id
-    return message
+# Relocated to ``compaction.marker`` so hosts that must not import the session
+# (the evaluation runner's ``run_compaction_pass``) render a marker exactly as
+# this session does. The private names stay bound here because they are the
+# session's seam and existing tests reach them through this module.
+_replayed_user_message = replayed_user_message
 
 
 #: Stands in for an image the provider refused, so the turn that follows it
@@ -1316,66 +1314,7 @@ def _last_reported_usage(usages: Sequence[Usage | None]) -> Usage | None:
     return None
 
 
-def _render_compaction_marker(marker: CustomMessage, entry_id: str | None = None) -> Message:
-    """Render one compaction marker into an LLM-visible message. ``entry_id``
-    (the marker's transcript entry id) rides onto the rendered message.
-
-    Snapcompact archives replay via ``history_blocks`` (lazy import; any
-    failure degrades to the plain-text summary so a malformed archive never
-    breaks the turn).
-    """
-    summary = marker.details.get("summary", "")
-    preserve = marker.details.get("preserve_data") or {}
-    archive_payload = preserve.get("snapcompact")
-    if archive_payload:
-        try:
-            from local_operator.compaction import snapcompact
-
-            archive = snapcompact.Archive.model_validate(archive_payload)
-            content: list[TextContent | ImageContent] = []
-            for block in snapcompact.history_blocks(archive):
-                if block["kind"] == "text":
-                    content.append(TextContent(text=block["text"]))
-                elif block["kind"] == "images":
-                    for frame_b64 in block["frames"]:
-                        content.append(ImageContent(data=frame_b64, mime_type="image/png"))
-            if content:
-                return _replayed_user_message(content, entry_id)
-        except Exception:
-            logger.warning("snapcompact replay failed; falling back to text summary", exc_info=True)
-    # A snapcompact summary is reading instructions for the frames, not a
-    # digest of the history — falling back to it ALONE would replay a caption
-    # describing images that are not there while the real content vanished.
-    # The archive's text edges are plain strings in the same payload and
-    # survive whatever made the frame list unrevivable, so salvage them: they
-    # are the newest/oldest slices of the actual transcript, which is strictly
-    # more useful than any caption.
-    salvage = ""
-    if isinstance(archive_payload, dict):
-        head = archive_payload.get("text_head")
-        tail = archive_payload.get("text_tail")
-        edges = [edge for edge in (head, tail) if isinstance(edge, str) and edge.strip()]
-        if edges:
-            joined = "\n[...]\n".join(edges)
-            # The summary above may describe pixel-font frames; none are in
-            # this message, and a caption describing absent images is a claim
-            # the model would waste attention reconciling. Say so explicitly.
-            salvage = (
-                "\n[note: the archive's image frames could not be replayed here; "
-                "the plain-text edges below are what survives]"
-                f"\n<archived-transcript-edges>\n{joined}\n</archived-transcript-edges>"
-            )
-    return _replayed_user_message(
-        [
-            TextContent(
-                text="<previous-context-summary>\n"
-                f"{summary}\n"
-                "</previous-context-summary>"
-                f"{salvage}"
-            )
-        ],
-        entry_id,
-    )
+_render_compaction_marker = render_compaction_marker
 
 
 class Session:
@@ -6596,14 +6535,7 @@ class Session:
                 preserve_data=preserve_data,
                 preserved_user_turns=preserved_user_turns,
             )
-            marker_details: dict[str, Any] = {"summary": summary}
-            if preserve_data is not None:
-                marker_details["preserve_data"] = preserve_data
-            marker = CustomMessage(
-                custom_type="compaction_summary",
-                attribution="system",
-                details=marker_details,
-            )
+            marker = build_compaction_marker(summary, preserve_data)
             # Rebuild the verbatim user turns as real user messages, reusing
             # each turn's original id so the live context and a resumed
             # ``build_llm_history`` (which re-injects the SAME payload) stay
