@@ -7,6 +7,7 @@ httpx transport.
 
 from __future__ import annotations
 
+import dataclasses
 import types
 from collections.abc import Iterator
 from typing import Any
@@ -15,7 +16,8 @@ import httpx
 import pytest
 
 from local_operator.harness.types import ModelSpec
-from local_operator.providers.controller import ProviderController
+from local_operator.providers.controller import PICKER_TTL_S, ProviderController
+from local_operator.providers.registry import get_provider_definition
 from local_operator.providers.usage import UsageAmount, UsageLimit, UsageReport
 from local_operator.providers.usage_cache import (
     USAGE_ACCOUNT_MAX_FAILURES,
@@ -1199,3 +1201,131 @@ class TestPerAccountLastKnown:
                 "damianvtran@gmail.com",
             }
         )
+
+
+# -- credential-change invalidation (the Fable 5.1 report) -------------------
+
+
+def _spy_available_models(monkeypatch, *, live: dict[str, list[str]] | None = None):
+    """Record every ``available_models`` call and the TTL it was given.
+
+    Returns the call log. ``live`` names the model ids a provider answers with;
+    anything absent answers as an unauthenticated provider, which is what the
+    registry's two dozen unconfigured entries look like in a real run.
+    """
+    from local_operator.model.discovery import DiscoveredModel
+
+    calls: list[tuple[str, float | None]] = []
+    live = live or {}
+
+    def fake(provider_id: str, **kwargs: Any):
+        calls.append((provider_id, kwargs.get("ttl_s")))
+        ids = live.get(provider_id)
+        if ids is None:
+            return [], "unauthenticated"
+        return [DiscoveredModel(id=model_id, name=model_id) for model_id in ids], "ok"
+
+    monkeypatch.setattr("local_operator.providers.controller.available_models", fake)
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_logging_in_drops_the_cached_listing(controller, store, monkeypatch) -> None:
+    """Re-authing is what a user does when a model is missing, and before this it
+    provably could not help: the credential row was written and the listing cache
+    -- the thing actually hiding the model -- was left alone for the rest of its
+    TTL.
+
+    The picker's own TTL (``PICKER_TTL_S``) bounds how long a stale list can
+    survive an idle session; this bounds how long it can survive the action the
+    user takes when they notice.
+    """
+    dropped: list[str] = []
+    monkeypatch.setattr(
+        "local_operator.providers.controller.invalidate_listing",
+        lambda provider_id: dropped.append(provider_id) or 1,
+    )
+
+    async def fake_login(_callbacks):
+        return {"access_token": "t", "refresh_token": "r", "email": "you@example.com"}
+
+    # ProviderDefinition is a frozen dataclass, so the login is swapped by
+    # replacing the definition the controller resolves rather than the field.
+    definition = controller.provider("anthropic")
+    assert definition is not None
+    monkeypatch.setattr(
+        "local_operator.providers.controller.get_provider_definition",
+        lambda provider_id: (
+            dataclasses.replace(definition, login=fake_login)
+            if provider_id == "anthropic"
+            else get_provider_definition(provider_id)
+        ),
+    )
+
+    await controller.login("anthropic")
+
+    assert dropped == ["anthropic"]
+
+
+@pytest.mark.asyncio
+async def test_an_api_key_login_also_drops_the_cached_listing(
+    controller, store, monkeypatch
+) -> None:
+    """The paste-a-key path stores a credential exactly as the OAuth path does, and
+    a key for a different account lists a different catalogue."""
+    dropped: list[str] = []
+    monkeypatch.setattr(
+        "local_operator.providers.controller.invalidate_listing",
+        lambda provider_id: dropped.append(provider_id) or 1,
+    )
+
+    async def fake_login(_callbacks):
+        return "sk-ant-pasted"
+
+    definition = controller.provider("anthropic")
+    assert definition is not None
+    monkeypatch.setattr(
+        "local_operator.providers.controller.get_provider_definition",
+        lambda provider_id: (
+            dataclasses.replace(definition, login=fake_login)
+            if provider_id == "anthropic"
+            else get_provider_definition(provider_id)
+        ),
+    )
+
+    await controller.login("anthropic")
+
+    assert dropped == ["anthropic"]
+
+
+@pytest.mark.asyncio
+async def test_logging_out_clears_the_listing_the_next_credential_must_not_inherit(
+    controller, store, monkeypatch
+) -> None:
+    """A catalogue fetched under the credential just removed must not decide what
+    the next account can select."""
+    dropped: list[str] = []
+    monkeypatch.setattr(
+        "local_operator.providers.controller.invalidate_listing",
+        lambda provider_id: dropped.append(provider_id) or 1,
+    )
+    store.upsert_credential("anthropic", {"key": "sk-ant", "type": "api_key"})
+
+    await controller.logout("anthropic")
+
+    assert "anthropic" in dropped
+
+
+@pytest.mark.asyncio
+async def test_the_picker_ttl_is_the_only_ttl_override(controller, store, monkeypatch) -> None:
+    """``live_catalogue`` passes the caller's TTL through untouched and adds none of
+    its own, so ``PICKER_TTL_S`` remains the single statement of picker freshness."""
+    store.upsert_credential("anthropic", {"key": "sk-ant", "type": "api_key"})
+    calls = _spy_available_models(monkeypatch, live={"anthropic": ["claude-opus-5"]})
+
+    await controller.live_catalogue()
+    assert [ttl for _, ttl in calls if ttl is not None] == [], "no override by default"
+
+    calls.clear()
+    await controller.live_catalogue(ttl_s=PICKER_TTL_S)
+    assert {ttl for _, ttl in calls} == {PICKER_TTL_S}
