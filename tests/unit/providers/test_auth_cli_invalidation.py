@@ -118,3 +118,59 @@ def test_logout_drops_the_listing_and_a_failed_drop_never_fails_the_logout(
 
     monkeypatch.setattr("local_operator.model.discovery.invalidate_listing", boom)
     assert auth_cli.run_logout("anthropic", store) == 0  # type: ignore[arg-type]
+
+
+def test_login_and_logout_drop_the_in_process_model_info_memo(cache, monkeypatch, capsys) -> None:
+    """The resolver memo survives a listing drop: a degraded status-band
+    resolution (no credential → registry-only numbers) is pinned per TTL
+    bucket until the memo is cleared too. Same pairing as the controller and
+    the server's credential route."""
+    cleared: list[str] = []
+    monkeypatch.setattr(auth_cli, "_apply_login_defaults", lambda provider_id: None)
+    monkeypatch.setattr(
+        "local_operator.model.configure.invalidate_model_info_cache",
+        lambda: cleared.append("memo"),
+    )
+    _swap_login(monkeypatch, "anthropic", "sk-ant-pasted")
+
+    assert auth_cli.run_login("anthropic", None, _Store()) == 0  # type: ignore[arg-type]
+    assert cleared == ["memo"]
+
+    store = _Store()
+    store.upsert_credential("anthropic", {"key": "k"})
+    assert auth_cli.run_logout("anthropic", store) == 0  # type: ignore[arg-type]
+    assert cleared == ["memo", "memo"]
+
+
+def test_a_failed_invalidation_is_logged_at_debug_not_silently_passed(
+    cache, monkeypatch, caplog
+) -> None:
+    """A read-only cache dir must be diagnosable from the debug log, the same
+    way the controller twin reports it."""
+    import logging
+
+    store = _Store()
+    store.upsert_credential("anthropic", {"key": "k"})
+
+    def boom(provider_id):
+        raise OSError("read-only cache")
+
+    monkeypatch.setattr("local_operator.model.discovery.invalidate_listing", boom)
+    with caplog.at_level(logging.DEBUG, logger="local_operator.providers.auth_cli"):
+        assert auth_cli.run_logout("anthropic", store) == 0  # type: ignore[arg-type]
+    assert any("listing invalidation failed" in record.message for record in caplog.records)
+
+
+def test_logout_invalidates_once_per_storage_id(cache, monkeypatch, capsys) -> None:
+    """``zai-oauth`` and ``zai`` resolve to the same document set; the logout
+    globs once, for the storage id."""
+    dropped: list[str] = []
+    monkeypatch.setattr(
+        "local_operator.model.discovery.invalidate_listing",
+        lambda provider_id: dropped.append(provider_id) or 1,
+    )
+    store = _Store()
+    store.upsert_credential("zai", {"key": "k"})
+
+    assert auth_cli.run_logout("zai-oauth", store) == 0  # type: ignore[arg-type]
+    assert dropped == ["zai"]

@@ -267,20 +267,37 @@ def _usable(payload: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
 
 
 def _row(model_id: str, entry: Mapping[str, Any]) -> DiscoveredModel:
-    """One projected entry as the struct every other resolution leg speaks."""
+    """One projected entry as the struct every other resolution leg speaks.
+
+    A ``cost`` mapping that quotes numeric ``input`` and ``output`` at exactly
+    zero is marked with :data:`_STATED_ZERO` so the chain can tell "the vendor
+    said free" apart from "nobody said anything" — the struct itself cannot
+    (see the marker's comment). Anything else — a missing or empty ``cost``,
+    or a ``cost`` without numeric ``input`` and ``output`` — stays ``0.0``
+    and therefore "unanswered": only a STATED price stops the chain.
+    """
     cost = entry.get("cost")
     cost = cost if isinstance(cost, Mapping) else {}
     limit = entry.get("limit")
     limit = limit if isinstance(limit, Mapping) else {}
     cache_read = _positive_float(cost.get("cache_read"))
     name = entry.get("name")
+    stated_zero = (
+        all(
+            isinstance(cost.get(k), (int, float)) and not isinstance(cost.get(k), bool)
+            for k in ("input", "output")
+        )
+        and _positive_float(cost.get("input")) == 0.0
+    )
+    input_price = _positive_float(cost.get("input"))
+    output_price = _positive_float(cost.get("output"))
     return DiscoveredModel(
         id=model_id,
         name=name if isinstance(name, str) else "",
         context_window=_positive_int(limit.get("context")),
         max_tokens=_positive_int(limit.get("output")),
-        input_price=_positive_float(cost.get("input")),
-        output_price=_positive_float(cost.get("output")),
+        input_price=_STATED_ZERO if stated_zero else input_price,
+        output_price=_STATED_ZERO if stated_zero else output_price,
         cache_read_price=cache_read,
         cache_write_price=_positive_float(cost.get("cache_write")),
         # Never from here: a second-hand catalogue cannot issue the provider's
@@ -315,10 +332,49 @@ def _lookup(providers: Mapping[str, Any], provider: str, model_id: str) -> Disco
     return None
 
 
+#: The in-flight marker for "models.dev priced this id and the price is zero".
+#: A listing row and a :class:`DiscoveredModel` both conflate "free" with
+#: "unknown" (0.0 / falsy), so a stated zero cannot survive the trip through
+#: the struct; the marker lets the chain tell the two apart internally and is
+#: stripped by :func:`_unmark` before a row leaves this module. Module-private:
+#: no caller ever sees a negative price.
+_STATED_ZERO = -1.0
+
+
+def _stated_zero(row: DiscoveredModel | None) -> bool:
+    """Whether ``row`` carries the marker — i.e. models.dev said 0/0 on purpose."""
+    return row is not None and row.input_price == _STATED_ZERO and row.output_price == _STATED_ZERO
+
+
+def _unmark(row: DiscoveredModel | None) -> DiscoveredModel | None:
+    """The chain's exit: a stated-zero marker back to the ``0.0`` the struct speaks.
+
+    ``price_row`` and ``price_catalogue_row`` both return through this so the
+    marker cannot leak to a caller. ``0.0`` renders ``free`` in the picker
+    exactly where the registry's zero does, which is what a vendor that quotes
+    $0 is telling the user anyway.
+    """
+    if _stated_zero(row):
+        assert row is not None  # for the type checker; ``_stated_zero`` implies it
+        return dataclasses.replace(row, input_price=0.0, output_price=0.0)
+    return row
+
+
 def _priced(row: DiscoveredModel | None) -> bool:
-    """Whether a row answers the MONEY question. A stub with limits but no cost
-    (models.dev's plan catalogues) is not a price hit and lets the chain move on."""
-    return row is not None and (row.input_price > 0 or row.output_price > 0)
+    """Whether a row answers the MONEY question — INCLUDING a stated zero.
+
+    A models.dev row whose ``cost`` mapping quotes numeric ``input`` and
+    ``output`` is an ANSWER even when both are ``0`` (the vendor bills nothing,
+    or bills by plan credits — ``zai/glm-4.7-flash``, ``kimi-for-coding/k3``):
+    the chain stops there and the OpenRouter secondary, which prices the same
+    weights hosted by a third party, must NOT get to invent a USD rate. Only a
+    row that is absent — no entry, or no ``cost`` mapping at all
+    (``google/gemma-4-31b-it``) — leaves the money question open. For an
+    OpenRouter row, which passes through :func:`openrouter_lookup` unchanged,
+    no marker exists and this is the ordinary "any positive leg" test: a
+    zero-priced OpenRouter route is not trusted to price the vendor's own API.
+    """
+    return row is not None and (row.input_price > 0 or row.output_price > 0 or _stated_zero(row))
 
 
 def openrouter_lookup(
@@ -378,12 +434,17 @@ def price_row(
     ids, one read per document, never fetches) share it without drifting.
 
     1. models.dev (``models_dev``: the projection's ``providers`` map) — first
-       refusal. A PRICED row here is the answer outright; its limits ride along.
+       refusal. A row here is the answer outright, INCLUDING one that states
+       ``0/0``: the vendor quoted zero (or bills by plan credits) and the
+       secondary's third-party hosting rate must not replace it. The zero
+       arrives marked (:data:`_STATED_ZERO`) and is stripped on the way out,
+       so callers see the same ``0.0`` they always have.
     2. OpenRouter (``openrouter``: the public listing's rows) — ONLY when
-       models.dev has no priced row for the id: a day-0 gap, a shape drift, or
-       the host being down. It fills the money; limits models.dev already gave
-       (from a cost-less stub, say) are kept because the primary's limits are
-       native while OpenRouter advertises the widest window across its routes.
+       models.dev has no row answering the money question: a day-0 gap, a
+       cost-less stub, a shape drift, or the host being down. It fills the
+       money; limits models.dev already gave (from a cost-less stub, say) are
+       kept because the primary's limits are native while OpenRouter
+       advertises the widest window across its routes.
     3. ``None`` — the caller keeps whatever the shipped registry says.
 
     When both price an id and disagree by more than
@@ -405,9 +466,9 @@ def price_row(
                 secondary.input_price,
                 secondary.output_price,
             )
-        return primary
+        return _unmark(primary)
     if secondary is None:
-        return primary
+        return _unmark(primary)
     if primary is None:
         return secondary
     # A models.dev stub with limits but no cost, and an OpenRouter price: take the
@@ -441,9 +502,11 @@ def price_catalogue_row(
     synchronously — for models.dev that is usually a 0-byte 304 unless the row
     really did just land, which is the case this exists for.
 
-    The OpenRouter document is read ONLY when models.dev has no priced row, so a
-    resolution models.dev answers never touches it — no second parse, no second
-    request, nothing added to the paint path in the common case.
+    The OpenRouter document is read ONLY when models.dev has no row answering
+    the money question — and a stated ``0/0`` ANSWERS it, so a vendor-free or
+    plan-billed model never touches the secondary either. A resolution
+    models.dev answers costs no second parse, no second request, nothing on
+    the paint path in the common case.
     """
     if provider not in _PRICE_CATALOGUE_KEYS:
         return None
@@ -453,7 +516,12 @@ def price_catalogue_row(
     except Exception as exc:  # noqa: BLE001 — a price is never worth a failed start
         logger.debug("models.dev catalogue unavailable for %s/%s: %s", provider, model_id, exc)
         models_dev = None
-    if _priced(_lookup(models_dev, provider, model_id) if models_dev is not None else None):
+    # The single "is the primary's answer complete" decision lives HERE so the
+    # document read and the read-OpenRouter skip share one rule. The final
+    # assembly — primary wins, secondary fills, limits merge — is all in
+    # ``price_row``; this function only decides which documents it sees.
+    primary = _lookup(models_dev, provider, model_id) if models_dev is not None else None
+    if _priced(primary):
         return price_row(provider, model_id, models_dev=models_dev, openrouter=None)
     openrouter: list[DiscoveredModel] | None = None
     namespace = OPENROUTER_NAMESPACE.get(provider)

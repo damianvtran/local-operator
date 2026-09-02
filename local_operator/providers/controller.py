@@ -351,9 +351,11 @@ class ProviderController:
         if removed == 0:
             raise ValueError(f"No stored credentials for '{provider_id}'.")
         # Symmetrical with login: a catalogue fetched under the credential just
-        # removed must not decide what the NEXT credential can select.
-        for target in sorted(targets):
-            _invalidate_cached_listing(target)
+        # removed must not decide what the NEXT credential can select. One call
+        # per STORAGE id: alias and storage id (``zai-oauth``/``zai``) resolve
+        # to the same document set, so iterating both would glob twice.
+        for storage_id in sorted({credential_provider_id(t) for t in targets}):
+            _invalidate_cached_listing(storage_id)
         return f"Removed {removed} credential(s) for '{provider_id}'."
 
     # -- usage -------------------------------------------------------------
@@ -1245,12 +1247,22 @@ def _invalidate_cached_listing(storage_id: str) -> None:
 
     An exception here would fail a login that actually succeeded, which is far
     worse than a stale list that the picker's TTL clears within the quarter
-    hour anyway.
+    hour anyway. The in-process resolver memo is dropped too: a status-band
+    resolution that degraded BEFORE the credential arrived (no key →
+    registry-only limits/price) is memoised per TTL bucket and would otherwise
+    stay pinned for the rest of the bucket in a long-lived TUI. Same pairing
+    the server's credential route performs for exactly this event.
     """
     try:
         invalidate_listing(storage_id)
     except Exception:  # noqa: BLE001 - never fail a successful login over a cache
         logger.debug("listing invalidation failed for %s", storage_id, exc_info=True)
+    try:
+        from local_operator.model.configure import invalidate_model_info_cache
+
+        invalidate_model_info_cache()
+    except Exception:  # noqa: BLE001 - same rule as the listing drop above
+        logger.debug("model-info invalidation failed for %s", storage_id, exc_info=True)
 
 
 def _enrich_prices(

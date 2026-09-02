@@ -1546,3 +1546,57 @@ async def test_a_failed_invalidation_never_fails_a_successful_login(
     )
 
     assert "Stored API key" in await controller.login("anthropic")
+
+
+@pytest.mark.asyncio
+async def test_login_and_logout_drop_the_in_process_model_info_memo(
+    controller, store, monkeypatch
+) -> None:
+    """A status-band resolution that degraded before the login (no credential
+    → registry-only numbers) is memoised per TTL bucket; without this drop a
+    long-lived TUI keeps the stale answer for the rest of the bucket. The
+    server's credential route already pairs the two invalidations for exactly
+    this event; the controller hook now matches."""
+    cleared: list[str] = []
+    monkeypatch.setattr("local_operator.providers.controller.invalidate_listing", lambda pid: 1)
+    monkeypatch.setattr(
+        "local_operator.model.configure.invalidate_model_info_cache",
+        lambda: cleared.append("memo"),
+    )
+
+    async def fake_login(_callbacks):
+        return "sk-ant"
+
+    definition = controller.provider("anthropic")
+    assert definition is not None
+    monkeypatch.setattr(
+        "local_operator.providers.controller.get_provider_definition",
+        lambda provider_id: (
+            dataclasses.replace(definition, login=fake_login)
+            if provider_id == "anthropic"
+            else get_provider_definition(provider_id)
+        ),
+    )
+
+    await controller.login("anthropic")
+    assert cleared == ["memo"]
+
+    store.upsert_credential("anthropic", {"key": "sk-ant", "type": "api_key"})
+    await controller.logout("anthropic")
+    assert cleared == ["memo", "memo"]
+
+
+@pytest.mark.asyncio
+async def test_logout_invalidates_once_per_storage_id(controller, store, monkeypatch) -> None:
+    """``zai-oauth`` and ``zai`` resolve to the SAME document set, so iterating
+    both would glob the cache dir twice per logout."""
+    dropped: list[str] = []
+    monkeypatch.setattr(
+        "local_operator.providers.controller.invalidate_listing",
+        lambda provider_id: dropped.append(provider_id) or 1,
+    )
+    store.upsert_credential("zai", {"key": "sk-zai", "type": "api_key"})
+
+    await controller.logout("zai-oauth")
+
+    assert dropped == ["zai"]

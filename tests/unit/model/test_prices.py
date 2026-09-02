@@ -105,7 +105,23 @@ _MODELS_DEV_BODY: dict[str, Any] = {
                 "id": "k3",
                 "name": "Kimi K3",
                 "limit": {"context": 262_144, "output": 32_768},
-                "cost": {},
+                # The plan bills credits, not USD per token — models.dev states
+                # that as explicit zeros, the same shape as ``zai/glm-4.7-flash``.
+                "cost": {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0},
+            }
+        },
+    },
+    "zai": {
+        "id": "zai",
+        "models": {
+            "glm-4.7-flash": {
+                "id": "glm-4.7-flash",
+                "name": "GLM-4.7-Flash",
+                "limit": {"context": 200_000, "output": 128_000},
+                # Z.AI lists this model at $0 on its own pricing page. The
+                # OpenRouter sibling (``z-ai/glm-4.7-flash``) is what a
+                # THIRD-PARTY host charges for the open weights.
+                "cost": {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0},
             }
         },
     },
@@ -225,6 +241,7 @@ def test_the_projection_keeps_only_mapped_providers_and_the_five_fields() -> Non
         "google",
         "moonshotai",
         "kimi-for-coding",
+        "zai",
         "openrouter",
     }
     fable = document["providers"]["anthropic"]["claude-fable-5-1"]
@@ -419,10 +436,12 @@ def test_lookup_matches_a_dotted_version_spelling(tmp_path) -> None:
 def test_kimi_tries_moonshotai_then_the_coding_plan(tmp_path) -> None:
     priced = _lookup("kimi", "kimi-k2.5", tmp_path)
     assert priced is not None and priced.input_price == 0.6
-    # `k3` is only in the coding-plan catalogue, which quotes limits and no cost.
+    # `k3` is only in the coding-plan catalogue, which quotes limits and a
+    # stated 0/0 cost — the plan bills credits, so zero is the ANSWER, not a
+    # miss. The chain must not let OpenRouter price it.
     plan_only = _lookup("kimi", "k3", tmp_path)
     assert plan_only is not None and plan_only.context_window == 262_144
-    assert plan_only.input_price == 0.0
+    assert plan_only.input_price == 0.0 and plan_only.output_price == 0.0
 
 
 def test_openrouter_ids_are_looked_up_under_their_own_namespace(tmp_path) -> None:
@@ -504,13 +523,85 @@ def test_a_disagreement_over_five_percent_is_logged_and_not_acted_on(caplog) -> 
     assert not any("disagree" in record.message for record in caplog.records)
 
 
+def test_a_models_dev_stated_zero_is_an_answer_not_a_miss(tmp_path) -> None:
+    """``zai/glm-4.7-flash`` is $0 on Z.AI's own pricing page; models.dev states
+    that as ``cost: {input: 0, output: 0, ...}``. That stated zero is the
+    ANSWER — the OpenRouter row for the same weights is a third-party host's
+    rate, and the chain must not print a number the user is not paying.
+    Reproduced from the reviewer's repro on the real 2026-09-02 documents:
+    main resolved 0.0/0.0, the pre-fix branch resolved 0.06/0.40."""
+    # An OpenRouter sibling EXISTS for this model — that is the trap.
+    openrouter_sibling = DiscoveredModel(
+        id="z-ai/glm-4.7-flash", input_price=0.06, output_price=0.40
+    )
+    row = price_row(
+        "zai", "glm-4.7-flash", models_dev=_providers(), openrouter=[openrouter_sibling]
+    )
+    assert row is not None
+    assert (row.input_price, row.output_price) == (
+        0.0,
+        0.0,
+    ), "a stated zero from models.dev is the answer, not a miss"
+    assert row.context_window == 200_000
+    # The struct never carries a negative price out of the chain.
+    assert row.input_price >= 0 and row.output_price >= 0
+
+
+def test_a_stated_zero_never_reaches_the_openrouter_leg(tmp_path, openrouter) -> None:
+    """The resolver path: a models.dev 0/0 costs NO OpenRouter read, the same
+    short-circuit a priced row gets."""
+    _plant(tmp_path, project(_MODELS_DEV_BODY, _ETAG))
+    openrouter.rows.append(
+        DiscoveredModel(id="z-ai/glm-4.7-flash", input_price=0.06, output_price=0.40)
+    )
+    row = price_catalogue_row("zai", "glm-4.7-flash", cache_dir=tmp_path)
+    assert row is not None and (row.input_price, row.output_price) == (0.0, 0.0)
+    assert openrouter.calls == [], "a stated zero answers the chain before the secondary"
+
+
+def test_an_absent_cost_is_a_miss_and_falls_through(tmp_path) -> None:
+    """``google/gemma-4-31b-it``: models.dev has the row with limits but NO
+    ``cost`` mapping — genuinely unanswered, so the secondary may fill it.
+    The distinction is the presence of numeric ``input``/``output``, not the
+    numbers' value."""
+    secondary = DiscoveredModel(id="google/gemma-4-31b-it", input_price=0.09, output_price=0.34)
+    row = price_row(
+        "google",
+        "gemma-4-31b-it",
+        models_dev=_providers(),
+        openrouter=[secondary],
+    )
+    # gemma-4-31b-it is absent from the fixture body entirely: a miss, so the
+    # secondary answers — same rule as an empty ``cost`` (``gemma`` rows ship
+    # ``cost: {}`` upstream, which projects identically to absent).
+    assert row is not None
+    assert (row.input_price, row.output_price) == (0.09, 0.34)
+
+    # A ``cost`` mapping with NO numeric input/output is equally unanswered.
+    body = json.loads(json.dumps(_MODELS_DEV_BODY))
+    body["google"]["models"]["gemma-4-31b-it"] = {
+        "id": "gemma-4-31b-it",
+        "limit": {"context": 262_144, "output": 32_768},
+        "cost": {},
+    }
+    row = price_row("google", "gemma-4-31b-it", models_dev=_providers(body), openrouter=[secondary])
+    assert row is not None
+    assert (row.input_price, row.output_price) == (0.09, 0.34)
+    assert row.context_window == 262_144, "the stub's native limits ride along"
+
+
 def test_a_models_dev_stub_with_limits_takes_openrouter_money_and_keeps_its_limits() -> None:
-    """``kimi-for-coding/k3``: limits, no cost. The money comes from the secondary,
-    the native window stays — every field is first-source-that-has-it."""
+    """A models.dev row whose ``cost`` quotes no numeric ``input``/``output``
+    has not answered the money question: the secondary fills the money and the
+    native window stays — every field is first-source-that-has-it. This is the
+    EMPTY-``cost`` shape (``google/gemma-4-31b-it``), distinct from a stated
+    ``0/0`` which stops the chain (see the stated-zero tests above)."""
+    body = json.loads(json.dumps(_MODELS_DEV_BODY))
+    body["kimi-for-coding"]["models"]["k3"]["cost"] = {}
     secondary = DiscoveredModel(
         id="moonshotai/k3", input_price=0.6, output_price=2.5, context_window=131_072
     )
-    row = price_row("kimi", "k3", models_dev=_providers(), openrouter=[secondary])
+    row = price_row("kimi", "k3", models_dev=_providers(body), openrouter=[secondary])
     assert row is not None
     assert (row.input_price, row.output_price) == (0.6, 2.5)
     assert row.context_window == 262_144

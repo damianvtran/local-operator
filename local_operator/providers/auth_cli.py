@@ -8,6 +8,7 @@ from an interactive terminal (exec/headless mode never calls them).
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import time
 from typing import TYPE_CHECKING, Any
@@ -21,6 +22,8 @@ from local_operator.providers.registry import (
     get_provider_definition,
     list_login_providers,
 )
+
+logger = logging.getLogger("local_operator.providers.auth_cli")
 
 if TYPE_CHECKING:  # lazy at runtime: the CLI top level must not import these
     from local_operator.credentials import CredentialManager
@@ -192,14 +195,22 @@ def _invalidate_cached_listing(provider_id: str) -> None:
 
     Best-effort by construction. A failed invalidation costs a stale list until
     the TTL lapses; an exception here would fail a login that actually
-    succeeded, which is far worse.
+    succeeded, which is far worse. Logged at debug with the traceback, the
+    same way the controller's twin does, so a read-only cache dir is
+    diagnosable rather than silently ignored.
     """
     try:
         from local_operator.model.discovery import invalidate_listing
 
         invalidate_listing(provider_id)
     except Exception:  # noqa: BLE001 - never fail a successful login over a cache
-        pass
+        logger.debug("listing invalidation failed for %s", provider_id, exc_info=True)
+    try:
+        from local_operator.model.configure import invalidate_model_info_cache
+
+        invalidate_model_info_cache()
+    except Exception:  # noqa: BLE001 - same rule as the listing drop above
+        logger.debug("model-info invalidation failed for %s", provider_id, exc_info=True)
 
 
 def _apply_login_defaults(provider_id: str) -> None:
@@ -270,9 +281,11 @@ def run_logout(provider_id: str, auth_store: "AuthStore") -> int:
         print(f"No stored credentials for '{provider_id}'.")
         return 1
     # Symmetrical with login: a catalogue fetched under the credential just
-    # removed must not decide what the NEXT credential can select.
-    for target in sorted(targets):
-        _invalidate_cached_listing(target)
+    # removed must not decide what the NEXT credential can select. One call
+    # per STORAGE id: alias and storage id (``zai-oauth``/``zai``) resolve to
+    # the same document set, so iterating both would glob twice.
+    for storage_id in sorted({credential_provider_id(t) for t in targets}):
+        _invalidate_cached_listing(storage_id)
     print(f"Removed {removed} credential(s) for '{provider_id}'.")
     # The cascade has two tiers below the stored rows: the process
     # environment and the legacy credentials.env. Deleting the rows does not
