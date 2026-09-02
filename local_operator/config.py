@@ -156,7 +156,22 @@ DEFAULT_CONFIG = Config(
             # Direct OpenAI GPT-5 calls use the public Responses API by default.
             # Set `providers.openai.api` to `chat_completions` for an explicit
             # compatibility opt-out; other OpenAI-shaped providers never read it.
-            "providers": {"openai": {"api": "responses"}},
+            #
+            # `providers.anthropic.cache_ttl_1h_min_context_tokens`: once a
+            # session's context reaches this many tokens, Anthropic requests
+            # carry the 1-hour prompt-cache TTL instead of the default 5 minutes.
+            # A 1h write costs 2× base (vs 1.25× for 5m), but a large context
+            # that idles past 5 minutes — waiting on subagents, a wake, or the
+            # user — otherwise rewrites the WHOLE prefix on its next call.
+            # Measured over 24h on this harness's own traffic: 276 TTL-expiry
+            # rewrites of >150k contexts cost 89.5M write tokens (~112M
+            # base-equivalent), while the incremental writes on those contexts
+            # were only 14.7M (~11M base-equivalent extra at 2×). 150k is the
+            # size above which the rewrite dominates; 0 disables the feature.
+            "providers": {
+                "openai": {"api": "responses"},
+                "anthropic": {"cache_ttl_1h_min_context_tokens": 150_000},
+            },
             # One ordered cascade for every text-model call. Entries may be
             # "provider/model" strings or {provider, model, effort} mappings;
             # usage-aware switching is opt-in because it spends one lightweight

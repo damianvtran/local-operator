@@ -1733,6 +1733,9 @@ class AnthropicClient:
     the volatile tail stays un-cached). Content arrives as
     ``content_block_start/delta/stop`` events for ``text`` and ``tool_use``
     blocks; tool arguments stream via ``input_json_delta``.
+
+    Large contexts switch every marker to the 1-hour cache TTL; see
+    ``_cache_ttl_for`` for the economics and the wire constraint.
     """
 
     def __init__(
@@ -1741,10 +1744,16 @@ class AnthropicClient:
         *,
         http_client: httpx.AsyncClient | None = None,
         timeout: float = 600.0,
+        cache_ttl_1h_min_context_tokens: int = 0,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._owns_client = http_client is None
         self._http = http_client or httpx.AsyncClient(timeout=_stream_timeout(timeout))
+        # Context size (tokens) from which requests carry the 1h TTL; 0 keeps
+        # every request on the default 5m. Defaults OFF at the constructor so a
+        # bare ``AnthropicClient()`` (tests, scripts) sends the exact body it
+        # always did; ``client_for_spec`` passes the configured threshold.
+        self._cache_ttl_1h_min_context_tokens = max(0, int(cache_ttl_1h_min_context_tokens))
 
     async def aclose(self) -> None:
         if self._owns_client:
@@ -1807,8 +1816,82 @@ class AnthropicClient:
     #: told they are a CLI.
     CLAUDE_CODE_IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude."
 
+    #: Rough bytes-per-token for the byte-based context estimate in
+    #: ``_cache_ttl_for``. English prose and JSON both sit near 4; the estimate
+    #: only has to land on the right side of a 150k threshold, not be exact.
+    _BYTES_PER_TOKEN_ESTIMATE = 4
+
+    @staticmethod
+    def _cache_control(ttl: str | None) -> dict[str, Any]:
+        """One ``cache_control`` marker. ``ttl`` is ``"1h"`` or None (5m).
+
+        The 5m marker deliberately omits the ``ttl`` key rather than spelling
+        ``"5m"``: it is the exact shape every prior request sent, so a client
+        below the threshold (or with the feature off) produces a byte-identical
+        body to the one before this feature existed, and nothing about the
+        default path has to be re-validated.
+        """
+        marker: dict[str, Any] = {"type": "ephemeral"}
+        if ttl:
+            marker["ttl"] = ttl
+        return marker
+
+    def _cache_ttl_for(self, request: ChatRequest, body: dict[str, Any]) -> str | None:
+        """Pick the prompt-cache TTL for this request: ``"1h"`` or None (5m).
+
+        WHY: a 5m entry expires while a large session waits on a subagent, a
+        scheduled wake, or the user, and its next call then rewrites the whole
+        prefix at 1.25× base. Measured over 24h of this harness's own traffic:
+        276 such rewrites of >150k contexts cost 89.5M write tokens (~112M
+        base-equivalent), while ALL incremental writes on those contexts were
+        14.7M tokens — which at the 1h rate (2× base instead of 1.25×) cost
+        ~11M base-equivalent extra. Above the threshold the 1h TTL is a
+        ~10:1 win; below it, small prefixes are cheap to rewrite and the 2×
+        write rate on every turn would cost more than the expiries it avoids.
+
+        CONSTRAINT (Anthropic, "Mixing different TTLs"): a 1h marker must
+        appear BEFORE every 5m marker in the request, so a body cannot carry
+        5m markers on the system blocks and 1h markers on the messages. The
+        result of this method is therefore applied to EVERY marker in the
+        request — system blocks and message breakpoints alike — never to a
+        subset.
+
+        The decision is one-directional in practice and needs no hysteresis:
+        context only grows within a turn, and once it crosses the threshold
+        the 1h markers stay until compaction shrinks it. Dropping back to 5m
+        markers after compaction is fine — the compacted prefix is new
+        content that has to be written either way, and a smaller context is
+        exactly the case where the cheaper write rate wins again.
+
+        Two size sources, in preference order:
+
+        1. ``request.context_tokens_hint`` — the provider's OWN count from
+           the session's previous call, stamped by ``SessionStreamFn``. It is
+           exact for the prefix this request replays, and off only by the
+           one new turn appended since.
+        2. A byte estimate of the serialized body (``len(json) / 4``) when no
+           hint exists: a session's first call, a fork's first request, a
+           one-shot errand with no usage history. The estimate is coarse —
+           base64 images and JSON punctuation skew it — but it only has to
+           land on the right side of a 150k threshold, and the hint replaces
+           it from the second call on. Without the fallback a resumed 400k
+           session would send its first (and most expensive) request at 5m.
+        """
+        threshold = self._cache_ttl_1h_min_context_tokens
+        if threshold <= 0:
+            return None
+        size = request.context_tokens_hint
+        if size is None:
+            # ``default=str`` guards against any non-JSON-native value a caller
+            # slipped into the body; ``separators`` matches what httpx sends.
+            serialized = json.dumps(body, default=str, separators=(",", ":"))
+            size = len(serialized) // self._BYTES_PER_TOKEN_ESTIMATE
+        return "1h" if size >= threshold else None
+
     @classmethod
-    def _system_blocks(cls, blocks: Sequence[str]) -> list[dict[str, Any]]:
+    def _system_blocks(
+        cls, blocks: Sequence[str], *, ttl: str | None = None
+    ) -> list[dict[str, Any]]:
         """System blocks → Anthropic ``system`` array with cache breakpoints.
 
         The harness sends [instructions, tool inventory, skills, env/date];
@@ -1819,13 +1902,16 @@ class AnthropicClient:
         at ``MAX_CACHE_BREAKPOINTS`` — Anthropic rejects requests carrying
         more than 4 ``cache_control`` markers, so surplus stable blocks keep
         the cache prefix intact without adding markers.
+
+        ``ttl`` is the request-wide TTL from ``_cache_ttl_for``; every marker
+        placed here carries it, because a 1h marker may not follow a 5m one.
         """
         rendered: list[dict[str, Any]] = []
         stable_count = min(cls.MAX_CACHE_BREAKPOINTS, max(0, len(blocks) - 2))
         for index, block in enumerate(blocks):
             entry: dict[str, Any] = {"type": "text", "text": block}
             if index < stable_count:
-                entry["cache_control"] = {"type": "ephemeral"}
+                entry["cache_control"] = cls._cache_control(ttl)
             rendered.append(entry)
         return rendered
 
@@ -1862,7 +1948,7 @@ class AnthropicClient:
         return blocks
 
     def _message_cache_breakpoints(
-        self, messages: list[dict[str, Any]], body: dict[str, Any]
+        self, messages: list[dict[str, Any]], body: dict[str, Any], *, ttl: str | None = None
     ) -> None:
         """Place cache_control on the conversation, not just the system head.
 
@@ -1877,6 +1963,10 @@ class AnthropicClient:
         first; when the sum would exceed the cap the LOWEST-value system
         breakpoint (the last stable block) is dropped in favour of the
         message markers, which cover far more tokens.
+
+        ``ttl`` must be the SAME value the system markers were rendered with:
+        Anthropic rejects a 1h marker that follows a 5m one, and the message
+        markers always follow the system ones.
         """
         system = body.get("system") or []
         system_markers = [i for i, entry in enumerate(system) if "cache_control" in entry]
@@ -1902,7 +1992,7 @@ class AnthropicClient:
             system[index].pop("cache_control", None)
         for block in message_targets:
             if isinstance(block, dict):
-                block["cache_control"] = {"type": "ephemeral"}
+                block["cache_control"] = self._cache_control(ttl)
 
     def _build_body(self, request: ChatRequest, *, oauth: bool = False) -> dict[str, Any]:
         messages: list[dict[str, Any]] = []
@@ -1960,16 +2050,12 @@ class AnthropicClient:
         blocks = list(request.system_blocks)
         if oauth:
             blocks.insert(0, self.CLAUDE_CODE_IDENTITY)
+        # Rendered marker-free first: the TTL every marker will carry is
+        # decided once messages, tools and system text are ALL in the body, so
+        # the byte-estimate fallback sees everything the provider will count.
+        # See ``_cache_ttl_for`` for why one value applies to every marker.
         if blocks:
-            body["system"] = self._system_blocks(blocks)
-        # System-only breakpoints stop the cached prefix before the first
-        # message: the entire growing conversation would be re-processed at
-        # full price on every request. Mark the last content block of the
-        # final message and the second-to-last user turn so the previous
-        # prefix stays warm across turns, within MAX_CACHE_BREAKPOINTS by
-        # dropping the lowest-value system breakpoint.
-        self._message_cache_breakpoints(messages, body)
-
+            body["system"] = [{"type": "text", "text": block} for block in blocks]
         if request.tools:
             body["tools"] = [
                 {
@@ -1979,6 +2065,17 @@ class AnthropicClient:
                 }
                 for tool in request.tools
             ]
+        ttl = self._cache_ttl_for(request, body)
+        if blocks:
+            body["system"] = self._system_blocks(blocks, ttl=ttl)
+        # System-only breakpoints stop the cached prefix before the first
+        # message: the entire growing conversation would be re-processed at
+        # full price on every request. Mark the last content block of the
+        # final message and the second-to-last user turn so the previous
+        # prefix stays warm across turns, within MAX_CACHE_BREAKPOINTS by
+        # dropping the lowest-value system breakpoint.
+        self._message_cache_breakpoints(messages, body, ttl=ttl)
+        if request.tools:
             # Safe default: unmapped values fall back to auto (PR-22).
             body["tool_choice"] = {
                 "auto": {"type": "auto"},
@@ -2055,6 +2152,19 @@ class AnthropicClient:
                     usage.input_tokens = int(raw_usage.get("input_tokens", usage.input_tokens))
                     usage.cache_read_tokens = int(raw_usage.get("cache_read_input_tokens", 0))
                     usage.cache_write_tokens = int(raw_usage.get("cache_creation_input_tokens", 0))
+                    # The per-TTL split of the write count. Anthropic documents
+                    # ``cache_creation_input_tokens`` as the SUM of these two,
+                    # and the two are priced differently (1.25× vs 2× base), so
+                    # analytics needs them apart to judge the 1h trade. The
+                    # object is absent on older API versions; both then stay 0.
+                    creation = raw_usage.get("cache_creation") or {}
+                    if isinstance(creation, dict):
+                        usage.cache_write_5m_tokens = int(
+                            creation.get("ephemeral_5m_input_tokens", 0) or 0
+                        )
+                        usage.cache_write_1h_tokens = int(
+                            creation.get("ephemeral_1h_input_tokens", 0) or 0
+                        )
                     # Anthropic reports input_tokens EXCLUDING cached blocks
                     # (OpenAI includes them), so the context actually read is
                     # the sum of the three. The compaction trigger and the TUI
@@ -2434,11 +2544,18 @@ def client_for_spec(
     *,
     http_client: httpx.AsyncClient | None = None,
     openai_api: str = "responses",
+    anthropic_cache_ttl_1h_min_context_tokens: int = 0,
 ) -> WireClient:
     """Build the wire client for a ``ModelSpec`` via the provider registry.
 
     Unknown providers raise :class:`ValueError` — the legacy fallback to the
     local ollama endpoint silently served the wrong wire shape.
+
+    ``anthropic_cache_ttl_1h_min_context_tokens`` is the configured
+    ``providers.anthropic.cache_ttl_1h_min_context_tokens`` (see
+    ``AnthropicClient._cache_ttl_for``); it only reaches the Anthropic wire.
+    Like ``openai_api`` it is a per-provider setting resolved by the caller
+    (``SessionStreamFn._client_for``) so this function stays settings-free.
     """
     from local_operator.providers.registry import get_provider_definition
 
@@ -2450,7 +2567,11 @@ def client_for_spec(
         return MockClient()
     if wire == "anthropic":
         base = spec.base_url or (definition.base_url if definition else None) or ANTHROPIC_API_URL
-        return AnthropicClient(base_url=base, http_client=http_client)
+        return AnthropicClient(
+            base_url=base,
+            http_client=http_client,
+            cache_ttl_1h_min_context_tokens=anthropic_cache_ttl_1h_min_context_tokens,
+        )
     if wire == "google":
         base = spec.base_url or GOOGLE_API_URL
         return GoogleClient(base_url=base, http_client=http_client)

@@ -740,3 +740,46 @@ def test_wal_is_enabled_despite_a_busy_journal_transition(tmp_path, monkeypatch)
     assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
     conn.close()
     assert busied["n"] == 2  # and the retry was genuinely exercised, not skipped
+
+
+def test_cache_write_1h_tokens_is_recorded_and_migrated(tmp_path):
+    """The 1h slice of a cache write lands in its own ledger column, and a
+    database from before the column existed gains it on open (old rows read
+    0, which is the truth: every pre-1h write was a 5m write)."""
+    import sqlite3
+
+    db = tmp_path / "pre1h.db"
+    conn = sqlite3.connect(str(db))
+    conn.executescript(f"""
+        CREATE TABLE calls (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, ts_ms INTEGER, session_id TEXT,
+          provider TEXT, model_id TEXT, ok INTEGER, input_tokens INTEGER,
+          output_tokens INTEGER, cache_read_tokens INTEGER, cache_write_tokens INTEGER,
+          reasoning_tokens INTEGER, context_tokens INTEGER,
+          cost_micro INTEGER NOT NULL DEFAULT 0, cost_known INTEGER NOT NULL DEFAULT 0,
+          {_PRE_IMAGES_COMPONENT_COLUMNS}, c_images INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE session_names (
+          session_id TEXT PRIMARY KEY, name TEXT, updated_at_ms INTEGER
+        );
+        """)
+    conn.execute(
+        "INSERT INTO calls (ts_ms, session_id, provider, model_id, ok, input_tokens, "
+        "output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, "
+        "context_tokens) VALUES (1, 'old', 'anthropic', 'claude', 1, 1, 1, 0, 500, 0, 501)"
+    )
+    conn.commit()
+    conn.close()
+
+    store = AnalyticsStore(db)
+    import dataclasses
+
+    snap = dataclasses.replace(_snap(cache_write=300), cache_write_1h_tokens=120)
+    assert store.record_batch([snap]) == 1
+    conn = store._connect()
+    assert conn is not None
+    rows = conn.execute(
+        "SELECT session_id, cache_write_tokens, cache_write_1h_tokens FROM calls ORDER BY id"
+    ).fetchall()
+    assert rows == [("old", 500, 0), ("s1", 300, 120)]
+    store.close()

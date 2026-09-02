@@ -3566,3 +3566,206 @@ def test_google_function_calling_mode_maps_auto_and_required() -> None:
             )
         )
         assert body["toolConfig"]["functionCallingConfig"]["mode"] == mode
+
+
+# ---------------------------------------------------------------------------
+# Anthropic 1-hour prompt-cache TTL for large contexts
+# ---------------------------------------------------------------------------
+
+
+def _every_cache_control(body: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every ``cache_control`` marker in a body, system blocks and messages.
+
+    The wire constraint is request-wide (a 1h marker may not follow a 5m one),
+    so the assertions below inspect EVERY marker rather than sampling one.
+    """
+    markers = [e["cache_control"] for e in body.get("system", []) if "cache_control" in e]
+    for message in body["messages"]:
+        content = message.get("content")
+        if isinstance(content, list):
+            markers.extend(b["cache_control"] for b in content if "cache_control" in b)
+    return markers
+
+
+def _large_context_request() -> ChatRequest:
+    return ChatRequest(
+        model=_spec(provider="anthropic"),
+        system_blocks=["instructions", "inventory", "skills", "env"],
+        messages=[Message.user("first"), Message.assistant("mid"), Message.user("second")],
+    )
+
+
+def test_anthropic_ttl_off_sends_no_ttl_keys() -> None:
+    """Threshold 0 (and the constructor default) keeps the historical body:
+    markers exist, none carries a ``ttl`` — even with a huge hint."""
+    request = _large_context_request().model_copy(update={"context_tokens_hint": 900_000})
+    for client in (AnthropicClient(), AnthropicClient(cache_ttl_1h_min_context_tokens=0)):
+        body = client._build_body(request)
+        markers = _every_cache_control(body)
+        assert markers, "the breakpoint policy itself must be untouched"
+        assert all(m == {"type": "ephemeral"} for m in markers)
+        assert "ttl" not in json.dumps(body)
+
+
+def test_anthropic_ttl_hint_above_threshold_marks_every_breakpoint_1h() -> None:
+    """Above the threshold EVERY marker carries ``ttl: 1h`` and none is 5m —
+    Anthropic rejects a 1h entry that follows a shorter one."""
+    client = AnthropicClient(cache_ttl_1h_min_context_tokens=150_000)
+    request = _large_context_request().model_copy(update={"context_tokens_hint": 150_000})
+    body = client._build_body(request, oauth=True)
+    markers = _every_cache_control(body)
+    assert len(markers) >= 3  # system head + last message + previous user turn
+    assert all(m == {"type": "ephemeral", "ttl": "1h"} for m in markers)
+
+
+def test_anthropic_ttl_hint_below_threshold_stays_5m() -> None:
+    client = AnthropicClient(cache_ttl_1h_min_context_tokens=150_000)
+    request = _large_context_request().model_copy(update={"context_tokens_hint": 149_999})
+    markers = _every_cache_control(client._build_body(request))
+    assert markers and all(m == {"type": "ephemeral"} for m in markers)
+
+
+def test_anthropic_ttl_without_hint_falls_back_to_byte_estimate() -> None:
+    """No hint (first call, fork) → ``len(json)/4`` decides. A 2 KB body reads
+    as ~500 tokens; the same body with a 4k-token threshold stays 5m and with
+    a 100-token threshold goes 1h, so the estimate is what flipped it."""
+    request = ChatRequest(
+        model=_spec(provider="anthropic"),
+        system_blocks=["x" * 1_000, "inventory", "skills", "env"],
+        messages=[Message.user("a" * 1_000), Message.assistant("mid"), Message.user("second")],
+    )
+    assert request.context_tokens_hint is None
+    small_threshold = AnthropicClient(cache_ttl_1h_min_context_tokens=100)
+    assert all(
+        m == {"type": "ephemeral", "ttl": "1h"}
+        for m in _every_cache_control(small_threshold._build_body(request))
+    )
+    big_threshold = AnthropicClient(cache_ttl_1h_min_context_tokens=4_000)
+    assert all(
+        m == {"type": "ephemeral"} for m in _every_cache_control(big_threshold._build_body(request))
+    )
+
+
+def test_anthropic_ttl_estimate_counts_tools_too() -> None:
+    """Tools sit at position 0 of the cached prefix, so the byte estimate has
+    to include them: a tool-heavy first request must not be undercounted."""
+    tools = [
+        AgentTool(
+            name=f"tool{i}",
+            description="d" * 400,
+            parameters={"type": "object", "properties": {}},
+            execute=_aside_execute,
+        )
+        for i in range(10)
+    ]
+    slim = ChatRequest(
+        model=_spec(provider="anthropic"),
+        system_blocks=["instructions", "inventory", "skills", "env"],
+        messages=[Message.user("first"), Message.assistant("mid"), Message.user("second")],
+    )
+    heavy = slim.model_copy(update={"tools": tools})
+    client = AnthropicClient(cache_ttl_1h_min_context_tokens=800)
+    assert all(m == {"type": "ephemeral"} for m in _every_cache_control(client._build_body(slim)))
+    assert all(
+        m == {"type": "ephemeral", "ttl": "1h"}
+        for m in _every_cache_control(client._build_body(heavy))
+    )
+
+
+def test_anthropic_ttl_keeps_the_breakpoint_budget() -> None:
+    """The TTL rides on the existing markers; it must not add any. Nine system
+    blocks + two message targets still fit MAX_CACHE_BREAKPOINTS."""
+    client = AnthropicClient(cache_ttl_1h_min_context_tokens=1)
+    request = ChatRequest(
+        model=_spec(provider="anthropic"),
+        system_blocks=[f"block-{i}" for i in range(9)],
+        messages=[Message.user("first"), Message.assistant("mid"), Message.user("second")],
+        context_tokens_hint=500_000,
+    )
+    markers = _every_cache_control(client._build_body(request, oauth=True))
+    assert len(markers) == AnthropicClient.MAX_CACHE_BREAKPOINTS
+    assert all(m["ttl"] == "1h" for m in markers)
+    rendered = AnthropicClient._system_blocks([f"b{i}" for i in range(9)], ttl="1h")
+    assert sum("cache_control" in b for b in rendered) == AnthropicClient.MAX_CACHE_BREAKPOINTS
+
+
+def test_client_for_spec_passes_anthropic_ttl_threshold() -> None:
+    client = client_for_spec(
+        _spec(provider="anthropic", model_id="claude-opus-4-8"),
+        anthropic_cache_ttl_1h_min_context_tokens=123_456,
+    )
+    assert isinstance(client, AnthropicClient)
+    assert client._cache_ttl_1h_min_context_tokens == 123_456
+
+
+async def test_anthropic_usage_parses_cache_creation_ttl_split() -> None:
+    """``usage.cache_creation`` splits the write count by TTL; both slices land
+    on the Usage event and the sum still equals ``cache_write_tokens``."""
+    body = _sse(
+        [
+            {
+                "type": "message_start",
+                "message": {
+                    "usage": {
+                        "input_tokens": 10,
+                        "cache_read_input_tokens": 1_800,
+                        "cache_creation_input_tokens": 248,
+                        "cache_creation": {
+                            "ephemeral_5m_input_tokens": 148,
+                            "ephemeral_1h_input_tokens": 100,
+                        },
+                    }
+                },
+            },
+            {"type": "content_block_start", "index": 0, "content_block": {"type": "text"}},
+            {"type": "content_block_delta", "index": 0, "delta": {"text": "ok"}},
+            {"type": "message_delta", "delta": {"stop_reason": "end_turn"}},
+        ]
+    )
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(
+            200, content=body, headers={"content-type": "text/event-stream"}
+        )
+    )
+    client = AnthropicClient(http_client=httpx.AsyncClient(transport=transport))
+    events = await _collect(
+        client.stream(
+            ChatRequest(model=_spec(provider="anthropic"), messages=[Message.user("hi")]), "sk-ant"
+        )
+    )
+    usage = [e for e in events if isinstance(e, StreamEndEvent)][-1].usage
+    assert usage is not None
+    assert usage.cache_write_tokens == 248
+    assert usage.cache_write_5m_tokens == 148
+    assert usage.cache_write_1h_tokens == 100
+    assert usage.cache_write_5m_tokens + usage.cache_write_1h_tokens == usage.cache_write_tokens
+    assert usage.context_tokens == 10 + 1_800 + 248
+
+
+async def test_anthropic_usage_without_cache_creation_object_leaves_split_zero() -> None:
+    """Older API versions omit the object; the split must read 0, not raise."""
+    body = _sse(
+        [
+            {
+                "type": "message_start",
+                "message": {"usage": {"input_tokens": 5, "cache_creation_input_tokens": 40}},
+            },
+            {"type": "message_delta", "delta": {"stop_reason": "end_turn"}},
+        ]
+    )
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(
+            200, content=body, headers={"content-type": "text/event-stream"}
+        )
+    )
+    client = AnthropicClient(http_client=httpx.AsyncClient(transport=transport))
+    events = await _collect(
+        client.stream(
+            ChatRequest(model=_spec(provider="anthropic"), messages=[Message.user("hi")]), "sk-ant"
+        )
+    )
+    usage = [e for e in events if isinstance(e, StreamEndEvent)][-1].usage
+    assert usage is not None
+    assert usage.cache_write_tokens == 40
+    assert usage.cache_write_5m_tokens == 0
+    assert usage.cache_write_1h_tokens == 0

@@ -3185,3 +3185,88 @@ async def test_preflight_reuses_stale_row_when_a_peer_holds_the_lease(tmp_path) 
         await stream_a.close()
         await stream_b.close()
         store.close()
+
+
+# ---------------------------------------------------------------------------
+# Anthropic 1h prompt-cache TTL: settings → client, last usage → next request
+# ---------------------------------------------------------------------------
+
+
+def test_anthropic_cache_ttl_threshold_setting_reads_like_openai_api() -> None:
+    """Same resolution rules as ``_openai_api_mode``: missing/malformed → the
+    default, an explicit non-negative int (including the 0 off switch) wins."""
+    from local_operator.model.configure import ANTHROPIC_CACHE_TTL_1H_MIN_CONTEXT_TOKENS
+    from local_operator.model.configure import (
+        _anthropic_cache_ttl_1h_min_context_tokens as read,
+    )
+
+    assert read(None) == ANTHROPIC_CACHE_TTL_1H_MIN_CONTEXT_TOKENS
+    assert read({}) == ANTHROPIC_CACHE_TTL_1H_MIN_CONTEXT_TOKENS
+    assert read({"providers": {"openai": {"api": "responses"}}}) == (
+        ANTHROPIC_CACHE_TTL_1H_MIN_CONTEXT_TOKENS
+    )
+    assert read({"providers": {"anthropic": {"cache_ttl_1h_min_context_tokens": 0}}}) == 0
+    assert read({"providers": {"anthropic": {"cache_ttl_1h_min_context_tokens": 42}}}) == 42
+    for bad in ("150000", -1, True, None, 1.5):
+        assert read({"providers": {"anthropic": {"cache_ttl_1h_min_context_tokens": bad}}}) == (
+            ANTHROPIC_CACHE_TTL_1H_MIN_CONTEXT_TOKENS
+        )
+
+
+@pytest.mark.asyncio
+async def test_session_stream_feeds_last_context_into_anthropic_ttl(tmp_path) -> None:
+    """The provider's reported context on call N picks the TTL on call N+1.
+
+    Call 1 has no hint and a tiny body, so the byte estimate keeps it at 5m
+    even though the threshold is low. The mocked response reports a 200k
+    context; call 2 (same small body) then goes out with ``ttl: 1h`` on every
+    marker. An isolated call in between must neither read nor move the hint.
+    """
+    bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            content=(
+                b'data: {"type":"message_start","message":{"usage":{"input_tokens":5,'
+                b'"cache_read_input_tokens":199995,"cache_creation_input_tokens":0}}}\n\n'
+                b'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},'
+                b'"usage":{"output_tokens":1}}\n\n'
+            ),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    store = AuthStore(tmp_path / "auth.db")
+    store.upsert_credential("anthropic", {"key": "sk-ant", "source": "login"})
+    settings = {"providers": {"anthropic": {"cache_ttl_1h_min_context_tokens": 150_000}}}
+    stream = create_stream_fn(store, settings, session_id="session-ttl")
+    await stream._http.aclose()
+    stream._http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    spec = build_model_spec("anthropic", "claude-opus-4-8")
+    request = ChatRequest(
+        model=spec,
+        system_blocks=["instructions", "inventory", "skills", "env"],
+        messages=[Message.user("first"), Message.assistant("mid"), Message.user("second")],
+    )
+    try:
+        await _collect_stream(stream(request, None))
+        await _collect_stream(stream(request.model_copy(update={"isolated": True}), None))
+        await _collect_stream(stream(request, None))
+    finally:
+        await stream.close()
+        store.close()
+
+    def markers(body: dict[str, Any]) -> list[dict[str, Any]]:
+        found = [e["cache_control"] for e in body["system"] if "cache_control" in e]
+        for message in body["messages"]:
+            found.extend(b["cache_control"] for b in message["content"] if "cache_control" in b)
+        return found
+
+    assert len(bodies) == 3
+    assert markers(bodies[0]) and all(m == {"type": "ephemeral"} for m in markers(bodies[0]))
+    # Isolated: no hint stamped, so the small body stays 5m by the estimate.
+    assert all(m == {"type": "ephemeral"} for m in markers(bodies[1]))
+    assert markers(bodies[2]) and all(
+        m == {"type": "ephemeral", "ttl": "1h"} for m in markers(bodies[2])
+    )
