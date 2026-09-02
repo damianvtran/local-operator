@@ -16143,18 +16143,40 @@ class OperatorApp(App[None]):
 
     @staticmethod
     def _usage_data_fetched_ms(reports: list[Any]) -> float:
-        """The oldest report's ``fetched_at`` as an epoch-ms clock reading.
+        """The NEWEST report's ``fetched_at`` as an epoch-ms clock reading.
 
-        The panel's title renders ``now - fetched_ms`` as the age, so handing
-        it the OLDEST report's fetch time states how stale the stalest number
-        on screen is. Falls back to the wall clock (age ≈ 0) when no report
-        carries a usable timestamp.
+        The title's age answers "when were these numbers last confirmed?" — a
+        property of the SET — so it is measured from the most recent successful
+        fetch in it. It deliberately does not report the stalest member.
+
+        It used to take the ``min``, and one stuck account then pinned the whole
+        header: reported against v0.44.38 with five Anthropic logins refreshed
+        1.8 minutes earlier and a single Kimi account whose per-account backoff
+        had been serving last-good for 169 minutes, the title read ``2h ago``
+        while everything under it was two minutes old. Pressing ``r`` did not
+        move it either, and could not: a forced refresh clears the streak and
+        re-probes, but a probe that misses again keeps the previous report
+        object (``ProviderController._mark_account_failure``) along with its old
+        ``fetched_at``, so the ``min`` returned the same 169-minute stamp every
+        time. The panel therefore looked frozen while it was in fact updating.
+
+        A per-account miss is a normal, designed-for state here — accounts are
+        probed and served independently — so it must not be reported as "nothing
+        has updated in two hours". The individual staleness is not lost by this:
+        ``usage_panel._account_status_note`` renders ``last known 2h ago`` on the
+        stuck block itself, which is both more specific and attached to the rows
+        it actually qualifies.
+
+        Honest when the whole set is stale: with nothing refreshed the newest
+        stamp is still old, so the title reports the true age rather than
+        ``just now``. Falls back to the wall clock (age ≈ 0) only when no report
+        carries a usable timestamp at all.
         """
         stamps = [int(getattr(report, "fetched_at", 0) or 0) for report in reports]
         stamps = [stamp for stamp in stamps if stamp > 0]
         if not stamps:
             return time.time() * 1000
-        return float(min(stamps))
+        return float(max(stamps))
 
     def _warm_usage_background(self) -> None:
         """Keep the active provider's quota row warm so `/usage` answers from disk.

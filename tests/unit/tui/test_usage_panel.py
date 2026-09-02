@@ -29,6 +29,7 @@ from local_operator.tui.widgets.usage_panel import (
     binding_limit,
     build_usage_body,
     collect_stats,
+    format_age,
     format_amount,
     format_countdown,
     usage_bar,
@@ -1456,3 +1457,117 @@ async def test_panel_width_caps_on_a_laptop_and_holds_on_eighty_cols() -> None:
     async with _panel_app(size=(140, 34)) as panel:
         assert panel.panel_width() == PANEL_MAX_WIDTH
         assert panel.panel_width() == 104
+
+
+# -- header freshness vs per-account staleness -------------------------------
+#
+# Reported against v0.44.38: the title read `2h ago` while five of six accounts
+# had been refreshed under two minutes earlier, and `r` did not move it. The
+# header took the OLDEST `fetched_at`, so a single account sitting in its
+# per-account backoff pinned the age of the whole set — and because a forced
+# re-probe that misses again keeps the previous report object (and its old
+# stamp), no number of refreshes could unstick it. These tests hold the two
+# halves of the contract that replaced it: the title states when the set was
+# last confirmed, and the individual staleness stays on the account it belongs
+# to.
+
+
+def _aged(report, fetched_at: float):
+    """A report stamped at ``fetched_at``, since ``_report`` builds live ones."""
+    report.fetched_at = int(fetched_at)
+    return report
+
+
+def test_one_stuck_account_does_not_pin_the_header_to_its_age() -> None:
+    """The bug, at the helper the title is computed from.
+
+    Five accounts confirmed 1.8 minutes ago and one serving 169-minute-old
+    last-good: the header must describe the confirmation, not the straggler.
+    """
+    now = 200 * 60_000.0
+    fresh = [
+        _aged(
+            _report(_percent(f"a:5h:{index}", "5 hour", 20.0, shared=True), identity=f"a{index}@x"),
+            now - 1.8 * 60_000,
+        )
+        for index in range(5)
+    ]
+    stuck = _aged(
+        _report(
+            _percent("kimi:7d", "7 day", 64.0, shared=True),
+            provider="kimi",
+            identity="cred:8",
+        ),
+        now - 169 * 60_000,
+    )
+    stuck.consecutive_failures = 1
+
+    fetched_ms = OperatorApp._usage_data_fetched_ms([*fresh, stuck])
+
+    assert fetched_ms == fresh[0].fetched_at
+    # What the title actually renders, not just the millisecond arithmetic.
+    assert format_age(now - fetched_ms) == "1m ago"
+
+
+def test_the_stuck_account_still_carries_its_own_last_known_note() -> None:
+    """The header got less specific, so the per-account honesty must not.
+
+    A fresh title next to a silently stale row would be a worse lie than the
+    one this change removes; the note is what keeps the individual age visible.
+    """
+    now = 200 * 60_000.0
+    fresh = _aged(
+        _report(_percent("a:5h", "5 hour", 20.0, shared=True), identity="a@x"),
+        now - 1.8 * 60_000,
+    )
+    stuck = _aged(
+        _report(
+            _percent("kimi:7d", "7 day", 64.0, shared=True),
+            provider="kimi",
+            identity="cred:8",
+        ),
+        now - 169 * 60_000,
+    )
+    stuck.consecutive_failures = 1
+
+    reports = [fresh, stuck]
+    lines = _lines(reports, now=now)
+    title_age = format_age(now - OperatorApp._usage_data_fetched_ms(reports))
+
+    assert title_age == "1m ago"
+    assert any("last known 2h ago" in line for line in lines), lines
+    # The healthy account is not labelled by its neighbour's failure.
+    assert sum("last known" in line for line in lines) == 1, lines
+
+
+def test_a_wholly_stale_set_still_reports_its_real_age() -> None:
+    """Freshness measured from the newest stamp is not freshness invented.
+
+    With nothing refreshed there is no recent confirmation to report, so the
+    title must still say how old the numbers are rather than ``just now``.
+    """
+    now = 200 * 60_000.0
+    stale = [
+        _aged(
+            _report(_percent(f"a:5h:{index}", "5 hour", 20.0, shared=True), identity=f"a{index}@x"),
+            now - (150 + index) * 60_000,
+        )
+        for index in range(3)
+    ]
+
+    fetched_ms = OperatorApp._usage_data_fetched_ms(stale)
+
+    assert fetched_ms == stale[0].fetched_at  # the newest of the stale set
+    assert format_age(now - fetched_ms) == "2h ago"
+
+
+def test_reports_without_a_usable_stamp_fall_back_to_the_wall_clock() -> None:
+    """The cold path: no stamp anywhere means "as of now", not an epoch age."""
+    import time as _time
+
+    unstamped = [_aged(_report(_percent("a:5h", "5 hour", 20.0, shared=True)), 0)]
+
+    assert OperatorApp._usage_data_fetched_ms([]) == pytest.approx(_time.time() * 1000, abs=5_000)
+    assert OperatorApp._usage_data_fetched_ms(unstamped) == pytest.approx(
+        _time.time() * 1000, abs=5_000
+    )
