@@ -119,6 +119,102 @@ async def test_resume_replays_peer_message_without_double_paint() -> None:
 
 
 @pytest.mark.asyncio
+async def test_busy_steer_paints_one_peer_block_and_no_user_block(tmp_path) -> None:
+    """A `send now=True` landing mid-turn paints ONE PeerMessageBlock, and
+    nothing else for the same message.
+
+    Regression: the busy-steer path used to queue a plain user Message built
+    from the peer body, so the steering drain announced it with a user
+    ``MessageStartEvent`` — which the app, finding no echo it registered,
+    painted as a second copy in a ``UserBlock`` right under the
+    ``PeerMessageBlock`` the live receipt had already put up. A REAL Session
+    in the REAL app is the only host that exercises both hops (the receipt
+    and the drain's announcement), so the FakeSession is no use here.
+    """
+    import asyncio
+
+    from local_operator.harness.types import (
+        AgentTool,
+        StreamEndEvent,
+        StreamTextDelta,
+        StreamToolCallDelta,
+        TextContent,
+        ToolResult,
+    )
+    from local_operator.session.session import Session
+    from local_operator.session.transcript import Transcript
+    from local_operator.tui.widgets.transcript import UserBlock
+    from tests.unit.session.test_session import MODEL, ScriptedStream
+
+    tool_started = asyncio.Event()
+    release_tool = asyncio.Event()
+
+    async def blocking_execute(tool_call_id, args, signal, on_update, context):
+        tool_started.set()
+        await release_tool.wait()
+        return ToolResult(
+            tool_call_id=tool_call_id, tool_name="block", content=[TextContent(text="done")]
+        )
+
+    tool = AgentTool(
+        name="block", parameters={"type": "object", "properties": {}}, execute=blocking_execute
+    )
+    stream = ScriptedStream(
+        [
+            [
+                StreamToolCallDelta(index=0, id="c1", name="block", argument_delta="{}"),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [StreamTextDelta(delta="ack"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    session = Session(
+        model=MODEL,
+        stream_fn=stream,
+        tools=[tool],
+        transcript=Transcript(tmp_path / "sess"),
+        system_blocks_provider=lambda: [],
+    )
+
+    async def factory():
+        return session
+
+    app = OperatorApp(factory)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _settle_for_session(pilot, app)
+        # The gate would otherwise park the scripted tool call on a prompt the
+        # test never answers (see AGENTS.md on the capture scripts).
+        app._set_approve_all(True)
+        prompt_task = asyncio.ensure_future(session.prompt("long task"))
+        for _ in range(200):
+            await pilot.pause()
+            if tool_started.is_set():
+                break
+        assert tool_started.is_set(), "the scripted tool never started"
+
+        await session.receive_peer_message(
+            "redirect now", mode="steer", sender={"pid": 3, "conversation_name": "peer"}
+        )
+        await _settle_for_peer_block(pilot, app)
+        release_tool.set()
+        await prompt_task
+        # Let the drain's events cross into the app before counting; the
+        # spurious UserBlock (if any) is painted from that announcement.
+        for _ in range(20):
+            await pilot.pause()
+
+        peers = _peer_blocks(app)
+        assert len(peers) == 1
+        assert peers[0].text() == "redirect now"
+        user_bodies = [
+            b.text() for b in app.query_one(TranscriptView).blocks() if isinstance(b, UserBlock)
+        ]
+        # Only the prompt that opened the turn is a user row.
+        assert user_bodies == ["long task"], user_bodies
+    await session.dispose()
+
+
+@pytest.mark.asyncio
 async def test_live_receipt_suppresses_its_replay() -> None:
     session = FakeSession()
     session._history = [

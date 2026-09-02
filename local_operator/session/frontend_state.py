@@ -1116,10 +1116,25 @@ class FrontendStateStore:
         try:
             for message in session.queued_steering():
                 content = list(getattr(message, "content", ()) or ())
+                text = str(getattr(message, "text", "") or "")
+                if not text:
+                    # Not everything on the steering queue is a plain user
+                    # Message: a busy-path wake and a busy-path peer steer
+                    # queue their CustomMessage, which carries no ``text``
+                    # property or ``content`` blocks — only ``details``.
+                    # Without this a follower saw those entries as
+                    # ``{"text": ""}`` and a renderer would paint a blank
+                    # queued row. ``body`` is the raw human-facing text a
+                    # peer row keeps for the UIs, preferred over ``text``
+                    # (the model-facing provenance envelope); a wake only has
+                    # ``text``, which IS its human-facing message.
+                    details = getattr(message, "details", None)
+                    if isinstance(details, dict):
+                        text = str(details.get("body") or details.get("text") or "")
                 queued.append(
                     {
                         "id": str(getattr(message, "id", "") or ""),
-                        "text": str(getattr(message, "text", "") or ""),
+                        "text": text,
                         "image_count": sum(
                             1 for block in content if block.__class__.__name__ == "ImageContent"
                         ),
