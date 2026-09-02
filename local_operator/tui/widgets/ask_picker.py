@@ -42,7 +42,7 @@ Two things it does that no other picker in this app does:
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 
 from rich.cells import cell_len
@@ -169,6 +169,16 @@ MIN_TRANSCRIPT_ROWS = 4
 #: R9-R11, measured on the composited screen rather than the card's own text).
 MIN_BODY_ROWS = 3
 
+#: Max wrapped lines the QUESTION header may occupy, mirroring OMP's
+#: ``MAX_HEADER_ROWS`` (ask-dialog.ts:62). A question longer than this is
+#: truncated to ``cap - 1`` whole lines plus a ``…``-marked line, so a long
+#: question cannot starve the option list of its budget and leave a cut
+#: description unreachable by any gesture (GAP D7). The ordering "question
+#: outranks options" (the safety property, ``_layout`` steps 1-2) is unchanged;
+#: this only bounds how many rows the question may TAKE before the options
+#: start competing for what is left.
+MAX_QUESTION_ROWS = 4
+
 #: The cursor glyph, matching the ``/resume`` and command pickers. A caret plus
 #: a tinted label rather than a reversed row: an inverted block reads as a
 #: selection the user made rather than the position they are on.
@@ -197,11 +207,45 @@ TAB_HINT_KEY = "⇥"
 #: is not on the list unreachable by any key (D13).
 OTHER_JUMP_KEY = "0"
 
+#: The key that reveals the selected row's description in full, as the footer
+#: names it. ``^e`` and not ``enter``: Enter ANSWERS here, and on the approval
+#: gate it authorises a tool call, so it is not available to overload. Not hover
+#: either — the text this uncovers is what decides an authorisation, and gating
+#: it behind a mouse loses it for a keyboard user, an ssh session with no mouse
+#: reporting, and every screen reader.
+#:
+#: Free, audited against the running app rather than against the binding tables:
+#: no node from this card up to the app resolves ``ctrl+e`` to anything, and
+#: :meth:`on_key` only swallows PRINTABLE single characters, which ``\x05`` is
+#: not — so the free-text row does not eat it either.
+REVEAL_HINT_KEY = "^e"
+
 #: The multi-select checkbox, including its trailing space. ``[x]``/``[ ]`` and
 #: not a filled glyph pair: this app already says "done/not done" that way in
 #: the todo panel, and a box reads as toggleable where ``◉`` reads as decoration.
 CHECK_ON = "[x] "
 CHECK_OFF = "[ ] "
+
+#: The scrollbar track and thumb, painted over the rightmost column of the
+#: windowed body rows so the user can see WHERE in a taller list the window is.
+#: The same two glyphs and the same proportional maths as ``usage_panel.py``
+#: (``SCROLLBAR_TRACK``/``SCROLLBAR_THUMB``, :meth:`_scrollbar_thumb`), so the
+#: bar matches the rest of the app. The gutter is NOT reserved (unlike
+#: usage_panel, whose right-aligned numbers must not slide when the bar
+#: toggles): this card's rows are left-aligned labels with nothing at the right
+#: edge to keep stable, and a persistent column would shift the approval gate's
+#: byte-identical frame one column. So the thumb is painted only while the list
+#: windows — keyed on ``layout.show_position`` (see the paint site). The list
+#: windows when the visual line list is taller than ``body_line_budget``, and
+#: at tight heights the D1 collapse drops the position row while the list is
+#: still windowed; painting a thumb with no count beside it would split the one
+#: overflow signal in two, so both hang off ``show_position``. When it windows,
+#: the option rows are built at ``content_width`` (``width - 1``) so the glyph
+#: has its own column — a state no pinned golden reaches, since the approval
+#: gate never windows above ~44 columns (its labels are kept whole by
+#: :meth:`_labels_must_all_fit`).
+SCROLLBAR_TRACK = "│"
+SCROLLBAR_THUMB = "█"
 
 #: The free-text row's label while it holds nothing and is not selected.
 OTHER_LABEL = "Other (type your own)"
@@ -220,16 +264,106 @@ SECRET_HINT = "hidden as you type — enter stores, esc skips"
 #: Same glyph the login key prompt uses, so a secret paste looks like one.
 SECRET_MASK = "•"
 
-#: The tag marking the option the model recommends. Words, not a glyph: this is
-#: the one row the user is being nudged toward, and a nudge nobody can read is
-#: just an unexplained difference in colour.
-RECOMMENDED_TAG = "recommended"
+#: The tag marking the option the model recommends.
+#:
+#: Uppercase behind a marker glyph, and drawn at ``fg`` + bold where it heads a
+#: description (:meth:`_description_text`) — three signals that are not hue,
+#: because hue is not available here. Contrast was measured
+#: for every candidate against BOTH themes and both of this card's grounds
+#: (``overlay`` for a normal row, ``raised`` for the selected one): amber
+#: (3.97:1), label violet (3.62:1) and signal blue (3.54:1) all fall under the
+#: 4.5:1 AA floor on the light theme, whose chromatic ramp is tuned against
+#: ``surface`` rather than against a card. ``$lo-accent`` is unavailable for a
+#: second reason — local_operator.tcss spends it on an exhaustive list of four
+#: sites and site 4 is already on this card ("what ENTER will take"), so a green
+#: badge would make the accent say two things on one frame.
+#:
+#: Words and not a bare glyph: this is the one row the user is being nudged
+#: toward, and a nudge nobody can read is just an unexplained difference in
+#: colour. It was `recommended` at ``muted`` for a release — the identical style
+#: to the prose it sits in, with no weight — and the designer reported being
+#: unable to find the word in the rendered frame without searching for it (D4).
+RECOMMENDED_TAG = "▸ RECOMMENDED"
 
 #: Cells a label must keep for its row to say anything. Below this the row is
 #: more honest showing its number alone than a one-character stub, which names a
 #: category and hides the instance — on this card that means two different
 #: answers painting the same text.
 LABEL_MIN_CELLS = 6
+
+#: The most description lines ``ctrl+e`` lifts the SELECTED row's cap to,
+#: however much room the terminal has (:meth:`_cap_for_row`).
+#:
+#: Under line-granular windowing the reveal is a per-row cap LIFT inside the one
+#: scrolling viewport, not a constant-height block (§4). ``ctrl+e`` raises the
+#: selected row's description cap from :data:`DEFAULT_DESC_CAP` (2) to this,
+#: making that one row up to 9 visual lines tall (a label plus 8 description
+#: lines) in place; :meth:`_move_to` then scrolls the list to keep the taller
+#: row's span visible, and the thumb reports the rest honestly. There is no
+#: block to pad, no tallest-in-list reservation, and no BLOCKER-1 column trade
+#: — lifting one row's cap never removes another row's prose, it only pushes
+#: other rows further out of the viewport.
+#:
+#: A DRAWING cap, applied to the line list, and deliberately not a cut on the
+#: wrap itself: :meth:`_description_lines` still returns the whole wrap, so the
+#: last kept line is ``…``-marked wherever the wrap exceeds the cap, exactly the
+#: "say that it continues" discipline every capped row follows. This is why D5
+#: (a reveal that truncated in silence) cannot recur: the cut is a decision
+#: about the FRAME, computed against the full wrap.
+#:
+#: Eight, and the number is the reported size's: at 150x40 the longest
+#: description on ``scripts/ask_user_repro.py`` (option 1, 1023 characters)
+#: wraps to exactly 8 lines, so an 8-line cap shows that whole consequence in
+#: place. Above 8 buys nothing at any size the card was verified at — the
+#: viewport binds first — and a taller row only pushes more of the list off
+#: screen, which the thumb and the position row already report.
+#:
+#: Widths here are TERMINAL columns, and the card is 4 cells narrower (padding
+#: one cell each side, plus the dock's own two): terminal 100 is card width 96,
+#: and the prose column is 5 narrower again (:meth:`_description_indent`). That
+#: conversion is stated because getting it backwards is what produced the "44
+#: columns" figure this file carried for a release — see :data:`DEFAULT_DESC_CAP`.
+REVEAL_MAX_ROWS = 8
+
+#: The most description lines the DEFAULT list draws for any one row.
+#:
+#: A different number for a different job than :data:`REVEAL_MAX_ROWS`: 2 is
+#: how much prose the LIST shows per row, 8 is how much the REVEAL shows for
+#: one row. Uncapped, the pool spent every spare row of a roomy terminal on prose
+#: and the card stopped being a list: measured on ``scripts/ask_user_repro.py``
+#: (three described options plus the free-text row) at 190x50 under the real
+#: ``OperatorApp``, an 18-row budget of which 14 were prose, options drawn
+#: 7/5/4/2 rows tall with no blank line between one option's paragraph and the
+#: next option's label. The labels are ``fg`` bold against ``muted`` prose, so
+#: the contrast ranking was intact and the list was still uncountable — a bold
+#: line every six lines does not separate anything at that density.
+#:
+#: Two, not three. The label/prose pair still reads as one unit at 2 lines and
+#: stops being perceptible from 3. Measured on the same fixture and size, a
+#: 3-cap draws rows 4/4/4/2 and a 24-row card against the 2-cap's 3/3/3/2 and
+#: 17 — seven rows of the conversation spent to add a third line to prose the
+#: reveal already reaches in full.
+#:
+#: The cap is what makes the reveal reachable at all. The two halves of the
+#: previous round fought each other: the pool spent the budget step 7a needed,
+#: so at 190x50 ``ctrl+e`` produced a byte-identical frame and the footer never
+#: offered it, and at 150x40 all three descriptions were ellipsised with no way
+#: to read them — the ORIGINAL truncation bug, at the size it was reported from
+#: (D2). Fixing the hierarchy with SPACE is also the only move left: prose is
+#: ``muted`` 6.51:1 and the next step down is ``dim`` 3.43:1, under the AA floor
+#: the description was deliberately walked UP to, and on the approval gate that
+#: text authorises a tool call.
+#:
+#: The APPROVAL gate is untouched by this cap, and the reason is a width the
+#: file previously mis-stated. Its three consequences are 37, 36 and 28 cells,
+#: so each wraps to one line — and therefore never asks for a second — down to a
+#: prose column of 37, which is card width 42, which is TERMINAL width 46. Not
+#: "44 columns": that figure was a card width transcribed as a terminal one, and
+#: it is the number the gate's byte-identity argument used to rest on. Below 46
+#: the consequences do wrap and the cap does apply to them; the first wrap going
+#: down is at terminal 45 (card 41, column 36), where *Allow*'s takes two lines.
+#: Measured through the same ``wrap_cells`` the card wraps with.
+DEFAULT_DESC_CAP = 2
 
 
 @dataclass
@@ -244,6 +378,15 @@ class _QuestionState:
     selected: int = 0
     checked: set[int] = field(default_factory=set)
     typed: str = ""
+    #: Whether ``ctrl+e`` has traded this question's one-line-per-row list for
+    #: the selected row's description in full.
+    #:
+    #: Per QUESTION and not per card, for the same reason the selection is: a
+    #: multi-question ask that carried the mode forward would change how the
+    #: NEXT question is drawn on the strength of a key pressed against the
+    #: previous one, and coming back to a question would show it differently
+    #: from how it was left.
+    revealed: bool = False
 
 
 @dataclass(frozen=True)
@@ -259,6 +402,18 @@ class _CardLayout:
 
     #: Content cells the card is drawing in, padding excluded.
     width: int
+    #: Cells an OPTION ROW's content (label and description) may use — ``width``
+    #: normally, ``width - 1`` when the list windows so the row reserves the
+    #: scrollbar column. Descriptions wrap into ``content_width - indent`` and
+    #: labels truncate to ``content_width``, so a windowed row is never cut by
+    #: the ``width - 1`` thumb reservation in :meth:`_card_text` — that cut used
+    #: to eat the tail of every full-width description line behind the thumb, and
+    #: mark a spurious ``…`` on blank continuation lines (the R11/R15/D5 class,
+    #: reintroduced by the line-granular wrap). This is OMP's own fix: when the
+    #: list overflows it re-renders one column narrower (``ask-dialog.ts:889-892``,
+    #: ``renderRows(width - 1)``). CHROME (header rule, question, footer, the
+    #: position row) is not under the thumb and keeps the full ``width``.
+    content_width: int
     #: The question's wrapped lines that fit, the last marked ``…`` if any were
     #: cut off.
     question: tuple[str, ...]
@@ -266,17 +421,45 @@ class _CardLayout:
     show_title: bool
     space_above: bool
     space_below: bool
-    show_descriptions: bool
-    #: Option ROWS the window may draw, whatever each of them costs in lines.
-    #: Zero when the body is too short to say anything about the question.
-    page: int
-    #: Whether the windowing line was BOUGHT. The renderer reads this instead of
-    #: re-deriving "the window is short of the list", which is how a row nobody
-    #: had paid for got drawn and took the footer off the tail (round 3, R11).
+    #: Description lines each row contributes to the line list, by row index.
+    #: Absent or 0 means the row is a bare label. Uniform at
+    #: :data:`DEFAULT_DESC_CAP` for every row that has prose — except the
+    #: SELECTED row while ``ctrl+e`` is on, lifted to :data:`REVEAL_MAX_ROWS`
+    #: in place (§4). The VIEWPORT clips lines uniformly; there is no longer an
+    #: all-or-nothing first-line decision (C5 retired, §3.4). ``page`` and
+    #: ``reveal_rows`` are gone with the row window and the reveal block.
+    description_rows: dict[int, int]
+    #: First line index of every row in the OMP-style line list,
+    #: ``lineStartByRow`` (``ask-dialog.ts:868-887``). Length ``row_count + 1``;
+    #: the last entry is ``len(line_list)``. The sole source of truth for the
+    #: cursor-visibility math (:meth:`_move_to`), the thumb's ``total`` (§5),
+    #: the position row's range (§7) and the paging step (§2.6).
+    line_start_by_row: tuple[int, ...]
+    #: Visual LINES the option-list viewport draws. The line list is windowed
+    #: into exactly this many lines — the viewport clips past its budget and
+    #: pads blank past the list's end (§2.3), so the body is a rigid rectangle
+    #: and the footer (bought first) is never clipped. This is C1 in line terms
+    #: (§3.4): ``body_line_budget == remaining`` after step 8, so the plan's
+    #: implied line count never exceeds ``budget``.
+    body_line_budget: int
+    #: Whether the windowing line and the thumb are drawn. Now
+    #: ``len(line_list) > body_line_budget`` (OMP's ``#shouldRenderScrollbar``),
+    #: the allocator's overflow decision. The renderer reads this instead of
+    #: re-deriving it, which is how a row nobody had paid for got drawn and took
+    #: the footer off the tail (round 3, R11).
     show_position: bool
     #: False only when the body has no drawable line at all. Everywhere else the
     #: footer is the first row bought, so it is the last thing that can go.
     show_footer: bool
+
+    #: Whether the list carries an option description COLUMN at all: True
+    #: whenever any OPTION has real prose (the free-text row's hint and the
+    #: recommended badge do not count). Independent of the budget — descriptions
+    #: now COEXIST with scroll rather than being dropped when the list windows
+    #: (§3.4, C5 retired). Read by :meth:`_row_text` to place the recommendation
+    #: badge: inline on the label when there is no column, in the column when
+    #: there is.
+    show_descriptions: bool
 
 
 class AskPickerScreen(Container):
@@ -348,12 +531,19 @@ class AskPickerScreen(Container):
         Binding("j", "move(1)", "Down", show=False),
         Binding("ctrl+p", "move(-1)", "Up", show=False),
         Binding("ctrl+n", "move(1)", "Down", show=False),
+        # PageUp/PageDown move the cursor a page and let `_move_to` autoscroll
+        # the window to keep it drawn. CLAMPED, unlike the arrows: paging past
+        # an end lands on the end rather than wrapping, so a page key can never
+        # jump the cursor to the far end of the list.
+        Binding("pageup", "page(-1)", "Page up", show=False),
+        Binding("pagedown", "page(1)", "Page down", show=False),
         # ``toggle_row``, not ``toggle``: ``DOMNode.action_toggle`` already
         # exists and takes an attribute name, so an ``action_toggle(self)``
         # here would override a live Textual action with an incompatible
         # signature — the shadowing class that breaks a widget from the inside
         # and reports the traceback somewhere else entirely.
         Binding("space", "toggle_row", "Toggle", show=False),
+        Binding("ctrl+e", "toggle_reveal", "Reveal", show=False),
         Binding("backspace", "backspace", "Edit answer", show=False),
         *[Binding(str(digit), f"jump({digit})", "Jump", show=False) for digit in range(1, 10)],
         # ``0`` is not an ordinal: it reaches the free-text row, which is the
@@ -424,6 +614,15 @@ class AskPickerScreen(Container):
         #: question wrapped; a click resolved by arithmetic landed on the row
         #: below whenever a description wrapped or the question did not.
         self._line_rows: list[int | None] = []
+        #: ``(row index, card width)`` -> that description's wrapped lines.
+        #:
+        #: ``_layout`` is called three times per paint and ``_repaint`` runs on
+        #: every keystroke, so wrapping every description on the paint path is
+        #: work the card does not need to repeat while nothing it depends on has
+        #: moved. Width is part of the key, so a resize serves nothing stale;
+        #: the question advancing is not visible in the key at all, so that path
+        #: clears it (:meth:`_invalidate_description_wraps`).
+        self._description_wraps: dict[tuple[int, int], list[str]] = {}
         #: Called once with the answers when the card settles. The app resolves
         #: the waiting tool call from it.
         self._on_settle = on_settle
@@ -572,6 +771,23 @@ class AskPickerScreen(Container):
         """Arrow/vi movement WRAPS: a discrete, deliberate keypress."""
         self._move_to((self.state.selected + delta) % self.row_count)
 
+    def action_page(self, delta: int) -> None:
+        """PageUp/PageDown move the cursor a page and let the window follow.
+
+        CLAMPED, not wrapped: paging past the end lands on the end, unlike
+        :meth:`action_move` which wraps a discrete keypress. The step is
+        ``max(1, rows_per_body - 1)`` ROWS — the line-model analogue of OMP's
+        ``Math.max(1, bodyRows - 1)`` (``ask-dialog.ts:702-708``) — where
+        ``rows_per_body`` is how many WHOLE option rows fit in one viewport
+        height at the current line list (§2.6). Paging moves the CURSOR;
+        :meth:`_move_to` then scrolls the viewport to follow, so a page still
+        means "about a screenful" while the window stays line-granular.
+        """
+        layout = self._layout()
+        step = max(1, self._rows_per_body(layout.line_start_by_row, layout.body_line_budget) - 1)
+        target = self.state.selected + delta * step
+        self._move_to(max(0, min(self.row_count - 1, target)))
+
     def action_jump(self, number: int) -> None:
         """``1``..``9`` jumps straight to a row, the free-text row included."""
         if 1 <= number <= self.row_count:
@@ -591,6 +807,41 @@ class AskPickerScreen(Container):
         """
         if self._allow_free_text:
             self._move_to(self.other_row)
+
+    def action_toggle_reveal(self) -> None:
+        """``ctrl+e``: show the selected row's description in full, or stop.
+
+        The list's one line per row is what the card can afford to draw for
+        EVERY option; this trades it for one option's whole paragraph. An
+        explicit, reversible keypress, so a card that windows its answers to
+        buy the prose (measured at 130x30 and below) does so because the user
+        asked, never on its own — and the count row it buys says how many
+        answers went off screen.
+
+        Reset here rather than in :meth:`_move_to`: the whole point of the
+        reveal is to read one row and then the next, so movement RETARGETS the
+        block instead of closing it. It stays the same height either way.
+
+        Turning it ON is refused wherever the footer is not OFFERING it, which
+        is a stronger rule than "would it show anything new" and is why it is
+        asked of the footer rather than of :meth:`_reveal_is_useful` directly.
+        The hint is dropped on a narrow card to keep `esc deny` whole, and a key
+        that still fired there would be an unadvertised gesture that trades two
+        of an authorisation's three consequences for one — measured on the
+        approval card at 24-40 columns. The card must not do anything by a key
+        it is not willing to name.
+
+        Turning it OFF is always allowed: the terminal can grow under a revealed
+        card until the list draws every description on its own, and a mode that
+        could only be left while it was still needed would be a trap.
+        """
+        if not self.state.revealed and not self._offers_reveal():
+            return
+        self.state.revealed = not self.state.revealed
+        # A new frame is a new state, so a refused Enter stops describing the
+        # one before it — the same rule every other key here follows.
+        self._rejected = False
+        self._repaint()
 
     def action_toggle_row(self) -> None:
         """Space toggles a multi-select row; on a single-select it does nothing.
@@ -655,6 +906,7 @@ class AskPickerScreen(Container):
         self._index += 1
         self._offset = 0
         self._hovered = None
+        self._invalidate_description_wraps()
         self._repaint()
         # Tell the host the card moved to a new question so the phone follows
         # the terminal to it (U8). Posted AFTER _index advances so the handler
@@ -703,6 +955,7 @@ class AskPickerScreen(Container):
         self._offset = 0
         self._hovered = None
         self._rejected = False
+        self._invalidate_description_wraps()
         self._repaint()
         # Same re-projection seam as the terminal Enter path: the phone that
         # DIDN'T drive this advance (or reconnects mid-ask) must still be
@@ -1083,12 +1336,145 @@ class AskPickerScreen(Container):
         return max(1, width - ASK_PADDING_CELLS * 2)
 
     def _question_lines(self, width: int) -> list[str]:
-        """The question, wrapped. Never truncated: it is what is being asked.
+        """The question, wrapped and bounded to :data:`MAX_QUESTION_ROWS`.
 
         Wrapping makes the header's height depend on content, which is why the
         row budget below is computed from this rather than from a constant.
+
+        Bounded (not "never truncated") so a long question cannot consume the
+        whole body and leave the option list a 1-2 line viewport in which a cut
+        description is unreachable by any gesture (GAP D7; OMP's
+        ``MAX_HEADER_ROWS``, ask-dialog.ts:62,153-159). The cut is MARKED, like
+        every other abbreviation this card makes, so the reader can tell the
+        question continues. The ordering that makes the question outrank the
+        options (the safety property, ``_layout`` steps 1-2) is untouched: this
+        bounds how many rows the question may take, not whether it is shown
+        first. The mark matches the budget-cut idiom ``_allocate`` already uses
+        for a question the body cannot fit, so the two truncation paths read
+        identically.
         """
-        return wrap_cells(self.question.question, width) or [""]
+        lines = wrap_cells(self.question.question, width) or [""]
+        if len(lines) <= MAX_QUESTION_ROWS:
+            return lines
+        kept = lines[: MAX_QUESTION_ROWS - 1]
+        tail = truncate_cells(lines[MAX_QUESTION_ROWS - 1], max(1, width - 2))
+        tail = tail[:-1].rstrip() if tail.endswith("…") else tail
+        return [*kept, f"{tail} …"]
+
+    def _description_indent(self) -> int:
+        """Cells a description line is inset by, so it sits under the LABEL.
+
+        One definition for the wrap and for the paint: measuring the room in
+        one place and indenting by another is how a continuation line comes out
+        one cell wider than the card it is drawn in.
+        """
+        return GUTTER_CELLS + NUMBER_CELLS + (cell_len(CHECK_ON) if self.question.multi else 0)
+
+    def _description_lines(self, index: int, width: int) -> list[str]:
+        """One row's description, wrapped into the card's own cell model, capped.
+
+        ``wrap_cells`` and NOT a wrappable ``Text``: ``Content.from_rich_text``
+        discards ``no_wrap``/``overflow`` when a ``Text`` crosses into a widget
+        (command_picker.py:31-39, and the reason :func:`_cut_row` exists), so
+        handing Textual a wrappable Text would let the card choose its own
+        width — the one condition AGENTS.md calls always a bug here. Wrapping in
+        the same width model the rest of the card measures in is what keeps
+        every line inside the column :func:`_fit_row` then pads it to.
+
+        The WHOLE wrap, uncapped, and memoised because ``_layout`` runs three
+        times per paint and ``_repaint`` runs on every keystroke. Callers cap
+        what they DRAW (:data:`DEFAULT_DESC_CAP` for the list,
+        :data:`REVEAL_MAX_ROWS` for the block) and both then mark the cut,
+        because both can still see the lines they are not showing.
+
+        Capped here for a release, and that is precisely how the reveal came to
+        stop mid-clause in silence (D5): a truncated return value made every
+        caller's ``len(wrapped) > len(kept)`` test compare the cut against
+        itself, so the card could not tell a description it had finished from
+        one it had abandoned. A cut is a decision about a FRAME; this is the
+        text.
+
+        Returns the PROSE only. The recommendation tag is charged to the FIRST
+        line, and this reserves its cells there by wrapping with a hanging
+        indent — so the tag introduces the paragraph without narrowing the rest
+        of it. Billed against every line instead, the same paragraph would wrap
+        into a column fourteen cells short of the one it is drawn in, and the
+        promoted option would be the one row on the card with a ragged edge.
+        """
+        cached = self._description_wraps.get((index, width))
+        if cached is not None:
+            return cached
+        room = max(1, width - self._description_indent())
+        description = self._row_description(index)
+        tag_cells = 0
+        if self.question.recommended == index:
+            # The tag plus its ` · ` separator, exactly as `_description_text`
+            # spends them, so what is reserved here is what is drawn there.
+            tag_cells = cell_len(RECOMMENDED_TAG) + 3
+            if not description or room - tag_cells <= 0:
+                # No room beside the tag for prose, or no prose to put there.
+                # The tag still earns its line: it is the only thing marking the
+                # row the model is pointing at once the badge has moved off the
+                # label (D6).
+                self._description_wraps[(index, width)] = [""]
+                return [""]
+        if not description:
+            self._description_wraps[(index, width)] = []
+            return []
+        if tag_cells:
+            # The tag's line is wrapped NARROW and the rest wide, both through
+            # `wrap_cells` so it keeps owning the word-breaking for over-long
+            # words (URLs, paths) and no second wrapper drifts from it.
+            #
+            # Not a placeholder word wrapped in one pass, which is what this
+            # was: a first token longer than `room - tag_cells` does not fit
+            # beside a filler either, so `wrap_cells` put the filler on a line
+            # of its own and slicing it off left line 0 EMPTY. At a grant of one
+            # the row then drew `recommended` alone and lost every cell of its
+            # prose — worse than the single truncated line the pre-wrap card
+            # drew, and reached by exactly the descriptions a model writes
+            # (measured at 70x22 on a description opening with a URL). The head
+            # is a character prefix of the description, so the remainder is a
+            # slice of it rather than a rejoin, and nothing is invented at the
+            # seam.
+            head = wrap_cells(description, room - tag_cells)[0]
+            rest = description[len(head) :].lstrip(" ")
+            lines = [head, *wrap_cells(rest, room)] if rest else [head]
+        else:
+            lines = wrap_cells(description, room)
+        self._description_wraps[(index, width)] = lines
+        return lines
+
+    def _reveal_wrap(self, index: int, width: int) -> list[str]:
+        """The lines ``ctrl+e`` may uncover for row ``index`` — none for a FIELD.
+
+        The reveal exists for the prose that decides the answer: an option's
+        consequence, which the model wrote and the user is comparing. The
+        free-text and secret rows' "descriptions" are neither — they are chrome
+        this app wrote to explain a paste box (``OTHER_HINT``, ``SECRET_HINT``),
+        and a card that spent rows elaborating on `type it here` would be
+        padding a text field. Measured on a two-option question with no
+        descriptions at all: the free-text hint alone made the footer offer
+        `^e` at 32 columns, so the key was advertised on a card whose answers
+        carry no consequences.
+
+        Blank wraps are dropped for the same reason. A row with no description
+        still wraps to one EMPTY line where it is the recommended one, because
+        the tag reserves its line there (:meth:`_description_lines`).
+        """
+        if index == self.other_row:
+            return []
+        wrap = self._description_lines(index, width)
+        return wrap if any(wrap) else []
+
+    def _invalidate_description_wraps(self) -> None:
+        """Drop the wrap cache: its inputs (the question's text, the width) moved.
+
+        Keyed by ``(index, width)``, so a resize alone cannot serve a stale
+        entry — but the INDEX means a different row once the card advances to
+        the next question, and that is the one input the key cannot see.
+        """
+        self._description_wraps.clear()
 
     def _body_rows(self, question_lines: int) -> int:
         """Lines the card's BODY may draw, with the transcript's share reserved.
@@ -1182,17 +1568,47 @@ class AskPickerScreen(Container):
         # and the card silently lost every second line: measured as options
         # drawn with no consequences under them, and a list that windowed at 13
         # options on a terminal with room for all of them.
+        # A description is now worth as many lines as it WRAPS to, capped, so
+        # the natural height counts those lines rather than one per row. Left at
+        # one, this cap sits below what `_allocate` can now spend and the
+        # allocator is handed a budget that can never buy a continuation line:
+        # the same failure recorded above, one step further in — every
+        # description would silently stay a single ellipsised line however much
+        # room the terminal had.
+        # Every row's description at its cap, through the SAME line list the
+        # allocator windows: :data:`DEFAULT_DESC_CAP` for each row, lifted to
+        # :data:`REVEAL_MAX_ROWS` for the selected row while ``ctrl+e`` is on
+        # (:meth:`_cap_for_row`). So the reveal is NOT a separate `wanted` term
+        # any more — it is just the one row that is taller — which is the whole
+        # simplification of the cap-lift model (§4): one line list, one height.
+        #
+        # Left counting one line per row, this cap sat below what `_allocate`
+        # can spend and the card silently lost every description's second line
+        # (measured: options drawn with no consequences under them, a list
+        # windowing at 13 options on a terminal with room for all). Counting the
+        # lifted cap for the selected row is what keeps the revealed frame's
+        # natural height honest, so the key draws its extra lines on exactly the
+        # terminals with room for them.
+        line_list, _ = self._build_line_list(
+            range(self.row_count),
+            self._card_width(),
+            revealed=self.state.revealed,
+            selected=self.state.selected,
+        )
+        # ``len(line_list)`` is already every row's label PLUS its capped
+        # description lines, so it stands in for both the per-row label row and
+        # the ``described`` term the old arithmetic summed separately.
         wanted = (
             2  # title and its rule
             + question_lines
             + 2  # the spacer above the list and below it
-            + self.row_count * 2  # each option, plus its description line
+            + len(line_list)  # every option's label and its capped description
             + 1  # the windowing line, where the list turns out to need one
             + 1  # the footer
         )
         return min(room, wanted)
 
-    def _layout(self) -> _CardLayout:
+    def _layout(self, *, reveal: bool | None = None) -> _CardLayout:
         """Divide the body's rows BEFORE anything is drawn into them.
 
         The old arithmetic reserved chrome and then handed the options
@@ -1209,15 +1625,29 @@ class AskPickerScreen(Container):
         1. the footer — the only statement of how to leave;
         2. the FIRST LINE OF THE QUESTION — what is being asked;
         3. one option row — a question with no answers is not a question;
-        4. the windowing line, whenever the window is short of the list, because
-           a card quietly showing one of four has hidden three;
+        4. the windowing line, whenever the line list is taller than the
+           viewport, because a card quietly showing one of four has hidden three;
         5. the rest of the question, every wrapped line of it, marked ``…`` if
            even that cannot fit;
         6. the title and its rule, which travel together — a rule under a title
            is a caption, a rule under nothing is the edge of a box;
         7. the rest of the option rows;
         8. the blank spacers, which are rhythm and nothing else;
-        9. the descriptions, all of them or none.
+        9. the option list is a fixed-height LINE VIEWPORT of whatever
+           ``remaining`` is left. Every row carries its 2-line-clamped
+           description (the selected row lifted to :data:`REVEAL_MAX_ROWS` while
+           ``ctrl+e`` is on) into a line list, and the viewport windows it,
+           clipping partial rows at the edges (§2.3). Descriptions and scroll
+           COEXIST — there is no all-or-nothing column decision (C5 retired) and
+           no separate reveal block (§4): the reveal is a per-row cap lift inside
+           this one viewport, so there is nothing to fight it.
+
+        The reveal is no longer a step: it is the cap lift step 9 already reads.
+        The old steps 7a (the constant-height block) and 10/11 (continuation
+        lines bought from a leftover pool) are gone with it — the viewport draws
+        exactly ``min(body_line_budget, len(line_list))`` lines, so wrapping is
+        free at the tight sizes (the list simply windows) without a pool to
+        drain.
 
         **The question outranks the options, and that ordering is a safety
         property rather than a preference.** It used to sit below them, which
@@ -1244,18 +1674,29 @@ class AskPickerScreen(Container):
         is every terminal four rows tall and under, to nothing at all. Laying
         out a card the screen cannot paint is how the keys went missing in the
         first place.
+
+        ``reveal`` overrides the question's own ``ctrl+e`` state, for asking
+        what the OTHER state would draw. A parameter rather than a temporary
+        write to ``_QuestionState``: this runs on the paint path, and a trial
+        that mutates the state it is trialling leaves the card one exception
+        away from being stuck in a mode nobody selected.
         """
         width = self._card_width()
         question = self._question_lines(width)
         budget = self._body_rows(len(question))
-        plan = self._allocate(width, question, budget, position=False)
-        if 0 < plan.page < self.row_count:
+        revealed = self.state.revealed if reveal is None else reveal
+        plan = self._allocate(width, question, budget, position=False, reveal=revealed)
+        # Would the line list overflow the first pass's viewport? The first pass
+        # never buys the position row (``position=False`` forces ``show_position``
+        # False), so ask the geometry directly: the list is taller than the body
+        # AND the body draws at least one line (a card under MIN_BODY_ROWS draws
+        # nothing to window).
+        first_total = plan.line_start_by_row[-1] if plan.line_start_by_row else 0
+        if plan.body_line_budget > 0 and first_total > plan.body_line_budget:
             # The list windows after all, so the line saying how much is hidden
-            # has to be bought. Taking a row back can only shrink the page, so
-            # this settles in one step rather than looping — and this branch is
-            # the only place the row can be bought, which is the only place the
-            # renderer will draw it from.
-            windowed = self._allocate(width, question, budget, position=True)
+            # has to be bought. This branch is the only place the row can be
+            # bought, which is the only place the renderer will draw it from.
+            windowed = self._allocate(width, question, budget, position=True, reveal=revealed)
             # ...unless paying for it costs the QUESTION. The count is a
             # refinement of the answers on offer; the question is what the card
             # is for. Measured at 60x16 with a 3-row budget: buying the count
@@ -1264,9 +1705,141 @@ class AskPickerScreen(Container):
             # hiding while hiding what the answers are TO (D1). Where the two
             # compete, the question wins and the list stays honest by other
             # means: the option rows it did draw are still numbered.
+            #
+            # No R11-inversion guard is needed any more. ``show_position`` is now
+            # ``position and len(line_list) > body_line_budget``, and buying the
+            # position row only SHRINKS ``body_line_budget`` (``position=True``
+            # subtracts a row up front), so a list that overflowed the first
+            # pass overflows the retry too — the retry can never claim to hide
+            # answers it is drawing, which the old row-granular retry could when
+            # a released title handed back more rows than the count cost.
             if windowed.question or not plan.question:
                 plan = windowed
         return plan
+
+    def _labels_must_all_fit(self) -> bool:
+        """Whether every option LABEL must stay on screen, never windowed off.
+
+        False here: the ``ask`` picker is a scannable list that SHOULD scroll
+        its labels with descriptions kept (OMP-style coexist, design §0). The
+        approval gate overrides it True — an authorisation prompt that hides
+        *Allow all* behind a scroll is the C3/D1 safety defect this file's
+        priority order exists to prevent (:class:`ApprovalPrompt`).
+        """
+        return False
+
+    def _cap_for_row(self, index: int, revealed: bool, selected: int, cap: int) -> int:
+        """Visual-line cap for row ``index``'s description in the line list.
+
+        ``cap`` (normally :data:`DEFAULT_DESC_CAP`) for every row, LIFTED to
+        :data:`REVEAL_MAX_ROWS` for the SELECTED row while ``ctrl+e`` is on.
+        This is the ENTIRE reveal (§4): the selected row grows in place inside
+        the one scrolling viewport rather than opening a competing block, so
+        there is no second mechanism to fight the scroll (AGENTS.md:595). OMP
+        has no analogue — its descriptions are always 2 lines — so the lift is
+        ours, expressed as one number the line list reads.
+
+        ``revealed``/``selected`` are passed rather than read off
+        :attr:`state`, because :meth:`_allocate` trials the OTHER reveal state
+        (``_layout(reveal=...)``) on the paint path and a cap read from the
+        live state would size the trial's line list wrong. ``cap`` is lowered
+        below the default only where :meth:`_labels_must_all_fit` forces
+        descriptions down to keep every label visible.
+        """
+        if revealed and index == selected:
+            return max(cap, REVEAL_MAX_ROWS)
+        return cap
+
+    def _build_line_list(
+        self,
+        rows: Iterable[int],
+        width: int,
+        *,
+        revealed: bool,
+        selected: int,
+        cap: int = DEFAULT_DESC_CAP,
+    ) -> tuple[list[tuple[int, str]], tuple[int, ...]]:
+        """The OMP-style line list and its ``lineStartByRow`` map.
+
+        Every row contributes, in order, its LABEL line (one — labels are
+        truncated here, never wrapped, §2.5) then up to :meth:`_cap_for_row`
+        description lines. This is ``renderRowLabel``'s output shape
+        (``ask-dialog.ts:329-341``) in this card's cell model: a flat list of
+        ``(row_index, kind)`` pairs whose length is the list's full visual
+        height, plus ``line_start_by_row[i]`` = the first line index of row
+        ``i`` (``ask-dialog.ts:872``, ``lineStartByRow.push(allLines.length)``
+        before each row). The last map entry is ``len(line_list)``.
+
+        The sole source of truth for the cursor-visibility math
+        (:meth:`_move_to`), the thumb's ``total`` (§5) and the visible-row
+        resolution. Cheap: :meth:`_description_lines` is memoised, so this is
+        ``O(row_count)`` slicing over cached wraps.
+
+        ``kind`` is ``"label"`` or ``"desc"`` \u2014 the paint reads it to draw a
+        row line versus a description line, and a partial row at a viewport edge
+        keeps whichever of its lines fall inside the window.
+        """
+        line_list: list[tuple[int, str]] = []
+        line_start_by_row: list[int] = []
+        for index in rows:
+            line_start_by_row.append(len(line_list))
+            line_list.append((index, "label"))
+            row_cap = self._cap_for_row(index, revealed, selected, cap)
+            desc = self._description_lines(index, width)
+            for _ in desc[:row_cap]:
+                line_list.append((index, "desc"))
+        line_start_by_row.append(len(line_list))
+        return line_list, tuple(line_start_by_row)
+
+    def _granted_lines(
+        self, index: int, width: int, revealed: bool, selected: int, cap: int = DEFAULT_DESC_CAP
+    ) -> int:
+        """Description lines row ``index`` draws: ``min(cap, wrap)``.
+
+        The per-row grant under line-granular windowing — no budget starvation
+        at the row level, the VIEWPORT clips (§2.3). Zero for a bare label.
+        ``cap`` drops below the default only where :meth:`_labels_must_all_fit`
+        forces descriptions down to keep every label visible.
+        """
+        row_cap = self._cap_for_row(index, revealed, selected, cap)
+        return min(row_cap, len(self._description_lines(index, width)))
+
+    @staticmethod
+    def _rows_per_body(line_start_by_row: tuple[int, ...], body: int) -> int:
+        """Rows whose WHOLE span fits in one ``body``-tall viewport from the top.
+
+        OMP pages the offset by ``bodyRows-1`` (``ask-dialog.ts:702-708``); we
+        page the CURSOR by the equivalent row count and let :meth:`_move_to`
+        follow (§2.6). At least one, so a row taller than the body still steps.
+        """
+        if body <= 0 or len(line_start_by_row) < 2:
+            return 1
+        count = 0
+        for i in range(len(line_start_by_row) - 1):
+            if line_start_by_row[i + 1] - line_start_by_row[0] <= body:
+                count = i + 1
+            else:
+                break
+        return max(1, count)
+
+    def _scroll_offset_for_cursor(
+        self, offset: int, cur_start: int, cur_end: int, body: int, total: int
+    ) -> int:
+        """Line offset keeping the selected row's WHOLE span visible (§2.2).
+
+        OMP's ``#scrollOffsetForCursor`` (``ask-dialog.ts:974-993``) for the
+        non-manual case. If the row is off either end: pull its BOTTOM to the
+        body's bottom when it fits, else pin its TOP so the label anchors the
+        view (a row taller than the body shows its label and as many
+        description lines as fit, the honest degradation, §4.3).
+        """
+        max_off = max(0, total - body)
+        if max_off == 0:
+            return 0
+        span = cur_end - cur_start
+        if cur_start < offset or cur_end > offset + body:
+            offset = cur_end - body if span <= body else cur_start
+        return max(0, min(offset, max_off))
 
     def _allocate(
         self,
@@ -1275,6 +1848,7 @@ class AskPickerScreen(Container):
         budget: int,
         *,
         position: bool,
+        reveal: bool,
     ) -> _CardLayout:
         """One trial division of ``budget`` body rows, in the order above.
 
@@ -1314,16 +1888,22 @@ class AskPickerScreen(Container):
             # No rows at all is a card that cannot be drawn, and drawing it
             # anyway is the clip itself (round 4, R15).
             first = question[:1] if budget >= 1 else ()
+            _, line_start_by_row = self._build_line_list(
+                range(self.row_count), width, revealed=reveal, selected=self.state.selected
+            )
             return _CardLayout(
                 width=width,
+                content_width=width,
                 question=tuple(first),
                 show_title=False,
                 space_above=False,
                 space_below=False,
                 show_descriptions=False,
-                page=0,
+                description_rows={},
                 show_position=False,
                 show_footer=budget >= 2,
+                line_start_by_row=line_start_by_row,
+                body_line_budget=0,
             )
         # The footer, the first line of the question, and one option row: the
         # three lines the card cannot say anything useful without. The question
@@ -1351,52 +1931,203 @@ class AskPickerScreen(Container):
             remaining -= 2
         extra = max(0, min(self.row_count - 1, remaining))
         remaining -= extra
-        space_above = remaining >= 1
+        # 7a is GONE. The reveal is no longer a constant-height block bought
+        # here out of the option rows' remainder; it is a per-row cap LIFT on
+        # the SELECTED row inside the ONE line viewport (§4, :meth:`_cap_for_row`).
+        # Deleting the block — the ~90-line BLOCKER-1 `affords_column` search,
+        # the spacer/title yield, the `reveal_rows` reservation — is what
+        # removes the "two mechanisms fighting for the viewport" bug by
+        # construction (AGENTS.md:595): there is one viewport, and `_move_to`
+        # owns it. `reveal` still reaches the plan through the line list the
+        # lifted cap makes taller, so `_body_rows`' `wanted` still sizes the
+        # card for a revealed row.
+        #
+        # 8. The blank spacers, which are rhythm and nothing else. No longer a
+        # yield to the block (there is none): the ordinary ranking — a list
+        # needs air around it — applies unconditionally, so every frame is
+        # byte-identical to before this change wherever the reveal was off,
+        # which is every frame the old `spacer_floor` also left alone.
+        space_above = remaining - 1 >= 0
         if space_above:
             remaining -= 1
-        space_below = remaining >= 1
+        space_below = remaining - 1 >= 0
         if space_below:
             remaining -= 1
-        rows = 1 + extra
-        # Descriptions are bought last and all at once: they cost one line per
-        # row, and a list where only some entries have their second line reads
-        # as broken rather than as abbreviated.
-        descriptions = rows >= self.row_count and remaining >= self.row_count
+        # 9. The option list is a fixed-height LINE VIEWPORT, not a row window.
+        # ``body_line_budget`` is the label rows step 3+7 bought PLUS whatever
+        # ``remaining`` the chrome left — the full height the viewport draws
+        # into. This is C1 in line terms (§3.4): the viewport draws EXACTLY
+        # ``min(body_line_budget, len(line_list))`` lines, clipping past its
+        # budget and padding blank past the list's end (§2.3), so the plan's
+        # implied line count never exceeds ``budget`` and the footer (bought
+        # first, step 1) is never clipped.
+        #
+        # The line list is every row at its 2-line clamp (the selected row
+        # lifted to REVEAL_MAX_ROWS while ``ctrl+e`` is on). Step 9 no longer
+        # decides "descriptions: all or none" (C5 retired): every row that has
+        # prose carries it and the VIEWPORT decides how many lines are visible.
+        # This is where descriptions and scroll COEXIST — the headline change.
+        body_line_budget = max(0, (1 + extra) + remaining)
+
+        # The wrap width descriptions and labels are measured against. When the
+        # list windows, an OPTION ROW reserves the scrollbar's column: the paint
+        # cuts each windowed row to ``width - 1`` before appending the thumb, so
+        # a description that wrapped to the full ``width`` would lose its tail
+        # (and a padded short line would gain a spurious ``…``) exactly there —
+        # the R11/R15/D5 truncation-behind-the-thumb class. OMP has the same
+        # problem and the same fix: when the list overflows it re-renders one
+        # column narrower (``ask-dialog.ts:889-892``, ``renderRows(width - 1)``).
+        # So build at full width first; if it overflows, rebuild the option-row
+        # content at ``width - 1`` so nothing is ever cut under the thumb.
+        def build(content_width: int, cap: int) -> tuple[list[tuple[int, str]], tuple[int, ...]]:
+            return self._build_line_list(
+                range(self.row_count),
+                content_width,
+                revealed=reveal,
+                selected=self.state.selected,
+                cap=cap,
+            )
+
+        desc_cap = DEFAULT_DESC_CAP
+        content_width = width
+        line_list, line_start_by_row = build(content_width, desc_cap)
+        # A surface may forbid hiding an option's LABEL behind the scroll — the
+        # approval gate's authorisation contract, where a user who cannot see
+        # that *Allow all* exists cannot weigh it (C3/D1, the same safety
+        # property the question-outranks-options order protects). When the full
+        # 2-line-clamp list would overflow, such a surface DROPS descriptions to
+        # the largest uniform cap whose list still fits every label, rather than
+        # windowing a label off. Only if even the labels-only (cap 0) list
+        # overflows does it window — there is then no way to show every label at
+        # once and the scroll is the honest degradation.
+        #
+        # The ask picker overrides this to keep OMP-style coexist: a long list
+        # SHOULD scroll its labels, with descriptions kept and the thumb honest
+        # (design §0, the headline). So the cap reduction runs only where
+        # :meth:`_labels_must_all_fit` is True and is a no-op elsewhere.
+        if self._labels_must_all_fit() and len(line_list) > body_line_budget:
+            for candidate in range(DEFAULT_DESC_CAP - 1, -1, -1):
+                desc_cap = candidate
+                line_list, line_start_by_row = build(content_width, desc_cap)
+                if len(line_list) <= body_line_budget:
+                    break
+        # OMP's ``#shouldRenderScrollbar`` (``scroll-view.ts:222-227``): the list
+        # windows iff it is taller than the viewport. Only claimed on the
+        # ``position=True`` retry — the first pass never buys the position row,
+        # exactly as before, so the thumb and the count appear together (§5).
+        show_position = position and len(line_list) > body_line_budget
+        if show_position:
+            # Reserve the thumb column: re-measure the option rows one cell
+            # narrower so no windowed line reaches the cut. Narrowing can only
+            # add wrapped lines, so a list that overflowed at ``width`` still
+            # overflows at ``width - 1`` — the window decision does not flip.
+            content_width = max(1, width - 1)
+            line_list, line_start_by_row = build(content_width, desc_cap)
+        # The description COLUMN exists whenever any OPTION carries real prose;
+        # a property of the QUESTION, not of the budget (§3.4). The free-text
+        # row's hint is not a description (:meth:`_reveal_wrap` returns nothing
+        # for it), so it does not count. Read by the renderer to place the
+        # recommendation badge inline vs in the column.
+        descriptions = any(
+            index != self.other_row
+            and self._granted_lines(index, content_width, reveal, self.state.selected, desc_cap)
+            >= 1
+            for index in range(self.row_count)
+        )
+        # The per-row grants, uniform at the cap — what the paint draws under
+        # each row. Not budget-starved: the viewport clips lines, not rows.
+        grants = {
+            index: g
+            for index in range(self.row_count)
+            if (
+                g := self._granted_lines(
+                    index, content_width, reveal, self.state.selected, desc_cap
+                )
+            )
+            >= 1
+        }
         return _CardLayout(
             width=width,
+            content_width=content_width,
             question=tuple(kept),
             show_title=show_title,
             space_above=space_above,
             space_below=space_below,
             show_descriptions=descriptions,
-            page=self.row_count if descriptions else rows,
-            show_position=position,
+            description_rows=grants,
+            show_position=show_position,
             show_footer=True,
+            line_start_by_row=line_start_by_row,
+            body_line_budget=body_line_budget,
         )
 
-    def _window(self, page: int | None = None) -> list[int]:
-        """The row indexes currently drawn, after clamping the scroll offset."""
-        if page is None:
-            page = self._layout().page
-        offset = max(0, min(self._offset, max(0, self.row_count - page)))
+    def _window(self, layout: "_CardLayout | None" = None) -> list[int]:
+        """The row indexes at least partially drawn, after clamping the offset.
+
+        Under line-granular windowing a row is "drawn" when any of its visual
+        lines fall inside the viewport ``[_offset, _offset + body_line_budget)``
+        — a partial row at an edge counts as visible (§2.3). Row-oriented
+        readers (``visible_rows``, ``answer_keys``, the position row, the
+        footer) keep reading this; the PAINT reads :meth:`_window_lines`.
+
+        Not a pure reader: it clamps and writes back :attr:`_offset` in VISUAL
+        LINES, the same idempotent side effect the row-granular ``_window`` had.
+        """
+        if layout is None:
+            layout = self._layout()
+        lsbr = layout.line_start_by_row
+        body = layout.body_line_budget
+        total = lsbr[-1] if lsbr else 0
+        offset = max(0, min(self._offset, max(0, total - body)))
         self._offset = offset
-        return list(range(offset, min(self.row_count, offset + page)))
+        if body <= 0:
+            return []
+        lo, hi = offset, offset + body
+        return [i for i in range(self.row_count) if lsbr[i] < hi and lsbr[i + 1] > lo]
+
+    def _scrollbar_thumb(self, total: int, budget: int) -> tuple[int, int]:
+        """``(thumb_top, thumb_len)`` inside a ``budget``-tall track.
+
+        The standard proportional model, copied from
+        ``usage_panel.py``:meth:`_scrollbar_thumb` so the two bars agree: the
+        thumb is the fraction of the track the viewport is of the content
+        (``budget / total``), and its top is that fraction of the free travel
+        the offset is of its range. Here ``total`` is ``len(line_list)`` and
+        ``budget`` is ``body_line_budget`` — both VISUAL LINE counts, which is
+        OMP's ``#thumbRange`` model (``scroll-view.ts:229-238``, over
+        ``totalRows``/``height``, its own visual-line counts) — and the offset
+        is :attr:`_offset`, now in lines, whose range is ``total - budget``
+        (the same clamp :meth:`_window_lines` applies). Guards a zero-travel
+        range so a thumb as tall as the track never moves. The arithmetic never
+        cared what the units were; only the callers moved rows→lines.
+        """
+        track = max(1, budget)
+        thumb = max(1, min(track, round(track * budget / total))) if total > 0 else track
+        span = track - thumb
+        max_off = max(0, total - budget)
+        top = round(span * self._offset / max_off) if (span > 0 and max_off > 0) else 0
+        return max(0, min(span, top)), thumb
 
     # -- internals -----------------------------------------------------------
     def _move_to(self, index: int) -> None:
         self.state.selected = max(0, min(self.row_count - 1, index))
         # Any movement is a new state, so a refused Enter stops describing it.
         self._rejected = False
-        # Scroll only far enough to keep the cursor drawn, so the list is stable
-        # while moving through the middle of it. A page of zero draws no rows at
-        # all (a body under :data:`MIN_BODY_ROWS`), and there is no keeping a
-        # cursor drawn on a list that is not: scrolling it would only leave an
-        # offset behind for the terminal to grow back into.
-        page = self._layout().page
-        if self.state.selected < self._offset:
-            self._offset = self.state.selected
-        elif page and self.state.selected >= self._offset + page:
-            self._offset = self.state.selected - page + 1
+        # Scroll just far enough to keep the SELECTED row's whole line-span
+        # visible (§2.2), so a row's description is never clipped under the
+        # cursor. A body of zero draws nothing (a card under MIN_BODY_ROWS), and
+        # there is no keeping a cursor drawn on a list that is not: leave the
+        # offset for the terminal to grow back into.
+        layout = self._layout()
+        lsbr = layout.line_start_by_row
+        body = layout.body_line_budget
+        if not lsbr or body <= 0:
+            self._repaint()
+            return
+        total = lsbr[-1]
+        cur_start = lsbr[self.state.selected]
+        cur_end = lsbr[self.state.selected + 1]
+        self._offset = self._scroll_offset_for_cursor(self._offset, cur_start, cur_end, body, total)
         self._repaint()
 
     # -- rendering -----------------------------------------------------------
@@ -1546,6 +2277,9 @@ class AskPickerScreen(Container):
             self.state.selected,
             tuple(sorted(self.state.checked)),
             self.state.typed,
+            # `^e more` becomes `^e less` and back, and the hint disappears
+            # entirely once the reveal has drawn everything there was.
+            self.state.revealed,
         )
 
     def repaint_if_stale(self) -> None:
@@ -1710,6 +2444,7 @@ class AskPickerScreen(Container):
         muted = Style(color=theme_mod.semantic_color("muted"))
         dim = Style(color=theme_mod.semantic_color("dim"))
         faint = Style(color=theme_mod.semantic_color("faint"))
+        edge = Style(color=theme_mod.semantic_color("edge"))
         layout = self._layout()
         width = layout.width
 
@@ -1735,21 +2470,121 @@ class AskPickerScreen(Container):
         if layout.space_above:
             newline(None)
 
-        window = self._window(layout.page)
-        for index in window:
+        # The option list is a fixed-height LINE VIEWPORT. Every row is rendered
+        # once into (row_index, Text) visual lines — its label line, then its
+        # granted description lines — into ``rendered``, the paint-side twin of
+        # :meth:`_build_line_list`. The viewport then draws the ``_offset`` slice
+        # of ``body_line_budget`` lines, clipping partial rows at the edges
+        # (§2.3) so the body is a rigid rectangle. Descriptions and scroll now
+        # COEXIST: a windowed list keeps every visible row's 2-line clamp.
+        # OPTION-ROW content is measured against ``content_width`` — ``width``
+        # normally, ``width - 1`` when the list windows so the row reserves the
+        # thumb column (:attr:`_CardLayout.content_width`). Rows come out exactly
+        # ``content_width`` wide, so the windowing cut below only pads and
+        # appends the glyph; it never truncates real text or marks a spurious
+        # ``…`` on a padded line (the R11/R15/D5 defect QA caught).
+        cwidth = layout.content_width
+        rendered: list[tuple[int, Text]] = []
+        for index in range(self.row_count):
             ground = self._row_ground(index)
+            rendered.append((index, self._row_text(index, cwidth, ground, fg, dim, faint, layout)))
+            granted = layout.description_rows.get(index, 0)
+            if granted:
+                # `fg` for the TAG and `muted` for the separator and the prose.
+                # Passed `muted` for both, the badge was the identical style to
+                # the text beside it and had neither weight nor hue to win on
+                # (D4); the tag carries the label's own ink and the prose keeps
+                # the ramp step it was walked up to.
+                for line in self._description_text(
+                    index, cwidth, ground, fg, muted, granted, layout
+                ):
+                    rendered.append((index, line))
+        body = layout.body_line_budget
+        total = len(rendered)
+        offset = max(0, min(self._offset, max(0, total - body)))
+        self._offset = offset
+        viewport = rendered[offset : offset + body]
+        # The last VISIBLE line of the viewport may belong to a row whose prose
+        # continues BELOW the bottom edge — the row is clipped by the viewport,
+        # not by its own grant. ``_description_text`` only marks the grant's last
+        # line, which is off-screen here, so the last visible line would end
+        # mid-clause with nothing saying so: the D5 silent-cut this widget exists
+        # to prevent, reintroduced by the cap-lift when a revealed row's span
+        # exceeds ``body_line_budget`` (§2.2/§4.3, the label-anchor case). Stamp
+        # the ``…`` onto that last visible line so the marker reflects what the
+        # user can actually SEE being cut, not what the grant would have drawn.
+        #
+        # ONLY when that last visible line is a DESCRIPTION line, never the row's
+        # LABEL. ``_mark_clipped`` assumes a description line — it slices off the
+        # indent and recolours to ``muted`` — so run on a label it would strip
+        # the cursor glyph and the number gutter and repaint the label as if it
+        # were unselected prose, on the very row ``_scroll_offset_for_cursor``
+        # pins to the top for the user to answer (the D8-fix's own false-cut, one
+        # view over). When only the label fits (``body_line_budget`` of 1 leaves
+        # no room for even one description line), the row's truncation is already
+        # told by the thumb and the position row; the label is left intact. The
+        # label is the row's FIRST rendered line, so restamp only when the last
+        # visible line sits PAST it.
+        if viewport and offset + body < total:
+            last_index, last_row = viewport[-1]
+            next_index, _ = rendered[offset + body]
+            label_pos = next(
+                (pos for pos, (idx, _) in enumerate(rendered) if idx == last_index), None
+            )
+            last_visible_pos = offset + body - 1
+            on_description = label_pos is not None and last_visible_pos > label_pos
+            if next_index == last_index and last_index != self.other_row and on_description:
+                marked = self._mark_clipped(last_row, cwidth, last_index)
+                viewport = viewport[:-1] + [(last_index, marked)]
+        # The scrollbar thumb spans the full body height, one cell per VISUAL
+        # LINE (not per option row), keyed on ``show_position`` — the
+        # allocator's overflow decision (``len(line_list) > body_line_budget``).
+        # Keyed there rather than on a raw comparison so the D1 collapse, which
+        # drops the position row at a tight height to protect the question, also
+        # drops the thumb: the two are one overflow signal in two renderings and
+        # appear and vanish together (§5). ``total``/``body`` are line counts, so
+        # the thumb reaches OMP byte-parity (``scroll-view.ts:229-238``).
+        thumb_top, thumb_len = (
+            self._scrollbar_thumb(total, body) if layout.show_position else (0, 0)
+        )
+        for line_pos, (index, row) in enumerate(viewport):
+            # ``_line_rows`` maps every DRAWN body line back to the row it
+            # belongs to (label OR description line), which the hit-test reads
+            # (:meth:`_index_at`). A partial row's visible lines still map to it.
             newline(index)
-            out.append_text(self._row_text(index, width, ground, fg, dim, faint, layout))
-            if layout.show_descriptions:
-                newline(index)
-                out.append_text(self._description_text(index, width, ground, muted, muted))
+            if layout.show_position:
+                # Pad the ``content_width``-wide row to the thumb's column and
+                # append the track/thumb glyph, so the bar never widens the
+                # card. ``content_width`` already reserved this column (the row
+                # wrapped to ``width - 1``), so the ``_cut_row`` here is a guard
+                # against an over-long LABEL, not the description-truncating cut
+                # it used to be. No gutter is reserved when the bar is absent
+                # (unlike usage_panel, whose right-aligned numbers must not
+                # slide): these rows are left-aligned, so the reservation would
+                # buy nothing and would shift the approval gate's byte-identical
+                # frame — which never windows at its pinned sizes and so never
+                # reaches here.
+                _cut_row(row, width - 1)
+                pad = (width - 1) - cell_len(row.plain)
+                if pad > 0:
+                    row.append(" " * pad, style=self._row_ground(index))
+                on_thumb = thumb_top <= line_pos < thumb_top + thumb_len
+                row.append(
+                    SCROLLBAR_THUMB if on_thumb else SCROLLBAR_TRACK,
+                    style=self._row_ground(index) + (muted if on_thumb else edge),
+                )
+            out.append_text(row)
         if layout.space_below:
             newline(None)
 
+        # The rows at least partially in the viewport — the position row's range
+        # (§7) and the footer's "any option drawn" test read this, in OPTION
+        # units, from the same offset the viewport used.
+        window = sorted({idx for idx, _ in viewport})
         # Both rows are drawn only where the plan BOUGHT them. The position line
-        # used to be emitted on `len(window) < self.row_count` alone, with no
-        # reference to the budget: at 1 or 2 rows the allocator never paid for
-        # it, the renderer drew it regardless, and the footer went off the tail
+        # is gated on ``show_position`` (the overflow decision), never on
+        # `len(window) < row_count` alone: at 1 or 2 rows the allocator never
+        # paid for it, and drawing it regardless took the footer off the tail
         # (round 3, R11). The allocator decides; this only reads the decision.
         if layout.show_position:
             newline(None)
@@ -1762,6 +2597,12 @@ class AskPickerScreen(Container):
 
     def _position_row(self, width: int, window: list[int], muted: Style, dim: Style) -> Text:
         """``showing 2–3 of 6`` — how much of the list is not on screen.
+
+        The range is still OPTION indexes, not line numbers (§7): "showing
+        options 2–3 of 6" is what a user wants, not "showing lines 14–27 of 38".
+        A partially-visible row counts as visible. Matches OMP's
+        ``#clipIndicator`` (``ask-dialog.ts:995-1002``), which is also about
+        content presence rather than line numbers.
 
         Numerals at `muted` and the grammar at `dim`, both a step up: at
         `faint`, `showing`/`of` measured 1.49:1 on this card's own ground, so
@@ -1995,15 +2836,39 @@ class AskPickerScreen(Container):
             # (D2/D6). A badge that truncates what it promotes, or that
             # overflows the screen to fit, is worth less than no badge: the
             # recommendation is PRESELECTED too, so the cursor is already there.
-            tag = f"  · {RECOMMENDED_TAG}"
-            if cell_len(row.plain) + cell_len(tag) <= width:
-                row.append(tag, style=ground + dim)
+            #
+            # Drawn exactly as :meth:`_description_text` draws it: the separator
+            # at ``muted`` and the tag at ``fg`` + bold, the label's own ink.
+            # The whole run sat at ``dim`` here — 3.43:1, under the 4.5:1 WCAG
+            # AA floor the description text was deliberately walked UP to (D7),
+            # and a second unscoped treatment of one badge besides. This is the
+            # call site that fires where there is NO description column, so it
+            # is the frame on which the badge is the only thing marking the
+            # promoted row: the least legible place to spend the least legible
+            # ink.
+            #
+            # ``muted`` is derived here rather than taken as a parameter, for
+            # the same reason ``accent`` above is: the caller's style set is the
+            # one the ROW needs, and a sixth Style threaded through the
+            # signature for one branch would change a call shape the tests hold.
+            separator = "  · "
+            muted = ground + Style(color=theme_mod.semantic_color("muted"))
+            if cell_len(row.plain) + cell_len(separator) + cell_len(RECOMMENDED_TAG) <= width:
+                row.append(separator, style=muted)
+                row.append(RECOMMENDED_TAG, style=ground + fg + Style(bold=True))
         return _fit_row(row, width, ground)
 
     def _description_text(
-        self, index: int, width: int, ground: Style, tag_ink: Style, ink: Style
-    ) -> Text:
-        """The row's second line: the recommendation tag, then the consequence.
+        self,
+        index: int,
+        width: int,
+        ground: Style,
+        tag_ink: Style,
+        ink: Style,
+        granted: int,
+        layout: _CardLayout,
+    ) -> list[Text]:
+        """The row's description lines: the recommendation tag, then the consequence.
 
         Drawn at ``muted``, which measures 6.51:1 on this card's ``overlay``
         ground. It has been walked up this ramp twice for the same reason: the
@@ -2025,26 +2890,121 @@ class AskPickerScreen(Container):
 
         The tag lives HERE, ahead of the prose, rather than after the label: on
         the label line it was paid for out of the label, so the one row the
-        model is pointing at carried the shortest text on the card (D6). At
-        ``muted`` it is the loudest thing on a line of ``dim`` prose and still
-        quieter than the label above it, which is the ranking a hint wants.
+        model is pointing at carried the shortest text on the card (D6).
+
+        It is drawn at ``tag_ink`` — ``fg`` + bold, the label's own ink — and
+        NOT at the ``ink`` its prose uses. It sat at ``muted`` for a release,
+        which is the same style as the prose it introduces: the docstring here
+        claimed it was "the loudest thing on a line of ``dim`` prose", and that
+        stopped being true the moment prose itself was walked up to ``muted``
+        (D7, round 1). The frame that resulted had a badge nobody could find
+        (D4). Ranking now: label (``fg`` bold, line N) > badge (``fg`` bold,
+        line N+1, indented) > prose (``muted``). The badge matches the label's
+        weight rather than exceeding it and loses on POSITION, which is the
+        right ordering for a hint that qualifies a label. Its salience comes
+        from weight, case and a glyph rather than from hue — see
+        :data:`RECOMMENDED_TAG` for why colour is not available here.
+
+        ``granted`` lines, not one. Where the wrap is longer than the grant the
+        LAST KEPT line is marked ``…`` — the same "say that it continues"
+        discipline the question uses when its own tail is cut. Marking every
+        line would say each of them was cut when only the last one is, which is
+        the reading a wrapped paragraph must not invite.
+
+        ...unless the ``ctrl+e`` block is about to draw the REST of this very
+        paragraph on the next line (``continued`` below). ``layout`` is what
+        says so, and it is passed for the same reason :meth:`_row_text` takes
+        it: whether a line is the last one the user sees is a fact about the
+        FRAME, not about the row. The mark and the fill both exist to stand in
+        for text that is not on screen; where it is on screen, immediately
+        below and in the same column, they describe a cut that is not
+        happening. The fill is the more damaging of the two — it re-draws the
+        opening of the line the block then starts with, so the paragraph gains
+        a stutter exactly at the seam it is being read across (F3).
         """
-        indent = GUTTER_CELLS + NUMBER_CELLS + (cell_len(CHECK_ON) if self.question.multi else 0)
-        body = Text(no_wrap=True, overflow="ellipsis")
-        body.append(" " * indent, style=ground)
-        description = self._row_description(index)
-        room = max(1, width - indent)
-        if self.question.recommended == index:
-            body.append(RECOMMENDED_TAG, style=ground + tag_ink)
-            room -= cell_len(RECOMMENDED_TAG)
-            if description and room > 3:
-                body.append(" · ", style=ground + ink)
-                room -= 3
-            else:
-                description = ""
-        if description:
-            body.append(truncate_cells(description, room), style=ground + ink)
-        return _fit_row(body, width, ground)
+        indent = self._description_indent()
+        wrapped = self._description_lines(index, width)
+        # ``continued`` is dead under line-granular windowing: there is no
+        # separate reveal block that draws the paragraph's remainder immediately
+        # below, so nothing suppresses the last line's ``…`` mark. The reveal is
+        # now a per-row cap LIFT (§4) — the selected row's OWN ``granted`` lines
+        # grow to REVEAL_MAX_ROWS, and where the wrap still exceeds that
+        # ``_prose_line`` marks the cut, exactly the "say that it continues"
+        # discipline every other row follows.
+        continued = False
+        # An option with a description draws its ``granted`` lines. A row with
+        # no prose contributes no line here at all (the caller only enters this
+        # method for rows in ``description_rows``, which are exactly the rows
+        # with ``granted >= 1``), so ``or [""]`` guards only the recommended row
+        # whose sole "line" is the badge.
+        kept = wrapped[:granted] or [""]
+        rows: list[Text] = []
+        for position, text in enumerate(kept):
+            body = Text(no_wrap=True, overflow="ellipsis")
+            body.append(" " * indent, style=ground)
+            room = max(1, width - indent)
+            if position == 0 and self.question.recommended == index:
+                body.append(RECOMMENDED_TAG, style=ground + tag_ink + Style(bold=True))
+                room -= cell_len(RECOMMENDED_TAG)
+                if text and room > 3:
+                    body.append(" · ", style=ground + ink)
+                    room -= 3
+                else:
+                    text = ""
+            if text:
+                body.append(
+                    truncate_cells(
+                        self._prose_line(index, wrapped, kept, position, text, continued=continued),
+                        room,
+                    ),
+                    style=ground + ink,
+                )
+            rows.append(_fit_row(body, width, ground))
+        return rows
+
+    def _prose_line(
+        self,
+        index: int,
+        wrapped: list[str],
+        kept: list[str],
+        position: int,
+        text: str,
+        *,
+        continued: bool = False,
+    ) -> str:
+        """One drawn line of ``index``'s prose: its own, or the SOURCE tail if last.
+
+        The last kept line of a paragraph that continues is filled from the REST
+        of the prose rather than from its own wrapped line; the caller's
+        :func:`truncate_cells` then marks the cut it makes.
+
+        Filling rather than marking the wrapped line matters where the grant is
+        one, which is every description the approval gate draws on a narrow
+        terminal: a wrapped line stops at a word boundary, so marking it would
+        end the consequence several cells earlier than a single truncated line
+        does. That is the authorisation frame getting WORSE. Filled, the line
+        carries at least as much of the consequence as it carried before and
+        says that there is more.
+
+        The tail-fill matters where the grant is one, which is every description
+        the approval gate draws on a narrow terminal: a wrapped line stops at a
+        word boundary, so marking it would end the consequence several cells
+        earlier than a single truncated line does. That is the authorisation
+        frame getting WORSE. Filled, the line carries at least as much of the
+        consequence as it carried before and says that there is more.
+
+        ``continued`` is retained for callers that draw the paragraph's
+        remainder immediately below, but the line-granular card no longer has a
+        second region that does so (the reveal is an in-place cap lift, §4), so
+        the sole live caller (:meth:`_description_text`) passes ``continued``
+        False. Kept as a keyword because the default is the one that is safe to
+        get wrong: an omitted argument marks a cut that did not happen.
+        """
+        if continued:
+            return text
+        if position == len(kept) - 1 and len(wrapped) > len(kept):
+            return _wrap_tail(self._row_description(index), wrapped, position)
+        return text
 
     def _footer_hints(self, width: int) -> list[tuple[str, str]]:
         """The key hints that fit, shedding WORDS before it sheds KEYS.
@@ -2162,9 +3122,203 @@ class AskPickerScreen(Container):
             if drawn < 2:
                 hints = [pair for pair in hints if pair[0] != jump]
                 ladder = [key for key in ladder if key != jump]
+        reveal = self._reveal_hint()
+        if reveal is not None:
+            hints.append(reveal)
+            # Immediately BEFORE the exit in the ladder, never after it. The
+            # ladder is ordered LEAST DEFENDED FIRST, and `_shed_to_fit` also
+            # refuses to drop its last entry outright — so appending `^e` past
+            # `esc` makes the exit the cheaper of the two. Measured on the
+            # approval card at 30 columns, exactly that: the frame read
+            # `↑↓ · enter · ^e more · esc`, spending cells on a reading aid
+            # while the word for REFUSING an authorisation had been shed. The
+            # exit's word is the one this row defends hardest (D3/D16/D19), and
+            # "deny" is not guessable from "skip".
+            #
+            # Located by the exit's KEY rather than by position: the ladders
+            # differ in what they defend hardest, and the multi-select's ends
+            # with `space` (the only key that can answer it) BEYOND the exit —
+            # so "one from the end" would put `^e` on the wrong side of `esc`
+            # there while looking right on the single-select.
+            exit_key = self._exit_hint[0]
+            cut = ladder.index(exit_key) if exit_key in ladder else len(ladder)
+            ladder = [*ladder[:cut], REVEAL_HINT_KEY, *ladder[cut:]]
+            # ...and shed OUTRIGHT before the second pass reaches the exit.
+            # `_shed_to_fit` keeps the ladder's last entry whatever happens, so
+            # on the ask card (`esc` last) `^e` is already safe — but the
+            # approval card and the multi-select rank other keys past the exit,
+            # and there `^e` survived while `deny`/`skip` had been shed.
+            # Measured at 18-23 columns: `^e · esc`, a card spending its last
+            # cells on a reading aid instead of the word for refusing.
+            #
+            # Dropped here rather than by reordering the ladder, because the
+            # ladder's tail is a genuine ranking those two surfaces own (`space`
+            # is the only key that can answer a multi-select) and `^e` outranks
+            # nothing on this row.
+            #
+            # Measured against the row WITH the exit on it, which is not yet in
+            # `hints` here: the exit is what the check is protecting, so leaving
+            # it out would ask whether the row fits without the thing that has
+            # to fit.
+            if _hint_cells([*hints, self._exit_hint]) > width:
+                hints = [pair for pair in hints if pair[0] != REVEAL_HINT_KEY]
+                ladder = [key for key in ladder if key != REVEAL_HINT_KEY]
         hints.append(self._exit_hint)
 
         return self._shed_to_fit(hints, ladder, width)
+
+    def _reveal_hint(self) -> tuple[str, str] | None:
+        """``^e more`` / ``^e less``, or nothing where the key does nothing.
+
+        This row already refuses to advertise dead keys — the digits on a
+        one-row window, the whole keymap while the composer holds the caret —
+        and on a roomy terminal the reveal IS dead: (A)'s continuation lines
+        have already drawn every description in full, so the key would toggle
+        a mode that changes nothing. Offered anyway it is the same lie, one
+        surface further along.
+
+        So: only where some DRAWN row has more prose than the lines it was
+        granted, or where the reveal is already on and the user needs to be told
+        how to leave it. Answered against the plan the card is actually drawing
+        rather than against the descriptions alone, because "is there more" is a
+        question about the grant, not about the text.
+
+        Below the sizes where the reveal can buy a line at all (measured: budget
+        8 and under, at 100x24 and below) it stays hidden — the plan grants
+        nothing in either state, so neither branch fires.
+        """
+        if self.state.revealed:
+            # `less` only while the lift actually draws a line the default view
+            # did not. A revealed card whose selected row shows no more than its
+            # 2-line clamp is byte-identical to the default one, so naming a key
+            # to undo it would point at a change nothing on screen shows.
+            return (REVEAL_HINT_KEY, "less") if self._reveal_is_useful() else None
+        return (REVEAL_HINT_KEY, "more") if self._reveal_is_useful() else None
+
+    def _offers_reveal(self) -> bool:
+        """Is ``^e`` actually ON the footer as the card is drawn right now?
+
+        The footer is the card's whole statement of what its keys do, and this
+        asks it rather than re-deriving the answer: the hint can be dropped for
+        reasons the predicate below knows nothing about — the shed ladder taking
+        it to keep the exit whole, the composer holding focus, the card drawing
+        no options at all. Re-derived, the key would work in states the card
+        does not advertise it in, which is the same defect as advertising a key
+        that does not work, inverted.
+        """
+        plan = self._layout()
+        if not plan.show_footer or plan.body_line_budget <= 0:
+            # No footer, or no option line drawn at all to reveal anything
+            # about. `_footer_row` draws only the exit on a card with no options
+            # drawn (`drawn=False`), so the hints below are not what is on
+            # screen there.
+            return False
+        return any(key == REVEAL_HINT_KEY for key, _ in self._footer_hints(plan.width))
+
+    def _reveal_is_useful(self) -> bool:
+        """Would turning ``ctrl+e`` on put prose on screen that is not there?
+
+        Re-resolved for the cap-lift model (§4.3). The reveal is now a per-row
+        cap lift on the SELECTED row inside the one line viewport, so this is
+        two conditions, and both are needed. Either alone offers a key that does
+        nothing, which is the lie this footer already refuses to tell about the
+        digits and about ``enter``:
+
+        - the SELECTED row's description must be longer than :data:`DEFAULT_DESC_CAP`
+          — there is more of ITS OWN prose to show. On a roomy terminal the row
+          already draws its full wrap (2 lines is the whole description), so the
+          lift would change nothing. The selected row and not "any drawn row":
+          lifting one row's cap never removes another row's description (there is
+          no shared block pool any more), so the old BLOCKER-1 "would this cost
+          the column" refusal is gone — it cannot arise;
+        - and the lift must actually put a NEW line of that row in the viewport:
+          the revealed line list must draw at least one more of the selected
+          row's lines than the default one does, given ``body_line_budget`` and
+          where the row sits. Below the sizes where the viewport can show a
+          third line of the row, the revealed frame equals the default one and
+          the key stays hidden.
+
+        Answered against the two PLANS the card would draw, not against the
+        descriptions alone: "is there more on screen" is a question about the
+        viewport, not about the text.
+        """
+        selected = self.state.selected
+        width = self._card_width()
+        # More of the selected row's OWN prose than the default clamp shows?
+        if len(self._reveal_wrap(selected, width)) <= DEFAULT_DESC_CAP:
+            return False
+        default = self._layout(reveal=False)
+        if selected not in self._window(default):
+            # The cursor's row is not even partially drawn. Nothing on screen
+            # would change in a way the user can attribute.
+            return False
+        revealed = self._layout(reveal=True)
+        # How many of the selected row's lines each plan actually draws in its
+        # viewport — the lift is useful iff the revealed frame shows strictly
+        # more of THIS row than the default one.
+        return self._visible_row_lines(revealed, selected) > self._visible_row_lines(
+            default, selected
+        )
+
+    def _mark_clipped(self, row: Text, width: int, index: int) -> Text:
+        """Re-mark ``row``'s last VISIBLE line with ``…`` when the viewport clips
+        its row below.
+
+        **Assumes ``row`` is a DESCRIPTION line, never a LABEL.** It slices off
+        the description indent and repaints the remainder at ``muted``, so run on
+        a label it would strip the cursor glyph and the number gutter and recolour
+        the label as unselected prose. The caller guards this: it only fires when
+        the last visible line sits PAST the row's label line (:meth:`_card_text`).
+
+        The line came out of :meth:`_description_text` already fitted to
+        ``width`` (indent, prose, then ground padding). It is the last line of a
+        row the viewport cuts off, so its prose continues off-screen and must
+        say so. Rebuild it: keep the indent, truncate the prose to force the
+        ellipsis (``truncate_cells`` rstrips before appending ``…``, so it never
+        reads "word …"), then re-fit to ``width`` in the row's own ground. The
+        thumb glyph is appended AFTER this by the caller, in its own reserved
+        column (``content_width`` already left it free), so the marker and the
+        bar never eat each other's cell. Idempotent: a line already ending ``…``
+        (its grant marked it) is returned unchanged.
+        """
+        ground = self._row_ground(index)
+        indent = self._description_indent()
+        plain = row.plain.rstrip()
+        if plain.endswith("…"):
+            return row
+        prose = plain[indent:] if len(plain) > indent else ""
+        room = max(1, width - indent)
+        # One cell short of the room forces the ellipsis even on a line that
+        # already fills the column, so the mark is added rather than absorbed.
+        cut = truncate_cells(prose, room - 1 if cell_len(prose) >= room else room)
+        if not cut.endswith("…"):
+            cut = (cut.rstrip() + "…") if cut else "…"
+        body = Text(no_wrap=True, overflow="ellipsis")
+        body.append(" " * indent, style=ground)
+        body.append(cut, style=ground + Style(color=theme_mod.semantic_color("muted")))
+        return _fit_row(body, width, ground)
+
+    def _visible_row_lines(self, layout: "_CardLayout", index: int) -> int:
+        """How many of row ``index``'s visual lines fall inside the viewport.
+
+        Clamps the row's ``[start, end)`` line span against the viewport
+        ``[_offset, _offset + body_line_budget)`` under ``layout``'s offset, so
+        a partially-clipped row counts only its visible lines (§2.3). Used by
+        :meth:`_reveal_is_useful` to compare what the default and revealed
+        frames actually put on screen for the selected row.
+        """
+        lsbr = layout.line_start_by_row
+        body = layout.body_line_budget
+        if not lsbr or body <= 0:
+            return 0
+        total = lsbr[-1]
+        offset = max(0, min(self._offset, max(0, total - body)))
+        # The revealed plan may want a different offset (its taller row scrolls
+        # into view); model _move_to's scroll so the comparison is honest.
+        cur_start, cur_end = lsbr[index], lsbr[index + 1]
+        offset = self._scroll_offset_for_cursor(offset, cur_start, cur_end, body, total)
+        lo, hi = offset, offset + body
+        return max(0, min(cur_end, hi) - max(cur_start, lo))
 
     def _shed_to_fit(
         self, hints: list[tuple[str, str]], ladder: list[str], width: int
@@ -2177,11 +3331,7 @@ class AskPickerScreen(Container):
         survives to the narrowest card.
         """
 
-        def cells(pairs: list[tuple[str, str]]) -> int:
-            return sum(cell_len(f"{key} {what}".strip()) for key, what in pairs) + 3 * max(
-                0, len(pairs) - 1
-            )
-
+        cells = _hint_cells
         shown = list(hints)
         if cells(shown) <= width:
             return shown
@@ -2197,6 +3347,18 @@ class AskPickerScreen(Container):
         # ladder defends hardest, and :func:`_cut_row` keeps even that inside
         # the card rather than letting it widen the screen.
         return shown
+
+
+def _hint_cells(pairs: list[tuple[str, str]]) -> int:
+    """Cells a footer row of ``key word`` hints takes, separators included.
+
+    One definition, because two callers ask the same question and a drifting
+    copy of it would let a hint be kept by one measure and shed by another — on
+    the row where the disagreement costs the card its only stated way out.
+    """
+    return sum(cell_len(f"{key} {what}".strip()) for key, what in pairs) + 3 * max(
+        0, len(pairs) - 1
+    )
 
 
 def _cut_row(row: Text, width: int) -> Text:
@@ -2246,6 +3408,48 @@ def _sanitize(question: AskQuestion) -> AskQuestion:
             ],
         }
     )
+
+
+def _wrap_tail(source: str, wrapped: list[str], position: int) -> str:
+    """``source`` from where ``wrapped[position]`` starts — the rest of the prose.
+
+    What the last kept line of a cut-short description is FILLED from. Sliced
+    out of the source rather than rejoined from ``wrapped[position:]``, because
+    the pieces `wrap_cells` produces are not uniformly space-separated: it
+    BREAKS a word longer than the row (a URL, a path — its documented behaviour
+    and the reason it exists), and those pieces never had a space between them.
+    Rejoining them with one fabricates a character the user is being asked to
+    authorise against, which on a path or a URL misreads the string itself.
+
+    Measured on the fill itself: 69,392 of 120,083 randomised fills contained a
+    character sequence absent from the source; with the slice, none do. On a
+    keycap run at room 8 the join produced ``1..1..1..1.. 1..\u2026`` where the
+    source has no space at all.
+
+    What that is NOT is a claim about the painted frame. Swept over 2,832
+    drawn comparisons (7 description shapes, widths 12-121, both hosts, single
+    and multi select, grants 1-4) the two fills painted the SAME line every
+    time, because the row's outer ellipsis re-cuts ahead of the seam. So this
+    is correctness at the boundary rather than a visible-defect fix, and it is
+    worth having for the reason the surface exists: the fill is the string a
+    user authorises against on the approval gate, and a widening card or a
+    longer consequence moves the cut, not the invariant.
+
+    Walked line by line rather than measured, because only `wrap_cells` knows
+    which breaks consumed a space. Each row it returns is a character prefix of
+    what is left once the previous row's trailing separator is dropped; that
+    holds over 19,619 randomised inputs (CJK, keycap clusters, combining marks,
+    RTL, multi-space runs, unbreakable words) and it is what makes the walk
+    exact. A source whose walk does not align is not reconstructable, and the
+    honest answer there is the wrapped line itself: shorter than the fill by a
+    few cells, but never a character the source does not contain.
+    """
+    remainder = source.lstrip(" ")
+    for line in wrapped[:position]:
+        if not remainder.startswith(line):
+            return wrapped[position]
+        remainder = remainder[len(line) :].lstrip(" ")
+    return remainder if remainder.startswith(wrapped[position]) else wrapped[position]
 
 
 def _tail_cells(text: str, width: int) -> str:

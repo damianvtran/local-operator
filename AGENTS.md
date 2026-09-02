@@ -228,14 +228,32 @@ takes about a minute.
 
 ### 1. Render the screen to an SVG still
 
-Two of these already exist and are worth reusing before writing a new one:
-`scripts/ask_shot.py` and `scripts/approval_shot.py` capture the `ask` picker
-and the tool-approval prompt over a seeded conversation, at any terminal size:
+Four of these already exist and are worth reusing before writing a new one.
+They capture the `ask` picker and the tool-approval prompt over a seeded
+conversation, at any terminal size:
 
 ```sh
 env -u NO_COLOR TERM=xterm-256color .venv/bin/python scripts/ask_shot.py out.svg 100x30
 env -u NO_COLOR TERM=xterm-256color .venv/bin/python scripts/approval_shot.py out.svg 100x30
+env -u NO_COLOR TERM=xterm-256color .venv/bin/python scripts/ask_user_repro.py out.svg 150x40 [ROW] [reveal]
+env -u NO_COLOR TERM=xterm-256color .venv/bin/python scripts/ask_long_shot.py out.svg 150x40 [ROW] [reveal]
 ```
+
+- `ask_shot.py` — the picker carrying SHORT descriptions, which is the shape
+  the card was originally measured against.
+- `approval_shot.py` — the tool-approval gate, where each option's description
+  is the consequence of authorising the call.
+- `ask_user_repro.py` — the user's reported frame: three options with
+  paragraph-long prose plus the free-text row, the reproduction for the
+  description-truncation report and for `ctrl+e`.
+- `ask_long_shot.py` — a LONG question as well as long descriptions, which is
+  what makes the question's own wrapped lines compete with the option rows.
+
+The last two take an optional `ROW` (arrow presses before the shot, so the
+selected row's prose can be checked) and `reveal` (press `ctrl+e` first). Pass
+both to check the property the reveal rests on: the card is the same height
+whichever row the cursor is on, so two shots at different rows differ in their
+text and in nothing else.
 
 Both seed real transcript blocks first, which is what makes "does this surface
 still let me read the conversation?" an answerable question rather than a

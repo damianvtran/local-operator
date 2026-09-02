@@ -1026,6 +1026,27 @@ class ApprovalPrompt(AskPickerScreen):
         """Refuse the key so it reaches the app's stop. See the note above."""
         raise SkipAction()
 
+    def _labels_must_all_fit(self) -> bool:
+        """Every consequence's LABEL stays on screen; descriptions yield first.
+
+        The authorisation contract, and the one place this gate diverges from
+        the ``ask`` picker's OMP-style windowing. On the ask card a long list
+        SHOULD scroll its labels with descriptions kept (the coexist headline,
+        ask_picker design §0). On an approval gate a user who cannot SEE that
+        *Allow all* exists cannot weigh it: hiding an answer's label behind a
+        scroll is the same C3/D1 defect as a card that never names what it is
+        asking — worse, because it looks answerable with a permissive option in
+        view. So when the full 2-line-clamp list overflows a tight budget (the
+        BOOT layout, dock 8, where an approval can be the first thing a session
+        shows), the allocator drops the consequence lines to keep every label
+        visible rather than windowing one off, and windows only if even the
+        labels alone do not fit. The three consequences are each one line at
+        every width down to 44 columns, so in practice the gate drops to bare
+        labels exactly as it did before the line-granular rework — the frame the
+        prior three rounds signed off on.
+        """
+        return True
+
     def __init__(
         self,
         tool_name: str,
