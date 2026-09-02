@@ -27,7 +27,11 @@ import sys
 
 sys.path.insert(0, os.getcwd())  # run from the repo root
 
-from local_operator.providers.usage import UsageAmount, UsageLimit, UsageReport  # noqa: E402
+from local_operator.providers.usage import (  # noqa: E402
+    UsageAmount,
+    UsageLimit,
+    UsageReport,
+)
 from local_operator.tui.app import OperatorApp  # noqa: E402
 from local_operator.tui.widgets.usage_panel import UsagePanel  # noqa: E402
 from tests.unit.tui.test_app_pilot import FakeSession, _factory  # noqa: E402
@@ -95,7 +99,13 @@ async def main() -> None:
     width, _, height = (sys.argv[2] if len(sys.argv) > 2 else "100x30").partition("x")
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(int(width), int(height))) as pilot:
-        await pilot.pause()
+        # Let the status band finish adopting the session before capturing.
+        # It settles from `connecting…` to the model name a few ticks after
+        # boot, and a frame taken during that window differs from the settled
+        # one in chrome that has nothing to do with the panel — which reads as
+        # an unstable capture when comparing before/after.
+        for _ in range(30):
+            await pilot.pause()
         panel = app.query_one(UsagePanel)
         reports = _reports()
         # Pin the panel's clock so the rendered ages are the ones the operator

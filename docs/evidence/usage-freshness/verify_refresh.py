@@ -16,11 +16,19 @@ import sys
 
 sys.path.insert(0, os.getcwd())  # run from the repo root
 
-from local_operator.providers.usage import UsageAmount, UsageLimit, UsageReport  # noqa: E402
+from local_operator.providers.usage import (  # noqa: E402
+    UsageAmount,
+    UsageLimit,
+    UsageReport,
+)
 from local_operator.tui.app import OperatorApp  # noqa: E402
 from local_operator.tui.widgets.editor import Editor  # noqa: E402
 from local_operator.tui.widgets.usage_panel import UsagePanel  # noqa: E402
-from tests.unit.tui.test_app_pilot import FakeProviderController, FakeSession, _factory  # noqa: E402
+from tests.unit.tui.test_app_pilot import (  # noqa: E402
+    FakeProviderController,
+    FakeSession,
+    _factory,
+)
 
 NOW_MS = 1_788_400_000_000.0
 MINUTE = 60_000.0
