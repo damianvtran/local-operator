@@ -130,6 +130,50 @@ def test_a_fresh_row_is_served_and_an_expired_one_is_not(cache) -> None:
     assert cache.get(key, include_expired=True) is not None
 
 
+def test_latest_account_report_slices_the_warmer_row_per_account(cache) -> None:
+    """The first-resolve pick reads one account out of the per-provider-set
+    payload: newest ``fetched_at`` among matching identities wins, rows of a
+    different provider and ``:pf:`` preflight rows are ignored, and expiry
+    does not matter (the caller applies its own age policy)."""
+    now = int(time.time() * 1000)
+    old_a = _report(percent=10.0)
+    old_a.fetched_at = now - 60_000
+    new_a = _report(percent=70.0)
+    new_a.fetched_at = now - 1_000
+    b = _report(percent=50.0)
+    b.identity = "other@example.com"
+    # Two fingerprints of the same provider (the account set changed once);
+    # the older row is expired, which must not hide it.
+    cache.set(
+        provider_cache_key("anthropic", "fp-old"), "anthropic", [old_a, b], expires_at_ms=now - 1
+    )
+    cache.set(
+        provider_cache_key("anthropic", "fp-new"), "anthropic", [new_a], expires_at_ms=now + 60_000
+    )
+    # Same identity under another provider must not bleed across.
+    stray = _report(provider="openai", percent=99.0)
+    stray.fetched_at = now
+    cache.set(provider_cache_key("openai", "fp"), "openai", [stray], expires_at_ms=now + 60_000)
+    # A preflight row under the anthropic prefix carrying the identity.
+    pf = _report(percent=99.0)
+    pf.fetched_at = now
+    cache.set(
+        account_preflight_key("anthropic", "me@example.com"),
+        "anthropic",
+        [pf],
+        expires_at_ms=now + 60_000,
+    )
+
+    found = cache.latest_account_report("anthropic", {"me@example.com"})
+    assert found is not None
+    assert found.fetched_at == new_a.fetched_at
+    assert found.limits[0].amount.used_fraction == 0.7
+    other = cache.latest_account_report("anthropic", {"other@example.com", "cred:9"})
+    assert other is not None and other.identity == "other@example.com"
+    assert cache.latest_account_report("anthropic", {"nobody@example.com"}) is None
+    assert cache.latest_account_report("anthropic", set()) is None
+
+
 def test_expiry_ms_reports_the_rows_ttl(cache) -> None:
     key = "anthropic:test"
     assert cache.expiry_ms(key) is None
