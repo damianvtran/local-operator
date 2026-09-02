@@ -426,11 +426,17 @@ class TuiSessionHandle(SessionHandle):
         the session as gone, through the reaped record on its next scan.
         """
 
-        def schedule() -> None:
+        def schedule() -> str:
+            session = self._app._session
+            sid = str(getattr(session, "session_id", "") or "")
+            name = str(getattr(session, "conversation_name", "") or sid)
             self._app.run_worker(self._app._stop_local_session(), thread=False, group="session")
+            # The follower's receipt: what ended and the way back, the same
+            # line the owner's own transcript paints.
+            reopen = f"/resume {sid}" if sid else "/resume"
+            return f'stopping "{name}" — {reopen} reopens it'
 
-        await self._on_app(schedule)
-        return "stopping this session"
+        return str(await self._on_app(schedule))
 
     async def set_model(self, provider: str, model_id: str) -> str:
         def apply() -> None:

@@ -879,7 +879,9 @@ class RuntimeServer:
             result = request_stop()
             if inspect.isawaitable(result):
                 result = await result
-            return "stopping"
+            # The host's own line when it gives one (a TUI owner names the
+            # session and the reopen command), else the bare progress word.
+            return str(result) if isinstance(result, str) and result else "stopping"
         raise ValueError(f"unknown op: {op!r}")
 
     async def _dispatch_payload(self, op: str, frame: dict[str, Any]) -> Any:
