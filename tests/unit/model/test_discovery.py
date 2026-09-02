@@ -1465,3 +1465,93 @@ def test_an_unstamped_document_is_the_original_shape_not_a_stale_one(tmp_path) -
     assert status == "cached"
     assert not client.calls
     assert "vendor/model" in {row.id for row in models}
+
+
+# -- credential-change invalidation (the Fable 5.1 report) --------------------
+
+#: The listing as it stood the day before ``claude-fable-5-1`` shipped, and as it
+#: answers after. The pair is the whole bug: a cache written from the first is
+#: served for 24h, so the model in the second is unreachable through the picker
+#: for up to a day and re-authing -- the one recovery a user tries -- did not
+#: clear it.
+_FABLE_BEFORE = {
+    "data": [
+        {
+            "id": "claude-opus-5",
+            "display_name": "Claude Opus 5",
+            "created_at": "2026-06-01T00:00:00Z",
+            "type": "model",
+            "max_input_tokens": 1_000_000,
+            "max_tokens": 128_000,
+        }
+    ],
+    "has_more": False,
+}
+_FABLE_AFTER = {
+    "data": [
+        {
+            "id": "claude-fable-5-1",
+            "display_name": "Claude Fable 5.1",
+            "created_at": "2026-09-01T00:00:00Z",
+            "type": "model",
+            "max_input_tokens": 1_000_000,
+            "max_tokens": 128_000,
+        },
+        *_FABLE_BEFORE["data"],
+    ],
+    "has_more": False,
+}
+
+
+def test_a_model_released_inside_the_ttl_is_invisible_until_the_listing_is_dropped(
+    tmp_path,
+) -> None:
+    """The reported defect, end to end.
+
+    A cache written before ``claude-fable-5-1`` shipped is still fresh, so the
+    second call issues NO request and cannot see the new model however many
+    times the picker is opened. Only invalidation reaches it -- which is why a
+    credential change has to perform one.
+    """
+    client = _StubClient([_Response(200, _FABLE_BEFORE), _Response(200, _FABLE_AFTER)])
+
+    first, first_status = available_models(
+        "anthropic", api_key="sk-ant", client=client, cache_dir=tmp_path
+    )
+    assert first_status == "ok"
+    assert "claude-fable-5-1" not in {row.id for row in first}, "premise: not released yet"
+
+    # Anthropic ships it. The picker opens again inside the 24h TTL.
+    stale, stale_status = available_models(
+        "anthropic", api_key="sk-ant", client=client, cache_dir=tmp_path
+    )
+    assert stale_status == "cached"
+    assert len(client.calls) == 1, "a fresh cache issues no request at all"
+    assert "claude-fable-5-1" not in {row.id for row in stale}, "the reported symptom"
+
+    dropped = discovery.invalidate_listing("anthropic", cache_dir=tmp_path)
+    assert dropped == 1
+
+    fresh, fresh_status = available_models(
+        "anthropic", api_key="sk-ant", client=client, cache_dir=tmp_path
+    )
+    assert fresh_status == "ok"
+    assert len(client.calls) == 2
+    assert "claude-fable-5-1" in {row.id for row in fresh}
+
+
+def test_invalidation_follows_the_credential_identity_not_the_provider_id(tmp_path) -> None:
+    """``openai-device`` is a login flavour of ``openai`` and they share ONE
+    document (``_static_rows`` and ``_cache_key`` both follow
+    ``store_credentials_as``). Invalidating under the literal id would leave the
+    document the next listing actually reads in place -- the exact half-fix that
+    makes a re-auth look like it did nothing."""
+    (tmp_path / "openai.listing.json").write_text("{}", encoding="utf-8")
+
+    assert discovery.invalidate_listing("openai-device", cache_dir=tmp_path) == 1
+    assert list(tmp_path.glob("*.json")) == []
+
+
+def test_invalidating_an_unknown_provider_does_not_raise(tmp_path) -> None:
+    """A login path calls this; an unknown id must cost nothing, not an exception."""
+    assert discovery.invalidate_listing("not-a-provider", cache_dir=tmp_path) == 0

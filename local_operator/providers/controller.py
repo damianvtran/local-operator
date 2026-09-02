@@ -26,7 +26,11 @@ from local_operator.harness.types import ModelSpec
 from local_operator.model.configure import (  # noqa: F401  (used by callers)
     build_model_spec,
 )
-from local_operator.model.discovery import available_models
+from local_operator.model.discovery import (
+    PUBLIC_LISTING_PROVIDERS,
+    available_models,
+    invalidate_listing,
+)
 from local_operator.model.naming import model_label
 from local_operator.model.registry import static_models
 from local_operator.providers.registry import (
@@ -156,6 +160,12 @@ class ProviderController:
         # lop session on this machine: several terminals run at once, and one
         # process's refresh is every process's answer.
         self._usage_cache = usage_cache
+        # Providers whose live listing has been force-refreshed in THIS process
+        # (see ``live_catalogue(force_fresh=True)``). Process-scoped rather than
+        # persisted, exactly like the model hub's guard: the point is to spend
+        # one request per provider per run, so a user who opens the picker
+        # repeatedly pays once while a restart still picks up a new release.
+        self._freshly_listed: set[str] = set()
 
     def set_login_callbacks(self, factory: "LoginCallbackFactory | None") -> None:
         """Install host-specific login callbacks after construction.
@@ -302,11 +312,19 @@ class ProviderController:
                 self.auth_store.upsert_credential(
                     storage, {"key": result, "source": "login", "type": "api_key"}
                 )
+                invalidate_listing(storage)
+                self._forget_fresh_listing(storage)
                 return f"Stored API key for '{storage}'."
             return f"Login for '{storage}' produced no key; nothing stored."
 
         result.setdefault("authorized_at", int(time.time() * 1000))
         self.auth_store.upsert_credential(storage, result)
+        # The new credential may list DIFFERENT models than the one it replaced
+        # -- a different account, a different plan, or simply a catalogue that
+        # grew while the old listing sat in cache. Nothing about a TTL can
+        # observe that, so the login event has to say so itself.
+        invalidate_listing(storage)
+        self._forget_fresh_listing(storage)
         identity = result.get("email") or result.get("account_id") or result.get("org_name") or ""
         suffix = f" ({identity})" if identity else ""
         msg = f"Logged in to '{storage}'{suffix}."
@@ -327,7 +345,28 @@ class ProviderController:
             )
         if removed == 0:
             raise ValueError(f"No stored credentials for '{provider_id}'.")
+        # Symmetrical with login: a catalogue fetched under the credential just
+        # removed must not decide what the NEXT credential can select.
+        for target in sorted(targets):
+            invalidate_listing(target)
+            self._forget_fresh_listing(target)
         return f"Removed {removed} credential(s) for '{provider_id}'."
+
+    def _forget_fresh_listing(self, storage_id: str) -> None:
+        """Re-arm the force-refresh guard for every provider sharing ``storage_id``.
+
+        Dropping the cache document is only half the job: the guard would still
+        report the provider as already refreshed this process, so the next picker
+        open would not pass ``ttl_s=0`` and the fetch would wait on the ordinary
+        TTL again. The credential is shared by its login flavours
+        (``openai``/``openai-device``), so the guard has to be cleared for all of
+        them rather than for the id the caller happened to name.
+        """
+        self._freshly_listed -= {
+            definition.id
+            for definition in PROVIDER_REGISTRY
+            if credential_provider_id(definition.id) == storage_id
+        }
 
     # -- usage -------------------------------------------------------------
     async def fetch_usage(
@@ -1047,7 +1086,7 @@ class ProviderController:
         )
 
     async def live_catalogue(
-        self, *, ttl_s: float | None = None
+        self, *, ttl_s: float | None = None, force_fresh: bool = False
     ) -> tuple[list[CatalogueEntry], dict[str, str]]:
         """The catalogue with each provider's LIVE listing layered over the registry.
 
@@ -1063,9 +1102,17 @@ class ProviderController:
         Each provider is isolated: discovery never raises by contract, but a
         credential resolution can (an OAuth refresh against a dead network), and
         one broken provider must not empty the whole list.
+
+        ``force_fresh`` bypasses the listing TTL for providers not yet refreshed
+        in THIS process (see :attr:`_freshly_listed`). It is what makes opening
+        the picker able to show a model released since the last fetch, and the
+        once-per-process guard is what stops that costing a request every time
+        the picker opens. An explicit ``ttl_s`` still wins: a caller naming a
+        TTL is making a deliberate statement about freshness.
         """
         entries: list[CatalogueEntry] = []
         statuses: dict[str, str] = {}
+        forced: list[str] = []
         usable = self.usable_providers()
         for definition in PROVIDER_REGISTRY:
             connected = usable is None or definition.id in usable
@@ -1084,11 +1131,31 @@ class ProviderController:
             }
             if ttl_s is not None:
                 kwargs["ttl_s"] = ttl_s
+            elif (
+                force_fresh
+                and definition.id not in self._freshly_listed
+                and _can_list(definition, connected=connected)
+            ):
+                # Gated on whether the provider CAN list, not on whether it is
+                # connected. An unauthenticated provider would spend a request to
+                # be told so again; but the aggregators list without a credential
+                # at all, and OpenRouter is the one catalogue that cannot be
+                # approximated from the registry -- its entry there is a single
+                # placeholder for the router itself, so leaving it on the TTL
+                # would exclude ~340 models from the whole point of this force.
+                kwargs["ttl_s"] = 0.0
+                forced.append(definition.id)
             # Off the event loop: discovery is synchronous httpx by design (it is
             # also called from the CLI and the server), and a dozen sequential
             # provider fetches on the loop would freeze a TUI's repaint.
             models, status = await asyncio.to_thread(available_models, definition.id, **kwargs)
             statuses[definition.id] = status
+            if definition.id in forced and status == "ok":
+                # Spend the once-per-process slot only on a listing that actually
+                # answered. Marking it on entry would let one offline picker open
+                # pin the stale catalogue for the rest of the process -- the same
+                # dead end as the TTL, just shorter-lived.
+                self._freshly_listed.add(definition.id)
             for model in models:
                 entries.append(
                     CatalogueEntry(
@@ -1197,6 +1264,20 @@ class ProviderController:
             # needs to know which one the numbers describe.
             report.identity = getattr(access, "email", None) or access.account_id
         return report
+
+
+def _can_list(definition: ProviderDefinition, *, connected: bool) -> bool:
+    """Whether forcing a live listing for this provider could actually answer.
+
+    Mirrors ``discovery._available_models``'s own ``keyless_listing`` test rather
+    than restating it: a local server needs no credential at all, and an
+    aggregator's catalogue is a public page even though its inference is not.
+    Gating on ``connected`` alone looked right and quietly excluded OpenRouter,
+    whose listing is the single most valuable one in the tree.
+    """
+    if definition.allows_missing_api_key or definition.id in PUBLIC_LISTING_PROVIDERS:
+        return True
+    return connected
 
 
 def _price(value: float | None, definition: ProviderDefinition) -> float:

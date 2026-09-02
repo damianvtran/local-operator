@@ -42,7 +42,12 @@ from typing import Any, Literal
 
 import httpx
 
-from local_operator.model.catalogue import DEFAULT_TTL_S, cached_listing, invalidate
+from local_operator.model.catalogue import (
+    DEFAULT_TTL_S,
+    cached_listing,
+    invalidate,
+    invalidate_documents,
+)
 from local_operator.model.registry import ModelInfo, static_models
 from local_operator.providers.registry import (
     PROVIDER_REGISTRY,
@@ -1136,6 +1141,27 @@ def _rows_from_payload(
             )
         )
     return rows
+
+
+def invalidate_listing(provider_id: str, *, cache_dir: Path | None = None) -> int:
+    """Drop ``provider_id``'s cached listing so the next call refetches.
+
+    For callers reacting to an event that can CHANGE WHAT THE LISTING RETURNS
+    but that no TTL can observe -- a login, a re-auth, a logout. Without this the
+    24h TTL is the only thing that can refresh a catalogue, so the one action a
+    user takes when a model is missing (log in again) provably cannot fix it:
+    ``lop login anthropic`` wrote the credential row and left a listing fetched
+    before the model existed in place for the rest of the day.
+
+    Keyed on the CREDENTIAL identity, not the provider id, because that is what
+    names the documents: ``openai-device`` and ``openai`` are one logged-in
+    account sharing one document, and invalidating under the literal id would
+    miss it. Returns how many documents were dropped -- 0 is the ordinary answer
+    for a provider that was never listed, not an error.
+    """
+    definition = get_provider_definition(provider_id)
+    storage_id = credential_provider_id(definition.id if definition else provider_id)
+    return invalidate_documents(storage_id, cache_dir=cache_dir)
 
 
 def available_models(

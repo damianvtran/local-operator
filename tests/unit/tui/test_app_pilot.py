@@ -9727,3 +9727,158 @@ async def test_help_documents_shell_mode_and_the_composer_chords() -> None:
         assert keyed, "no key-reference rows found in /help"
         for row in keyed:
             assert len(row) <= 74, f"{row!r} is {len(row)} cells and wraps at 80 columns"
+
+
+class _TTLBoundController(_AccessController):
+    """A provider whose listing cache behaves the way the real one does.
+
+    ``live_catalogue`` serves whatever the cache holds and only re-reads the
+    upstream catalogue when told to bypass the TTL — which is exactly the
+    contract ``model/catalogue.py`` implements with a 24h document on disk.
+    ``upstream`` is what Anthropic would answer if asked right now.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(stored=("anthropic",))
+        # Written before `claude-fable-5-1` shipped, and still inside its TTL.
+        self.cached = ["claude-opus-5"]
+        self.upstream = ["claude-fable-5-1", "claude-opus-5"]
+        self.fetches = 0
+        # The real controller's once-per-process guard, modelled here because the
+        # end-to-end claim is about what a REOPEN costs, and that is a property
+        # of the two halves together.
+        self._freshly_listed: set[str] = set()
+
+    def login_providers(self):
+        return [_FakeDef("anthropic", "Anthropic", None, ("claude",))]
+
+    def _entries(self, model_ids):
+        from local_operator.providers.controller import CatalogueEntry
+
+        return [
+            CatalogueEntry(
+                provider="anthropic",
+                model_id=model_id,
+                label=model_id,
+                context_window=1_000_000,
+                input_price=5.0,
+                output_price=25.0,
+                connected=True,
+            )
+            for model_id in model_ids
+        ]
+
+    def static_catalogue(self):
+        return self._entries(["claude-opus-5"])
+
+    async def live_catalogue(self, *, ttl_s=None, force_fresh=False):
+        forcing = (force_fresh and "anthropic" not in self._freshly_listed) or ttl_s == 0.0
+        if forcing:
+            self.fetches += 1
+            self.cached = list(self.upstream)
+            self._freshly_listed.add("anthropic")
+            return self._entries(self.cached), {"anthropic": "ok"}
+        return self._entries(self.cached), {"anthropic": "cached"}
+
+
+@pytest.mark.asyncio
+async def test_the_picker_shows_a_model_released_since_the_listing_was_cached() -> None:
+    """The reported defect, at the surface the user actually touches.
+
+    `claude-fable-5-1` shipped after the cached listing was written and inside
+    its 24h TTL, so before this change `/model` painted the stale list on every
+    open — the live refresh worker ran, asked for the cache, and got yesterday's
+    answer. Re-authing did not help either, because nothing invalidated the
+    document.
+    """
+    ctrl = _TTLBoundController()
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=ctrl)
+    async with app.run_test(size=(90, 24)) as pilot:
+        await pilot.pause()
+        picker = await _open_model_picker(app, pilot)
+        offered = {row.model_id for row in picker.rows()}
+    assert "claude-fable-5-1" in offered, offered
+    assert ctrl.fetches == 1, "and it cost exactly one live listing"
+
+
+@pytest.mark.asyncio
+async def test_reopening_the_picker_does_not_refetch_the_catalogue() -> None:
+    """The force is once per provider per process. A user filtering by reopening
+    `/model` must not issue a request per open — that is the cost the TTL was
+    there to control, and the guard is what replaces it."""
+    ctrl = _TTLBoundController()
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=ctrl)
+    async with app.run_test(size=(90, 24)) as pilot:
+        await pilot.pause()
+        await _open_model_picker(app, pilot)
+        first = ctrl.fetches
+        editor = app.query_one(Editor)
+        _set_editor_line(editor, "")
+        await pilot.pause()
+        picker = await _open_model_picker(app, pilot)
+        offered = {row.model_id for row in picker.rows()}
+    assert first == 1
+    assert ctrl.fetches == 1, "the second open served the cache the first wrote"
+    assert "claude-fable-5-1" in offered, "and still shows the new model"
+
+
+class _LegacyFacadeController(_AccessController):
+    """An embedding host still implementing the OLD ``live_catalogue`` signature.
+
+    ``provider_controller`` is duck-typed (``Any``), so this is a real shape the
+    app can be handed. It must keep getting its live list rather than being
+    degraded to the static registry with a "live model list unavailable" note.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(stored=("anthropic",))
+
+    def login_providers(self):
+        return [_FakeDef("anthropic", "Anthropic", None, ("claude",))]
+
+    def static_catalogue(self):
+        from local_operator.providers.controller import CatalogueEntry
+
+        return [
+            CatalogueEntry(
+                provider="anthropic",
+                model_id="claude-opus-5",
+                label="claude-opus-5",
+                context_window=1_000_000,
+                input_price=5.0,
+                output_price=25.0,
+                connected=True,
+            )
+        ]
+
+    async def live_catalogue(self, *, ttl_s=None):
+        from local_operator.providers.controller import CatalogueEntry
+
+        return [
+            CatalogueEntry(
+                provider="anthropic",
+                model_id="claude-fable-5-1",
+                label="claude-fable-5-1",
+                context_window=1_000_000,
+                input_price=5.0,
+                output_price=25.0,
+                connected=True,
+            )
+        ], {"anthropic": "ok"}
+
+
+@pytest.mark.asyncio
+async def test_a_host_on_the_older_signature_still_gets_its_live_catalogue() -> None:
+    """Passing an unknown keyword to a duck-typed facade raises TypeError, which
+    the worker's own handler would have rendered as "live model list
+    unavailable" over the STATIC registry — a new no-models failure introduced
+    by the fix for a no-models failure."""
+    ctrl = _LegacyFacadeController()
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=ctrl)
+    async with app.run_test(size=(90, 24)) as pilot:
+        await pilot.pause()
+        picker = await _open_model_picker(app, pilot)
+        offered = {row.model_id for row in picker.rows()}
+        chrome = picker.render_text(90).plain
+    assert "claude-fable-5-1" in offered, offered
+    assert "live model list unavailable" not in chrome

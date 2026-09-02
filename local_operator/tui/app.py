@@ -13908,6 +13908,13 @@ class OperatorApp(App[None]):
         what shipped too late to be in the registry — which is the whole reason this
         exists: after logging in to Anthropic, `claude-opus-5` has to be findable
         without the user already knowing its id.
+
+        That fetch is FORCED past the listing TTL, once per provider per process.
+        Without the force it was a no-op for a whole day at a time: the listing
+        cache is 24h and nothing else invalidates it, so a model released after
+        the last fetch was unreachable through the picker AND unfixable by the
+        one thing a user tries — logging in again. Measured cost of the force is
+        ~0.28s against a warm cache, in a worker, after the rows are on screen.
         """
         rows, note = self._catalogue_rows(
             self._providers.static_catalogue() if self._providers else []
@@ -13927,11 +13934,29 @@ class OperatorApp(App[None]):
             self.run_worker(self._refresh_catalogue(), thread=False, group="catalogue")
 
     async def _refresh_catalogue(self) -> None:
-        """Worker: replace the picker's rows with the live catalogue."""
+        """Worker: replace the picker's rows with the live catalogue.
+
+        ``force_fresh`` asks the controller to bypass the TTL for providers it
+        has not already refreshed this process, so the first ``/model`` of a run
+        sees today's models and every later one is served from the cache it just
+        wrote.
+
+        That keyword is passed defensively, for the same reason ``entry_for``
+        below is: this facade is duck-typed (``provider_controller: Any``) and an
+        embedding host may still implement the older ``live_catalogue(*,
+        ttl_s=None)`` signature. Letting the ``TypeError`` reach the handler
+        would degrade such a host to the STATIC registry on every open and
+        report it as "live model list unavailable" — strictly worse than the
+        cached-but-real list it used to get, and precisely the "no models"
+        failure the rest of this change exists to remove.
+        """
         if self._providers is None:
             return
         try:
-            entries, statuses = await self._providers.live_catalogue()
+            try:
+                entries, statuses = await self._providers.live_catalogue(force_fresh=True)
+            except TypeError:
+                entries, statuses = await self._providers.live_catalogue()
         except Exception as error:  # noqa: BLE001 — a picker must not take the app down
             rows, note = self._catalogue_rows(self._providers.static_catalogue())
             self._editor().model_picker.set_rows(

@@ -155,6 +155,7 @@ def run_login(
             auth_store.upsert_credential(
                 storage_provider, {"key": result, "source": "login", "type": "api_key"}
             )
+            _invalidate_cached_listing(storage_provider)
             print(f"Stored API key for '{storage_provider}'.")
             _apply_login_defaults(storage_provider)
         return 0
@@ -162,6 +163,7 @@ def run_login(
     # OAuth credentials dict; stamp authorized_at if missing.
     result.setdefault("authorized_at", int(time.time() * 1000))
     row = auth_store.upsert_credential(storage_provider, result)
+    _invalidate_cached_listing(storage_provider)
     identity = result.get("email") or result.get("account_id") or result.get("org_name") or ""
     suffix = f" ({identity})" if identity else ""
     print(f"Logged in to '{storage_provider}'{suffix}.")
@@ -170,6 +172,32 @@ def run_login(
     _apply_login_defaults(storage_provider)
     _ = row
     return 0
+
+
+def _invalidate_cached_listing(provider_id: str) -> None:
+    """Drop the provider's cached model listing after a credential change.
+
+    A login is the one moment a user expects the model list to be right, and
+    before this it was the one moment that provably could not fix it: the
+    listing cache had a 24h TTL and no other invalidation, so re-authing wrote
+    a credential row and served the same stale catalogue. Reported by a user
+    who could not see a model released inside that window and, reasonably,
+    tried logging in again.
+
+    Imported here rather than at module scope: this module is lazy-imported by
+    the CLI top level precisely so that ``lop --help`` does not pay for the
+    provider stack, and discovery pulls in httpx.
+
+    Best-effort by construction. A failed invalidation costs a stale list until
+    the TTL lapses; an exception here would fail a login that actually
+    succeeded, which is far worse.
+    """
+    try:
+        from local_operator.model.discovery import invalidate_listing
+
+        invalidate_listing(provider_id)
+    except Exception:  # noqa: BLE001 - never fail a successful login over a cache
+        pass
 
 
 def _apply_login_defaults(provider_id: str) -> None:
@@ -239,6 +267,8 @@ def run_logout(provider_id: str, auth_store: "AuthStore") -> int:
     if removed == 0:
         print(f"No stored credentials for '{provider_id}'.")
         return 1
+    for target in sorted(targets):
+        _invalidate_cached_listing(target)
     print(f"Removed {removed} credential(s) for '{provider_id}'.")
     # The cascade has two tiers below the stored rows: the process
     # environment and the legacy credentials.env. Deleting the rows does not
