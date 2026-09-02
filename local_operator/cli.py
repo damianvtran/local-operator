@@ -1580,10 +1580,15 @@ def stop_command(args: argparse.Namespace) -> int:
             for line in candidate_lines(targets, indent="  ", prefix="pid"):
                 print(line)
             count = len(targets)
+            # Disclose --force IN the question: consent to "stop everything"
+            # is not consent to "signal everything whose socket is silent",
+            # and the flag was typed once at the top of a command whose
+            # listing may be long (round-3 U3-3).
+            forced_part = " (--force: signal any that will not answer)" if args.force else ""
             try:
                 answer = input(
                     f"stop {'all ' if count != 1 else ''}{count} lop session"
-                    f"{'s' if count != 1 else ''} on this machine? [y/N] "
+                    f"{'s' if count != 1 else ''} on this machine{forced_part}? [y/N] "
                 )
             except EOFError:
                 # Ctrl+D: not a yes. A traceback would exit 1 with noise and

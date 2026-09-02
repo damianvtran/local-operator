@@ -643,12 +643,17 @@ async def test_arm_listing_at_80_columns_never_wraps_a_row(monkeypatch: pytest.M
         # No row exceeds the block's own body budget: every painted row is
         # one line, so the block's pinned height equals its text rows and the
         # last line (the instruction) is always painted.
-        from local_operator.tui.widgets.transcript import NoticeBlock as NB
-
-        budget = NB.body_budget(80 - 1)
-        for line in block._text.split("\n"):
-            assert len(line) <= budget, (line, len(line), budget)
-        assert block._text.split("\n")[-1].startswith("repeat /stop all")
+        # Assert the PROPERTY, not a budget re-derived from the terminal
+        # width: doing the arithmetic here repeats the very off-by-three the
+        # test exists to catch, and it passed against the D2-1 bug for
+        # exactly that reason (round-3 D3-3, demonstrated by mutation). What
+        # matters to the user is that no row wraps, which is precisely
+        # "the block is as tall as it has rows".
+        authored = block._text.split("\n")
+        painted = block._build().plain.split("\n")
+        assert len(painted) == len(authored), (len(painted), len(authored))
+        assert block.size.height == len(authored), (block.size.height, len(authored))
+        assert authored[-1].startswith("repeat /stop all")
         assert "…" in block._text  # the long name really was truncated
         assert "(this one, last)" in block._text.split("\n")[-2]
 

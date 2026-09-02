@@ -475,15 +475,19 @@ async def _identity_by_start_time(record: SessionRecord) -> tuple[bool, str]:
     age = time.time() - record.heartbeat_at
     if age <= HEARTBEAT_TIMEOUT_S:
         # Name the remedy: the refusal is only true while the heartbeat is
-        # fresh, and the wait is bounded (one heartbeat window). --force is
-        # the opt-in past it for a starved process the socket cannot reach.
+        # fresh, and the wait is bounded (one heartbeat window). The forced
+        # stop is the opt-in past it for a starved process the socket cannot
+        # reach. Names the whole COMMAND, not a bare `--force`: this string is
+        # painted by the TUI's /stop as well as by the CLI, and the TUI has no
+        # spelling for a flag — a user told to "pass --force" there has
+        # nowhere to type it (round-3 U3-2).
         wait_s = int(HEARTBEAT_TIMEOUT_S - age) + 1
         return (
             False,
             f"it is heartbeating but not answering its socket "
             f"(its last heartbeat was {int(age)}s ago; it must lapse "
-            f"(~{wait_s}s) before a forced stop is safe — retry then, "
-            f"or pass --force)",
+            f"(~{wait_s}s) before a forced stop is safe — retry then, or run "
+            f"`lop stop --pid {record.pid} --force` from a shell)",
         )
     # Off the loop: this is a fork/exec of ``ps`` with a 5 s ceiling, and the
     # TUI runs the ladder on its event loop (``run_worker(thread=False)``).
