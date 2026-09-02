@@ -149,7 +149,17 @@ LYING_MAX_TOKENS = 4096
 #: the fix would stay invisible for a day on every install. Same one-time
 #: synchronous refetch the version-2 bump described, and paid by the same two
 #: aggregators, since they are the only transports that quote a price at all.
-LISTING_CAPTURE_VERSIONS: dict[str, int] = {"anthropic": 2, "openrouter": 3, "radient": 3}
+#:
+#: Version 4 for ``openrouter`` and ``radient`` is the modality gate on that
+#: same flag (:func:`_bills_in_tokens`). Unlike the version-3 bump this one is
+#: not about a field the writer omitted: the document records ``free`` as a
+#: COMPUTED boolean, so a version-3 document written by the ungated parser
+#: carries ``free: true`` for the two per-song-billed lyria rows and the reader
+#: has no modality left to re-judge it with. Without the bump every existing
+#: install keeps making the false claim on screen until its listing TTL expires
+#: — the fix would ship and change nothing for a day. Same one-time synchronous
+#: refetch, paid by the same two aggregators.
+LISTING_CAPTURE_VERSIONS: dict[str, int] = {"anthropic": 2, "openrouter": 4, "radient": 4}
 #: What a transport not named above is stamped with. Version 1 is the original
 #: shape; a transport only earns a bump when its own reader starts needing a
 #: field its writer did not record.
@@ -485,6 +495,47 @@ def _has_image_input(architecture: Mapping[str, object]) -> bool | None:
     return None
 
 
+def _bills_in_tokens(architecture: Mapping[str, object]) -> bool:
+    """Whether a token price of zero can be this model's WHOLE price.
+
+    A quoted ``0`` per token only means "free" for a model whose product IS
+    tokens. OpenRouter prices ``google/lyria-3-pro-preview`` at $0.08 per SONG
+    and ``google/lyria-3-clip-preview`` at $0.04 per CLIP, and quotes
+    ``{"prompt": "0", "completion": "0"}`` for both — not because they are free
+    but because the leg that bills is not denominated in tokens at all. The
+    symmetric zero there is a silence about the charge, and reading it as
+    ``free`` advertises a paid model as free, the one error
+    ``format_price_pair`` exists to prevent.
+
+    The wire carries the discriminator: ``architecture.output_modalities`` is
+    ``["text", "audio"]`` on exactly those two rows against ``["text"]`` on all
+    19 genuinely-free routes in the live listing. Gating on the modality closes
+    the whole class — any future image/audio/video generator priced per artifact
+    is covered — rather than naming two ids that go stale.
+
+    ABSENT modalities — the key missing, or an empty list, which is how the
+    models.dev projection normalises "said nothing" — default to text
+    (permissive), and that direction is deliberate. Every lean
+    OpenAI-compatible gateway sends an id and little else, and the same
+    reasoning :func:`_has_image_input` documents applies: silence is not a
+    statement. The conservative default would strip ``free`` from every
+    genuinely-free route on any gateway that omits the field — a large, silent
+    regression against a hypothetical one, where the permissive default is wrong
+    only for a gateway that both omits modalities AND quotes a token zero for a
+    non-token-billed model. OpenRouter, the only transport that quotes zeros at
+    all today, states the field on 100% of its rows.
+    """
+    modalities = architecture.get("output_modalities")
+    if isinstance(modalities, (list, tuple)) and modalities:
+        return all(isinstance(item, str) and item.strip().lower() == "text" for item in modalities)
+    modality = architecture.get("modality")
+    if isinstance(modality, str) and "->" in modality:
+        # The older encoding packs the same fact to the RIGHT of the arrow.
+        # Only the output side decides what the model bills for.
+        return all(part.strip() == "text" for part in modality.split("->")[-1].split("+") if part)
+    return True
+
+
 def _row_from_openai_entry(entry: Mapping[str, object]) -> DiscoveredModel | None:
     """One OpenAI-compatible listing entry, or ``None`` when it has no id.
 
@@ -529,9 +580,13 @@ def _row_from_openai_entry(entry: Mapping[str, object]) -> DiscoveredModel | Non
         # BOTH legs, and only when the wire wrote a zero in each. A half-stated
         # row (``prompt: 0`` beside a priced ``completion``) is a model you pay
         # for, and calling it free would understate it by the whole output bill.
+        # The modality gate is the same guard one level up: a zero per TOKEN is
+        # only a whole price for a model that bills in tokens (see
+        # :func:`_bills_in_tokens`).
         free=(
             _stated_zero_price(pricing.get("prompt"))
             and _stated_zero_price(pricing.get("completion"))
+            and _bills_in_tokens(architecture)
         ),
         cache_read_price=cache_read_price,
         supports_images=_has_image_input(architecture),

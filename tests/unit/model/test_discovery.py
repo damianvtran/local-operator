@@ -215,6 +215,61 @@ def test_a_quoted_zero_is_read_as_free_and_a_router_price_is_not() -> None:
     assert all(row.input_price == 0.0 for row in rows)
 
 
+def test_a_token_zero_is_not_free_when_the_model_does_not_bill_in_tokens() -> None:
+    """A quoted ``0`` per token is only a whole price for a model whose product
+    IS tokens.
+
+    Both lyria rows are real: OpenRouter quotes ``{"prompt": "0",
+    "completion": "0"}`` for them while billing $0.08 per song and $0.04 per
+    clip. The symmetric zero is a silence about the leg that charges, and
+    reading it as ``free`` is the one error this column must not make. The wire
+    discriminator is ``architecture.output_modalities`` — ``["text", "audio"]``
+    on exactly those rows against ``["text"]`` on all 19 genuinely-free routes
+    in the live listing — so the gate closes the class rather than two ids.
+    """
+    body = {
+        "data": [
+            {
+                "id": "google/lyria-3-pro-preview",
+                "pricing": {"prompt": "0", "completion": "0"},
+                "architecture": {"output_modalities": ["text", "audio"]},
+            },
+            {
+                "id": "google/lyria-3-clip-preview",
+                "pricing": {"prompt": "0", "completion": "0"},
+                "architecture": {"output_modalities": ["text", "audio"]},
+            },
+            # The genuinely-free shape, which must keep saying the word.
+            {
+                "id": "google/gemma:free",
+                "pricing": {"prompt": "0", "completion": "0"},
+                "architecture": {"output_modalities": ["text"]},
+            },
+            # Silence about modalities defaults to text: every lean
+            # OpenAI-compatible gateway sends an id and little else, and the
+            # conservative default would strip ``free`` from every real free
+            # route on all of them.
+            {"id": "terse/free", "pricing": {"prompt": "0", "completion": "0"}},
+            # The older arrow encoding carries the same fact on the right.
+            {
+                "id": "legacy/audio",
+                "pricing": {"prompt": "0", "completion": "0"},
+                "architecture": {"modality": "text->text+audio"},
+            },
+        ]
+    }
+    rows = fetch_models("openrouter", api_key="k", client=_StubClient([_Response(200, body)]))
+
+    assert rows is not None
+    assert {row.id: row.free for row in rows} == {
+        "google/lyria-3-pro-preview": False,
+        "google/lyria-3-clip-preview": False,
+        "google/gemma:free": True,
+        "terse/free": True,
+        "legacy/audio": False,
+    }
+
+
 def test_the_free_flag_survives_a_cache_round_trip(tmp_path) -> None:
     """A document is read back by a different function than the one that parsed
     the wire, and a field it forgets silently reverts to the unstated default —
@@ -1787,11 +1842,14 @@ def test_only_the_transport_that_changed_invalidates_its_cache(tmp_path) -> None
     transport's own reader starts needing something its writer did not record:
     Anthropic's at the capability read (2), the two aggregators' again at the
     stated-zero ``free`` read (3), which no other transport can express because
-    no other listing in the tree quotes a price.
+    no other listing in the tree quotes a price, and once more at the modality
+    gate on that flag (4) — ``free`` is stored COMPUTED, so a version-3 document
+    carries the ungated ``true`` for the per-song-billed rows and the reader has
+    no modality left to re-judge it with.
     """
     assert discovery.listing_capture_version("anthropic") == 2
-    assert discovery.listing_capture_version("openrouter") == 3
-    assert discovery.listing_capture_version("radient") == 3
+    assert discovery.listing_capture_version("openrouter") == 4
+    assert discovery.listing_capture_version("radient") == 4
     # Ollama's reader never changed: an OpenAI-compatible document with no
     # pricing object has nothing new to capture, so its stamp stays at 1.
     assert discovery.listing_capture_version("ollama") == discovery.LISTING_CAPTURE_DEFAULT

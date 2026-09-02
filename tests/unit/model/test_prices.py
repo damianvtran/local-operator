@@ -229,7 +229,7 @@ def _stored(tmp_path) -> dict[str, Any]:
 # -- projection ---------------------------------------------------------------
 
 
-def test_the_projection_keeps_only_mapped_providers_and_the_five_fields() -> None:
+def test_the_projection_keeps_only_mapped_providers_and_the_six_fields() -> None:
     document = project(_MODELS_DEV_BODY, _ETAG)
 
     assert document["capture"] == PRICE_CATALOGUE_CAPTURE
@@ -247,7 +247,16 @@ def test_the_projection_keeps_only_mapped_providers_and_the_five_fields() -> Non
     fable = document["providers"]["anthropic"]["claude-fable-5-1"]
     # Structural, not numeric: the point of the projection is that the bulk of
     # a real entry never reaches disk.
-    assert set(fable) == {"name", "cost", "limit", "attachment", "release_date"}
+    assert set(fable) == {
+        "name",
+        "cost",
+        "limit",
+        "attachment",
+        "release_date",
+        # Carried so ``_row`` can refuse to call a per-artifact-billed model
+        # free; normalised to a list here, ``[]`` when models.dev said nothing.
+        "output_modalities",
+    }
     assert "description" not in json.dumps(document)
     assert fable["cost"] == {"input": 10, "output": 50, "cache_read": 0.25, "cache_write": 12.5}
 
@@ -560,6 +569,49 @@ def test_a_pay_per_token_stated_zero_is_marked_free_for_display() -> None:
     assert row is not None
     assert (row.input_price, row.output_price) == (0.0, 0.0)
     assert row.free is True
+
+
+def test_a_models_dev_zero_is_never_free_for_a_non_text_output_model() -> None:
+    """The second source states the same zero, so it needs the same gate.
+
+    models.dev quotes ``google/lyria-3-pro-preview`` at ``{"input": 0,
+    "output": 0}`` exactly as OpenRouter does — billing is per song, not per
+    token — but it also carries the discriminator, under ``modalities.output``
+    rather than ``architecture.output_modalities``. Without this the secondary
+    leg would restate the claim the wire parser now withholds, and the
+    two-source chain would launder a false ``free`` back onto the screen.
+    """
+    body = json.loads(json.dumps(_MODELS_DEV_BODY))
+    body["openrouter"] = {
+        "id": "openrouter",
+        "models": {
+            "google/lyria-3-pro-preview": {
+                "id": "google/lyria-3-pro-preview",
+                "cost": {"input": 0, "output": 0},
+                "modalities": {"input": ["text"], "output": ["text", "audio"]},
+            },
+            "google/gemma:free": {
+                "id": "google/gemma:free",
+                "cost": {"input": 0, "output": 0},
+                "modalities": {"input": ["text"], "output": ["text"]},
+            },
+            # No modalities at all: permissive, for the reason
+            # ``_bills_in_tokens`` documents.
+            "terse/free": {"id": "terse/free", "cost": {"input": 0, "output": 0}},
+        },
+    }
+    providers = _providers(body)
+
+    lyria = price_row(
+        "openrouter", "google/lyria-3-pro-preview", models_dev=providers, openrouter=[]
+    )
+    assert lyria is not None
+    assert (lyria.input_price, lyria.output_price) == (0.0, 0.0), "the zero still answers"
+    assert lyria.free is False, "per-song billing is not free"
+
+    for model_id in ("google/gemma:free", "terse/free"):
+        row = price_row("openrouter", model_id, models_dev=providers, openrouter=[])
+        assert row is not None and row.free is True, model_id
 
 
 def test_a_plan_catalogues_zero_is_an_answer_but_never_the_word_free() -> None:

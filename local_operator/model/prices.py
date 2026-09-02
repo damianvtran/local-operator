@@ -79,6 +79,7 @@ from local_operator.model.catalogue import (
 from local_operator.model.discovery import (
     DEFAULT_TIMEOUT_S,
     DiscoveredModel,
+    _bills_in_tokens,
     _positive_float,
     _positive_int,
 )
@@ -97,7 +98,16 @@ PRICE_CATALOGUE_KEY = "models-dev.listing"
 #: reason ``discovery.LISTING_CAPTURE_VERSIONS`` exists: a reader that starts
 #: needing a field the writer did not record must be able to force one refetch
 #: rather than serve zeros for a day. Version 1 is the five-field projection.
-PRICE_CATALOGUE_CAPTURE = 1
+#:
+#: Version 2 adds ``output_modalities``, which :func:`_row` needs to decide
+#: whether a stated zero may be displayed as ``free`` (see
+#: :func:`_bills_in_tokens`). A version-1 document carries no modality at all, so
+#: the permissive default would let it keep claiming ``free`` for the very rows
+#: this gate exists to silence — the lyria pair, which models.dev also quotes at
+#: $0/0. The bump is what makes the fix take effect on an existing install
+#: rather than a day later; the refetch is one conditional GET of a document
+#: every install already refreshes on its own TTL.
+PRICE_CATALOGUE_CAPTURE = 2
 
 #: A local (canonical) provider id, mapped to the models.dev provider keys that
 #: describe the same models — FIRST MATCH WINS, per model id. The local id is the
@@ -198,6 +208,22 @@ OPENROUTER_CATALOGUE_KEY = "openrouter.listing"
 PRICE_DISAGREEMENT_RATIO = 0.05
 
 
+def _output_modalities(modalities: Any) -> list[str]:
+    """models.dev's ``modalities.output`` as a list of strings, else ``[]``.
+
+    Normalised on the way IN so the on-disk document carries the same shape
+    :func:`_bills_in_tokens` reads off an OpenRouter ``architecture`` mapping,
+    and the two sources answer the free question through one predicate. An empty
+    list is the "said nothing" case that predicate treats as text.
+    """
+    if not isinstance(modalities, Mapping):
+        return []
+    output = modalities.get("output")
+    if not isinstance(output, (list, tuple)):
+        return []
+    return [item for item in output if isinstance(item, str)]
+
+
 def project(body: Mapping[str, Any], etag: str | None) -> dict[str, Any]:
     """The on-disk document for a models.dev body: mapped providers, five fields.
 
@@ -229,6 +255,13 @@ def project(body: Mapping[str, Any], etag: str | None) -> dict[str, Any]:
                 "release_date": (
                     model.get("release_date") if isinstance(model.get("release_date"), str) else ""
                 ),
+                # models.dev nests the same fact OpenRouter puts under
+                # ``architecture``: ``modalities.output``. Carried so ``_row``
+                # can refuse to call a per-artifact-billed model free — it
+                # quotes the lyria pair at $0/0 exactly as OpenRouter does, so
+                # without this the second source would reintroduce the claim the
+                # first one now refuses to make.
+                "output_modalities": _output_modalities(model.get("modalities")),
             }
         providers[provider_key] = projected
     return {"capture": PRICE_CATALOGUE_CAPTURE, "etag": etag, "providers": providers}
@@ -355,7 +388,17 @@ def _row(model_id: str, entry: Mapping[str, Any], key: str = "") -> DiscoveredMo
         # catalogues, whose zeros are an answer to the first question and not to
         # the second — a credit-billed model's real cost is unknowable, and
         # printing ``free`` for it would be a lie the user could act on.
-        free=stated_zero and key not in _PLAN_BILLED_KEYS,
+        # The third way a stated zero fails to mean "free", beside a plan
+        # catalogue: a model whose product is not tokens. models.dev quotes the
+        # lyria pair at $0/0 per token while OpenRouter bills them per song and
+        # per clip, so without this gate the secondary leg would restate the
+        # claim the primary now withholds. One predicate, shared with the wire
+        # parser (see :func:`_bills_in_tokens`).
+        free=(
+            stated_zero
+            and key not in _PLAN_BILLED_KEYS
+            and _bills_in_tokens({"output_modalities": entry.get("output_modalities")})
+        ),
         cache_read_price=cache_read,
         cache_write_price=_positive_float(cost.get("cache_write")),
         # Never from here: a second-hand catalogue cannot issue the provider's
