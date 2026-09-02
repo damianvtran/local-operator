@@ -57,6 +57,39 @@ _ALWAYS_INFRA = (
     "OSWORLD_FILE_BASE_URL",
 )
 
+# Optional operator knobs. OSWORLD_INPUTS_ROOT names the durable directory
+# holding the gated assets and the prepared checkout (the workspace pins their
+# manifests by sha but cannot hold the 4.2 GB of assets under its 4 GiB cap);
+# OSWORLD_TTL_SECONDS overrides the budget-derived lease length.
+_OPTIONAL_INFRA = (
+    "OSWORLD_INPUTS_ROOT",
+    "OSWORLD_TTL_SECONDS",
+)
+
+# The LLM judge. OSWorld's ``model_client`` resolves the key from the
+# environment and ``llm_metrics`` returns 0.0 on ANY exception, so a judged
+# task run without a key scores a silent zero -- the previous pilot lost ~17%
+# of its suite that way. These are REQUIRED for a task whose source imports
+# the judge client, and absent for every other task, so preflight refuses a
+# judged episode up front rather than sealing a zero.
+_JUDGE_SECRET = "OSWORLD_EVAL_MODEL_API_KEY"
+_JUDGE_INFRA = (
+    "OSWORLD_EVAL_MODEL_PROVIDER",
+    "OSWORLD_EVAL_MODEL_NAME",
+)
+# Source substrings that mark a task as judge-backed. Both the package path
+# and the bare module name are matched because tasks import either
+# ``desktop_env.evaluators.model_client`` directly or a metric from
+# ``llm_metrics`` that wraps it.
+_JUDGE_MARKERS = ("desktop_env.evaluators.model_client", "llm_metrics")
+
+
+def is_judged(descriptor: TaskDescriptor) -> bool:
+    """Whether the task's evaluator calls the LLM judge."""
+
+    source_text = descriptor.source_text
+    return any(marker in source_text for marker in _JUDGE_MARKERS)
+
 
 def _requirement(name: str, *, kind: str, required: bool) -> Requirement:
     # requirement_id is the name itself: it is unique within an episode and
@@ -98,6 +131,13 @@ def derive_requirements(descriptor: TaskDescriptor) -> tuple[Requirement, ...]:
         out.append(_requirement(name, kind="infra", required=True))
     for name in _ALWAYS_INFRA:
         out.append(_requirement(name, kind="infra", required=True))
+    for name in _OPTIONAL_INFRA:
+        out.append(_requirement(name, kind="infra", required=False))
+
+    if is_judged(descriptor):
+        out.append(_requirement(_JUDGE_SECRET, kind="secret", required=True))
+        for name in _JUDGE_INFRA:
+            out.append(_requirement(name, kind="infra", required=True))
 
     # --- Conditional on the task -------------------------------------------
 
