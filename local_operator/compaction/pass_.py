@@ -86,6 +86,13 @@ class CompactionPassResult:
     ``frames_dropped`` how many image blocks the frame prune replaced — both
     are non-zero on a refused pass too, so a caller that rebuilds its prefix
     on a frame budget learns the frames went even when no summary was bought.
+
+    A frozen dataclass rather than a pydantic model, unlike everything at the
+    evaluation runner's boundary: ``messages`` holds live ``Message`` objects
+    whose IDENTITY the caller relies on (untouched messages are reused ``is``-
+    identically), and a validating model would copy them. It is the one
+    non-pydantic result the provider client consumes, and it never crosses a
+    process or file boundary.
     """
 
     messages: list[Message]
