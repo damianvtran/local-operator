@@ -1728,6 +1728,43 @@ class TestUsageAwareFirstPick:
         for i in range(20):
             assert self._order(store, f"session-{i}") == [rows[1].id, rows[0].id]
 
+    def test_a_fresh_limit_less_stub_does_not_mask_a_real_report(self, tmp_path: Any) -> None:
+        """The warmer's first failure for a never-seen account is a stub
+        stamped ``now`` with an empty ``limits`` list. "Newest wins" must
+        skip it: ranking by recency alone let that stub outvote a slightly
+        older real preflight report and left a 95%-used account looking
+        neutral (review round 2, F7)."""
+        import time
+
+        from local_operator.providers.usage import UsageReport
+        from local_operator.providers.usage_cache import (
+            account_backoff_ms,
+            fingerprint_accounts,
+            provider_cache_key,
+        )
+
+        store, rows, cache = self._store(tmp_path, 2)
+        self._cache_report(cache, rows[0], five_hour=0.05, age_ms=2 * 60_000)
+        # rows[1]: a REAL preflight report, 95% used, two minutes old...
+        self._cache_report(cache, rows[1], five_hour=0.95, age_ms=2 * 60_000)
+        # ...and the warmer's failure stub for the SAME account, fresher.
+        now = int(time.time() * 1000)
+        stub = UsageReport(
+            provider="anthropic",
+            fetched_at=now,
+            identity=rows[1].data["email"],
+            consecutive_failures=1,
+            next_probe_at_ms=now + account_backoff_ms(1),
+        )
+        key = provider_cache_key("anthropic", fingerprint_accounts(["the-whole-set"]))
+        cache.set(key, "anthropic", [stub], expires_at_ms=now + 60_000)
+
+        # The stub is skipped, so rows[1]'s real 5% remaining still ranks it
+        # last; masked, it would look neutral and share first place with
+        # rows[0] under the hash rotation.
+        for i in range(20):
+            assert self._order(store, f"session-{i}") == [rows[0].id, rows[1].id]
+
     def test_a_preflight_row_is_never_mistaken_for_a_warmer_row(self, tmp_path: Any) -> None:
         """The warmer scan walks every row under the provider; the ``:pf:``
         rows live under the same prefix and must be skipped there, or a
