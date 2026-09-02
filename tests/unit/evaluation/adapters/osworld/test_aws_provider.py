@@ -416,12 +416,17 @@ async def test_desktop_env_cache_dir_is_absolute_and_outside_the_workspace(
 @pytest.mark.asyncio
 async def test_allocate_refuses_without_a_cache_root(monkeypatch: pytest.MonkeyPatch) -> None:
     """A missing cache root must fail loudly before any boto3 call: defaulting
-    to cwd would silently re-open the digest-break defect."""
+    to cwd would silently re-open the digest-break defect.
+
+    ``cache_root`` is typed as a required ``Path``, so a caller that forgets it
+    is caught at type-check time; the ``type: ignore`` below is deliberate —
+    it exercises the RUNTIME guard that still has to hold for a caller passing
+    ``None`` dynamically."""
 
     with _Stubs() as stubs:
         provider = _provider(stubs, monkeypatch, desktop_env_factory=_FakeEnv)
         with pytest.raises(AllocationError, match="cache root"):
-            await provider.allocate(_plan(), _task(), cache_root=None)
+            await provider.allocate(_plan(), _task(), cache_root=None)  # type: ignore[arg-type]
 
 
 @pytest.mark.asyncio

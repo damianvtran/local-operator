@@ -63,9 +63,9 @@ class FakeProvider:
         # guest (screenshot + a11y tree), so a duplicated call is real cost,
         # not a cosmetic issue. Counted here so a test can pin it.
         self.observe_calls = 0
-        # Where the adapter told us to cache. Recorded (never used to write
-        # anything: the fake downloads nothing) so tests assert the cache
-        # root actually crossed the adapter -> provider boundary.
+        # Where the adapter told us to cache. Recorded (never written to: the
+        # fake downloads nothing) so tests assert the cache root actually
+        # crossed the adapter -> provider boundary. None until allocate.
         self.cache_root: Path | None = None
 
     def _frame(self) -> bytes:
@@ -80,7 +80,7 @@ class FakeProvider:
         return write_png_rgb(width, height, pixel * (width * height))
 
     async def allocate(
-        self, plan: ProvisioningPlan, task: TaskDescriptor, *, cache_root: Path | None = None
+        self, plan: ProvisioningPlan, task: TaskDescriptor, *, cache_root: Path
     ) -> None:
         # The ref is the tag; allocation registers the instance under it, so
         # teardown-by-ref is the same operation a rescue worker performs.

@@ -329,13 +329,14 @@ class AwsProvider:
     # ------------------------------------------------------------------
 
     async def allocate(
-        self, plan: ProvisioningPlan, task: TaskDescriptor, *, cache_root: Path | None
+        self, plan: ProvisioningPlan, task: TaskDescriptor, *, cache_root: Path
     ) -> None:
+        # Typed as required (matching the Protocol), and re-checked at
+        # runtime: a DesktopEnv built without a cache root would fall back to
+        # upstream's cwd-relative default and re-open the digest-break
+        # defect. The type stops a caller that forgets it; this stops one
+        # that passes None dynamically.
         if cache_root is None:
-            # The whole point of the cache root is that upstream's writes
-            # land OUTSIDE the pinned workspace. Constructing a DesktopEnv
-            # without one re-opens the digest-break defect (the cwd IS the
-            # workspace), so refusing loudly beats defaulting to cwd.
             raise AllocationError(
                 "allocate needs the adapter's episode cache root (cache_root); "
                 "without it upstream writes land in the digest-pinned workspace"
@@ -589,7 +590,6 @@ class AwsProvider:
         env._revert_to_snapshot = refuse("_revert_to_snapshot")
         env.close = refuse("close")
         env._save_state = refuse("_save_state")
-        AwsProvider._seal_cwd_writes(env)
         provider = getattr(env, "provider", None)
         if provider is not None:
             provider.revert_to_snapshot = refuse("provider.revert_to_snapshot")
@@ -598,57 +598,6 @@ class AwsProvider:
         manager = getattr(env, "manager", None)
         if manager is not None:
             manager.get_vm_path = refuse("manager.get_vm_path")
-
-    @staticmethod
-    def _seal_cwd_writes(env: Any) -> None:
-        """Redirect upstream's cwd-RELATIVE writes to the episode cache root.
-
-        The cache_dir fix routes every ``os.path.join(env.cache_dir, ...)``
-        download. But a handful of upstream metric helpers open files in the
-        CURRENT WORKING DIRECTORY with a hard-coded relative name (no cache
-        root): ``evaluators/metrics/vscode.py`` writes ``temp.pdf``,
-        ``slides.py`` writes ``temp_extracted_N.jpeg``, ``others.py`` extracts
-        an epub into ``<name>.dir``, ``docs.py`` writes a netpbm temp image.
-        With the worker's cwd pinned to the workspace, any task whose metric
-        lands on one of those writes into the digest-pinned workspace and
-        re-wedges rescue exactly as the cache download did.
-
-        We cannot enumerate every present and future such helper. The
-        load-bearing invariant is narrower and provable: a write whose path
-        resolves to cwd lands inside the pinned workspace. So the env's
-        file-writing surface is patched at the instance level with a guard
-        that refuses any open-for-write whose resolved path is inside the
-        workspace. That fails the offending metric loudly (scored 0 for that
-        episode) rather than silently corrupting the pin — the honest
-        failure, since a metric that needs to write has no business doing so
-        in the attested input directory. Absolute paths under the cache root
-        (the legitimate writes) pass through untouched.
-
-        Applied to the live env object, not the module, so the redirect
-        cannot leak into another DesktopEnv in the same process.
-        """
-
-        workspace = os.path.realpath(os.getcwd())
-        original_open = open
-
-        def _guarded_open(file: Any, mode: str = "r", *args: Any, **kwargs: Any) -> Any:
-            # ``file`` may be an fd (int) rather than a path; only path-like
-            # opens can land in the workspace, so guard those and let fds
-            # through untouched.
-            if not isinstance(file, int) and any(f in mode for f in ("w", "a", "x", "+")):
-                target = os.path.realpath(os.fspath(file))
-                if target == workspace or target.startswith(workspace + os.sep):
-                    raise UpstreamAllocationRefused(
-                        f"upstream tried to write {os.fspath(file)!r} inside the "
-                        "digest-pinned workspace (the worker's cwd); that write "
-                        "would break the rescue digest re-check. Refused."
-                    )
-            return original_open(file, mode, *args, **kwargs)
-
-        env.open = _guarded_open  # type: ignore[attr-defined]
-        # Expose the workspace path so tests can assert the guard boundary
-        # without re-deriving it.
-        env._lop_workspace_root = workspace  # type: ignore[attr-defined]
 
     # ------------------------------------------------------------------
     # episode I/O
