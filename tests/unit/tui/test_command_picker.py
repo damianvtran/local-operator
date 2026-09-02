@@ -840,7 +840,7 @@ async def test_click_on_the_overflow_row_does_nothing() -> None:
         # `settings` and its `config` alias join these two prefixes; both are
         # ranked ahead of their neighbours because a prefix match on a longer
         # word still beats one that starts later in the name.
-        ("s", ["settings", "search", "skills"]),
+        ("s", ["settings", "search", "stop", "skills"]),
         # Every one of these is a flat 900 prefix match (verified, not assumed:
         # `score_command_text_match("/c", …)` returns 900 for all six), so
         # `match_commands` sorts them on `(-score, registry_index)` and the

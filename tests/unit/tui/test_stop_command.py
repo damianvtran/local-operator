@@ -76,10 +76,11 @@ async def test_bare_stop_ends_the_session_and_keeps_the_transcript() -> None:
         receipt = [n for n in _notices(app) if n.startswith("stopped")]
         assert receipt, _notices(app)
         assert "/resume sess reopens it" in receipt[0]
-        # The next prompt reports the ended session rather than starting one.
+        # The next prompt names the way back rather than "still starting".
         app._submit_prompt("again?")
         await pilot.pause()
         assert session.prompts == []
+        assert _notices(app)[-1] == "this session was stopped — /resume sess reopens it"
 
 
 @pytest.mark.asyncio

@@ -1876,6 +1876,13 @@ class OperatorApp(App[None]):
         #: `_on_boot_failed`, cleared the moment another session transition
         #: starts, so a `/login` or `/resume` re-opens the arriving window.
         self._boot_failed = False
+        #: The id of a session bare ``/stop`` ended in-process, or "" when no
+        #: session was stopped. A THIRD ``_session is None`` state beside
+        #: "still starting" and "failed": the user ended it on purpose, so
+        #: the prompt path must name the way back (``/resume <id>``) rather
+        #: than tell them to wait for a session that is never arriving.
+        #: Cleared the moment another session transition starts.
+        self._stopped_session_id = ""
         #: True between a first-run "no hosting configured" boot failure and the
         #: `/login` that resolves it. While set, a successful login reloads the
         #: session (there is none yet) rather than only re-polling the splash.
@@ -5216,8 +5223,9 @@ class OperatorApp(App[None]):
         self._session_transition_pending = True
         # A new session is arriving, so a previous boot failure no longer
         # describes the app's state: the `/team` reserve must be allowed to
-        # promise rows again (U7-1).
+        # promise rows again (U7-1). Same for a /stop: the reopen is happening.
         self._boot_failed = False
+        self._stopped_session_id = ""
         self.run_worker(
             self._finish_session_transition(operation),
             thread=False,
@@ -5750,6 +5758,13 @@ class OperatorApp(App[None]):
         """
         failed: NoticeKind = "error"
         starting: NoticeKind = "warning"
+        if self._stopped_session_id:
+            # /stop ended it on purpose: nothing is arriving, and the answer
+            # is the reopen command the receipt already named.
+            return (
+                f"this session was stopped — /resume {self._stopped_session_id} reopens it",
+                starting,
+            )
         if self._boot_failed:
             return ("session failed to start — /login to reconfigure or restart lop", failed)
         return ("session is still starting…", starting)
@@ -10607,7 +10622,12 @@ class OperatorApp(App[None]):
         # nothing was collapsed, so every other caller is unchanged.
         image_blocks = self._append_image_blocks(images, marker_text=named)
         if self._session is None:
-            self._append_block(NoticeBlock("session is still starting…", "warning"))
+            # Through the helper: after a bare /stop the honest answer is the
+            # reopen command, not "still starting" (measured: the first
+            # prompt after /stop said exactly that, contradicting the receipt
+            # one row above it).
+            body, kind = self._no_session_notice()
+            self._append_block(NoticeBlock(body, kind))
             return
         session = self._session
         assert self._status is not None
@@ -13088,6 +13108,7 @@ class OperatorApp(App[None]):
         except Exception:  # noqa: BLE001 — a stop that faults is still a stop
             logger.debug("stop-path dispose failed", exc_info=True)
         self._session = None
+        self._stopped_session_id = resumable_id
         self._approval = None
         self._refresh_working_activity()
         # The receipt names what was stopped and the way back, in the stop

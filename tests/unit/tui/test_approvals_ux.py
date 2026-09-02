@@ -531,6 +531,9 @@ def test_the_registry_states_which_commands_offer_values() -> None:
         # OPTIONAL like `/effort`: bare `/credential` lists the names in
         # memory; the space opens a KEY argument, then a masked paste.
         "credential": ArgumentMode.OPTIONAL,
+        # OPTIONAL like `/approvals`: bare `/stop` stops THIS session; the
+        # list offers the other sessions and `all`.
+        "stop": ArgumentMode.OPTIONAL,
         # OPTIONAL like `/mcp`: bare `/team` lists the teams, and the space
         # opens the team-name argument list with roster details.
         "team": ArgumentMode.OPTIONAL,
