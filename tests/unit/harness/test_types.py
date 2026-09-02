@@ -112,3 +112,63 @@ def test_an_out_of_range_recommendation_is_still_refused():
     with pytest.raises(ValidationError) as excinfo:
         _ask(["a", "b"], 5)
     assert "recommended must index options (0..1)" in str(excinfo.value)
+
+
+def test_a_negative_recommendation_is_refused_rather_than_indexing_from_the_end():
+    """``-1`` is a valid Python index and would silently promote the LAST
+    option — endorsing something the model did not choose, which is the exact
+    failure the bounds check exists to prevent. The message states the usable
+    range so the model can correct it."""
+    with pytest.raises(ValidationError) as excinfo:
+        _ask(["a", "b", "c"], -1)
+    assert "recommended must index options (0..2)" in str(excinfo.value)
+
+
+def test_a_refused_recommendation_never_reorders_the_options():
+    """The refusal path must leave the list alone: a question that came back
+    both rejected AND scrambled would hand the model a correction to make
+    against options it no longer recognises."""
+    options = [AskOption(label=label) for label in ("a", "b", "c")]
+    with pytest.raises(ValidationError):
+        AskQuestion(id="rollout", question="Which rollout?", options=options, recommended=7)
+    assert [option.label for option in options] == ["a", "b", "c"]
+
+
+def test_the_hoist_survives_a_json_round_trip():
+    """A question is re-parsed from JSON on transcript replay and on the way to
+    a subagent, not only from a dumped dict — the order the user was shown has
+    to be the order that comes back."""
+    once = _ask(["a", "b", "c", "d"], 2)
+    replayed = AskQuestion.model_validate_json(once.model_dump_json())
+    assert [option.label for option in replayed.options] == ["c", "a", "b", "d"]
+    assert replayed.recommended == 0
+
+
+def test_hoisting_moves_the_whole_option_not_just_its_label():
+    """Each option carries the consequence line the user decides on, so a hoist
+    that moved labels alone would pair the promoted option with somebody else's
+    description."""
+    question = AskQuestion(
+        id="rollout",
+        question="Which rollout?",
+        options=[
+            AskOption(label="a", description="cheapest"),
+            AskOption(label="b", description="keeps history"),
+            AskOption(label="c", description="safest"),
+        ],
+        recommended=2,
+    )
+    assert (question.options[0].label, question.options[0].description) == ("c", "safest")
+    assert [option.description for option in question.options] == [
+        "safest",
+        "cheapest",
+        "keeps history",
+    ]
+
+
+def test_a_secret_question_still_refuses_a_recommendation_after_the_hoist_landed():
+    """The secret branch returns before the hoist, so a credential paste can
+    never be reordered or preselected into endorsing a value nobody can see."""
+    with pytest.raises(ValidationError) as excinfo:
+        AskQuestion(id="GITHUB_TOKEN", question="Paste it.", options=[], secret=True, recommended=0)
+    assert "no options to recommend" in str(excinfo.value)

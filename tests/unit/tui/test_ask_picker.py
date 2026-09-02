@@ -657,6 +657,154 @@ async def test_a_mid_list_recommendation_is_the_row_the_card_opens_on() -> None:
 
 
 @pytest.mark.asyncio
+async def test_the_digit_gutter_agrees_with_the_hoisted_order() -> None:
+    """Key ``1`` takes the RECOMMENDED option after the hoist, and every other
+    digit lands on the row printed beside it.
+
+    The numbers are painted from the row's position, and the recommendation now
+    moves; a gutter that still numbered the authored order would offer a
+    shortcut that answers a different option than the one the user is reading.
+    Driven as keypresses rather than by reading the labels, because it is the
+    KEYMAP against the drawn list that has to agree.
+    """
+    app = _AskHost(
+        [
+            _question(
+                labels=("Drop them", "Backfill", "Dual-write", "Add a filter"),
+                descriptions=("cheapest", "keeps history", "safest", "hides it"),
+                recommended=2,
+            )
+        ]
+    )
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+        expected = ["Dual-write", "Drop them", "Backfill", "Add a filter"]
+        for ordinal, label in enumerate(expected, start=1):
+            await pilot.press(str(ordinal))
+            await pilot.pause()
+            assert screen.selected_index == ordinal - 1
+            assert screen._row_label(screen.selected_index) == label
+        # Key 1 is the recommendation, and it is what Enter answers from there.
+        await pilot.press("1")
+        await pilot.press("enter")
+        await pilot.pause()
+    assert app.answered == [{"stale": ["Dual-write"]}]
+
+
+@pytest.mark.asyncio
+async def test_the_free_text_row_stays_last_behind_a_hoisted_recommendation() -> None:
+    """The hoist rotates the OPTIONS; the free-text row is the surface's own and
+    must still be the final row, or the one row that answers what nobody
+    enumerated moves under the user between questions."""
+    app = _AskHost(
+        [
+            _question(
+                labels=("Drop them", "Backfill", "Dual-write"),
+                descriptions=("cheapest", "keeps history", "safest"),
+                recommended=2,
+            )
+        ]
+    )
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+        assert screen.other_row == screen.row_count - 1
+        assert screen._row_label(screen.other_row) == OTHER_LABEL
+        lines = screen.render_lines_for_test()
+        rendered = "\n".join(lines)
+        assert rendered.index("Dual-write") < rendered.index(OTHER_LABEL)
+        # And it still answers with typed text rather than an option label.
+        await pilot.press("0")
+        for char in "neither":
+            await pilot.press(char)
+        await pilot.press("enter")
+        await pilot.pause()
+    assert app.answered == [{"stale": ["neither"]}]
+
+
+@pytest.mark.asyncio
+async def test_a_multi_select_recommendation_is_first_but_nothing_is_preticked() -> None:
+    """A recommendation on a multi-select promotes and parks the CURSOR, and
+    must not tick the box for the user: the answer is theirs to build, and a
+    pre-ticked row would be an answer nobody chose riding along with the ones
+    they did.
+    """
+    app = _AskHost(
+        [
+            _question(
+                labels=("Drop them", "Backfill", "Dual-write", "Add a filter"),
+                descriptions=("cheapest", "keeps history", "safest", "hides it"),
+                multi=True,
+                recommended=2,
+            )
+        ]
+    )
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+        assert screen.selected_index == 0
+        assert screen.checked_indexes == []
+        # Tick the recommendation the cursor already sits on, plus one below it.
+        await pilot.press("space")
+        await pilot.press("down")
+        await pilot.press("space")
+        assert screen.checked_indexes == [0, 1]
+        await pilot.press("enter")
+        await pilot.pause()
+    assert app.answered == [{"stale": ["Dual-write", "Drop them"]}]
+
+
+@pytest.mark.asyncio
+async def test_a_recommendation_authored_last_is_drawn_first() -> None:
+    """The furthest a rotation has to travel, and the case a swap would make
+    indistinguishable from a rotation on a two-option question."""
+    app = _AskHost(
+        [
+            _question(
+                labels=("A", "B", "C", "D", "E"),
+                descriptions=("", "", "", "", ""),
+                recommended=4,
+            )
+        ]
+    )
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+        assert screen.visible_rows[:5] == ["E", "A", "B", "C", "D"]
+        await pilot.press("enter")
+        await pilot.pause()
+    assert app.answered == [{"stale": ["E"]}]
+
+
+@pytest.mark.asyncio
+async def test_duplicate_labels_promote_the_recommended_one_not_its_twin() -> None:
+    """Labels are what the answer is reported as, so two identical ones are
+    indistinguishable in the RESULT — but the card must still hoist the row the
+    model pointed at rather than the first one that happens to match."""
+    app = _AskHost(
+        [
+            _question(
+                labels=("Same", "Same", "Different"),
+                descriptions=("first", "second", "third"),
+                recommended=1,
+            )
+        ]
+    )
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+        assert screen.visible_rows[:3] == ["Same", "Same", "Different"]
+        # The DESCRIPTION is what tells the two apart: the promoted row is the
+        # second authored one, so its consequence line rides at the top.
+        assert screen._row_description(0) == "second"
+        assert screen._row_description(1) == "first"
+        await pilot.press("enter")
+        await pilot.pause()
+    assert app.answered == [{"stale": ["Same"]}]
+
+
+@pytest.mark.asyncio
 async def test_the_position_is_shown_only_when_there_is_more_than_one_question() -> None:
     app = _AskHost([_question()])
     async with app.run_test(size=(100, 30)) as pilot:
