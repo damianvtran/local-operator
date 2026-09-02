@@ -88,6 +88,7 @@ from local_operator.harness.types import AskOption, AskQuestion
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets.ask_picker import (
     DEFAULT_DESC_CAP,
+    MAX_QUESTION_ROWS,
     MIN_TRANSCRIPT_ROWS,
     OTHER_LABEL,
     PROMPT_HEIGHT_SHARE,
@@ -3966,85 +3967,320 @@ async def test_the_reveal_never_shows_less_than_the_default_view() -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "GAP D7 (pre-existing, architect ruling pending): at canary 100x30 the"
-        " 592-char QUESTION wraps to 7 lines and leaves body_line_budget=2, so"
-        " option 1's description is cut (reaches 65/434) and ^e is REFUSED — a"
-        " 2-line viewport can show nothing more via the cap-lift, and offering the"
-        " key would be a dead-key lie. Identical pre/post the thumb-column fix"
-        " (7538f42b); this is a reveal-reachability-at-extreme-tight-sizes question"
-        " (should the question yield rows to the reveal, or is refusing ^e correct"
-        " when the card is simply too short?), NOT a windowing regression. Routed"
-        " to the architect. Do NOT green by relaxing."
-    ),
-)
 @pytest.mark.asyncio
-async def test_a_cut_description_is_never_unreachable_by_every_gesture() -> None:
-    """The original truncation report, as a property: text the card withholds
-    must be reachable by SOME gesture.
+async def test_a_long_question_is_bounded_and_marks_its_cut() -> None:
+    """D7's fix, pinned at its source: the QUESTION is bounded to
+    ``MAX_QUESTION_ROWS`` so it cannot starve the option list, and the cut is
+    marked with the card's usual ``…`` idiom (``cb5d8e2b``; OMP's
+    ``MAX_HEADER_ROWS``).
 
-    This is what `ctrl+e` was built for. `test_ctrl_e_is_live_at_the_sizes_the_
-    user_reported` pins it at two sizes with one fixture; this asks the general
-    question, over both fixtures in this file and a grid of sizes: is there any
-    frame where a description is cut AND the card refuses the only key that
-    could uncover it? If so, the user is back where the report started —
-    looking at a paragraph that stops, with nothing to press.
+    Our port had declared the question "never truncated", which is what let a
+    592-character question wrap to 7 lines and leave a 2-line option viewport
+    (D7). The fix caps it. This asserts the property directly on the real app: a
+    question far longer than four lines' worth wraps to EXACTLY
+    ``MAX_QUESTION_ROWS`` lines, the last ending ``…``, at several widths (the
+    wrap count is width-dependent, so the cap must hold across them).
 
-    Filed as **D7** against the BLOCKER 1 fix, and STILL OPEN under line-granular
-    windowing (qa-linegran certification of 7538f42b). Its manifestation narrowed
-    to a single reachable case: **canary 100x30**. There the 592-character
-    QUESTION wraps to 7 lines, leaving ``body_line_budget = 2``; option 1's
-    description needs more, so it is cut (reaches 65/434 characters), and
-    ``_reveal_is_useful`` correctly refuses ``^e`` because the 2-line viewport
-    cannot draw a third line of the row even with the cap lifted (§4.3's
-    label-anchor degradation). So the cut text is unreachable by every gesture —
-    the reveal cannot help, and the question has already taken the rows the prose
-    would need.
-
-    This is NOT the thumb-column truncation defect (fixed at 7538f42b): it is
-    identical before and after that fix, because it is about the QUESTION
-    out-competing the description for a tiny budget, not about the scrollbar. The
-    architect is to rule whether refusing ``^e`` is correct when the card is
-    simply too short, or whether the question should yield rows to the reveal at
-    extreme sizes. Kept RED (xfail-strict) rather than relaxed, per the D5
-    "silent truncation pinned as correct" discipline: greening it would hide the
-    exact class of bug the whole feature exists to prevent.
-
-    Both fixtures are swept because they have opposite shapes: the canary carries
-    a 592-character QUESTION that steals the budget the prose would need, the
-    repro question is one line and does not bite.
+    Proven able to go red by
+    :func:`test_an_unbounded_question_can_starve_the_options` (monkeypatch).
     """
-    unreachable: list[str] = []
-
-    for question, descriptions, name in (
-        (_long_description_question(), _LONG_DESCRIPTIONS, "canary"),
-        (_repro_question(), _REPRO_DESCRIPTIONS, "repro"),
-    ):
-        for size in ((190, 50), (150, 40), (130, 30), (100, 30), (100, 44)):
-            app, card = await _real_app_card(size, [question])
-            async with app.run_test(size=size) as pilot:
-                await _show(app, pilot, card)
-                plan = card._layout(reveal=False)
-                selected = card.state.selected
-                if not plan.description_rows:
-                    # No description column at all: a different frame, covered
-                    # by the label-only guards. Nothing is being withheld
-                    # SILENTLY here — the card is visibly not showing prose.
-                    continue
-                cut = len(card._reveal_wrap(selected, plan.width)) > plan.description_rows.get(
-                    selected, 0
-                )
-                if cut and card._reveal_hint() is None:
-                    full = " ".join(descriptions[0].split())
-                    reach = _prefix_reach(_fingerprint(card), full)
-                    unreachable.append(f"{name} {size}: {reach}/{len(full)} chars, no ^e offered")
-
-    assert not unreachable, (
-        "a cut description is unreachable by every gesture the card offers",
-        unreachable,
+    long_question = AskQuestion(
+        id="long_q",
+        question=" ".join(f"word{i}" for i in range(300)),
+        options=[
+            AskOption(label="A", description="first consequence"),
+            AskOption(label="B", description="second consequence"),
+        ],
     )
+    for size in ((100, 40), (80, 40), (150, 40), (130, 40)):
+        app, card = await _real_app_card(size, [long_question])
+        async with app.run_test(size=size) as pilot:
+            await _show(app, pilot, card)
+            width = card._layout().width
+            lines = card._question_lines(width)
+            # Bounded to the cap — never the 16-line wall an unbounded question
+            # would draw at these widths.
+            assert len(lines) == MAX_QUESTION_ROWS, (size, len(lines), lines)
+            # And the cut is MARKED, so the reader can tell the question
+            # continues — the same discipline every other abbreviation follows.
+            assert lines[-1].rstrip().endswith("…"), (size, lines[-1])
+            # The drawn plan carries the same bounded question (not just the
+            # helper): the renderer reads ``layout.question``.
+            assert len(card._layout().question) <= MAX_QUESTION_ROWS, (
+                size,
+                card._layout().question,
+            )
+
+
+@pytest.mark.asyncio
+async def test_an_unbounded_question_can_starve_the_options(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The red half of the question-cap guard: lift the bound and the question
+    grows past ``MAX_QUESTION_ROWS`` again, which is the D7 starvation the cap
+    prevents.
+
+    Patched as the module constant (the coder owns the widget file; the editable
+    install maps ``local_operator`` to the shared tree, so monkeypatch is the
+    reliable isolation). With the cap raised, a long question wraps to its full
+    height — the uncapped state that starved the option list — proving the
+    guard above is load-bearing rather than a restatement of current behaviour.
+    """
+    import local_operator.tui.widgets.ask_picker as ask_picker_module
+
+    monkeypatch.setattr(ask_picker_module, "MAX_QUESTION_ROWS", 99)
+
+    long_question = AskQuestion(
+        id="long_q",
+        question=" ".join(f"word{i}" for i in range(300)),
+        options=[
+            AskOption(label="A", description="first consequence"),
+            AskOption(label="B", description="second consequence"),
+        ],
+    )
+    size = (100, 60)
+    app, card = await _real_app_card(size, [long_question])
+    async with app.run_test(size=size) as pilot:
+        await _show(app, pilot, card)
+        lines = card._question_lines(card._layout().width)
+        # Uncapped: the question is far taller than the bound, so it would take
+        # the rows the option list needs — the D7 starvation.
+        assert len(lines) > MAX_QUESTION_ROWS, (len(lines), "the cap should have been lifted")
+
+
+@pytest.mark.asyncio
+async def test_a_cut_description_is_reachable_by_the_reveal_where_the_body_can_hold_it() -> None:
+    """D7, RULED (FIX) and re-pinned LIVE. The original truncation report as a
+    property: where the card is tall enough for the reveal to draw the whole
+    description, ``ctrl+e`` must reach it.
+
+    D7 was that a 592-character QUESTION starved the option list — at canary
+    100x30 the question wrapped to 7 lines, leaving ``body_line_budget = 2``, so
+    option 1's description was cut and ``^e`` was REFUSED. The architect ruled a
+    FIX in the header, not the reveal (our port had declared the question "never
+    truncated" where OMP caps its header at ``MAX_HEADER_ROWS``): ``cb5d8e2b``
+    added ``MAX_QUESTION_ROWS`` (4) and bounds ``_question_lines`` to it, marking
+    the cut. Canary 100x30 body budget went 2 -> 5 and ``^e`` is now offered.
+
+    This pins the LIVE claim at the sizes where the fix genuinely delivers: where
+    the body can hold the whole revealed row (``body_line_budget >= wrap + 1``),
+    the reveal reaches the FULL description — measured thumb-stripped so a
+    windowed frame's scrollbar glyph is not mistaken for lost text. That
+    condition first holds at **100x36** (budget 7 against a 6-line wrap); it is
+    DERIVED per size rather than hardcoded, so a budget shift moves the coverage
+    with it.
+
+    Two OTHER regimes are deliberately NOT asserted here and are covered
+    elsewhere, because conflating them is how a partial reveal gets pinned as
+    correct:
+
+    - **100x30-34 / 120x30-34**: ``^e`` is offered but the viewport is shorter
+      than the lifted row, so the reveal truncates — and qa-linegran found it
+      does so WITHOUT a ``…`` marker (**D8**, the silent-truncation defect). That
+      band is pinned RED by
+      :func:`test_a_revealed_row_taller_than_the_viewport_marks_its_cut`.
+    - **<= ~28 rows** (100x26, budget 2): the body is physically too short for
+      any reveal even with the question capped; ``^e`` is refused and the escape
+      hatch is the phone —
+      :func:`test_a_tui_unreachable_description_still_reaches_the_phone`.
+    """
+    full = " ".join(_LONG_DESCRIPTIONS[0].split())
+    proven = 0
+
+    # Sizes tall enough that the whole revealed row fits the viewport. Asserted
+    # per size from the measured budget, not assumed, so the claim tracks the
+    # arithmetic.
+    for size in ((100, 36), (100, 40), (100, 44), (150, 40), (130, 40)):
+        app, card = await _real_app_card(size, [_long_description_question()])
+        async with app.run_test(size=size) as pilot:
+            await _show(app, pilot, card)
+            width = card._layout().width
+            wrap = len(card._reveal_wrap(card.state.selected, width))
+            budget = card._layout().body_line_budget
+            # The precondition for a COMPLETE reveal: the whole row fits.
+            if budget < wrap + 1:
+                continue
+            assert card._reveal_hint() == ("^e", "more"), (size, "reveal not offered")
+            await pilot.press("ctrl+e")
+            await _until(pilot, lambda: card.state.revealed)
+            # The full description is present — read thumb-stripped so the
+            # scrollbar glyph never breaks the prose stream.
+            reached = _prefix_reach(card.render_lines_for_test(), full)
+            assert full in _collapsed_text(card.render_lines_for_test()), (
+                size,
+                f"the reveal reached only {reached}/{len(full)} chars where the body"
+                " was tall enough to hold the whole row",
+            )
+            proven += 1
+
+    assert proven >= 3, ("no size exercised a complete reveal — re-derive this guard", proven)
+
+
+@pytest.mark.asyncio
+async def test_a_revealed_row_taller_than_the_viewport_marks_its_cut() -> None:
+    """D8: a reveal that cannot show the whole description must MARK the cut, the
+    same D5 discipline the default view already follows — mark the cut, never
+    drop text in silence.
+
+    FLIPPED FROM xfail(strict) TO A LIVE GUARD at `24e5841e`. qa-linegran filed
+    this as a MAJOR D5-class defect: at the sizes the D7 question-cap made ``^e``
+    LIVE (canary 100x30/32/34, 120x30/32/34), the viewport was still shorter than
+    the lifted row, so ``ctrl+e`` drew a prefix and CLIPPED the rest with NO
+    marker — the DEFAULT view marked its 2-line cut with ``…`` but the revealed
+    4-line clip was silent, making honesty WORSE. Root cause: the ``…`` was
+    stamped on the row's last GRANTED line (cap-lifted), which the viewport clips
+    off-screen, leaving the last VISIBLE line unmarked. The fix (``_mark_clipped``)
+    stamps the marker onto the last VISIBLE line when the next rendered line is
+    the same row (its wrap genuinely continues off-screen, the §2.2/§4.3
+    label-anchor case).
+
+    The claim, on drawn ink (thumb glyph stripped): where the reveal is offered
+    but the row is taller than the viewport, the reveal is either COMPLETE or its
+    last visible line is ``…``-marked — never a silent clip.
+
+    Distinct from :func:`test_the_reveal_says_so_when_it_is_still_holding_text_back`,
+    which covers the cap-bound cut at NON-windowing sizes (the wrap exceeds
+    ``REVEAL_MAX_ROWS``); this covers the VIEWPORT-bound cut (the wrap fits the
+    cap but not the body), the regime the D7 fix exposed.
+
+    Proven able to go red by :func:`test_a_silent_viewport_clip_is_caught`.
+    """
+    full = " ".join(_LONG_DESCRIPTIONS[0].split())
+    exercised = 0
+
+    for size in ((100, 30), (100, 32), (100, 34), (120, 30), (120, 32), (120, 34)):
+        app, card = await _real_app_card(size, [_long_description_question()])
+        async with app.run_test(size=size) as pilot:
+            await _show(app, pilot, card)
+            width = card._layout().width
+            wrap = len(card._reveal_wrap(card.state.selected, width))
+            budget = card._layout().body_line_budget
+            # The regime under test: reveal offered, but the row is taller than
+            # the viewport (so the reveal must clip and therefore mark).
+            if card._reveal_hint() != ("^e", "more") or budget >= wrap + 1:
+                continue
+            await pilot.press("ctrl+e")
+            await _until(pilot, lambda: card.state.revealed)
+
+            reached = _prefix_reach(card.render_lines_for_test(), full)
+            complete = full in _collapsed_text(card.render_lines_for_test())
+            sel_lines = _selected_row_lines(card)
+            marked = any(_strip_scrollbar_cell(line).rstrip().endswith("…") for line in sel_lines)
+            # THE CLAIM: incomplete implies marked. A clipped reveal says so.
+            assert complete or marked, (
+                size,
+                f"a revealed row was clipped ({reached}/{len(full)}) without marking the cut (D8)",
+                sel_lines,
+            )
+            exercised += 1
+
+    # The sweep must actually reach the viewport-clip regime, or it is vacuous.
+    assert exercised >= 4, ("no size exercised a viewport-clipped reveal", exercised)
+
+
+@pytest.mark.asyncio
+async def test_a_silent_viewport_clip_is_caught(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The red half of the D8 guard, per AGENTS.md's "prove the test can still
+    fail".
+
+    Reintroduces the defect at runtime by making ``_mark_clipped`` a no-op — the
+    pre-fix behaviour, where a revealed row clipped by the viewport kept the
+    unmarked last visible line. Patched on the class (the coder owns
+    ``ask_picker.py``; the editable install maps ``local_operator`` to the shared
+    tree, so monkeypatch is the reliable isolation). At canary 100x30 the reveal
+    then holds text back (reaches 328/434) and marks nothing — the exact silent
+    clip the live guard forbids.
+    """
+    monkeypatch.setattr(AskPickerScreen, "_mark_clipped", lambda self, row, width, index: row)
+
+    full = " ".join(_LONG_DESCRIPTIONS[0].split())
+    size = (100, 30)
+    app, card = await _real_app_card(size, [_long_description_question()])
+    async with app.run_test(size=size) as pilot:
+        await _show(app, pilot, card)
+        assert card._reveal_hint() == ("^e", "more"), (size, "reveal not offered")
+        await pilot.press("ctrl+e")
+        await _until(pilot, lambda: card.state.revealed)
+
+        complete = full in _collapsed_text(card.render_lines_for_test())
+        sel_lines = _selected_row_lines(card)
+        marked = any(_strip_scrollbar_cell(line).rstrip().endswith("…") for line in sel_lines)
+        # The live guard's assertion, INVERTED: with the marker disabled the clip
+        # is real and silent, so the guard would have caught it.
+        assert not complete and not marked, (
+            "the clip was complete or marked even with _mark_clipped disabled;"
+            " the D8 guard would not have caught the regression",
+            _prefix_reach(card.render_lines_for_test(), full),
+            sel_lines,
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_tui_unreachable_description_still_reaches_the_phone() -> None:
+    """The DOCUMENTED-LIMIT tail of D7, with a tested escape hatch (architect
+    ruling §6 residual; NOT an xfail).
+
+    On a terminal so short that even the question-capped body cannot hold a
+    third line of the selected row (``body_line_budget == 2`` at canary 100x26),
+    the reveal is correctly refused — a 2-line viewport can show nothing more via
+    the cap-lift, and offering ``^e`` would be a dead-key lie. So the full
+    description is genuinely UNREACHABLE in the TUI at that size, by physics, not
+    by a bug.
+
+    That tail is acceptable ONLY because it has an escape hatch, and this pins
+    that the escape hatch is real rather than assumed: the mobile relay ships the
+    option's description UNTRUNCATED to the phone. The wire cap is
+    ``FRAME_CAP_PENDING_DETAIL_CHARS`` = 2000 characters, far above the 434-char
+    canary description, so the phone user reads the whole consequence the
+    terminal could not fit. Both halves are asserted together — the TUI cut and
+    the phone's completeness — so a regression that dropped either (a TUI that
+    silently completed, or a wire that started truncating) fails here.
+    """
+    from local_operator.mobile.tui_handle import TuiSessionHandle
+    from local_operator.tui.app import OperatorApp
+    from tests.unit.mobile.test_tui_ask import _mount_ask, _wait_for_handle
+    from tests.unit.tui.test_app_pilot import FakeSession, _factory
+
+    full = " ".join(_LONG_DESCRIPTIONS[0].split())
+    size = (100, 26)
+
+    # (1) The TUI half: the description is cut and the reveal is refused, so the
+    # tail is unreachable in the terminal at this size.
+    app, card = await _real_app_card(size, [_long_description_question()])
+    async with app.run_test(size=size) as pilot:
+        await _show(app, pilot, card)
+        plan = card._layout(reveal=False)
+        selected = card.state.selected
+        assert len(card._reveal_wrap(selected, plan.width)) > plan.description_rows.get(
+            selected, 0
+        ), (size, "the description should be cut at this tight size")
+        assert card._reveal_hint() is None, (size, "^e should be refused; the body is too short")
+        reached = _prefix_reach(card.render_lines_for_test(), full)
+        assert reached < len(full), (size, reached, "expected the TUI to withhold text here")
+
+    # (2) The escape hatch: the phone gets the WHOLE description, untruncated.
+    # Driven through the real mobile handle's projection, the JSON the phone
+    # renders from, so this is the actual wire the daemon ships.
+    phone_app = OperatorApp(lambda: _factory(FakeSession()))
+    async with phone_app.run_test(size=size) as pilot:
+        await pilot.pause()
+        handle = await _wait_for_handle(phone_app, pilot)
+        assert isinstance(handle, TuiSessionHandle)
+        asked = await _mount_ask(phone_app, pilot, _long_description_question())
+        try:
+            pending = handle._fold.projection.pending
+            assert pending is not None, "no pending ask projected to the phone"
+            phone_description = " ".join(pending.options[selected].description.split())
+            assert phone_description == full, (
+                "the phone did not receive the full description",
+                len(phone_description),
+                len(full),
+            )
+        finally:
+            phone_app._settle_ask_picker()
+            for _ in range(4):
+                await pilot.pause()
+            await asyncio.wait_for(asked, 2)
 
 
 @pytest.mark.asyncio
@@ -4532,6 +4768,18 @@ async def test_the_cap_leaves_the_approval_gate_byte_identical() -> None:
                 layout.body_line_budget,
             )
             assert not layout.show_position, (size, "the approval gate is windowing")
+            # The question cap (MAX_QUESTION_ROWS, cb5d8e2b) is a NO-OP on the
+            # gate: its question ("Allow bash? …") is one line, well under the
+            # bound, so the cap neither truncates it nor marks it — which is why
+            # the golden above is byte-identical. Asserted so a future change that
+            # started wrapping the gate's question past the bound (and thus drew a
+            # `…` on an authorisation prompt) fails here with a readable cause.
+            assert len(layout.question) == 1, (
+                size,
+                "the gate question should be one line",
+                layout.question,
+            )
+            assert not layout.question[0].rstrip().endswith("…"), (size, layout.question)
             # The dock the frame was measured in, pinned with it. Without this
             # the golden could go on agreeing with a card measured in the wrong
             # budget — which is the exact way this test passed while wrong.
