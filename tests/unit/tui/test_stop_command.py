@@ -649,8 +649,14 @@ async def test_arm_listing_at_80_columns_never_wraps_a_row(monkeypatch: pytest.M
         # exactly that reason (round-3 D3-3, demonstrated by mutation). What
         # matters to the user is that no row wraps, which is precisely
         # "the block is as tall as it has rows".
+        from rich.text import Text
+
         authored = block._text.split("\n")
-        painted = block._build().plain.split("\n")
+        built = block._build()
+        # `_build` is typed as returning any renderable; this block builds a
+        # Text, and the row count is what the assertions below are about.
+        assert isinstance(built, Text)
+        painted = built.plain.split("\n")
         assert len(painted) == len(authored), (len(painted), len(authored))
         assert block.size.height == len(authored), (block.size.height, len(authored))
         assert authored[-1].startswith("repeat /stop all")
