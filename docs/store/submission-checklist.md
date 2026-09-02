@@ -3,32 +3,32 @@
 Run this against the final release candidate. Do not submit from a development
 build or from copy that no longer matches the manifest.
 
-## Live session status (2026-08-25) — where we actually are
+## Live session status (2026-09-02) — where we actually are
 
-A first live dogfood run drove a real Chrome (piloted by our own extension) to
-the dashboard. Confirmed on the ground:
+The extension is **published**. The first-publication gates described in the
+previous revision of this section (business verification, trader declaration)
+are cleared; do not re-litigate them.
 
-- **Signed in** as `damian@gominerva.com`; the Chrome Web Store Developer
-  Dashboard opens, so a developer account exists under that address.
-- **Blocking gate:** the dashboard shows an "Action required" **trader /
-  non-trader declaration** (EEA consumer-protection law) on Settings, and full
-  **business verification** for Radient, Inc. is required before publishing.
-  That verification is a multi-day, account-owner/legal task — it is THE gate.
-- **Packed store artifact is built and ready:**
-  `extension/local-operator-extension.zip` (v0.1.0, 31 KB, **no source maps** —
-  `pnpm --dir extension build:zip` regenerates it). Manifest verified store-clean
-  (MV3, name "Local Operator", the 7 justified permissions, `<all_urls>`).
-- **Known platform limit found live:** Chrome forbids the debugger API on the
+- **v0.1.0 is live** on the Chrome Web Store at 100% deployment, item
+  `omibaecbjdhgbbcedbnnnmjpmopfheof`.
+- **v0.1.5 is submitted and `PENDING_REVIEW`** at 100% deployment, uploaded
+  manually because it adds the `tabGroups` permission, whose justification can
+  only be entered in the dashboard. See the release record in
+  `docs/store/release-record.md`.
+- **Automated publishing is verified end to end** and is the intended path for
+  every subsequent release — see "Automated updates after the first public
+  release" below. Both protected environments, the WIF provider, and the
+  Chrome Web Store API authorization were confirmed working on 2026-09-02.
+- **Known platform limit, still true:** Chrome forbids the debugger API on the
   Web Store domains ("The extensions gallery cannot be scripted"), so the
   extension cannot auto-fill the developer console — a human drives the console
-  pages. Documented in `guide://browser`.
+  pages. Documented in `guide://browser`. This is why a release that introduces
+  a new permission needs a human in the dashboard.
 
-**Pick-up point:** once Radient's business verification + trader declaration
-clear, finish the first-publication steps below for permanent item
-`omibaecbjdhgbbcedbnnnmjpmopfheof`, paste the copy from `listing.md`,
-`permissions.md`, `privacy-policy.md`, and the assets in `assets/`, then walk
-the rest of this checklist. Later package uploads use the protected GitHub
-workflows documented below; no long-lived Google credential is stored.
+**Pick-up point:** watch for the v0.1.5 review decision, then run the
+post-approval steps in section 11. Sections 0–9 describe *first* publication
+and are retained as the reference for listing copy and asset requirements;
+re-walk them only when the listing, permissions, or privacy policy change.
 
 ## 0. Resolve the launch assumptions
 
@@ -48,9 +48,18 @@ workflows documented below; no long-lived Google credential is stored.
       law fields, and supply any required business address/D-U-N-S details.
       This is a legal/account-owner decision, not defined by the product design.
 
-## 0.1.4 permission handoff
+## Permission handoff (`tabGroups`, added in 0.1.4)
 
-- [ ] **Damian must add the NEW `tabGroups` permission justification in the Chrome Web Store dashboard when uploading the next package.** Use the exact paste-ready rationale in `permissions.md`; the package will request a new permission and must not be submitted against the old seven-permission declaration.
+- [x] **Done for the 0.1.5 upload (2026-09-02).** The `tabGroups` justification
+      from `permissions.md` was entered in the dashboard and 0.1.5 was submitted
+      against the eight-permission declaration, not the original seven.
+
+**Standing rule for future releases:** a package that adds a permission cannot
+go out through the automated workflow alone. The Chrome Web Store API cannot set
+permission justifications, and Chrome blocks scripting the dashboard, so a human
+must paste the rationale from `permissions.md` before submitting. Diff the built
+`extension/dist/manifest.json` against the previously published version's
+permission list on every release to catch this; when they differ, upload by hand.
 
 ## 1. Developer account and publisher identity
 
@@ -265,6 +274,14 @@ and what control remains with the user.
 
 ### Automated updates after the first public release
 
+**Status (2026-09-02): configured and verified end to end.** Both protected
+environments, the workload identity provider, the service-account IAM binding,
+and the store's authorization of that service account were all confirmed
+working; the evidence is in `release-record.md`. The workflows have not yet run
+a real release — v0.1.5 went out by hand because it added a permission — so the
+first automated run will be the next version. It fails closed before uploading
+anything, so a surprise there is recoverable.
+
 The workflows use Chrome Web Store API v2 directly with `curl` and exchange a
 GitHub OIDC token for a short-lived service-account access token through
 `google-github-actions/auth@v3` (pinned by full commit SHA, like every action in
@@ -372,7 +389,7 @@ high-scrutiny. Do not promise a launch date until approval.
       the store, clearly marked as the advanced fallback.
 - [ ] Record the approved version, approval timestamp, item ID, listing URL,
       artifact SHA-256, source commit, and protocol version in the extension
-      release record.
+      release record, `docs/store/release-record.md`.
 - [ ] Establish the update runbook: build from a release commit, inspect zip,
       upload, reconcile newly requested permissions, refresh screenshots/copy
       when behavior changes, submit, monitor, and run the production smoke test.
