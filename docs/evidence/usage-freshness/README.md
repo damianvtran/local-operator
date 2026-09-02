@@ -10,6 +10,7 @@ differ only by the code under test.
 | `before-stuck-account.svg` | The same frame scrolled to the bottom: `kimi cred:8 · last known 2h ago` — the one account the header was reporting |
 | `after.svg` | This branch, same state: the title reads `Usage  1m ago` |
 | `after-stuck-account.svg` | The same, scrolled: the header is fresh and the stuck block still says `last known 2h ago` |
+| `*.png` | The same four frames rendered, so they are viewable inline |
 | `usage_shot.py` | Reproduces all four frames (run from the worktree root) |
 | `verify_refresh.py` | Drives the real `r` key against a controller with one permanently-stuck account, printing the header's `fetched_ms` after each press |
 
