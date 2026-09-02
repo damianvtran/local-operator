@@ -1991,12 +1991,21 @@ class AnthropicClient:
             # ``tool_choice="none"`` — ``Session.complete_aside`` (``/btw`` and
             # the ``/loop`` judge) and ``Session.advise_compaction`` — exist to
             # ride the working turn's cached prefix, and the turn sends
-            # ``{"type": "auto"}``. Measured live (``scripts/
-            # measure_aside_tool_choice_cache.py``): with ``none`` a ~35k-token
-            # aside read only the ~1k head from cache and wrote the other ~34k;
-            # with ``auto`` it read the whole conversation and wrote only its
-            # appended question. Across the fleet that difference was a quarter
-            # of all daily cache-write tokens.
+            # ``{"type": "auto"}``.
+            #
+            # This mapping is hygiene, not a measured saving. Measured live
+            # (``scripts/measure_aside_tool_choice_cache.py``, result in
+            # ``docs/evidence/compaction-advisor/aside-tool-choice-measurement.txt``):
+            # a ~37k-token aside sent with ``none`` read the turn's FULL prefix
+            # and wrote only its appended question, identical to ``auto`` — no
+            # cache break reproduced on either model tried. The fleet's
+            # head-only-hit signature that first pointed here was root-caused
+            # elsewhere: per-account cache isolation when the quota preflight
+            # moved a session between OAuth accounts under a reserve verdict
+            # (PR #537). ``auto`` is kept because it makes the aside body
+            # byte-identical to the turn's request, which is the only shape the
+            # invalidation rule is guaranteed not to bite, and nothing about an
+            # aside changes the tool surface the turn declared.
             #
             # The "reads the turn, calls nothing" contract those callers promise
             # is therefore NOT enforced on the wire for Anthropic. It is

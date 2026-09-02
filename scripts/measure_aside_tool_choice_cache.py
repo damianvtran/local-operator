@@ -4,32 +4,45 @@
 request shape rides the working turn's cached prefix — but it did so on a
 ~14k-token toy conversation whose tools+system HEAD was most of the prompt.
 Fleet analytics on real sessions (average context 184k) then showed a
-different picture: a quarter of all daily cache-WRITE tokens came from side
-requests with the signature ``cache_read ≈ head only, cache_write ≈ the whole
-message tail``. Anthropic's prompt-caching docs explain it ("What invalidates
-the cache"): ``tool_choice`` is rendered into the MESSAGES level of the
-tools -> system -> messages hierarchy, so a request that sends
-``{"type": "none"}`` against a prefix written with ``{"type": "auto"}`` keeps
-the head and re-writes every message block. The toy measurement could not see
-that because its tail was ~10% of the prompt.
+large share of daily cache-WRITE tokens on calls with the signature
+``cache_read ≈ head only, cache_write ≈ the whole message tail``, and
+Anthropic's prompt-caching docs ("What invalidates the cache") offered a
+candidate mechanism: ``tool_choice`` is rendered into the MESSAGES level of
+the tools -> system -> messages hierarchy, so a request that sends
+``{"type": "none"}`` against a prefix written with ``{"type": "auto"}``
+WOULD keep the head and re-write every message block. The toy measurement
+could not have seen that because its tail was ~10% of the prompt.
 
-This script reproduces the effect at a size where it is unambiguous and shows
-the fix closing it. It builds a ~35k-token conversation of tool-result-shaped
-pairs (the thing a real session is made of) and makes four REAL streamed calls,
-printing the provider's own cache counters for each:
+Hypothesis under test: the aside's ``none`` splits the cache at the messages
+level, and sending the turn's own ``auto`` closes the split. The script builds
+a ~35k-token conversation of tool-result-shaped pairs (the thing a real
+session is made of) and makes four REAL streamed calls, printing the
+provider's own cache counters for each:
 
 1. WARM        — a working-turn-shaped request: tools + ``tool_choice=auto``.
                  Writes the prefix.
 2. ASIDE-OLD   — the advisor/aside shape with the PRE-FIX wire body
-                 (``tool_choice: {"type": "none"}``). Expect ``cache_read`` to
-                 be roughly the tools+system head and ``cache_write`` to be the
-                 rest of the conversation.
+                 (``tool_choice: {"type": "none"}``). If the hypothesis holds,
+                 ``cache_read`` is roughly the tools+system head and
+                 ``cache_write`` is the rest of the conversation.
 3. RE-WARM     — re-writes the turn's prefix so (4) is measured against the
                  turn, not against (2)'s ``none`` variant.
 4. ASIDE-FIXED — the same request through the SHIPPED client, which sends the
-                 turn's own ``{"type": "auto"}`` when tools are present. Expect
-                 ``cache_read`` to be the whole conversation and
-                 ``cache_write`` to be only the appended question.
+                 turn's own ``{"type": "auto"}`` when tools are present. If the
+                 hypothesis holds, ``cache_read`` is the whole conversation and
+                 ``cache_write`` is only the appended question.
+
+Result: the hypothesis did NOT hold. Full output, both runs, in
+``docs/evidence/compaction-advisor/aside-tool-choice-measurement.txt``. Arm 2
+(``none``) read the full 36,578-token prefix and wrote only its 674-token
+appended question — identical to arm 4 — on ``claude-opus-5`` and
+``claude-fable-5-1``. Do not expect a cache split from this script on a warm
+account; if arm 2 reads 0, suspect the settle gap first (the script's first
+run did exactly that with a 1s settle, and arm 3 read 0 too — hence
+``SETTLE_SECONDS``). The fleet's head-only signature was later root-caused to
+per-account cache isolation under reserve-verdict account rotation (PR #537).
+The ``none`` -> ``auto`` mapping ships as hygiene (aside body byte-identical
+to the turn's), not as a measured saving.
 
 Deliberately small: four calls of ~35k tokens each, ``max_tokens`` capped and
 the lowest reasoning effort, because the shared OAuth accounts run close to
