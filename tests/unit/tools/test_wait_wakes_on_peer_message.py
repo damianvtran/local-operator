@@ -39,6 +39,7 @@ class _Peer:
     def __init__(self) -> None:
         self._event = asyncio.Event()
         self._count = 0
+        self._arrivals: dict[str, int] = {}
 
     def event(self) -> asyncio.Event:
         return self._event
@@ -46,8 +47,12 @@ class _Peer:
     def count(self) -> int:
         return self._count
 
-    def mark(self) -> None:
+    def arrivals(self) -> dict[str, int]:
+        return dict(self._arrivals)
+
+    def mark(self, kind: str = "peer_message") -> None:
         self._count += 1
+        self._arrivals[kind] = self._arrivals.get(kind, 0) + 1
         self._event.set()
 
 
