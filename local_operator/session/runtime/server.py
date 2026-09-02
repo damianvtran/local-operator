@@ -352,6 +352,68 @@ class RuntimeServer:
         self._loop = asyncio.get_running_loop()
         await self._serve()
 
+    def announce_stop(self) -> None:
+        """Tell every attached viewer this session is ending DELIBERATELY.
+
+        THE single emitter of the ``stopping`` frame, called by both triggers:
+        the control-op path (a peer's ``lop stop``, another TUI's
+        ``/stop all``) and the owner's own bare ``/stop``, which runs its
+        teardown locally and never dispatches an op. Round 3 found that second
+        route silent, so a follower watching an owner that stopped itself saw
+        a plain EOF and took over the session the user had just ended — U2-4
+        surviving on a different path.
+
+        Must be called BEFORE the teardown that closes these sockets. Safe
+        twice: a viewer reads the frame only as "the disconnect coming next
+        is deliberate", so a duplicate is a no-op.
+
+        There is deliberately no on-disk fallback. A wakeless session has no
+        wake-index entry at all (``write_entry`` removes the file when a
+        session has no schedules), so the wire is the only channel covering
+        every session — which is why the marker approach was dropped.
+
+        Safe from any thread, like :meth:`close`, and best-effort by
+        contract: a viewer that never receives it degrades to the pre-round-2
+        behaviour, which is strictly better than a stop failing because one
+        socket was slow.
+        """
+        if self._closed.is_set():
+            return
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            return
+        frame = {"op": "stopping", "session_id": self._record.session_id}
+        if self._on_owner_loop():
+            # An in-process runtime shares the TUI's loop, so the owner's own
+            # /stop arrives HERE, from a synchronous caller whose very next
+            # statement tears the sockets down. Awaiting a drain is therefore
+            # not available and scheduling a task is too late — the teardown
+            # would win the race. ``write`` is synchronous (it buffers into
+            # the transport), and a transport closed afterwards still flushes
+            # what it holds, so writing inline is what actually gets the frame
+            # to the viewer ahead of the EOF it must explain.
+            self._write_now(frame)
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(self._broadcast(frame), loop).result(timeout=2.0)
+        except Exception:  # noqa: BLE001 — announcing is best-effort
+            logger.debug("stop announcement did not reach viewers", exc_info=True)
+
+    def _write_now(self, frame: dict[str, Any]) -> None:
+        """Buffer one frame to every viewer without awaiting a drain.
+
+        Deliberately skips ``conn.send_lock``: this runs on the owner loop, so
+        no other coroutine can be mid-write at this instant, and taking the
+        lock would require awaiting — the thing the caller cannot do. A
+        partially-written frame from a concurrent send is impossible for the
+        same reason.
+        """
+        for conn in list(self._clients.values()):
+            try:
+                conn.writer.write(json.dumps(frame).encode() + b"\n")
+            except Exception:  # noqa: BLE001 — announcing is best-effort
+                logger.debug("stop announcement write failed", exc_info=True)
+
     def close(self) -> None:
         """Unpublish and shut down. Safe from any thread, safe twice.
 

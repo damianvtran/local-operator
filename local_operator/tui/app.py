@@ -10278,6 +10278,23 @@ class OperatorApp(App[None]):
         except Exception:
             logger.debug("mobile handle rebind failed", exc_info=True)
 
+    def _announce_stop_to_viewers(self) -> None:
+        """Emit the deliberate-stop announcement for the owner-local ``/stop``.
+
+        Best-effort and guarded: the registrant is absent whenever nothing
+        ever attached, and a stop must never fail because announcing did.
+        """
+        registrant = self._mobile_registrant
+        if registrant is None:
+            return
+        announce = getattr(registrant, "announce_stop", None)
+        if not callable(announce):
+            return
+        try:
+            announce()
+        except Exception:  # noqa: BLE001 — announcing must not break the stop
+            logger.debug("stop announcement failed", exc_info=True)
+
     def _mobile_teardown(self) -> None:
         if self._mobile_registrant is not None:
             try:
@@ -13152,6 +13169,13 @@ class OperatorApp(App[None]):
         # TUI's /stop all lists it. The remote branch of `_mobile_adopted`
         # does exactly this; `/resume` re-adopts and republishes. It is also
         # what a peer's stop ladder observes as "landed" (`_await_stopped`).
+        # Announce BEFORE the teardown closes the viewers' sockets: a
+        # follower watching this owner must read the disconnect as a
+        # deliberate stop, not as owner death it should recover from. The
+        # control-op path announces from the same emitter; this is the
+        # owner-local route, which dispatches no op at all (round 3
+        # BLOCKER-1 — a follower took over the session the user just ended).
+        self._announce_stop_to_viewers()
         self._mobile_teardown()
         self._approval = None
         self._refresh_working_activity()

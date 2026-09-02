@@ -13,6 +13,7 @@ window, and a repeat inside the window executes while one outside re-arms.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 from typing import Any
@@ -650,3 +651,74 @@ async def test_arm_listing_at_80_columns_never_wraps_a_row(monkeypatch: pytest.M
         assert block._text.split("\n")[-1].startswith("repeat /stop all")
         assert "…" in block._text  # the long name really was truncated
         assert "(this one, last)" in block._text.split("\n")[-2]
+
+
+@pytest.mark.asyncio
+async def test_owner_local_stop_announces_to_viewers_before_teardown() -> None:
+    """Bare ``/stop`` in the OWNER's own window announces the deliberate stop.
+
+    Round-3 BLOCKER-1: the control-op dispatch was the only emitter, so an
+    owner that stopped itself tore its registrant down without a word and a
+    watching follower read a plain EOF as owner death — taking over the
+    session the user had just ended (U2-4 on a different route). The
+    announcement must be written BEFORE ``_mobile_teardown`` closes those
+    sockets, which is why it is written inline rather than scheduled.
+    """
+    from local_operator.mobile.attach_client import STOPPED_REASON, AttachClient
+    from local_operator.session.runtime.server import RuntimeServer
+    from tests.unit.session.runtime.test_server import FakeHandle, _wait_record
+
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _booted(app, pilot, session)
+        server = RuntimeServer(FakeHandle(), kind="tui")
+        await server.start_in_process()
+        app._mobile_registrant = server
+        # A REAL attached viewer, so the frame travels the real socket the
+        # teardown is about to close — the ordering under test.
+        record = await _wait_record()
+        seen: list[str] = []
+        client = AttachClient(
+            on_projection=lambda _p: None,
+            on_disconnected=seen.append,
+        )
+        await client.connect(record, record.session_id)
+        for _ in range(6):
+            await pilot.pause()
+        app._run_slash_command("/stop")
+        for _ in range(80):
+            await pilot.pause()
+            await asyncio.sleep(0.02)
+            if seen:
+                break
+        # The viewer classifies the disconnect as a deliberate stop, which is
+        # what suppresses its owner-death takeover.
+        assert seen == [STOPPED_REASON]
+        # The registrant is torn down by the same path; announcing first is
+        # the whole point, so the frame must already be out by now.
+        assert app._mobile_registrant is None
+
+
+@pytest.mark.asyncio
+async def test_announce_stop_is_safe_without_viewers_or_registrant() -> None:
+    """Announcing never breaks a stop: no registrant and no viewers both pass.
+
+    The stop is the user's instruction; a best-effort courtesy frame that
+    could raise would turn a working kill switch into a failing one.
+    """
+    from local_operator.session.runtime.server import RuntimeServer
+    from tests.unit.session.runtime.test_server import FakeHandle
+
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _booted(app, pilot, session)
+        app._mobile_registrant = None
+        app._announce_stop_to_viewers()  # no registrant at all
+        server = RuntimeServer(FakeHandle(), kind="tui")
+        await server.start_in_process()
+        app._mobile_registrant = server
+        app._announce_stop_to_viewers()  # registrant, zero viewers
+        server.close()
+        app._announce_stop_to_viewers()  # already closed
