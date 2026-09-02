@@ -1727,16 +1727,16 @@ class SessionStreamFn:
         # until first use, and stays None whenever the cache cannot open (a
         # permanent live-fetch miss, never an error). See ``_usage_cache_store``.
         self._usage_cache: "UsageCacheStore | None" = None
-        # The provider-reported context size of the last NON-isolated call this
-        # stream fn forwarded, carried onto the next request as
-        # ``ChatRequest.context_tokens_hint``. Only the Anthropic client reads it
-        # (to pick the prompt-cache TTL); it is remembered here rather than read
-        # off ``Session._last_usage`` because every provider call — turns, tool
-        # loops, asides, compaction summaries — funnels through ``__call__``
-        # and ``_record_stream`` already sees each final ``Usage``. Isolated
-        # (naming) calls are excluded: their tiny prefix is not the session's
-        # context and would drag the hint below the threshold mid-turn.
-        self._last_context_tokens: int | None = None
+        # Registered by the conversation owner (see
+        # ``set_context_tokens_hint``); reads back the last provider-reported
+        # context size for THIS conversation. Kept as a REGISTRAR rather than
+        # memory on this object because subagents share the parent's stream fn
+        # (see ``harness/subagent.py``), so anything stored here is shared by
+        # every child too and would contaminate their first requests — the
+        # parent's 300k count would send a fresh ~10k child prefix out at 2x
+        # write rates. The value's home is the session, which knows which
+        # calls belong to its conversation.
+        self._context_tokens_hint_reader: Callable[[], int | None] | None = None
 
     def _client_for(self, spec: ModelSpec) -> WireClient:
         from local_operator.providers.clients import client_for_spec
@@ -1749,6 +1749,21 @@ class SessionStreamFn:
                 self._settings
             ),
         )
+
+    def set_context_tokens_hint(self, reader: Callable[[], int | None] | None) -> None:
+        """Register the per-CONVERSATION context-size hint reader.
+
+        The reader returns the provider-reported context size of the
+        conversation's last call, and ``__call__`` stamps it onto the next
+        request as ``ChatRequest.context_tokens_hint`` (read by the Anthropic
+        client to pick the prompt-cache TTL). The session — the owner of the
+        conversation — registers it, mirroring how it already passes its
+        per-session state into the loop as callables. Because the memory lives
+        with the caller and only the READER is held here, a subagent sharing
+        this stream fn cannot see (or poison) the parent's hint and vice
+        versa; see the attribute note in ``__init__``.
+        """
+        self._context_tokens_hint_reader = reader
 
     @property
     def routing_settings(self) -> Mapping[str, Any]:
@@ -3308,6 +3323,12 @@ class SessionStreamFn:
             # * the session's prompt cache key, which identifies a request
             #   PREFIX. The naming call's prefix is a different system block, so
             #   sharing the key buys no hit and dirties the turn's cache entry.
+            # * the per-conversation context hint, whose reader belongs to the
+            #   session's conversation — a naming call is not part of it, and
+            #   stamping the session's large count onto a tiny one-shot prompt
+            #   would send it out at the 1h write rate for no replay benefit.
+            #   The branch order gives it for free: the hint is stamped after
+            #   this early return, never inside it.
             async for event in self._record_stream(
                 request,
                 stream_with_failover(
@@ -3386,11 +3407,17 @@ class SessionStreamFn:
             # alone and is unaffected either way.
             request = request.model_copy(update={"prompt_cache_key": self._cache_lineage_id})
 
-        if request.context_tokens_hint is None and self._last_context_tokens:
-            # The provider's own count from the previous call is the most
-            # accurate size anyone has for this request (the client only has a
-            # byte estimate). A hint the caller set deliberately is kept.
-            request = request.model_copy(update={"context_tokens_hint": self._last_context_tokens})
+        hint = (
+            self._context_tokens_hint_reader()
+            if self._context_tokens_hint_reader is not None
+            else None
+        )
+        if request.context_tokens_hint is None and hint:
+            # The provider's own count of THIS conversation's previous call is
+            # the most accurate size anyone has for this request (the client
+            # alone only has a byte estimate). A hint the caller set
+            # deliberately — including an explicit 0 to suppress one — is kept.
+            request = request.model_copy(update={"context_tokens_hint": hint})
 
         await self.preflight_usage(request.model)
         async for event in self._record_stream(
@@ -3454,12 +3481,6 @@ class SessionStreamFn:
             # input tokens) is recorded too — best-effort and never raising.
             if component_chars is not None and final_usage is not None:
                 self._record_usage(request, component_chars, final_usage, ok)
-            if final_usage is not None and not request.isolated and final_usage.context_tokens:
-                # Feeds the next request's ``context_tokens_hint``; see the
-                # attribute's note in ``__init__`` for why isolated calls are
-                # left out. Failed streams still report input usage on some
-                # wires, and that count is as honest as a successful one.
-                self._last_context_tokens = int(final_usage.context_tokens)
 
     def _record_usage(
         self,

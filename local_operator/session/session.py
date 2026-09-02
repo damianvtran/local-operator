@@ -1392,6 +1392,14 @@ class Session:
             # is actually serving requests, the session persists that fact and
             # emits the event a front end repaints its model display from.
             route_bridge(self._on_route_settled)
+        hint_bridge = getattr(self._stream_fn, "set_context_tokens_hint", None)
+        if callable(hint_bridge):
+            # The stream fn is SHARED with subagents, so its TTL hint memory
+            # must live here — the conversation owner — or a child's first
+            # request would inherit this session's large count (and this
+            # session's next request the child's small one). See
+            # ``SessionStreamFn.set_context_tokens_hint``.
+            hint_bridge(lambda: self._context_tokens_hint if self._context_tokens_hint else None)
         self._tools = list(tools)
         self._transcript = transcript
         self._session_id = session_id or transcript.directory.name
@@ -1624,6 +1632,18 @@ class Session:
         # ``Transcript.usages_since_compaction`` and ``_last_reported_usage``).
         self._last_usage: Usage | None = _last_reported_usage(
             [_parsed_usage(payload) for payload in transcript.usages_since_compaction()]
+        )
+        # The per-conversation prompt-cache TTL hint (see
+        # ``SessionStreamFn.set_context_tokens_hint``): the provider-reported
+        # context size of THIS session's last turn call, excluding isolated
+        # errands (their tiny prefix is not this conversation) and one-shots
+        # that do not carry the conversation (their prompt is a different,
+        # write-once prefix — see ``_one_shot_complete``). Seeded from the
+        # transcript's last usage so a RESUMED large session starts on its
+        # real size instead of re-deriving it through the client's byte
+        # estimate. ``None`` until the first provider call reports one.
+        self._context_tokens_hint: int | None = (
+            self._last_usage.context_tokens if self._last_usage is not None else None
         )
         self._last_activity_ms: int = 0  # epoch ms; drives idle-flush pruning
         self._generation = 0  # monotonic turn counter for agent_start/end
@@ -4691,6 +4711,12 @@ class Session:
                 # waiting for another user message. The loop keeps the turn-start
                 # snapshot as a fallback if this host resolver ever fails.
                 get_system_blocks=self._system_blocks,
+                # Per-conversation TTL hint memory: the loop re-reads it before
+                # every provider call and the stream fn stamps it onto the
+                # request. Lives here — not on the shared stream fn — so a
+                # subagent's calls cannot contaminate this session's hint; see
+                # ``SessionStreamFn.set_context_tokens_hint``.
+                get_context_tokens_hint=lambda: self._context_tokens_hint,
                 convert_to_llm=self._render_history,
                 stream_fn=self._stream_fn,
                 get_steering_messages=self._drain_steering,
@@ -4781,6 +4807,21 @@ class Session:
                 if isinstance(message, Message) and message.usage is not None:
                     self._last_usage = message.usage
                     break
+            # The TTL hint rides the same per-conversation memory: a hint the
+            # provider never reported (some wires omit it) clears the stale
+            # one rather than keeping a pre-compaction figure alive forever.
+            hint = next(
+                (
+                    int(message.usage.context_tokens)
+                    for message in reversed(new_messages)
+                    if isinstance(message, Message)
+                    and message.usage is not None
+                    and message.usage.context_tokens
+                ),
+                None,
+            )
+            if hint is not None:
+                self._context_tokens_hint = hint
             self._last_activity_ms = int(time.time() * 1000)
             # The run just completed provider round-trips; the idle flush
             # measures provider-cache age from this stamp, not turn
@@ -7247,6 +7288,15 @@ class Session:
             tools=[],
             tool_choice="none",
             replayable=True,
+            # ``0`` is a DELIBERATE hint, not a missing one: this prompt is a
+            # fresh write-once system+transcript prefix, not the turn's cached
+            # prefix, so a 1h entry (2x write rate) buys nothing — it is never
+            # replayed except a stall retry. Inheriting the session's large
+            # pre-compaction count here would send a transcript-sized prompt
+            # out at the 1h rate for several dollars of pure overpayment per
+            # compaction. ``SessionStreamFn.__call__`` keeps a set hint, and
+            # the Anthropic client treats 0 as below any threshold.
+            context_tokens_hint=0,
         )
         parts: list[str] = []
         async for event in self._stream_fn(request, None):
