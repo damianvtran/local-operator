@@ -8109,16 +8109,26 @@ class Session:
     ) -> None:
         """Best-effort index write. Swallows everything: see
         :meth:`_persist_wake_schedules` for why a failure here must not
-        propagate. Function-local import keeps ``wakes.store`` off this
-        module's import graph in the direction that matters — the store must
-        never import the session, and a top-level import here would make a
-        future cycle silent rather than loud."""
+        propagate.
+
+        The imports are function-local for the reason every other one in
+        this file is: they keep this module's own import cheap and cannot
+        form a top-level cycle if ``wakes.store`` ever grows one. The rule
+        that matters more — the store never imports the session, because the
+        supervisor and the picker read it without a harness — is NOT
+        enforced by this; ``tests/unit/test_import_graph.py`` is what pins
+        that direction."""
         try:
             from local_operator.paths import config_dir
             from local_operator.wakes import store as wake_store
 
             root = config_dir()
-            existing = wake_store.read_entry(root, self._session_id)
+            # An empty list means "remove the entry", and removal needs
+            # nothing from the old file — so skip the read. This is the open
+            # path for every session without wakes (including every subagent
+            # child), and the directory should not be touched twice for a
+            # file that almost never exists.
+            existing = wake_store.read_entry(root, self._session_id) if schedules else None
             wake_store.write_entry(
                 root,
                 self._session_id,

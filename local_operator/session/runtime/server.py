@@ -223,7 +223,7 @@ class ProjectionSink(Protocol):
     The phone renders from a :class:`SessionProjection` snapshot that the
     runtime broadcasts on change; :class:`ProjectionFold` is the production
     implementation. The runtime only ever READS ``projection`` (to serialize
-    a frame) and calls ``set_pending`` (the reduced-host bridge for gate
+    a frame) and calls ``set_pending`` (the reduced-handle bridge for gate
     cards), so that is the whole contract — narrow enough that a test can
     hand in a stub and a future runtime with no phone can hand in nothing.
     """
@@ -247,16 +247,17 @@ class RuntimeServer:
         self._handle = handle
         seed = handle.session_projection_seed
         seed.kind = kind
-        # The projection fold is an OPTIONAL, injected collaborator. Given
-        # one, the runtime uses it as-is (the TUI mirror handle and tests do
-        # this). Given none — the default, and what every headless runtime
-        # does — nothing is built until a client that consumes projection
-        # semantics (the mobile daemon) actually dials, so a runtime that
-        # only ever serves a follower terminal or fires a wake constructs no
-        # fold at all. Welcomes and repaints before that moment serialize the
-        # seed directly: the seed IS the object the host's own fold mutates,
-        # so the bytes on the wire are identical either way. See
-        # ``_ensure_projection_sink``.
+        # The projection fold is an OPTIONAL, injected collaborator. A caller
+        # that already owns a fold may hand it in and the runtime uses it
+        # as-is — only tests do today; every production constructor call
+        # (the TUI at ``tui/app.py``, the owned-session process) passes none.
+        # Given none, nothing is built until a client that consumes
+        # projection semantics (the mobile daemon) actually dials, so a
+        # runtime that only ever serves a follower terminal or fires a wake
+        # constructs no fold at all. Welcomes and repaints before that moment
+        # serialize the seed directly: the seed IS the object the handle's
+        # own fold mutates, so the bytes on the wire are identical either
+        # way. See ``_ensure_projection_sink``.
         self._projection_sink: ProjectionSink | None = projection_sink
         #: How many times this runtime built a fold on its own. Observable
         #: for tests and for the "did a headless runtime pay for a fold?"
@@ -1149,7 +1150,7 @@ class RuntimeServer:
 
     @property
     def fold(self) -> ProjectionFold:
-        """The default fold, built on demand. Hosts that reach for this want
+        """The default fold, built on demand. Handles that reach for this want
         the full :class:`ProjectionFold` surface (subagent details, todos);
         an injected sink that is not one is a programming error here."""
         sink = self._ensure_projection_sink()

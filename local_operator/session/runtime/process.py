@@ -76,8 +76,9 @@ def _grace_seconds() -> float:
 def _wake_within_window(handle: object, *, now_ms: int | None = None) -> bool:
     """Term 2 of the predicate: does the runtime's OWN scheduler have a wake
     due within ``WARM_WINDOW_S``? Read through the handle (an optional
-    capability, probed) so reduced test handles and older hosts that never
-    grew the accessor behave as "no wakes" rather than crash the reaper."""
+    capability, probed) so reduced test handles and older handle
+    implementations that never grew the accessor behave as "no wakes" rather
+    than crash the reaper."""
     accessor = getattr(handle, "next_wake_due_at", None)
     if not callable(accessor):
         return False
