@@ -213,19 +213,31 @@ sessions, `lop send` prints the candidates and exits non-zero asking you to
 disambiguate with `--pid`. If the only match is `wedged`, it says so rather
 than hanging on a dial.
 
-**With `--pid` or `--session`, pipe the body — do not pass it as an argument.**
-`send` declares `target` and `message` as two optional positionals, so a single
-positional alongside `--pid`/`--session` binds to `target`, leaving `message`
-empty; the command then looks for a body on stdin, finds a terminal, and exits
-1 with `no message given`. Nothing is delivered. So:
+**With `--pid` or `--session`, pipe the body — a lone positional is read as the
+target, not the message.** `send` declares `target` and `message` as two
+optional positionals, so a *single* positional alongside `--pid`/`--session`
+binds to `target`, leaving `message` empty; the command then looks for a body
+on stdin, finds a terminal, and exits 1 with `no message given`. Nothing is
+delivered. Piping the body is the clean form:
 
 ```
 echo "the deploy finished; verify prod" | lop send --pid 12345 --wake   # works
+echo "gates are green" | lop send --session 7c44b23dc86f                # works
 lop send --pid 12345 --wake "the deploy finished; verify prod"          # exits 1
 ```
 
-The positional form (`lop send "<target>" "message"`) is unaffected — both
-positionals are filled, so it is the form to prefer at a terminal.
+A *second* positional does fill `message`, so a placeholder target delivers —
+the selector wins, because the resolver checks `--pid`/`--session` before it
+ever looks at `target`:
+
+```
+lop send ignored "the deploy finished; verify prod" --pid 12345         # works
+```
+
+That works, but it reads as though it addresses `ignored`; prefer the piped
+form. The plain positional form (`lop send "<target>" "message"`) is unaffected
+— both positionals are filled, so it stays the form to reach for at a
+terminal.
 
 ### What the human sees
 
