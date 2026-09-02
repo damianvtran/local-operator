@@ -88,6 +88,8 @@ ECHO_POLICY = {
     # ledger; a user row would be the one it left. See `SLASH_COMMANDS`.
     "btw": False,
     "compact": False,
+    # The stop receipt names what was stopped; nothing reaches the model.
+    "stop": False,
     "context": False,
     "approvals": False,
     "skills": False,
@@ -152,6 +154,7 @@ PROMPT_POLICY = {
     "loop": True,
     "btw": True,
     "compact": False,
+    "stop": False,
     "context": False,
     "approvals": False,
     "skills": False,

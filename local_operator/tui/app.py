@@ -686,6 +686,17 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # did not run — nothing typed here reaches the model, so a user row above
     # that would only restate the word.
     SlashCommand("compact", "Compact the context now"),
+    # The kill switch (design §12): bare stops THIS session, `/stop <target>`
+    # stops another one (the `send` target vocabulary: name / session id /
+    # pid / substring), `/stop all` arms a 10 s window and a repeat executes.
+    # The receipt is the stop line itself, so no echo: nothing here reaches
+    # the model, and the receipt names what was stopped — strictly more than
+    # the typed word.
+    SlashCommand(
+        "stop",
+        "Stop this session (bare), another by name, or all",
+        arguments=ArgumentMode.OPTIONAL,
+    ),
     # The receipt states the resulting mode, which is the durable fact; the
     # typed argument is only how it was reached.
     SlashCommand(
@@ -1204,6 +1215,15 @@ class _TerminalFrontendReaper:
 #: before deciding. A window that expires while they are still reading would
 #: silently demote the press back to a no-op.
 DOUBLE_STOP_WINDOW_S = 4.0
+
+#: How long a repeated ``/stop all`` counts as the confirming press (§12).
+#: Ten, not the Esc ladder's 4: the confirmation is a LISTING the user has
+#: to read — a dozen sessions with pids and names is several seconds of
+#: reading — and a window that expires mid-read silently demotes the repeat
+#: to a fresh listing, which reads as the command ignoring them. The same
+#: reading-time reasoning that made DOUBLE_STOP_WINDOW_S longer than the
+#: Ctrl+C window, one step up.
+STOP_ALL_WINDOW_S = 10.0
 
 #: The working line's PHASE while a turn is parked on something the USER owes —
 #: a tool-approval prompt, or an `ask` picker waiting for a decision. One phase
@@ -2467,6 +2487,17 @@ class OperatorApp(App[None]):
         # "stopped N subagents"), replaced rather than repeated for the same
         # reason `_exit_hint` is.
         self._stop_notice: NoticeBlock | None = None
+        # ``/stop all`` arm-and-repeat: stamps WHEN the destructive listing
+        # was shown. A second ``/stop all`` inside ``STOP_ALL_WINDOW_S``
+        # executes; outside it the listing is shown again and a fresh window
+        # is armed. The Esc ladder idiom (``_stop_offered_at``) as a modal:
+        # the listing itself is the confirmation, so nothing is ever stopped
+        # by the press that first SHOWED it.
+        self._stop_all_armed_at: float | None = None
+        # The listing block the arm painted, so execution (or lapse) can
+        # restate it from a standing amber promise to a settled note — the
+        # same retire-the-instruction rule the Esc ladder's offer follows.
+        self._stop_all_listing: NoticeBlock | None = None
         # The MAIN transcript, held rather than looked up. Once the full-page
         # subagent view is open there are two `TranscriptView`s in the screen,
         # so `query_one(TranscriptView)` is ambiguous exactly while a turn may
@@ -4489,6 +4520,12 @@ class OperatorApp(App[None]):
         self._stop_offered_at = None
         self._stop_offer_count = 0
         self._stop_notice = None
+        # The armed `/stop all` window is the same kind of escalation, one
+        # rung wider: a repeat landing after a swap would stop every agent
+        # on the machine on the strength of a listing shown for a different
+        # conversation. The listing widget goes with the transcript.
+        self._stop_all_armed_at = None
+        self._stop_all_listing = None
         # And a deferred completion belongs to the dying conversation too. Left
         # set, the replacement session's first settling background job would
         # announce "task complete" for a turn the user can no longer see — the
@@ -9639,6 +9676,10 @@ class OperatorApp(App[None]):
         self._stop_notice = None
         self._stop_offered_at = None
         self._stop_offer_count = 0
+        # Same for the `/stop all` listing and its armed window (`/clear`
+        # took the terms off screen, so the repeat must not still execute).
+        self._stop_all_listing = None
+        self._stop_all_armed_at = None
         self._streaming_block = None
         self._tool_cards = {}
         self._composing_cards = {}
@@ -12859,6 +12900,8 @@ class OperatorApp(App[None]):
             self._cmd_btw(prompt_arg, text)
         elif command == "/compact":
             self._cmd_compact()
+        elif command == "/stop":
+            self._cmd_stop(arg, notice)
         elif command == "/copy":
             self._cmd_copy(notice)
         elif command == "/approvals":
@@ -12957,6 +13000,323 @@ class OperatorApp(App[None]):
         # A pass that RAN needs nothing further here: the band is settled from
         # the END EVENT, in `on_compaction_ended`, so the automatic trigger gets
         # the same treatment instead of leaving its own reading stale.
+
+    # -- the kill switch ---------------------------------------------------------
+
+    def _cmd_stop(self, arg: str, notice: NoticeFn) -> None:
+        """``/stop`` — end this session, another one, or every one (§12).
+
+        Bare ``/stop`` stops the session THIS app is looking at. In this PR
+        the TUI still owns its session in-process (the PR 5 cutover moves
+        ownership to a runtime), so "stop" here is deny gates → abort →
+        dispose the in-process session → show it cold: the transcript stays
+        on screen and the app reports the session ended and ``/resume``
+        reopens it. On a follower (a RemoteSession) the same command sends
+        the graceful ``stop`` op to the owner and paints the receipt.
+
+        ``/stop <target>`` uses the `send` target vocabulary — pid, session
+        id, or a name/cwd substring — one vocabulary shared with `lop send`
+        and the in-session send tool, so anything a user has learned about
+        addressing a peer transfers unchanged.
+
+        ``/stop all`` is arm-and-repeat (see ``_stop_all_worker``): the first
+        press PRINTS the listing and arms the window; the second inside it
+        executes. Confirmation-by-listing rather than a modal, the Esc
+        ladder's idiom, because a kill switch that can be dismissed by the
+        same key that armed it is one that cannot trap the user.
+        """
+        session = self._session
+        target = arg.strip()
+        if target.lower() == "all":
+            self._stop_all(notice)
+            return
+        if not target:
+            if session is None:
+                # ``_system_notice``: nothing ran, so the boot composition
+                # must survive it — the rule every rejecting branch follows.
+                self._system_notice("no session to stop yet", "warning")
+                return
+            if bool(getattr(session, "is_remote", False)):
+                # A follower does not own its session; the owner ends it.
+                # Routed rather than run locally, the way every
+                # authoritative-scope command on a follower is.
+                self.run_worker(self._stop_remote_worker(session), thread=False, group="session")
+                return
+            self.run_worker(self._stop_local_session(), thread=False, group="session")
+            return
+        self.run_worker(self._stop_target_worker(target), thread=False, group="session")
+
+    async def _stop_local_session(self) -> None:
+        """Bare ``/stop`` on a TUI-OWNED session: end it, show it cold.
+
+        The in-process branch of the kill switch for THIS PR's ownership
+        model. Deny gates first, dispose the session (abort + flush + lease
+        release), then drop the reference without rebuilding anything: the
+        transcript stays exactly as it is — the reading record survives the
+        session it describes — and the next prompt reports that the session
+        has ended (``_submit_prompt``'s no-session branch) until ``/resume``
+        reopens it. Park the session's wakes dormant through the same
+        ``stopped_at`` stamp the cross-process stop uses, so a stopped
+        session's schedules never fire while nobody is driving it.
+        """
+        session = self._session
+        if session is None:
+            return
+        resumable_id = getattr(session, "session_id", "") or ""
+        name = getattr(session, "conversation_name", "") or resumable_id
+        wakes = self._mark_own_wakes_dormant(session)
+        # Deny first: dispose AWAITS teardown, and a turn parked on an
+        # unanswered approval never reaches it — the same ordering
+        # on_unmount and _reload_session both enforce.
+        self._deny_queued_approvals()
+        self._settle_ask_picker()
+        self._settle_key_prompt()
+        await self._settle_shell_command()
+        self._dismiss_working_block()
+        self._retire_live_tool_cards()
+        self._interrupted_cards = 0
+        self._stop_offered_at = None
+        self._stop_offer_count = 0
+        self._stop_notice = None
+        self._completion_deferred = False
+        self._settled_child_ids.clear()
+        if self._controller is not None:
+            self._controller.dispose()
+            self._controller = None
+        try:
+            await session.dispose()
+        except Exception:  # noqa: BLE001 — a stop that faults is still a stop
+            logger.debug("stop-path dispose failed", exc_info=True)
+        self._session = None
+        self._approval = None
+        self._refresh_working_activity()
+        # The receipt names what was stopped and the way back, in the stop
+        # vocabulary the cross-process ladder reports in ("stopped …"), with
+        # the resume hint appended: bare /stop's whole difference from Esc
+        # is that the SESSION ended, and a user who meant Esc needs the way
+        # back stated, not implied.
+        # One clause for the way back. The cross-process receipt ends with
+        # "dormant until you reopen it" because there the reader has no
+        # reopen affordance in front of them; here they do, so the resume
+        # command IS the reopen and is named once rather than restated.
+        reopen = f"/resume {resumable_id}" if resumable_id else "/resume"
+        wakes_part = (
+            f" — {wakes} wake{'s' if wakes != 1 else ''} dormant until then" if wakes else ""
+        )
+        self._system_notice(f'stopped "{name}" — {reopen} reopens it{wakes_part}')
+
+    def _mark_own_wakes_dormant(self, session: Any) -> int:
+        """Stamp ``stopped_at`` on THIS session's wake index entry.
+
+        The same dormancy the cross-process ladder applies (``control.
+        _mark_wakes_dormant``) — schedules are never deleted by a stop; the
+        derived index entry carries the marker, the future supervisor skips
+        it, and the session's next open clears it. Returns the count for the
+        receipt.
+        """
+        try:
+            from local_operator.paths import config_dir
+            from local_operator.session.runtime.control import _mark_wakes_dormant
+            from local_operator.session.runtime.registry import SessionRecord
+
+            session_id = getattr(session, "session_id", "") or ""
+            scheduler = getattr(session, "wake_scheduler", None)
+            schedules = list(getattr(scheduler, "schedules", []) or [])
+            if not session_id or not schedules:
+                return 0
+            record = SessionRecord(
+                pid=os.getpid(),
+                kind="tui",
+                session_id=session_id,
+                conversation_name=getattr(session, "conversation_name", "") or "",
+                cwd=str(getattr(session, "_cwd", "") or ""),
+                model_label="",
+                control_port=0,
+                control_key="",
+            )
+            return _mark_wakes_dormant(record, config_dir())
+        except Exception:  # noqa: BLE001 — the index is derived; the stop is not
+            logger.debug("could not stamp wake dormancy", exc_info=True)
+            return 0
+
+    async def _stop_remote_worker(self, session: Any) -> None:
+        """Bare ``/stop`` on a FOLLOWER: send the graceful op to the owner.
+
+        The receipt is the owner's ack; the owner's runtime then runs its own
+        ladder outcome (exit for a runtime process, session-end for a TUI
+        owner) and this follower observes the disconnect the way it observes
+        any owner loss.
+        """
+        request = getattr(session, "request_stop", None)
+        if not callable(request):
+            self._system_notice(
+                "cannot stop this session's owner — the owner is an older process; "
+                "close it there or upgrade",
+                "warning",
+            )
+            return
+        try:
+            detail = await cast(Callable[[], Awaitable[str]], request)()
+        except Exception as error:  # noqa: BLE001 — the refusal is the receipt
+            self._system_notice(f"could not stop the owner: {error}", "warning")
+            return
+        self._system_notice(detail or "stop requested from the owner")
+
+    async def _stop_target_worker(self, target: str) -> None:
+        """``/stop <target>``: resolve with the `send` vocabulary, stop it.
+
+        One target vocabulary shared with `lop send` and the send tool
+        (``resolve_peer_target``): pid, session id, or a case-insensitive
+        substring over name/session-id/cwd-basename. The resolution, the
+        escalation ladder and the receipt are all the shared module's — this
+        worker only surfaces them.
+        """
+        from local_operator.mobile.peer_send import resolve_peer_target
+        from local_operator.paths import config_dir
+        from local_operator.session.runtime import control
+
+        record, candidates, error = resolve_peer_target(
+            target=target,
+            pid=None,
+            session=None,
+            pid_hint="a pid",
+            session_hint="a session id",
+            include_wedged=True,  # a wedged agent is the one a user most needs to stop
+        )
+        if candidates:
+            names = ", ".join(
+                f"pid {c.pid} ({c.conversation_name or c.session_id})" for c in candidates
+            )
+            self._system_notice(
+                f"{len(candidates)} sessions match — stop one exactly: {names}", "warning"
+            )
+            return
+        if record is None:
+            self._system_notice(error or f"no live session matches {target!r}", "warning")
+            return
+        # Never signal ourselves through the socket ladder: a TUI-owned
+        # session stopped from its own process goes through the in-process
+        # branch, which ends the session without killing the terminal.
+        if record.pid == os.getpid():
+            self._cmd_stop("", lambda body, kind="info": self._system_notice(body, kind))
+            return
+        outcome = await control.stop_session(record, _root=config_dir())
+        self._system_notice(outcome.line, "error" if outcome.method == "sigkill" else "info")
+
+    def _stop_all(self, notice: NoticeFn) -> None:
+        """``/stop all`` — arm-and-repeat over every agent on this machine.
+
+        ALL agents, not just detached ones: a TUI-owned session in another
+        terminal gets the same graceful op and its process survives with the
+        session ended beneath it. Other users are excluded by the OS (their
+        0600 records under the 0700 run dir are unreadable) and again by the
+        defensive same-uid check in the shared module. Own session LAST, so
+        the front end painting the report is the last thing to go.
+        """
+        now = time.monotonic()
+        if (
+            self._stop_all_armed_at is not None
+            and now - self._stop_all_armed_at < STOP_ALL_WINDOW_S
+        ):
+            self._stop_all_armed_at = None
+            self._settle_stop_all_listing("stopping them all…")
+            self.run_worker(self._stop_all_worker(), thread=False, group="session")
+            return
+        self._stop_all_armed_at = now
+        self.run_worker(self._arm_stop_all_worker(), thread=False, group="session")
+        # Retire the instruction when the window that makes it true closes —
+        # the standing-offer rule from the Esc ladder (``_expire_stop_offer``),
+        # so the listing cannot leave a live "repeat to stop" promise that no
+        # subsequent press will honour.
+        self.set_timer(STOP_ALL_WINDOW_S, lambda: self._expire_stop_all_window(now))
+
+    def _expire_stop_all_window(self, armed_at: float) -> None:
+        """Drop the armed window's promise once it lapses (keyed on its stamp).
+
+        The listing's last line is an INSTRUCTION that is only true inside
+        the window; left standing it is an amber offer no press will honour
+        (the Esc ladder's D4). The facts above it stay; the promise goes.
+        """
+        if self._stop_all_armed_at != armed_at:
+            return
+        self._stop_all_armed_at = None
+        self._settle_stop_all_listing("window lapsed — /stop all again to re-arm")
+
+    def _settle_stop_all_listing(self, last_line: str) -> None:
+        """Restate the arm listing in the calm weight with a new last line."""
+        listing = self._stop_all_listing
+        self._stop_all_listing = None
+        if listing is None or not listing.is_attached:
+            return
+        body = listing._text.rsplit("\n", 1)[0]
+        listing.restate(f"{body}\n{last_line}", "note")
+
+    async def _arm_stop_all_worker(self) -> None:
+        """Print what a confirmed ``/stop all`` would stop.
+
+        The listing IS the confirmation (arm-and-repeat, §12): every live and
+        wedged session with its pid and name, plus the instruction naming the
+        window. The state shown here is the state the shared module will act
+        on, read through the same registry scan, so the listing cannot
+        promise a target the stop cannot resolve.
+        """
+        from local_operator.paths import config_dir
+        from local_operator.session.runtime import control
+
+        own_pid = os.getpid()
+        targets = [
+            rec
+            for rec in control._stop_targets(config_dir(), own_pid=own_pid)
+            if rec.pid != own_pid
+        ]
+        # This app's own session is listed from what the app HOLDS, not from
+        # its published record: the record can lag a swap (or be absent under
+        # a test host), and the listing must promise exactly what the second
+        # press will do — every other session through the ladder, then this
+        # one in-process, last.
+        own = self._session
+        own_local = own is not None and not bool(getattr(own, "is_remote", False))
+        total = len(targets) + (1 if own_local else 0)
+        if not total:
+            self._stop_all_armed_at = None
+            self._system_notice("no sessions to stop")
+            return
+        lines = [f"will stop {total} session{'s' if total != 1 else ''}:"]
+        for record in targets:
+            lines.append(f"  pid {record.pid}  {record.conversation_name or record.session_id}")
+        if own_local:
+            own_name = getattr(own, "conversation_name", "") or getattr(own, "session_id", "")
+            lines.append(f"  pid {own_pid}  {own_name} (this one, last)")
+        lines.append(f"repeat /stop all within {STOP_ALL_WINDOW_S:g}s to stop them all")
+        self._stop_all_listing = NoticeBlock("\n".join(lines), "warning")
+        self._append_block(self._stop_all_listing)
+
+    async def _stop_all_worker(self) -> None:
+        """Execute a confirmed ``/stop all`` and report the grouped outcome.
+
+        Every OTHER process first through the shared ladder, own session
+        last through the in-process branch (this app's own process must
+        survive to paint the report).
+        """
+        from local_operator.paths import config_dir
+        from local_operator.session.runtime import control
+
+        outcomes = await control.stop_all(own_pid=os.getpid(), _root=config_dir())
+        # Anything that did NOT stop cleanly gets its own line, because the
+        # grouped count cannot say WHICH agent was refused or had to be
+        # killed, and that is the one thing the user must act on. Clean
+        # stops are the common case and the count is enough for them.
+        for outcome in outcomes:
+            if outcome.method == "refused":
+                self._system_notice(outcome.line, "warning")
+            elif outcome.method == "sigkill":
+                self._system_notice(outcome.line, "error")
+        # Own session LAST, through the in-process branch, which paints its
+        # own receipt naming the way back — the report below does not repeat
+        # it, and this process stays up to paint both.
+        if self._session is not None and not bool(getattr(self._session, "is_remote", False)):
+            await self._stop_local_session()
+        self._system_notice(control.summarize(outcomes))
 
     def _settle_context_reading(self, tokens_before: int, tokens_after: int) -> None:
         """Move the band's context reading to what a compaction left behind.
@@ -16068,6 +16428,30 @@ class OperatorApp(App[None]):
         if message.command == "approvals":
             picker.set_choices(self._approval_choices())
             picker.set_notice("")
+            return
+        if message.command == "stop":
+            # Rows are the live registry scan (the same targets ``/stop all``
+            # would act on) plus the reserved ``all`` word, so the list the
+            # user picks from cannot offer a target the stop cannot resolve.
+            from local_operator.paths import config_dir
+            from local_operator.session.runtime import control
+
+            choices = [
+                ArgumentChoice(
+                    name=str(rec.pid),
+                    description=rec.conversation_name or rec.session_id,
+                    detail="this one" if rec.pid == os.getpid() else rec.kind,
+                )
+                for rec in control._stop_targets(config_dir(), own_pid=os.getpid())
+            ]
+            # `all` after the sessions: it is the one word that stops
+            # everything at once, and sitting under them it is also the
+            # deliberate reach rather than the first row Enter would take.
+            choices.append(
+                ArgumentChoice(name="all", description="stop every session on this machine")
+            )
+            picker.set_choices(choices)
+            picker.set_notice("" if choices else "no other sessions are running")
             return
         if message.command == "analytics":
             picker.set_choices(self._analytics_choices())

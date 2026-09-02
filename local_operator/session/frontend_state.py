@@ -102,6 +102,14 @@ _FRONTEND_LOCAL_SLASHES = {
     # The overlay is local UI; its provider request crosses the authoritative
     # complete_aside operation on RemoteSession.
     "btw",
+    # The kill switch is the one session command that must act from THIS
+    # process even on a follower: bare /stop ends the session the viewer is
+    # looking at (the owner's runtime via the direct stop op, not a routed
+    # slash), `/stop <target>` and `/stop all` enumerate THIS machine's
+    # registry — a different machine's registry than the owner's is exactly
+    # the point of stopping from here. Routing it to the owner would stop the
+    # OWNER's neighbours, not the viewer's.
+    "stop",
 }
 # Bare ``/mcp`` renders the canonical server list locally, but its grant
 # subcommands mutate OAuth state that lives on the authoritative owner — the

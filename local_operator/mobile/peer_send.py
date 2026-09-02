@@ -41,13 +41,18 @@ def resolve_peer_target(
     session: str | None = None,
     pid_hint: str = "an exact pid",
     session_hint: str = "a session id",
+    include_wedged: bool = False,
 ) -> "tuple[Any | None, list[Any], str]":
     """Resolve a peer-send target to one live :class:`SessionRecord`.
 
     Priority: ``pid`` (exact), ``session`` (exact session_id), then the ``target``
     substring matched case-insensitively against conversation_name, then
     session_id, then the cwd basename. Only ``live`` records are eligible (a
-    ``wedged`` owner will not service the socket promptly; ``stale`` is dead).
+    ``wedged`` owner will not service the socket promptly; ``stale`` is dead)
+    — unless ``include_wedged``, which the kill switch passes: a wedged
+    session is exactly the one a user needs to be able to STOP, and the stop
+    ladder's signal rungs are built for an owner that will not answer. A send
+    never wants that; a message to a wedged owner is a message nobody reads.
 
     A selector (``pid``/``session``) alongside a ``target`` substring is REFUSED
     rather than resolved. The two name different sessions, and the precedence
@@ -87,12 +92,13 @@ def resolve_peer_target(
         )
 
     scanned = registry.scan(config_dir())
-    live = [(rec, state) for rec, state in scanned if state == "live"]
+    eligible = ("live", "wedged") if include_wedged else ("live",)
+    live = [(rec, state) for rec, state in scanned if state in eligible]
 
     if pid is not None:
         for rec, state in scanned:
             if rec.pid == pid:
-                if state != "live":
+                if state not in eligible:
                     return (
                         None,
                         [],
@@ -107,7 +113,7 @@ def resolve_peer_target(
     if session:
         for rec, state in scanned:
             if rec.session_id == session:
-                if state != "live":
+                if state not in eligible:
                     return None, [], (f"target session {session} is {state}, not live")
                 return rec, [], ""
         return None, [], f"no session found with session id {session!r}"
@@ -142,7 +148,7 @@ def resolve_peer_target(
         wedged = [
             rec
             for rec, state in scanned
-            if state != "live"
+            if state not in eligible
             and needle
             in (
                 f"{rec.conversation_name or ''} {rec.session_id or ''} "

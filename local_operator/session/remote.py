@@ -1117,6 +1117,17 @@ class RemoteSession:
         if self._client is not None:
             asyncio.create_task(self._client.abort())
 
+    async def request_stop(self) -> str:
+        """Forward the viewer's bare ``/stop`` to the owner (graceful rung).
+
+        Async where ``abort`` is fire-and-forget because the caller wants the
+        owner's ack to paint a receipt; a stop whose receipt cannot say the
+        owner accepted would be indistinguishable from a dropped keypress.
+        """
+        if self._client is None:
+            raise ConnectionError("not attached")
+        return await self._client.request_stop()
+
     def cancel_subagents(self, reason: str = "interrupted") -> int:
         """Optimistic cancel: returns the running count the offer promised.
 

@@ -402,6 +402,19 @@ class AttachClient:
     async def abort(self) -> str:
         return await self._request("abort")
 
+    async def request_stop(self) -> str:
+        """Ask the owner to stop itself — the follower's bare ``/stop``.
+
+        The graceful rung of the kill switch, dialled from the viewer that
+        is looking at the session rather than by a third party: the owner's
+        runtime runs deny-gates → dispose → unpublish → exit. An owner too
+        old to know the op answers the standard unknown-op error, which the
+        caller surfaces as the upgrade hint — the follower never escalates
+        to a signal against its own owner (that decision belongs to the
+        owner's machine, through ``lop stop`` or ``/stop <target>``).
+        """
+        return await self._request("stop")
+
     async def slash(
         self,
         command: str,

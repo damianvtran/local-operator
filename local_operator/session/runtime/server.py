@@ -200,6 +200,18 @@ class SessionHandle(Protocol):
         model change): the runtime pushes whatever changed."""
         ...
 
+    # -- the kill switch: graceful self-stop (optional, probed) --------------
+    # request_stop() -> None: deny parked gates, abort the turn, dispose the
+    # session and begin the runtime's own shutdown, so the ``stop`` control
+    # op ends this runtime the way SIGTERM would. Probed with getattr like
+    # every optional capability below so reduced handles (tests, older
+    # bridges) keep satisfying the protocol: a handle without it answers the
+    # ``stop`` op with the unknown-op error, and the caller's escalation
+    # ladder (session/runtime/control.py) proceeds to identity-confirmed
+    # SIGTERM — which the runtime's signal handler has always honoured.
+    # Sync and non-raising by contract: called ON the runtime loop from the
+    # dispatch, and a stop that faults here is still a stop.
+    #
     # -- v4 optional capabilities (probed with getattr, never required) -------
     # subscribe_events(on_event) -> unsubscribe: feed the host session's raw
     #   AgentEvent stream, serialized (``model_dump(mode="json")``) on the
@@ -723,8 +735,12 @@ class RuntimeServer:
                 detail = await self._dispatch(op, frame)
             await self._send_to(conn, {"op": "ack", "req": req, "detail": detail})
             # Mutations change the projection; push what every front end
-            # should see.
-            if op not in ("watch", "unwatch"):
+            # should see. ``stop`` is exempt: its whole job is to END the
+            # session, so a post-ack refresh would re-read a host that is
+            # mid-dispose (the TUI's handle raises "session is still
+            # starting" the moment its session reference drops) — the ack is
+            # the reply and the ladder's exit-wait is the confirmation.
+            if op not in ("watch", "unwatch", "stop"):
                 await self._handle.refresh()
                 await self._push()
         except Exception as exc:  # noqa: BLE001 — the error IS the reply
@@ -840,6 +856,30 @@ class RuntimeServer:
                 wake=bool(frame.get("wake", False)),
                 sender=frame.get("sender") or {},
             )
+        if op == "stop":
+            # PR 3 (the kill switch): the graceful rung of the stop ladder
+            # (session/runtime/control.py). The plan is deny parked gates →
+            # abort/dispose the session → release the lease → unpublish the
+            # record → exit, executed by the host's ``request_stop`` hook
+            # (OwnedSessionHandle.request_stop owns the ordering); all this
+            # dispatch does is trigger it and ack, so the ack reaching the
+            # caller means "the stop is underway", not "it finished" — the
+            # ladder's timeout decides what a slow exit costs.
+            #
+            # Optional capability, probed: a host that predates the hook (a
+            # reduced test handle, an old TUI bridge) answers with an error,
+            # which the ladder treats as a scheduled miss and proceeds to
+            # identity-confirmed SIGTERM. Additive on the wire — no
+            # PROTOCOL_VERSION bump, for the same reason ``peer_message``
+            # needed none: an old runtime's unknown-op error is exactly the
+            # answer the ladder is built to continue from.
+            request_stop = getattr(h, "request_stop", None)
+            if not callable(request_stop):
+                raise ValueError("this owner cannot stop itself gracefully")
+            result = request_stop()
+            if inspect.isawaitable(result):
+                result = await result
+            return "stopping"
         raise ValueError(f"unknown op: {op!r}")
 
     async def _dispatch_payload(self, op: str, frame: dict[str, Any]) -> Any:
