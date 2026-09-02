@@ -158,6 +158,19 @@ polls `describe_instances` until the state is `terminated` (up to 55 s) and
 otherwise reports `terminate-unconfirmed`, which keeps `rescue_required` set.
 `DesktopEnv.close()` is never called — it terminates without confirming.
 
+**Upstream is sealed after the first `reset`.** OSWorld's own allocation
+paths — a second `reset` on a used env (`_revert_to_snapshot` →
+`AWSProvider.revert_to_snapshot`), `manager.get_vm_path`, `_save_state`,
+`close`/`stop_emulator` — would launch or release an instance with no
+`ClientToken`, no `lop:adapter` tag and no TTL lease: invisible to the audit,
+unreachable by rescue. The provider replaces every one of those methods on
+the live env with a raiser (`UpstreamAllocationRefused`) before any boto3
+call. One `reset` per episode is the contract; the harness runner only ever
+issues one (`reset_start` is PREPARED→RUNNING once), and the seal is what
+makes that a guarantee rather than a convention. A test statically scans
+the pinned upstream for any method that reaches `run_instances`/
+`terminate_instances`/`create_image` and asserts it is sealed.
+
 If the parent dies mid-episode, `rescue.json` in the rescue root names the
 episode's refs. Sweep them all:
 

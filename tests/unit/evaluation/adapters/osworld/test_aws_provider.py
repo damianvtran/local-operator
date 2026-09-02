@@ -245,14 +245,60 @@ def _expect_running(stubs: _Stubs, public_ip: str = "203.0.113.5") -> None:
     )
 
 
+class _UpstreamProviderShape:
+    """Mirrors the upstream AWSProvider/AWSVMManager surface the seal covers.
+
+    Each method records that upstream was reached and then calls
+    ``boto3.client`` -- which the tests assert never happens, because the
+    seal must raise BEFORE any boto3 call.
+    """
+
+    def __init__(self) -> None:
+        self.reached: list[str] = []
+
+    def _touch_boto3(self, name: str) -> None:
+        self.reached.append(name)
+        boto3.client("ec2", region_name=REGION)  # pragma: no cover - must be unreachable
+
+    def revert_to_snapshot(self, path_to_vm: str, snapshot_name: str) -> str:
+        self._touch_boto3("revert_to_snapshot")
+        return "i-untagged"
+
+    def stop_emulator(self, path_to_vm: str) -> None:
+        self._touch_boto3("stop_emulator")
+
+    def save_state(self, path_to_vm: str, snapshot_name: str) -> None:
+        self._touch_boto3("save_state")
+
+    def get_vm_path(self, **kwargs: Any) -> str:
+        self._touch_boto3("get_vm_path")
+        return "i-untagged"
+
+
 class _FakeEnv:
     def __init__(self, **kwargs: Any) -> None:
         self.kwargs = kwargs
         self.reset_calls: list[Any] = []
         self.user_simulator = None
         self.controller = self
+        self.provider = _UpstreamProviderShape()
+        self.manager = self.provider
+        self.is_environment_used = False
+        self.path_to_vm: str = str(kwargs.get("path_to_vm", ""))
+        self.snapshot_name: str = str(kwargs.get("snapshot_name", ""))
+
+    def _revert_to_snapshot(self) -> None:
+        # Upstream desktop_env.py:202-212, condensed.
+        self.path_to_vm = self.provider.revert_to_snapshot(self.path_to_vm, self.snapshot_name)
+
+    def _save_state(self, snapshot_name: str = "") -> None:
+        self.provider.save_state(self.path_to_vm, snapshot_name)
 
     def reset(self, task_config: Any) -> None:
+        # Upstream desktop_env.py:329-336: a used env reverts before setup.
+        if self.is_environment_used:
+            self._revert_to_snapshot()
+        self.is_environment_used = True
         self.reset_calls.append(task_config)
 
     def _get_obs(self) -> dict[str, Any]:
@@ -264,8 +310,9 @@ class _FakeEnv:
     def evaluate(self) -> Any:
         return 0.5
 
-    def close(self) -> None:  # pragma: no cover - must never be called
-        raise AssertionError("DesktopEnv.close() terminates unconfirmed and must not be called")
+    def close(self) -> None:
+        # Upstream desktop_env.py:282-284.
+        self.provider.stop_emulator(self.path_to_vm)
 
 
 # ---------------------------------------------------------------------------
@@ -366,6 +413,118 @@ async def test_allocate_refuses_a_plan_for_another_region(monkeypatch: pytest.Mo
         )
         with pytest.raises(AllocationError, match="region"):
             await provider.allocate(_plan(), _task())
+
+
+# ---------------------------------------------------------------------------
+# the upstream boundary is sealed: no second launch, no unconfirmed close
+# ---------------------------------------------------------------------------
+
+
+async def _allocated(
+    stubs: _Stubs, monkeypatch: pytest.MonkeyPatch
+) -> tuple[AwsProvider, _FakeEnv]:
+    _expect_describe_images(stubs)
+    _expect_run_instances(stubs)
+    _expect_create_schedule(stubs)
+    _expect_running(stubs)
+    envs: list[_FakeEnv] = []
+
+    def factory(**kwargs: Any) -> _FakeEnv:
+        env = _FakeEnv(**kwargs)
+        envs.append(env)
+        return env
+
+    provider = _provider(
+        stubs, monkeypatch, desktop_env_factory=factory, task_factory=lambda t: {"id": t.task_id}
+    )
+    await provider.allocate(_plan(), _task())
+    stubs.ec2_stub.assert_no_pending_responses()
+    return provider, envs[0]
+
+
+@pytest.mark.asyncio
+async def test_a_second_reset_on_a_used_env_is_refused_before_any_boto3_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MAJOR-1. Upstream's second ``reset`` routes through
+    ``_revert_to_snapshot`` -> ``AWSProvider.revert_to_snapshot``, which
+    ``run_instances`` a NEW instance with no ClientToken, no lop:adapter tag
+    and no TTL -- invisible to the audit, unreachable by rescue. The seal must
+    raise before that provider method runs at all.
+
+    The Stubber has no pending responses at this point, so any boto3 call
+    would ALSO fail loudly -- but the assertion is on ``reached`` so the test
+    proves the refusal happened before upstream code, not merely that boto3
+    was unhappy afterwards.
+    """
+
+    with _Stubs() as stubs:
+        provider, env = await _allocated(stubs, monkeypatch)
+        assert env.reset_calls == [{"id": "task_plain"}]
+        assert env.is_environment_used is True
+        with pytest.raises(aws_mod.UpstreamAllocationRefused, match="_revert_to_snapshot"):
+            env.reset(task_config={"id": "again"})
+        assert env.provider.reached == []
+        assert env.reset_calls == [{"id": "task_plain"}]
+        # The direct provider paths are sealed too, not just the DesktopEnv entry.
+        with pytest.raises(aws_mod.UpstreamAllocationRefused, match="revert_to_snapshot"):
+            env.provider.revert_to_snapshot("i-x", "ami-x")
+        with pytest.raises(aws_mod.UpstreamAllocationRefused, match="get_vm_path"):
+            env.manager.get_vm_path()
+        with pytest.raises(aws_mod.UpstreamAllocationRefused, match="_save_state"):
+            env._save_state("snap")
+        assert env.provider.reached == []
+
+
+@pytest.mark.asyncio
+async def test_upstream_close_is_refused_so_teardown_is_only_ever_confirmed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with _Stubs() as stubs:
+        provider, env = await _allocated(stubs, monkeypatch)
+        with pytest.raises(aws_mod.UpstreamAllocationRefused, match="close"):
+            env.close()
+        with pytest.raises(aws_mod.UpstreamAllocationRefused, match="stop_emulator"):
+            env.provider.stop_emulator("i-x")
+        assert env.provider.reached == []
+
+
+def test_the_seal_covers_every_upstream_launch_and_release_method() -> None:
+    """Pins the seal against the PINNED upstream: if a future OSWorld adds
+    another path to ``run_instances``/``terminate_instances`` on the
+    provider or manager, this list is where it must be added, and the
+    static scan of the real checkout below is what flags it."""
+
+    import os
+    import pwd
+    import re
+    from pathlib import Path
+
+    # The suite's conftest points HOME at a scratch directory; the pinned
+    # checkout lives in the REAL home (or wherever OSWORLD_INPUTS_ROOT says).
+    real_home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+    inputs_root = Path(os.environ.get("OSWORLD_INPUTS_ROOT", real_home / "worktrees" / "osworld"))
+    prepared = inputs_root / "prepared"
+    provider_src = prepared / "desktop_env" / "providers" / "aws" / "provider.py"
+    manager_src = prepared / "desktop_env" / "providers" / "aws" / "manager.py"
+    if not provider_src.exists():  # pragma: no cover - inputs root absent on CI
+        pytest.skip("pinned OSWorld checkout not present")
+    sealed = {
+        "revert_to_snapshot",
+        "stop_emulator",
+        "save_state",
+        "get_vm_path",
+    }
+    launching: set[str] = set()
+    for src in (provider_src, manager_src):
+        text = src.read_text()
+        for match in re.finditer(r"def (\w+)\(self[^)]*\):(.*?)(?=\n    def |\Z)", text, re.S):
+            name, body = match.group(1), match.group(2)
+            if re.search(r"run_instances|terminate_instances|create_image", body):
+                launching.add(name)
+    # start_emulator only start_instances/describe -- never launches -- and is
+    # exactly the one upstream method we rely on during __init__.
+    assert launching <= sealed, f"unsealed upstream launch/release methods: {launching - sealed}"
 
 
 # ---------------------------------------------------------------------------
@@ -521,11 +680,62 @@ async def test_describe_resolves_by_tag() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _log_from(logger_name: str, pathname: str, message: str) -> None:
+    """Emit an ERROR record attributed to ``pathname``, as if from that file.
+
+    ``LogRecord.pathname`` is what the capture filters on; ``makeRecord``
+    lets the test set it to the upstream file that would really have logged.
+    """
+
+    logger = logging.getLogger(logger_name)
+    record = logger.makeRecord(logger_name, logging.ERROR, pathname, 1, message, (), None)
+    logger.handle(record)
+
+
+_LLM_METRICS = "/site-packages/desktop_env/evaluators/metrics/llm_metrics.py"
+_DESKTOP_ENV = "/site-packages/desktop_env/desktop_env.py"
+
+
 @pytest.mark.asyncio
-async def test_evaluate_raises_when_the_judge_logged_an_error() -> None:
+async def test_a_benign_setup_retry_error_does_not_mask_a_good_score() -> None:
+    """MAJOR-3. ``desktopenv.env`` carries both the judge's swallowed errors
+    (llm_metrics.py logs on it) and benign setup-retry ERRORs from
+    desktop_env.py. A good score after a recoverable retry must be SCORED."""
+
+    class _RetriedThenScoredEnv(_FakeEnv):
+        def evaluate(self) -> Any:
+            _log_from(
+                "desktopenv.env",
+                _DESKTOP_ENV,
+                "Environment setup failed, retrying (1/5)...",
+            )
+            _log_from("desktopenv.env", _DESKTOP_ENV, "No evaluator configured for task x")
+            return 0.75
+
+    with _Stubs() as stubs:
+        provider = AwsProvider(CREDS, region=REGION, lease_ref="lop-ttl-x", clients=stubs.clients)
+        provider._env = _RetriedThenScoredEnv()
+        assert await provider.evaluate() == 0.75
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("logger_name", "pathname", "message"),
+    [
+        ("desktopenv.env", _LLM_METRICS, "Error in compare_text_with_llm: boom"),
+        ("desktopenv.env", _LLM_METRICS, "Error in compare_images_with_llm: 401"),
+        ("desktopenv.eval_model", "/x/desktop_env/evaluators/model_client.py", "no key"),
+    ],
+)
+async def test_a_judge_backend_error_raises_scoring_unavailable(
+    logger_name: str, pathname: str, message: str
+) -> None:
+    """The other direction: an ERROR from a judge-owned file, on ANY of the
+    loggers those files use, turns the swallowed 0.0 into ScoringUnavailable."""
+
     class _JudgeFailsEnv(_FakeEnv):
         def evaluate(self) -> Any:
-            logging.getLogger("desktopenv.eval_model").error("Error in compare_text_with_llm: boom")
+            _log_from(logger_name, pathname, message)
             return 0.0
 
     with _Stubs() as stubs:
@@ -536,16 +746,31 @@ async def test_evaluate_raises_when_the_judge_logged_an_error() -> None:
 
 
 @pytest.mark.asyncio
+async def test_judge_error_and_benign_error_together_still_raise() -> None:
+    class _BothEnv(_FakeEnv):
+        def evaluate(self) -> Any:
+            _log_from("desktopenv.env", _DESKTOP_ENV, "Environment setup failed, retrying (2/5)...")
+            _log_from("desktopenv.env", _LLM_METRICS, "Error in _compare_answers_with_llm: timeout")
+            return 0.0
+
+    with _Stubs() as stubs:
+        provider = AwsProvider(CREDS, region=REGION, lease_ref="lop-ttl-x", clients=stubs.clients)
+        provider._env = _BothEnv()
+        with pytest.raises(scoring.ScoringUnavailable, match="_compare_answers_with_llm"):
+            await provider.evaluate()
+
+
+@pytest.mark.asyncio
 async def test_evaluate_returns_raw_when_the_judge_is_quiet() -> None:
     with _Stubs() as stubs:
         provider = AwsProvider(CREDS, region=REGION, lease_ref="lop-ttl-x", clients=stubs.clients)
         provider._env = _FakeEnv()
         assert await provider.evaluate() == 0.5
-        # The capture handler was removed afterwards.
-        assert not any(
-            isinstance(h, aws_mod._JudgeErrorCapture)
-            for h in logging.getLogger("desktopenv.eval_model").handlers
-        )
+        # The capture handler was removed afterwards, on every logger.
+        for name in aws_mod._JUDGE_LOGGERS:
+            assert not any(
+                isinstance(h, aws_mod._JudgeErrorCapture) for h in logging.getLogger(name).handlers
+            )
 
 
 @pytest.mark.asyncio

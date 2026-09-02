@@ -43,6 +43,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -204,14 +205,48 @@ def _error_code(error: Exception) -> str:
     return ""
 
 
+class UpstreamAllocationRefused(RuntimeError):
+    """Upstream OSWorld tried to allocate, revert, or release an instance.
+
+    Every upstream launch path (``AWSVMManager._allocate_vm``,
+    ``AWSProvider.revert_to_snapshot``) issues ``run_instances`` with NO
+    ``ClientToken``, NO ``lop:adapter``/``lop:episode`` tag (``Name`` only,
+    and only when ``AWS_INSTANCE_NAME`` is set) and NO TTL schedule (our
+    ``ENABLE_TTL=false``). An instance it created would be invisible to the
+    tag audit, unreachable by descriptor-driven rescue, and unleased -- the
+    exact leak this provider exists to prevent. ``stop_emulator`` is the
+    unconfirmed terminate we also never want. So ``_seal_upstream`` replaces
+    every one of those methods on the live env with a raiser, and this is
+    what it raises: BEFORE any boto3 call, from inside the worker, surfacing
+    to the runner as an adapter error whose cleanup path terminates OUR
+    tagged instance by tag and confirms it.
+    """
+
+
+# Files, not logger names, identify a judge failure. ``llm_metrics.py`` logs
+# its swallowed exceptions on the SHARED ``desktopenv.env`` logger -- the
+# same one ``DesktopEnv.reset``/``evaluate`` use for benign setup-retry
+# ERRORs ("Environment setup failed, retrying (1/5)...") -- so filtering by
+# logger name either misses the judge (drop ``desktopenv.env``) or trips on a
+# good score after a recoverable retry (keep it). ``LogRecord.pathname`` is
+# set by the caller's frame and is what actually distinguishes them. The
+# pinned checkout is what makes matching a basename safe.
+_JUDGE_SOURCE_FILES = frozenset({"llm_metrics.py", "model_client.py"})
+# The loggers those files write to; the handler is attached here only.
+_JUDGE_LOGGERS = ("desktopenv.eval_model", "llm_metrics", "desktopenv.env")
+
+
 class _JudgeErrorCapture(logging.Handler):
-    """Records ERROR-level records from OSWorld's judge loggers.
+    """Records ERROR records emitted FROM OSWorld's judge modules.
 
     ``llm_metrics`` swallows every judge exception into ``0.0`` after a
     ``logger.error("Error in compare_...")`` (llm_metrics.py:176-178). The
     only observable trace of a failed judge call is that log record, so
     capturing it is what lets ``evaluate`` raise ``ScoringUnavailable``
-    instead of returning a silent zero.
+    instead of returning a silent zero. Records from any other file --
+    setup retries, "No evaluator configured", metric file-not-found -- are
+    deliberately NOT captured: those are either benign or already the
+    score's own honest content.
     """
 
     def __init__(self) -> None:
@@ -219,17 +254,12 @@ class _JudgeErrorCapture(logging.Handler):
         self.messages: list[str] = []
 
     def emit(self, record: logging.LogRecord) -> None:
+        if os.path.basename(record.pathname) not in _JUDGE_SOURCE_FILES:
+            return
         try:
             self.messages.append(record.getMessage())
         except Exception:  # pragma: no cover - a broken format must not mask the error
             self.messages.append(record.msg if isinstance(record.msg, str) else "judge error")
-
-
-# Loggers OSWorld's judge path writes to. ``desktopenv.env`` is shared with
-# the rest of the evaluator, which also logs metric failures at ERROR — those
-# are genuine scoring failures too (a metric that raised was swallowed to 0.0),
-# so catching them is correct, not over-broad.
-_JUDGE_LOGGERS = ("desktopenv.eval_model", "llm_metrics", "desktopenv.env")
 
 
 class AwsProvider:
@@ -260,6 +290,10 @@ class AwsProvider:
         # the parent time the whole call out and record nothing.
         self._terminate_timeout_s = terminate_timeout_s
         self._clients = clients if clients is not None else build_clients(credentials, region)
+        # Retained ONLY for _install_default_session; never logged (see
+        # AwsCredentials.__repr__), dropped with the provider.
+        self._credentials = credentials
+        self._reset_count = 0
         self._desktop_env_factory = desktop_env_factory
         self._task_factory = task_factory
         self._sleep = sleep
@@ -454,6 +488,14 @@ class AwsProvider:
             from lop_osworld_v2_adapter import vendor_bridge
 
             task_instance = vendor_bridge.instantiate_task(task.module_name, task.task_id)
+        # Upstream builds its own boto3 clients ambiently (``boto3.client(
+        # 'ec2', region_name=...)`` in start_emulator/get_ip_address) with
+        # NO credentials argument. The worker environment is stripped, so
+        # those calls would fail with NoCredentialsError -- unless the
+        # process default session carries the delivered values. This is the
+        # one place credentials leave our Session object, and it is still
+        # in-process memory, never the environment.
+        self._install_default_session(plan.region)
         env = factory(
             provider_name="aws",
             region=plan.region,
@@ -471,8 +513,72 @@ class AwsProvider:
             instance_type=plan.instance_type,
             use_public_ip=True,
         )
+        self._seal_upstream(env)
         env.reset(task_config=task_instance)
         self._env = env
+        # ``is_environment_used`` flips True on the first step, after which a
+        # second ``reset`` would route through ``_revert_to_snapshot``.
+        # The seal makes that raise; this records the invariant the seal
+        # protects so a reader of the env object sees it.
+        self._reset_count = 1
+
+    def _install_default_session(self, region: str) -> None:
+        if self._credentials is None:
+            return
+        try:
+            import boto3  # type: ignore[import-not-found]
+        except ImportError:  # pragma: no cover - only reachable without the paid extra
+            return
+        boto3.setup_default_session(
+            aws_access_key_id=self._credentials.access_key_id,
+            aws_secret_access_key=self._credentials.secret_access_key,
+            aws_session_token=self._credentials.session_token,
+            region_name=region,
+        )
+
+    @staticmethod
+    def _seal_upstream(env: Any) -> None:
+        """Replace every upstream allocate/revert/release path with a raiser.
+
+        Applied to the LIVE env object (not the class) immediately after
+        construction and before ``reset``: ``DesktopEnv.__init__`` has
+        already called ``provider.start_emulator``/``get_ip_address`` on our
+        instance, which is the only upstream provider work we want. From
+        here on, ``_revert_to_snapshot`` (a second ``reset`` once the env is
+        used), ``provider.revert_to_snapshot`` (the untagged relaunch),
+        ``manager.get_vm_path`` (upstream's own allocation), and
+        ``close``/``stop_emulator`` (unconfirmed terminate) all raise
+        ``UpstreamAllocationRefused`` BEFORE any boto3 call.
+
+        The env is sealed at the instance level so the seal cannot leak
+        into another ``DesktopEnv`` in the same process, and it survives
+        upstream re-assigning ``self.provider``/``self.manager`` in
+        ``_revert_to_snapshot`` only because that method is itself sealed
+        first. Missing attributes are tolerated so an upstream refactor
+        fails loudly at the seal's own test rather than silently here.
+        """
+
+        def refuse(name: str) -> Callable[..., Any]:
+            def _refused(*_args: Any, **_kwargs: Any) -> Any:
+                raise UpstreamAllocationRefused(
+                    f"upstream DesktopEnv.{name} would allocate, revert, or release an "
+                    "EC2 instance outside the adapter's tagged, leased, "
+                    "rescue-resolvable path; refused before any boto3 call"
+                )
+
+            return _refused
+
+        env._revert_to_snapshot = refuse("_revert_to_snapshot")
+        env.close = refuse("close")
+        env._save_state = refuse("_save_state")
+        provider = getattr(env, "provider", None)
+        if provider is not None:
+            provider.revert_to_snapshot = refuse("provider.revert_to_snapshot")
+            provider.stop_emulator = refuse("provider.stop_emulator")
+            provider.save_state = refuse("provider.save_state")
+        manager = getattr(env, "manager", None)
+        if manager is not None:
+            manager.get_vm_path = refuse("manager.get_vm_path")
 
     # ------------------------------------------------------------------
     # episode I/O
