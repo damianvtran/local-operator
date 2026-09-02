@@ -9711,6 +9711,7 @@ async def test_help_documents_shell_mode_and_the_composer_chords() -> None:
             "ctrl+t",
             "ctrl+g",
             "ctrl+b",
+            "ctrl+pageup",
             "esc",
             "ctrl+d",
         )
@@ -9740,6 +9741,7 @@ async def test_help_documents_shell_mode_and_the_composer_chords() -> None:
             "ctrl+t",
             "ctrl+g",
             "ctrl+b",
+            "ctrl+pageup",
             "esc",
             "ctrl+d",
         )
@@ -9757,3 +9759,225 @@ async def test_help_documents_shell_mode_and_the_composer_chords() -> None:
         assert keyed, "no key-reference rows found in /help"
         for row in keyed:
             assert len(row) <= 74, f"{row!r} is {len(row)} cells and wraps at 80 columns"
+
+
+# -- the aside's keyboard scroll chord (D3) --------------------------------
+#
+# The card is `can_focus = False` and binds nothing, so before these chords the
+# WHEEL was its only scroll gesture — and a wheel event does not exist under
+# `tmux set -g mouse off`, with mouse reporting disabled, or over `screen(1)`
+# and non-SGR terminals. These tests are the no-mouse half of the contract:
+# every one of them drives the REAL binding through `pilot.press`, never the
+# action or the panel API, because "the key reaches the app with the composer
+# focused" is the whole claim and calling the action directly assumes it.
+def _aside_answer_rows(rows: int, tag: str = "ANSWER") -> str:
+    """`rows` uniquely identifiable lines, short enough never to wrap.
+
+    Same device as the investigation file's `_long_answer`: "row" in these
+    assertions means one source line, so the counts are not a function of the
+    terminal's column count.
+    """
+    return "\n".join(f"{tag}-ROW-{index:03d}" for index in range(rows))
+
+
+async def _open_long_aside(pilot, app: OperatorApp, question: str = "explain the loop"):
+    """Open a real aside through the composer and settle its answer."""
+    for _ in range(80):
+        await pilot.pause()
+        if app._session is not None:
+            break
+    assert app._session is not None, "the session never booted"
+    app.query_one(Editor).focus()
+    await pilot.pause()
+    app.query_one(Editor).load_text(f"/btw {question}")
+    await pilot.press("enter")
+    await pilot.pause()
+    await pilot.pause()
+    from local_operator.tui.widgets.aside_panel import AsidePanel
+
+    panel = app.query_one(AsidePanel)
+    assert panel.is_open, "the aside never opened"
+    return panel
+
+
+def _aside_rows_on_screen(panel) -> set[int]:
+    """Which answer rows the card is painting right now."""
+    blob = "\n".join(panel.render_lines_for_test())
+    return {index for index in range(200) if f"ANSWER-ROW-{index:03d}" in blob}
+
+
+@pytest.mark.asyncio
+async def test_the_aside_chord_scrolls_without_touching_the_composer() -> None:
+    """ctrl+pageup reaches rows unreachable at rest, and the caret does not move.
+
+    The acceptance criterion the whole slice exists for: the Editor is FOCUSED
+    (the aside's premise is that the user keeps typing), so the chord has to
+    reach app level past a focused `TextArea` without the key landing in the
+    buffer. Both halves are asserted — a chord that scrolled the card AND typed
+    into the composer would pass a movement-only test.
+    """
+    from tests.unit.tui.test_aside import AsideSession
+
+    session = AsideSession(answer=_aside_answer_rows(200))
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        panel = await _open_long_aside(pilot, app)
+
+        editor = app.query_one(Editor)
+        assert app.screen.focused is editor, "the aside must keep the composer focused"
+        # A real draft, so "unchanged" is a claim about content and not about
+        # an empty buffer staying empty.
+        editor.load_text("half a thought")
+        await pilot.pause()
+        caret_before = editor.cursor_location
+
+        at_rest = _aside_rows_on_screen(panel)
+        assert at_rest, "the card is painting no answer rows at all"
+
+        await pilot.press("ctrl+pageup")
+        await pilot.pause()
+        after = _aside_rows_on_screen(panel)
+
+        # The point of the chord: rows that offset 0 could not show.
+        assert after - at_rest, (
+            "ctrl+pageup reached no new rows — "
+            f"at rest {min(at_rest)}-{max(at_rest)}, after {min(after)}-{max(after)}"
+        )
+        # And the composer is untouched: text AND caret.
+        assert editor.text == "half a thought", "the chord typed into the composer"
+        assert editor.cursor_location == caret_before, "the chord moved the caret"
+
+
+@pytest.mark.asyncio
+async def test_the_aside_chord_returns_to_the_newest_rows() -> None:
+    """ctrl+pagedown is the way back, and the pair is symmetric.
+
+    Without this the chord is a one-way trip: a reader who paged up to check
+    something has no keyboard route back to the live tail, which is the same
+    gap `ctrl+end` fills for the transcript.
+    """
+    from tests.unit.tui.test_aside import AsideSession
+
+    session = AsideSession(answer=_aside_answer_rows(200))
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        panel = await _open_long_aside(pilot, app)
+        at_rest = _aside_rows_on_screen(panel)
+
+        for _ in range(3):
+            await pilot.press("ctrl+pageup")
+            await pilot.pause()
+        scrolled = _aside_rows_on_screen(panel)
+        assert scrolled != at_rest, "ctrl+pageup did not move the card"
+
+        for _ in range(12):
+            await pilot.press("ctrl+pagedown")
+            await pilot.pause()
+        # Clamped at the tail, back where it started — not merely "somewhere
+        # else". The wheel clamps rather than wrapping and the key must agree.
+        assert _aside_rows_on_screen(panel) == at_rest, "ctrl+pagedown did not return home"
+
+
+@pytest.mark.asyncio
+async def test_the_aside_chord_pages_rather_than_creeping_by_a_row() -> None:
+    """One press turns over a screenful, because there is no wheel to spin.
+
+    A row-per-press chord is technically "reachable" and useless: the measured
+    worst case is 200 rows against a 3-row budget. This is the assertion that
+    stops the page size being quietly reduced to a row.
+    """
+    from tests.unit.tui.test_aside import AsideSession
+
+    session = AsideSession(answer=_aside_answer_rows(200))
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        panel = await _open_long_aside(pilot, app)
+        before = _aside_rows_on_screen(panel)
+        await pilot.press("ctrl+pageup")
+        await pilot.pause()
+        after = _aside_rows_on_screen(panel)
+
+        moved = min(before) - min(after)
+        # Most of a screenful, not all of it: the panel owns the exact page
+        # size and may hold a row back for its overflow marker or a pinned
+        # question row, so this is bounded below rather than pinned.
+        assert moved >= max(1, len(before) // 2), (
+            f"one press moved {moved} rows against a {len(before)}-row window; "
+            "the chord is creeping, not paging"
+        )
+
+
+@pytest.mark.asyncio
+async def test_the_aside_chord_is_a_no_op_with_the_aside_closed() -> None:
+    """Closed, the chord does nothing AND steals nothing.
+
+    The reason it bubbles rather than sitting at `priority`. Asserted against
+    the neighbouring chords it sits between in `BINDINGS`: `ctrl+up`/`ctrl+down`
+    page the todos and `ctrl+home`/`ctrl+end` page the transcript, and a chord
+    that swallowed a key on the common path would be a regression in a feature
+    that has nothing to do with the aside.
+    """
+    from local_operator.tui.widgets.aside_panel import AsidePanel
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        for _ in range(80):
+            await pilot.pause()
+            if app._session is not None:
+                break
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        editor.load_text("still typing")
+        await pilot.pause()
+        caret_before = editor.cursor_location
+
+        assert not app._aside_is_open()
+        # No exception, no focus change, no edit to the buffer.
+        await pilot.press("ctrl+pageup")
+        await pilot.pause()
+        await pilot.press("ctrl+pagedown")
+        await pilot.pause()
+
+        assert not app._aside_is_open(), "the chord opened an aside"
+        assert editor.text == "still typing"
+        assert editor.cursor_location == caret_before
+        assert app.screen.focused is editor
+        assert app.query_one(AsidePanel).is_open is False
+
+        # The keys it must not have taken still work.
+        await pilot.press("ctrl+t")
+        await pilot.pause()
+        assert app._todo_panel is not None
+
+
+@pytest.mark.asyncio
+async def test_the_aside_chord_is_silent_when_there_is_nothing_to_scroll() -> None:
+    """Open but fully on screen: the press is a harmless miss, not a notice.
+
+    The `_scroll_todos` rule. An aside stays open across whole conversations,
+    so a receipt on every stray press would append warning rows to a transcript
+    from a card whose title says nothing here joins it — and they would be
+    drawn BEHIND the card, so the user would find them only after dismissing
+    the thing they were reading. Silence is the deliberate choice.
+    """
+    from tests.unit.tui.test_aside import AsideSession
+
+    # Two rows against a 40-row screen: nothing is ever hidden.
+    session = AsideSession(answer="one line.")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        panel = await _open_long_aside(pilot, app, "short one")
+        before = panel.render_lines_for_test()
+
+        await pilot.press("ctrl+pageup")
+        await pilot.pause()
+        await pilot.press("ctrl+pagedown")
+        await pilot.pause()
+
+        after = panel.render_lines_for_test()
+        assert after == before, "a no-op press repainted the card"
+        # And it did not invent an overflow marker for a card with no overflow.
+        # Pinned on the marker's own noun rather than on the word "scroll",
+        # which the card's hint row legitimately carries.
+        assert not any("earlier" in line for line in after), after

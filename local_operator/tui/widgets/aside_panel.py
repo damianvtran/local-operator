@@ -170,11 +170,22 @@ class AsideTurn:
 
 @dataclass
 class AsideBody:
-    """The visible rows, and how many whole QUESTIONS were dropped above them.
+    """The visible rows, and how many whole QUESTIONS sit above them.
 
     Questions, not lines. A user remembers asking three things; they never
     counted the rows an answer wrapped to, so a line count names a quantity
     they cannot check against anything.
+
+    That reasoning covers whole turns the window has scrolled past. It does
+    NOT extend to rows cut out of the middle of ONE answer: there is no
+    question to count there (the count is zero, which is why the card used to
+    say nothing at all), and the reader's question is "how much of this answer
+    am I missing", which only a row count answers. ``_body`` therefore names
+    lines in that case and questions in this one; see the two markers there.
+
+    Counted from the top of the window only. The old count also included turns
+    hidden BELOW it, so a card scrolled to the oldest question announced "5
+    earlier questions" under an arrow pointing up at nothing.
     """
 
     lines: list[Text] = field(default_factory=list)
@@ -213,13 +224,20 @@ class AsidePanel(Static):
         #: aside promises not to leave, and while the card is up the row would
         #: be drawn behind it, so the user finds it only after dismissing.
         self._notice = ""
-        #: How many turns back from the tail the reader has walked. The wheel
+        #: How many ROWS back from the tail the reader has walked. The wheel
         #: moves it; ASKING snaps it back to 0, because the user's own new
         #: question is a re-acquire. Streaming does NOT: the same three-state
         #: rule the transcript follows (:class:`TailAnchor`), in this card's
         #: units — a reader who walked back mid-answer is reading, and the
-        #: deltas must not drag them forward.
-        self._scroll_back = 0
+        #: deltas must not drag them forward (see :meth:`append_answer`).
+        #:
+        #: Rows and not turns, which is the fix for the defect this card
+        #: shipped with: a turn is the coarsest possible unit and an answer
+        #: taller than the card has no unit smaller than itself, so the middle
+        #: of one was addressable by no gesture at all — measured at 191 of 200
+        #: rows at 80x24. The name carries the unit because getting it wrong
+        #: is precisely what went wrong.
+        self._scroll_back_rows = 0
         #: Screen size plus the live dock ceiling at the last paint. The dock
         #: grows as the composer wraps without resizing this card, so Textual
         #: emits no resize event for it and the app has to ask.
