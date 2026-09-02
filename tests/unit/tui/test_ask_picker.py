@@ -93,10 +93,19 @@ from local_operator.tui.widgets.ask_picker import (
     PROMPT_HEIGHT_SHARE,
     RECOMMENDED_TAG,
     REVEAL_MAX_ROWS,
+    SCROLLBAR_THUMB,
+    SCROLLBAR_TRACK,
     SECRET_MASK,
     AskPickerScreen,
     _CardLayout,
 )
+
+# The two scrollbar glyphs are read from the card under test itself, so a rename
+# fails this file rather than leaving it asserting on a stale literal. Track and
+# thumb are the design's `│`/`█` (docs/design/ask-omp-scroll.md §3.1), and the
+# card copies both the glyphs and the maths from `usage_panel`.
+_THUMB_GLYPH = SCROLLBAR_THUMB
+_TRACK_GLYPH = SCROLLBAR_TRACK
 
 
 def _question(
@@ -404,6 +413,50 @@ async def test_a_click_on_a_row_selects_and_answers_with_it() -> None:
         await pilot.click(offset=(region.x + 4, region.y + target))
         await pilot.pause()
     assert app.answered == [{"stale": ["Backfill from the audit log"]}]
+
+
+@pytest.mark.asyncio
+async def test_a_click_under_the_thumb_still_answers_the_row_it_lands_on() -> None:
+    """The click's sibling for the OMP thumb (ask-omp-scroll.md §7): in a
+    WINDOWING state the row under the scrollbar is cut to ``width - 1`` and the
+    glyph takes the freed column, so a hit-test derived from column arithmetic
+    could resolve the thumb's cell to the wrong row. The map ``_index_at`` reads
+    is ``_line_rows``, and it is unchanged by the overlay — a line still maps to
+    the row it belongs to whatever occupies its last cell — so this pins that a
+    click on a windowed, thumb-bearing row answers THAT row.
+
+    Runs on the real ``OperatorApp``: the thumb is only drawn under the app's
+    stylesheet, and windowing is a budget-decided geometry claim, so ``_AskHost``
+    is the wrong host (this file's header). The target is re-derived from
+    ``_line_rows`` for the same reason the sibling at :378 is — column
+    arithmetic would encode the very off-by-one the thumb column can introduce.
+    """
+    answered: dict[str, list[str]] = {}
+    size = (100, 24)
+    app, card = await _real_app_card(size, [_many_options_question(21)])
+    card._on_settle = lambda values: answered.update(values or {})
+    async with app.run_test(size=size) as pilot:
+        await _show(app, pilot, card)
+        # Scroll the window off the top so the click lands on a row whose index
+        # is not its screen position — and confirm we really are windowing with a
+        # thumb before trusting the click.
+        for _ in range(8):
+            await pilot.press("down")
+            await pilot.pause()
+        assert card._layout().show_position, size
+        assert _thumb_is_drawn(card), (size, "expected a thumb to click under")
+
+        body = card.query_one("#ask-picker-body")
+        region = body.region
+        drawn_rows = [row for row in card._line_rows if row is not None]
+        # The SECOND drawn option row, whatever its option index — the target is
+        # the row the map says owns that body line, not a computed offset.
+        target_row = drawn_rows[1]
+        target_line = card._line_rows.index(target_row)
+        expected = card.question.options[target_row].label
+        await pilot.click("#ask-picker-body", offset=(region.x + 4, target_line))
+        await pilot.pause()
+    assert answered == {"many": [expected]}, (answered, target_row, expected)
 
 
 # --- multi-select -----------------------------------------------------------
@@ -806,6 +859,12 @@ async def test_the_position_row_is_only_drawn_when_the_list_is_windowed() -> Non
         # the user reads.
         assert not layout.show_position, (layout.page, card.row_count, text)
         assert "showing" not in text, text
+        # The OMP thumb (ask-omp-scroll.md §3.2) shares this exact condition —
+        # it is the position row's proportional twin, one overflow fact in two
+        # renderings. A list drawn in full must therefore carry NO scrollbar
+        # glyph either, so the two overflow signals can never drift apart: a
+        # thumb without a count would be the same lie in the other medium.
+        assert not _thumb_is_drawn(card), (layout.page, card.row_count, _thumb_column(card))
 
 
 @pytest.mark.asyncio
@@ -1671,6 +1730,26 @@ def _long_question(recommended: int | None = 1) -> AskQuestion:
         labels=("Drop the column and the rows with it", "Backfill from the audit log", "Leave it"),
         descriptions=("nothing reads it any more", "slower, keeps the history", "cheapest now"),
         recommended=recommended,
+    )
+
+
+def _many_options_question(count: int = 21) -> AskQuestion:
+    """A list far taller than any card's body, so it WINDOWS at every real size.
+
+    Short single-line labels with short descriptions on purpose: the scroll
+    regime is entered by having more ROWS than the body can draw, not by prose
+    length (windowing implies `desc_rows == {}`, ask-omp-scroll.md §4). Twenty-
+    one options plus the free-text row is 22 rows — a body has to be very tall to
+    fit that, so the card windows across the whole band of sizes these tests
+    sweep and the thumb has somewhere to travel.
+    """
+    return AskQuestion(
+        id="many",
+        question="Pick a target for the migration",
+        options=[
+            AskOption(label=f"Option {index} label here", description=f"consequence {index}")
+            for index in range(count)
+        ],
     )
 
 
@@ -3405,6 +3484,51 @@ def _fingerprint(card: AskPickerScreen) -> list[str]:
     return [line.rstrip() for line in card.render_lines_for_test()]
 
 
+def _thumb_column(card: AskPickerScreen) -> list[str]:
+    """The rightmost cell of every OPTION-ROW line, in window order.
+
+    Read from the DRAWN frame through `_line_rows` — the same map the hit-test
+    resolves a click through — never from an internal flag. A previous suite was
+    green while a feature was dead because it checked intentions instead of ink
+    (BLOCKER 1, `_prose_by_row`); the thumb is checked the same way. The thumb is
+    painted over the last column of each windowed option row (`_paint_scrollbar`,
+    row cut to `width-1` then the glyph appended), so this column IS the track:
+    `█` where the thumb sits, `│` on the bare track, and anything else where no
+    scrollbar is drawn at all.
+
+    Lines that map to no row (`None`: header, spacers, the position row, the
+    footer, the reveal block) are skipped, so what comes back is exactly the
+    `page` drawn option rows, top to bottom.
+    """
+    lines = card.render_lines_for_test()
+    column: list[str] = []
+    for line_index, row in enumerate(card._line_rows):
+        if row is None:
+            continue
+        line = lines[line_index]
+        column.append(line[-1] if line else "")
+    return column
+
+
+def _thumb_is_drawn(card: AskPickerScreen) -> bool:
+    """Whether any scrollbar glyph reached the card's rightmost column."""
+    return any(cell in (_THUMB_GLYPH, _TRACK_GLYPH) for cell in _thumb_column(card))
+
+
+def _thumb_span(card: AskPickerScreen) -> tuple[int | None, int]:
+    """`(thumb_top, thumb_len)` READ FROM THE DRAWN TRACK, not from the maths.
+
+    The design's `_scrollbar_thumb` returns the intended `(top, len)`; this
+    recovers the same pair from the glyphs the user can actually see, so a test
+    can pin that the render agrees with the arithmetic rather than trusting one
+    to stand for the other. `top` is `None` when no `█` is drawn.
+    """
+    column = _thumb_column(card)
+    top = next((i for i, cell in enumerate(column) if cell == _THUMB_GLYPH), None)
+    length = sum(1 for cell in column if cell == _THUMB_GLYPH)
+    return top, length
+
+
 @pytest.mark.asyncio
 async def test_ctrl_e_is_live_at_the_sizes_the_user_reported() -> None:
     """D2, the blocker: the reveal must DO something at 190x50 and 150x40.
@@ -4294,6 +4418,17 @@ async def test_the_cap_leaves_the_approval_gate_byte_identical() -> None:
             width = card._layout().width
             golden = ["─" * width if line == "─" else line for line in body]
             assert _fingerprint(card) == golden, (size, _fingerprint(card))
+            # The gate does not window at this size — `page == row_count`, so the
+            # OMP thumb (ask-omp-scroll.md §3.2) is never painted here and no
+            # column is stolen from a consequence. Added so a future change that
+            # lengthens a consequence or adds an option — and thus starts
+            # windowing the approval gate — fails HERE with a readable cause
+            # rather than as a mystery one-column shift on the golden above.
+            assert card._layout().page == card.row_count, (
+                size,
+                card._layout().page,
+                card.row_count,
+            )
             # The dock the frame was measured in, pinned with it. Without this
             # the golden could go on agreeing with a card measured in the wrong
             # budget — which is the exact way this test passed while wrong.
@@ -4397,6 +4532,13 @@ async def test_the_cap_leaves_the_short_description_card_byte_identical() -> Non
             layout = card._layout()
             golden = ["─" * layout.width if line == "─" else line for line in body]
             assert _fingerprint(card) == golden, (size, _fingerprint(card))
+            # Neither pinned size windows — `page == row_count`, so the OMP thumb
+            # (ask-omp-scroll.md §3.2) is not drawn and the golden above shifts by
+            # no column. Added alongside the approval-gate assertion so a future
+            # change that started windowing this card (and cut a row to `width-1`
+            # under a thumb) fails here with a readable cause rather than as an
+            # unexplained one-cell diff on the golden.
+            assert layout.page == card.row_count, (size, layout.page, card.row_count)
             # The dock the frame was measured in, pinned with it — the term
             # that was silently 0 before.
             assert card._dock_reserved_rows() == 5, (size, card._dock_reserved_rows())
@@ -4769,3 +4911,356 @@ async def test_a_silently_truncated_reveal_is_caught(monkeypatch: pytest.MonkeyP
             "expected the silent truncation",
             block,
         )
+
+
+# --- the OMP scrollbar thumb and paging (docs/design/ask-omp-scroll.md §7) ---
+#
+# All geometry via the real ``OperatorApp`` (:func:`_show`), never ``_AskHost``:
+# the dockless host reserves 0 rows where the app reserves 5, so its ``page`` is
+# a card the app never draws (this file's header, and BLOCKER 2). Every guard
+# below asserts on DRAWN TEXT — the thumb glyphs the compositor actually paints,
+# read back through :func:`_thumb_column` — rather than on ``_scrollbar_thumb``'s
+# return or on ``layout.page``, because a previous suite was green while a
+# feature was dead by checking intentions instead of ink (BLOCKER 1).
+
+
+@pytest.mark.asyncio
+async def test_the_thumb_appears_only_when_the_list_windows() -> None:
+    """The thumb is an overflow signal, so it must appear on EXACTLY the frames
+    that hide part of the list — and disappear, leaving no track behind, the
+    moment the whole list fits.
+
+    The one-for-one with ``show_position`` is the contract, not ``page <
+    row_count``: the two diverge. Measured against the real app, a 21-option
+    list at 100x16 has ``page == 1 < row_count`` yet ``show_position`` is False —
+    the D1 collapse in ``_layout`` (:1663-1700) drops the position row to keep
+    the QUESTION line, and a thumb keyed on the raw ``page`` comparison would
+    then paint a scrollbar with no count beside it. The design's own invariant
+    (§6, §10) is that the thumb and the position row are one overflow fact in two
+    renderings, never one without the other, so this pins the thumb to
+    ``show_position``. If the coder keyed the thumb on ``page < row_count`` this
+    fails at the tight leg, which is the intended catch.
+
+    Swept across a band that includes fitting sizes (tall terminals), windowing
+    sizes (the position row bought), and the collapse size (page short of the
+    list but the count dropped), so both directions of the iff are exercised.
+    """
+    question = _many_options_question(21)
+    # (size, windows-with-count?) — derived from the real-app probes in §9-style
+    # measurement, re-asserted here rather than trusted.
+    for size in ((100, 16), (100, 24), (100, 28), (100, 50), (120, 60)):
+        app, card = await _real_app_card(size, [question])
+        async with app.run_test(size=size) as pilot:
+            await _show(app, pilot, card)
+            layout = card._layout()
+            drawn = _thumb_is_drawn(card)
+            # The contract: thumb iff the card is reporting a window, on the
+            # PAINT and on the PLAN together — either alone can be right while
+            # the other is wrong (the flag is what the renderer reads, the glyph
+            # is what the user sees).
+            assert drawn == layout.show_position, (
+                size,
+                layout.page,
+                card.row_count,
+                layout.show_position,
+                "".join(_thumb_column(card)),
+            )
+            # And when it is absent it leaves NO track behind — not a bare `│`
+            # column on a card that fits. A residual track is a scrollbar
+            # claiming a list is windowed when it is not.
+            if not layout.show_position:
+                assert not any(
+                    cell in (_THUMB_GLYPH, _TRACK_GLYPH) for cell in _thumb_column(card)
+                ), (size, "".join(_thumb_column(card)))
+
+
+@pytest.mark.asyncio
+async def test_the_thumb_tracks_the_scroll_offset() -> None:
+    """The thumb's position IS the window's position in the list: at the top of
+    the list it sits at the top of the track, at the bottom it sits at the
+    bottom, and it only ever moves down as the offset grows.
+
+    Pinned on the DRAWN thumb (`_thumb_span`), and cross-checked against
+    ``_scrollbar_thumb`` so the render and the arithmetic cannot drift. Driven by
+    real ``down`` presses through the app's own keymap — the autoscroll that
+    ``_move_to`` provides is what carries the offset, so this also proves the
+    thumb follows the cursor and not some independent counter.
+    """
+    size = (100, 24)
+    question = _many_options_question(21)
+    app, card = await _real_app_card(size, [question])
+    async with app.run_test(size=size) as pilot:
+        await _show(app, pilot, card)
+        layout = card._layout()
+        assert layout.show_position, (size, layout.page, card.row_count)
+        page = layout.page
+        track = max(1, page)
+
+        tops: list[int] = []
+        # Walk the whole list top to bottom, sampling the thumb top and the
+        # offset at each step.
+        seen_offsets: list[int] = []
+        for _ in range(card.row_count):
+            top, length = _thumb_span(card)
+            # The thumb is always drawn while the list windows (a `█` is present,
+            # so `top` is never None here), and it agrees with the maths the
+            # design copied from usage_panel.
+            assert top is not None, (card._offset, "expected a drawn thumb")
+            expected_top, expected_len = card._scrollbar_thumb(card.row_count, page)
+            assert top == expected_top, (card._offset, top, expected_top)
+            assert length == expected_len, (card._offset, length, expected_len)
+            tops.append(top)
+            seen_offsets.append(card._offset)
+            await pilot.press("down")
+            await pilot.pause()
+
+        # Top at 0 when the offset is 0; top at the track's far end
+        # (`track - thumb`) when the offset is at its maximum.
+        assert tops[0] == 0, tops
+        _, thumb_len = card._scrollbar_thumb(card.row_count, page)
+        max_offset = max(0, card.row_count - page)
+        assert seen_offsets[0] == 0, seen_offsets
+        # The last sample where the offset reached its max pins the bottom.
+        assert max(seen_offsets) == max_offset, (seen_offsets, max_offset)
+        bottom_top = tops[seen_offsets.index(max(seen_offsets))]
+        assert bottom_top == track - thumb_len, (bottom_top, track, thumb_len)
+        # Monotone non-decreasing: paging down never walks the thumb UP.
+        assert tops == sorted(tops), tops
+
+
+@pytest.mark.asyncio
+async def test_the_thumb_never_widens_the_card() -> None:
+    """The thumb costs no width: the row under it is cut to ``width - 1`` and the
+    glyph takes the freed column, so a windowed frame is exactly as wide as the
+    same card without a scrollbar.
+
+    This is the property ``test_no_row_overflows_the_card_at_any_width`` (:443)
+    pins for the non-windowed card, re-asserted for the one new frame the change
+    introduces. It is the byte-identity guard's little sibling: if the thumb ever
+    APPENDED its column instead of overlaying it, every windowed row would run
+    one cell past ``layout.width`` and the card would widen the dock.
+    """
+    question = _many_options_question(21)
+    for size in ((80, 24), (100, 24), (100, 28), (120, 24)):
+        app, card = await _real_app_card(size, [question])
+        async with app.run_test(size=size) as pilot:
+            await _show(app, pilot, card)
+            layout = card._layout()
+            assert layout.show_position, (size, "expected a windowed frame")
+            assert _thumb_is_drawn(card), (size, "expected a thumb")
+            for line in card.render_lines_for_test():
+                assert cell_len(line) <= layout.width, (size, cell_len(line), layout.width, line)
+
+
+@pytest.mark.asyncio
+async def test_page_down_and_up_move_a_page_and_clamp() -> None:
+    """``PageDown`` moves the cursor ``max(1, page - 1)`` rows and clamps at the
+    last row; ``PageUp`` mirrors it and clamps at 0. No wrap either way — unlike
+    the arrows, a page gesture that wrapped would read as the list resetting.
+
+    ``page - 1`` (not ``page``) keeps one row of context across the jump, which
+    is OMP's ``Math.max(1, bodyRows - 1)`` (ask-dialog.ts:702-708) and the step
+    the design specifies (§4.1). Driven through the real keymap so the bindings
+    themselves are pinned, not just ``action_page``.
+    """
+    size = (100, 24)
+    question = _many_options_question(21)
+    app, card = await _real_app_card(size, [question])
+    async with app.run_test(size=size) as pilot:
+        await _show(app, pilot, card)
+        page = card._layout().page
+        step = max(1, page - 1)
+        assert card.state.selected == 0, card.state.selected
+
+        # One page down moves exactly one page-step.
+        await pilot.press("pagedown")
+        await pilot.pause()
+        assert card.state.selected == step, (card.state.selected, step)
+
+        # A second page down moves another step (no double-counting, no drift).
+        await pilot.press("pagedown")
+        await pilot.pause()
+        assert card.state.selected == 2 * step, (card.state.selected, step)
+
+        # Paging past the end CLAMPS on the last row and does not wrap to 0.
+        for _ in range(card.row_count):
+            await pilot.press("pagedown")
+            await pilot.pause()
+        assert card.state.selected == card.row_count - 1, card.state.selected
+
+        # One page up steps back by the same amount from the last row.
+        await pilot.press("pageup")
+        await pilot.pause()
+        assert card.state.selected == card.row_count - 1 - step, (card.state.selected, step)
+
+        # Paging past the top CLAMPS on row 0 and does not wrap to the end.
+        for _ in range(card.row_count):
+            await pilot.press("pageup")
+            await pilot.pause()
+        assert card.state.selected == 0, card.state.selected
+
+
+@pytest.mark.asyncio
+async def test_paging_keeps_the_cursor_visible() -> None:
+    """After every page and every arrow the selected row is DRAWN — it stays
+    inside the window ``[_offset, _offset + page)``. This is the autoscroll
+    invariant ``_move_to`` exists to hold, and it is the reason paging routes
+    through ``_move_to`` rather than moving the offset on its own: a page that
+    left the cursor off-screen would be a card whose highlighted row nobody can
+    see.
+
+    Checked against the DRAWN window (`_window`) as well as the arithmetic, and
+    checked after a mixed sequence of pages and arrows so the two movement paths
+    cannot each be right alone while their composition drifts.
+    """
+    size = (100, 24)
+    question = _many_options_question(21)
+    app, card = await _real_app_card(size, [question])
+    async with app.run_test(size=size) as pilot:
+        await _show(app, pilot, card)
+
+        def cursor_is_drawn() -> None:
+            page = card._layout().page
+            window = card._window(page)
+            assert card.state.selected in window, (
+                card.state.selected,
+                card._offset,
+                page,
+                window,
+            )
+
+        cursor_is_drawn()
+        # A mix of both gestures, in an order neither handler would special-case.
+        for key in (
+            "pagedown",
+            "down",
+            "down",
+            "pagedown",
+            "pageup",
+            "down",
+            "pagedown",
+            "pagedown",
+            "up",
+            "pageup",
+            "down",
+        ):
+            await pilot.press(key)
+            await pilot.pause()
+            cursor_is_drawn()
+
+
+@pytest.mark.asyncio
+async def test_the_wheel_scrolls_the_windowed_list() -> None:
+    """The wheel moves the cursor a row and scrolls the window with it, and the
+    thumb follows — the mouse-gesture half of the same autoscroll.
+
+    Nothing in this file drove the wheel handler before this: the existing click
+    test (:378) names the wheel in its docstring but only clicks. So this is the
+    added coverage §7 asks for, and it exercises the real ``on_mouse_scroll_down``
+    path, asserting the DRAWN thumb advances, not an internal offset.
+    """
+    from textual.events import MouseScrollDown
+
+    def _wheel_down(widget) -> MouseScrollDown:  # type: ignore[no-untyped-def]
+        """A wheel-down event over ``widget``. Built with keywords so a Textual
+        signature change fails loudly here rather than silently reordering the
+        positional flags into the wrong fields."""
+        return MouseScrollDown(
+            widget=widget,
+            x=0,
+            y=0,
+            delta_x=0,
+            delta_y=1,
+            button=0,
+            shift=False,
+            meta=False,
+            ctrl=False,
+        )
+
+    size = (100, 24)
+    question = _many_options_question(21)
+    app, card = await _real_app_card(size, [question])
+    async with app.run_test(size=size) as pilot:
+        await _show(app, pilot, card)
+        assert card._layout().show_position, size
+        top_before, _ = _thumb_span(card)
+        assert top_before == 0, top_before
+        offset_before = card._offset
+
+        # Wheel down far enough to drive the window well past the top — one notch
+        # moves the cursor one row, and the offset follows once the cursor
+        # reaches the window's bottom edge. Enough notches to clear the whole
+        # list, so the thumb has to have moved off the top by the end.
+        for _ in range(card.row_count):
+            card.on_mouse_scroll_down(_wheel_down(card))
+            await pilot.pause()
+
+        # The wheel scrolled the window: the offset advanced from the top.
+        assert card._offset > offset_before, (offset_before, card._offset)
+        # And the thumb followed it off the top of the track.
+        top_after, _ = _thumb_span(card)
+        assert top_after is not None and top_after > top_before, (top_before, top_after)
+        # The drawn thumb agrees with the maths the design copied from
+        # usage_panel at the offset the wheel left the window on.
+        expected_top, _ = card._scrollbar_thumb(card.row_count, card._layout().page)
+        assert top_after == expected_top, (top_after, expected_top)
+
+
+@pytest.mark.asyncio
+async def test_the_approval_gate_is_byte_identical_with_the_thumb() -> None:
+    """The strongest safety guard (§3.2): the tool-approval gate is byte-for-byte
+    unchanged by the thumb, AND no thumb column is drawn on it at any pinned
+    size.
+
+    Distinct from ``test_the_cap_leaves_the_approval_gate_byte_identical``
+    (:4227), which pins the frame against the CAP. This one pins it against the
+    THUMB, and both are kept for the reason the two wrap/cap goldens are: a
+    regression from either change must name itself. The gate's three consequences
+    are the description that authorises a possibly destructive call, so a column
+    silently stolen from them — or a thumb painted over one — is the failure this
+    surface exists to prevent.
+
+    The gate never windows above ~44 columns (`page == row_count == 3` at every
+    pinned size, measured), so the thumb's ``page < row_count`` /
+    ``show_position`` condition is never met here and the frame is the same one
+    :4227 pins. That is asserted, not assumed: if a future change lengthens a
+    consequence or adds an option so the gate windows, ``show_position`` flips
+    true, a thumb appears over an authorisation surface, and this fails with a
+    readable cause.
+    """
+    body = [
+        "the agent needs your approval",
+        "─",
+        f"Allow bash? {_APPROVAL_TARGET}",
+        "",
+        "❯ y. Allow",
+        "     run this call and ask again next time",
+        "  n. Deny",
+        "     refuse this call; the turn continues",
+        "  A. Allow all",
+        "     stop asking for this session",
+        "",
+        "↑↓ move · enter answer · esc deny",
+    ]
+
+    for size in ((100, 30), (130, 30), (150, 40)):
+        app = _baseline_app()
+        async with app.run_test(size=size) as pilot:
+            await pilot.pause()
+            card, task = await _real_approval_card(app, pilot)
+
+            width = card._layout().width
+            golden = ["─" * width if line == "─" else line for line in body]
+            # Byte-identical to the pre-thumb frame.
+            assert _fingerprint(card) == golden, (size, _fingerprint(card))
+            # And the gate does not window, so no thumb is drawn and no column is
+            # stolen from a consequence. Both halves: the plan says the list fits
+            # (`page == row_count`), and the paint carries no scrollbar glyph.
+            assert card._layout().page == card.row_count, (
+                size,
+                card._layout().page,
+                card.row_count,
+            )
+            assert not card._layout().show_position, (size, card._layout())
+            assert not _thumb_is_drawn(card), (size, "".join(_thumb_column(card)))
+            task.cancel()
