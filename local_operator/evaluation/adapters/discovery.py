@@ -193,10 +193,14 @@ def workspace_digest(path: str) -> str:
                 raise AdapterDiscoveryError("adapter workspace contains a symlink")
             if stat.S_ISDIR(info.st_mode):
                 continue
-            if _is_bytecode_cache(candidate.relative_to(root)):
-                continue
+            # The unsafe-file check precedes the bytecode exclusion: the cache
+            # rule forgives a bytecode FILE, not any entry named like one, so a
+            # fifo or hardlink named ``x.pyc`` under ``__pycache__`` is refused
+            # like any other.
             if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
                 raise AdapterDiscoveryError("adapter workspace contains an unsafe file")
+            if _is_bytecode_cache(candidate.relative_to(root)):
+                continue
             if len(entries) >= MAX_WORKSPACE_FILES:
                 raise AdapterDiscoveryError("adapter workspace file count exceeds limit")
             total_bytes += info.st_size

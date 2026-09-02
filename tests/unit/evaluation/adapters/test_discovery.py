@@ -1009,6 +1009,12 @@ def test_workspace_digest_ignores_bytecode_caches_by_rule(tmp_path: Path) -> Non
     # other. Real content outside the cache still moves the digest.
     (cache / "stray.py").write_text("x = 1\n")
     assert workspace_digest(str(workspace)) == before
+    # The exclusion forgives a bytecode FILE, never an entry merely named like
+    # one: a fifo named ``*.pyc`` inside the cache is still unsafe.
+    os.mkfifo(cache / "task_004.cpython-312.pyc")
+    with pytest.raises(AdapterDiscoveryError, match="unsafe"):
+        workspace_digest(str(workspace))
+    os.unlink(cache / "task_004.cpython-312.pyc")
     (cache / "task_002.cpython-312.pyc").symlink_to(tasks / "task_001.py")
     with pytest.raises(AdapterDiscoveryError, match="symlink"):
         workspace_digest(str(workspace))

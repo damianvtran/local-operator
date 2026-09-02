@@ -157,11 +157,17 @@ def _maybe_import_workspace_task():
     marker = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tiny_workspace_import")
     if not os.path.exists(marker):
         return
-    path = os.path.join(os.getcwd(), "tasks", "task_001.py")
-    spec = importlib.util.spec_from_file_location("osworld_task_task_001", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    assert module.MARK == "source"
+    for relative, expected in (
+        (("tasks", "task_001.py"), "source"),
+        (("tasks", "pkg", "mod.py"), "nested"),
+    ):
+        path = os.path.join(os.getcwd(), *relative)
+        spec = importlib.util.spec_from_file_location(
+            "osworld_task_" + relative[-1].replace(".py", ""), path
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        assert module.MARK == expected
 
 
 # Build the frame list for one observation, publishing real bytes into the root
@@ -406,10 +412,13 @@ def real_selector(tmp_path: Path, adapter_site: Path) -> AdapterSelector:
     (workspace / "adapter-release.json").write_text(
         json.dumps({"release_digest": RELEASE_DIGEST}, separators=(",", ":"), sort_keys=True)
     )
-    # A task module in the pinned workspace, as the OSWorld layout has, so a
-    # test can make the worker import from the verified tree.
+    # Task modules in the pinned workspace, as the OSWorld layout has, so a
+    # test can make the worker import from the verified tree. The nested
+    # module proves ``-B`` covers subdirectory caches, not only the top level.
     (workspace / "tasks").mkdir(exist_ok=True)
     (workspace / "tasks" / "task_001.py").write_text("MARK = 'source'\n")
+    (workspace / "tasks" / "pkg").mkdir(exist_ok=True)
+    (workspace / "tasks" / "pkg" / "mod.py").write_text("MARK = 'nested'\n")
     return AdapterSelector(
         schema_version="1.2",
         adapter_id="tiny-runner",
