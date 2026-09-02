@@ -32,7 +32,7 @@ from local_operator.tui.app import (
     OperatorApp,
 )
 from local_operator.tui.events import SteeringDelivered, TurnEnded
-from local_operator.tui.widgets.editor import Editor
+from local_operator.tui.widgets.editor import Attachment, Editor
 from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView, UserBlock
 
 from .test_app_pilot import FakeSession, _factory
@@ -214,7 +214,11 @@ async def test_a_recalled_draft_keeps_its_original_screenshot(tmp_path: Path) ->
         assert "[Image #1" in editor.text
         attachments = editor.attachments()
         assert list(attachments) == [1]
-        assert attachments[1].image.data == original, "the original bytes ride the recall"
+        # The map holds both payload shapes now; an image paste must still put
+        # an `Attachment` in it, not merely something marker-shaped.
+        recalled = attachments[1]
+        assert isinstance(recalled, Attachment)
+        assert recalled.image.data == original, "the original bytes ride the recall"
         # And the resend resolves the marker to that image.
         assert [image.data for image in editor.referenced_images()] == [original]
 
