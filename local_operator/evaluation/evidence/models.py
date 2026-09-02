@@ -75,6 +75,7 @@ EventKind = Literal[
     "model_request",
     "model_response",
     "usage_cost",
+    "context_compaction",
     "budget_commitment",
     "reconciliation",
     "observation",
@@ -273,6 +274,12 @@ class ModelRequestPayload(ProtocolModel):
     message_count: SafeCount
     tool_count: SafeCount
     redacted_prompt: EvidenceArtifactRef | None = None
+    # The provider-cache key the wire actually received, and the context size
+    # the client believed it was sending. Both default to None so a bundle
+    # written before they existed still validates; a client that has them
+    # records them so cache behaviour is auditable offline.
+    prompt_cache_key: StrictIdentifier | None = None
+    context_tokens: SafeCount | None = None
 
 
 class ModelResponsePayload(ProtocolModel):
@@ -366,6 +373,42 @@ class EnvironmentStepPayload(ProtocolModel):
     output_observation_id: StrictIdentifier
     terminated: bool
     truncated: bool
+    # WHY the episode stopped early (``max-steps``, a guard code such as
+    # ``repeated-batch``). Truncation is a scored outcome, so a consumer
+    # comparing runs needs the reason to tell a step cap from a floundering
+    # guard. Only meaningful on a truncated step: the validator rejects a
+    # reason on a step that did not truncate, so the field can never claim a
+    # stop that did not happen.
+    truncation_reason: StrictIdentifier | None = None
+
+    @model_validator(mode="after")
+    def _reason_requires_truncation(self) -> Self:
+        if self.truncation_reason is not None and not self.truncated:
+            raise ValueError("truncation_reason requires truncated=True")
+        return self
+
+
+class ContextCompactionPayload(ProtocolModel):
+    """The model client rebuilt its context between two requests.
+
+    Declared rather than inferred: a compaction is scaffolding assistance the
+    harness gave the model (a summary it did not write, frames it can no longer
+    see), and a run whose only trace of it is a ``message_count`` drop is
+    hiding it. ``previous_request_id`` binds the event to the request whose
+    context was rebuilt; the summarization call's own tokens are billed into
+    the NEXT ``usage_cost`` by the client, so the counters stay a pure sum of
+    usage events.
+    """
+
+    compaction_id: StrictIdentifier
+    previous_request_id: StrictIdentifier | None
+    strategy: StrictIdentifier
+    tokens_before: SafeCount
+    tokens_after: SafeCount
+    frames_dropped: SafeCount
+    messages_before: SafeCount
+    messages_after: SafeCount
+    summary_artifact: EvidenceArtifactRef | None = None
 
 
 class UserSimulatorExchangePayload(ProtocolModel):
@@ -491,6 +534,7 @@ EventPayload: TypeAlias = (
     | ModelRequestPayload
     | ModelResponsePayload
     | UsageCostPayload
+    | ContextCompactionPayload
     | BudgetCommitmentPayload
     | ReconciliationPayload
     | ObservationPayload
@@ -510,6 +554,7 @@ _EVENT_PAYLOAD_TYPES: dict[str, type[ProtocolModel]] = {
     "model_request": ModelRequestPayload,
     "model_response": ModelResponsePayload,
     "usage_cost": UsageCostPayload,
+    "context_compaction": ContextCompactionPayload,
     "budget_commitment": BudgetCommitmentPayload,
     "reconciliation": ReconciliationPayload,
     "observation": ObservationPayload,
@@ -571,6 +616,9 @@ class EvidenceCounters(ProtocolModel):
     model_response_count: SafeCount
     action_batch_count: SafeCount
     environment_step_count: SafeCount
+    # Defaulted so a sealed outcome from before compaction events existed
+    # still validates and still equals the recomputed counters.
+    compactions: SafeCount = 0
     input_tokens: SafeCount
     output_tokens: SafeCount
     reasoning_tokens: SafeCount
