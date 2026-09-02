@@ -65,8 +65,9 @@ async def _wait(context: ToolContext, signal: AbortSignal | None = None, **args:
 
 @pytest.mark.asyncio
 async def test_a_peer_message_wakes_a_blocking_wait() -> None:
-    """The headline fix: a mailbox delivery returns the wait in ~0s, not in
-    300s, and the model keeps the job id so it can re-issue the wait."""
+    """The headline fix: a mailbox delivery returns the wait in ~0s, not at
+    the budget's deadline (now up to an hour), and the model keeps the job id
+    so it can re-issue the wait."""
     manager = AsyncJobManager()
     peer = _Peer()
     context = ToolContext(cwd=".", jobs=manager, peer_arrival=peer)

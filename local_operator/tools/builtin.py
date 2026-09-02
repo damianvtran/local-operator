@@ -7137,13 +7137,32 @@ class WaitParams(BaseModel):
         )
     )
     wait_ms: int = Field(
-        default=300_000,
+        # The ceiling and the default are sized to the work agents actually
+        # await, not to a round-trip latency. Measured on this host's own
+        # transcripts (30 h, Anthropic only): the old 300 000 ms cap made an
+        # agent awaiting a CI pipeline (8-20 min) or a long subagent (30-90
+        # min) poll every five minutes - 1 488 wait-only model calls in 877
+        # consecutive chains, 434 of them two or more polls deep (up to 12).
+        # Every poll re-sends the full context, and any poll landing after the
+        # provider's 5-minute prompt-cache TTL rewrites the whole prefix: one
+        # wait per chain would have saved 762 round trips (~207 M context
+        # tokens) and 69 cache rewrites (20.8 M cache-write tokens, 8.7% of
+        # all cache writes). A long budget strands nothing because the wait
+        # is already interruptible: it returns on job settle, peer message
+        # and steer (see ``execute_wait``), and the abort signal cuts it.
+        # 60 min covers the longest subagent runs observed; 10 min is the
+        # default because it spans a typical CI run without a second call.
+        default=600_000,
         gt=0,
-        le=300_000,
+        le=3_600_000,
         description=(
-            "Max ms to block before reporting back (capped at 300000). The "
-            "call returns as soon as a job settles, so a generous budget costs "
-            "nothing when the work finishes early."
+            "Max ms to block (up to 3600000 = 60 min). The call returns the "
+            "moment a job settles, a peer message arrives, or you are steered, "
+            "so SIZE THE BUDGET TO THE WORK: estimate how long the job should "
+            "take (a CI pipeline, a review, a build) and wait for all of it in "
+            "one call; if it expires, that is the signal to check on the job. "
+            "Use short budgets only when you genuinely need to inspect progress "
+            "mid-run (e.g. a training loop)."
         ),
     )
 
@@ -7504,11 +7523,11 @@ async def _await_any_settled(
     The ABORT is raced alongside the settle events, not checked between
     sleeps. The old 50 ms poll re-read ``signal.aborted`` on every tick, so
     parking on the settle events alone silently made the abort branch dead for
-    a job that never settles: an aborted wait sat for its whole budget (up to
-    five minutes) instead of returning. The TUI masks that through its own
-    interruptible-tool poll, but that is a different mechanism and does not
-    cover deadline-tripped signals or non-TUI embedders relying on the
-    documented ``AbortSignal`` contract.
+    a job that never settles: an aborted wait sat for its whole budget (then
+    five minutes, now up to an hour) instead of returning. The TUI masks that
+    through its own interruptible-tool poll, but that is a different mechanism
+    and does not cover deadline-tripped signals or non-TUI embedders relying
+    on the documented ``AbortSignal`` contract.
 
     Falls back to the poll loop when the manager predates ``settled_event``
     (a third-party job manager satisfying the older protocol must keep
@@ -7569,8 +7588,13 @@ def build_wait_tool(context: ToolContext) -> AgentTool | None:
         description=(
             "Block until a background job settles (or wait_ms elapses), returning "
             "its final output/status. Pass a LIST of job ids to wake on the first "
-            "one to finish. Returns the moment work settles, so prefer one "
-            "generous wait over repeated short ones."
+            "one to finish. Returns the moment work settles, a peer message "
+            "arrives, or you are steered, so SIZE THE BUDGET TO THE WORK: "
+            "estimate how long the job should take (a CI pipeline, a review, a "
+            "build) and wait for all of it in one call, up to 60 minutes; an "
+            "expired wait is the signal to check on the job, not to re-issue "
+            "the same short poll. Use short budgets only when you genuinely "
+            "need to inspect progress mid-run (e.g. a training loop)."
         ),
         parameters=WaitParams.model_json_schema(),
         # read-only observation of job state; blocks the turn but changes nothing.
