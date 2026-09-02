@@ -6,7 +6,7 @@ others because the module path is a **cross-process spawn contract**: a daemon
 of one version spawns ``python -m <path>`` and the child that answers may be a
 binary of another version. Keeping ``python -m local_operator.mobile.child``
 runnable means an upgrade window cannot strand a daemon that cannot start a
-session \u2014 hence the ``__main__`` block below, which the other shims do not
+session — hence the ``__main__`` block below, which the other shims do not
 need.
 
 New code should use ``local_operator.session.runtime.process``.

@@ -235,7 +235,7 @@ def test_the_core_stays_import_light() -> None:
     # ``local_operator.session.runtime.*`` is EXEMPT, and the exemption does not
     # weaken this guard. The registry this module imports is the same
     # stdlib-only record layer it always used — it merely moved from
-    # ``mobile/registry.py`` into the neutral host package, whose ``types``
+    # ``mobile/registry.py`` into the session runtime package, whose ``types``
     # and ``registry`` modules are import-light by contract precisely because
     # they sit on the CLI startup path (see session/runtime/types.py and
     # tests/unit/test_import_graph.py). What this test actually exists to

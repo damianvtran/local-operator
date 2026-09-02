@@ -2423,7 +2423,8 @@ def _install_group_reaper_soft_death() -> None:
     nothing is lost by leaving SIGINT to its turn-abort semantics.
 
     Scoped to the interactive entry on purpose: ``exec``/``serve``/``mobile``
-    own their own SIGTERM semantics (``exec_worker.py``, ``mobile/child.py``) and
+    own their own SIGTERM semantics (``exec_worker.py``,
+    ``session/runtime/process.py``) and
     are dispatched before this is ever called. As a second belt, any
     pre-existing SIGTERM handler is CHAINED, not clobbered — the reaper
     runs first, then the previous handler (or the default) still fires — so this
@@ -2955,7 +2956,7 @@ def main() -> int:
         # exit) then kills this process's own still-live bash groups precisely
         # and instantly instead of leaving them for the next launch's sweep.
         # Deliberately NOT installed for `exec`/`serve`/`mobile`: those own their
-        # own SIGTERM lifecycle (exec_worker.py, mobile/child.py) and must keep
+        # own SIGTERM lifecycle (exec_worker.py, session/runtime/process.py) and must keep
         # it — `_install_group_reaper_soft_death` chains any pre-existing handler
         # rather than clobbering it, but scoping to here keeps the concern where
         # the groups are actually created.

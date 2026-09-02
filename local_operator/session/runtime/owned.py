@@ -841,16 +841,25 @@ async def spawn_owned_session(
     the phone's "open this past conversation" button.
     """
     # These imports MUST stay function-local, and ``create_session`` most of
-    # all. This module now lives under ``local_operator.session.runtime``, and
-    # ``session_factory`` imports ``local_operator.session.*`` — hoisting that
-    # line to module scope creates an import cycle (session.runtime.owned ->
-    # session_factory -> session.session -> ...) that surfaces as a partially
-    # initialised module at CLI startup, not as a clean ImportError at the
-    # edit. It is also a startup-cost guard: ``session_factory`` is the
-    # composition root and drags in the engine, so importing it eagerly would
-    # put the whole harness on the import graph of anything that touches a
-    # runtime record. `tests/unit/test_import_graph.py` pins that budget.
-    # Do not "tidy" these to the top of the file.
+    # all. Do not "tidy" them to the top of the file.
+    #
+    # The operative reason TODAY is startup cost: ``session_factory`` is the
+    # composition root and pulls the engine, the registry and the provider
+    # layer behind it. Hoisting it would put the whole harness on the import
+    # graph of anything that merely touches this module, and this package sits
+    # on the CLI startup path.
+    #
+    # The second reason is latent rather than current, and is stated precisely
+    # so nobody "disproves" it and hoists the line. There is no cycle at this
+    # commit — ``session_factory`` has no module-scope ``local_operator.session.*``
+    # imports (they are function-local or TYPE_CHECKING), and nothing under
+    # ``local_operator/session/`` imports this package. A cycle becomes REAL the
+    # moment either of those changes, which later PRs in this series plan to do
+    # (``session.session``/``session_factory`` reaching into the runtime package
+    # for engagement and arbitration). Because this module now lives *under*
+    # ``session/``, that day it would surface as a partially initialised module
+    # at CLI startup rather than as a clean ImportError at the edit — so the
+    # function-local form is what keeps that future change cheap.
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
     from local_operator.credentials import CredentialManager

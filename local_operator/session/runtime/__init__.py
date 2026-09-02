@@ -37,10 +37,20 @@ The old module paths (``local_operator.mobile.registrant``, ``.registry``,
 remains an alias of
 :class:`~local_operator.session.runtime.server.RuntimeServer`.
 
-This ``__init__`` deliberately exports NOTHING and imports NOTHING. The
-runtime sits on the CLI startup path, where
-``import local_operator.session.runtime.types`` must not drag in :mod:`.server`
-(asyncio) or :mod:`.owned` (the composition root).
-``tests/unit/test_import_graph.py`` is the guard; import the submodule you
-need directly.
+**The import-light contract.** As of this commit this ``__init__`` exports
+nothing and imports nothing, and callers import the submodule they need
+directly. The binding constraint is not "``__init__`` must stay empty
+forever" — later PRs in this series give this package public entry points
+(``engage_runtime()``, ``find_runtime()``, ``stop_session()``,
+``stop_all()``) and those may legitimately live here. It is that
+**importing this package must never pull the heavy graph**:
+:mod:`.types` and :mod:`.registry` are stdlib-only because the runtime
+publishes its record on the CLI startup path, where dragging in
+:mod:`.server` (asyncio) or :mod:`.owned` (the composition root) is paid by
+every ``lop`` invocation including ``--version``.
+
+So an entry point added here must resolve its heavy dependencies lazily
+(function-local imports), exactly as :func:`.owned.spawn_owned_session`
+already does with ``session_factory``. ``tests/unit/test_import_graph.py``
+is the guard that will catch the alternative.
 """

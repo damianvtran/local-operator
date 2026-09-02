@@ -19,7 +19,7 @@ moving parts:
   session. No delta protocol means no drift; caps in the fold keep repaints
   cheap.
 
-Threading: one asyncio loop. Session hosts run their own loops in their own
+Threading: one asyncio loop. Session runtimes run their own loops in their own
 processes; this loop only dials them. Blocking work (session construction,
 which reads provider catalogues) goes through ``asyncio.to_thread`` so a
 phone starting a session never stalls the SSE streams of the others.
@@ -618,7 +618,7 @@ def _durable_projection(session_id: str) -> SessionProjection | None:
 
 
 # ---------------------------------------------------------------------------
-# Session host connections
+# Session runtime connections
 # ---------------------------------------------------------------------------
 
 

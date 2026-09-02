@@ -1,7 +1,7 @@
 """The TUI's side of the mobile bridge.
 
 :class:`TuiSessionHandle` adapts a running :class:`~local_operator.tui.app.OperatorApp`
-to the host server's :class:`~local_operator.session.runtime.server.SessionHandle`
+to the session runtime's :class:`~local_operator.session.runtime.server.SessionHandle`
 contract, so a phone can drive the same session the terminal is showing.
 
 Two rules shape everything here:

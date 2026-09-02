@@ -2,7 +2,7 @@
 
 This module's contents now live in
 :mod:`local_operator.session.runtime.server`, and ``Registrant`` is an alias of
-:class:`~local_operator.session.runtime.server.RuntimeServer` \u2014 nothing about a
+:class:`~local_operator.session.runtime.server.RuntimeServer` — nothing about a
 control socket, a discovery record or a session handle was ever phone-specific
 (see that package's ``__init__`` for the reasoning). The shim exists so
 imports outside this tree, and any process mid-upgrade, keep resolving.
