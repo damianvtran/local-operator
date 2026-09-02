@@ -8,6 +8,7 @@ URL; then conditional on the task's own fields.
 
 from __future__ import annotations
 
+import pytest
 from lop_osworld_v2_adapter import requirements, taskfile
 
 from tests.unit.evaluation.adapters.osworld import fixtures
@@ -110,6 +111,50 @@ def test_judged_task_requires_the_judge_key_and_settings() -> None:
 
 def test_judged_via_llm_metrics_import_is_also_detected() -> None:
     assert _JUDGE <= _names(fixtures.JUDGED_VIA_METRICS)
+
+
+def test_judged_via_metrics_reexport_is_detected() -> None:
+    """MAJOR-2: task_007 reaches the judge as ``metrics.compare_text_with_llm``
+    with no judge-module substring in its source. Detection is by symbol."""
+
+    assert _JUDGE <= _names(fixtures.JUDGED_VIA_REEXPORT)
+    assert _JUDGE <= _names(fixtures.JUDGED_VIA_BARE_NAME)
+
+
+def test_a_non_judge_metric_from_the_same_package_is_not_judged() -> None:
+    assert not (_JUDGE & _names(fixtures.METRICS_NOT_JUDGED))
+
+
+def test_judge_detection_over_the_pinned_corpus_matches_the_call_surface() -> None:
+    """Every task in the real corpus that references a judge entry point is
+    detected, and none that does not. The truth set is a plain text scan for
+    the judge's call surface, independent of the AST walk under test."""
+
+    import glob
+    import os
+    import pwd
+    import re
+    from pathlib import Path
+
+    real_home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+    root = Path(os.environ.get("OSWORLD_INPUTS_ROOT", real_home / "worktrees" / "osworld"))
+    tasks = sorted(glob.glob(str(root / "gated" / "tasks" / "task_*.py")))
+    if len(tasks) != 108:  # pragma: no cover - inputs root absent on CI
+        pytest.skip("pinned OSWorld corpus not present")
+    truth_re = re.compile(r"generate_text|generate_json|llm_metrics|model_client|_with_llm")
+    detected: set[str] = set()
+    truth: set[str] = set()
+    for path in tasks:
+        source = Path(path).read_bytes()
+        descriptor = taskfile.load_static(source, module_name=path)
+        stem = Path(path).stem
+        if requirements.is_judged(descriptor):
+            detected.add(stem)
+        if truth_re.search(source.decode()):
+            truth.add(stem)
+    assert detected == truth
+    assert len(detected) == 19
+    assert "task_007" in detected
 
 
 def test_plain_task_does_not_require_the_judge() -> None:

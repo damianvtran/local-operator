@@ -74,6 +74,47 @@ class Task009:
     evaluator = {"func": "compare_images_with_llm"}
 """
 
+# Reaches the judge through the ``metrics`` package re-export
+# (metrics/__init__.py:194-200): no ``llm_metrics``/``model_client``
+# substring anywhere in the source. The real task_007 has this shape.
+JUDGED_VIA_REEXPORT = """
+from desktop_env.evaluators import getters, metrics
+
+class Task007:
+    id = "task_judged_reexport"
+    instruction = "Answer the question in the document."
+    config = [{"type": "launch", "app": "libreoffice"}]
+
+    def evaluate(self, env):
+        return metrics.compare_text_with_llm("q", "a", "b")
+"""
+
+# Bare-name import of a re-exported judge metric.
+JUDGED_VIA_BARE_NAME = """
+from desktop_env.evaluators.metrics import compare_images_with_llm
+
+class Task010:
+    id = "task_judged_bare"
+    instruction = "Recreate the image."
+    config = []
+
+    def evaluate(self, env):
+        return compare_images_with_llm("a.png", "b.png")
+"""
+
+# A non-judge metric from the same package must NOT trip detection.
+METRICS_NOT_JUDGED = """
+from desktop_env.evaluators import metrics
+
+class Task011:
+    id = "task_metrics_plain"
+    instruction = "Compare the files."
+    config = []
+
+    def evaluate(self, env):
+        return metrics.compare_zip_files("a.zip", "b.zip")
+"""
+
 # A googledrive config entry needs Google account credentials.
 GOOGLEDRIVE = """
 class Task005:

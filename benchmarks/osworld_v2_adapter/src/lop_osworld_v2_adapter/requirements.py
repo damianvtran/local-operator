@@ -18,6 +18,8 @@ executable spec of this table.
 
 from __future__ import annotations
 
+import ast
+
 from lop_osworld_v2_adapter.taskfile import TaskDescriptor
 
 from local_operator.evaluation.adapters.api import Requirement
@@ -77,18 +79,62 @@ _JUDGE_INFRA = (
     "OSWORLD_EVAL_MODEL_PROVIDER",
     "OSWORLD_EVAL_MODEL_NAME",
 )
-# Source substrings that mark a task as judge-backed. Both the package path
-# and the bare module name are matched because tasks import either
-# ``desktop_env.evaluators.model_client`` directly or a metric from
-# ``llm_metrics`` that wraps it.
-_JUDGE_MARKERS = ("desktop_env.evaluators.model_client", "llm_metrics")
+# The judge's CALL SURFACE, not an import spelling. OSWorld exposes the LLM
+# judge three ways and the pinned corpus uses all of them: the client itself
+# (``model_client.generate_text``), the ``llm_metrics`` module, and the
+# metric functions RE-EXPORTED through ``desktop_env.evaluators.metrics``
+# (``metrics/__init__.py:194-200``), which a task reaches as
+# ``metrics.compare_text_with_llm`` with no ``llm_metrics`` substring in
+# its source at all (task_007). Detection therefore walks the task's AST for
+# any reference -- attribute or bare name -- to one of these symbols, or any
+# import of the two judge modules. Every symbol here is a judge entry point
+# by construction of the pinned upstream; the set is closed and pinned with
+# it. ``_with_llm`` covers the five metric names and any sibling added
+# under the same convention.
+_JUDGE_MODULES = frozenset({"model_client", "llm_metrics"})
+_JUDGE_SYMBOLS = frozenset({"generate_text", "generate_json"})
+_JUDGE_SYMBOL_SUFFIX = "_with_llm"
+
+
+def _is_judge_symbol(name: str) -> bool:
+    return name in _JUDGE_SYMBOLS or name.endswith(_JUDGE_SYMBOL_SUFFIX)
 
 
 def is_judged(descriptor: TaskDescriptor) -> bool:
-    """Whether the task's evaluator calls the LLM judge."""
+    """Whether the task's evaluator calls the LLM judge.
+
+    AST-based so a re-exported metric (``metrics.compare_text_with_llm``) is
+    caught the same as a direct import. A module that fails to parse cannot
+    be judged honestly either way and falls back to a substring scan, which
+    is strictly a superset of the old behaviour.
+    """
 
     source_text = descriptor.source_text
-    return any(marker in source_text for marker in _JUDGE_MARKERS)
+    try:
+        tree = ast.parse(source_text)
+    except SyntaxError:
+        return any(module in source_text for module in _JUDGE_MODULES)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            if module.rsplit(".", 1)[-1] in _JUDGE_MODULES:
+                return True
+            # ``from desktop_env.evaluators.metrics import llm_metrics`` names
+            # the judge MODULE as an imported name, not as ``node.module``.
+            if any(
+                _is_judge_symbol(alias.name) or alias.name in _JUDGE_MODULES for alias in node.names
+            ):
+                return True
+        elif isinstance(node, ast.Import):
+            if any(alias.name.rsplit(".", 1)[-1] in _JUDGE_MODULES for alias in node.names):
+                return True
+        elif isinstance(node, ast.Attribute):
+            if _is_judge_symbol(node.attr) or node.attr in _JUDGE_MODULES:
+                return True
+        elif isinstance(node, ast.Name):
+            if _is_judge_symbol(node.id):
+                return True
+    return False
 
 
 def _requirement(name: str, *, kind: str, required: bool) -> Requirement:
