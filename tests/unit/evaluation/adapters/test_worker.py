@@ -270,7 +270,7 @@ def rescue_selector(tmp_path: Path) -> AdapterSelector:
     release_digest = "b" * 64
     (workspace / "adapter-release.json").write_text(f'{{"release_digest":"{release_digest}"}}')
     return AdapterSelector(
-        schema_version="1.1",
+        schema_version="1.2",
         adapter_id="rescue",
         distribution="rescue-adapter",
         version="1.0",
@@ -292,7 +292,7 @@ def rescue_metadata() -> AdapterMetadata:
         entry_point="rescue_adapter:create",
         package_digest="a" * 64,
         release_digest="b" * 64,
-        schema_version="1.1",
+        schema_version="1.2",
         capabilities=AdapterCapabilities(routes=("computer",), ask_user=False, scoring=False),
     )
 
@@ -339,7 +339,7 @@ async def test_real_worker_rescue_invokes_each_cleanup_once_and_blocks_normal_fl
             ),
         )
         descriptor = RescueDescriptor(
-            schema_version="1.1",
+            schema_version="1.2",
             selector=selected,
             handshake=handshake,
             episode_id="episode",
@@ -461,7 +461,7 @@ def test_rescue_cleanup_rejects_forged_episode_and_action_without_losing_pin(
         selected_route="computer",
     )
     descriptor = RescueDescriptor(
-        schema_version="1.1",
+        schema_version="1.2",
         selector=selected,
         handshake=pinned_handshake,
         episode_id="episode",

@@ -15,6 +15,22 @@ There are two tiers, and the tier boundary is the security decision:
   resource exists — requirements, provisioning, the cleanup plan — is made
   from Tier 1 alone. ``inspect_requirements`` and ``prepare`` must never
   import a task module.
+
+  The pinned V2 corpus is not uniformly literal: 29 of 108 tasks bind a
+  field through a module-level constant (``id = TASK_ID``,
+  ``instruction = INSTRUCTION``), an earlier class attribute
+  (``user_simulator = {..., "instruction": instruction}``), a parenthesised
+  f-string, or ``"...".strip()``. ``_fold`` resolves exactly those shapes
+  by walking the SAME module's AST — a ``Name`` to its module-level or
+  earlier class-body assignment, an f-string to its parts, a ``.strip()``
+  on a folded string — and nothing else: no attribute access, no
+  arithmetic, no imported name, no call with arguments. An f-string whose
+  interpolation is unresolvable (an imported ``HOST_SUFFIX``, a ``uuid4()``)
+  folds to its literal parts with ``instruction_static=False``; that is
+  honest because the harness makes no DECISION on the instruction text
+  (OSWorld's live object supplies the real one at ``reset``), while ``id``
+  and ``user_simulator`` — which do drive decisions — remain hard refusals
+  when they cannot be fully resolved.
 - **Tier 2 (import, deferred to ``reset_start``/``score``):** the live module
   object, needed only when OSWorld's own machinery requires the class
   (``setup()``, a custom ``evaluate()`` override). By then the cleanup plan is
@@ -86,6 +102,18 @@ class TaskDescriptor:
     disable_vnc: bool = False
     disable_recording: bool = False
     intermediate_eval_safe: bool = False
+    # Whether the task class defines its own ``evaluate(self, env)``. This is
+    # how EVERY task in the pinned V2 corpus scores (108 of 108 override it;
+    # none declares an ``evaluator`` dict), and ``DesktopEnv.evaluate`` calls
+    # the override in preference to the dict (desktop_env.py:584-587). A
+    # parser that only recorded the dict would judge the whole corpus as
+    # unscorable and refuse every paid episode at ``score``.
+    evaluate_override: bool = False
+    # False when ``instruction`` folded from an f-string whose interpolations
+    # could not be statically resolved; the text then carries only the literal
+    # parts. Recorded so a consumer that ever DID want the exact text (none
+    # does today) cannot mistake a partial fold for the real thing.
+    instruction_static: bool = True
     source_sha256: str = ""
     # The raw module source, kept so requirement derivation can detect
     # controller references (gitlab/website imports) without re-reading the
@@ -104,7 +132,7 @@ class TaskDescriptor:
         score-deflation error ``scoring.score_to_artifact`` exists to reject.
         """
 
-        return bool(self.evaluator)
+        return bool(self.evaluator) or self.evaluate_override
 
     def is_infeasible(self) -> bool:
         """Whether this task grades a correct refusal rather than a completion.
@@ -133,21 +161,131 @@ class TaskDescriptor:
         return "'infeasible'" in repr(evaluator)
 
 
-def _literal(node: ast.AST) -> Any:
-    """Resolve a class-level assignment value to a plain Python literal.
+class _Unresolved(Exception):
+    """A node is outside the closed set ``_fold`` will resolve."""
 
-    Only ``ast.literal_eval``-compatible nodes are accepted: constants, lists,
-    dicts, tuples, booleans, None. Anything else — a call, a name, an f-string
-    — means the field is not statically resolvable, which is a ``TaskParseError``
-    rather than a reason to execute the module.
+
+# Bound on the Name -> assignment -> Name chain, so a pathological module
+# (or a self-referential one) terminates with a refusal rather than a stack
+# overflow. Real tasks chain at most twice.
+_MAX_FOLD_DEPTH = 8
+
+
+class _Folder:
+    """Resolve the closed set of static shapes the V2 corpus uses.
+
+    Scope is the module's top-level ``Assign``/``AnnAssign`` statements plus
+    the task class's OWN body assignments that precede the field being
+    resolved (Python class-body semantics). Nothing is executed and nothing
+    outside this module's AST is consulted, so an imported name is
+    unresolvable by construction — which is what keeps the host-side import
+    ban intact.
     """
 
+    def __init__(self, tree: ast.Module, class_body: list[ast.stmt]) -> None:
+        self._module: dict[str, ast.AST] = {}
+        for stmt in tree.body:
+            if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
+                target = stmt.targets[0]
+                if isinstance(target, ast.Name):
+                    self._module[target.id] = stmt.value
+            elif isinstance(stmt, ast.AnnAssign) and stmt.value is not None:
+                if isinstance(stmt.target, ast.Name):
+                    self._module[stmt.target.id] = stmt.value
+        self._class: dict[str, ast.AST] = {}
+        self._class_body = class_body
+        self.partial = False
+
+    def bind_class_prefix(self, upto: ast.stmt) -> None:
+        """Make class attributes assigned BEFORE ``upto`` resolvable."""
+
+        self._class = {}
+        for stmt in self._class_body:
+            if stmt is upto:
+                break
+            if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
+                target = stmt.targets[0]
+                if isinstance(target, ast.Name):
+                    self._class[target.id] = stmt.value
+
+    def fold(self, node: ast.AST, *, depth: int = 0) -> Any:
+        if depth > _MAX_FOLD_DEPTH:
+            raise _Unresolved("fold depth exceeded")
+        try:
+            return ast.literal_eval(node)
+        except (ValueError, SyntaxError, TypeError):
+            pass
+        if isinstance(node, ast.Name):
+            # Class scope shadows module scope, as it would at class-body
+            # execution time.
+            target = self._class.get(node.id, self._module.get(node.id))
+            if target is None:
+                raise _Unresolved(node.id)
+            return self.fold(target, depth=depth + 1)
+        if isinstance(node, ast.JoinedStr):
+            parts: list[str] = []
+            for value in node.values:
+                if isinstance(value, ast.Constant):
+                    parts.append(str(value.value))
+                elif isinstance(value, ast.FormattedValue):
+                    try:
+                        parts.append(str(self.fold(value.value, depth=depth + 1)))
+                    except _Unresolved:
+                        # Keep the literal skeleton; the caller decides whether
+                        # a partial fold is acceptable for this field.
+                        self.partial = True
+                else:
+                    raise _Unresolved("f-string part")
+            return "".join(parts)
+        if isinstance(node, (ast.Dict,)):
+            if any(key is None for key in node.keys):
+                raise _Unresolved("dict unpacking")
+            return {
+                self.fold(key, depth=depth + 1): self.fold(value, depth=depth + 1)
+                for key, value in zip(node.keys, node.values)
+                if key is not None
+            }
+        if isinstance(node, (ast.List, ast.Tuple)):
+            folded = [self.fold(item, depth=depth + 1) for item in node.elts]
+            return folded if isinstance(node, ast.List) else tuple(folded)
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "strip"
+            and not node.args
+            and not node.keywords
+        ):
+            inner = self.fold(node.func.value, depth=depth + 1)
+            if isinstance(inner, str):
+                return inner.strip()
+        raise _Unresolved(type(node).__name__)
+
+
+def _literal(node: ast.AST, folder: _Folder, *, field: str) -> Any:
+    """Resolve a class-level assignment value to a plain Python value.
+
+    Literal nodes resolve directly; the closed static shapes in ``_Folder``
+    resolve by AST walk. Anything else means the field is not statically
+    resolvable, which is a ``TaskParseError`` rather than a reason to execute
+    the module. A PARTIAL fold (an f-string with an unresolvable
+    interpolation) is accepted only for ``instruction``; every other field
+    drives a pre-allocation decision and must resolve completely.
+    """
+
+    folder.partial = False
     try:
-        return ast.literal_eval(node)
-    except (ValueError, SyntaxError, TypeError) as error:
+        value = folder.fold(node)
+    except _Unresolved as error:
         raise TaskParseError(
-            f"task field is not statically resolvable: {ast.dump(node)[:200]}"
+            f"task field {field!r} is not statically resolvable ({error}): "
+            f"{ast.dump(node)[:200]}"
         ) from error
+    if folder.partial and field != "instruction":
+        raise TaskParseError(
+            f"task field {field!r} interpolates a value this module does not define: "
+            f"{ast.dump(node)[:200]}"
+        )
+    return value
 
 
 def load_static(source: bytes, *, module_name: str) -> TaskDescriptor:
@@ -168,6 +306,8 @@ def load_static(source: bytes, *, module_name: str) -> TaskDescriptor:
     # we require only that exactly one class assigns ``instruction`` and ``id``.
     values: dict[str, Any] = {}
     found = False
+    evaluate_override = False
+    instruction_static = True
     for node in ast.walk(tree):
         if not isinstance(node, ast.ClassDef):
             continue
@@ -183,11 +323,22 @@ def load_static(source: bytes, *, module_name: str) -> TaskDescriptor:
         if "instruction" not in names or "id" not in names:
             continue
         found = True
+        folder = _Folder(tree, node.body)
         for stmt in body_assigns:
             target = stmt.targets[0]
             assert isinstance(target, ast.Name)
             if target.id in _STATIC_FIELDS:
-                values[target.id] = _literal(stmt.value)
+                folder.bind_class_prefix(stmt)
+                values[target.id] = _literal(stmt.value, folder, field=target.id)
+                if target.id == "instruction" and folder.partial:
+                    instruction_static = False
+        # Detected on the SAME class that carries the task fields, by AST,
+        # so a helper module defining an unrelated ``evaluate`` cannot claim
+        # the task is scorable. Statically observable and side-effect free.
+        evaluate_override = any(
+            isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)) and stmt.name == "evaluate"
+            for stmt in node.body
+        )
         break
     if not found:
         raise TaskParseError("no task class with 'id' and 'instruction' assignments found")
@@ -218,6 +369,8 @@ def load_static(source: bytes, *, module_name: str) -> TaskDescriptor:
         disable_vnc=bool(values.get("disable_vnc", False)),
         disable_recording=bool(values.get("disable_recording", False)),
         intermediate_eval_safe=bool(values.get("intermediate_eval_safe", False)),
+        evaluate_override=evaluate_override,
+        instruction_static=instruction_static,
         source_sha256=source_sha256,
         source_text=source.decode("utf-8", errors="replace"),
         module_name=module_name,

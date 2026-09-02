@@ -18,6 +18,8 @@ executable spec of this table.
 
 from __future__ import annotations
 
+import ast
+
 from lop_osworld_v2_adapter.taskfile import TaskDescriptor
 
 from local_operator.evaluation.adapters.api import Requirement
@@ -56,6 +58,85 @@ _ALWAYS_INFRA = (
     "OSWORLD_CLIENT_PASSWORD",
     "OSWORLD_FILE_BASE_URL",
 )
+
+# Optional operator knobs. OSWORLD_INPUTS_ROOT names the durable directory
+# holding the gated assets and the prepared checkout (the workspace pins their
+# manifests by sha but cannot hold the 4.2 GB of assets under its 4 GiB cap);
+# OSWORLD_TTL_SECONDS overrides the budget-derived lease length.
+_OPTIONAL_INFRA = (
+    "OSWORLD_INPUTS_ROOT",
+    "OSWORLD_TTL_SECONDS",
+)
+
+# The LLM judge. OSWorld's ``model_client`` resolves the key from the
+# environment and ``llm_metrics`` returns 0.0 on ANY exception, so a judged
+# task run without a key scores a silent zero -- the previous pilot lost ~17%
+# of its suite that way. These are REQUIRED for a task whose source imports
+# the judge client, and absent for every other task, so preflight refuses a
+# judged episode up front rather than sealing a zero.
+_JUDGE_SECRET = "OSWORLD_EVAL_MODEL_API_KEY"
+_JUDGE_INFRA = (
+    "OSWORLD_EVAL_MODEL_PROVIDER",
+    "OSWORLD_EVAL_MODEL_NAME",
+)
+# The judge's CALL SURFACE, not an import spelling. OSWorld exposes the LLM
+# judge three ways and the pinned corpus uses all of them: the client itself
+# (``model_client.generate_text``), the ``llm_metrics`` module, and the
+# metric functions RE-EXPORTED through ``desktop_env.evaluators.metrics``
+# (``metrics/__init__.py:194-200``), which a task reaches as
+# ``metrics.compare_text_with_llm`` with no ``llm_metrics`` substring in
+# its source at all (task_007). Detection therefore walks the task's AST for
+# any reference -- attribute or bare name -- to one of these symbols, or any
+# import of the two judge modules. Every symbol here is a judge entry point
+# by construction of the pinned upstream; the set is closed and pinned with
+# it. ``_with_llm`` covers the five metric names and any sibling added
+# under the same convention. ``compare_pdf_answers`` (metrics/pdf.py) calls
+# ``_compare_answers_with_llm`` for ``llm_match`` rules without the suffix
+# in its own name; no pinned task uses it, but it is a judge entry point.
+_JUDGE_MODULES = frozenset({"model_client", "llm_metrics"})
+_JUDGE_SYMBOLS = frozenset({"generate_text", "generate_json", "compare_pdf_answers"})
+_JUDGE_SYMBOL_SUFFIX = "_with_llm"
+
+
+def _is_judge_symbol(name: str) -> bool:
+    return name in _JUDGE_SYMBOLS or name.endswith(_JUDGE_SYMBOL_SUFFIX)
+
+
+def is_judged(descriptor: TaskDescriptor) -> bool:
+    """Whether the task's evaluator calls the LLM judge.
+
+    AST-based so a re-exported metric (``metrics.compare_text_with_llm``) is
+    caught the same as a direct import. A module that fails to parse cannot
+    be judged honestly either way and falls back to a substring scan, which
+    is strictly a superset of the old behaviour.
+    """
+
+    source_text = descriptor.source_text
+    try:
+        tree = ast.parse(source_text)
+    except SyntaxError:
+        return any(module in source_text for module in _JUDGE_MODULES)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            if module.rsplit(".", 1)[-1] in _JUDGE_MODULES:
+                return True
+            # ``from desktop_env.evaluators.metrics import llm_metrics`` names
+            # the judge MODULE as an imported name, not as ``node.module``.
+            if any(
+                _is_judge_symbol(alias.name) or alias.name in _JUDGE_MODULES for alias in node.names
+            ):
+                return True
+        elif isinstance(node, ast.Import):
+            if any(alias.name.rsplit(".", 1)[-1] in _JUDGE_MODULES for alias in node.names):
+                return True
+        elif isinstance(node, ast.Attribute):
+            if _is_judge_symbol(node.attr) or node.attr in _JUDGE_MODULES:
+                return True
+        elif isinstance(node, ast.Name):
+            if _is_judge_symbol(node.id):
+                return True
+    return False
 
 
 def _requirement(name: str, *, kind: str, required: bool) -> Requirement:
@@ -98,6 +179,13 @@ def derive_requirements(descriptor: TaskDescriptor) -> tuple[Requirement, ...]:
         out.append(_requirement(name, kind="infra", required=True))
     for name in _ALWAYS_INFRA:
         out.append(_requirement(name, kind="infra", required=True))
+    for name in _OPTIONAL_INFRA:
+        out.append(_requirement(name, kind="infra", required=False))
+
+    if is_judged(descriptor):
+        out.append(_requirement(_JUDGE_SECRET, kind="secret", required=True))
+        for name in _JUDGE_INFRA:
+            out.append(_requirement(name, kind="infra", required=True))
 
     # --- Conditional on the task -------------------------------------------
 

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-operator"
-version = "0.44.29"
+version = "0.44.30"
 description = "A team of proactive AI assistants that can work together behind the scenes to help you get mundane tasks done so you can focus on the fun stuff."
 readme = "README.md"
 authors = [{ name = "Damian Tran", email = "damian@gominerva.com" }]
@@ -157,6 +157,13 @@ dev = [
     # Direct, not via the lsp extra: CI installs dev and must exercise the
     # optional tool's suite, while `all` stays lean for end users.
     "jedi>=0.19",
+    # The OSWorld adapter's AWS provider (benchmarks/osworld_v2_adapter) is a
+    # SEPARATE distribution that depends on boto3; the harness itself never
+    # imports it. Its unit tests still live under tests/ and drive the
+    # provider against botocore's Stubber, so the dev extra carries boto3 for
+    # the test interpreter only. Keeping it out of `all` is deliberate: an end
+    # user who never runs a benchmark should not install an AWS SDK.
+    "boto3>=1.34",
 ]
 
 # Explicit package discovery. Without this, setuptools falls back to

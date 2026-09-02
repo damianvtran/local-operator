@@ -71,7 +71,7 @@ def selector(tmp_path: Path) -> AdapterSelector:
     workspace = tmp_path / "workspace"
     workspace.mkdir(exist_ok=True)
     return AdapterSelector(
-        schema_version="1.1",
+        schema_version="1.2",
         adapter_id="tiny",
         distribution="tiny-adapter",
         version="1.0",
@@ -95,7 +95,7 @@ def handshake(tmp_path: Path) -> Handshake:
             entry_point="tiny_adapter:create",
             package_digest="a" * 64,
             release_digest="b" * 64,
-            schema_version="1.1",
+            schema_version="1.2",
             capabilities=AdapterCapabilities(routes=("computer",), ask_user=True, scoring=True),
         ),
         python=PythonRuntime.current(),

@@ -31,7 +31,10 @@ _AMI_RE = re.compile(r"^ami-[a-f0-9]{8,17}$")
 # ``image`` field when that field is a valid AMI id.
 _DEFAULT_AMI = "ami-01017272139e01feb"
 _DEFAULT_INSTANCE_TYPE = "t3.xlarge"
-_DEFAULT_REGION = "us-east-1"
+# Public: the adapter's rescue path needs the same default when a descriptor
+# predates AWS_REGION being supplied.
+DEFAULT_REGION = "us-east-1"
+_DEFAULT_REGION = DEFAULT_REGION
 # The only screen geometry the V2 AMI map and the released IMAGE_ID_MAP carry.
 _SCREEN = (1920, 1080)
 

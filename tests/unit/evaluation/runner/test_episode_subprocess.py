@@ -324,7 +324,7 @@ def create():
             entry_point="tiny_runner_adapter:create",
             package_digest=distribution_digest(installed),
             release_digest="%s",
-            schema_version="1.1",
+            schema_version="1.2",
             capabilities=AdapterCapabilities(
                 routes=("computer",), ask_user=False, scoring=True
             ),
@@ -453,7 +453,7 @@ def real_selector(tmp_path: Path, adapter_site: Path) -> AdapterSelector:
         json.dumps({"release_digest": RELEASE_DIGEST}, separators=(",", ":"), sort_keys=True)
     )
     return AdapterSelector(
-        schema_version="1.1",
+        schema_version="1.2",
         adapter_id="tiny-runner",
         distribution="tiny-runner-adapter",
         version="1.0",

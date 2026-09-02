@@ -1,43 +1,126 @@
 #!/usr/bin/env python3
-"""Materialise the OSWorld V2 adapter workspace and compute its digests.
+"""Materialise the OSWorld V2 adapter workspace from verified durable inputs.
 
-This is the build-time step that needs the gated Hugging Face task corpus
-(`xlangai/osworld_v2_tasks`, gated: "auto") and so is a human/operator command,
-NOT a CI job — CI has no HF_TOKEN and no gate acceptance.
+This is an operator command, NOT a CI job: the task corpus and assets are
+gated Hugging Face datasets that a human fetches once (with an accepted access
+request and an ``HF_TOKEN``) into a DURABLE inputs root. This script never
+downloads. It verifies what is on disk against the committed release pin and
+copies the verified task bytes into a workspace; the assets stay in the
+inputs root.
 
-What it produces, and why each piece exists:
+WHY THE INPUTS ROOT MUST NOT BE UNDER /tmp. macOS purges ``/private/tmp`` on
+disk pressure and on a periodic sweep with no warning and no regard for open
+handles. A purge mid-run destroyed a previous paid pilot's prepared checkout,
+its 4.2 GB asset snapshot AND its output directory, and left an EC2 instance
+running. The default root is ``~/worktrees/osworld``; ``--inputs-root`` (or
+``$OSWORLD_INPUTS_ROOT``) may move it anywhere durable, because every input
+is content-hash verified wherever it lives.
 
-- ``adapter-release.json`` — exactly ``{"release_digest": "<64 hex>"}`` and
-  nothing else. ``discovery.verify_release_manifest`` requires that canonical
-  shape, and the worker refuses to launch without it.
-- ``tasks/task_*.py`` — the gated task classes, materialised INTO the
-  workspace so the episode's ``workspace_digest`` pins the exact task bytes
-  that were run (that is what ``EpisodeSpec.task_digest`` binds to).
-- ``benchmark_release.json`` — a copy of the V2 release manifest, which
-  supplies the benchmark_release / environment_digest pins.
-- ``task_hashes.json`` — the 108-task sha256 manifest, verified against the
-  downloaded bytes so a corrupt or swapped task fails the build, not an
-  episode.
+Verification, in order, each failing with exit 4 and the offending path:
 
-The workspace must contain no symlinks and no hardlinks
-(``discovery.workspace_digest`` rejects both), which is why the tasks are
-COPIED in, never linked, and why the source tree (with its .git) is never the
-workspace.
+1. ``<inputs>/prepared/benchmark_releases/<release>.json`` sha256 equals the
+   pin's ``release_manifest_sha256``.
+2. ``<inputs>/gated/tasks/manifests/task_hashes.json`` sha256 equals the
+   pin's ``tasks.hash_manifest_sha256``.
+3. every ``task_NNN.py`` in that manifest exists, its sha256 matches, and the
+   count equals the pin's ``task_count``.
+4. ``git -C <inputs>/prepared rev-parse HEAD`` equals the pin's
+   ``osworld.commit`` (when git is available; a checkout without ``.git`` is
+   refused rather than trusted).
+5. ``<inputs>/gated/manifests/assets.json`` exists (its sha is recorded, not
+   compared -- the pin carries the repository revision, and the manifest
+   records that revision; the episode-time re-verification in the adapter
+   compares against what THIS build recorded).
+
+What the workspace gets, all read-only, copied never linked
+(``discovery.workspace_digest`` rejects symlinks and hardlinks):
+
+- ``adapter-release.json`` -- exactly ``{"release_digest": "<64 hex>"}``,
+  which ``discovery.verify_release_manifest`` requires and the worker refuses
+  to launch without.
+- ``benchmark_release.json`` -- the V2 release manifest, verified.
+- ``task_hashes.json`` -- the task-hash manifest, verified.
+- ``tasks/task_*.py`` -- the verified task bytes, so ``workspace_digest``
+  pins exactly what runs.
+- ``adapter-provider.json`` -- ``{"provider": "aws"}``.
+- ``inputs.json`` -- the manifests' sha256s and the prepared commit, which the
+  adapter re-verifies against the live inputs root at ``reset_start`` so a
+  moved or edited root cannot change what runs.
+
+The assets (4.2 GB) are NOT copied: the workspace cap is 4 GiB
+(``discovery.MAX_WORKSPACE_BYTES``) and the guest reads them through
+``OSWORLD_FILE_BASE_URL``, never the worker.
 
 Usage:
-    python scripts/build_osworld_adapter.py \
-        --benchmark-release osworld-v2-2026.08.08 \
-        --out /opt/lop-adapters/osworld-v2/<version>/workspace
+    python scripts/build_osworld_adapter.py \\
+        --benchmark-release osworld-v2-2026.08.08 \\
+        --out ~/worktrees/osworld/workspaces/0.1.0 \\
+        --package-digest <digest of the installed adapter wheel>
 """
 
 from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 import stat
+import subprocess
 import sys
 from pathlib import Path
+from typing import Any
+
+EXIT_VERIFY = 4
+_DEFAULT_INPUTS_ROOT = "~/worktrees/osworld"
+_DEFAULT_PIN = (
+    Path(__file__).resolve().parents[1]
+    / "benchmarks"
+    / "osworld_v2_adapter"
+    / "config"
+    / "release-v2026.08.08.json"
+)
+
+
+class VerificationFailed(Exception):
+    """An input does not match the pin. The message names the path."""
+
+
+def _volatile_roots() -> tuple[Path, ...]:
+    """Directories the OS may purge under a live run."""
+
+    roots = [Path("/tmp"), Path("/private/tmp"), Path("/var/tmp"), Path("/private/var/tmp")]
+    tmpdir = os.environ.get("TMPDIR")
+    if tmpdir:
+        roots.append(Path(tmpdir))
+    out: list[Path] = []
+    for root in roots:
+        try:
+            out.append(root.resolve())
+        except OSError:
+            out.append(root)
+    return tuple(out)
+
+
+def refuse_volatile_root(inputs_root: Path) -> None:
+    """Fail fast if the inputs root lives somewhere the OS may purge.
+
+    This turns the docstring's warning into a check. A previous paid pilot
+    lost its prepared checkout, its 4.2 GB of assets and its output directory
+    to a ``/private/tmp`` sweep mid-episode, and the EC2 instance kept
+    billing. The roots are compared RESOLVED so ``/tmp -> /private/tmp`` on
+    macOS cannot slip past a prefix check on the spelled path.
+    """
+
+    try:
+        resolved = inputs_root.resolve()
+    except OSError:
+        resolved = inputs_root
+    for volatile in _volatile_roots():
+        if resolved == volatile or volatile in resolved.parents:
+            raise VerificationFailed(
+                f"inputs root {inputs_root} resolves under {volatile}, which the OS may purge "
+                "mid-run; use a durable location such as ~/worktrees/osworld"
+            )
 
 
 def _release_digest(
@@ -53,46 +136,208 @@ def _release_digest(
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _write_readonly(path: Path, data: bytes) -> None:
+    # A previous build's read-only file would refuse the overwrite; the
+    # workspace is rebuilt from verified inputs, so replacing is correct.
+    if path.exists():
+        path.chmod(stat.S_IRUSR | stat.S_IWUSR)
     path.write_bytes(data)
     # The workspace is immutable once built: a task byte that changed after
     # the digest was computed would make the evidence pin a lie.
     path.chmod(stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
 
 
-def main() -> int:
+def _prepared_commit(prepared: Path) -> str:
+    if not (prepared / ".git").exists():
+        raise VerificationFailed(f"{prepared} is not a git checkout; cannot verify its commit")
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(prepared), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise VerificationFailed(f"git rev-parse failed in {prepared}: {error}") from error
+    return result.stdout.strip()
+
+
+def verify_inputs(inputs_root: Path, pin: dict[str, Any]) -> dict[str, Any]:
+    """Verify every input against the pin; return the facts the build records."""
+
+    release = pin["release"]
+    prepared = inputs_root / "prepared"
+    gated = inputs_root / "gated"
+
+    release_manifest = prepared / "benchmark_releases" / f"{release}.json"
+    if not release_manifest.is_file():
+        raise VerificationFailed(f"release manifest missing: {release_manifest}")
+    actual = _sha256(release_manifest)
+    if actual != pin["release_manifest_sha256"]:
+        raise VerificationFailed(f"release manifest sha256 mismatch: {release_manifest}")
+
+    hash_manifest = gated / "tasks" / pin["tasks"]["hash_manifest_path"]
+    if not hash_manifest.is_file():
+        raise VerificationFailed(f"task hash manifest missing: {hash_manifest}")
+    hash_manifest_sha = _sha256(hash_manifest)
+    if hash_manifest_sha != pin["tasks"]["hash_manifest_sha256"]:
+        raise VerificationFailed(f"task hash manifest sha256 mismatch: {hash_manifest}")
+
+    manifest = json.loads(hash_manifest.read_bytes())
+    files = manifest.get("files")
+    if not isinstance(files, dict):
+        raise VerificationFailed(f"task hash manifest has no 'files' map: {hash_manifest}")
+    expected_count = int(pin["tasks"]["task_count"])
+    if len(files) != expected_count:
+        raise VerificationFailed(
+            f"task hash manifest lists {len(files)} tasks, pin says {expected_count}: "
+            f"{hash_manifest}"
+        )
+    tasks_dir = gated / "tasks"
+    task_bytes: dict[str, bytes] = {}
+    for name in sorted(files):
+        entry = files[name]
+        path = tasks_dir / name
+        if not path.is_file():
+            raise VerificationFailed(f"task file missing: {path}")
+        data = path.read_bytes()
+        if hashlib.sha256(data).hexdigest() != entry.get("sha256"):
+            raise VerificationFailed(f"task file sha256 mismatch: {path}")
+        size = entry.get("size")
+        if size is not None and int(size) != len(data):
+            raise VerificationFailed(f"task file size mismatch: {path}")
+        task_bytes[name] = data
+
+    commit = _prepared_commit(prepared)
+    if commit != pin["osworld"]["commit"]:
+        raise VerificationFailed(
+            f"prepared checkout HEAD {commit[:12]} != pinned "
+            f"{pin['osworld']['commit'][:12]}: {prepared}"
+        )
+
+    assets_manifest = gated / "manifests" / "assets.json"
+    if not assets_manifest.is_file():
+        raise VerificationFailed(f"assets manifest missing: {assets_manifest}")
+    assets_payload = json.loads(assets_manifest.read_bytes())
+    if assets_payload.get("revision") != pin["assets"]["revision"]:
+        raise VerificationFailed(
+            f"assets manifest revision {assets_payload.get('revision')!r} != pinned "
+            f"{pin['assets']['revision']!r}: {assets_manifest}"
+        )
+
+    return {
+        "release_manifest_bytes": release_manifest.read_bytes(),
+        "hash_manifest_bytes": hash_manifest.read_bytes(),
+        "hash_manifest_sha256": hash_manifest_sha,
+        "assets_manifest_sha256": _sha256(assets_manifest),
+        "prepared_commit": commit,
+        "tasks": task_bytes,
+    }
+
+
+def build_workspace(
+    *,
+    out: Path,
+    facts: dict[str, Any],
+    release: str,
+    version: str,
+    package_digest: str,
+) -> str:
+    """Write the workspace files; return the release digest."""
+
+    out.mkdir(parents=True, exist_ok=True)
+    tasks_out = out / "tasks"
+    tasks_out.mkdir(exist_ok=True)
+    release_digest = _release_digest(
+        version=version,
+        package_digest=package_digest,
+        benchmark_release=release,
+        task_manifest_sha256=facts["hash_manifest_sha256"],
+    )
+    canonical = {"separators": (",", ":"), "sort_keys": True}
+    _write_readonly(
+        out / "adapter-release.json",
+        json.dumps({"release_digest": release_digest}, **canonical).encode(),
+    )
+    _write_readonly(out / "benchmark_release.json", facts["release_manifest_bytes"])
+    _write_readonly(out / "task_hashes.json", facts["hash_manifest_bytes"])
+    _write_readonly(
+        out / "adapter-provider.json", json.dumps({"provider": "aws"}, **canonical).encode()
+    )
+    _write_readonly(
+        out / "inputs.json",
+        json.dumps(
+            {
+                "assets_manifest_sha256": facts["assets_manifest_sha256"],
+                "tasks_manifest_sha256": facts["hash_manifest_sha256"],
+                "prepared_commit": facts["prepared_commit"],
+            },
+            **canonical,
+        ).encode(),
+    )
+    for name, data in facts["tasks"].items():
+        _write_readonly(tasks_out / name, data)
+    return release_digest
+
+
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--benchmark-release", required=True)
     parser.add_argument("--out", required=True, type=Path)
+    parser.add_argument(
+        "--inputs-root",
+        type=Path,
+        default=Path(os.environ.get("OSWORLD_INPUTS_ROOT", _DEFAULT_INPUTS_ROOT)),
+    )
+    parser.add_argument("--release-pin", type=Path, default=_DEFAULT_PIN)
     parser.add_argument("--version", default="0.1.0")
     parser.add_argument("--package-digest", default="0" * 64)
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
-    token = os.environ.get("HF_TOKEN")
-    if not token:
+    pin = json.loads(Path(args.release_pin).read_bytes())
+    if pin.get("release") != args.benchmark_release:
         print(
-            "HF_TOKEN is not set. The OSWorld V2 task corpus is gated "
-            "(xlangai/osworld_v2_tasks); accept the terms once and export a token.",
+            f"release pin {args.release_pin} is for {pin.get('release')!r}, "
+            f"not {args.benchmark_release!r}",
             file=sys.stderr,
         )
         return 2
-
-    out: Path = args.out
-    out.mkdir(parents=True, exist_ok=True)
-    (out / "tasks").mkdir(exist_ok=True)
-
-    # NOTE: the actual gated download lands with PR 2's AWS provider, which is
-    # when a real workspace is first materialised. PR 1's tests build their
-    # own minimal workspaces from fixture tasks, so this script's download body
-    # is intentionally a stub that fails loudly rather than fabricate a
-    # workspace that would produce unattested evidence.
-    print(
-        "build_osworld_adapter: the gated HF download is wired in PR 2 alongside\n"
-        "the AWS provider. PR 1 tests materialise fixture workspaces directly.\n"
-        f"Requested release: {args.benchmark_release} -> {out}",
-        file=sys.stderr,
+    inputs_root = Path(os.path.expanduser(str(args.inputs_root)))
+    try:
+        refuse_volatile_root(inputs_root)
+        facts = verify_inputs(inputs_root, pin)
+    except VerificationFailed as error:
+        print(f"build_osworld_adapter: verification failed: {error}", file=sys.stderr)
+        return EXIT_VERIFY
+    release_digest = build_workspace(
+        out=args.out,
+        facts=facts,
+        release=args.benchmark_release,
+        version=args.version,
+        package_digest=args.package_digest,
     )
-    return 3
+    print(
+        json.dumps(
+            {
+                "workspace": str(args.out),
+                "release_digest": release_digest,
+                "task_count": len(facts["tasks"]),
+                "prepared_commit": facts["prepared_commit"],
+                "assets_manifest_sha256": facts["assets_manifest_sha256"],
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    return 0
 
 
 if __name__ == "__main__":
