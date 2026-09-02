@@ -264,3 +264,120 @@ async def test_wire_stopping_frame_prevents_takeover_without_any_wake_entry(
     # The viewer stays usable: a prompt resolves against the stopped notice
     # instead of blocking forever on an owner that will never return.
     assert remote._owner_ready.is_set()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_stop_does_not_disable_later_owner_death_recovery(
+    tmp_path, monkeypatch
+) -> None:
+    """A follower whose ``/stop`` FAILED must still take over a real death.
+
+    Round-3 MAJOR-1: the flag was set before the op and never cleared, so
+    both reachable failures — no client attached, and an old owner answering
+    unknown-op — told the user the stop had failed and then silently
+    disabled recovery for the rest of the session. Only an ACCEPTED stop may
+    suppress the takeover.
+    """
+
+    class OldOwner:
+        """An owner too old to know the op: answers with an error."""
+
+        connected = True
+
+        async def request_stop(self) -> str:
+            raise RuntimeError("this owner cannot stop itself gracefully")
+
+    class Winner:
+        async def dispose(self) -> None:
+            pass
+
+    winner = Winner()
+    monkeypatch.setattr(remote_module, "find_owner_record", lambda *args: (None, None))
+    remote = RemoteSession(
+        config_dir=tmp_path,
+        session_id="s1",
+        takeover_factory=lambda: asyncio.sleep(0, result=winner),
+    )
+    remote._client = OldOwner()  # type: ignore[assignment]
+    with pytest.raises(RuntimeError):
+        await remote.request_stop()
+    assert remote._deliberate_stop is False
+
+    # ... and the owner is genuinely killed later: recovery must still run.
+    adopted: list[Any] = []
+
+    async def adopt(local):  # noqa: ANN001
+        adopted.append(local)
+        await remote.dispose()
+
+    remote.set_takeover_callback(adopt)
+    remote._client = None
+    remote._on_disconnected("owner exited")
+    if remote._recovery_task is not None:
+        await asyncio.wait_for(remote._recovery_task, timeout=5)
+    assert adopted == [winner]
+
+
+@pytest.mark.asyncio
+async def test_stop_with_no_client_attached_does_not_latch(tmp_path, monkeypatch) -> None:
+    """The simpler failure shape: nothing attached, so nothing was stopped."""
+    monkeypatch.setattr(remote_module, "find_owner_record", lambda *args: (None, None))
+    remote = RemoteSession(
+        config_dir=tmp_path,
+        session_id="s1",
+        takeover_factory=lambda: asyncio.sleep(0, result=None),
+    )
+    remote._client = None
+    with pytest.raises(ConnectionError):
+        await remote.request_stop()
+    assert remote._deliberate_stop is False
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_viewer_is_told_so_and_never_says_reconnecting(
+    tmp_path, monkeypatch
+) -> None:
+    """The viewer's side of a deliberate stop is legible, not just safe.
+
+    Round-3 D3-1/Q3-2/U3-1: the viewer painted nothing at the moment the
+    stop landed (indistinguishable from an idle agent) and then answered
+    every later message with the owner-death wording — promising a
+    reconnection that was never coming, on the one screen where the kill
+    switch has to be readable.
+    """
+    from local_operator.mobile.attach_client import STOPPED_REASON
+
+    told: list[str] = []
+    monkeypatch.setattr(remote_module, "find_owner_record", lambda *args: (None, None))
+    remote = RemoteSession(
+        config_dir=tmp_path,
+        session_id="s1",
+        takeover_factory=lambda: asyncio.sleep(0, result=None),
+    )
+    remote.set_stopped_callback(lambda: told.append("stopped"))
+    remote._on_disconnected(STOPPED_REASON)
+    if remote._recovery_task is not None:
+        await asyncio.wait_for(remote._recovery_task, timeout=5)
+
+    assert told == ["stopped"]  # the app was told exactly once
+    with pytest.raises(ConnectionError, match="stopped"):
+        await remote.prompt("a message after the stop")
+    # Fired once even if both recognition points run.
+    remote._notify_stopped()
+    assert told == ["stopped"]
+
+
+@pytest.mark.asyncio
+async def test_a_dropped_connection_still_says_reconnecting(tmp_path, monkeypatch) -> None:
+    """The converse: a real owner loss keeps the recovery wording.
+
+    The two states are opposites and must not collapse into one sentence —
+    this is what stops the D3-1 fix from lying in the other direction.
+    """
+    monkeypatch.setattr(remote_module, "find_owner_record", lambda *args: (None, None))
+    remote = RemoteSession(
+        config_dir=tmp_path,
+        session_id="s1",
+        takeover_factory=lambda: asyncio.sleep(0, result=None),
+    )
+    assert remote._unavailable_reason() == "session owner is reconnecting"

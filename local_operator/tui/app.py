@@ -1883,6 +1883,7 @@ class OperatorApp(App[None]):
         #: than tell them to wait for a session that is never arriving.
         #: Cleared the moment another session transition starts.
         self._stopped_session_id = ""
+        self._watched_stop_notice_shown = False
         #: True between a first-run "no hosting configured" boot failure and the
         #: `/login` that resolves it. While set, a successful login reloads the
         #: session (there is none yet) rather than only re-polling the splash.
@@ -2869,6 +2870,13 @@ class OperatorApp(App[None]):
             set_takeover = getattr(session, "set_takeover_callback", None)
             if callable(set_takeover):
                 set_takeover(self._adopt_takeover_session)
+            # The opposite outcome to takeover, and equally in need of a
+            # screen: the owner ENDED this session, so this viewer stays a
+            # viewer of something cold and must say so rather than leaving
+            # the transcript to stop mid-air (round-3 D3-1/Q3-2/U3-1).
+            set_stopped = getattr(session, "set_stopped_callback", None)
+            if callable(set_stopped):
+                set_stopped(self._on_watched_session_stopped)
             # The double-Esc cancel reads the synchronous count the protocol
             # returns, but a follower's REAL count resolves on the owner. The
             # resolver is installed per-press by the Esc handler; arming the
@@ -3076,6 +3084,33 @@ class OperatorApp(App[None]):
             activity_started_at=getattr(state, "activity_started_at", None),
         )
         self._refresh_band()
+
+    def _on_watched_session_stopped(self) -> None:
+        """A viewer's session was ended deliberately by whoever owns it.
+
+        Says the same thing the owner's own ``/stop`` says, because it is the
+        same fact: the session is cold and ``/resume`` is the way back. The
+        id is recorded FIRST — ``_no_session_notice`` is gated on it, so it
+        is what turns every later "owner is reconnecting" into the truth.
+        """
+        session = self._session
+        session_id = getattr(session, "session_id", "") if session is not None else ""
+        if session_id:
+            self._stopped_session_id = session_id
+        self._paint_watched_stop_notice()
+
+    def _paint_watched_stop_notice(self) -> None:
+        """The one notice a viewer gets when its session is stopped elsewhere.
+
+        Idempotent: the announcement and the marker inference can both fire,
+        and two identical notices read as two separate events.
+        """
+        if self._watched_stop_notice_shown:
+            return
+        self._watched_stop_notice_shown = True
+        resume = self._stopped_session_id
+        way_back = f"; /resume {resume} reopens it" if resume else ""
+        self._system_notice(f"this session was stopped from another terminal{way_back}", "warning")
 
     async def _adopt_takeover_session(self, session: Any) -> None:
         """Become the owner after the remote facade wins the transcript lease.
@@ -13251,6 +13286,16 @@ class OperatorApp(App[None]):
         except Exception as error:  # noqa: BLE001 — the refusal is the receipt
             self._system_notice(f"could not stop the owner: {error}", "warning")
             return
+        # The owner's ack says the stop is UNDERWAY ("stopping …"); what
+        # settles it is the announcement that follows, which paints the
+        # stopped notice through `_on_watched_session_stopped`. Recording the
+        # id here means that notice can name the reopen command even though
+        # the session object is about to go away (round-3 Q3-2: the receipt
+        # stayed at "stopping" and nothing on screen ever confirmed it
+        # landed).
+        session_id = getattr(session, "session_id", "") or ""
+        if session_id:
+            self._stopped_session_id = session_id
         self._system_notice(detail or "stop requested from the owner")
 
     async def _stop_target_worker(self, target: str) -> None:
