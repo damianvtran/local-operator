@@ -105,8 +105,12 @@ PRICE_CATALOGUE_KEY = "models-dev.listing"
 #: the permissive default would let it keep claiming ``free`` for the very rows
 #: this gate exists to silence — the lyria pair, which models.dev also quotes at
 #: $0/0. The bump is what makes the fix take effect on an existing install
-#: rather than a day later; the refetch is one conditional GET of a document
-#: every install already refreshes on its own TTL.
+#: rather than a day later. It costs ONE unconditional refetch per install, on
+#: whichever surface reads the document first: single-id resolution repairs it
+#: in-call (:func:`_models_dev_providers`) and the picker's bulk read repairs it
+#: off-loop (:func:`_repair_unusable_capture`). Both drop the document before
+#: refetching, so the stale ETag cannot turn the repair into a 304 that rewrites
+#: the same unusable capture.
 PRICE_CATALOGUE_CAPTURE = 2
 
 #: A local (canonical) provider id, mapped to the models.dev provider keys that
@@ -718,15 +722,59 @@ def models_dev_providers(
 
     For a caller that is about to price many ids at once (the picker's row
     builder) and must not put a fetch on its path: it reads what is there,
-    whatever its age, and never schedules anything. A document from a capture
-    this reader cannot use reads as absent; the next single-id resolution
-    performs the drop-and-refetch, not this.
+    whatever its age, and NEVER fetches synchronously. A document from a capture
+    this reader cannot use reads as absent, and is dropped so the next read
+    finds a repairable state — see :func:`_repair_unusable_capture`.
     """
     try:
-        return _usable(peek_listing(PRICE_CATALOGUE_KEY, cache_dir=cache_dir).payload)
+        payload = peek_listing(PRICE_CATALOGUE_KEY, cache_dir=cache_dir).payload
+        providers = _usable(payload)
+        if providers is None and payload is not None:
+            _repair_unusable_capture(cache_dir)
+        return providers
     except Exception as exc:  # noqa: BLE001 — a price is never worth a failed paint
         logger.debug("models.dev catalogue unreadable: %s", exc)
         return None
+
+
+def _repair_unusable_capture(cache_dir: Path | None) -> None:
+    """Drop a document this reader's capture rejects and refetch it OFF-loop.
+
+    WHY: the picker reads through :func:`models_dev_providers`, which is
+    peek-only, so before this a capture bump had no repair path on the surface
+    it exists to fix. The drop-and-refetch lived only in
+    :func:`_models_dev_providers`, reachable from single-id resolution — and
+    that leg is itself gated behind ``configure._needs_enrichment``, so an
+    operator whose default model the registry fully describes could open
+    ``/model`` for days and keep seeing the rows the stale capture unprices
+    (8 of them at the 1→2 bump: gpt-5.3-codex-spark and the grok-4.20 trio
+    across two provider spellings). "The fix ships and changes nothing" is
+    precisely what the capture stamp exists to prevent, so the picker surface
+    needs the same recovery ``discovery._available_models`` performs.
+
+    IT CANNOT STALL A PAINT. Both halves are non-blocking: ``invalidate`` is one
+    ``unlink``, and ``_schedule_revalidate`` hands the 4.4 MB GET to a daemon
+    thread and returns. The caller is unaffected either way — it already has its
+    answer (``None``), which is what an unusable document meant before.
+
+    ORDER IS LOAD-BEARING: the drop must precede the schedule. ``_fetch`` sends
+    ``If-None-Match`` from the document on disk, so scheduling against the stale
+    one invites a 304, which hands the SAME capture-1 payload back to be
+    rewritten — repaired never, re-attempted forever. Dropping first takes the
+    ETag with it and makes the refetch unconditional, so the document that lands
+    is stamped with the current capture.
+
+    IT CANNOT LOOP. A successful refetch is usable, so this branch is not
+    re-entered. A failed one leaves no document, and an absent document is the
+    ordinary cold miss the single-id path already owns — this branch needs a
+    payload to fire. Between those, ``_schedule_revalidate``'s own in-flight set
+    and ``REVALIDATE_BACKOFF_S`` bound an offline machine to one thread per five
+    minutes however often the picker repaints.
+    """
+    invalidate(PRICE_CATALOGUE_KEY, cache_dir=cache_dir)
+    _schedule_revalidate(
+        PRICE_CATALOGUE_KEY, lambda: _fetch(DEFAULT_TIMEOUT_S, cache_dir), cache_dir
+    )
 
 
 def _models_dev_providers(

@@ -855,5 +855,77 @@ def test_models_dev_providers_reads_disk_only_and_never_fetches(tmp_path) -> Non
     assert providers is not None and "claude-fable-5-1" in providers["anthropic"]
     assert recorder.calls == []
     # An older capture reads as absent rather than as a half-usable document.
+    with catalogue._revalidate_lock:
+        catalogue._revalidating.clear()
+        catalogue._last_attempt.clear()
+        catalogue._threads.clear()
     _plant(tmp_path, {"capture": 0, "providers": {}})
-    assert prices.models_dev_providers(cache_dir=tmp_path) is None
+    with patch("httpx.get", _Canned([_ok()])):
+        assert prices.models_dev_providers(cache_dir=tmp_path) is None
+        for thread in catalogue._revalidation_threads():
+            thread.join(timeout=5.0)
+
+
+def test_an_unusable_capture_is_dropped_and_repaired_off_the_paint_path(tmp_path) -> None:
+    """A2: the picker's bulk read is peek-only, so a stale-capture document had
+    no repair path on the very surface the capture bump exists to fix. It now
+    drops the document and refetches off-loop; the CALLING read still answers
+    ``None`` without a synchronous request, and the next one is repaired."""
+    with catalogue._revalidate_lock:
+        catalogue._revalidating.clear()
+        catalogue._last_attempt.clear()
+        catalogue._threads.clear()
+    stale = project(_MODELS_DEV_BODY, _ETAG)
+    stale["capture"] = prices.PRICE_CATALOGUE_CAPTURE - 1
+    _plant(tmp_path, stale)
+    gate = __import__("threading").Event()
+    recorder = _Canned([_ok()])
+
+    def held(url, **kwargs):
+        # Held open so the assertion below proves the caller returned WITHOUT
+        # waiting on the fetch — a stalled paint would block here instead.
+        gate.wait(timeout=5.0)
+        return recorder(url, **kwargs)
+
+    with patch("httpx.get", held):
+        assert prices.models_dev_providers(cache_dir=tmp_path) is None
+        threads = catalogue._revalidation_threads()
+        assert len(threads) == 1, "one off-loop repair expected"
+        assert not (tmp_path / f"{PRICE_CATALOGUE_KEY}.json").exists(), "dropped before refetch"
+        gate.set()
+        for thread in threads:
+            thread.join(timeout=5.0)
+
+    # The refetch is UNCONDITIONAL: dropping first takes the stale ETag with it,
+    # so a 304 cannot hand the same unusable capture back to be rewritten.
+    assert "If-None-Match" not in recorder.calls[0]["headers"]
+    assert recorder.calls[0]["timeout"] == prices.DEFAULT_TIMEOUT_S
+    repaired = prices.models_dev_providers(cache_dir=tmp_path)
+    assert repaired is not None and "claude-fable-5-1" in repaired["anthropic"]
+
+
+def test_the_capture_repair_cannot_loop_when_the_refetch_keeps_failing(tmp_path) -> None:
+    """The backoff owns the offline case: a picker repainting against a document
+    that cannot be refetched schedules once, not once per paint."""
+    with catalogue._revalidate_lock:
+        catalogue._revalidating.clear()
+        catalogue._last_attempt.clear()
+        catalogue._threads.clear()
+    stale = project(_MODELS_DEV_BODY, _ETAG)
+    stale["capture"] = prices.PRICE_CATALOGUE_CAPTURE - 1
+    attempts: list[str] = []
+
+    def offline(url, **kwargs):
+        attempts.append(url)
+        raise httpx.ConnectError("offline")
+
+    with patch("httpx.get", offline):
+        for _ in range(5):
+            # Re-planted each time: a failed repair leaves NO document, and the
+            # absent-document case is the ordinary cold miss, not this branch.
+            _plant(tmp_path, stale)
+            assert prices.models_dev_providers(cache_dir=tmp_path) is None
+            for thread in catalogue._revalidation_threads():
+                thread.join(timeout=5.0)
+
+    assert len(attempts) == 1, "REVALIDATE_BACKOFF_S bounds the repair to one attempt"
