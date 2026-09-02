@@ -47,12 +47,20 @@ def resolve_peer_target(
 
     Priority: ``pid`` (exact), ``session`` (exact session_id), then the ``target``
     substring matched case-insensitively against conversation_name, then
-    session_id, then the cwd basename. Only ``live`` records are eligible (a
-    ``wedged`` owner will not service the socket promptly; ``stale`` is dead)
-    — unless ``include_wedged``, which the kill switch passes: a wedged
-    session is exactly the one a user needs to be able to STOP, and the stop
-    ladder's signal rungs are built for an owner that will not answer. A send
-    never wants that; a message to a wedged owner is a message nobody reads.
+    session_id, then the cwd basename. An ALL-DIGIT ``target`` is tried as a
+    pid first: the picker rows, ``lop sessions`` and every disambiguation
+    line present the pid as the thing to retype, and a vocabulary whose
+    listed form cannot be typed back is a dead end (found by the ``/stop``
+    argument picker: every row it offered failed to resolve). Only when no
+    record has that pid does the digit string fall through to the substring
+    match, so a session id or name that happens to be numeric still works.
+
+    Only ``live`` records are eligible (a ``wedged`` owner will not service
+    the socket promptly; ``stale`` is dead) — unless ``include_wedged``,
+    which the kill switch passes: a wedged session is exactly the one a user
+    needs to be able to STOP, and the stop ladder's signal rungs are built
+    for an owner that will not answer. A send never wants that; a message to
+    a wedged owner is a message nobody reads.
 
     A selector (``pid``/``session``) alongside a ``target`` substring is REFUSED
     rather than resolved. The two name different sessions, and the precedence
@@ -130,6 +138,16 @@ def resolve_peer_target(
             [],
             f"no target given (pass a name/substring, {pid_hint}, or {session_hint})",
         )
+
+    if needle_source.isdigit():
+        as_pid = int(needle_source)
+        if any(rec.pid == as_pid for rec, _state in scanned):
+            return resolve_peer_target(
+                pid=as_pid,
+                pid_hint=pid_hint,
+                session_hint=session_hint,
+                include_wedged=include_wedged,
+            )
 
     needle = needle_source.lower()
     matches: list[Any] = []
