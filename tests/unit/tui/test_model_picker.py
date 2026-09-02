@@ -17,6 +17,7 @@ from local_operator.tui.widgets.model_picker import (
     MAX_VISIBLE_ROWS,
     ModelPicker,
     ModelRow,
+    _is_parenthesised_tail,
     format_price_pair,
     format_window,
     rank_rows,
@@ -92,6 +93,64 @@ def test_only_a_genuine_pair_of_zeroes_reads_as_free() -> None:
     assert format_price_pair(0.09, 0.4) == "$0.09/0.4"
     assert format_price_pair(0.0, 0.0) == "free"
     assert format_price_pair(-1.0, -1.0) == ""
+    # One unknown leg is still unknown: a row that could not price half of
+    # itself has not been quoted free, and must not print the sentinel either.
+    assert format_price_pair(0.0, -1.0) == ""
+    assert format_price_pair(-1.0, 0.0) == ""
+
+
+def test_a_sub_cent_price_keeps_three_significant_figures() -> None:
+    """The `$18.75 -> $19` argument does not stop at one cent.
+
+    A flat two decimals under-quoted `zai/glm-5.3-flash` by 6.7% (`0.075` ->
+    `$0.07`) on exactly the cheap models a user picks BECAUSE of the price, and
+    resolved the same half-cent in opposite directions on two rows of one list:
+    `gpt-5.2:batch` (0.875) rounded up while `gpt-5.1:batch` (0.625) rounded
+    down, an artefact of binary floats rather than of anything either vendor
+    quoted.
+    """
+    assert format_price_pair(0.075, 0.25) == "$0.075/0.25"
+    assert format_price_pair(0.875, 1.75) == "$0.875/1.75"
+    assert format_price_pair(0.625, 1.25) == "$0.625/1.25"
+    assert format_price_pair(0.125, 0.5) == "$0.125/0.5"
+    # Three SIGNIFICANT figures, not three decimals: the bound is relative, so
+    # it says the same thing about a $5 model and a $0.05 one.
+    assert format_price_pair(0.04815, 0.19305) == "$0.0481/0.193"
+    # Unchanged where it was already right — no trailing-zero noise, and the
+    # one-decimal rule above ten still governs.
+    assert format_price_pair(3.0, 15.0) == "$3/15"
+    assert format_price_pair(0.6, 2.5) == "$0.6/2.5"
+    assert format_price_pair(15.0, 18.75) == "$15/18.8"
+
+
+def test_a_name_that_is_already_a_parenthetical_is_not_wrapped_twice() -> None:
+    """`GLM-5.2 (Token Plan)` rendered as `(GLM-5.2 (Token Plan))`; the stray `))`
+    reads as a rendering fault rather than as a qualifier.
+
+    Only a TRAILING parenthetical is unwrapped, so brackets can never be dropped
+    from a name that needs them to read as an annotation at all.
+    """
+    assert _is_parenthesised_tail("GLM-5.2 (Token Plan)")
+    assert _is_parenthesised_tail("Claude Opus 4.5 (2025-11-01)")
+    assert not _is_parenthesised_tail("GPT-4.1 mini")
+    # The group closes before the end, so the name continues past it.
+    assert not _is_parenthesised_tail("(preview) thing")
+    # Unbalanced: a naive `endswith(")")` would strip a bracket that is needed.
+    assert not _is_parenthesised_tail("a) b")
+
+    picker = ModelPicker(lambda row: None)
+    picker.set_rows(
+        [
+            ModelRow(
+                "alibaba-token-plan", "glm-5.2", "GLM-5.2 (Token Plan)", 1_000_000, -1.0, -1.0, True
+            )
+        ],
+        current="",
+    )
+    picker.open("glm")
+    painted = picker.render_text(100).plain
+    assert "GLM-5.2 (Token Plan)" in painted, painted
+    assert "))" not in painted, painted
 
 
 # -- ranking -----------------------------------------------------------------
@@ -639,7 +698,10 @@ def test_a_name_that_cannot_be_read_whole_is_not_painted_at_all() -> None:
     )
     picker.open("opus")
     wide = picker.render_text(120).plain
-    assert f"({long_name})" in wide, wide
+    # Painted whole and WITHOUT a second pair of brackets: this name already
+    # ends in its own parenthetical, so the wrapper would read `))`.
+    assert long_name in wide, wide
+    assert f"({long_name})" not in wide, wide
     narrow = picker.render_text(60).plain
     assert "Claude" not in narrow, narrow
     assert "claude-opus-4-5-20251101" in narrow, narrow

@@ -1139,8 +1139,13 @@ class ProviderController:
                         model_id=model.id,
                         label=model_label(definition.id, model.id, model.name or "").full,
                         context_window=max(0, model.context_window),
-                        input_price=_price(model.input_price, definition),
-                        output_price=_price(model.output_price, definition),
+                        # ``free`` is consumed HERE and goes no further: a
+                        # stated zero survives ``_price`` as ``0.0``, which is
+                        # already the entry's way of saying free (an unknown is
+                        # ``-1.0``). Carrying the flag onto the entry as well
+                        # would be a second spelling of one fact, free to drift.
+                        input_price=_price(model.input_price, definition, free=model.free),
+                        output_price=_price(model.output_price, definition, free=model.free),
                         connected=connected,
                         aggregated=definition.id in AGGREGATOR_PROVIDERS,
                     )
@@ -1289,7 +1294,10 @@ def _enrich_prices(
     the provider's own listing stated is authoritative and never overridden.
     (3) Aggregator rows are never enriched — their listing IS the priced source —
     and a provider the chain does not map (``ollama``, ``radient``) is left as
-    is, so a keyless provider's genuine ``free`` stays free (``_price``).
+    is, so a keyless provider's genuine ``free`` stays free (``_price``). An
+    aggregator's ``:free`` routes therefore take their ``free`` flag straight
+    from ``discovery._row_from_openai_entry``, the parser that saw the explicit
+    ``0`` on the wire, and never pass through here at all.
     """
     from local_operator.model.prices import models_dev_providers, price_row
 
@@ -1307,11 +1315,24 @@ def _enrich_prices(
         canonical = credential_provider_id(definition.id)
         enriched: list[DiscoveredModel] = []
         for row in rows:
-            if row.input_price > 0 or row.output_price > 0:
+            if row.input_price > 0 or row.output_price > 0 or row.free:
+                # ``free`` counts as priced: the listing already ANSWERED the
+                # money question with a quoted zero, and re-asking the chain
+                # could only replace that answer with a third party's rate.
                 enriched.append(row)
                 continue
             found = price_row(canonical, row.id, models_dev=models_dev, openrouter=openrouter)
-            if found is None or not (found.input_price > 0 or found.output_price > 0):
+            if found is None:
+                enriched.append(row)
+                continue
+            if found.free:
+                # A stated zero fills the HOLE without filling the prices: the
+                # numbers stay 0.0 and the flag is what the picker reads. Kept
+                # ahead of the positive-price test below because a free row has
+                # no positive leg and would otherwise be dropped as unanswered.
+                enriched.append(dataclasses.replace(row, free=True))
+                continue
+            if not (found.input_price > 0 or found.output_price > 0):
                 enriched.append(row)
                 continue
             enriched.append(
@@ -1331,7 +1352,7 @@ def _enrich_prices(
     return result
 
 
-def _price(value: float | None, definition: ProviderDefinition) -> float:
+def _price(value: float | None, definition: ProviderDefinition, *, free: bool = False) -> float:
     """A per-million price, with UNKNOWN kept distinct from FREE.
 
     Discovery and the static registry both use ``0`` for "no price known", and the
@@ -1340,9 +1361,23 @@ def _price(value: float | None, definition: ProviderDefinition) -> float:
     this immediate rather than theoretical: its listing carries no pricing at all,
     so every model it discovers that we did not already ship would read ``free``.
 
-    ``-1`` is the unknown sentinel the picker blanks. Zero is preserved only for
-    providers that need no credential — a local Ollama really is free per token,
-    and blanking that would hide the one thing that makes it interesting.
+    ``-1`` is the unknown sentinel the picker blanks. Zero — and therefore the
+    word ``free`` — survives in exactly two cases:
+
+    * ``allows_missing_api_key``: a local Ollama really is free per token, and
+      blanking that would hide the one thing that makes it interesting.
+    * ``free``: a SOURCE stated the zero. That is a quoted price, not a silence,
+      and repeating a quoted zero fabricates nothing. This is what makes the
+      picker's ``free`` label reachable for the 18 ``:free`` OpenRouter routes,
+      every one of which the listing prices at an explicit ``0``; before it, a
+      stated zero collapsed into the unknown sentinel here and rendered as the
+      same blank cell as a model nobody had priced.
+
+    ``free`` is never derived from ``value`` — it arrives from the parser that
+    read the wire (:attr:`DiscoveredModel.free`) — which is what keeps two rows
+    that both reach here as ``0.0`` apart: a plan-billed row whose real cost is
+    unknowable stays blank, because the plan catalogues do not set it (see
+    ``prices._PLAN_BILLED_KEYS``), and so does a row nobody quoted at all.
 
     NOT the same ``-1.0`` as ``model.prices._STATED_ZERO``, which means the
     opposite — "models.dev stated this price and it is zero". That marker is
@@ -1352,4 +1387,4 @@ def _price(value: float | None, definition: ProviderDefinition) -> float:
     """
     if value is not None and value > 0:
         return float(value)
-    return 0.0 if definition.allows_missing_api_key else -1.0
+    return 0.0 if (free or definition.allows_missing_api_key) else -1.0

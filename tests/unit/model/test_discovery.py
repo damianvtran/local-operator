@@ -176,6 +176,78 @@ def test_openai_compat_parses_a_captured_openrouter_payload() -> None:
     assert rows[1].supports_images is False
     assert rows[1].supports_prompt_cache is False
     assert rows[1].cache_write_price == 0.0
+    # Both are priced, so neither claims to be free.
+    assert [row.free for row in rows] == [False, False]
+
+
+def test_a_quoted_zero_is_read_as_free_and_a_router_price_is_not() -> None:
+    """OpenRouter spells THREE things in this field and two of them collapse to
+    ``0.0`` once ``_positive_float`` is done, so the difference has to be read
+    off the wire.
+
+    ``"0"`` is a model that is genuinely free at the point of use (the 18
+    ``:free`` routes, verified against the live listing); ``"-1"`` is a
+    meta-route whose cost depends on the model it picks (``openrouter/auto``)
+    and is emphatically NOT free; an absent leg is a listing that quoted
+    nothing. Only the first may ever reach the picker's ``free`` label.
+    """
+    body = {
+        "data": [
+            {"id": "google/gemma:free", "pricing": {"prompt": "0", "completion": "0"}},
+            {"id": "openrouter/auto", "pricing": {"prompt": "-1", "completion": "-1"}},
+            {"id": "terse/model"},
+            # Half-stated: a model you pay for on output. Calling it free would
+            # understate it by the whole output bill.
+            {"id": "half/stated", "pricing": {"prompt": "0", "completion": "0.000015"}},
+        ]
+    }
+    rows = fetch_models("openrouter", api_key="k", client=_StubClient([_Response(200, body)]))
+
+    assert rows is not None
+    assert {row.id: row.free for row in rows} == {
+        "google/gemma:free": True,
+        "openrouter/auto": False,
+        "terse/model": False,
+        "half/stated": False,
+    }
+    # Every one of them still reports 0.0 on at least the input leg, which is
+    # exactly why the flag rather than the price is what carries the answer.
+    assert all(row.input_price == 0.0 for row in rows)
+
+
+def test_the_free_flag_survives_a_cache_round_trip(tmp_path) -> None:
+    """A document is read back by a different function than the one that parsed
+    the wire, and a field it forgets silently reverts to the unstated default —
+    the same failure mode ``supports_images`` documents just below."""
+    body = {"data": [{"id": "google/gemma:free", "pricing": {"prompt": "0", "completion": "0"}}]}
+    client = _StubClient([_Response(200, body)])
+
+    live, live_status = available_models(
+        "openrouter", api_key=None, client=client, cache_dir=tmp_path
+    )
+    assert live_status == "ok" and live[0].free is True
+
+    cached, cached_status = available_models(
+        "openrouter", api_key=None, client=client, cache_dir=tmp_path
+    )
+    assert cached_status == "cached", "premise: served from disk, not refetched"
+    assert len(client.calls) == 1
+    assert cached[0].free is True, "the stated zero must survive the document"
+
+
+def test_a_registry_price_clears_a_stale_free_flag() -> None:
+    """The merge falls back to the bundled numbers for a silent listing, so a row
+    that ends up quoting a real price must not also claim to be free — the two
+    would render as a contradiction in one cell."""
+    static = {"m": _info("m", input_price=3.0, output_price=15.0)}
+    merged = merge_models(static, [DiscoveredModel(id="m", free=True)])
+
+    assert (merged[0].input_price, merged[0].output_price) == (3.0, 15.0)
+    assert merged[0].free is False, "priced rows are not free"
+
+    # With nothing bundled to fall back to, the live statement stands.
+    kept = merge_models({}, [DiscoveredModel(id="m", free=True)])
+    assert kept[0].free is True
 
 
 def test_openai_compat_reads_the_legacy_modality_string() -> None:
@@ -1007,7 +1079,9 @@ def test_an_openrouter_document_from_capture_one_is_refetched_once(tmp_path) -> 
     assert status == "ok"
     assert len(client.calls) == 1
     assert models[0].cache_write_price == pytest.approx(12.5)
-    assert json.loads(stale.read_text())["payload"]["capture"] == 2
+    assert json.loads(stale.read_text())["payload"]["capture"] == discovery.listing_capture_version(
+        "openrouter"
+    )
 
 
 def test_an_unstated_capability_defers_to_the_registry() -> None:
@@ -1709,11 +1783,15 @@ def test_only_the_transport_that_changed_invalidates_its_cache(tmp_path) -> None
 
     A single global number invalidated every provider's cache on upgrade, and for
     an aggregator — whose registry has no static rows to fall back on — the
-    replacement answer was an empty model list. Only the Anthropic reader started
-    needing a field its writer had not recorded, so only Anthropic's stamp moved.
+    replacement answer was an empty model list. Each stamp moves only when that
+    transport's own reader starts needing something its writer did not record:
+    Anthropic's at the capability read (2), the two aggregators' again at the
+    stated-zero ``free`` read (3), which no other transport can express because
+    no other listing in the tree quotes a price.
     """
     assert discovery.listing_capture_version("anthropic") == 2
-    assert discovery.listing_capture_version("openrouter") == 2
+    assert discovery.listing_capture_version("openrouter") == 3
+    assert discovery.listing_capture_version("radient") == 3
     # Ollama's reader never changed: an OpenAI-compatible document with no
     # pricing object has nothing new to capture, so its stamp stays at 1.
     assert discovery.listing_capture_version("ollama") == discovery.LISTING_CAPTURE_DEFAULT

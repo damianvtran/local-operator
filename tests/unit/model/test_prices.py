@@ -547,6 +547,48 @@ def test_a_models_dev_stated_zero_is_an_answer_not_a_miss(tmp_path) -> None:
     assert row.input_price >= 0 and row.output_price >= 0
 
 
+def test_a_pay_per_token_stated_zero_is_marked_free_for_display() -> None:
+    """``zai/glm-4.7-flash`` is $0 on Z.AI's own pricing page, and the picker's
+    ``free`` label exists for exactly that row.
+
+    ``_STATED_ZERO`` answers "does this stop the chain" and is stripped on the
+    way out; ``free`` answers "may the display say the word" and is what
+    survives, because the ``0.0`` a caller receives cannot say it alone.
+    """
+    row = price_row("zai", "glm-4.7-flash", models_dev=_providers(_MODELS_DEV_BODY), openrouter=[])
+
+    assert row is not None
+    assert (row.input_price, row.output_price) == (0.0, 0.0)
+    assert row.free is True
+
+
+def test_a_plan_catalogues_zero_is_an_answer_but_never_the_word_free() -> None:
+    """The distinction that keeps the ``free`` label honest.
+
+    ``alibaba-token-plan`` bills CREDITS, so models.dev quotes 0/0 to mean "not
+    priced in dollars" rather than "costs nothing". That zero must still stop
+    the chain — quoting ``alibaba``'s pay-per-token USD rate for a plan the user
+    is not paying it on is the number this chain must never invent — while the
+    display keeps its blank cell, because the real cost is unknowable from here.
+    """
+    body = json.loads(json.dumps(_MODELS_DEV_BODY))
+    body["alibaba-token-plan"] = {
+        "id": "alibaba-token-plan",
+        "models": {"glm-5.2": {"id": "glm-5.2", "cost": {"input": 0, "output": 0}}},
+    }
+    # The pay-per-token sibling whose rate must not leak into the plan row.
+    body["alibaba"] = {
+        "id": "alibaba",
+        "models": {"glm-5.2": {"id": "glm-5.2", "cost": {"input": 0.6, "output": 2.2}}},
+    }
+
+    row = price_row("alibaba-token-plan", "glm-5.2", models_dev=_providers(body), openrouter=[])
+
+    assert row is not None
+    assert (row.input_price, row.output_price) == (0.0, 0.0), "the plan's zero still answers"
+    assert row.free is False, "credit-billed is not free"
+
+
 def test_a_stated_zero_never_reaches_the_openrouter_leg(tmp_path, openrouter) -> None:
     """The resolver path: a models.dev 0/0 costs NO OpenRouter read, the same
     short-circuit a priced row gets."""

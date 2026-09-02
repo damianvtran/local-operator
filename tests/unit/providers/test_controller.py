@@ -1214,10 +1214,11 @@ class TestPerAccountLastKnown:
 # money. ``live_catalogue`` now fills those holes through ``prices.price_row``
 # over ONE read of each document, so the two surfaces cannot drift.
 
-import dataclasses  # noqa: E402
-
 from local_operator.model.discovery import DiscoveredModel  # noqa: E402
-from local_operator.providers.registry import get_provider_definition  # noqa: E402
+
+# The picker's own formatter, so these tests assert what a USER would read in
+# the price column rather than re-spelling the sentinel convention themselves.
+from local_operator.tui.widgets.model_picker import format_price_pair  # noqa: E402
 
 #: The models.dev projection's ``providers`` map, as ``models_dev_providers``
 #: returns it — one row per case the tests below exercise.
@@ -1326,6 +1327,79 @@ async def test_a_price_the_listing_quoted_is_never_overridden(
 
     row = _by_selector(entries)["anthropic/claude-fable-5-1"]
     assert (row.input_price, row.output_price) == (8.0, 40.0)
+
+
+@pytest.mark.asyncio
+async def test_a_stated_zero_reaches_the_picker_as_free_not_as_unknown(
+    controller, store, monkeypatch
+) -> None:
+    """The ``:free`` routes, which rendered a BLANK price cell.
+
+    ``_price`` maps ``0.0`` to its ``-1.0`` unknown sentinel for every provider
+    that wants a credential, so a vendor's quoted ``$0`` was indistinguishable
+    from silence and got the same empty cell — eighteen rows literally named
+    ``:free`` among them. The flag the parser sets is what tells them apart.
+    """
+    store.upsert_credential("anthropic", {"key": "sk-ant", "type": "api_key"})
+    stated = DiscoveredModel(id="gemma-free", context_window=32_000, free=True)
+    _listing(monkeypatch, {"anthropic": [stated]})
+    _projection(monkeypatch, _PROJECTION)
+
+    entries, _ = await controller.live_catalogue()
+
+    row = _by_selector(entries)["anthropic/gemma-free"]
+    assert (row.input_price, row.output_price) == (0.0, 0.0), "the stated zero survived"
+    assert format_price_pair(row.input_price, row.output_price) == "free"
+
+
+@pytest.mark.asyncio
+async def test_a_row_nobody_priced_still_renders_blank(controller, store, monkeypatch) -> None:
+    """The other half of the same distinction, and the reason it cannot simply
+    stop mapping zero to the sentinel: an UNPRICED row must keep its blank cell
+    rather than gain a ``free`` it was never quoted."""
+    store.upsert_credential("anthropic", {"key": "sk-ant", "type": "api_key"})
+    silent = DiscoveredModel(id="claude-unpriced", context_window=200_000)
+    _listing(monkeypatch, {"anthropic": [silent]})
+    _projection(monkeypatch, {})
+
+    entries, _ = await controller.live_catalogue()
+
+    row = _by_selector(entries)["anthropic/claude-unpriced"]
+    assert (row.input_price, row.output_price) == (-1.0, -1.0), "unknown, not free"
+    assert format_price_pair(row.input_price, row.output_price) == ""
+
+
+@pytest.mark.asyncio
+async def test_a_plan_billed_row_stays_blank_rather_than_claiming_to_be_free(
+    controller, store, monkeypatch
+) -> None:
+    """``alibaba-token-plan`` bills CREDITS, so models.dev quotes it 0/0 to mean
+    "not priced in dollars" — a stated zero whose real cost is still unknowable.
+
+    It must stop the chain exactly as before (never taking ``alibaba``'s
+    pay-per-token rate) and must NOT print ``free``, which would be a lie the
+    user could act on. This is the case that keeps the fix honest.
+    """
+    store.upsert_credential("alibaba-token-plan", {"key": "sk-plan", "type": "api_key"})
+    plan_row = DiscoveredModel(id="glm-5.2", context_window=1_000_000)
+    _listing(monkeypatch, {"alibaba-token-plan": [plan_row]})
+    _projection(
+        monkeypatch,
+        {
+            "alibaba-token-plan": {
+                "glm-5.2": {"cost": {"input": 0, "output": 0}, "limit": {"context": 1_000_000}}
+            },
+            # A priced sibling under the pay-per-token key: if the plan's zero
+            # stopped answering, this is the number that would wrongly appear.
+            "alibaba": {"glm-5.2": {"cost": {"input": 0.6, "output": 2.2}}},
+        },
+    )
+
+    entries, _ = await controller.live_catalogue()
+
+    row = _by_selector(entries)["alibaba-token-plan/glm-5.2"]
+    assert (row.input_price, row.output_price) == (-1.0, -1.0), "unknowable, so blank"
+    assert format_price_pair(row.input_price, row.output_price) == ""
 
 
 @pytest.mark.asyncio

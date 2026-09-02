@@ -133,6 +133,25 @@ _PRICE_CATALOGUE_KEYS: dict[str, tuple[str, ...]] = {
     "openrouter": ("openrouter",),
 }
 
+#: The models.dev keys whose ``0/0`` means "billed in plan credits", NOT "free".
+#:
+#: These catalogues describe subscription plans: the vendor genuinely does not
+#: quote a USD-per-token rate, so models.dev records zeros as a way of saying
+#: "not priced in dollars". A row from one of them therefore STATES a zero and
+#: still has an unknowable cost — the one shape where the stated-zero signal
+#: must not become the word ``free`` on screen, because the user IS paying, just
+#: not per token. The distinction is per KEY rather than per row because it is a
+#: property of the billing arrangement the catalogue describes: every id under
+#: ``alibaba-token-plan`` is credit-billed and every id under ``zai`` is not,
+#: whatever their individual costs happen to be.
+#:
+#: Contrast ``zai``/``moonshotai``/``google``, which are pay-per-token
+#: catalogues: a zero there is a quoted zero (``zai/glm-4.7-flash`` is $0 on
+#: Z.AI's own pricing page) and is exactly what ``free`` is for.
+_PLAN_BILLED_KEYS: frozenset[str] = frozenset(
+    {"alibaba-token-plan", "kimi-for-coding", "zai-coding-plan"}
+)
+
 #: Every models.dev key the projection keeps, derived from the map above so the
 #: two cannot disagree about what is on disk.
 _PROJECTED_PROVIDERS: frozenset[str] = frozenset(
@@ -285,8 +304,13 @@ def _stated_price(value: object) -> float | None:
     return number
 
 
-def _row(model_id: str, entry: Mapping[str, Any]) -> DiscoveredModel:
+def _row(model_id: str, entry: Mapping[str, Any], key: str = "") -> DiscoveredModel:
     """One projected entry as the struct every other resolution leg speaks.
+
+    ``key`` is the models.dev catalogue the entry was found under, and it decides
+    what a stated zero MEANS: a plan catalogue (:data:`_PLAN_BILLED_KEYS`) quotes
+    zeros because it bills credits rather than dollars, so its rows stop the
+    chain exactly as before but are never marked ``free`` for display.
 
     Two facts live in a ``cost`` mapping and the chain needs them apart:
 
@@ -323,6 +347,15 @@ def _row(model_id: str, entry: Mapping[str, Any]) -> DiscoveredModel:
         max_tokens=_positive_int(limit.get("output")),
         input_price=_STATED_ZERO if stated_zero else input_price,
         output_price=_STATED_ZERO if stated_zero else output_price,
+        # Nearly the same fact as the marker, in the field that OUTLIVES this
+        # module. ``_STATED_ZERO`` is an in-flight marker the chain strips on
+        # the way out (:func:`_unmark`) and answers "does this row stop the
+        # chain"; ``free`` is the durable statement a display reads and answers
+        # "may this row say the word". They differ on exactly the plan
+        # catalogues, whose zeros are an answer to the first question and not to
+        # the second — a credit-billed model's real cost is unknowable, and
+        # printing ``free`` for it would be a lie the user could act on.
+        free=stated_zero and key not in _PLAN_BILLED_KEYS,
         cache_read_price=cache_read,
         cache_write_price=_positive_float(cost.get("cache_write")),
         # Never from here: a second-hand catalogue cannot issue the provider's
@@ -340,6 +373,10 @@ def _lookup(providers: Mapping[str, Any], provider: str, model_id: str) -> Disco
     and the dotted/dashed rewrites in :func:`id_spellings`. For ``openrouter``
     the id already carries its ``vendor/`` namespace, which is how models.dev
     keys that provider too, so no namespace mapping is needed.
+
+    The MATCHED key is handed to :func:`_row`, not just the entry: whether a
+    stated zero may be displayed as ``free`` depends on which catalogue answered
+    (see :data:`_PLAN_BILLED_KEYS`), and this is the only place that knows.
     """
     for key in _PRICE_CATALOGUE_KEYS.get(provider, ()):
         models = providers.get(key)
@@ -348,21 +385,26 @@ def _lookup(providers: Mapping[str, Any], provider: str, model_id: str) -> Disco
         for spelling in id_spellings(model_id):
             entry = models.get(spelling)
             if isinstance(entry, Mapping):
-                return _row(spelling, entry)
+                return _row(spelling, entry, key)
         wanted = normalised_id(model_id)
         for candidate, entry in models.items():
             if isinstance(candidate, str) and isinstance(entry, Mapping):
                 if normalised_id(candidate) == wanted:
-                    return _row(candidate, entry)
+                    return _row(candidate, entry, key)
     return None
 
 
 #: The in-flight marker for "models.dev priced this id and the price is zero".
-#: A listing row and a :class:`DiscoveredModel` both conflate "free" with
-#: "unknown" (0.0 / falsy), so a stated zero cannot survive the trip through
-#: the struct; the marker lets the chain tell the two apart internally and is
-#: stripped by :func:`_unmark` before a row leaves this module. Module-private:
-#: no caller ever sees a negative price.
+#: A listing row's PRICE FIELDS conflate "free" with "unknown" (0.0 either way),
+#: so a stated zero cannot survive the trip through them; the marker lets the
+#: chain tell the two apart internally and is stripped by :func:`_unmark` before
+#: a row leaves this module. Module-private: no caller ever sees a negative
+#: price.
+#:
+#: Purely in-flight, and NOT how the fact reaches a display —
+#: :attr:`DiscoveredModel.free` is, set beside this marker in :func:`_row` and
+#: never stripped. The two answer different questions (see the comment there),
+#: which is why both exist rather than one doing double duty.
 #:
 #: NOT the same ``-1.0`` as ``providers.controller._price``'s UNKNOWN sentinel,
 #: which the picker renders blank. The two spell opposite facts — "the vendor
@@ -385,13 +427,15 @@ def _unmark(row: DiscoveredModel | None) -> DiscoveredModel | None:
     """The chain's exit: a stated-zero marker back to the ``0.0`` the struct speaks.
 
     ``price_row`` and ``price_catalogue_row`` both return through this so the
-    marker cannot leak to a caller. ``0.0`` is the same zero the registry uses,
-    and the picker renders it ``free`` where the provider needs no credential
-    and BLANK everywhere else — ``providers.controller._price`` maps ``0.0`` to
-    its own ``-1.0`` unknown marker for any provider that wants an API key, so
-    unknown stays distinct from free. Blank is the right answer there: it is
-    what a credentialled provider showed before this chain existed, and it
-    beats printing a third party's rate for the vendor's own endpoint.
+    marker cannot leak to a caller. ``0.0`` is the same zero the registry uses.
+
+    ``free`` is deliberately NOT stripped with it: ``dataclasses.replace``
+    carries it through, and it is what tells the display apart the two things
+    this ``0.0`` could mean. ``providers.controller._price`` still maps a bare
+    ``0.0`` to its own ``-1.0`` unknown marker for any provider that wants an
+    API key — blank beats printing a third party's rate for the vendor's own
+    endpoint — but it now consults ``free`` first, so a vendor-quoted zero
+    reaches the picker as the word instead of an empty cell.
     """
     if _stated_zero(row):
         assert row is not None  # for the type checker; ``_stated_zero`` implies it
@@ -523,6 +567,10 @@ def price_row(
     # A models.dev stub with limits but no cost, and an OpenRouter price: take the
     # money from the secondary and keep the primary's native limits where it has
     # them. Every field is "first source that has it", never a blend.
+    # ``free`` rides with the MONEY, so it comes from the secondary along with
+    # the prices and is never taken from the primary: the primary reaching here
+    # is by definition one that answered no money question at all (an empty
+    # ``cost``), so it has nothing to say about whether the model is free.
     return dataclasses.replace(
         secondary,
         name=primary.name or secondary.name,
