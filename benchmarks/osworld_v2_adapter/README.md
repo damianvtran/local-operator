@@ -151,6 +151,48 @@ private RPC pipe, on `reset_start` (the side-effect boundary) and on
 are never on `prepare`, never in `rescue.json`, and the AWS values never touch
 `os.environ`; the provider builds its boto3 session from them directly.
 
+On the parent side the runner resolves `EpisodeSpec.secret_refs` through an
+injected `SecretResolver` (`runner/secrets.py`) **after the handshake and
+before the evidence writer opens**, so every resolved value is a redaction
+canary from the bundle's first byte. A missing ref fails the episode
+`failed_pre_bundle` with a diagnostic naming only the ref — before `prepare`,
+before any descriptor is persisted, before anything is allocated. The
+credential-store resolver (`runner/host_secrets.py`) is the only runner
+module besides `provider_client.py` allowed near the store.
+
+## Running one episode
+
+`scripts/run_episode.py` runs ONE episode end to end — real spawned worker,
+real provider-backed model client, real credential store, sealed bundle — and
+prints the `EpisodeOutcome` as JSON. It is an operator script, not a CLI
+surface. Its `--run-root` must be durable (it refuses `/tmp`, `$TMPDIR` and
+friends); `evidence/`, `artifacts/` and `rescue/` are created under it.
+
+Secrets: every ref the task needs is either on `--secret-env NAME` (read from
+the script's own environment, and only the names listed) or resolved from the
+credential store (`~/.local-operator/credentials.env`, or `--config-dir`).
+Both the AWS pair and the model client come from that same store, so a paid
+episode needs no environment variables at all:
+
+```sh
+python ~/local-operator/scripts/run_episode.py \
+    --selector ~/worktrees/osworld/workspaces/0.1.0/selector.json \
+    --task-id task_001 \
+    --route openrouter/deepseek/deepseek-v4-flash-vision-exp \
+    --run-root ~/worktrees/osworld/runs/$(date +%Y%m%d-%H%M%S) \
+    --infra AWS_REGION=us-east-1 \
+    --infra AWS_SUBNET_ID=subnet-f2f9adad \
+    --infra AWS_SECURITY_GROUP_ID=<sg-id> \
+    --infra AWS_SCHEDULER_ROLE_ARN=<role arn> \
+    --infra OSWORLD_CLIENT_PASSWORD=<guest password> \
+    --infra OSWORLD_FILE_BASE_URL=<asset mirror> \
+    --max-steps 25 --max-usd 0.50 --max-wall-s 1800 --keep-recent-frames 3
+```
+
+Exit 0 only on `completed`; 1 on any other terminal; 2 when a secret is
+missing (named on stderr, value never printed) or the run root is volatile.
+Run the leak audit before and after.
+
 ## Teardown and rescue
 
 `cleanup` reports `succeeded` only on **positive** evidence: `terminate`
