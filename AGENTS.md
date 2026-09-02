@@ -70,6 +70,26 @@ suite expects:
 env -u NO_COLOR TERM=xterm-256color .venv/bin/python -m pytest tests/unit/tui -q
 ```
 
+**A local failure CI does not have is usually your shell, and the fix belongs
+in the fixture.** Tests that construct a third-party client inherit whatever
+the developer exports. The OSWorld AWS tests scrub `AWS_PROFILE`,
+`AWS_DEFAULT_REGION` and `AWS_REGION` in an autouse fixture for exactly this
+reason — but botocore also reads `AWS_DEFAULT_PROFILE`, which the fixture
+missed, so a developer with that exported gets 24 failures
+(`ProfileNotFound: The config profile (sandbox) could not be found`) on a tree
+that is green on CI. Confirm the diagnosis by unsetting the variable for one
+run:
+
+```sh
+env -u AWS_DEFAULT_PROFILE .venv/bin/python -m pytest tests/unit/evaluation -q
+```
+
+Then add the missing name to the fixture's scrub list. Do **not** leave it as a
+local workaround or a note in the PR: the next agent re-diagnoses it from
+scratch, and a fixture whose docstring promises "no ambient configuration may
+reach these tests" is simply wrong until it covers every variable the client
+reads.
+
 `tests/e2e` is a separate stage that drives the **assembled** application —
 boot, a real turn through a real tool, and `/resume` — and it is **deselected
 from the default run** (`-m "not e2e"` in `addopts`). Run it explicitly:
@@ -156,6 +176,87 @@ edits are live. After a pull that changes dependencies:
 ```sh
 uv pip install -e ".[all,dev]" --python .venv/bin/python
 ```
+
+### Every feature worktree owns its own venv. Never symlink one.
+
+This repo is worked through many concurrent worktrees, and **each one gets a
+real `.venv` installed editable from itself**:
+
+```sh
+git worktree add -b feat/my-change ~/workspace/repos/lo-my-change main
+cd ~/workspace/repos/lo-my-change
+uv venv --python 3.12 .venv
+uv pip install -e ".[all,dev]" --python .venv/bin/python
+```
+
+It is tempting to symlink the parent's venv instead — it is one line and the
+test suite passes either way. Do not. An editable install resolves imports
+through a generated finder holding **one** hard-coded source root:
+
+```python
+MAPPING = {'local_operator': '/Users/you/workspace/repos/local-operator/local_operator'}
+```
+
+A symlinked venv therefore imports the tree it was *installed from*, not the
+worktree you are standing in. The failure is silent and total:
+`.venv/bin/local-operator` launches the TUI, the banner shows your branch's
+version, the status bar shows your worktree's path, and every line of code
+executing is `main`'s. An agent that "tested the feature interactively" this
+way has tested nothing, and will report a working change as broken — or worse,
+a broken change as working.
+
+Verify which source a venv actually resolves before trusting an interactive
+session, especially after any venv repair:
+
+```sh
+cd ~/workspace/repos/lo-my-change
+.venv/bin/python -c "import local_operator; print(local_operator.__file__)"
+# MUST print .../lo-my-change/local_operator/__init__.py
+```
+
+Wrong path? Rebuild the venv with the two `uv` commands above. `PYTHONPATH=$PWD`
+is prepended ahead of the finder and will also work, but it is a per-invocation
+plaster that the next command forgets — fix the venv instead.
+
+**Why `cd` alone does not save you.** Python puts the *script's* directory on
+`sys.path[0]`, not your current directory. For a console entry point that is
+`.venv/bin`, so the worktree you are in never enters the path and the finder
+wins. `python -c` and `python -m` do put the cwd first, which is exactly why a
+quick `python -c "import local_operator"` can look correct while
+`.venv/bin/local-operator` runs someone else's code — do not use the former to
+clear the latter.
+
+The one legitimate symlink is a **throwaway** worktree used to capture a
+before-frame (see "Always capture before AND after"), where the parent's code
+is what you want and the checkout is deleted minutes later. Scripts under
+`scripts/` self-correct with `sys.path.insert(0, ...)` at the top, so they read
+the tree they live in regardless. Anything you intend to *run as the product*
+needs a real venv.
+
+### A dead venv fails loudly; a wrong one does not
+
+When the worktree that owned a shared venv is deleted, the console scripts in
+it keep a shebang pointing at a `python` that no longer exists:
+
+```
+zsh: .venv/bin/local-operator: bad interpreter: .../lo-old-branch/.venv/bin/python: no such file
+```
+
+The fix is to reinstall editable **from the checkout you want to run**, not
+merely to make the error go away:
+
+```sh
+cd ~/workspace/repos/local-operator   # or the worktree that should own it
+uv pip install -e ".[all,dev]" --python .venv/bin/python
+```
+
+Repairing it from the *wrong* checkout converts a loud failure into a silent
+one — the import now resolves, to the wrong tree. That has already cost a
+session: a stale editable install was also collecting `tests/unit/tools/
+test_eval_tool.py` as **24 failures** that three agents in a row wrote off as
+"environmental". They were a broken venv, and they all pass once it points
+somewhere real. Treat a standing block of "known environmental" failures as an
+unverified claim, not as weather.
 
 ## Releasing the stable `lop` runtime
 
@@ -334,6 +435,12 @@ ln -s ~/local-operator/.venv /tmp/lo-before/.venv
 cd /tmp/lo-before && env -u NO_COLOR TERM=xterm-256color .venv/bin/python /tmp/shot.py /tmp/before.svg
 git worktree remove --force /tmp/lo-before
 ```
+
+The symlink is safe **here and only here**: a shot script starts with
+`sys.path.insert(0, <repo root>)`, so it reads the tree it lives in rather than
+the one the venv was installed from, and this checkout is deleted immediately.
+Never copy that line into a feature worktree — see "Every feature worktree
+owns its own venv".
 
 Two stills side by side catch what a single "looks fine" never does. The
 usage-card round found a **pre-existing** bug this way: the after-frame had a
