@@ -2367,7 +2367,9 @@ class AskPickerScreen(Container):
                 # the text beside it and had neither weight nor hue to win on
                 # (D4); the tag carries the label's own ink and the prose keeps
                 # the ramp step it was walked up to.
-                for line in self._description_text(index, width, ground, fg, muted, granted):
+                for line in self._description_text(
+                    index, width, ground, fg, muted, granted, layout
+                ):
                     newline(index)
                     out.append_text(line)
             if index == self.state.selected:
@@ -2668,7 +2670,14 @@ class AskPickerScreen(Container):
         return _fit_row(row, width, ground)
 
     def _description_text(
-        self, index: int, width: int, ground: Style, tag_ink: Style, ink: Style, granted: int
+        self,
+        index: int,
+        width: int,
+        ground: Style,
+        tag_ink: Style,
+        ink: Style,
+        granted: int,
+        layout: _CardLayout,
     ) -> list[Text]:
         """The row's description lines: the recommendation tag, then the consequence.
 
@@ -2712,9 +2721,32 @@ class AskPickerScreen(Container):
         discipline the question uses when its own tail is cut. Marking every
         line would say each of them was cut when only the last one is, which is
         the reading a wrapped paragraph must not invite.
+
+        ...unless the ``ctrl+e`` block is about to draw the REST of this very
+        paragraph on the next line (``continued`` below). ``layout`` is what
+        says so, and it is passed for the same reason :meth:`_row_text` takes
+        it: whether a line is the last one the user sees is a fact about the
+        FRAME, not about the row. The mark and the fill both exist to stand in
+        for text that is not on screen; where it is on screen, immediately
+        below and in the same column, they describe a cut that is not
+        happening. The fill is the more damaging of the two — it re-draws the
+        opening of the line the block then starts with, so the paragraph gains
+        a stutter exactly at the seam it is being read across (F3).
         """
         indent = self._description_indent()
         wrapped = self._description_lines(index, width)
+        # Only where the block genuinely carries this row's remainder. It is
+        # sized to the TALLEST description in the list, so a block with rows in
+        # it may still have nothing to say about the row under the cursor: the
+        # free-text row's hint is never revealed at all (:meth:`_reveal_wrap`
+        # returns nothing for it), and a description already drawn in full has
+        # no remainder. Suppressing the mark there would be a line cut in
+        # silence with nothing below it — which is D5, one row over.
+        continued = (
+            index == self.state.selected
+            and layout.reveal_rows >= 1
+            and len(self._reveal_wrap(index, width)) > granted
+        )
         # An option with NO description still draws the blank line step 9 bought
         # for it, exactly as it did before wrapping existed. The description
         # column is all-or-nothing across the window (C5), so a row opting out
@@ -2736,7 +2768,10 @@ class AskPickerScreen(Container):
                     text = ""
             if text:
                 body.append(
-                    truncate_cells(self._prose_line(index, wrapped, kept, position, text), room),
+                    truncate_cells(
+                        self._prose_line(index, wrapped, kept, position, text, continued=continued),
+                        room,
+                    ),
                     style=ground + ink,
                 )
             rows.append(_fit_row(body, width, ground))
@@ -2749,6 +2784,8 @@ class AskPickerScreen(Container):
         kept: list[str],
         position: int,
         text: str,
+        *,
+        continued: bool = False,
     ) -> str:
         """One drawn line of ``index``'s prose: its own, or the SOURCE tail if last.
 
@@ -2773,7 +2810,17 @@ class AskPickerScreen(Container):
         Two copies of "say that it continues" is two places for the condition to
         drift, on the one block whose shortfall a reader has no other way to
         detect.
+
+        ``continued`` turns both off: the caller has undertaken to draw the rest
+        of this paragraph immediately below, so there is no shortfall to stand
+        in for. It is the caller's fact rather than this method's because only
+        the caller knows what the frame draws next — and it is a keyword because
+        the default is the one that is safe to get wrong. An omitted argument
+        marks a cut that did not happen; an omitted suppression re-draws two
+        lines of prose, which is the defect (F3).
         """
+        if continued:
+            return text
         if position == len(kept) - 1 and len(wrapped) > len(kept):
             return _wrap_tail(self._row_description(index), wrapped, position)
         return text
@@ -2808,13 +2855,37 @@ class AskPickerScreen(Container):
         if layout.reveal_rows < 1:
             return []
         width = layout.width
+        # Where the list has ALREADY drawn the opening lines of this paragraph,
+        # the block picks up after them instead of restarting (F3). The default
+        # view caps at `DEFAULT_DESC_CAP` and the block was reserved for the
+        # tallest wrap in the list, so at 190x50 lines 1-2 appeared twice, a few
+        # rows apart, once cut and once whole — which reads as a rendering fault
+        # rather than as "here it is in full".
+        #
+        # A DRAWING decision and not an allocation one, and that distinction is
+        # the whole reason this works here. The block is bought at step 7a,
+        # BEFORE the per-row grants exist (step 11), so the allocator cannot
+        # know what to skip; a previous attempt to make the allocator skip it
+        # instead measured 190x50 reach 1023 -> 339 with two blank rows left in
+        # the block, because a reservation sized against a grant that does not
+        # exist yet is a guess. By the time this method runs the plan is final
+        # and `layout.description_rows` is a fact, so the skip costs the block
+        # nothing: it is the same `reveal_rows` lines, filled from further down
+        # the same paragraph.
+        #
+        # Clamped so the block can never START past what it can finish, which
+        # is what keeps D6 dead: `_allocate`'s floor guarantees the block is at
+        # least as tall as the grant it stands beside, so the skip cannot leave
+        # the frame showing less of the row than it did before `^e`.
+        granted = layout.description_rows.get(self.state.selected, 0)
         # The card's ordinary ground, NOT `_row_ground`: the block is chrome
         # about a row rather than a row, and under the cursor's tint its blank
         # padding would read as several more selected rows below the list.
         ground = Style()
         indent = self._description_indent()
         wrapped = self._reveal_wrap(self.state.selected, width)
-        kept = wrapped[: layout.reveal_rows]
+        start = granted if layout.show_descriptions and granted < len(wrapped) else 0
+        kept = wrapped[start : start + layout.reveal_rows]
         rows: list[Text] = []
         for position in range(layout.reveal_rows):
             body = Text(no_wrap=True, overflow="ellipsis")
@@ -2832,8 +2903,19 @@ class AskPickerScreen(Container):
                 # card whose own shortfall a reader has no other way to detect —
                 # which is why it shares that method with the list rather than
                 # keeping a second copy that cannot see the first.
+                # Positioned against the WHOLE wrap, not against `kept`, so
+                # "is this the last line, and is there more after it" is asked
+                # of the paragraph rather than of the slice. Asked of the slice
+                # after a skip, the fill would restart from line 0 of the
+                # source and the block would draw the opening sentence again on
+                # its own last row — the same duplicate this skip removes,
+                # relocated (D5's failure mode, one step along).
                 text = self._prose_line(
-                    self.state.selected, wrapped, kept, position, kept[position]
+                    self.state.selected,
+                    wrapped,
+                    wrapped[: start + len(kept)],
+                    start + position,
+                    kept[position],
                 )
                 body.append(truncate_cells(text, room), style=ground + ink)
             rows.append(_fit_row(body, width, ground))

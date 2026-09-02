@@ -95,6 +95,7 @@ from local_operator.tui.widgets.ask_picker import (
     REVEAL_MAX_ROWS,
     SECRET_MASK,
     AskPickerScreen,
+    _CardLayout,
 )
 
 
@@ -1446,6 +1447,16 @@ async def test_the_reveal_block_is_drawn_under_the_row_it_explains() -> None:
     between the selected row's label and the NEXT row's label belongs to the
     selected row or to the block, and that the block is not sitting after the
     last row.
+
+    RE-DERIVED for F3, and only the LOCATOR moved. This used to find the block
+    by searching the frame for the first six words of the selected row's
+    description, which silently assumed the block RESTARTS the paragraph — the
+    duplicate F3 removed. The block now continues from where the inline lines
+    stopped, so those words appear once, on the row's own inline line, and the
+    search found nothing. The claim under test is positional and is unchanged;
+    it is now read off `_line_rows` through :func:`_reveal_block_lines`, the
+    structural locator this file already uses, which cannot drift with the
+    block's text.
     """
     size = (150, 40)
     app, card = await _real_app_card(size, [_long_description_question()])
@@ -1460,19 +1471,13 @@ async def test_the_reveal_block_is_drawn_under_the_row_it_explains() -> None:
             await pilot.pause()
             lines = card.render_lines_for_test()
             rows = card._line_rows
-            first = " ".join(_LONG_DESCRIPTIONS[index].split()).split(" ")[0:6]
-            opening = " ".join(first)
-
-            # Where the block's first line actually is.
-            block_at = next(
-                (
-                    position
-                    for position, line in enumerate(lines)
-                    if opening in " ".join(line.split()) and rows[position] is None
-                ),
-                None,
-            )
-            assert block_at is not None, (index, lines)
+            # The block starts on the first `None`-mapped line after the last
+            # line the selected row owns — the same rule
+            # :func:`_reveal_block_lines` reads it by.
+            assert _reveal_block_lines(card), (index, lines)
+            owned = [position for position, row in enumerate(rows) if row == index]
+            block_at = max(owned) + 1
+            assert block_at < len(rows), (index, lines)
             # The selected row's own label line, and the next row's.
             label_at = rows.index(index)
             following = [
@@ -4171,9 +4176,15 @@ async def test_a_badge_drawn_like_the_prose_is_caught(
         tag_ink: Style,
         ink: Style,
         granted: int,
+        layout: _CardLayout,
     ) -> list[Text]:
-        """The rejected variant: the tag takes the prose's own ink and weight."""
-        lines = original(self, index, width, ground, tag_ink, ink, granted)
+        """The rejected variant: the tag takes the prose's own ink and weight.
+
+        Mirrors the real signature, ``layout`` included: the patch delegates to
+        the original and only restyles what comes back, so a parameter missing
+        here is a TypeError at compose time rather than a different badge.
+        """
+        lines = original(self, index, width, ground, tag_ink, ink, granted, layout)
         for line in lines:
             if RECOMMENDED_TAG not in line.plain:
                 continue
