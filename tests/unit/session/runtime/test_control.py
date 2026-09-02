@@ -170,7 +170,7 @@ async def test_dead_pid_reports_already_exited(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(registry, "pid_alive", lambda pid: False)
     try:
         outcome = await control.stop_session(ghost, timeout_s=1.0, _root=registry.run_dir())
-        assert outcome.method == "refused"
+        assert outcome.method == "gone"
         assert "already exited" in outcome.line
     finally:
         registry.unpublish(ghost.pid)
@@ -228,44 +228,97 @@ def test_mark_wakes_dormant_no_entry_is_zero(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_stop_all_orders_own_last_and_groups_outcomes(
+async def test_stop_all_never_targets_the_callers_own_pid(
     monkeypatch: pytest.MonkeyPatch, no_signals
 ) -> None:
-    """``stop_all`` stops every live target, own session last, and the
-    grouped summary names the rung that worked."""
+    """``stop_all`` stops every OTHER live target and skips ``own_pid``
+    entirely — never a socket op to itself, never a signal to itself.
+
+    The first draft appended the own record LAST and walked it down the
+    ladder; the TUI's own handle had no ``request_stop``, so identity was
+    confirmed over its own socket and the terminal SIGTERMed itself (R1-1).
+    The caller ends its own session in-process; this module must not.
+    """
     handle = _StoppingHandle()
     no_signals[1]["handle"] = handle
     server, record = await _serve(handle)
     try:
-        # Two records for the one live runtime: the real one plus a "self"
-        # marker so own-last ordering is observable against a real scan.
-        # Port 1 is never a lop runtime, so the "own" record is unreachable
-        # over the socket, and its pid (-1) reads dead through the fixture's
-        # liveness — the "already exited" resolution, still a ``refused``
-        # method, which is what the grouped summary must count separately.
-        own = _record_for(record, pid=-1, session_id="own-session", control_port=1)
-        monkeypatch.setattr(control, "_stop_targets", lambda root, own_pid=None: [record, own])
+        # The in-process runtime's record carries the runner's own pid, so
+        # the CALLER here is modelled as a distinct pid: what is pinned is
+        # that the pid handed in as ``own_pid`` never reaches the ladder,
+        # whichever pid that is.
+        own = _record_for(record, pid=424242, session_id="own-session", control_port=1)
+        other = record
+        monkeypatch.setattr(
+            control.registry,
+            "scan",
+            lambda root=None: [(own, "live"), (other, "live")],
+        )
         monkeypatch.setattr(control, "_same_uid", lambda rec: True)
-        outcomes = await control.stop_all(own_pid=-1, _root=registry.run_dir())
-        assert [o.method for o in outcomes] == ["socket", "refused"]
-        # The own-last listing: the self record is second even though it was
-        # first in the scan — the reordering the TUI relies on to keep its
-        # own process painting the report.
-        assert outcomes[-1].session_id == "own-session"
-        summary = control.summarize(outcomes)
-        assert "1 stopped via socket" in summary
+        outcomes = await control.stop_all(own_pid=424242, _root=registry.run_dir())
+        assert [o.session_id for o in outcomes] == [other.session_id]
+        assert [o.method for o in outcomes] == ["socket"]
+        assert no_signals[0] == []
+        assert handle.stops == [True]
     finally:
         server.close()
 
 
-def test_summarize_names_every_rung() -> None:
+@pytest.mark.asyncio
+async def test_stop_all_only_pids_restricts_to_the_listed_set(
+    monkeypatch: pytest.MonkeyPatch, no_signals
+) -> None:
+    """A target that was not on the caller's listing is skipped, not stopped:
+    the listing is the confirmation (R1-6)."""
+    handle = _StoppingHandle()
+    no_signals[1]["handle"] = handle
+    server, record = await _serve(handle)
+    try:
+        newcomer = _record_for(record, pid=99999, session_id="newcomer", control_port=1)
+        monkeypatch.setattr(
+            control.registry, "scan", lambda root=None: [(record, "live"), (newcomer, "live")]
+        )
+        monkeypatch.setattr(control, "_same_uid", lambda rec: True)
+        outcomes = await control.stop_all(
+            own_pid=None, only_pids={record.pid}, _root=registry.run_dir()
+        )
+        assert [o.session_id for o in outcomes] == [record.session_id]
+        assert no_signals[0] == []
+    finally:
+        server.close()
+
+
+def test_summarize_reconciles_with_the_listing() -> None:
+    """The summary leads with the total and folds the caller's own session
+    in, so the count matches what the listing promised (D2)."""
     outcomes = [
         control.StopOutcome(1, "a", "a", "socket", "x"),
         control.StopOutcome(2, "b", "b", "sigkill", "y"),
         control.StopOutcome(3, "c", "c", "refused", "z"),
+        control.StopOutcome(4, "d", "d", "gone", "w"),
     ]
-    summary = control.summarize(outcomes)
-    assert summary == "1 stopped via socket, 1 killed, 1 refused"
+    own = control.StopOutcome(5, "e", "e", "socket", "")
+    assert (
+        control.summarize(outcomes, own=own)
+        == "5 sessions: 2 stopped, 1 killed, 1 already exited, 1 refused"
+    )
+    assert control.summarize([]) == "no sessions to stop"
+    assert control.summarize([outcomes[0]]) == "1 session: 1 stopped"
+
+
+@pytest.mark.asyncio
+async def test_refusal_line_names_the_session_then_the_pid_once(no_signals) -> None:
+    """The refusal a user must act on is name-first with the pid once, so
+    it matches the listing's row shape (D2/D8)."""
+    server, record = await _serve()
+    try:
+        impostor = _record_for(record, session_id="someone-elses-session", conversation_name="x")
+        outcome = await control.stop_session(impostor, timeout_s=2.0, _root=registry.run_dir())
+        assert outcome.method == "refused"
+        assert outcome.line.startswith(f'refused "x" (pid {record.pid}) — it serves session "')
+        assert no_signals[0] == []
+    finally:
+        server.close()
 
 
 @pytest.mark.asyncio

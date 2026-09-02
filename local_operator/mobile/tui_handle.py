@@ -404,6 +404,34 @@ class TuiSessionHandle(SessionHandle):
         await self._on_app(self._app._interrupt)
         return "stopping"
 
+    async def request_stop(self) -> str:
+        """The graceful rung of the kill switch, for a TUI-OWNED session.
+
+        A TUI process is not a runtime process: the session ends, the
+        terminal stays. So the ``stop`` op here routes into the exact path
+        bare ``/stop`` takes in this app (deny gates → abort → dispose →
+        release the lease → tear the registrant down → show the session
+        cold with the ``/resume`` receipt), and the process survives with
+        the session ended beneath it. Without this hook the ladder saw a
+        runtime that "cannot stop itself gracefully", confirmed identity
+        over this very socket, and SIGTERMed the terminal (seen live: every
+        open ``lop`` window died on ``lop stop --all``).
+
+        Scheduled, not awaited: the stop tears down the registrant that is
+        serving THIS request, so awaiting its completion from inside the
+        dispatch would hold the socket open past the point where anything
+        can answer on it. The ack means "underway"; the ladder's exit-wait
+        (a pid-alive poll) never applies to a TUI, whose record is simply
+        unpublished — ``_await_pid_exit`` is what makes the caller observe
+        the session as gone, through the reaped record on its next scan.
+        """
+
+        def schedule() -> None:
+            self._app.run_worker(self._app._stop_local_session(), thread=False, group="session")
+
+        await self._on_app(schedule)
+        return "stopping this session"
+
     async def set_model(self, provider: str, model_id: str) -> str:
         def apply() -> None:
             self._app._run_slash_command(f"/model {provider}/{model_id}")

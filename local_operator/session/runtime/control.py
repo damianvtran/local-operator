@@ -49,6 +49,7 @@ signal here targets the single recorded pid.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import signal
 import time
@@ -64,10 +65,13 @@ if TYPE_CHECKING:
 
 #: Which stop method produced an outcome, in escalation order. The runtime's
 #: own control socket (``socket``) is the graceful rung; the two signals are
-#: the escalation; the remaining two name the non-signalled resolutions —
-#: a connection the OS refused because the process is already gone, and a
-#: target that matched no live session.
-Method = str  # "socket" | "sigterm" | "sigkill" | "refused" | "no_match"
+#: the escalation; the remaining two name the non-signalled resolutions.
+#: ``gone`` is a process that left the table before the ladder reached it
+#: (already exited — nothing to do, not a failure); ``refused`` is the
+#: ladder declining to signal because identity could not be confirmed. Kept
+#: distinct so a front end can decide "partial" from the method alone
+#: rather than by parsing the receipt line.
+Method = str  # "socket" | "sigterm" | "sigkill" | "gone" | "refused"
 
 #: How long to wait, after the graceful ``stop`` op is acked, for the process
 #: to actually exit before escalating to SIGTERM. The op acks before its clean
@@ -296,7 +300,7 @@ async def _confirmed_session_id(record: SessionRecord) -> tuple[bool, str]:
             timeout_s=_IDENTITY_TIMEOUT_S,
         )
     except (OSError, ConnectionError, TimeoutError, ValueError):
-        return False, "did not answer the control socket"
+        return False, _SOCKET_SILENT
     finally:
         await _close_dial(dial)
 
@@ -306,8 +310,7 @@ async def _confirmed_session_id(record: SessionRecord) -> tuple[bool, str]:
         return True, ""
     return (
         False,
-        f"the process at pid {record.pid} serves session {session_id!r}, "
-        f"not {record.session_id!r}",
+        f'it serves session "{session_id}", not "{record.session_id}"',
     )
 
 
@@ -340,7 +343,7 @@ def _process_started_at(pid: int) -> float | None:
     return None
 
 
-def _identity_by_start_time(record: SessionRecord) -> tuple[bool, str]:
+async def _identity_by_start_time(record: SessionRecord) -> tuple[bool, str]:
     """Identity for a process that will not answer its socket.
 
     A wedged runtime — alive, heartbeat stale, socket silent — is the one
@@ -371,17 +374,21 @@ def _identity_by_start_time(record: SessionRecord) -> tuple[bool, str]:
     if time.time() - record.heartbeat_at <= HEARTBEAT_TIMEOUT_S:
         return (
             False,
-            f"pid {record.pid} is heartbeating but not answering its socket "
+            "it is heartbeating but not answering its socket "
             "(the record may not describe this process); retry shortly",
         )
-    started = _process_started_at(record.pid)
+    # Off the loop: this is a fork/exec of ``ps`` with a 5 s ceiling, and the
+    # TUI runs the ladder on its event loop (``run_worker(thread=False)``).
+    # A loaded host — exactly when someone reaches for a kill switch — is
+    # where a synchronous call here would freeze the frame (the #401 class).
+    started = await asyncio.to_thread(_process_started_at, record.pid)
     if started is None:
         return False, "could not read the process start time"
     if started > record.heartbeat_at + 1.0:
         return (
             False,
-            f"the process at pid {record.pid} started after the recorded "
-            "session's last heartbeat (the pid was reused)",
+            "the process started after the recorded session's last heartbeat "
+            "(the pid was reused)",
         )
     return True, ""
 
@@ -452,17 +459,61 @@ def _mark_wakes_dormant(record: SessionRecord, root: Path) -> int:
     return len(schedules)
 
 
-async def _await_pid_exit(pid: int, timeout_s: float) -> bool:
-    """Wait for pid to leave the process table, bounded by ``timeout_s``.
+async def _park_wakes(record: SessionRecord, root: Path) -> int:
+    """``_mark_wakes_dormant`` off the loop: two small file operations, but
+    on the same TUI loop as the ladder, and a cold disk under load is enough
+    to show as a dropped frame. Best-effort — the index is derived."""
+    try:
+        return await asyncio.to_thread(_mark_wakes_dormant, record, root)
+    except Exception:  # noqa: BLE001 — the index is derived; the stop is not
+        return 0
 
-    Polls rather than waiting on a child: these processes are not this
-    process's children, so there is no waitpid right to hang on. 100 ms is
-    fine-grained enough that a clean exit (sub-second in the common case) is
-    observed almost immediately, and cheap enough to hold for 10 s without
-    cost. Returns False on timeout — the caller's next escalation rung.
+
+def _record_retired(record: SessionRecord) -> bool:
+    """True once the record on disk no longer describes this session.
+
+    The graceful op's observable end is NOT always a process exit: a
+    TUI-owned session ends beneath a terminal that stays up, and its only
+    trace of the stop is the unpublished (or rewritten) record. Reading
+    the file rather than ``registry.scan`` keeps this a single stat+read on
+    the 100 ms poll, and a file that now names a different session (the
+    process reopened something else) counts as retired too.
     """
-    import asyncio
+    import json
 
+    path = registry.run_dir() / f"{record.pid}.json"
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return True
+    return data.get("session_id") != record.session_id
+
+
+async def _await_stopped(record: SessionRecord, timeout_s: float) -> bool:
+    """Wait for the stop to land, bounded by ``timeout_s``.
+
+    Landed means the pid left the process table (a runtime process) OR the
+    record was unpublished (a TUI owner whose process survives with the
+    session ended beneath it). Polls rather than waiting on a child: these
+    processes are not this process's children, so there is no waitpid
+    right to hang on. 100 ms is fine-grained enough that a clean exit
+    (sub-second in the common case) is observed almost immediately, and
+    cheap enough to hold for 10 s without cost. Returns False on timeout —
+    the caller's next escalation rung.
+    """
+    deadline = asyncio.get_running_loop().time() + timeout_s
+    while True:
+        if not registry.pid_alive(record.pid) or _record_retired(record):
+            return True
+        if asyncio.get_running_loop().time() >= deadline:
+            return False
+        await asyncio.sleep(0.1)
+
+
+async def _await_pid_exit(pid: int, timeout_s: float) -> bool:
+    """The signal rungs' wait: only a process exit counts. A signalled
+    process that stays up did not honour the signal, whatever its record
+    says, and the next rung is the answer."""
     deadline = asyncio.get_running_loop().time() + timeout_s
     while asyncio.get_running_loop().time() < deadline:
         if not registry.pid_alive(pid):
@@ -494,7 +545,9 @@ async def _graceful_stop(record: SessionRecord, timeout_s: float) -> bool:
 
     The op the runtime serves (``RuntimeServer._dispatch``'s ``stop`` case)
     runs deny-pending-gates → dispose → unpublish → exit; the ack comes back
-    when the decision is made, the exit lands moments later. An ``error``
+    when the decision is made, the exit lands moments later. A TUI owner
+    runs the same op but its PROCESS stays (the session ends beneath the
+    terminal), so the wait accepts an unpublished record as the landing. An ``error``
     reply (an old runtime that predates the op) is a scheduled miss, not a
     failure — the ladder proceeds to identity confirmation and SIGTERM, which
     every runtime already handles, so mixed-version machines never wedge.
@@ -502,7 +555,7 @@ async def _graceful_stop(record: SessionRecord, timeout_s: float) -> bool:
     reply = await _exchange(record, {"op": "stop"}, reply_timeout_s=timeout_s)
     if reply is None or reply.get("op") != "ack":
         return False
-    return await _await_pid_exit(record.pid, timeout_s)
+    return await _await_stopped(record, timeout_s)
 
 
 async def _signal_and_confirm(record: SessionRecord, sig: "signal.Signals", grace_s: float) -> bool:
@@ -559,7 +612,7 @@ async def stop_session(
     # an unreachable socket means already-gone-or-crashed, an error reply
     # means an older runtime. Either way the ladder continues.
     if await _graceful_stop(record, timeout_s):
-        wakes = _mark_wakes_dormant(record, root)
+        wakes = await _park_wakes(record, root)
         _recover_record(record)
         method: Method = "socket"
         return StopOutcome(
@@ -573,11 +626,12 @@ async def stop_session(
 
     # The pid is gone but the graceful op never acked: it died under us
     # (crash, or an old runtime that exited on its own). Nothing to signal;
-    # reap the record, park the wakes, report the refused-connect resolution.
+    # reap the record, park the wakes, report it as already gone — a clean
+    # resolution, not a refusal, so `--all` over a dead record exits 0.
     if not registry.pid_alive(record.pid):
-        wakes = _mark_wakes_dormant(record, root)
+        wakes = await _park_wakes(record, root)
         _recover_record(record)
-        method = "refused"
+        method = "gone"
         return StopOutcome(
             pid=record.pid,
             session_id=record.session_id,
@@ -598,7 +652,7 @@ async def stop_session(
         # refusing when it cannot be made. A socket that ANSWERED with a
         # different session id never reaches here: that is a live stranger
         # and stays refused.
-        confirmed, why_not = _identity_by_start_time(record)
+        confirmed, why_not = await _identity_by_start_time(record)
     if not confirmed:
         method = "refused"
         return StopOutcome(
@@ -606,13 +660,13 @@ async def stop_session(
             session_id=record.session_id,
             name=name,
             method=method,
-            line=f"refused to signal pid {record.pid} — {why_not}",
+            line=f'refused "{name}" (pid {record.pid}) — {why_not}',
         )
 
     # Rung 2 — SIGTERM: the runtime's existing handler runs the same clean
     # exit the socket op would have.
     if await _signal_and_confirm(record, signal.SIGTERM, SIGTERM_GRACE_S):
-        wakes = _mark_wakes_dormant(record, root)
+        wakes = await _park_wakes(record, root)
         _recover_record(record)
         method = "sigterm"
         return StopOutcome(
@@ -627,7 +681,7 @@ async def stop_session(
     # Rung 3 — SIGKILL. State is orphaned by design; stale-record reaping
     # and the lease's dead-owner recovery pick it up. Report the rung used.
     await _signal_and_confirm(record, signal.SIGKILL, SIGTERM_GRACE_S)
-    wakes = _mark_wakes_dormant(record, root)
+    wakes = await _park_wakes(record, root)
     _recover_record(record)
     method = "sigkill"
     return StopOutcome(
@@ -641,40 +695,49 @@ async def stop_session(
 
 
 def _stop_targets(root: Path, own_pid: int | None = None) -> list[SessionRecord]:
-    """Every agent on THIS machine, in stopping order (own session last).
+    """Every OTHER agent on THIS machine, in scan order.
 
     ``live`` AND ``wedged`` are both targets — a wedged owner is exactly the
     agent the user most needs to be able to stop, and its socket will not
     answer, which is what the signal rungs are for. NOT merely detached
-    sessions: a TUI-owned session gets the same op, and its process survives
-    with the session ended beneath it (the TUI's stop handler owns that
-    in-process case).
+    sessions: a TUI-owned session in another terminal gets the same graceful
+    op, and its process survives with the session ended beneath it (the
+    TUI's ``request_stop`` hook owns that in-process case).
+
+    The caller's OWN record is never a target here. A process cannot walk
+    itself down the ladder: its graceful op is a socket call to itself, and
+    the signal rungs would terminate the very front end painting the report
+    (seen live: the TUI SIGTERMed itself). An in-process caller ends its own
+    session through its own in-process path, after this list — the TUI's
+    ``_stop_all_worker`` does exactly that, last, so the receipt is the last
+    line the user reads. A CLI caller has no own session (``own_pid=None``).
 
     Other users' sessions are excluded twice over: the OS already makes their
-    records unreadable (0600 under 0700), and the same-uid check below
-    refuses to act on any record that slips through a downgraded mode.
-
-    Own session LAST, deliberately: stopping the caller's own session first
-    would tear down the very front end painting the report, so it goes last
-    and its receipt is the last line the user reads.
+    records unreadable (0600 under 0700), and the same-uid check in
+    :func:`stop_all` refuses to act on any record that slips through a
+    downgraded mode.
     """
-    scanned = registry.scan(root)
-    targets = [
+    return [
         rec
-        for rec, state in scanned
+        for rec, state in registry.scan(root)
         if state in ("live", "wedged") and (own_pid is None or rec.pid != own_pid)
     ]
-    own = [rec for rec, state in scanned if own_pid is not None and rec.pid == own_pid]
-    return targets + own
 
 
 async def stop_all(
     *,
     timeout_s: float = DEFAULT_TIMEOUT_S,
     own_pid: int | None = None,
+    only_pids: "frozenset[int] | set[int] | None" = None,
     _root: Path | None = None,
 ) -> list[StopOutcome]:
-    """Stop every agent on this machine, own session last. Never raises.
+    """Stop every OTHER agent on this machine. Never raises.
+
+    ``own_pid`` is excluded outright (see :func:`_stop_targets`); the caller
+    ends its own session in-process afterwards. ``only_pids`` restricts the
+    run to a set the user was SHOWN — the TUI's arm listing is the
+    confirmation, so a session that appeared between arm and repeat must
+    not be stopped on the strength of a listing it was never on.
 
     Sequential, not concurrent: the graceful rung waits up to ``timeout_s``
     per uncooperative session, and a fan-out would hold every target's wait
@@ -686,6 +749,8 @@ async def stop_all(
     root = _root if _root is not None else config_dir()
     outcomes: list[StopOutcome] = []
     for record in _stop_targets(root, own_pid=own_pid):
+        if only_pids is not None and record.pid not in only_pids:
+            continue
         if not _same_uid(record):
             outcomes.append(
                 StopOutcome(
@@ -704,40 +769,36 @@ async def stop_all(
     return outcomes
 
 
-def stop_all_sync(
-    *,
-    timeout_s: float = DEFAULT_TIMEOUT_S,
-    own_pid: int | None = None,
-    _root: Path | None = None,
-) -> list[StopOutcome]:
-    """The sync entry the CLI uses — one loop for the whole ladder.
-
-    Exists so the CLI does not construct its own per-call loop semantics, and
-    so the TUI's async worker and `lop stop --json` run the identical code.
-    """
-    import asyncio
-
-    return asyncio.run(stop_all(timeout_s=timeout_s, own_pid=own_pid, _root=_root))
+#: Outcomes that count as "the session is no longer running", i.e. the stop
+#: did its job. Everything else (``refused``) is the partial case.
+ENDED_METHODS = frozenset({"socket", "sigterm", "sigkill", "gone"})
 
 
-def summarize(outcomes: list[StopOutcome]) -> str:
+def summarize(outcomes: list[StopOutcome], *, own: StopOutcome | None = None) -> str:
     """The grouped report every front end paints after ``stop all``.
 
-    Grouped by rung because that is the honest summary of an escalation: the
-    user wants to know how many stopped cleanly, how many needed a signal,
-    and how many were refused — not twelve identical lines.
+    Reconciles with the promise the listing made: leads with the total the
+    user was told would be stopped, then the rung grouping — the honest
+    summary of an escalation is how many stopped cleanly, how many needed a
+    signal, how many were already gone and how many were refused, not twelve
+    identical lines. ``own`` is the caller's in-process outcome (the TUI's
+    own session), folded into the total and the ``stopped`` count so the
+    numbers add up on one line instead of across three.
     """
-    if not outcomes:
+    everything = list(outcomes) + ([own] if own is not None else [])
+    if not everything:
         return "no sessions to stop"
     order: list[tuple[str, str]] = [
-        ("socket", "stopped via socket"),
+        ("socket", "stopped"),
         ("sigterm", "stopped via sigterm"),
         ("sigkill", "killed"),
+        ("gone", "already exited"),
         ("refused", "refused"),
     ]
     parts: list[str] = []
     for method, label in order:
-        count = sum(1 for o in outcomes if o.method == method)
+        count = sum(1 for o in everything if o.method == method)
         if count:
             parts.append(f"{count} {label}")
-    return ", ".join(parts)
+    total = len(everything)
+    return f"{total} session{'s' if total != 1 else ''}: " + ", ".join(parts)
