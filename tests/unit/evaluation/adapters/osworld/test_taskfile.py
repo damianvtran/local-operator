@@ -49,6 +49,22 @@ def test_no_evaluator_task_reports_no_evaluator() -> None:
     assert not descriptor.has_evaluator()
 
 
+def test_evaluate_override_counts_as_an_evaluator() -> None:
+    """108 of 108 pinned V2 tasks score through an ``evaluate`` override and
+    none declares an ``evaluator`` dict; ``has_evaluator`` must see them."""
+
+    descriptor = taskfile.load_static(fixtures.EVALUATE_OVERRIDE.encode(), module_name="t.py")
+    assert descriptor.evaluate_override is True
+    assert descriptor.evaluator is None
+    assert descriptor.has_evaluator() is True
+
+
+def test_an_evaluate_outside_the_task_class_does_not_count() -> None:
+    descriptor = taskfile.load_static(fixtures.EVALUATE_ELSEWHERE.encode(), module_name="t.py")
+    assert descriptor.evaluate_override is False
+    assert descriptor.has_evaluator() is False
+
+
 def test_source_sha256_binds_the_exact_bytes() -> None:
     a = taskfile.load_static(fixtures.PLAIN.encode(), module_name="tasks/a.py")
     b = taskfile.load_static(fixtures.PLAIN.encode() + b"\n", module_name="tasks/b.py")

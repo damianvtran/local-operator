@@ -132,7 +132,32 @@ class Task010:
     config = [{"type": "launch", "app": "files"}]
 """
 
-# An infeasible-style task (V2 shape). PR 1 EXCLUDES these from scoring support.
+# The shape of EVERY task in the pinned V2 corpus: no ``evaluator`` dict, an
+# ``evaluate(self, env)`` override on the task class instead.
+EVALUATE_OVERRIDE = """
+from desktop_env.task_base import BaseTask
+
+class Task011(BaseTask):
+    id = "task_override"
+    instruction = "Create the report."
+    config = [{"type": "launch", "app": "gedit"}]
+
+    def evaluate(self, env):
+        return 0.5
+"""
+
+# An ``evaluate`` defined OUTSIDE the task class must not count.
+EVALUATE_ELSEWHERE = """
+def evaluate(env):
+    return 1.0
+
+class Task012:
+    id = "task_helper_only"
+    instruction = "Nothing scores this."
+    config = []
+"""
+
+# An infeasible-style task (V2 shape). Excluded from scoring support.
 INFEASIBLE = """
 class Task011:
     id = "task_infeasible"

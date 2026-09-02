@@ -86,6 +86,13 @@ class TaskDescriptor:
     disable_vnc: bool = False
     disable_recording: bool = False
     intermediate_eval_safe: bool = False
+    # Whether the task class defines its own ``evaluate(self, env)``. This is
+    # how EVERY task in the pinned V2 corpus scores (108 of 108 override it;
+    # none declares an ``evaluator`` dict), and ``DesktopEnv.evaluate`` calls
+    # the override in preference to the dict (desktop_env.py:584-587). A
+    # parser that only recorded the dict would judge the whole corpus as
+    # unscorable and refuse every paid episode at ``score``.
+    evaluate_override: bool = False
     source_sha256: str = ""
     # The raw module source, kept so requirement derivation can detect
     # controller references (gitlab/website imports) without re-reading the
@@ -104,7 +111,7 @@ class TaskDescriptor:
         score-deflation error ``scoring.score_to_artifact`` exists to reject.
         """
 
-        return bool(self.evaluator)
+        return bool(self.evaluator) or self.evaluate_override
 
     def is_infeasible(self) -> bool:
         """Whether this task grades a correct refusal rather than a completion.
@@ -168,6 +175,7 @@ def load_static(source: bytes, *, module_name: str) -> TaskDescriptor:
     # we require only that exactly one class assigns ``instruction`` and ``id``.
     values: dict[str, Any] = {}
     found = False
+    evaluate_override = False
     for node in ast.walk(tree):
         if not isinstance(node, ast.ClassDef):
             continue
@@ -188,6 +196,13 @@ def load_static(source: bytes, *, module_name: str) -> TaskDescriptor:
             assert isinstance(target, ast.Name)
             if target.id in _STATIC_FIELDS:
                 values[target.id] = _literal(stmt.value)
+        # Detected on the SAME class that carries the task fields, by AST,
+        # so a helper module defining an unrelated ``evaluate`` cannot claim
+        # the task is scorable. Statically observable and side-effect free.
+        evaluate_override = any(
+            isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)) and stmt.name == "evaluate"
+            for stmt in node.body
+        )
         break
     if not found:
         raise TaskParseError("no task class with 'id' and 'instruction' assignments found")
@@ -218,6 +233,7 @@ def load_static(source: bytes, *, module_name: str) -> TaskDescriptor:
         disable_vnc=bool(values.get("disable_vnc", False)),
         disable_recording=bool(values.get("disable_recording", False)),
         intermediate_eval_safe=bool(values.get("intermediate_eval_safe", False)),
+        evaluate_override=evaluate_override,
         source_sha256=source_sha256,
         source_text=source.decode("utf-8", errors="replace"),
         module_name=module_name,
