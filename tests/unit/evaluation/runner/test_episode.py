@@ -735,3 +735,129 @@ async def test_context_unrecoverable_seals_as_a_harness_error_not_a_provider_one
     assert len(errors) == 1
     assert errors[0].category == "adapter"
     assert errors[0].diagnostic_code == "contextunrecoverableerror"
+
+
+# ---------------------------------------------------------------------------
+# Rejected decisions: one bad reply is re-prompted, not fatal; the retry is
+# in the evidence; the bound ends the episode as a MODEL failure.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_one_rejected_decision_is_re_prompted_and_the_corrected_batch_proceeds(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """Bundle ep-6ea01a117eee ended on its first decision (``frame_id '1'``
+    against ``screen``) as a provider failure with $0 spent. A rejected reply
+    is now recorded as a billed attempt with a retryable ``model`` error, the
+    model is asked again for the SAME observation, and the corrected batch
+    runs the episode to a scored, reportable seal."""
+
+    adapter = FakeAdapter(tmp_path, episode_id)
+    model = ScriptedModel(["reject", "step", "finish"])
+    runner = _runner(tmp_path, episode_id, adapter=adapter, model=model)
+
+    outcome = await runner.run()
+
+    assert outcome.status == "completed", outcome.diagnostic
+    assert outcome.score is not None and outcome.score.status == "scored"
+    assert outcome.reportability_label == "reportable"
+    root = outcome.bundle_root
+    assert root is not None
+    report = verify_bundle(root)
+    assert report.valid, [issue.code for issue in report.issues]
+    # Three billed calls, three triples: the rejected attempt is not hidden.
+    assert report.counters is not None
+    assert report.counters.model_request_count == 3
+    assert report.counters.model_response_count == 3
+    assert model.calls == 3
+    # The re-prompt was for the same observation: identical history both times.
+    assert model.histories[0] == model.histories[1]
+    errors = payloads(root, ErrorPayload)
+    assert [(e.category, e.diagnostic_code, e.retryable) for e in errors] == [
+        ("model", "decision-rejected", True)
+    ]
+    assert errors[0].detail_artifact is not None
+    # Journal order: the rejected attempt's triple, THEN its error, then the
+    # corrected attempt's triple.
+    kinds = _kinds(root)
+    first_request = kinds.index("model_request")
+    assert kinds[first_request : first_request + 7] == [
+        "model_request",
+        "model_response",
+        "usage_cost",
+        "error",
+        "model_request",
+        "model_response",
+        "usage_cost",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_exhausted_decision_retries_seal_as_a_model_failure(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """After ``max_decision_retries`` corrective re-prompts the model still
+    has not produced a usable batch. That is the agent's failure, so the
+    bundle says ``model`` / ``model_failure`` -- not ``provider`` (nothing was
+    down) and not ``crash`` (nothing broke) -- and every billed attempt is in
+    the evidence."""
+
+    adapter = FakeAdapter(tmp_path, episode_id)
+    model = ScriptedModel(["reject", "reject", "reject", "step", "finish"])
+    runner = EpisodeRunner(
+        build_spec(episode_id),
+        build_config(tmp_path, max_decision_retries=2),
+        selector=selector(tmp_path),
+        model=model,
+        launch=lambda _: adapter,
+        rescue=_rescue_ok,
+    )
+
+    outcome = await runner.run()
+
+    assert outcome.status == "failed"
+    assert outcome.rescue_required is False
+    assert outcome.score is not None
+    assert outcome.score.status == "unscored"
+    assert outcome.score.reason == "model_failure"
+    assert outcome.reportability_label == "unscored"
+    assert outcome.diagnostic is not None and "3 attempt(s)" in outcome.diagnostic
+    # Exactly the bound plus one: no fourth call.
+    assert model.calls == 3
+    root = outcome.bundle_root
+    assert root is not None
+    report = verify_bundle(root)
+    assert report.valid, [issue.code for issue in report.issues]
+    assert report.counters is not None
+    assert report.counters.model_request_count == 3
+    errors = payloads(root, ErrorPayload)
+    assert [(e.category, e.retryable) for e in errors] == [
+        ("model", True),
+        ("model", True),
+        ("model", True),
+        ("model", False),
+    ]
+    assert errors[-1].diagnostic_code == "modelfailure"
+    # Cleanup ran on the live session: the environment was never at fault.
+    assert "cleanup" in adapter.calls
+
+
+@pytest.mark.asyncio
+async def test_zero_decision_retries_restores_one_strike(tmp_path: Path, episode_id: str) -> None:
+    adapter = FakeAdapter(tmp_path, episode_id)
+    model = ScriptedModel(["reject", "finish"])
+    runner = EpisodeRunner(
+        build_spec(episode_id),
+        build_config(tmp_path, max_decision_retries=0),
+        selector=selector(tmp_path),
+        model=model,
+        launch=lambda _: adapter,
+        rescue=_rescue_ok,
+    )
+
+    outcome = await runner.run()
+
+    assert outcome.status == "failed"
+    assert outcome.score is not None and outcome.score.reason == "model_failure"
+    assert model.calls == 1

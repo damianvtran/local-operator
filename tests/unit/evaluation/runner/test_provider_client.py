@@ -29,7 +29,7 @@ from local_operator.evaluation.protocol import (
     Observation,
     TypeAction,
 )
-from local_operator.evaluation.runner.model import EpisodeTurn
+from local_operator.evaluation.runner.model import DecisionRejected, EpisodeTurn
 from local_operator.evaluation.runner.provider_client import (
     DecisionParseError,
     ProviderModelClient,
@@ -370,13 +370,177 @@ async def test_client_reports_the_provider_stop_reason() -> None:
 
 @pytest.mark.asyncio
 async def test_client_raises_on_an_unparseable_reply() -> None:
-    """The runner converts this to a provider failure, so it must surface."""
+    """An unusable reply is a billed MODEL error, surfaced as ``DecisionRejected``
+    with the call's provenance so the runner can record the attempt and
+    re-prompt -- never a provider failure, and never silently swallowed."""
 
     current = observation()
-    stream = ScriptedStream("I'm afraid I can't do that.")
+    stream = ScriptedStream(
+        "I'm afraid I can't do that.",
+        usage=Usage(input_tokens=11, output_tokens=7, usd_cost=0.002),
+        provider_payload={"id": "chatcmpl-REJ"},
+    )
 
-    with pytest.raises(DecisionParseError):
+    with pytest.raises(DecisionRejected) as info:
         await _client(stream).decide(current, _turns(current))
+
+    rejected = info.value
+    assert isinstance(rejected.__cause__, DecisionParseError)
+    assert rejected.usage.input_tokens == 11 and rejected.usage.output_tokens == 7
+    assert rejected.cost_micros == 2000
+    assert rejected.provider_request_id == "chatcmpl-REJ"
+    assert rejected.route == ROUTE
+    assert rejected.diagnostic.startswith("Your previous reply was rejected:")
+
+
+# ---------------------------------------------------------------------------
+# Frame-id contract: the model is told which frame ids exist, and a wrong one
+# is fed back rather than ending the episode (the first paid OSWorld episode).
+# ---------------------------------------------------------------------------
+
+
+def _click_payload(current: Observation, frame_id: str, x: int = 0, y: int = 0) -> str:
+    return json.dumps(
+        {
+            "actions": [
+                {
+                    "kind": "click",
+                    "observation_id": current.observation_id,
+                    "frame_id": frame_id,
+                    "x": x,
+                    "y": y,
+                }
+            ]
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_rendered_observation_names_its_frame_ids_and_geometry(tmp_path: Path) -> None:
+    """The adapter chooses the frame ids (OSWorld: ``screen``; here: ``frame-N``)
+    and ``validate_for`` refuses any other, so the rendered text MUST list them.
+    The first paid episode's model was never told and guessed ``"1"``."""
+
+    stream = RecordingStream(_wait_reply)
+    client = _client(stream, tmp_path)
+    current = _framed_observation(tmp_path, 4)
+
+    await client.decide(current, _turns(current))
+
+    text = stream.requests[0].messages[0].content[0].text
+    assert "Frames: frame-4 (1x1)" in text
+    # The system prompt states the constraint the observation line serves.
+    prompt = stream.requests[0].system_blocks[0]
+    assert '"Frames:"' in prompt
+    assert "MUST use one of the ids named on the CURRENT observation" in prompt
+
+
+@pytest.mark.asyncio
+async def test_frameless_observation_renders_no_frames_rather_than_nothing() -> None:
+    current = observation()
+    stream = ScriptedStream(finish_payload(current))
+
+    await _client(stream).decide(current, _turns(current))
+
+    assert "Frames: none" in stream.requests[0].messages[0].content[0].text
+
+
+@pytest.mark.asyncio
+async def test_unknown_frame_id_is_fed_back_and_the_corrected_reply_proceeds(
+    tmp_path: Path,
+) -> None:
+    """The exact defect from bundle ep-6ea01a117eee: ``frame_id "1"`` against a
+    published ``frame-0``. The first call raises ``DecisionRejected``; the
+    client has ALREADY appended the bad reply and a correction naming the
+    valid ids, so the runner's re-call for the same observation is corrective
+    and the corrected click parses."""
+
+    current = _framed_observation(tmp_path, 0)
+    replies = iter([_click_payload(current, "1"), _click_payload(current, "frame-0")])
+    stream = RecordingStream(lambda _message: next(replies))
+    client = _client(stream, tmp_path)
+    history = _turns(current)
+
+    with pytest.raises(DecisionRejected) as info:
+        await client.decide(current, history)
+    assert "unknown frame_id '1'" in info.value.diagnostic
+
+    decision = await client.decide(current, history)
+
+    assert decision.action_batch.actions[0].frame_id == "frame-0"  # type: ignore[union-attr]
+    # The retry request is the original observation, the model's own bad
+    # reply, then the correction -- appended, never rewritten.
+    retry = stream.requests[1]
+    assert _shape(retry) == [
+        ("user", ("text", "image")),
+        ("assistant", ("text",)),
+        ("user", ("text",)),
+    ]
+    assert retry.messages[0] is stream.requests[0].messages[0]
+    assert json.loads(retry.messages[1].content[0].text)["actions"][0]["frame_id"] == "1"
+    correction = retry.messages[2].content[0].text
+    assert correction.startswith("Your previous reply was rejected:")
+    assert "Frames: frame-0 (1x1)" in correction
+    assert current.observation_id in correction
+
+
+@pytest.mark.asyncio
+async def test_a_corrected_turn_closes_after_the_correction_in_the_next_request(
+    tmp_path: Path,
+) -> None:
+    """Once the runner closes the corrected turn, the accepted batch is
+    replayed AFTER the rejection pair, so the conversation reads as it
+    happened and the sent prefix is still reused by identity."""
+
+    first = _framed_observation(tmp_path, 0)
+    second = _framed_observation(tmp_path, 1)
+    replies = iter(
+        [
+            _click_payload(first, "nope"),
+            _click_payload(first, "frame-0"),
+            _click_payload(second, "frame-1"),
+        ]
+    )
+    stream = RecordingStream(lambda _message: next(replies))
+    client = _client(stream, tmp_path)
+
+    history = [EpisodeTurn(observation=first)]
+    with pytest.raises(DecisionRejected):
+        await client.decide(first, tuple(history))
+    decision = await client.decide(first, tuple(history))
+    history[-1] = history[-1].model_copy(update={"batch": decision.action_batch})
+    history.append(EpisodeTurn(observation=second))
+    await client.decide(second, tuple(history))
+
+    third = stream.requests[2]
+    assert _shape(third) == [
+        ("user", ("text", "image")),
+        ("assistant", ("text",)),
+        ("user", ("text",)),
+        ("assistant", ("text",)),
+        ("user", ("text", "image")),
+    ]
+    assert json.loads(third.messages[3].content[0].text)["actions"][0]["frame_id"] == "frame-0"
+    assert all(a is b for a, b in zip(stream.requests[1].messages, third.messages))
+
+
+@pytest.mark.asyncio
+async def test_a_runaway_rejected_reply_is_replayed_truncated(tmp_path: Path) -> None:
+    from local_operator.evaluation.runner.provider_client import (
+        MAX_REJECTED_REPLY_CHARS,
+    )
+
+    current = _framed_observation(tmp_path, 0)
+    stream = RecordingStream("x" * (MAX_REJECTED_REPLY_CHARS * 3))
+    client = _client(stream, tmp_path)
+
+    with pytest.raises(DecisionRejected):
+        await client.decide(current, _turns(current))
+
+    block = client._context.messages[1].content[0]
+    assert isinstance(block, TextContent)
+    assert len(block.text) < MAX_REJECTED_REPLY_CHARS + 64
+    assert block.text.endswith("[... reply truncated]")
 
 
 @pytest.mark.asyncio
