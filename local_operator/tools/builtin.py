@@ -4636,11 +4636,20 @@ class SendParams(BaseModel):
         default=None,
         description=(
             "Peer to message: case-insensitive substring of the conversation name, "
-            "session id, or cwd basename (`lop sessions` lists what is running)."
+            "session id, or cwd basename (`lop sessions` lists what is running). "
+            "ALTERNATIVE to pid/session, not a companion — pass exactly one way of "
+            "addressing the peer; target together with pid or session is refused as "
+            "an ambiguous recipient."
         ),
     )
-    pid: int | None = Field(default=None, description="Exact pid of the peer session.")
-    session: str | None = Field(default=None, description="Exact session id of the peer.")
+    pid: int | None = Field(
+        default=None,
+        description=("Exact pid of the peer session. Use INSTEAD of target, never alongside it."),
+    )
+    session: str | None = Field(
+        default=None,
+        description=("Exact session id of the peer. Use INSTEAD of target, never alongside it."),
+    )
     message: str = Field(
         min_length=1,
         description="The message body; it lands in the peer's transcript as an inbound card.",
@@ -4733,9 +4742,11 @@ def build_send_tool(context: ToolContext) -> AgentTool | None:
         describe_approval=_describe_send_approval,
         description=(
             "Hand a message to another local lop session on this machine (no cmux). "
-            "Address the peer by `target` (name/cwd substring), `pid` (exact), or "
-            "`session` (exact session id); `lop sessions` lists what is running. By "
-            "default the message lands in the peer's mailbox AND wakes the peer if it "
+            "Address the peer by EXACTLY ONE of `target` (name/cwd substring), `pid` "
+            "(exact), or `session` (exact session id) — they are alternatives, and "
+            "passing a `target` together with a `pid`/`session` is refused as an "
+            "ambiguous recipient rather than resolved. `lop sessions` lists what is "
+            "running. By default the message lands in the peer's mailbox AND wakes the peer if it "
             "is idle, so an idle peer responds right away; `wake=False` is the quiet "
             "mailbox drop (read on the peer's next turn), and `now=True` steers "
             "mid-turn (opens a turn if the peer is idle). The result says how the "

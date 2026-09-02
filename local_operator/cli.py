@@ -438,15 +438,26 @@ def build_cli_parser() -> argparse.ArgumentParser:
     send_parser.add_argument(
         "target",
         nargs="?",
-        help="conversation-name / session-id / cwd substring (case-insensitive)",
+        help=(
+            "conversation-name / session-id / cwd substring (case-insensitive). "
+            "Omit when addressing with --pid/--session."
+        ),
     )
     send_parser.add_argument(
         "message",
         nargs="?",
-        help="message text; omit to read the body from stdin",
+        help=(
+            "message text; omit to read the body from stdin. With --pid/--session "
+            "a single positional IS the message."
+        ),
     )
-    send_parser.add_argument("--pid", type=int, help="target by exact pid")
-    send_parser.add_argument("--session", dest="session", help="target by exact session id")
+    # Mutually exclusive because they name DIFFERENT recipients: argparse rejects
+    # the pair natively ("argument --session: not allowed with argument --pid"),
+    # which is a better error than anything hand-written here, and it removes a
+    # whole branch from _bind_send_positionals below.
+    send_selector = send_parser.add_mutually_exclusive_group()
+    send_selector.add_argument("--pid", type=int, help="target by exact pid")
+    send_selector.add_argument("--session", dest="session", help="target by exact session id")
     send_parser.add_argument(
         "--now",
         "--steer",
@@ -1117,8 +1128,60 @@ def _peer_sender_identity() -> "dict[str, Any]":
     return peer_sender_identity(os.getppid())
 
 
+def _bind_send_positionals(
+    args: argparse.Namespace,
+) -> "tuple[str | None, str | None, str]":
+    """Map ``lop send``'s parsed positionals onto ``(target, message, error)``.
+
+    ``lop send`` accepts the recipient EITHER as a positional substring or as a
+    ``--pid``/``--session`` selector, so argparse alone cannot decide what a
+    single positional means: it always fills ``target`` first, which made
+    ``lop send --pid N "hello"`` bind "hello" to the TARGET and then fail with
+    "no message given" — the exact form guides/peer-messaging documented.
+
+    A selector fully determines the recipient, so with one present a lone
+    positional has exactly one possible meaning: the body. With BOTH a
+    positional and a selector the command names two different recipients; the
+    resolver would silently prefer the selector and deliver somewhere the
+    command does not appear to name, so we refuse instead of guessing.
+
+    Kept as a pure function (namespace in, tuple out) for the same reason
+    ``resolve_peer_target`` is a core rather than parser logic: the rule is
+    testable without a parser, a socket, or a registry. Expressing it in
+    argparse itself was tried and rejected — ``nargs="*"`` cannot absorb words
+    that follow an optional flag (``lop send peer --wake "act now"`` becomes
+    "unrecognized arguments"), and ``argparse.REMAINDER`` swallows ``--wake``
+    INTO the body, silently downgrading the delivery mode. See
+    ``docs/design/peer-send.md`` §4.3.
+    """
+    target, message = args.target, args.message
+    selector = (
+        f"--pid {args.pid}"
+        if args.pid is not None
+        else f"--session {args.session}" if args.session else ""
+    )
+    if not selector:
+        # No selector: today's grammar exactly — first positional is the target,
+        # second is the body.
+        return target, message, ""
+    if target is not None and message is not None:
+        by = "pid" if args.pid is not None else "session id"
+        return (
+            None,
+            None,
+            (
+                f"ambiguous recipient: {target!r} and {selector} name different "
+                f'sessions. Drop one — `lop send {selector} "{message}"` to address '
+                f'by {by}, or `lop send {target!r} "{message}"` to address by name'
+            ),
+        )
+    # One positional (or none) alongside a selector: it is the body.
+    return None, target, ""
+
+
 def _resolve_peer_target(
     args: argparse.Namespace,
+    target: "str | None",
 ) -> "tuple[Any | None, list[Any], str]":
     """Resolve a ``lop send`` target to one live SessionRecord.
 
@@ -1127,13 +1190,20 @@ def _resolve_peer_target(
     mapped onto the core's keyword arguments. The resolution rules themselves —
     pid, then session id, then case-insensitive substring; only ``live`` records;
     candidates returned on ambiguity — live in the core so the in-session
-    ``send`` tool resolves targets identically."""
+    ``send`` tool resolves targets identically.
+
+    ``target`` is passed explicitly rather than read off the namespace because
+    ``_bind_send_positionals`` has already decided whether the positional was a
+    target or the message body; ``args.target`` is the RAW parse and using it
+    here would re-introduce the binding bug one layer down. It is required
+    rather than defaulted for that reason: a caller that forgets it should fail
+    loudly, not silently resolve as though no target was given."""
     from local_operator.mobile.peer_send import resolve_peer_target
 
     # The flag grammar is passed in so the CLI's user-visible error keeps saying
     # `--pid` / `--session`, exactly as it did before the extraction.
     return resolve_peer_target(
-        target=args.target,
+        target=target,
         pid=args.pid,
         session=args.session,
         pid_hint="--pid",
@@ -1147,13 +1217,22 @@ def send_command(args: argparse.Namespace) -> int:
     Delivery mode maps from the flags: ``--now``/``--steer`` => steer (inject
     mid-turn), otherwise mailbox; ``--wake`` drives a turn if the mailbox
     target is idle. The body comes from the positional argument or, when
-    omitted, stdin (the ergonomic path for piping a longer note)."""
+    omitted, stdin (the ergonomic path for piping a longer note).
+
+    The positionals are rebound BEFORE anything is resolved or dialled, because
+    an ambiguous recipient must cost nothing: the refusal has to happen while
+    the command is still inert."""
     import asyncio
 
     from local_operator.mobile.peer_client import send_peer_message
     from local_operator.mobile.peer_send import candidate_lines, validate_peer_body
 
-    record, candidates, error = _resolve_peer_target(args)
+    target, message, bind_error = _bind_send_positionals(args)
+    if bind_error:
+        _peer_red(bind_error)
+        return 1
+
+    record, candidates, error = _resolve_peer_target(args, target)
     if candidates:
         print(f"{len(candidates)} sessions match; disambiguate with --pid:", file=sys.stderr)
         for line in candidate_lines(candidates, indent="  ", prefix="--pid"):
@@ -1184,8 +1263,8 @@ def send_command(args: argparse.Namespace) -> int:
 
     # Body: positional wins; otherwise read stdin (piped note).
 
-    if args.message is not None:
-        text = args.message
+    if message is not None:
+        text = message
     elif not sys.stdin.isatty():
         text = sys.stdin.read()
     else:

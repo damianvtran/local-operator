@@ -419,6 +419,7 @@ lop sessions
 lop send "release cutter" "gates are green, ready for review"
 lop send "release cutter" --wake "the deploy finished; verify prod"
 lop send "ingest refactor" --now "hold off, the schema changed"
+lop send --pid 12345 "gates are green, ready for review"   # address by exact pid
 git log -1 --stat | lop send "release cutter"      # body from stdin
 ```
 
@@ -438,8 +439,12 @@ is matched case-insensitively against the conversation name, then the session
 id, then the cwd basename. Only `live` sessions are eligible. When a substring
 matches several of them, `lop send` prints the candidates and exits non-zero
 asking you to disambiguate with `--pid` rather than delivering to the wrong
-session. A target that has gone `wedged` says so immediately instead of hanging
-on the dial.
+session. Address a session exactly one way: a `--pid`/`--session` selector
+already names the recipient, so a single positional beside one is the message,
+and a positional target passed *together* with a selector names two different
+sessions and is refused as an ambiguous recipient rather than silently
+delivering to the selector. A target that has gone `wedged` says so immediately
+instead of hanging on the dial.
 
 **Every delivery leaves a receipt.** A delivered message appears in the target's
 transcript as an inbound card reading `↔ peer message from "<conversation>"

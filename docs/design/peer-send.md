@@ -587,6 +587,67 @@ the body from stdin when `message` is omitted (`lop send mytarget < note.txt`),
 which is the ergonomic path for an agent piping a longer note. `--pid`/`--session`
 override the positional `target`.
 
+#### Revision: argument grammar
+
+**The "`--pid`/`--session` override the positional `target`" rule above shipped
+and was wrong.** It is recorded here rather than deleted because the sentence
+reads as obviously correct and is how this defect gets re-derived.
+
+Two optional positionals plus a selector flag is not a grammar argparse can
+resolve. argparse fills `target` first, always, so `lop send --pid N "hello"`
+bound `"hello"` to `target`, left `message` empty, and exited 1 with `no message
+given (pass it as an argument or pipe it on stdin)` — an error that is not
+merely unhelpful but **false**, since the user did pass it as an argument. That
+was the exact invocation this guide documented. Worse, the "override" behaviour
+made `lop send other-name "body" --pid N` deliver to pid N, exit 0, and read as
+though it addressed `other-name`: a wrong-recipient hazard, and with
+`--wake`/`--now` it had already interrupted the wrong session by the time the
+success line printed.
+
+The rule now:
+
+1. `--pid` and `--session` are mutually exclusive (an argparse
+   `add_mutually_exclusive_group`, which produces a better error than a
+   hand-written check).
+2. With a selector present: two positionals → **refused** as an ambiguous
+   recipient (exit 1, nothing resolved and nothing dialled); one positional →
+   it is the **message**; none → body from stdin.
+3. With no selector: first positional is the target, second is the message —
+   unchanged.
+4. A typed body argument wins over piped stdin.
+
+The rebinding lives in `cli._bind_send_positionals`, a pure namespace-in /
+tuple-out function, for the same reason `resolve_peer_target` is a core:
+argparse is the wrong place to express a rule that depends on which flags are
+present. The *conflict* half also lives in `mobile/peer_send.resolve_peer_target`
+so the `send` tool inherits it — a conflict rule that existed only in `cli.py`
+would falsify that module's claim to be the single source of truth.
+
+**Two alternatives look obviously right and are both wrong. Do not re-adopt
+them without re-running these probes.**
+
+- **`message` as `nargs="*"`, joined into a body.** A single `nargs="*"`
+  positional **cannot** absorb words that appear after an optional flag.
+  Measured: `["peer", "--wake", "act on this now"]` → `SystemExit(2)`,
+  `error: unrecognized arguments: act on this now`. That breaks
+  `lop send "<target>" --wake "…"` and `--now "…"`, three documented forms that
+  work today. Disqualifying on its own.
+- **`message` as `argparse.REMAINDER`.** Measured:
+  `["peer", "--wake", "act on this now"]` → `message=['--wake', 'act on this
+  now']`. `--wake` is swallowed **into the body**: the command parses, exits 0,
+  delivers — and the delivery mode silently degrades from wake to mailbox with
+  the flag text pasted into the message. A currently-working invocation starts
+  quietly doing the wrong thing, which is worse than the bug being fixed.
+
+`-m/--message` was also considered and rejected as the primary fix: it leaves
+the natural form (`lop send --pid N "hello"`) broken unless the user learns a
+second flag, and it fights every send-style Unix command (`mail`, `write`,
+`wall`, `notify-send`, `gh pr comment -b`) where the body is a positional.
+
+A dash-leading body beside a selector needs `--`
+(`lop send --pid N -- "--dashy"`). That is argparse's standard behaviour and
+deliberately not special-cased; a bespoke escape would be a second grammar.
+
 Dispatch in `main()` beside the others (`cli.py:2099`): `elif args.subcommand ==
 "send": return send_command(args)`.
 
