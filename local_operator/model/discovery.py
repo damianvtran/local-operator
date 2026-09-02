@@ -1429,17 +1429,30 @@ def _lists_id(rows: list[DiscoveredModel], model_id: str) -> bool:
     paid a blocking round trip on boot for a document the refetch could not
     improve — indefinitely, since the refetched document lacked the alias too.
 
-    So a row counts as a hit when any of its :func:`id_spellings` (the id as
-    given, date-stripped, dotted) coincides with any of the wanted id's, after
-    normalisation. That covers both directions — an alias whose snapshot is
-    listed, and a snapshot whose alias is listed (the aggregators' habit) — so
-    neither direction can refetch for a row the provider spells differently.
-    The rewrites are the conservative ones ``prices._lookup`` already trusts.
+    So a row counts as a hit when the wanted id's LITERAL (normalised) is one
+    of the row's :func:`id_spellings` (the id as given, date-stripped, dotted),
+    or the row's literal is one of the wanted id's. That covers both directions
+    — an alias whose snapshot is listed, and a snapshot whose alias is listed
+    (the aggregators' habit) — so neither direction can refetch for a row the
+    provider spells differently. The rewrites are the conservative ones
+    ``prices._lookup`` already trusts.
+
+    The match is literal-against-spellings on purpose, NOT spellings-against-
+    spellings: both sides date-stripped coincide for ANY two snapshots of one
+    family, so a document listing only ``claude-opus-4-5-20251101`` counted
+    ``claude-opus-4-5-20260315`` as present — the day a new snapshot landed,
+    the one trigger built for that case stayed silent, the lookup missed, and
+    the memo pinned the fallback for the rest of the day. A literal never loses
+    its date, so two dated ids match only when they are the same id.
     """
     if any(row.id == model_id for row in rows):
         return True
-    wanted = {normalised_id(spelling) for spelling in id_spellings(model_id)}
-    return any(
-        not wanted.isdisjoint(normalised_id(spelling) for spelling in id_spellings(row.id))
-        for row in rows
-    )
+    wanted_literal = normalised_id(model_id)
+    wanted_spellings = {normalised_id(spelling) for spelling in id_spellings(model_id)}
+    for row in rows:
+        row_literal = normalised_id(row.id)
+        if row_literal in wanted_spellings:
+            return True
+        if any(normalised_id(spelling) == wanted_literal for spelling in id_spellings(row.id)):
+            return True
+    return False

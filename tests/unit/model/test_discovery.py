@@ -1445,6 +1445,37 @@ def test_a_want_id_listed_under_another_spelling_makes_no_request(
     assert client.calls == []
 
 
+@pytest.mark.parametrize(
+    ("listed", "wanted"),
+    [
+        # R2-1: a snapshot the document does not list yet, of a family it
+        # does. Matching each side's derived spellings against the OTHER's
+        # derived spellings made every two snapshots of a family coincide, so
+        # the day a new snapshot landed the trigger built for exactly that
+        # case stayed silent and the memo pinned the fallback for the day.
+        ("claude-opus-4-5-20251101", "claude-opus-4-5-20260315"),
+        ("claude-3-5-sonnet-20240620", "claude-3-5-sonnet-20241022"),
+    ],
+)
+def test_an_unlisted_snapshot_of_a_listed_family_still_refetches(
+    tmp_path, listed: str, wanted: str
+) -> None:
+    _plant_anthropic_document(tmp_path, age_s=20 * 60, ids=[listed])
+    fresh = {
+        "data": [{"id": wanted, "display_name": wanted, "type": "model"}],
+        "has_more": False,
+    }
+    client = _StubClient([_Response(200, fresh)])
+
+    models, status = available_models(
+        "anthropic", api_key="sk-ant", client=client, cache_dir=tmp_path, want_id=wanted
+    )
+
+    assert status == "ok"
+    assert len(client.calls) == 1
+    assert wanted in {row.id for row in models}
+
+
 def test_a_genuinely_unlisted_id_still_refetches_after_the_alias_widening(tmp_path) -> None:
     """The widening must not swallow the trigger it sits beside: a NEW family
     id that no spelling of any listed row matches is still a miss."""
