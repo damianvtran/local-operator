@@ -473,9 +473,30 @@ class RecordingStream:
     the episode turns and the compaction summary the client buys.
     """
 
-    def __init__(self, reply: str | Callable[[Any], str], *, summary: str = "SUMMARY") -> None:
+    def __init__(
+        self,
+        reply: str | Callable[[Any], str],
+        *,
+        summary: str = "SUMMARY",
+        report_context: bool = False,
+        context_scale: float = 1.0,
+        report_context_until: int | None = None,
+    ) -> None:
         self.reply = reply
         self.summary = summary
+        # A real provider reports the context size it billed; ``True`` makes
+        # the fake do the same (a local estimate of the request it received)
+        # so the client's ``max(provider, local)`` trigger path is exercised.
+        # ``context_scale`` inflates that figure the way a real provider does
+        # for images (Anthropic bills a 1932px frame at ~5,000 tokens against
+        # the local ruler's flat 1,200), which is what puts the provider's
+        # figure ABOVE the local one and makes a stale copy of it dangerous.
+        self.report_context = report_context
+        self.context_scale = context_scale
+        # ``Usage.context_tokens`` is optional on the wire; ``until`` stops
+        # reporting after the first N requests so a stale figure can be
+        # left behind on purpose.
+        self.report_context_until = report_context_until
         self.requests: list[Any] = []
         self.summary_requests: list[Any] = []
 
@@ -488,7 +509,16 @@ class RecordingStream:
         self.requests.append(request)
         observation = request.messages[-1]
         text = self.reply(observation) if callable(self.reply) else self.reply
-        return self._events(text, Usage(input_tokens=10, output_tokens=5, usd_cost=0.001))
+        usage = Usage(input_tokens=10, output_tokens=5, usd_cost=0.001)
+        reporting = self.report_context and (
+            self.report_context_until is None or len(self.requests) <= self.report_context_until
+        )
+        if reporting:
+            from local_operator.compaction.tokens import estimate_messages_tokens
+
+            reported = int(estimate_messages_tokens(request.messages) * self.context_scale)
+            usage = usage.model_copy(update={"context_tokens": reported})
+        return self._events(text, usage)
 
     async def _events(self, text: str, usage: Usage) -> AsyncIterator[Any]:
         yield StreamTextDelta(delta=text)
@@ -664,6 +694,168 @@ async def test_provider_client_folds_summary_usage_into_the_decision(tmp_path: P
     # The rebuilt prefix opens with the summary marker the session would render.
     request_after = stream.requests[decisions.index(first)]
     assert "<previous-context-summary>" in request_after.messages[0].content[0].text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("context_scale", "report_until"), [(1.0, None), (1.1, 11)])
+async def test_threshold_rebuild_creates_headroom_so_appends_resume(
+    tmp_path: Path, context_scale: float, report_until: int | None
+) -> None:
+    """Once the window is genuinely full, a rebuild must buy several cached
+    appends, not one per turn.
+
+    Two things used to make the token trigger re-fire every turn after a
+    pass (the reviewer observed a rebuild on every turn from 11 to 23):
+
+    * A threshold-triggered pass re-asked the threshold after its own prune,
+      so the prune alone could slip under the line, refuse the summary, and
+      leave the context to cross the line again on the next observation. The
+      threshold rebuild must therefore be a SUMMARISING pass, asserted below.
+    * The provider's last reported context size described the prefix that
+      was just replaced, and ``max(provider, local)`` kept judging the old
+      figure. It bites when the provider bills above the local ruler (image
+      billing does) AND stops reporting ``context_tokens`` right after the
+      rebuild, so nothing refreshes the figure: the ``(1.1, 11)`` variant
+      reports on the first 11 requests only, the last of them the over-the-
+      line prefix. The client must forget the figure at a rebuild and judge
+      the new prefix on the local estimate until a fresh one arrives.
+    """
+
+    from local_operator.compaction.thresholds import CompactionSettings
+
+    stream = RecordingStream(
+        _wait_reply,
+        report_context=True,
+        context_scale=context_scale,
+        report_context_until=report_until,
+    )
+    spec = ModelSpec(provider="provider", model_id="model", context_window=30_000)
+    client = ProviderModelClient(
+        stream,
+        route=ROUTE,
+        model_spec=spec,
+        artifact_root=tmp_path,
+        compaction=CompactionSettings(keep_recent_tokens=2000),
+    )
+
+    history: list[EpisodeTurn] = []
+    decisions = []
+    for sequence in range(24):
+        current = _framed_observation(tmp_path, sequence, text=f"screen {sequence} " + "x " * 800)
+        history.append(EpisodeTurn(observation=current))
+        decision = await client.decide(current, tuple(history))
+        decisions.append(decision)
+        history[-1] = history[-1].model_copy(update={"batch": decision.action_batch})
+
+    rebuilds = [
+        index
+        for index in range(1, len(stream.requests))
+        if not all(
+            a is b
+            for a, b in zip(stream.requests[index - 1].messages, stream.requests[index].messages)
+        )
+    ]
+    # The first rebuild is the frame budget (turn 11) or, when the provider's
+    # inflated figure gets there first, the threshold a little earlier; every
+    # later one must be separated from the previous by several plain appends.
+    assert 8 <= rebuilds[0] <= 11
+    assert len(rebuilds) >= 2
+    gaps = [b - a for a, b in zip(rebuilds, rebuilds[1:])]
+    assert min(gaps) >= 4, (rebuilds, gaps)
+    # Every threshold-triggered rebuild summarised (the engine's strategy for
+    # a vision model is snapcompact) rather than merely pruning frames and
+    # refusing the summary as below-threshold.
+    later = [decisions[index].compaction for index in rebuilds[1:]]
+    assert all(record is not None and record.strategy == "snapcompact" for record in later), [
+        record.strategy if record else None for record in later
+    ]
+    assert all(request.messages for request in stream.requests)
+
+
+@pytest.mark.asyncio
+async def test_stall_is_judged_at_the_provider_price_not_the_local_ruler(tmp_path: Path) -> None:
+    """A provider that bills images well above the local ruler (1.5x here)
+    can keep the compacted residual over the line even when the ruler says
+    it cleared the recovery band; the stall rule must price the residual the
+    way the next bill will, or the pass re-fires every other turn."""
+
+    from local_operator.compaction.thresholds import CompactionSettings
+
+    stream = RecordingStream(_wait_reply, report_context=True, context_scale=1.5)
+    spec = ModelSpec(provider="provider", model_id="model", context_window=30_000)
+    client = ProviderModelClient(
+        stream,
+        route=ROUTE,
+        model_spec=spec,
+        artifact_root=tmp_path,
+        compaction=CompactionSettings(keep_recent_tokens=2000),
+    )
+
+    history: list[EpisodeTurn] = []
+    for sequence in range(24):
+        current = _framed_observation(tmp_path, sequence, text=f"screen {sequence} " + "x " * 800)
+        history.append(EpisodeTurn(observation=current))
+        decision = await client.decide(current, tuple(history))
+        history[-1] = history[-1].model_copy(update={"batch": decision.action_batch})
+
+    rebuilds = [
+        index
+        for index in range(1, len(stream.requests))
+        if not all(
+            a is b
+            for a, b in zip(stream.requests[index - 1].messages, stream.requests[index].messages)
+        )
+    ]
+    # Priced at the ruler this was [8, 12, 14, 16, 18, 20, 22]: a rebuild
+    # every other turn with the stall never declared.
+    gaps = [b - a for a, b in zip(rebuilds, rebuilds[1:])]
+    assert max(gaps) >= 8, (rebuilds, gaps)
+
+
+@pytest.mark.asyncio
+async def test_a_pass_that_cannot_clear_the_line_stalls_the_threshold_trigger(
+    tmp_path: Path,
+) -> None:
+    """The reviewer's scenario: a window so small that the compacted form of
+    the history (archive + kept window) is itself above the threshold. Then
+    no pass can create headroom, and re-firing on every turn is a cache miss
+    per turn for nothing. The engine's ``RECOVERY_BAND`` rule decides the
+    pass stalled; the client then falls back to the frame cadence alone.
+    """
+
+    from local_operator.compaction.thresholds import CompactionSettings
+
+    stream = RecordingStream(_wait_reply, report_context=True)
+    spec = ModelSpec(provider="provider", model_id="model", context_window=6_000)
+    client = ProviderModelClient(
+        stream,
+        route=ROUTE,
+        model_spec=spec,
+        artifact_root=tmp_path,
+        compaction=CompactionSettings(keep_recent_tokens=300),
+    )
+
+    history: list[EpisodeTurn] = []
+    for sequence in range(24):
+        current = _framed_observation(tmp_path, sequence, text=f"screen {sequence} " + "x " * 60)
+        history.append(EpisodeTurn(observation=current))
+        decision = await client.decide(current, tuple(history))
+        history[-1] = history[-1].model_copy(update={"batch": decision.action_batch})
+
+    rebuilds = [
+        index
+        for index in range(1, len(stream.requests))
+        if not all(
+            a is b
+            for a, b in zip(stream.requests[index - 1].messages, stream.requests[index].messages)
+        )
+    ]
+    # Before the stall rule this was every turn from 7 to 23. Now the first
+    # snapcompact that fails to clear the band stalls the trigger and the
+    # frame cadence takes over: a long run of plain appends must follow.
+    gaps = [b - a for a, b in zip(rebuilds, rebuilds[1:])]
+    assert max(gaps) >= 8, (rebuilds, gaps)
+    assert len(rebuilds) <= 6, rebuilds
 
 
 @pytest.mark.asyncio

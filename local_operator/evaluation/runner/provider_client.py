@@ -402,6 +402,16 @@ class ProviderModelClient:
             rebuild_every_frames=rebuild_every_frames,
         )
         self._last_provider_context_tokens: int | None = None
+        # provider-reported context / local estimate for the same request:
+        # how much more the provider bills than the local ruler counts
+        # (images are the usual reason; Anthropic bills a 1932px frame at
+        # ~5,000 tokens against the ruler's flat 1,200). Used to price a
+        # compaction pass's residual the way the next bill will, which is
+        # what the session's frame correction does for the same question.
+        self._provider_scale = 1.0
+        # Set when a threshold-triggered pass ran but left the context above
+        # the engine's recovery band; see ``_maybe_compact``.
+        self._threshold_stalled = False
         self._last_request_ms = _now_ms()
 
     async def decide(
@@ -431,6 +441,9 @@ class ProviderModelClient:
         self._last_request_ms = _now_ms()
         if context_tokens is not None:
             self._last_provider_context_tokens = context_tokens
+            local = _estimate_context(messages)
+            if local > 0 and context_tokens > 0:
+                self._provider_scale = context_tokens / local
         # The summary call was a billed provider call on the way to this
         # decision. It is folded into THIS decision's figures rather than
         # reported separately so the bundle's usage events remain the whole
@@ -463,7 +476,9 @@ class ProviderModelClient:
         """
         from local_operator.compaction.pass_ import run_compaction_pass
         from local_operator.compaction.thresholds import (
+            RECOVERY_BAND,
             compaction_context_tokens,
+            resolve_threshold_tokens,
             should_compact,
         )
         from local_operator.compaction.tokens import estimate_messages_tokens
@@ -475,11 +490,16 @@ class ProviderModelClient:
         tokens_before = compaction_context_tokens(
             self._last_provider_context_tokens, estimate_messages_tokens(messages)
         )
-        threshold_due = should_compact(
-            tokens_before,
-            int(getattr(self._model_spec, "context_window", 0) or 0),
-            self._compaction,
-        )
+        window = int(getattr(self._model_spec, "context_window", 0) or 0)
+        threshold_due = should_compact(tokens_before, window, self._compaction)
+        if threshold_due and self._threshold_stalled and not frame_due:
+            # The last threshold pass could not get under the line (the
+            # compacted form of this history -- an archive, a summary plus
+            # the kept window -- is itself above it), so firing again would
+            # rebuild the prefix every turn for no headroom: a cache miss per
+            # turn, forever. Fall back to the frame cadence alone, which still
+            # bounds the history and still rebuilds on the N-appends rhythm.
+            return None, None, 0
         if not (frame_due or threshold_due):
             return None, None, 0
 
@@ -503,15 +523,48 @@ class ProviderModelClient:
             last_activity_ms=self._last_request_ms,
             provider_context_tokens=self._last_provider_context_tokens,
             # The frame prune inside the pass runs unconditionally; only the
-            # SUMMARY half is gated on the threshold. So a frame-budget rebuild
-            # on a small context prunes its frames and refuses the summary as
-            # below-threshold, which is the common and correct outcome, and a
-            # context that is genuinely over the line gets both.
-            respect_threshold=True,
+            # SUMMARY half is gated on the threshold. A frame-budget rebuild
+            # lets the pass judge that gate itself: on a small context it
+            # prunes its frames and refuses the summary as below-threshold,
+            # which is the common and correct outcome. A threshold-triggered
+            # pass has ALREADY been judged over the line by the same resolver,
+            # so the gate is not re-asked after the prune: re-asking let the
+            # prune alone bring the context a hair under the line, refuse the
+            # summary, and re-fire (another rebuild, another cache miss) on
+            # the very next turn once one more observation landed -- a rebuild
+            # per turn, the failure this client exists to prevent. Summarising
+            # here creates real headroom (``keep_recent_tokens`` worth) instead.
+            respect_threshold=not threshold_due,
         )
         # The pass returns the pruned list even when it refused to summarize;
         # either way it is the prefix to send from now on.
         self._context.replace(result.messages)
+        # The provider's last reported context size described the prefix that
+        # was just replaced. ``compaction_context_tokens`` is max(provider,
+        # local), so leaving it in place keeps the trigger judging the OLD
+        # size against the new prefix and re-fires the pass every turn once
+        # the window is genuinely full -- a rebuild per turn, which is exactly
+        # the cache-miss-per-turn this client exists to avoid (observed on
+        # turns 11-23 of a small-window drive before this reset). Judge the
+        # rebuilt prefix on the local estimate until the provider reports a
+        # fresh figure for it.
+        self._last_provider_context_tokens = None
+        if threshold_due and result.ran:
+            # The engine's own anti-thrash rule (``RECOVERY_BAND``, added after
+            # a live dead-loop): a pass only counts as having created headroom
+            # when the residual lands at or below 0.8 x threshold. Above that
+            # the SUMMARY barely helped and re-firing it would thrash the
+            # cache. Judged only on a pass that actually summarised: a pass
+            # that refused (``ran`` false) left nothing to judge, and marking
+            # it stalled would silence the trigger on a context that was never
+            # compacted at all.
+            threshold = resolve_threshold_tokens(window, self._compaction)
+            priced = result.tokens_after * self._provider_scale
+            self._threshold_stalled = priced > RECOVERY_BAND * threshold
+        elif frame_due:
+            # A frame-budget rebuild is a fresh prefix; let the threshold
+            # judge it anew.
+            self._threshold_stalled = False
         if result.frames_dropped == 0 and not result.ran and not result.pruned:
             return None, None, 0
         record = CompactionRecord(
@@ -534,8 +587,12 @@ class ProviderModelClient:
 
         # Mirrors ``Session._one_shot_complete``: a summary is collected whole
         # before anything reads it, so a stalled stream may be retried
-        # (``replayable``). No cache key -- the summary prompt shares no prefix
-        # with the episode's history and must not be keyed under it.
+        # (``replayable``). No cache key is set HERE; the stream fn stamps the
+        # episode's ``lop-eval-<id>`` on any request that carries none
+        # (``configure.py``, ``_cache_lineage_id``), which is the same
+        # treatment the session's one-shot summary gets. The key is a routing
+        # hint, and the summary prompt shares no prefix with the history, so
+        # it simply misses -- harmless, and consistent with ordinary sessions.
         return ChatRequest(
             model=self._model_spec,
             system_blocks=[SUMMARIZATION_SYSTEM_PROMPT],
