@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import io
 import json
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -112,11 +113,12 @@ def test_refused_identity_exits_2(capsys) -> None:
 
 
 def test_already_exited_is_clean(capsys) -> None:
-    """The dead-pid resolution shares the ``refused`` method but nothing is
-    left for a human to do, so it exits 0."""
+    """The dead-pid resolution is its own method (``gone``): nothing is
+    left for a human to do, so it exits 0 — decided from the method, never
+    from the receipt text (R1-7)."""
 
     async def gone(record, *, timeout_s, _root):  # noqa: ANN001, ANN202
-        return _outcome("refused", line='"the agent" already exited')
+        return _outcome("gone", line='"the agent" already exited')
 
     with (
         patch("local_operator.cli._resolve_stop_target", return_value=(_Record(), [], "")),
@@ -162,18 +164,44 @@ def test_all_in_a_pipe_refuses_without_yes(monkeypatch: pytest.MonkeyPatch) -> N
 
 def test_all_with_yes_runs_and_reports_partial(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
     monkeypatch.setattr("sys.stdin", io.StringIO(""))
+    seen: dict[str, Any] = {}
 
-    async def fake_all(*, own_pid, _root, timeout_s=10.0):  # noqa: ANN001, ANN202
+    async def fake_all(*, own_pid, _root, only_pids=None, timeout_s=10.0):  # noqa: ANN001, ANN202
+        seen.update(own_pid=own_pid, only_pids=only_pids, timeout_s=timeout_s)
         return [
             _outcome("socket", pid=1),
-            _outcome("refused", pid=2, line="refused to signal pid 2 — did not answer"),
+            _outcome("refused", pid=2, line='refused "the agent" (pid 2) — did not answer'),
         ]
 
-    with patch("local_operator.session.runtime.control.stop_all", fake_all):
-        rc = stop_command(_args(stop_all=True, yes=True))
+    with (
+        patch("local_operator.session.runtime.control.stop_all", fake_all),
+        patch(
+            "local_operator.session.runtime.control._stop_targets",
+            return_value=[_Record(1), _Record(2)],
+        ),
+    ):
+        rc = stop_command(_args(stop_all=True, yes=True, timeout=4.0))
     assert rc == 2
     out = capsys.readouterr().out
-    assert "1 stopped via socket, 1 refused" in out
+    assert "2 sessions: 1 stopped, 1 refused" in out
+    # --timeout reaches the ladder (R1-5); the run is scoped to the scan.
+    assert seen == {"own_pid": None, "only_pids": {1, 2}, "timeout_s": 4.0}
+
+
+def test_all_with_nothing_running_says_so(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    """An empty ``--all --yes`` still prints a line (D5)."""
+    monkeypatch.setattr("sys.stdin", io.StringIO(""))
+
+    async def fake_all(**kwargs):  # noqa: ANN003, ANN202
+        return []
+
+    with (
+        patch("local_operator.session.runtime.control.stop_all", fake_all),
+        patch("local_operator.session.runtime.control._stop_targets", return_value=[]),
+    ):
+        rc = stop_command(_args(stop_all=True, yes=True))
+    assert rc == 0
+    assert capsys.readouterr().out.strip() == "no sessions to stop"
 
 
 def test_all_on_a_tty_prompts_and_n_aborts(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
@@ -182,12 +210,28 @@ def test_all_on_a_tty_prompts_and_n_aborts(monkeypatch: pytest.MonkeyPatch, caps
             return True
 
     monkeypatch.setattr("sys.stdin", Tty("n\n"))
-    monkeypatch.setattr("builtins.input", lambda prompt="": "n")
-    with patch("local_operator.session.runtime.control.stop_all") as stop_all:
+    prompts: list[str] = []
+
+    def fake_input(prompt: str = "") -> str:
+        prompts.append(prompt)
+        return "n"
+
+    monkeypatch.setattr("builtins.input", fake_input)
+    with (
+        patch("local_operator.session.runtime.control.stop_all") as stop_all,
+        patch(
+            "local_operator.session.runtime.control._stop_targets",
+            return_value=[_Record(1), _Record(2)],
+        ),
+    ):
         rc = stop_command(_args(stop_all=True))
     assert rc == 1
     stop_all.assert_not_called()
-    assert "aborted" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    # The listing precedes the prompt, and the prompt carries the count (U7/D6).
+    assert "will stop 2 sessions:" in out and "pid 1  the agent" in out
+    assert prompts == ["stop all 2 lop sessions on this machine? [y/N] "]
+    assert "aborted" in out
 
 
 def test_resolver_is_the_send_resolver() -> None:

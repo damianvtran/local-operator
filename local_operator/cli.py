@@ -501,7 +501,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "--all",
         dest="stop_all",
         action="store_true",
-        help="stop every session on this machine (own-last; prompts on a TTY)",
+        help="stop every session on this machine (prompts on a TTY; --yes to skip)",
     )
     stop_parser.add_argument(
         "--yes",
@@ -1552,16 +1552,34 @@ def stop_command(args: argparse.Namespace) -> int:
         # pipe must never inherit a terminal's y/N affordance — it would hang
         # waiting on stdin nobody is watching, or worse, read the piped body
         # the user meant for something else.
+        targets = control._stop_targets(config_dir(), own_pid=None)
         if not args.yes:
             if not sys.stdin.isatty():
-                _peer_red("lop stop --all reads no prompt from a pipe — pass --yes to confirm")
+                _peer_red(
+                    "stdin is not a terminal — pass --yes to stop every session without a prompt"
+                )
                 return 1
-            answer = input("stop every lop session on this machine? [y/N] ")
+            # The listing is the confirmation, as in the TUI: consent to
+            # "every session" is only informed when the user can see which.
+            if not targets:
+                print("no sessions to stop")
+                return 0
+            print(f"will stop {len(targets)} session{'s' if len(targets) != 1 else ''}:")
+            for line in candidate_lines(targets, indent="  ", prefix="pid"):
+                print(line)
+            answer = input(f"stop all {len(targets)} lop sessions on this machine? [y/N] ")
             if answer.strip().lower() not in ("y", "yes"):
                 print("aborted")
                 return 1
-        outcomes = asyncio.run(control.stop_all(own_pid=None, _root=config_dir()))
-        return _report_stops(outcomes, args.json)
+        outcomes = asyncio.run(
+            control.stop_all(
+                own_pid=None,
+                timeout_s=timeout_s,
+                only_pids={rec.pid for rec in targets},
+                _root=config_dir(),
+            )
+        )
+        return _report_stops(outcomes, args.json, summary=True)
 
     record, candidates, error = _resolve_stop_target(args)
     if candidates:
@@ -1601,13 +1619,15 @@ def _resolve_stop_target(
     )
 
 
-def _report_stops(outcomes: list[Any], as_json: bool) -> int:
+def _report_stops(outcomes: list[Any], as_json: bool, *, summary: bool = False) -> int:
     """Paint the stop outcomes and derive the exit code.
 
     0 clean (every outcome resolved, including "already exited"), 2 partial
     (some refused), never 1 here — 1 belongs to resolution failures above.
     A kill rung is reported as what it is; the code stays 0 because from the
     caller's side the agent IS stopped, which is the thing they asked for.
+    ``summary`` (the ``--all`` path) always prints the grouped line, so an
+    empty run says "no sessions to stop" instead of nothing.
     """
     if as_json:
         import json as _json
@@ -1631,17 +1651,14 @@ def _report_stops(outcomes: list[Any], as_json: bool) -> int:
     else:
         for outcome in outcomes:
             print(outcome.line)
-        if len(outcomes) > 1:
+        if summary:
             from local_operator.session.runtime.control import summarize
 
             print(summarize(outcomes))
-    # "refused" covers both a same-identity refusal (nothing signalled — the
-    # exit is NOT clean) and the already-exited resolution (nothing left to
-    # do — clean). The already-exited line is quoted ('"name" already
-    # exited'); the refusal line starts "refused to signal". The line text
-    # carries which; the code only cares whether anything still needs a
-    # human.
-    refused = any(o.method == "refused" and not o.line.startswith('"') for o in outcomes)
+    # Only a refusal (identity unconfirmed, nothing signalled) is partial;
+    # "gone" (already exited) is a clean resolution — the method says which,
+    # so no receipt text is parsed here.
+    refused = any(o.method == "refused" for o in outcomes)
     return 2 if refused else 0
 
 
