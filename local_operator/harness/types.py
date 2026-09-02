@@ -1445,6 +1445,21 @@ class LoopConfig(BaseModel):
     # steering alone.
     has_pending_fork: Callable[[], bool] | None = Field(default=None, exclude=True)
 
+    # The provider-reported context size (``Usage.context_tokens``) of this
+    # conversation's LAST call, re-read immediately before every provider call
+    # and stamped onto the request as ``ChatRequest.context_tokens_hint``.
+    # Per-CONVERSATION memory, not per-stream-fn: subagents share the parent's
+    # stream fn (one httpx pool, one failover cascade), so a hint remembered
+    # on the stream fn itself would let a child's tiny first request inherit
+    # the parent's 300k count and pay 2x write rates on a fresh ~10k prefix —
+    # and let the parent's post-child request go out at 5m on its large
+    # context, the exact expiry this hint exists to dodge. The loop asks the
+    # HOST (which owns the conversation), exactly as it does for the model and
+    # the system blocks. ``None`` (no callback, or nothing reported yet) means
+    # no hint and the client's own byte estimate decides. Read in
+    # ``SessionStreamFn.__call__``; see ``ChatRequest.context_tokens_hint``.
+    get_context_tokens_hint: Callable[[], int | None] | None = Field(default=None, exclude=True)
+
     interrupt_mode: Literal["immediate", "wait"] = "wait"
     # Epoch-ms deadline for the whole run, if any.
     deadline: float | None = None
@@ -1551,8 +1566,12 @@ class ChatRequest(BaseModel):
     #: previous turn is the most accurate figure anyone has. ``None`` on a
     #: session's first call and on paths that never saw a usage event (a fork's
     #: first request, one-shot errands); the client then falls back to a byte
-    #: estimate of the serialized body. Set by ``SessionStreamFn.__call__``
-    #: from the last usage it recorded; retries and fallback clones keep it.
+    #: estimate of the serialized body. Stamped by ``SessionStreamFn.__call__``
+    #: from the conversation owner's registered reader (see
+    #: ``SessionStreamFn.set_context_tokens_hint`` — the memory is
+    #: per-conversation precisely because subagents share one stream fn);
+    #: retries and fallback clones keep it, and a caller's EXPLICIT value —
+    #: including ``0``, which suppresses the hint — always wins.
     context_tokens_hint: int | None = None
     #: This call's output has NOT been shown to anyone yet, so a failed attempt
     #: may be discarded and retried whole.

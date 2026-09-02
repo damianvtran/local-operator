@@ -3217,20 +3217,34 @@ def test_anthropic_cache_ttl_threshold_setting_reads_like_openai_api() -> None:
 async def test_session_stream_feeds_last_context_into_anthropic_ttl(tmp_path) -> None:
     """The provider's reported context on call N picks the TTL on call N+1.
 
-    Call 1 has no hint and a tiny body, so the byte estimate keeps it at 5m
-    even though the threshold is low. The mocked response reports a 200k
-    context; call 2 (same small body) then goes out with ``ttl: 1h`` on every
-    marker. An isolated call in between must neither read nor move the hint.
+    Mirrors how the session drives the hint now that the memory is
+    per-conversation (review F1): the caller registers a READER on the stream
+    fn and updates the value behind it from each final usage — exactly what
+    ``Session.__init__``/the turn boundary do. Call 1 has no hint and a tiny
+    body, so the byte estimate keeps it at 5m even though the threshold is
+    low. The mocked response reports a 200k context; call 2 (same small
+    body) then goes out with ``ttl: 1h`` on every marker. An isolated call
+    in between neither reads nor moves the hint: its response reports a
+    SMALL context (5k) and call 3 still goes 1h — so dropping the
+    reader/guard would have to fail the test, not just leave it green.
     """
     bodies: list[dict[str, Any]] = []
+    hint: dict[str, int | None] = {"value": None}
 
     def handler(request: httpx.Request) -> httpx.Response:
-        bodies.append(json.loads(request.content))
+        body = json.loads(request.content)
+        bodies.append(body)
+        isolated = body.get("metadata", {}).get("isolation") is not None
+        # Deliberately DIFFERENT counts: 200k for the turn, 5k for the
+        # isolated errand. A mock that reports the same figure for every
+        # call cannot prove the isolated one was excluded.
+        context = 5_000 if isolated else 200_000
         return httpx.Response(
             200,
             content=(
                 b'data: {"type":"message_start","message":{"usage":{"input_tokens":5,'
-                b'"cache_read_input_tokens":199995,"cache_creation_input_tokens":0}}}\n\n'
+                b'"cache_read_input_tokens":199995,"cache_creation_input_tokens":0,'
+                b'"context_tokens":' + str(context).encode() + b"}}}\n\n"
                 b'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},'
                 b'"usage":{"output_tokens":1}}\n\n'
             ),
@@ -3241,6 +3255,9 @@ async def test_session_stream_feeds_last_context_into_anthropic_ttl(tmp_path) ->
     store.upsert_credential("anthropic", {"key": "sk-ant", "source": "login"})
     settings = {"providers": {"anthropic": {"cache_ttl_1h_min_context_tokens": 150_000}}}
     stream = create_stream_fn(store, settings, session_id="session-ttl")
+    # The conversation owner (Session) registers the hint reader and moves the
+    # value behind it as usages land — the per-conversation design from F1.
+    stream.set_context_tokens_hint(lambda: hint["value"])
     await stream._http.aclose()
     stream._http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     spec = build_model_spec("anthropic", "claude-opus-4-8")
@@ -3251,6 +3268,8 @@ async def test_session_stream_feeds_last_context_into_anthropic_ttl(tmp_path) ->
     )
     try:
         await _collect_stream(stream(request, None))
+        # The turn reported 200k: move the hint the way the session does.
+        hint["value"] = 200_000
         await _collect_stream(stream(request.model_copy(update={"isolated": True}), None))
         await _collect_stream(stream(request, None))
     finally:
@@ -3265,8 +3284,98 @@ async def test_session_stream_feeds_last_context_into_anthropic_ttl(tmp_path) ->
 
     assert len(bodies) == 3
     assert markers(bodies[0]) and all(m == {"type": "ephemeral"} for m in markers(bodies[0]))
-    # Isolated: no hint stamped, so the small body stays 5m by the estimate.
+    # Isolated: runs while the hint says 200k, but the isolated branch skips
+    # the stamping entirely, so the small body stays 5m by the estimate.
     assert all(m == {"type": "ephemeral"} for m in markers(bodies[1]))
+    # The turn call after it still carries the conversation's own 200k hint
+    # (the isolated 5k report never entered it) and goes 1h on every marker.
+    assert markers(bodies[2]) and all(
+        m == {"type": "ephemeral", "ttl": "1h"} for m in markers(bodies[2])
+    )
+
+
+@pytest.mark.asyncio
+async def test_session_stream_hint_is_per_conversation_not_per_stream_fn(
+    tmp_path,
+) -> None:
+    """A parent and a subagent share ONE stream fn but not ONE hint (F1).
+
+    Subagents are built with ``stream_fn=parent_session._stream_fn``, so any
+    memory held on the stream fn is shared by every child. This test drives
+    the two conversations the way the harness does — parent hint 300k,
+    child hint ``None`` — through the SAME stream fn, and asserts both sides
+    of the contamination the shared-scalar design would cause: the child's
+    first request stays 5m (no hint → its own small body decides) while the
+    parent's next request goes 1h on its own large hint. It also proves the
+    child cannot poison the parent: the child's 10k report changes nothing
+    the parent reads.
+    """
+    bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            content=(
+                b'data: {"type":"message_start","message":{"usage":{"input_tokens":5,'
+                b'"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}\n\n'
+                b'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},'
+                b'"usage":{"output_tokens":1}}\n\n'
+            ),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    store = AuthStore(tmp_path / "auth.db")
+    store.upsert_credential("anthropic", {"key": "sk-ant", "source": "login"})
+    settings = {"providers": {"anthropic": {"cache_ttl_1h_min_context_tokens": 150_000}}}
+    stream = create_stream_fn(store, settings, session_id="session-parent")
+    await stream._http.aclose()
+    stream._http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    # Two conversations, one pipe — the parent's registered reader and the
+    # child's, exactly as Session.__init__ builds them (the child registers
+    # its own on the same stream fn object).
+    parent_hint: dict[str, int | None] = {"value": 300_000}
+    child_hint: dict[str, int | None] = {"value": None}
+    stream.set_context_tokens_hint(lambda: parent_hint["value"])
+    spec = build_model_spec("anthropic", "claude-opus-4-8")
+    parent_request = ChatRequest(
+        model=spec,
+        system_blocks=["instructions", "inventory", "skills", "env"],
+        messages=[Message.user("parent turn")],
+    )
+    child_request = ChatRequest(
+        model=spec,
+        system_blocks=["child instructions"],
+        messages=[Message.user("child errand")],
+    )
+    try:
+        # Parent works while the child runs — same stream fn, interleaved.
+        await _collect_stream(stream(parent_request, None))
+        stream.set_context_tokens_hint(lambda: child_hint["value"])
+        await _collect_stream(stream(child_request, None))
+        stream.set_context_tokens_hint(lambda: parent_hint["value"])
+        await _collect_stream(stream(parent_request, None))
+    finally:
+        await stream.close()
+        store.close()
+
+    def markers(body: dict[str, Any]) -> list[dict[str, Any]]:
+        found = [e["cache_control"] for e in body["system"] if "cache_control" in e]
+        for message in body["messages"]:
+            found.extend(b["cache_control"] for b in message["content"] if "cache_control" in b)
+        return found
+
+    assert len(bodies) == 3
+    # Parent: 300k hint → 1h on every marker.
+    assert markers(bodies[0]) and all(
+        m == {"type": "ephemeral", "ttl": "1h"} for m in markers(bodies[0])
+    )
+    # Child (same stream fn, NO hint of its own): its small body decides and
+    # stays 5m — this is the (a) contamination the shared scalar caused.
+    assert all(m == {"type": "ephemeral"} for m in markers(bodies[1]))
+    # Parent again after the child: still 1h on its own hint, proving the
+    # child's call did not overwrite anything the parent reads — the (b)
+    # contamination (parent downgraded to 5m at the exact resume moment).
     assert markers(bodies[2]) and all(
         m == {"type": "ephemeral", "ttl": "1h"} for m in markers(bodies[2])
     )
