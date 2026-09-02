@@ -2504,6 +2504,24 @@ class AskPickerScreen(Container):
         offset = max(0, min(self._offset, max(0, total - body)))
         self._offset = offset
         viewport = rendered[offset : offset + body]
+        # The last VISIBLE line of the viewport may belong to a row whose prose
+        # continues BELOW the bottom edge — the row is clipped by the viewport,
+        # not by its own grant. ``_description_text`` only marks the grant's last
+        # line, which is off-screen here, so the last visible line would end
+        # mid-clause with nothing saying so: the D5 silent-cut this widget exists
+        # to prevent, reintroduced by the cap-lift when a revealed row's span
+        # exceeds ``body_line_budget`` (§2.2/§4.3, the label-anchor case). Stamp
+        # the ``…`` onto that last visible line so the marker reflects what the
+        # user can actually SEE being cut, not what the grant would have drawn.
+        # Only when the NEXT rendered line is the SAME row (its wrap genuinely
+        # continues off-screen); a row that ends inside the viewport, or whose
+        # own grant already marked its last line, is left alone.
+        if viewport and offset + body < total:
+            last_index, last_row = viewport[-1]
+            next_index, _ = rendered[offset + body]
+            if next_index == last_index and last_index != self.other_row:
+                marked = self._mark_clipped(last_row, cwidth, last_index)
+                viewport = viewport[:-1] + [(last_index, marked)]
         # The scrollbar thumb spans the full body height, one cell per VISUAL
         # LINE (not per option row), keyed on ``show_position`` — the
         # allocator's overflow decision (``len(line_list) > body_line_budget``).
@@ -3227,6 +3245,38 @@ class AskPickerScreen(Container):
         return self._visible_row_lines(revealed, selected) > self._visible_row_lines(
             default, selected
         )
+
+    def _mark_clipped(self, row: Text, width: int, index: int) -> Text:
+        """Re-mark ``row``'s last VISIBLE line with ``…`` when the viewport clips
+        its row below.
+
+        The line came out of :meth:`_description_text` already fitted to
+        ``width`` (indent, prose, then ground padding). It is the last line of a
+        row the viewport cuts off, so its prose continues off-screen and must
+        say so. Rebuild it: keep the indent, truncate the prose to force the
+        ellipsis (``truncate_cells`` rstrips before appending ``…``, so it never
+        reads "word …"), then re-fit to ``width`` in the row's own ground. The
+        thumb glyph is appended AFTER this by the caller, in its own reserved
+        column (``content_width`` already left it free), so the marker and the
+        bar never eat each other's cell. Idempotent: a line already ending ``…``
+        (its grant marked it) is returned unchanged.
+        """
+        ground = self._row_ground(index)
+        indent = self._description_indent()
+        plain = row.plain.rstrip()
+        if plain.endswith("…"):
+            return row
+        prose = plain[indent:] if len(plain) > indent else ""
+        room = max(1, width - indent)
+        # One cell short of the room forces the ellipsis even on a line that
+        # already fills the column, so the mark is added rather than absorbed.
+        cut = truncate_cells(prose, room - 1 if cell_len(prose) >= room else room)
+        if not cut.endswith("…"):
+            cut = (cut.rstrip() + "…") if cut else "…"
+        body = Text(no_wrap=True, overflow="ellipsis")
+        body.append(" " * indent, style=ground)
+        body.append(cut, style=ground + Style(color=theme_mod.semantic_color("muted")))
+        return _fit_row(body, width, ground)
 
     def _visible_row_lines(self, layout: "_CardLayout", index: int) -> int:
         """How many of row ``index``'s visual lines fall inside the viewport.
