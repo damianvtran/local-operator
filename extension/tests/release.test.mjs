@@ -56,7 +56,7 @@ async function runRelease(args, handlers) {
 
 test("manifest requests tabGroups exactly once", async () => {
   const manifest = JSON.parse(await readFile(new URL("../manifest.json", import.meta.url), "utf8"));
-  assert.equal(manifest.version, "0.1.5");
+  assert.equal(manifest.version, "0.1.6");
   assert.equal(manifest.permissions.filter((permission) => permission === "tabGroups").length, 1);
 });
 

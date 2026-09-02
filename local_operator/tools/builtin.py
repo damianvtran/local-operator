@@ -5099,6 +5099,13 @@ BROWSER_ACTIONS = (
     "cancel_access",
 )
 
+#: ``retitle`` is a wire METHOD but deliberately NOT an action: the SESSION
+#: pushes a late-arriving conversation title to the tab group
+#: (:func:`retitle_browser_surface`), and the model has no business renaming
+#: browser chrome. Advertising it would add schema to every request for a
+#: capability no agent should exercise, so this asymmetry between METHODS and
+#: BROWSER_ACTIONS is intentional rather than an oversight to be "fixed".
+
 #: Actions that only the Local Operator browser extension can serve. cmux has no
 #: console-log tap and no background-tab scroll primitive, so rather than fake a
 #: partial result these degrade with a clear, actionable error naming the
@@ -6048,6 +6055,39 @@ def _browser_requester(context: ToolContext | None, tool_call_id: str) -> str:
 
 _BROWSER_SESSION_LABEL_CLUSTERS = 30
 
+#: Last-resort label for a session with neither a title nor a usable cwd. A
+#: bare ``Session`` on every group at once is what the ordinal de-duplication
+#: then turns into ``LO · Session (2)``/``(3)`` — technically distinct, and
+#: naming nothing. It survives only for a session running from a filesystem
+#: root, where ``cwd_label`` itself declines to answer.
+_BROWSER_FALLBACK_LABEL = "Session"
+
+
+def _browser_live_session_name(context: ToolContext | None) -> str:
+    """The session's title as of NOW, not as of the turn's context snapshot.
+
+    ``ToolContext`` is rebuilt once per turn, while a conversation names itself
+    a second or two INTO its first turn (asynchronously, alongside the turn).
+    A browse in that opening turn — the common case, since "look at this page"
+    is often the opening request — therefore read an empty ``session_name``
+    even after the title had landed. The provider re-reads the session's live
+    holder; the snapshot remains the fallback for hosts that install no
+    provider. Display-only, and guarded: a host callback must never be able to
+    fail a browse.
+    """
+    if context is None:
+        return ""
+    provider = context.session_name_provider
+    if provider is not None:
+        try:
+            live = provider()
+        except Exception:  # noqa: BLE001 — a label is never worth a failed browse
+            logger.debug("browser: live session-name provider failed", exc_info=True)
+        else:
+            if isinstance(live, str) and live.strip():
+                return live
+    return context.session_name
+
 
 def _browser_session_label(context: ToolContext | None) -> str:
     """Display-only session title safe for compact browser chrome.
@@ -6056,8 +6096,17 @@ def _browser_session_label(context: ToolContext | None) -> str:
     back to a UUID or request token. Removing all control/format characters is
     intentionally broader than the known bidi and zero-width set: browser tab
     chrome is too small to make invisible direction changes attributable.
+
+    An UNNAMED session falls back to its working directory's basename, which is
+    the same substitution the TUI's status band and terminal title already make
+    in this exact slot (``tui/terminal_title.cwd_label`` — ``lo › <cwd>``). The
+    slot has always held "the best label we have", and a directory the user
+    chose the session for distinguishes three concurrent groups where three
+    copies of ``Session`` do not.
     """
-    raw = context.session_name if context is not None else ""
+    raw = _browser_live_session_name(context)
+    if not raw.strip() and context is not None:
+        raw = _browser_cwd_label(context.cwd)
     cleaned = "".join(
         " " if char.isspace() else char
         for char in raw
@@ -6066,7 +6115,7 @@ def _browser_session_label(context: ToolContext | None) -> str:
     )
     cleaned = " ".join(cleaned.split())
     if not cleaned:
-        return "Session"
+        return _BROWSER_FALLBACK_LABEL
 
     clusters: list[str] = []
     for char in cleaned:
@@ -6083,7 +6132,24 @@ def _browser_session_label(context: ToolContext | None) -> str:
     word_boundary = clipped.rfind(" ")
     if word_boundary >= 8:
         clipped = clipped[:word_boundary].rstrip()
-    return f"{clipped}…" if clipped else "Session"
+    return f"{clipped}…" if clipped else _BROWSER_FALLBACK_LABEL
+
+
+def _browser_cwd_label(cwd: str) -> str:
+    """The working directory's basename, or ``""`` at a filesystem root.
+
+    Deliberately re-derived here rather than imported from
+    ``tui.terminal_title``: the tool layer must not depend on the TUI (headless
+    hosts — server, exec, mobile — build browser params too, and the TUI module
+    pulls in Textual settings). The RULE is shared, not the code, and it is one
+    line; ``cwd_label``'s root case is mirrored because ``LO · /`` names a
+    session no better than ``LO · Session`` does. Sanitisation is the caller's:
+    this feeds the same cleaner every other label goes through.
+    """
+    if not cwd:
+        return ""
+    path = Path(cwd)
+    return "" if path.name in ("", path.anchor) else path.name
 
 
 def _browser_identity_params(context: ToolContext | None, tool_call_id: str) -> dict[str, str]:
@@ -6634,6 +6700,37 @@ async def _bridge_action(
         f"Screenshot of {_page_line(title, href)} saved to {target} ({len(payload)} bytes).",
         details={"path": target, "bytes": len(payload)},
     )
+
+
+async def retitle_browser_surface(state: BrowserSurfaceProtocol, context: ToolContext) -> None:
+    """Push a title that arrived after the tab was opened, so its group renames.
+
+    Public because the SESSION calls it, not the model: a conversation names
+    itself asynchronously, typically after the opening turn's ``open`` already
+    created the group, and every other command only reconciles the group as a
+    side effect of doing something else. A session that opens a tab, screenshots
+    it and closes issues no such command, so without this its group wears the
+    open-time label — the bare fallback — for the tab's whole life.
+
+    Identity rides the same trusted ``_browser_identity_params`` boundary as
+    every other command: the requester is derived from the host's context, never
+    from an argument, so this cannot be used to rename another session's group.
+
+    Entirely best-effort and never raised: grouping is presentation, and a
+    rename must not cost the title, the turn, or a browse. Cmux surfaces have no
+    group chrome to rename, so they are skipped rather than errored.
+    """
+    surface = state.surface_id
+    if not surface.startswith("bridge:"):
+        return
+    identity = _browser_identity_params(context, "retitle")
+    _result, problem = await _bridge_call(
+        "retitle", "retitle", {"tab": surface, **identity}, surface=surface
+    )
+    if problem is not None:
+        # Logged, not surfaced: the tab is still perfectly usable under the
+        # label it already has, and the next ordinary command reconciles it.
+        logger.debug("browser: could not push the session title to the tab group")
 
 
 async def close_browser_surface(state: BrowserSurfaceProtocol) -> str:

@@ -1,6 +1,6 @@
 {
   "name": "local-operator-browser-extension",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "private": true,
   "packageManager": "pnpm@11.22.0",
   "scripts": {

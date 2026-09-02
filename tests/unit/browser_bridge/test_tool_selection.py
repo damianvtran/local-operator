@@ -688,3 +688,125 @@ async def test_goto_carries_the_session_identity(monkeypatch) -> None:
     )
     assert captured["action"] == "goto"
     assert captured["requester"] == "session:sess-42"
+
+
+# --- The `LO · Session` tab-group bug ------------------------------------
+#
+# Three concurrent sessions all showed `LO · Session`, `LO · Session (2)` and
+# `LO · Session (3)`: the ordinal de-duplication working correctly on top of an
+# empty session name. Two independent defects fed it, and both are pinned here.
+
+
+def test_unnamed_session_labels_itself_by_cwd_not_a_bare_fallback() -> None:
+    # Defect 1a: every unnamed session sent the same bare `Session`, so the
+    # ordinal was the only thing distinguishing three groups and it named
+    # nothing. The cwd basename is the same substitution the TUI's band and
+    # terminal title already make in this slot (`lo › <cwd>`).
+    assert builtin._browser_session_label(ToolContext(cwd="/Users/x/minervaai")) == "minervaai"
+    # A real title still wins over the directory.
+    assert (
+        builtin._browser_session_label(
+            ToolContext(cwd="/Users/x/minervaai", session_name="Fix the tab groups")
+        )
+        == "Fix the tab groups"
+    )
+    # A filesystem root has no basename worth showing, so the bare fallback
+    # survives exactly there — `LO · /` names a session no better than
+    # `LO · Session` does.
+    assert builtin._browser_session_label(ToolContext(cwd="/")) == "Session"
+    # The cwd goes through the same sanitizer/clipper as a title.
+    assert builtin._browser_session_label(ToolContext(cwd="/tmp/" + "d" * 40)) == "d" * 30 + "…"
+
+
+def test_live_session_name_beats_the_per_turn_snapshot() -> None:
+    # Defect 1b (the latch race): ToolContext is a SNAPSHOT built once per turn,
+    # while the naming errand lands a second or two INTO the first turn. A
+    # browse in that turn read the empty name the context was built with even
+    # after the title existed, and the group latched it for the tab's life.
+    context = ToolContext(cwd="/Users/x/proj", session_name_provider=lambda: "Named mid-turn")
+    assert builtin._browser_session_label(context) == "Named mid-turn"
+
+    # Still empty at call time: fall through to the cwd, not to the provider's
+    # empty string.
+    blank = ToolContext(cwd="/Users/x/proj", session_name_provider=lambda: "")
+    assert builtin._browser_session_label(blank) == "proj"
+
+
+def test_live_session_name_provider_never_breaks_a_browse() -> None:
+    # A host callback is best-effort: grouping is presentation, so a provider
+    # that raises must degrade to the snapshot rather than fail the command.
+    def boom() -> str:
+        raise RuntimeError("host went away")
+
+    context = ToolContext(cwd="/Users/x/proj", session_name="Snapshot", session_name_provider=boom)
+    assert builtin._browser_session_label(context) == "Snapshot"
+
+
+@pytest.mark.asyncio
+async def test_retitle_pushes_the_late_title_with_trusted_identity(monkeypatch) -> None:
+    # Defect 2: nothing propagated a title that arrived AFTER the tab existed.
+    # Every ordinary command reconciles the group as a side effect, but an
+    # open -> screenshot -> close session issues none, so its group kept the
+    # open-time label forever. The session pushes it explicitly instead.
+    seen: list[tuple[str, dict[str, Any]]] = []
+
+    async def fake_call(tool_call_id, action, params, *, surface=""):
+        seen.append((action, dict(params)))
+        return {"title": "LO · Named later"}, None
+
+    monkeypatch.setattr(builtin, "_bridge_call", fake_call)
+    surface = BrowserSurface()
+    surface.surface_id = "bridge:5:n0nce"
+    await builtin.retitle_browser_surface(
+        surface, ToolContext(session_id="sess-7", session_name="Named later")
+    )
+    assert len(seen) == 1
+    action, params = seen[0]
+    assert action == "retitle"
+    assert params["tab"] == "bridge:5:n0nce"
+    assert params["session_label"] == "Named later"
+    # The identity boundary is the host's, not the model's: same trusted
+    # requester every other command carries.
+    assert params["requester"] == "session:sess-7"
+
+
+@pytest.mark.asyncio
+async def test_retitle_is_skipped_without_a_bridge_surface(monkeypatch) -> None:
+    # No tab, or a cmux tab (which has no group chrome to rename): nothing on
+    # the wire at all, so a non-browsing session pays nothing for this.
+    calls: list[str] = []
+
+    async def fake_call(tool_call_id, action, params, *, surface=""):
+        calls.append(action)
+        return {}, None
+
+    monkeypatch.setattr(builtin, "_bridge_call", fake_call)
+    for surface_id in ("", "cmux:1"):
+        surface = BrowserSurface()
+        surface.surface_id = surface_id
+        await builtin.retitle_browser_surface(surface, ToolContext(session_id="s"))
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_retitle_swallows_a_bridge_failure(monkeypatch) -> None:
+    # Renaming tab chrome must never raise into the caller: this runs off a
+    # title landing, and a title must not be able to cost a turn.
+    async def fake_call(tool_call_id, action, params, *, surface=""):
+        return None, builtin._error(tool_call_id, "browser", "extension not connected")
+
+    monkeypatch.setattr(builtin, "_bridge_call", fake_call)
+    surface = BrowserSurface()
+    surface.surface_id = "bridge:5:n0nce"
+    await builtin.retitle_browser_surface(surface, ToolContext(session_id="s"))
+
+
+def test_retitle_is_a_wire_method_but_not_a_model_action() -> None:
+    # The session pushes the rename; the model has no business renaming browser
+    # chrome, and advertising it would tax every request's schema for a
+    # capability no agent should hold. The asymmetry is deliberate.
+    from local_operator.browser_bridge.protocol import COMMAND_TIMEOUTS, METHODS
+
+    assert "retitle" in METHODS
+    assert "retitle" in COMMAND_TIMEOUTS
+    assert "retitle" not in builtin.BROWSER_ACTIONS

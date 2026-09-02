@@ -433,3 +433,97 @@ async def test_a_resumed_session_findable_by_either_name_after_reindex(tmp_path)
     digests = build_index(tmp_path, [rows[0].id])
     assert search_digests(digests, "classifier") == {rows[0].id}
     assert search_digests(digests, "load test review") == {rows[0].id}
+
+
+@pytest.mark.asyncio
+async def test_a_landing_title_renames_an_open_browser_tab_group(tmp_path, monkeypatch) -> None:
+    """The title has to reach browser chrome that was created before it existed.
+
+    A conversation names itself a second or two INTO its first turn, which is
+    normally after an opening "look at this page" already created the tab group
+    — so the group latched the label the session had at open time (the bare
+    fallback) and, for an open→screenshot→close session, no later command ever
+    came along to reconcile it. Three concurrent sessions read ``LO · Session``,
+    ``LO · Session (2)`` and ``LO · Session (3)`` for exactly that reason.
+    """
+    pushed: list[tuple[str, str]] = []
+
+    async def fake_retitle(state: Any, context: Any) -> None:
+        pushed.append((state.surface_id, context.session_name))
+
+    monkeypatch.setattr("local_operator.tools.builtin.retitle_browser_surface", fake_retitle)
+
+    session = _session(tmp_path)
+    await session.async_init()
+    session._browser.surface_id = "bridge:5:n0nce"
+
+    session.set_conversation_name("Fix the tab groups", user_set=False)
+    # Fire-and-forget through the session's task group: the rename must not sit
+    # in front of the paint path that stored the title.
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert pushed == [("bridge:5:n0nce", "Fix the tab groups")]
+
+    # A no-op store (same name again) journals nothing and pushes nothing —
+    # otherwise every turn's re-title check would re-push an unchanged label.
+    pushed.clear()
+    session.set_conversation_name("Fix the tab groups", user_set=False)
+    await asyncio.sleep(0)
+    assert pushed == []
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_session_with_no_open_tab_pushes_no_rename(tmp_path, monkeypatch) -> None:
+    """The overwhelmingly common case must cost nothing — not even the import."""
+    called = False
+
+    async def fake_retitle(state: Any, context: Any) -> None:
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr("local_operator.tools.builtin.retitle_browser_surface", fake_retitle)
+    session = _session(tmp_path)
+    await session.async_init()
+    session.set_conversation_name("No browsing here", user_set=False)
+    await asyncio.sleep(0)
+    assert called is False
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_failing_rename_never_costs_the_title(tmp_path, monkeypatch) -> None:
+    """Tab chrome is presentation; a push that blows up must not lose the name."""
+
+    async def boom(state: Any, context: Any) -> None:
+        raise RuntimeError("extension went away")
+
+    monkeypatch.setattr("local_operator.tools.builtin.retitle_browser_surface", boom)
+    session = _session(tmp_path)
+    await session.async_init()
+    session._browser.surface_id = "bridge:5:n0nce"
+    stored = session.set_conversation_name("Survives the failure", user_set=True)
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert stored == "Survives the failure"
+    assert session.conversation_name == "Survives the failure"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_tool_context_reads_the_live_title_not_a_stale_snapshot(tmp_path) -> None:
+    """``_build_tool_context`` is a per-TURN snapshot, so the browser label has
+    to reach through it to the live holder — that is the latch race itself."""
+    session = _session(tmp_path)
+    await session.async_init()
+    context = session._build_tool_context()
+    assert context.session_name == ""
+    assert context.session_name_provider is not None
+    assert context.session_name_provider() == ""
+
+    # Named after the context was built, exactly as the naming errand does.
+    session.set_conversation_name("Named mid-turn", user_set=False)
+    assert context.session_name == "", "the snapshot itself is expected to be stale"
+    assert context.session_name_provider() == "Named mid-turn"
+    await session.dispose()
