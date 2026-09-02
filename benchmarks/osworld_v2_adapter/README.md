@@ -196,6 +196,17 @@ it must print `[]`.**
   operator-built workspace containing one fails loudly instead of silently
   grading an honest refusal as a failure. Support lands when the terminal-claim
   gap is resolved.
+- **Static parse coverage: 108 of 108 pinned tasks.** Task fields are read
+  by AST, never by import, so a field bound through code is a refusal, not an
+  execution. The closed set of shapes the parser folds — a module-level
+  constant, an earlier class attribute, a parenthesised f-string over those,
+  and `"...".strip()` — covers every task in the `v2026.08.08` corpus. Five
+  tasks (015, 050, 056, 057, 072) interpolate an *imported* name into their
+  `instruction`; their descriptor keeps the literal skeleton with
+  `instruction_static=False`, which is honest because no harness decision
+  reads the instruction text (OSWorld's live object supplies the real one at
+  `reset`). `id` and `user_simulator` must resolve completely or the task is
+  refused with the field named.
 - **Screenshot-only observations.** The a11y tree is not shipped as a frame
   (a geometry for an XML document is a fiction). Its presence is recorded in
   observation metadata; shipping it is a protocol addition, not a fake frame.

@@ -157,6 +157,69 @@ class Task012:
     config = []
 """
 
+# The four non-literal shapes the pinned corpus actually uses (29 of 108
+# tasks): module constant for id/instruction, an earlier class attribute
+# inside user_simulator, a parenthesised f-string over module constants, and
+# ``"...".strip()``.
+FOLDED = """
+TASK_ID = "013"
+TUTORIAL_ID = "reaper-ducking-050"
+INSTRUCTION = (
+    "First line. "
+    f"Watch tutorial {TUTORIAL_ID} and then "
+    "finish."
+)
+
+class Task013:
+    id = TASK_ID
+    instruction = INSTRUCTION.strip()
+    config = [{"type": "launch", "app": "reaper"}]
+    user_simulator = {"type": "llm", "model": "gpt-4o", "instruction": instruction}
+"""
+
+# An f-string whose interpolation is an IMPORTED name: instruction folds
+# partially (literal skeleton kept, instruction_static=False).
+PARTIAL_INSTRUCTION = """
+from desktop_env.controllers.website import HOST_SUFFIX
+
+class Task014:
+    id = "task_partial"
+    instruction = f"Open https://streamview.{HOST_SUFFIX}/watch?v=1 and summarise."
+    config = []
+"""
+
+# The same unresolvable interpolation on a DECISION field must refuse.
+PARTIAL_ID = """
+import os
+
+class Task015:
+    id = f"task_{os.getpid()}"
+    instruction = "Nothing."
+    config = []
+"""
+
+# A simulator that interpolates an imported name must refuse too.
+PARTIAL_SIMULATOR = """
+from somewhere import KNOWLEDGE
+
+class Task016:
+    id = "task_partial_sim"
+    instruction = "Ask me."
+    config = []
+    user_simulator = {"type": "llm", "model": "x", "knowledge": f"{KNOWLEDGE}"}
+"""
+
+# A self-referential module constant must terminate with a refusal.
+CYCLIC = """
+A = B
+B = A
+
+class Task017:
+    id = A
+    instruction = "Loop."
+    config = []
+"""
+
 # An infeasible-style task (V2 shape). Excluded from scoring support.
 INFEASIBLE = """
 class Task011:

@@ -65,6 +65,41 @@ def test_an_evaluate_outside_the_task_class_does_not_count() -> None:
     assert descriptor.has_evaluator() is False
 
 
+def test_module_constants_class_attributes_fstrings_and_strip_fold_statically() -> None:
+    """29 of 108 pinned tasks bind a field through exactly these shapes."""
+
+    descriptor = taskfile.load_static(fixtures.FOLDED.encode(), module_name="t.py")
+    assert descriptor.task_id == "013"
+    assert descriptor.instruction == (
+        "First line. Watch tutorial reaper-ducking-050 and then finish."
+    )
+    assert descriptor.instruction_static is True
+    assert descriptor.user_simulator == {
+        "type": "llm",
+        "model": "gpt-4o",
+        "instruction": "First line. Watch tutorial reaper-ducking-050 and then finish.",
+    }
+
+
+def test_an_imported_interpolation_folds_the_instruction_partially() -> None:
+    descriptor = taskfile.load_static(fixtures.PARTIAL_INSTRUCTION.encode(), module_name="t.py")
+    assert descriptor.instruction_static is False
+    assert descriptor.instruction == "Open https://streamview./watch?v=1 and summarise."
+
+
+@pytest.mark.parametrize(
+    ("source", "field"),
+    [
+        (fixtures.PARTIAL_ID, "id"),
+        (fixtures.PARTIAL_SIMULATOR, "user_simulator"),
+        (fixtures.CYCLIC, "id"),
+    ],
+)
+def test_a_decision_field_that_cannot_fully_resolve_is_refused(source: str, field: str) -> None:
+    with pytest.raises(taskfile.TaskParseError, match=field):
+        taskfile.load_static(source.encode(), module_name="t.py")
+
+
 def test_source_sha256_binds_the_exact_bytes() -> None:
     a = taskfile.load_static(fixtures.PLAIN.encode(), module_name="tasks/a.py")
     b = taskfile.load_static(fixtures.PLAIN.encode() + b"\n", module_name="tasks/b.py")
