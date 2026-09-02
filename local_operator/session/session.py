@@ -3953,8 +3953,9 @@ class Session:
           session stays idle — non-interrupting by design.
         - ``mailbox`` + ``wake`` while idle: drive a turn now via the prompt
           pipeline (which persists the row once — do NOT also append).
-        - ``steer`` while busy: inject mid-turn through the existing steer
-          path (which persists its own steering row — do NOT also append).
+        - ``steer`` while busy: put the peer row ITSELF on the steering queue
+          so it is injected mid-turn (the drain persists what it takes — do
+          NOT also append).
         - ``steer`` while idle: nothing to steer into, so degrade to a driven
           turn exactly like mailbox+wake idle (dropping it would violate the
           guarantee that the message MUST appear in history).
@@ -3985,9 +3986,26 @@ class Session:
         busy = self._is_streaming
         if mode == "steer":
             if busy:
-                # steer() persists its own transcript row when the queue
-                # drains; appending here too would double-write.
-                self.steer(str(message.details["body"]), message_id=message.id)
+                # Queue the peer CustomMessage ITSELF, not a plain user Message
+                # built from its body (what ``steer()`` would mint). Both reach
+                # the model — ``_default_convert_to_llm`` renders this custom
+                # type as a user turn exactly as ``build_llm_history`` does on
+                # replay — but only the CustomMessage keeps the provenance:
+                # ``_drain_steering`` persists whatever it takes, so a plain
+                # Message left a bare user row in the transcript (no sender,
+                # no ``<peer-session-message>`` envelope, so the model read it
+                # as the user's own words and a resume repainted it as one),
+                # and the drain announces every plain user Message with a
+                # ``MessageStartEvent`` that the TUI paints as a UserBlock
+                # under the PeerMessageBlock the receipt below already painted
+                # — the message showed twice. Same shape as the busy wake and
+                # busy resume-catchup paths, which queue their CustomMessage.
+                # The drain persists the row; appending here too would
+                # double-write. Deliberately NOT counted as courtesy: a
+                # ``now=True`` send is an explicit mid-turn steer, so it must
+                # stay urgent for ``_has_urgent_steering`` like a typed steer.
+                self._steering_queue.put_nowait(message)
+                self.refresh_frontend_state()
                 await self._emit_peer_receipt(message, sender)
                 self._peer_arrival.mark()
                 return "delivered mid-turn (steered)"
