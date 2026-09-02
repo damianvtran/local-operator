@@ -32,6 +32,7 @@ def _args(**overrides: object) -> argparse.Namespace:
         "yes": False,
         "json": False,
         "timeout": None,
+        "force": False,
     }
     base.update(overrides)
     return argparse.Namespace(**base)
@@ -58,7 +59,7 @@ def _outcome(method: str, pid: int = 4242, line: str | None = None) -> StopOutco
     )
 
 
-async def _fake_stop(record, *, timeout_s, _root):  # noqa: ANN001, ANN202
+async def _fake_stop(record, *, timeout_s, _root, force=False):  # noqa: ANN001, ANN202
     return _outcome("socket", pid=record.pid)
 
 
@@ -101,7 +102,7 @@ def test_refused_identity_exits_2(capsys) -> None:
     """A refusal is a PARTIAL result, not a no-match: the target existed and
     was not stopped, which a script must be able to tell from 'wrong name'."""
 
-    async def refuse(record, *, timeout_s, _root):  # noqa: ANN001, ANN202
+    async def refuse(record, *, timeout_s, _root, force=False):  # noqa: ANN001, ANN202
         return _outcome("refused", line="refused to signal pid 4242 — identity mismatch")
 
     with (
@@ -117,7 +118,7 @@ def test_already_exited_is_clean(capsys) -> None:
     left for a human to do, so it exits 0 — decided from the method, never
     from the receipt text (R1-7)."""
 
-    async def gone(record, *, timeout_s, _root):  # noqa: ANN001, ANN202
+    async def gone(record, *, timeout_s, _root, force=False):  # noqa: ANN001, ANN202
         return _outcome("gone", line='"the agent" already exited')
 
     with (
@@ -155,6 +156,13 @@ def test_all_in_a_pipe_refuses_without_yes(monkeypatch: pytest.MonkeyPatch) -> N
     with (
         patch("local_operator.cli._peer_red") as red,
         patch("local_operator.session.runtime.control.stop_all") as stop_all,
+        # One live target: an empty machine is a clean no-op in every mode
+        # (D2-3), so the refusal is only reachable when there IS something
+        # the confirmation would be about.
+        patch(
+            "local_operator.session.runtime.control._stop_targets",
+            return_value=[_Record(pid=4242)],
+        ),
     ):
         rc = stop_command(_args(stop_all=True))
     assert rc == 1
@@ -166,7 +174,9 @@ def test_all_with_yes_runs_and_reports_partial(monkeypatch: pytest.MonkeyPatch, 
     monkeypatch.setattr("sys.stdin", io.StringIO(""))
     seen: dict[str, Any] = {}
 
-    async def fake_all(*, own_pid, _root, only_pids=None, timeout_s=10.0):  # noqa: ANN001, ANN202
+    async def fake_all(  # noqa: ANN001, ANN202
+        *, own_pid, _root, only_pids=None, timeout_s=10.0, force=False
+    ):  # noqa: ANN001, ANN202
         seen.update(own_pid=own_pid, only_pids=only_pids, timeout_s=timeout_s)
         return [
             _outcome("socket", pid=1),
