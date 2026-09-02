@@ -4,6 +4,7 @@ open, self-healing, and never able to break wake persistence."""
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -38,7 +39,17 @@ def _open(tmp_path: Path, session_id: str = "sess") -> Session:
     )
 
 
-def _schedule(sid: str = "w1", due: int = 1_700_000_060_000) -> WakeSchedule:
+def _schedule(sid: str = "w1", *, due: int | None = None) -> WakeSchedule:
+    # The default due time MUST be future-derived. These tests assert on the
+    # index file surviving between set_wake_schedules and dispose, and a
+    # schedule that is already overdue arms the scheduler's MIN_ARM_MS timer
+    # (~25 ms): when that timer wins the race against dispose()'s awaits, the
+    # pump fires the one-shot, retires it, and persists the now-EMPTY list —
+    # which removes the index file the test is about to read. Nothing here
+    # asserts firing behaviour, so an hour out makes every test in this file
+    # deterministic instead of racing dispose on a loaded host.
+    if due is None:
+        due = int(time.time() * 1000) + 3_600_000
     return WakeSchedule(id=sid, message="check in", next_due_at=due, created_at=1_700_000_000_000)
 
 
@@ -117,8 +128,13 @@ async def test_stopped_at_preserved_on_persist_and_cleared_on_open(
     path.write_text(json.dumps(data), encoding="utf-8")
 
     # A persist from the live session keeps the marker (the stop is not
-    # this session's to undo mid-flight).
-    await session.set_wake_schedules([_schedule("w1"), _schedule("w2", due=1_700_000_120_000)])
+    # this session's to undo mid-flight). The second schedule is also
+    # future-derived — and later than w1's — for the same reason as the
+    # default: an overdue fixture here races dispose the same way, and this
+    # test reads the transcript rows back after a reopen.
+    await session.set_wake_schedules(
+        [_schedule("w1"), _schedule("w2", due=int(time.time() * 1000) + 3_900_000)]
+    )
     entry = wake_store.read_entry(config_dir, "sess")
     assert entry is not None and entry["stopped_at"] == 1_700_000_100_000
     assert [row["id"] for row in entry["schedules"]] == ["w1", "w2"]
