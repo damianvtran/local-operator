@@ -75,10 +75,13 @@ comparison; that is tracked as a follow-up (see the note under v0.1.5).
 above. "Pending review" is a snapshot from the submission date; Chrome review
 usually resolves within days, so if that date is well in the past, assume the
 row is stale and re-check before relying on it. Append the approval timestamp
-and promote this heading when it lands. Calling that API **by hand** needs a
-temporary IAM grant that must be revoked afterwards — read the warning under
-"Release-automation verification" before you do, or just dispatch the workflow,
-which needs no grant at all.
+and promote this heading when it lands. Note there is no status-only workflow to
+dispatch — both store workflows write (`stage` uploads and submits, `promote`
+publishes), so a read-only status check has to be the hand-rolled API call, and
+that needs a temporary IAM grant which must be revoked afterwards. Read the
+warning under "Release-automation verification" before making it. The dashboard
+shows the same state with no grant at all, which is the cheaper check when you
+only need to eyeball it.
 
 **Follow-up: make `build:zip` deterministic.** `build.mjs` invokes `zip` without
 normalising timestamps, which is why the archive hash above cannot be
