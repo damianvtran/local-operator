@@ -38,7 +38,7 @@ def _selector(
         schema_version=ADAPTER_SCHEMA_VERSION,
         adapter_id="osworld-v2",
         distribution="lop-osworld-v2-adapter",
-        version="0.1.0",
+        version="0.1.1",
         entry_point="lop_osworld_v2_adapter:create",
         package_digest=package_digest,
         release_digest=release_digest,
@@ -54,7 +54,7 @@ def test_wheel_has_no_console_scripts(adapter_wheel: Path, tmp_path: Path) -> No
     import zipfile
 
     with zipfile.ZipFile(adapter_wheel) as archive:
-        record = archive.read("lop_osworld_v2_adapter-0.1.0.dist-info/RECORD").decode()
+        record = archive.read("lop_osworld_v2_adapter-0.1.1.dist-info/RECORD").decode()
     for line in record.splitlines():
         path = line.split(",")[0]
         assert not path.startswith(".."), f"RECORD path escapes the root: {path}"

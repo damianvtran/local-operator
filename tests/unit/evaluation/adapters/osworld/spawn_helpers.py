@@ -39,7 +39,7 @@ from tests.unit.evaluation.copied_interpreter import (
 # tests/unit/evaluation/adapters/osworld/spawn_helpers.py -> repo root is 5
 # parents up (osworld -> adapters -> evaluation -> unit -> tests -> root).
 ADAPTER_SRC = Path(__file__).resolve().parents[5] / "benchmarks" / "osworld_v2_adapter"
-WHEEL_NAME = "lop_osworld_v2_adapter-0.1.0-py3-none-any.whl"
+WHEEL_NAME = "lop_osworld_v2_adapter-0.1.1-py3-none-any.whl"
 
 
 def build_adapter_wheel(out_dir: Path) -> Path:
@@ -134,7 +134,7 @@ def install_adapter_into_site(site: Path, wheel: Path) -> str:
 
     from local_operator.evaluation.adapters.discovery import distribution_digest
 
-    info = site / "lop_osworld_v2_adapter-0.1.0.dist-info"
+    info = site / "lop_osworld_v2_adapter-0.1.1.dist-info"
     return distribution_digest(PathDistribution(info))
 
 
@@ -207,7 +207,7 @@ def build_spawnable_adapter(
         schema_version=ADAPTER_SCHEMA_VERSION,
         adapter_id="osworld-v2",
         distribution="lop-osworld-v2-adapter",
-        version="0.1.0",
+        version="0.1.1",
         entry_point="lop_osworld_v2_adapter:create",
         package_digest=package_digest,
         release_digest=release_digest,
@@ -248,5 +248,5 @@ def release_digest_for(package_digest: str, tasks: dict[str, str]) -> str:
     workspace manifest and the selector agree on the same attestation."""
 
     manifest = hashlib.sha256("".join(tasks[k] for k in sorted(tasks)).encode()).hexdigest()
-    payload = f"lop-osworld-v2-adapter|0.1.0|{package_digest}|osworld-v2-2026.08.08|{manifest}"
+    payload = f"lop-osworld-v2-adapter|0.1.1|{package_digest}|osworld-v2-2026.08.08|{manifest}"
     return hashlib.sha256(payload.encode()).hexdigest()

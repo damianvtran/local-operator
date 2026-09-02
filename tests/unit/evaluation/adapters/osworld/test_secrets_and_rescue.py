@@ -289,7 +289,7 @@ def _descriptor(tmp_path: Path, workspace: Path, adapter: OSWorldV2Adapter, epis
         schema_version=ADAPTER_SCHEMA_VERSION,
         adapter_id="osworld-v2",
         distribution="lop-osworld-v2-adapter",
-        version="0.1.0",
+        version="0.1.1",
         entry_point="lop_osworld_v2_adapter:create",
         package_digest=adapter.metadata.package_digest,
         release_digest=adapter.metadata.release_digest,
@@ -303,7 +303,7 @@ def _descriptor(tmp_path: Path, workspace: Path, adapter: OSWorldV2Adapter, epis
         metadata=AdapterMetadata(
             adapter_id="osworld-v2",
             distribution="lop-osworld-v2-adapter",
-            version="0.1.0",
+            version="0.1.1",
             entry_point="lop_osworld_v2_adapter:create",
             package_digest=adapter.metadata.package_digest,
             release_digest=adapter.metadata.release_digest,

@@ -20,6 +20,7 @@ two steps never hash to the same artifact.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from lop_osworld_v2_adapter.cleanup import (
@@ -58,6 +59,14 @@ class FakeProvider:
         self.terminated_refs: list[str] = []
         self.deleted_schedules: list[str] = []
         self.evaluate_calls = 0
+        # On the paid path each observe() is a live HTTP round-trip to the
+        # guest (screenshot + a11y tree), so a duplicated call is real cost,
+        # not a cosmetic issue. Counted here so a test can pin it.
+        self.observe_calls = 0
+        # Where the adapter told us to cache. Recorded (never written to: the
+        # fake downloads nothing) so tests assert the cache root actually
+        # crossed the adapter -> provider boundary. None until allocate.
+        self.cache_root: Path | None = None
 
     def _frame(self) -> bytes:
         """A deterministic but sequence-varying 1920x1080 PNG frame."""
@@ -70,9 +79,12 @@ class FakeProvider:
         pixel = bytes((shade, (shade * 3) % 256, (shade * 7) % 256))
         return write_png_rgb(width, height, pixel * (width * height))
 
-    async def allocate(self, plan: ProvisioningPlan, task: TaskDescriptor) -> None:
+    async def allocate(
+        self, plan: ProvisioningPlan, task: TaskDescriptor, *, cache_root: Path
+    ) -> None:
         # The ref is the tag; allocation registers the instance under it, so
         # teardown-by-ref is the same operation a rescue worker performs.
+        self.cache_root = cache_root
         self._instances[plan.tag_dict()["Name"]] = {
             "state": "running",
             "task_id": task.task_id,
@@ -83,6 +95,7 @@ class FakeProvider:
         self._sequence = 0
 
     async def observe(self) -> dict[str, Any]:
+        self.observe_calls += 1
         return {
             "screenshot": self._frame(),
             "accessibility_tree": None,

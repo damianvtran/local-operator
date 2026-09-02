@@ -47,6 +47,7 @@ import os
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Callable
 
 from lop_osworld_v2_adapter import scoring
@@ -299,6 +300,10 @@ class AwsProvider:
         self._instance_id: str | None = None
         self._public_ip: str | None = None
         self._env: Any = None
+        # The episode-scoped, absolute, workspace-external cache root the
+        # adapter mints in reset_start. None until allocate; a rescue
+        # (teardown-only) provider never allocates and never needs one.
+        self._cache_root: Path | None = None
         self._schedule_created = False
 
     @classmethod
@@ -323,7 +328,20 @@ class AwsProvider:
     # allocate
     # ------------------------------------------------------------------
 
-    async def allocate(self, plan: ProvisioningPlan, task: TaskDescriptor) -> None:
+    async def allocate(
+        self, plan: ProvisioningPlan, task: TaskDescriptor, *, cache_root: Path
+    ) -> None:
+        # Typed as required (matching the Protocol), and re-checked at
+        # runtime: a DesktopEnv built without a cache root would fall back to
+        # upstream's cwd-relative default and re-open the digest-break
+        # defect. The type stops a caller that forgets it; this stops one
+        # that passes None dynamically.
+        if cache_root is None:
+            raise AllocationError(
+                "allocate needs the adapter's episode cache root (cache_root); "
+                "without it upstream writes land in the digest-pinned workspace"
+            )
+        self._cache_root = cache_root
         if plan.region != self._region:
             raise AllocationError(
                 f"plan region {plan.region!r} differs from provider region {self._region!r}"
@@ -502,6 +520,13 @@ class AwsProvider:
             # allocation (desktop_env.py:110-113) and adopt ours.
             path_to_vm=self._instance_id,
             snapshot_name=plan.ami_id,
+            # THE FIX for the rescue-wedge defect: upstream's default is
+            # cache_dir="cache", resolved against the cwd — and the worker's
+            # cwd IS the digest-pinned workspace. Routing the base under the
+            # episode's owned root (absolute, outside the workspace) keeps
+            # _download_setup / reset_cache_dir / getter downloads off the
+            # pin, so the rescue worker's digest re-check still matches.
+            cache_dir=str(self._cache_root),
             action_space="pyautogui",
             screen_size=plan.screen,
             headless=True,
