@@ -93,7 +93,7 @@ A team is a named roster of these agents under one manager, plus collaboration a
 
 ## Awaiting delegated work
 
-`wait` returns the moment a job settles, so prefer ONE generous wait over repeated short ones — a short budget does not make the result arrive sooner, it just costs a model round trip to learn the work is still running. Pass a LIST of job ids to wake on the first of several to finish, which is how to await a fan-out without polling each child in turn.
+`wait` returns the moment a job settles, a peer message arrives, or you are steered, so SIZE THE WAIT TO THE WORK: estimate how long the thing you are awaiting should take and set one `wait_ms` (up to 3600000 = 60 minutes) that covers all of it — a CI pipeline its whole expected run, a review or remediation round 20–45 minutes, a build its known duration. A short budget does not make the result arrive sooner; it costs a model round trip to learn the work is still running, and every such poll re-sends the whole context — past the provider's 5-minute prompt-cache TTL it also rewrites the cache from scratch. A wait that expires is the cue to look at the job (`jobs`, `hub op='peek'`) and re-estimate, not to re-issue the same short poll. Use short waits only when you must manage progress along the way (a training loop, a staged rollout). Pass a LIST of job ids to wake on the first of several to finish, which is how to await a fan-out without polling each child in turn.
 
 Use `jobs` to inspect background work, and `hub` to question or steer a running child rather than cancelling and relaunching it.
 
