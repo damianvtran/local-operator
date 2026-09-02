@@ -1077,6 +1077,15 @@ class AuthStore:
         warmed = cache.latest_account_report(provider, labels)
         if warmed is not None:
             candidates.append(warmed)
+        # A report that measures nothing cannot describe the account, however
+        # fresh it is. The warmer's first failure for a never-seen account
+        # (``_mark_account_failure`` with no last-good) is exactly that: a
+        # stub stamped ``now`` with an empty ``limits``. Letting it win the
+        # recency contest below would mask a slightly older real preflight
+        # report and rank a 95%-used account as neutral (review round 2, F7).
+        candidates = [
+            r for r in candidates if any(limit.amount.fraction() is not None for limit in r.limits)
+        ]
         if not candidates:
             return None
         report = max(candidates, key=lambda r: r.fetched_at)
