@@ -18,14 +18,22 @@ halves of that sentence. A change that makes either fail is a change to what
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
 from local_operator.harness.types import Message, Usage
 from local_operator.tui.app import RESIZE_REFIT_DELAY_S, OperatorApp
-from local_operator.tui.widgets.aside_panel import QUESTION_MARK, AsidePanel, AsideTurn
+from local_operator.tui.widgets import aside_panel as aside_panel_module
+from local_operator.tui.widgets.aside_panel import (
+    ASIDE_COPY_KEY,
+    PANEL_HEIGHT_MARGIN,
+    AsidePanel,
+    AsideTurn,
+)
 from local_operator.tui.widgets.editor import (
     ASIDE_PLACEHOLDER,
     DEFAULT_PLACEHOLDER,
@@ -662,13 +670,21 @@ def test_a_failed_aside_is_never_forkable() -> None:
     assert "provider exploded" in "\n".join(panel.render_lines_for_test())
 
 
-def test_a_long_exchange_cuts_on_a_turn_boundary_and_counts_questions() -> None:
-    """The newest turn is what is being read; the rest announces itself.
+def test_a_long_exchange_pins_the_owning_question_and_counts_questions() -> None:
+    """The newest rows are what is being read; the rest announces itself.
 
-    Cut on TURNS, not rows: a row-cut left the card opening on a mid-sentence
-    continuation at the answer indent with no question above it, which reads
-    as the start of a new answer. And counted in questions, because a user
-    remembers asking three things and never counted the rows they wrapped to.
+    The cut is by ROW — cutting on turn boundaries made a turn the smallest
+    addressable unit, so an answer taller than the card had a middle no gesture
+    could reach. What the boundary cut was protecting is kept: the window pins
+    the question that OWNS its rows, so the card never opens on a mid-sentence
+    continuation at the answer indent with no question above it, which reads as
+    the start of a new answer.
+
+    Counted in questions here, because whole questions are above the window and
+    a user remembers asking three things without counting the rows they wrapped
+    to. Inside one answer there is no question to count and the marker switches
+    to lines; that is
+    ``test_one_long_answer_states_the_rows_it_withheld``.
 
     The answer is a LIST because the answer renders as markdown: twelve
     repetitions of a bare word are one paragraph to a markdown parser, which
@@ -682,9 +698,302 @@ def test_a_long_exchange_cuts_on_a_turn_boundary_and_counts_questions() -> None:
     ]
     rendered = panel.render_lines_for_test()
 
-    assert any("earlier questions" in line for line in rendered)
-    # The visible exchange starts at a question, never mid-answer.
-    assert rendered[3].startswith("▌ question 5?")
+    assert any("↑ 4 earlier questions · scroll" in line for line in rendered)
+    # The newest question and its whole answer are on screen, which is where a
+    # reader who has not scrolled should be.
+    assert any(line.startswith("▌ question 5?") for line in rendered)
+
+    # Scrolled back INTO question 4's answer, that question is pinned above the
+    # fragment rather than leaving it unattributed.
+    panel._scroll_by(8)
+    rendered = panel.render_lines_for_test()
+    assert rendered[3].startswith("▌ question 4?")
+    assert rendered[4].strip() == "• line"
+
+
+def test_one_long_answer_states_the_rows_it_withheld() -> None:
+    """A single turn taller than the card must ADMIT the cut, in lines.
+
+    This is the defect the card shipped with: with one turn the question count
+    is zero, so the marker was skipped entirely and a truncated answer read as
+    a complete one. The count is in lines because there is no question above to
+    count, and it states a quantity rather than a bare "…more" — two more lines
+    and fifty are a different decision about whether to go looking.
+    """
+    panel = AsidePanel()
+    panel.display = True
+    panel._turns = [
+        AsideTurn(question="why?", answer="\n".join(f"row {i}" for i in range(200)), state="done")
+    ]
+
+    rendered = panel.render_lines_for_test()
+    marker = [line for line in rendered if "earlier" in line]
+    assert marker and "line" in marker[0] and "question" not in marker[0]
+    assert re.search(r"↑ \d+ earlier lines · scroll", marker[0])
+    # The owning question is pinned under it, so the fragment has an owner.
+    assert any(line.startswith("▌ why?") for line in rendered)
+
+    # At the top of the exchange there is nothing withheld and no marker.
+    panel._scroll_back_rows = panel._max_scroll_back()
+    assert not any("earlier" in line for line in panel.render_lines_for_test())
+
+
+def test_every_row_of_a_long_answer_is_reachable_by_scrolling() -> None:
+    """The fix: the scroll unit is a ROW, so no row is unaddressable.
+
+    Under the turn-index model ``_max_scroll_back`` was ``len(turns) - 1``,
+    which is 0 for one turn — 184 of 200 rows could not be reached by any
+    gesture. Drives the same entry point the wheel handlers do.
+    """
+    panel = AsidePanel()
+    panel.display = True
+    panel._turns = [
+        AsideTurn(
+            question="why?",
+            answer="\n".join(f"ROW-{i:03d}" for i in range(200)),
+            state="done",
+        )
+    ]
+
+    seen: set[str] = set()
+    for _ in range(400):
+        seen.update(panel.render_lines_for_test())
+        before = panel._scroll_back_rows
+        panel._scroll_by(1)
+        if panel._scroll_back_rows == before:
+            break
+
+    blob = "\n".join(seen)
+    assert {i for i in range(200) if f"ROW-{i:03d}" in blob} == set(range(200))
+    # And the card never grew to do it: one height at every offset.
+    heights = set()
+    for offset in range(panel._max_scroll_back() + 1):
+        panel._scroll_back_rows = offset
+        heights.add(len(panel._compose_rows()) + panel._fit()[1])
+    assert len(heights) == 1
+    assert max(heights) <= panel._fit()[0] - PANEL_HEIGHT_MARGIN
+
+
+def test_a_reader_scrolled_back_is_not_dragged_by_a_streaming_answer() -> None:
+    """The anchor rule, testable for the first time.
+
+    Under the turn-index model a streaming answer was one turn, so max
+    scroll-back was 0 and a reader could not BE scrolled back inside it — the
+    state ``append_answer``'s comment protects was unreachable. In rows it is
+    real, and holding the offset number still is not enough: the offset counts
+    back from the tail, so rows arriving at the tail slide the window forward
+    under a reader who is holding still.
+    """
+    panel = AsidePanel()
+    panel.display = True
+    generation = panel.ask("why?")
+    for index in range(200):
+        panel.append_answer(generation, f"ROW-{index:03d}\n")
+
+    panel._scroll_by(120)
+    parked = [line for line in panel.render_lines_for_test() if "ROW-" in line]
+    for index in range(200, 260):
+        panel.append_answer(generation, f"ROW-{index:03d}\n")
+
+    assert [line for line in panel.render_lines_for_test() if "ROW-" in line] == parked
+
+    # A reader AT the tail still follows the stream — that is the other half of
+    # the rule, and a fix that pinned everyone would break it.
+    following = AsidePanel()
+    following.display = True
+    generation = following.ask("why?")
+    for index in range(50):
+        following.append_answer(generation, f"ROW-{index:03d}\n")
+    assert "ROW-049" in "\n".join(following.render_lines_for_test())
+    for index in range(50, 90):
+        following.append_answer(generation, f"ROW-{index:03d}\n")
+    assert "ROW-089" in "\n".join(following.render_lines_for_test())
+    assert following._scroll_back_rows == 0
+
+
+def test_scroll_page_is_the_keyboards_way_in_and_reaches_what_the_wheel_does() -> None:
+    """``scroll_page`` pages by the rows SHOWN, not by the budget.
+
+    The card overlays its marker and pinned question on the window's top rows,
+    so a page of ``_fit()[2]`` would step over exactly the rows the overlay was
+    covering. Returns False rather than moving when there is nothing to scroll;
+    the caller discards it, so this is a signal and not a receipt.
+    """
+    closed = AsidePanel()
+    assert closed.scroll_page(down=False) is False
+
+    short = AsidePanel()
+    short.display = True
+    short._turns = [AsideTurn(question="q?", answer="one line", state="done")]
+    assert short.scroll_page(down=False) is False
+
+    panel = AsidePanel()
+    panel.display = True
+    panel._turns = [
+        AsideTurn(
+            question="why?",
+            answer="\n".join(f"ROW-{i:03d}" for i in range(200)),
+            state="done",
+        )
+    ]
+
+    seen: set[str] = set()
+    for _ in range(400):
+        seen.update(panel.render_lines_for_test())
+        if not panel.scroll_page(down=False):
+            break
+    blob = "\n".join(seen)
+    assert {i for i in range(200) if f"ROW-{i:03d}" in blob} == set(range(200))
+
+    # Clamped at the top, and it says so rather than moving.
+    assert panel.scroll_page(down=False) is False
+    assert panel.scroll_page(down=True) is True
+
+    # FORWARD reaches everything too, which is not implied by the sweep above.
+    # Paging forward moves the window the other way from the overlay it has to
+    # step around, so a step sized against the CURRENT window lands past rows
+    # the destination will cover and nothing ever paints them: measured at
+    # budget 8, the jump 51 -> 43 stepped 8 while 6 rows were visible and rows
+    # 8-9 fell in the gap. The two directions have to agree about which rows
+    # exist.
+    panel._scroll_back_rows = panel._max_scroll_back()
+    seen = set()
+    for _ in range(400):
+        seen.update(panel.render_lines_for_test())
+        if not panel.scroll_page(down=True):
+            break
+    blob = "\n".join(seen)
+    assert {i for i in range(200) if f"ROW-{i:03d}" in blob} == set(range(200))
+    assert panel._scroll_back_rows == 0
+
+
+@pytest.mark.parametrize("budget", [1, 2, 3])
+def test_a_one_row_budget_still_shows_the_answer_not_just_a_marker(budget: int) -> None:
+    """At the smallest sizes CONTENT wins the last row, not the marker.
+
+    ``_fit()`` returns 1 for 4 to 7 rows above the dock, and for 8 or 10 with a
+    notice showing, so this is a short terminal or a full dock rather than a
+    hypothetical. The overlay is drawn OVER the window's top rows, so an
+    overlay as large as the budget covers every row it names — measured before
+    the fix, budget 1 painted ``↑ 60 earlier lines · scroll`` and nothing else
+    at every offset, which is the defect this work exists to remove, sharpened.
+    """
+    panel = AsidePanel()
+    panel.display = True
+    panel._turns = [
+        AsideTurn(
+            question="why?", answer="\n".join(f"ROW-{i:03d}" for i in range(59)), state="done"
+        )
+    ]
+
+    with patch.object(AsidePanel, "_fit", return_value=(budget + 6, 0, budget)):
+        seen: set[str] = set()
+        for offset in range(panel._max_scroll_back() + 1):
+            panel._scroll_back_rows = offset
+            rendered = panel.render_lines_for_test()
+            body = rendered[2:-2]
+            assert len(body) == budget, "the card must paint exactly its budget"
+            # A row of the EXCHANGE, never a marker on its own. At the very top
+            # of a one-row window that row is the question itself, which is
+            # content the reader asked for; the failure being guarded is a card
+            # whose only row describes the text instead of showing any.
+            assert any(
+                "ROW-" in line or line.startswith("▌") for line in body
+            ), f"only a marker at offset {offset}: {body}"
+            seen.update(rendered)
+
+        # And every row is still reachable at these sizes.
+        blob = "\n".join(seen)
+        assert {i for i in range(59) if f"ROW-{i:03d}" in blob} == set(range(59))
+
+
+def test_copy_text_takes_the_whole_exchange_off_the_dataclass() -> None:
+    """The copy payload is the TEXT, not the painted rows.
+
+    The rows are the windowed subset the reader can already see and they carry
+    the card's chrome — a copy key that returned the screen would fail on
+    exactly the long answer that makes someone reach for it. Includes a running
+    turn, which is the window where ``^f`` is refused.
+    """
+    panel = AsidePanel()
+    panel.display = True
+    panel._turns = [
+        AsideTurn(
+            question="first?", answer="\n".join(f"ROW-{i:03d}" for i in range(200)), state="done"
+        ),
+        AsideTurn(question="second?", answer="still arriving", state="running"),
+    ]
+
+    payload = panel.copy_text()
+    for index in range(200):
+        assert f"ROW-{index:03d}" in payload
+    assert "still arriving" in payload
+    assert "first?" in payload and "second?" in payload
+    # No chrome: no title, no rule, no hint row, no overflow marker, no spine.
+    for chrome in ("Aside", "off the record", "esc discard", "─", "▌", "↑ "):
+        assert chrome not in payload
+    # Fork still refuses the half exchange it always refused.
+    assert panel.fork_messages() == [("first?", panel._turns[0].answer)]
+
+    assert AsidePanel().copy_text() == ""
+
+
+def test_copy_text_drops_failed_and_cancelled_turns_on_their_STATE() -> None:
+    """A turn that streamed text and then failed must not be copied as an answer.
+
+    Filtering on ``turn.answer`` rather than on ``turn.state`` looks equivalent
+    and is not: a failed turn KEEPS whatever streamed before it died, so the
+    text test copies words the model never stood behind, formatted exactly like
+    words it did. ``fork_messages`` drops the same turns for the same reason.
+    """
+    panel = AsidePanel()
+    panel.display = True
+    panel._turns = [
+        AsideTurn(question="ok?", answer="a good answer", state="done"),
+        AsideTurn(
+            question="failed?",
+            answer="partial text before it died",
+            state="error",
+            error="provider exploded",
+        ),
+        AsideTurn(question="superseded?", answer="half a thought", state="cancelled"),
+        AsideTurn(question="live?", answer="still arriving", state="running"),
+    ]
+
+    payload = panel.copy_text()
+    assert "a good answer" in payload
+    assert "still arriving" in payload
+    assert "partial text before it died" not in payload
+    assert "half a thought" not in payload
+    assert "provider exploded" not in payload
+    assert "failed?" not in payload and "superseded?" not in payload
+
+
+def test_the_footer_advertises_copy_beside_fork() -> None:
+    """Copy is discoverable, because the alternative is forking to keep a line.
+
+    The two keys differ in the thing the card's title promises: ``^f`` writes
+    the exchange onto the record, ``ctrl+r`` writes it to the clipboard and
+    leaves the record alone. Copy shows whenever there is a turn, NOT on
+    fork's condition — it works while the answer streams, which is when ``^f``
+    is refused.
+    """
+    panel = AsidePanel()
+    panel.display = True
+    panel.open()
+    assert f"{ASIDE_COPY_KEY} copy" not in panel.render_lines_for_test()[-1]
+
+    generation = panel.ask("why?")
+    panel.append_answer(generation, "still streaming")
+    footer = panel.render_lines_for_test()[-1]
+    assert f"{ASIDE_COPY_KEY} copy" in footer
+    assert "^f" not in footer
+
+    panel.settle_answer(generation, "settled")
+    panel.set_fork_available(True)
+    footer = panel.render_lines_for_test()[-1]
+    assert footer.index(ASIDE_COPY_KEY) < footer.index("^f")
+    assert footer.startswith("esc discard, back to the chat")
 
 
 def test_the_wheel_walks_back_through_earlier_questions() -> None:
@@ -952,29 +1261,35 @@ async def test_a_resize_refolds_the_answer_rather_than_reusing_the_old_width() -
         assert max(len(row) for row in rows) <= panel.panel_width()
 
 
-def test_a_paint_renders_only_the_turns_the_card_can_show() -> None:
-    """The card sheds whole turns, so it must not RENDER what it sheds.
+def test_a_repeat_paint_does_not_re_render_the_exchange() -> None:
+    """The card must not do work proportional to the exchange on every paint.
 
-    `_body` cuts the exchange to a budget of a couple of turns. The cut used to
-    read the lengths of a fully-built exchange, so every turn above it was
-    markdown-rendered and then discarded. Rendering is the expensive half —
-    measured at a 120x40 card over realistic answers, a cold paint cost 9.7 ms
-    at 10 turns and 117 ms at 120, against the 50 ms bar
-    `tests/unit/test_tui_responsiveness.py` calls a dropped frame (`STALL_MS`
-    records from 30 ms). The turn count is uncapped and the card paints on
-    every streamed delta, so the cost grew with an exchange the user could not
-    even see. `_visible_rows` now builds turns lazily, newest first, and stops
-    when one does not fit.
+    The guard this replaces asserted the narrower fact that a paint renders
+    only the turns it can show, which the TURN walk could promise because it
+    stopped at the first turn that did not fit. A ROW cut cannot: to know where
+    a row window starts you need the row counts of everything above it, so
+    `_flat_body` renders the whole exchange once by construction. Asserting the
+    old ratio now would be asserting the row window does not exist.
 
-    The warm cache does not make this test redundant, because the cache is not
-    what bounds the cost: the width is in the key, so a resize drag misses
-    every key at once and re-renders whatever the paint walks.
+    What the guard was actually protecting is the cost, and that survives
+    intact — the card repaints on every streamed delta, the turn count is
+    uncapped, so what must not scale is the REPEAT paint. That is what is
+    pinned here, and it is pinned the same way: as a ratio, so the test says
+    what is wrong (work proportional to the whole exchange) rather than how
+    fast this machine is.
 
-    Pinned as a ratio rather than a millisecond count so the test says what is
-    wrong (work proportional to the whole exchange) rather than how fast this
-    machine is. The `+ 1` is the single turn the cut has to build in order to
-    measure it and find it does not fit — the one render the walk genuinely
-    cannot avoid. Anything above that is a turn rendered for nobody.
+    Measured at a 120x40 card over realistic answers, the first paint costs
+    31 ms at 120 turns and 78 ms at 300 — real, and inherent to the row cut —
+    while every later paint is 0.02 ms and a streamed delta is 0.74 ms, because
+    `_flat_body` is memoised on `(width, theme epoch, revision)` and
+    `_markdown_rows` caches underneath it. Against the 30 ms `STALL_MS` bar in
+    `tests/unit/test_tui_responsiveness.py`, the cost that repeats is what
+    decides whether the user feels it.
+
+    Both halves are asserted, because they fail differently: a missed
+    `_invalidate_flat` makes the memo stale (wrong rows, caught by the
+    correctness tests around it), while a memo keyed on something that changes
+    every paint makes it useless (caught here).
     """
     panel = AsidePanel()
     panel.display = True
@@ -982,11 +1297,77 @@ def test_a_paint_renders_only_the_turns_the_card_can_show() -> None:
         AsideTurn(question=f"question {index}?", answer=f"answer `{index}` here", state="done")
         for index in range(50)
     ]
-    rendered = panel.render_lines_for_test()
-    painted_questions = [row for row in rendered if row.startswith(QUESTION_MARK)]
+    panel._invalidate_flat()
 
-    assert len(panel._answer_cache) <= len(painted_questions) + 1, (
-        f"the paint rendered {len(panel._answer_cache)} answers to show "
-        f"{len(painted_questions)} — every turn above the cut is markdown-rendered "
-        "and then discarded by `_body`"
-    )
+    # Two counters, because the two caches fail independently and the cheap
+    # one masks the expensive one. `flatten` is the markdown render, which
+    # `_answer_cache` already prevents repeating; `_answer_rows` is the
+    # per-turn ASSEMBLY the flatten memo is what avoids. Counting only the
+    # former passes with the memo deleted outright — the assembly is what
+    # scales with the exchange once the renders are cached.
+    assembled: list[int] = []
+    rendered_md: list[int] = []
+    original_rows = AsidePanel._answer_rows
+    original_flatten = aside_panel_module.flatten
+
+    def counted_rows(self, turn, width, dim, danger):
+        assembled.append(1)
+        return original_rows(self, turn, width, dim, danger)
+
+    def counted_flatten(*args, **kwargs):
+        rendered_md.append(1)
+        return original_flatten(*args, **kwargs)
+
+    panel.render_lines_for_test()  # the one paint that pays for the flatten
+
+    AsidePanel._answer_rows = counted_rows
+    aside_panel_module.flatten = counted_flatten
+    try:
+        panel.render_lines_for_test()
+        assert assembled == [], (
+            f"a repeat paint re-assembled {len(assembled)} answers — the flatten "
+            "memo is not holding, so every paint walks the whole exchange"
+        )
+
+        # A streamed delta drops the memo, so the exchange IS re-assembled —
+        # and that is the point of the second counter: assembly comes back from
+        # `_answer_cache`, so no matter how long the exchange is, exactly one
+        # answer reaches the markdown renderer. This is what fails if the memo
+        # is ever made to evict that cache.
+        generation = panel.ask("what changed?")
+        rendered_md.clear()
+        panel.append_answer(generation, "a token")
+        panel.render_lines_for_test()
+        assert len(rendered_md) <= 1, (
+            f"a streamed delta rendered {len(rendered_md)} answers — only the "
+            "live turn's text changed, so the rest must come from the cache"
+        )
+    finally:
+        AsidePanel._answer_rows = original_rows
+        aside_panel_module.flatten = original_flatten
+
+
+def test_the_flatten_memo_is_dropped_when_the_exchange_changes() -> None:
+    """A memo that outlives its input paints rows the exchange no longer has.
+
+    The risk the memo introduces, asserted directly rather than through a
+    height: every mutation path has to reach `_invalidate_flat`, and the one
+    that is easy to get wrong is `append_answer`, which measures the flattened
+    height on BOTH sides of the delta to hold a parked reader still.
+    """
+    panel = AsidePanel()
+    panel.display = True
+    generation = panel.ask("why?")
+    panel.append_answer(generation, "- one\n")
+    before = len(panel._flat_body().lines)
+
+    panel.append_answer(generation, "- two\n- three\n")
+    after = len(panel._flat_body().lines)
+    assert after > before, "the flatten memo survived a streamed delta"
+
+    panel.settle_answer(generation, "- one\n")
+    assert len(panel._flat_body().lines) < after, "the memo survived a settle"
+
+    panel.close()
+    panel.open()
+    assert panel._flat_body().lines == [], "the memo survived the card closing"

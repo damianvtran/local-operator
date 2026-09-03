@@ -1,0 +1,64 @@
+"""Capture raw stdin bytes for one key gesture, under a chosen kitty flag set.
+
+Derived from docs/evidence/cmd-chords/probe2.py, with one deliberate change:
+the kitty progressive-enhancement flag set is a PARAMETER, not hardcoded to 13.
+
+Why that matters here. The cmd-chords probe pushed `ESC[>13u`
+(disambiguate|alternates|all-keys). Textual 8.2.8's LinuxDriver pushes
+`ESC[>25u` — DISAMBIGUATE(1) | REPORT_ALL_KEYS(8) | REPORT_ASSOCIATED_TEXT(16)
+(linux_driver.py:288-292). Those are different negotiations and a terminal may
+legitimately answer them with different byte sequences. Measuring 13 and
+reporting it as "what the app sees" would be measuring the wrong question, so
+this probe defaults to 25 and takes 13 only when asked, for comparison.
+
+Retained from the precedent, both load-bearing (MEASURED.md:9-19):
+
+* select() rather than O_NONBLOCK. The pre-precedent probe set O_NONBLOCK on a
+  tty shared with the shell; the shell's own reader raced it for the bytes and
+  the capture came back empty even for plain typed characters.
+* The caller sets focus with `tell application "X" to activate`; `set frontmost
+  of window id N` does not deliver System Events keystrokes.
+
+Usage: probe.py <outfile> [seconds] [kitty_flags|none]
+"""
+
+import os
+import select
+import sys
+import termios
+import time
+import tty
+
+out = sys.argv[1] if len(sys.argv) > 1 else "/tmp/aside_chord/out.bin"
+secs = float(sys.argv[2]) if len(sys.argv) > 2 else 14.0
+flags = sys.argv[3] if len(sys.argv) > 3 else "25"
+
+fd = sys.stdin.fileno()
+old = termios.tcgetattr(fd)
+buf = b""
+try:
+    tty.setraw(fd)
+    if flags != "none":
+        # Match textual's own negotiation so the captured bytes are the bytes
+        # the real app would receive, not a different protocol's answer.
+        os.write(1, ("\x1b[>%su" % flags).encode())
+    os.write(1, b"\x1b[?2004h")  # bracketed paste, as textual also enables
+    os.write(1, b"PROBE READY\r\n")
+    end = time.time() + secs
+    while True:
+        left = end - time.time()
+        if left <= 0:
+            break
+        r, _, _ = select.select([fd], [], [], min(0.2, left))
+        if r:
+            b = os.read(fd, 8192)
+            if b:
+                buf += b
+    if flags != "none":
+        os.write(1, b"\x1b[<u")
+    os.write(1, b"\x1b[?2004l")
+finally:
+    termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+open(out, "wb").write(buf)
+sys.stdout.write("\r\nCAPTURED %d bytes: %r\r\n" % (len(buf), buf[:300]))
