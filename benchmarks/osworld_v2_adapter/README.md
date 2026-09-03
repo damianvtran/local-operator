@@ -67,37 +67,84 @@ uv build --wheel --out-dir dist/
 #    `--copies` flag (that is uv pip's install link-mode). Use the stdlib
 #    venv, which DOES copy. `--without-pip` because uv pip installs the rest
 #    and the uv-managed interpreter's ensurepip can SIGABRT on macOS.
-python3.12 -m venv --copies --without-pip /opt/lop-adapters/osworld-v2/0.1.1/venv
-uv pip install --python /opt/lop-adapters/osworld-v2/0.1.1/venv/bin/python \
+#
+#    Invoke the venv module through the interpreter's REAL path, never through
+#    a ~/.local/bin shim: venv records the invoking argv[0]'s directory as
+#    `home` in pyvenv.cfg, and step 3a resolves libpython relative to it. A
+#    shim directory holds no lib/, so the copy silently finds nothing.
+VENV=/opt/lop-adapters/osworld-v2/0.1.1/venv
+WS=~/worktrees/osworld/workspaces/0.1.1/workspace   # the digest-pinned dir itself
+BASE=$(python3.12 -c 'import sys; print(sys.base_prefix)')   # e.g. ~/.local/share/uv/python/cpython-3.12.13-...
+"$BASE/bin/python3.12" -m venv --copies --without-pip "$VENV"
+
+# 3a. copy libpython beside the interpreter. REQUIRED on macOS and easy to
+#     miss: `--copies` copies the python binary but NOT the shared library it
+#     links, and the copied binary keeps `@rpath/libpython3.12.dylib` with an
+#     rpath of `<venv>/lib`. Without this the interpreter aborts on every
+#     invocation with "Library not loaded" (dyld) / SIGABRT, and uv reports
+#     the opaque "Failed to inspect Python interpreter". A framework or
+#     system python that links libpython by absolute path does not need it;
+#     the uv-managed CPython this recipe uses does.
+#     The copy is allowed to fail (a python that needs no dylib has none to
+#     copy); the -V beside it is the real check and catches a genuine miss.
+cp "$BASE/lib/libpython3.12.dylib" "$VENV/lib/" 2>/dev/null || true   # macOS only
+"$VENV/bin/python3.12" -V   # must print the version, not abort
+uv pip install --python "$VENV/bin/python3.12" \
     --no-deps dist/lop_osworld_v2_adapter-0.1.1-py3-none-any.whl
-uv pip install --python /opt/lop-adapters/osworld-v2/0.1.1/venv/bin/python \
-    -r <(uv export --frozen --no-emit-project)
-uv pip install --python /opt/lop-adapters/osworld-v2/0.1.1/venv/bin/python \
-    local-operator==<harness version>
 
-# 3b. for the PAID path only: OSWorld itself is an extra (~380 packages) that
-#     the cloud-free wheel does not need. Install it into the same venv.
-uv pip install --python /opt/lop-adapters/osworld-v2/0.1.1/venv/bin/python \
-    "lop-osworld-v2-adapter[osworld] @ dist/lop_osworld_v2_adapter-0.1.1-py3-none-any.whl"
+# 3b. install the locked set. For the PAID path export WITH the osworld extra
+#     (~380 packages the cloud-free wheel does not need); omit --extra for a
+#     cloud-free venv. Export to a FILE and keep it beside the venv: it is the
+#     record of what was actually installed, and the lock's own
+#     local-operator pin lags the harness (schema 1.2 and host_secrets only
+#     exist from 0.44.30+), so substitute the harness version you are running
+#     and note the substitution in the build record.
+uv export --frozen --no-emit-project --extra osworld --no-hashes \
+    -o "$VENV/build/requirements.locked.txt"
+sed -i '' 's/^local-operator==.*/local-operator==<harness version>/' \
+    "$VENV/build/requirements.locked.txt"   # macOS sed; GNU sed wants -i without ''
+uv pip install --python "$VENV/bin/python3.12" -r "$VENV/build/requirements.locked.txt"
 
-# 4. materialise the workspace from the verified inputs root (no download;
+# The one expected `uv pip check` incompatibility is the documented
+# requests>=2.32 override onto OSWorld's ~=2.31 pin (see [tool.uv] above).
+
+# 4. compute package_digest FIRST: it digests the installed wheel's RECORD and
+#    does not depend on the workspace, while step 5's --package-digest does
+#    depend on it. (Computing it after the build is what forces a second
+#    build with the real value.)
+PKG=$("$VENV/bin/python3.12" -c '
+from pathlib import Path
+from importlib.metadata import PathDistribution
+from local_operator.evaluation.adapters.discovery import distribution_digest
+import sysconfig
+sp = Path(sysconfig.get_paths()["purelib"])
+di = next(sp.glob("lop_osworld_v2_adapter-*.dist-info"))
+print(distribution_digest(PathDistribution(di)))
+')
+echo "package_digest   $PKG"
+
+# 5. materialise the workspace from the verified inputs root (no download;
 #    writes adapter-release.json, benchmark_release.json, task_hashes.json,
 #    adapter-provider.json, inputs.json, tasks/, all read-only).
-python ~/local-operator/scripts/build_osworld_adapter.py \
+#    --out is the WORKSPACE directory itself, not its parent: it is what the
+#    selector's `workspace` field and workspace_digest address. Keep the
+#    selector and build-output.json in the parent so they are not inside the
+#    digest they describe.
+#    Run it with the venv's interpreter (it imports the harness). --version
+#    defaults to the adapter's own pyproject version and REFUSES a value that
+#    disagrees with it unless --allow-version-mismatch is passed.
+"$VENV/bin/python3.12" ~/local-operator/scripts/build_osworld_adapter.py \
     --benchmark-release osworld-v2-2026.08.08 \
     --inputs-root ~/worktrees/osworld \
-    --package-digest <package_digest from step 5> \
-    --out ~/worktrees/osworld/workspaces/0.1.1
+    --package-digest "$PKG" \
+    --out "$WS"
 
-# 5. compute the three digests the AdapterSelector needs
-python - <<'PY'
-from importlib.metadata import PathDistribution
-from local_operator.evaluation.adapters.discovery import (
-    distribution_digest, workspace_digest,
-)
-print("package_digest  ", distribution_digest(PathDistribution(<dist-info path>)))
-print("workspace_digest", workspace_digest("/opt/lop-adapters/osworld-v2/0.1.1/workspace"))
-PY
+# 6. the remaining digest the AdapterSelector needs (release_digest is printed
+#    by step 5 and written into adapter-release.json).
+"$VENV/bin/python3.12" -c "
+from local_operator.evaluation.adapters.discovery import workspace_digest
+print('workspace_digest', workspace_digest('$WS'))
+"
 ```
 
 `release_digest` is our attestation of the build:
@@ -187,7 +234,7 @@ episode needs no environment variables at all:
 python ~/local-operator/scripts/run_episode.py \
     --selector ~/worktrees/osworld/workspaces/0.1.1/selector.json \
     --task-id task_001 \
-    --route openrouter/deepseek/deepseek-v4-flash-vision-exp \
+    --route openrouter/google/gemini-3.8-flash \
     --run-root ~/worktrees/osworld/runs/$(date +%Y%m%d-%H%M%S) \
     --infra AWS_REGION=us-east-1 \
     --infra AWS_SUBNET_ID=subnet-f2f9adad \
@@ -211,8 +258,8 @@ a result and cannot be mistaken for one.
 The sealed `requested_route.model_id` is a **lossless fold** of the model id
 (`RouteIdentity` fields cannot carry `/`): `_` → `__`, `/` → `_s`, anything
 else outside `[A-Za-z0-9.:-]` → `_x<hh>` per UTF-8 byte, so
-`deepseek/deepseek-v4-flash-vision-exp` seals as
-`deepseek_sdeepseek-v4-flash-vision-exp` and `runner.route_ids.unfold_model_id`
+`google/gemini-3.8-flash` seals as
+`google_sgemini-3.8-flash` and `runner.route_ids.unfold_model_id`
 recovers it exactly. The manifest metadata also carries the raw id as
 `route_model_id`, so a reader never has to decode by hand.
 

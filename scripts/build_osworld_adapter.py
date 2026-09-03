@@ -67,6 +67,7 @@ import os
 import stat
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -81,6 +82,91 @@ _DEFAULT_PIN = (
     / "config"
     / "release-v2026.08.08.json"
 )
+
+
+_ADAPTER_PYPROJECT = (
+    Path(__file__).resolve().parents[1] / "benchmarks" / "osworld_v2_adapter" / "pyproject.toml"
+)
+
+
+def _adapter_version() -> str | None:
+    """The adapter distribution version declared in its pyproject, or None.
+
+    Read from source rather than from ``importlib.metadata`` on purpose: this
+    script runs from the repository against a workspace that is built BEFORE
+    (or without) the wheel being installed into the caller's interpreter, so
+    the installed distribution is the wrong authority and may not exist at all.
+
+    Returns None rather than a placeholder when the declaration cannot be read.
+    A placeholder would flow into ``_release_digest`` and mint a real,
+    well-formed workspace attesting a version that does not exist -- and since
+    ``adapter-release.json`` carries ONLY the digest (``discovery`` rejects any
+    other key), the artifact could not record its own doubt even if we wanted
+    it to. An unattributable attestation is worse than no artifact, so the
+    caller refuses to build instead.
+    """
+
+    try:
+        return str(tomllib.loads(_ADAPTER_PYPROJECT.read_text())["project"]["version"])
+    except (OSError, KeyError, tomllib.TOMLDecodeError):
+        return None
+
+
+class VersionRefused(Exception):
+    """The attested version cannot be trusted, so no workspace may be built.
+
+    Separate from ``VerificationFailed`` because it carries a different exit
+    code (2, a usage error) and fires BEFORE any input is read: the version is
+    a property of the build, not of the corpus.
+    """
+
+
+def resolve_attested_version(
+    *, requested: str | None, declared: str | None, allow_mismatch: bool
+) -> tuple[str, str | None]:
+    """The single implementation of "which version does this build attest".
+
+    Pure -- no argparse, no filesystem, no corpus -- so the tests exercise the
+    REAL resolution rather than re-implementing it. That distinction is not
+    academic: the digest regression test previously recomputed the rule itself
+    and therefore stayed green when the rule was mutated, which is the same
+    bypass the original stale-default defect exploited.
+
+    Returns the version to attest plus an optional advisory line the caller
+    should print. Raises ``VersionRefused`` when nothing trustworthy can be
+    attested.
+
+    The rule: the attested version must agree with what the tree declares
+    unless the operator says out loud that it should not. Attesting a version
+    OTHER than the tree's is legitimate (re-attesting an older wheel against
+    the same corpus) but deliberate, so it is opt-in and still announced --
+    the resulting digest is not reproducible from this tree alone.
+    """
+
+    version = requested if requested is not None else declared
+    if version is None:
+        raise VersionRefused(
+            "cannot determine the adapter version "
+            f"({_ADAPTER_PYPROJECT} is unreadable or declares none) and no "
+            "--version was given. Refusing to build: the version is an input "
+            "to release_digest, and adapter-release.json carries only that "
+            "digest, so the workspace could not record that its attestation "
+            "is unattributable."
+        )
+    if requested is not None and declared is not None and requested != declared:
+        if not allow_mismatch:
+            raise VersionRefused(
+                f"--version {requested!r} disagrees with the version the adapter "
+                f"declares ({declared!r} in {_ADAPTER_PYPROJECT}). release_digest "
+                "attests the distribution that was built, so a mismatch produces "
+                "a workspace claiming a version nobody can verify. Pass "
+                "--allow-version-mismatch if that is deliberate."
+            )
+        return version, (
+            f"attesting {requested!r} while this tree declares {declared!r} "
+            "(--allow-version-mismatch)."
+        )
+    return version, None
 
 
 class VerificationFailed(Exception):
@@ -277,9 +363,38 @@ def main(argv: list[str] | None = None) -> int:
         default=Path(os.environ.get("OSWORLD_INPUTS_ROOT", _DEFAULT_INPUTS_ROOT)),
     )
     parser.add_argument("--release-pin", type=Path, default=_DEFAULT_PIN)
-    parser.add_argument("--version", default="0.1.0")
+    # Left with NO argparse default: the adapter's own declared version is
+    # resolved below so that "not passed" stays distinguishable from "passed
+    # a value equal to the default". The version is an input to
+    # ``_release_digest``, so a value that does not match the distribution
+    # actually built mints a workspace attesting a version that never existed
+    # -- a wrong attestation no digest check can catch, because every digest
+    # is internally consistent with it. That already happened once: the
+    # literal default still said 0.1.0 after the 0.1.1 bump.
+    parser.add_argument("--version", default=None)
+    parser.add_argument(
+        "--allow-version-mismatch",
+        action="store_true",
+        help="permit --version to differ from the adapter's declared version "
+        "(for attesting a build of a version other than this tree's)",
+    )
     parser.add_argument("--package-digest", default="0" * 64)
     args = parser.parse_args(argv)
+
+    # Resolved BEFORE the corpus is touched: the version is a property of the
+    # build, not of the inputs, and refusing early means a bad attestation
+    # never gets as far as reading 4.2 GB of task bytes.
+    try:
+        version, advisory = resolve_attested_version(
+            requested=args.version,
+            declared=_adapter_version(),
+            allow_mismatch=args.allow_version_mismatch,
+        )
+    except VersionRefused as error:
+        print(f"build_osworld_adapter: {error}", file=sys.stderr)
+        return 2
+    if advisory is not None:
+        print(f"build_osworld_adapter: {advisory}", file=sys.stderr)
 
     pin = json.loads(Path(args.release_pin).read_bytes())
     if pin.get("release") != args.benchmark_release:
@@ -300,7 +415,7 @@ def main(argv: list[str] | None = None) -> int:
         out=args.out,
         facts=facts,
         release=args.benchmark_release,
-        version=args.version,
+        version=version,
         package_digest=args.package_digest,
     )
     print(

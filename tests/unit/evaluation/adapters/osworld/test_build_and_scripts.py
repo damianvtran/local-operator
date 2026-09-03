@@ -185,7 +185,7 @@ def _fixture_inputs(tmp_path: Path, *, task_count: int = 3) -> tuple[Path, Path]
     return root, pin_path
 
 
-def _run(root: Path, pin: Path, out: Path) -> int:
+def _run(root: Path, pin: Path, out: Path, *extra: str) -> int:
     return build.main(
         [
             "--benchmark-release",
@@ -196,6 +196,7 @@ def _run(root: Path, pin: Path, out: Path) -> int:
             str(root),
             "--release-pin",
             str(pin),
+            *extra,
         ]
     )
 
@@ -333,6 +334,204 @@ def test_a_wrong_prepared_commit_fails(durable_path: Path, capsys: Any) -> None:
     pin.write_text(json.dumps(payload))
     assert _run(root, pin, durable_path / "w") == build.EXIT_VERIFY
     assert "prepared checkout HEAD" in capsys.readouterr().err
+
+
+# --- the attested version -------------------------------------------------
+#
+# ``version`` is an input to ``_release_digest``, and NOTHING downstream can
+# catch a wrong one: ``adapter-release.json`` carries only the digest, so every
+# digest stays internally consistent with whatever version went in. That is how
+# a stale ``--version 0.1.0`` default survived the 0.1.1 bump and silently
+# attested a distribution that was never built. These tests pin the two
+# fail-closed guards that replaced it, and the digests themselves, so a future
+# edit restoring a permissive default cannot pass with a green suite.
+
+
+def test_an_explicit_version_disagreeing_with_the_adapter_is_refused(
+    durable_path: Path, capsys: Any
+) -> None:
+    """A mismatched --version must refuse and leave NO artifact behind.
+
+    Exit code alone is not the assertion that matters: the defect being
+    guarded is a workspace that exists and looks pristine while attesting a
+    version nobody built, so the absence of the output path is the property.
+    """
+
+    root, pin = _fixture_inputs(durable_path)
+    out = durable_path / "workspace"
+    assert _run(root, pin, out, "--version", "9.9.9") == 2
+    err = capsys.readouterr().err
+    # Both values, so the operator can see which one is wrong.
+    assert "9.9.9" in err
+    assert build._adapter_version() in err
+    assert "--allow-version-mismatch" in err
+    assert not out.exists()
+
+
+def test_a_mismatched_version_builds_only_when_explicitly_allowed(
+    durable_path: Path, capsys: Any
+) -> None:
+    """The override exists for re-attesting another build, and announces itself.
+
+    Attesting a version other than this tree's is legitimate but deliberate,
+    so it must be unreachable by accident: the flag is opt-in (``store_true``,
+    default False), and taking it still prints what it did, because the
+    resulting digest is not reproducible from this tree alone.
+    """
+
+    root, pin = _fixture_inputs(durable_path)
+    out = durable_path / "workspace"
+    assert _run(root, pin, out, "--version", "9.9.9", "--allow-version-mismatch") == 0
+    captured = capsys.readouterr()
+    assert "9.9.9" in captured.err and build._adapter_version() in captured.err
+    assert out.exists()
+    # The attested version reached the digest: same inputs, different version,
+    # different release_digest -- which is the whole reason the guard exists.
+    allowed_digest = json.loads(captured.out)["release_digest"]
+    matching = durable_path / "workspace-matching"
+    assert _run(root, pin, matching) == 0
+    assert allowed_digest != json.loads(capsys.readouterr().out)["release_digest"]
+
+
+def test_the_mismatch_override_cannot_be_set_by_accident(durable_path: Path, capsys: Any) -> None:
+    """Omitting the flag must refuse even when everything else is identical.
+
+    Guards the shape of the option rather than its effect: a ``store_true``
+    silently changed to ``default=True``, or the flag being read from the
+    environment, would make the override the default and re-open the defect
+    while every other test here still passed.
+    """
+
+    root, pin = _fixture_inputs(durable_path)
+    # Identical invocation, flag omitted -> refused, nothing written.
+    assert _run(root, pin, durable_path / "w-off", "--version", "9.9.9") == 2
+    assert not (durable_path / "w-off").exists()
+    capsys.readouterr()
+    # Same again with the flag -> allowed. The ONLY difference is the flag.
+    assert (
+        _run(root, pin, durable_path / "w-on", "--version", "9.9.9", "--allow-version-mismatch")
+        == 0
+    )
+    assert (durable_path / "w-on").exists()
+
+
+def test_a_version_that_cannot_be_determined_refuses_to_build(
+    durable_path: Path, capsys: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No declared version and no --version must produce no artifact.
+
+    Reachable in practice by running the script from outside the repository
+    (``parents[1]`` then misses the adapter's pyproject), which is simulated
+    here by pointing the module's pyproject constant at a path that does not
+    exist. A placeholder version would mint a real, well-formed workspace
+    attesting something unverifiable, and ``discovery.verify_release_manifest``
+    requires ``adapter-release.json`` to be exactly ``{"release_digest": ...}``
+    -- so the artifact could not record its own doubt even if we wanted it to.
+    """
+
+    monkeypatch.setattr(build, "_ADAPTER_PYPROJECT", durable_path / "absent" / "pyproject.toml")
+    root, pin = _fixture_inputs(durable_path)
+    out = durable_path / "workspace"
+    assert _run(root, pin, out) == 2
+    err = capsys.readouterr().err
+    assert "cannot determine the adapter version" in err
+    assert not out.exists()
+    # ...but an explicit version still builds: the refusal is about not
+    # KNOWING, not about the file being absent.
+    assert _run(root, pin, out, "--version", "0.1.1") == 0
+    assert out.exists()
+
+
+def test_the_staged_pilot_release_digest_is_reproduced_from_committed_values() -> None:
+    """The pinned attestation of the staged pilot, through the REAL resolution.
+
+    This is the regression test the original defect needed: it fails outright
+    on the bug (the stale ``0.1.0`` version yields ``a15961b1...``) rather than
+    only on a guard's error message.
+
+    It routes through ``resolve_attested_version`` -- the same call ``main``
+    makes -- rather than recomputing the rule. Calling ``_adapter_version()``
+    and passing the result straight to ``_release_digest`` would re-implement
+    the resolution, and a mutation to it would leave this test green: exactly
+    the bypass the original defect exploited, one level up.
+
+    Hermetic because every input is committed or supplied here -- the release
+    name and task-hash manifest sha from ``config/release-v2026.08.08.json``,
+    plus the package digest of the wheel the pilot installed. The COMPANION
+    ``workspace_digest`` is deliberately not asserted: it hashes the 4.2 GB
+    gated corpus, an operator-fetched input CI does not have and must never
+    download. That half is covered structurally by the happy-path test above
+    (a workspace ``workspace_digest`` accepts, rebuilt identically) and by the
+    operator's build record.
+    """
+
+    pin = json.loads(build._DEFAULT_PIN.read_text())
+    # Exactly what main does: nothing requested, so the tree's own declaration
+    # is what gets attested.
+    version, advisory = build.resolve_attested_version(
+        requested=None,
+        declared=build._adapter_version(),
+        allow_mismatch=False,
+    )
+    assert advisory is None
+    digest = build._release_digest(
+        version=version,
+        # The digest of the 0.1.1 wheel installed into the staged pilot venv.
+        package_digest="69e8504d9caa6732940ec59030dc149f83549da7155fb828fa9f7de677d5a736",
+        benchmark_release=pin["release"],
+        task_manifest_sha256=pin["tasks"]["hash_manifest_sha256"],
+    )
+    assert digest == "d0067e23af3dc2ed790c2a8b802ee453200d516466ad27770d7f2bbe7b0b41cd"
+
+
+def test_main_takes_its_attested_version_from_the_resolver(
+    durable_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    """``main`` must OBTAIN the version from ``resolve_attested_version``.
+
+    Asserted structurally -- the resolver is replaced and its return value must
+    be what reaches ``_release_digest`` -- rather than by comparing versions.
+    A value comparison cannot detect this wiring at all: on the default path
+    ``args.version`` is None and the resolver returns ``declared``, and on the
+    override path the resolver returns ``args.version`` unchanged, so
+    "resolved" and "raw" are numerically identical on every reachable input.
+    Re-deriving the version at the call site is therefore an EQUIVALENT mutant
+    to any value assertion (verified: it passes one), while still being the
+    defect that matters -- two implementations of the rule, free to drift.
+
+    Runs against the fixture corpus, so it needs none of the gated inputs.
+    """
+
+    root, pin = _fixture_inputs(durable_path)
+    sentinel = "resolver-sentinel-version"
+    calls: list[dict[str, Any]] = []
+    seen: list[str] = []
+
+    def fake_resolver(
+        *, requested: str | None, declared: str | None, allow_mismatch: bool
+    ) -> tuple[str, str | None]:
+        calls.append(
+            {"requested": requested, "declared": declared, "allow_mismatch": allow_mismatch}
+        )
+        return sentinel, None
+
+    real_digest = build._release_digest
+
+    def spy(*, version: str, **kwargs: Any) -> str:
+        seen.append(version)
+        return real_digest(version=version, **kwargs)
+
+    monkeypatch.setattr(build, "resolve_attested_version", fake_resolver)
+    monkeypatch.setattr(build, "_release_digest", spy)
+
+    assert _run(root, pin, durable_path / "w") == 0
+    # main asked the resolver, handing it the real declared version...
+    assert calls == [
+        {"requested": None, "declared": build._adapter_version(), "allow_mismatch": False}
+    ]
+    # ...and attested exactly what it answered, rather than re-deriving it.
+    assert seen == [sentinel]
+    capsys.readouterr()
 
 
 def test_the_committed_release_pin_carries_the_known_hashes() -> None:
