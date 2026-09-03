@@ -26,13 +26,19 @@ from __future__ import annotations
 import base64
 import json
 import re
+import textwrap
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping, Sequence, get_args, get_origin
 
 from local_operator.evaluation.adapters.supervisor import verify_artifact
 from local_operator.evaluation.evidence.models import RouteIdentity
-from local_operator.evaluation.protocol import ActionBatch, ComputerAction, Observation
+from local_operator.evaluation.protocol import (
+    NAMED_KEYS,
+    ActionBatch,
+    ComputerAction,
+    Observation,
+)
 from local_operator.evaluation.runner.model import (
     CompactionRecord,
     DecisionRejected,
@@ -70,9 +76,34 @@ MAX_REJECTED_REPLY_CHARS = 4_000
 #: changes the message being appended.
 UNCHANGED_OBSERVATION = "(unchanged)"
 
+#: Rendered when an observation carries NO text at all. Kept distinct from
+#: :data:`UNCHANGED_OBSERVATION` because the two mean opposite things and a
+#: model that conflates them loses its only textual progress signal: a
+#: benchmark whose adapter publishes the task once and then screenshots only
+#: (OSWorld) yields ``text=None`` on every step after the first, and folding
+#: those into "(unchanged)" told the model the SCREEN had not moved on every
+#: single turn of a real paid episode.
+NO_TEXTUAL_STATE = "(no textual state)"
+
+#: Appended to an observation whose frame bytes are byte-identical to the
+#: previous observation's. This is the only reliable "nothing happened" signal
+#: a screenshot-only benchmark has: without it a model that clicked a dead
+#: pixel sees a new observation id, a new image block, and no statement that
+#: the two images are the same, so re-deciding the same click is the rational
+#: reading of the context rather than a lapse.
+UNCHANGED_FRAMES_NOTE = (
+    "The screenshot is byte-identical to the previous observation's: your last "
+    "action changed nothing visible. Do not repeat it -- try a different "
+    "target, a different action kind, or wait for the surface to settle."
+)
+
 # The batch wire version this harness speaks; pinned here rather than taken
 # from a model reply.
 PROTOCOL_VERSION = "1.0"
+
+#: Function keys are collapsed to a range in the prompt rather than listed:
+#: F1-F24 is 24 of the vocabulary's 43 entries and the pattern is obvious.
+_FUNCTION_KEY = re.compile(r"F\d+")
 
 # Mirrors receipts.StrictIdentifier, which every evidence identifier must match.
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]*")
@@ -101,11 +132,31 @@ def _action_schema_lines() -> list[str]:
             else:
                 rendered = _type_name(field.annotation)
             optional = "" if field.is_required() else " (optional)"
-            fields.append(f"{name}: {rendered}{optional}")
+            # The name is QUOTED like the two literal keys beside it. Rendered
+            # bare it reads as a label rather than a JSON key: a real episode
+            # answered the bare ``keys: [str, ...]`` line with ``"key":
+            # ["Alt", "F10"]`` and lost the turn to extra_forbidden/missing.
+            fields.append(f'"{name}": {rendered}{optional}')
         kind = action.model_fields["kind"].default
         detail = ", ".join(fields) if fields else "no further fields"
         lines.append(f'  {{"kind": "{kind}", "observation_id": "<id>", {detail}}}')
     return lines
+
+
+def _named_keys_line() -> str:
+    """The key vocabulary, wrapped, derived from the set the validator enforces.
+
+    Stated rather than implied. ``KeyAction`` accepts a closed set and rejects
+    everything else, so a model reaching for the obvious synonym loses the
+    turn: probed against the real parser, a reply of ``["control", "k"]`` is
+    refused with ``unknown key: 'control'`` while ``["ctrl", "k"]`` parses.
+    The function keys are collapsed to a range because listing F1-F24 in full
+    spends prompt budget on a pattern one phrase conveys.
+    """
+
+    named = sorted(key.lower() for key in NAMED_KEYS if not _FUNCTION_KEY.fullmatch(key))
+    wrapped = textwrap.wrap(", ".join(named) + ", and f1 through f24", width=68)
+    return textwrap.indent("\n".join(wrapped), "  ")
 
 
 def _type_name(annotation: Any) -> str:
@@ -138,17 +189,29 @@ def build_system_prompt() -> str:
 
 Each user message is one observation of the screen: its text, and a screenshot
 when one is attached. Your own earlier replies are the actions you already
-took; an observation reading "(unchanged)" has the same text as the one before
-it, and "[screenshot omitted ...]" marks an older screenshot that a newer one
-has replaced. A message starting <previous-context-summary> summarises turns
-that are no longer shown.
+took. "{UNCHANGED_OBSERVATION}" means the observation's TEXT repeats the
+previous one's; "{NO_TEXTUAL_STATE}" means the adapter published no text for
+this step, which is normal for a screenshot-only benchmark and means the
+screenshot is the whole state; "[screenshot omitted ...]" marks an older
+screenshot that a newer one has replaced. A message starting
+<previous-context-summary> summarises turns that are no longer shown.
+
+An observation that says the screenshot is byte-identical to the previous
+one's is telling you your last action did nothing. Treat that as evidence, not
+noise: repeating an action that already had no effect wastes the step budget.
+Change something -- a different target, a different action kind, a "wait" if
+the surface may still be painting, or a scroll to bring the target into view.
 
 Every observation lists its frames on a "Frames:" line as "<frame_id>
 (<width>x<height>)", one per attached screenshot, in order. Any action that
 takes a "frame_id" MUST use one of the ids named on the CURRENT observation's
-"Frames:" line, exactly as written, and its x/y must lie inside that frame's
-width and height (0-based). Never invent a frame id or number the frames
-yourself.
+"Frames:" line, exactly as written. Coordinates are in that frame's own pixel
+space: x/y are integers, the origin (0,0) is its TOP-LEFT corner, x grows
+right, y grows down, and both must lie inside the width and height given on
+that line (0-based, so the largest valid x is width-1). The screenshot you are
+shown IS that pixel space at exactly that size -- do not rescale it, do not
+normalize to 0-1, and do not assume a different resolution. Never invent a
+frame id or number the frames yourself.
 
 If a reply of yours is rejected, the next user message starts "Your previous
 reply was rejected:" and names the defect. Reply again for the SAME
@@ -165,8 +228,34 @@ looking at right now. These are the only permitted shapes:
 
 {chr(10).join(_action_schema_lines())}
 
-Where a field lists alternatives separated by "|", you must use exactly one of
-those literal values.
+Field names are JSON keys spelled exactly as quoted above -- "keys" is not
+"key", "text" is not "value". Where a field lists alternatives separated by
+"|", you must use exactly one of those literal values.
+
+You drive a real keyboard as well as a mouse, and most tasks cannot be done by
+clicking alone: entering a title, a search term, an address, a date, or a file
+name all require typing.
+
+* "type" enters literal text wherever the keyboard focus already is. It does
+  NOT click first, so focus the field with a click (or Tab) in an earlier
+  action, then type. It sends exactly the characters given and does not press
+  Enter for you.
+* "key" presses named keys, and presses the ones in a single action TOGETHER
+  as one chord: ["ctrl", "s"] is Ctrl+S, ["enter"] commits a field or dialog,
+  ["tab"] moves focus, ["esc"] dismisses, and ["ctrl", "a"] followed by a
+  "type" replaces a field's contents. Two presses in sequence are two separate
+  "key" actions, not one chord. A single printable character is also a key, so
+  ["ctrl", "k"] is valid. These are the ONLY named keys accepted, and a
+  synonym is rejected -- "ctrl" not "control", "esc" not "escape", "enter"
+  not "return":
+
+{_named_keys_line()}
+
+A batch may contain SEVERAL actions and they execute in order against the
+screen you are looking at, with one new observation at the end. That is how a
+click-then-type-then-Enter sequence is done in one step rather than three.
+Batch only what you can predict without seeing the screen in between; when the
+result of an action decides the next one, end the batch and look.
 
 Two actions end your turn in a special way, and each must be the ONLY action in
 its batch. Their fields are listed above; what the list cannot tell you is what
@@ -332,12 +421,24 @@ class _ContextBuilder:
         from local_operator.harness.types import ImageContent, Message, TextContent
 
         observation = turn.observation
-        text = observation.text or "(no textual state)"
+        text = observation.text
         # The adapter owns observation text and the runner never rewrites it;
         # the one dedup that is append-only-safe is choosing how to render the
         # message being appended, so a byte-identical repeat is sent as a
         # marker rather than as the same paragraph again.
-        rendered_text = UNCHANGED_OBSERVATION if text == self._previous_text else text
+        #
+        # ABSENT text is not UNCHANGED text. Only compare when the adapter
+        # actually published text on both turns: an adapter that publishes the
+        # goal once and screenshots thereafter (OSWorld) has ``text=None`` from
+        # step 1 on, and treating that as "unchanged" asserted that the screen
+        # had not moved on every turn of a real episode -- the exact signal the
+        # model needs to detect a no-op click, inverted into noise.
+        if text is None:
+            rendered_text = NO_TEXTUAL_STATE
+        elif self._previous_text is not None and text == self._previous_text:
+            rendered_text = UNCHANGED_OBSERVATION
+        else:
+            rendered_text = text
         self._previous_text = text
         lines = [
             f"Step: {observation.sequence}",
@@ -354,6 +455,12 @@ class _ContextBuilder:
             # that answer was delivered", as the system prompt promises.
             lines.append(f"Answer from the user: {previous.ask_answer}")
         lines.append(f"Frames: {_frames_line(observation)}")
+        if previous is not None and _frames_identical(previous.observation, observation):
+            # Stated on the observation itself rather than left for the model
+            # to infer by diffing two base64 image blocks, which no model does
+            # reliably. Digests are compared, not pixels: the frames are
+            # content-addressed already, so this costs nothing.
+            lines.append(UNCHANGED_FRAMES_NOTE)
         lines.extend(["", rendered_text])
         content: list[Any] = [TextContent(text="\n".join(lines))]
         for frame in observation.frames:
@@ -528,6 +635,9 @@ class ProviderModelClient:
             self._context.append_rejection(text, diagnostic)
             raise DecisionRejected(
                 diagnostic,
+                # Truncated with the same bound the context replay uses: a
+                # runaway reply must not be able to inflate the bundle either.
+                reply=text[:MAX_REJECTED_REPLY_CHARS],
                 route=self._route,
                 usage=usage,
                 cost_micros=cost_micros,
@@ -832,6 +942,24 @@ def _frames_line(observation: Observation) -> str:
         f"{frame.frame_id} ({frame.geometry.model_visible.width}x"
         f"{frame.geometry.model_visible.height})"
         for frame in observation.frames
+    )
+
+
+def _frames_identical(previous: Observation, current: Observation) -> bool:
+    """Whether two observations carry exactly the same frame bytes.
+
+    Compared by the frames' content-addressed digests, in order, so this is a
+    statement about the BYTES rather than a perceptual judgement the runner is
+    not entitled to make. An observation with no frames is never "identical":
+    a frameless benchmark has no screen to be unchanged, and claiming
+    otherwise would put a false no-op note on every one of its turns.
+    """
+
+    if not current.frames or len(previous.frames) != len(current.frames):
+        return False
+    return all(
+        before.artifact.sha256 == after.artifact.sha256
+        for before, after in zip(previous.frames, current.frames)
     )
 
 

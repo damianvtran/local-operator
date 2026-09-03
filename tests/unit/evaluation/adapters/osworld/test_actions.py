@@ -113,9 +113,9 @@ def test_out_of_frame_coordinate_raises_not_clamps() -> None:
 
 
 def test_every_named_key_has_a_mapping() -> None:
-    from local_operator.evaluation.protocol import _NAMED_KEYS
+    from local_operator.evaluation.protocol import NAMED_KEYS
 
-    for key in sorted(_NAMED_KEYS):
+    for key in sorted(NAMED_KEYS):
         compiled = actions.compile_action(KeyAction(observation_id="o", keys=(key,)), None)
         assert compiled is not None
         assert compiled.startswith("pyautogui.press(")
