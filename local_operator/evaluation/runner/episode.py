@@ -815,7 +815,16 @@ class EpisodeRunner:
             # The diagnostic is what the model will be shown; it is published
             # as an artifact rather than squeezed into the identifier-shaped
             # ``diagnostic_code`` so the exact correction is auditable.
-            detail = self._publish(rejected.diagnostic.encode("utf-8"), media_type="text/plain")
+            #
+            # The REPLY is published alongside it, because the diagnostic
+            # alone does not say what the model was attempting. A Pydantic
+            # error names the fields it refused; it cannot tell a later reader
+            # whether the turn was a mistyped keyboard action or a stray
+            # sentence after the JSON. Without the reply, diagnosing a
+            # rejection class costs a whole re-run of a paid episode.
+            detail = self._publish(
+                _rejection_detail(rejected).encode("utf-8"), media_type="text/plain"
+            )
             self._append(
                 "error",
                 ErrorPayload(
@@ -1651,6 +1660,23 @@ def _incomplete_receipt(plan: CleanupPlan, action_id: str) -> CleanupReceipt:
         evidence_code="worker-unavailable",
         duration_ms=0,
     )
+
+
+def _rejection_detail(rejected: Any) -> str:
+    """The rejection artifact: why the reply was refused AND what it said.
+
+    Two sections rather than one blob, so a reader (or a script mining a batch
+    of bundles for rejection classes) can tell the harness's diagnostic apart
+    from the model's own words. A client that did not capture the reply --
+    every implementation of the protocol is free not to -- degrades to the
+    diagnostic alone rather than emitting an empty section that reads as "the
+    model said nothing".
+    """
+
+    reply = getattr(rejected, "reply", None)
+    if not reply:
+        return rejected.diagnostic
+    return f"{rejected.diagnostic}\n\n--- rejected reply ---\n{reply}"
 
 
 def _diagnostic(error: BaseException) -> str:

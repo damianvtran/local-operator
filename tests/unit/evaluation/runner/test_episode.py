@@ -794,6 +794,55 @@ async def test_one_rejected_decision_is_re_prompted_and_the_corrected_batch_proc
 
 
 @pytest.mark.asyncio
+async def test_a_rejected_decision_publishes_the_reply_beside_the_diagnostic(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """A diagnostic alone cannot answer "what was the model attempting?".
+
+    Bundle ep-ffda3fc88f81 recorded three ``decision-rejected`` errors whose
+    artifacts held only the Pydantic complaint. Whether those were failed
+    keyboard actions -- the difference between "the model never tried to type"
+    and "the model tried and the schema refused it" -- was not answerable from
+    the bundle, and answering it would have cost another paid run.
+    """
+
+    adapter = FakeAdapter(tmp_path, episode_id)
+    model = ScriptedModel(["reject", "finish"])
+    runner = _runner(tmp_path, episode_id, adapter=adapter, model=model)
+
+    outcome = await runner.run()
+
+    root = outcome.bundle_root
+    assert root is not None
+    errors = payloads(root, ErrorPayload)
+    assert len(errors) == 1
+    detail = errors[0].detail_artifact
+    assert detail is not None
+    recorded = (root / "artifacts" / detail.sha256).read_text()
+    # Both halves, and labelled: a reader can tell the harness's refusal from
+    # the model's own words.
+    assert "unknown frame_id '1'" in recorded
+    assert "--- rejected reply ---" in recorded
+    assert '{"actions": [{"kind": "click", "frame_id": "1"}]}' in recorded
+
+
+@pytest.mark.asyncio
+async def test_a_rejection_without_a_captured_reply_records_the_diagnostic_alone(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """``reply`` is optional on the protocol boundary, so a client that does not
+    capture it must degrade to the diagnostic rather than emit an empty section
+    that reads as "the model said nothing"."""
+
+    from local_operator.evaluation.runner.episode import _rejection_detail
+    from local_operator.evaluation.runner.model import DecisionRejected
+
+    assert _rejection_detail(DecisionRejected("refused")) == "refused"
+    assert _rejection_detail(DecisionRejected("refused", reply="")) == "refused"
+    assert "--- rejected reply ---" in _rejection_detail(DecisionRejected("refused", reply="{}"))
+
+
+@pytest.mark.asyncio
 async def test_exhausted_decision_retries_seal_as_a_model_failure(
     tmp_path: Path, episode_id: str
 ) -> None:
