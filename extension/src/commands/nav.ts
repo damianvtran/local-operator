@@ -249,10 +249,18 @@ async function closeSurface(token: string, surface: StoredSurface): Promise<void
  * precisely the hijack this model removes.
  */
 export async function close(params: Record<string, unknown>): Promise<Record<string, unknown>> {
+  // The closed handle is RETURNED (`closed`, not `tab` — `tab` on a result is
+  // the handle of a tab that still exists, and worker.ts reads it as such) so
+  // the worker can name the surface in its `tab_closed` announcement even in
+  // the no-param call shape. Without it that shape announced an empty handle,
+  // which the daemon can only read as "blank every driven record" — including
+  // other sessions' live tabs. The daemon knows the token here; not sending it
+  // was the only reason the clear-all path was reachable from a routine close.
   if (params.tab !== undefined && params.tab !== null && params.tab !== "") {
     const surface = await requireSurface(params.tab);
-    await closeSurface(surfaceToken(surface), surface);
-    return {};
+    const token = surfaceToken(surface);
+    await closeSurface(token, surface);
+    return { closed: token };
   }
   const surfaces = await liveSurfaces();
   const entries = Object.entries(surfaces);
@@ -273,5 +281,5 @@ export async function close(params: Record<string, unknown>): Promise<Record<str
   }
   const [token, surface] = entries[0]!;
   await closeSurface(token, surface);
-  return {};
+  return { closed: token };
 }

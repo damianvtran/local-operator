@@ -59,11 +59,96 @@ class BridgeUnreachable(RuntimeError):
     pass
 
 
+#: Ceiling on the confirmation probe below. It runs at most once per browser
+#: action and ONLY when the cheap file check was about to condemn a daemon
+#: whose pid is still alive, so it is never on the common path. Short because
+#: a loopback /health answers in single-digit milliseconds; anything slower is
+#: a daemon that is genuinely not serving.
+HEALTH_PROBE_TIMEOUT_S = 1.5
+
+
 def bridge_browser_available(root: Path | None = None) -> bool:
-    """File-only createIf probe: no socket, no subprocess, never raises."""
+    """File-only "known-good right now" probe: no socket, no subprocess, never raises.
+
+    Stays file-only on purpose: it runs while constructing EVERY session, where
+    a socket round-trip would tax startup for every session on the machine. The
+    stale-but-alive rescue lives in :func:`bridge_browser_reachable`, on the
+    browser path.
+
+    Use :func:`bridge_browser_advertisable` for tool GATING, which is a weaker
+    commitment and must not hide a stale-but-alive daemon.
+    """
     try:
         return state_store.available(root)
     except Exception:  # noqa: BLE001 - session startup must not fail on discovery
+        return False
+
+
+def bridge_browser_advertisable(root: Path | None = None) -> bool:
+    """File-only gate for whether the `browser` TOOL is offered at all.
+
+    Same cost and the same no-socket/no-subprocess contract as
+    :func:`bridge_browser_available`, but it also accepts a STALE heartbeat
+    whose pid is alive, so the RC2 rescue in ``execute_browser`` can actually
+    be reached on a host with no cmux. See
+    :func:`local_operator.browser_bridge.state.advertisable` for the full
+    reasoning and the hot-path constraint it preserves.
+    """
+    try:
+        return state_store.advertisable(root)
+    except Exception:  # noqa: BLE001 - session startup must not fail on discovery
+        return False
+
+
+async def bridge_browser_reachable(
+    root: Path | None = None,
+    *,
+    classified: tuple[state_store.Liveness, state_store.BridgeState | None] | None = None,
+) -> bool:
+    """Availability for the BROWSER PATH: file first, socket only to acquit.
+
+    The file heartbeat is a proxy that lies in both directions, and when it
+    lied the failure was silent and total: a daemon whose heartbeat writer had
+    died kept serving ``/health`` while every session read the file, concluded
+    the extension was gone, and fell back to cmux — disagreeing with
+    ``lop browser status``, which reads the live socket. Nothing reconciled
+    them, so both the agent and the user concluded a phantom tab held a lock.
+
+    The contract that removes the contradiction, without slowing the common
+    case:
+
+    - ``FRESH``  → available. No probe (the overwhelmingly common path).
+    - ``ABSENT`` → unavailable. No probe; there is nothing to acquit.
+    - ``STALE``  → the file cannot tell, and the pid is alive, so spend ONE
+      bounded ``/health`` request before condemning the bridge.
+
+    A daemon that answers is available regardless of what the file says.
+
+    ``classified`` lets a caller that has ALREADY classified the daemon pass
+    its answer in, so one browser action performs one file read instead of
+    several and the demotion diagnostic cannot describe a different reading
+    than the decision it explains.
+    """
+    try:
+        status, current = classified if classified is not None else state_store.liveness(root)
+    except Exception:  # noqa: BLE001 - discovery must never raise at a call site
+        return False
+    if status is state_store.Liveness.FRESH:
+        return True
+    if status is not state_store.Liveness.STALE or current is None:
+        return False
+    return await _health_ok(current.port)
+
+
+async def _health_ok(port: int) -> bool:
+    """One bounded loopback /health probe; any failure means "not reachable"."""
+    try:
+        async with httpx.AsyncClient(timeout=HEALTH_PROBE_TIMEOUT_S) as client:
+            response = await client.get(f"http://127.0.0.1:{port}/health")
+        return response.status_code == 200 and bool(
+            response.json().get("extension_connected", False)
+        )
+    except Exception:  # noqa: BLE001 - unreachable, malformed, or timed out
         return False
 
 

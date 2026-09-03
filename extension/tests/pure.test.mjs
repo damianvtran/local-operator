@@ -444,7 +444,8 @@ test("surface tokens resolve only with an exact nonce-bearing handle", async () 
 test("redacted handles are recognizable by their owner but not driveable", async () => {
   const module = await load("src/state.ts");
   try {
-    const { surfaceToken, redactToken, ownsRedacted, resolveSurfaceToken } = module.loaded;
+    const { surfaceToken, redactToken, ownsRedacted, resolveSurfaceToken, isRedactedToken } =
+      module.loaded;
     const surface = { tabId: 42, nonce: "abcdef0123456789abcdef0123456789", epoch: 1, createdAt: 1, lastUsedAt: 2 };
     const token = surfaceToken(surface);
     const redacted = redactToken(token);
@@ -459,6 +460,13 @@ test("redacted handles are recognizable by their owner but not driveable", async
     assert.equal(resolveSurfaceToken(redacted, { [token]: surface }), undefined);
     // Unredacted comparison still exact-matches (defensive path).
     assert.equal(ownsRedacted(token, token), true);
+    // A redacted token is DETECTABLE as such, which is what stops worker.ts
+    // forwarding it as a tab_update handle. Doing so keyed a second driven
+    // record for one tab, and that duplicate outlived the real close as a
+    // phantom advertising a dead URL — the ghost this release removes.
+    assert.equal(isRedactedToken(redacted), true);
+    assert.equal(isRedactedToken(token), false);
+    assert.equal(isRedactedToken(""), false);
   } finally { await module.close(); }
 });
 

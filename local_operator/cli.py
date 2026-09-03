@@ -410,7 +410,15 @@ def build_cli_parser() -> argparse.ArgumentParser:
     browser_subparsers = browser_parser.add_subparsers(dest="browser_command")
     install_browser = browser_subparsers.add_parser("install", help="Install the bridge daemon")
     install_browser.add_argument("--port", type=int, default=4099)
-    browser_subparsers.add_parser("status", help="Show daemon, extension and pairing status")
+    status_browser = browser_subparsers.add_parser(
+        "status", help="Show daemon, extension and pairing status"
+    )
+    status_browser.add_argument(
+        "--repair",
+        action="store_true",
+        help="Reconcile advertised state against reality: drop tabs that no longer "
+        "exist and republish a fresh heartbeat. Safe while sessions are live.",
+    )
     for action in ("start", "stop", "restart"):
         browser_subparsers.add_parser(action, help=f"{action.capitalize()} the daemon")
     pair_browser = browser_subparsers.add_parser("pair", help="Show the extension pairing code")
@@ -1070,6 +1078,15 @@ def browser_command(args: argparse.Namespace) -> int:
         print("  load the Local Operator extension, then run `lop browser pair`.")
         return 0
     if command == "status":
+        if getattr(args, "repair", False):
+            repair = browser_install.repair()
+            for line in repair["steps"]:
+                print(f"  {line}")
+            if not repair["ok"]:
+                print(f"\n\033[1;31m{repair['error']}\033[0m")
+                return 1
+            print("\nbrowser bridge state reconciled.")
+            return 0
         result = browser_install.status()
         health = result.get("health") or {}
         assert isinstance(health, dict)
@@ -1084,9 +1101,41 @@ def browser_command(args: argparse.Namespace) -> int:
             print(
                 "                     (browser not currently attached; it reconnects when opened)"
             )
-        driven = health.get("current_url")
-        if connected and driven:
-            print(f"driving:             {driven}")
+        # Driven tabs, PLURAL and counted. `driving: <url>` implied a single
+        # system-wide binding; with one tab per session that framing turned a
+        # stale URL into "something is holding the bridge". Say how many tabs
+        # are live, name them, and say "none" explicitly rather than printing
+        # nothing (which read as "it isn't telling me").
+        driven_tabs = health.get("driven_tabs")
+        if connected:
+            if isinstance(driven_tabs, list):
+                if driven_tabs:
+                    label = f"{len(driven_tabs)} tab{'s' if len(driven_tabs) != 1 else ''}"
+                    print(f"driving:             {label}")
+                    for entry in driven_tabs:
+                        if isinstance(entry, dict):
+                            print(f"                     - {entry.get('url', '')}")
+                else:
+                    print("driving:             no tabs driven")
+            elif health.get("current_url"):
+                # Older daemon still running under a newer CLI.
+                print(f"driving:             {health.get('current_url')}")
+        # A stale heartbeat is THE thing to surface here. status reads the live
+        # /health socket while every session reads the discovery file, so when
+        # the two disagree status looks authoritative and sessions silently
+        # fall back to cmux. Showing the age makes that contradiction visible
+        # and names the fix instead of leaving both parties to guess.
+        stale_age = browser_install.stale_heartbeat_age()
+        if stale_age is not None:
+            print(
+                f"\n\033[1;33mheartbeat:           STALE by {stale_age:.0f}s "
+                "(discovery file is not being refreshed)\033[0m"
+            )
+            print(
+                "                     sessions will fall back to cmux despite the daemon "
+                "being healthy."
+            )
+            print("                     run 'lop browser status --repair' to reconcile.")
         print(f"port:                {result['port']}")
         print(f"log:                 {result['log']}")
         return 0 if result["healthy"] else 1

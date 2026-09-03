@@ -123,9 +123,12 @@ def test_health_reports_driven_url_and_pending_origin(tmp_path: Path) -> None:
     app = create_app(root=tmp_path)
     with TestClient(app) as client:
         service = app.state.bridge
-        service.link.current_url = "https://example.com/page"
-        service.link.current_title = "Example"
+        # Driven pages are tracked per tab now (a single global slot could not
+        # be cleared per tab, which is how a closed tab stayed "driving"
+        # forever), so record one through the same API the receive loop uses.
+        service.link.note_driven("bridge:1:aa", "https://example.com/page", "Example")
         service.link.awaiting_origin["r-1"] = "https://bank.example"
         health = client.get("/health").json()
         assert health["current_url"] == "https://example.com/page"
+        assert health["current_title"] == "Example"
         assert health["pending_origin"] == "https://bank.example"

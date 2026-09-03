@@ -214,6 +214,20 @@ export function ownsRedacted(fullToken: string, redacted: string): boolean {
   return fullToken.startsWith(redacted.slice(0, -1));
 }
 
+/**
+ * Whether a token has been through {@link redactToken}.
+ *
+ * A redacted handle names a tab without proving ownership of it, so it must
+ * never be reported to the daemon as the handle of a driven tab: it would key
+ * a SECOND record for a tab already tracked under its full token, and that
+ * duplicate outlives the real close as a phantom advertising a dead URL. The
+ * worker uses this to downgrade such a handle to "unknown" rather than
+ * inventing an identity for it.
+ */
+export function isRedactedToken(token: string): boolean {
+  return token.endsWith("…");
+}
+
 export function parseSurface(token: unknown): { tabId: number; nonce: string } | undefined {
   if (typeof token !== "string") return undefined;
   const match = /^bridge:(\d+):([a-z0-9_-]+)$/i.exec(token);

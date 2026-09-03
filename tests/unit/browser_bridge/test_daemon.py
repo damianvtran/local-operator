@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import time
+from contextlib import suppress
 from pathlib import Path
 
 import pytest
 from starlette.testclient import TestClient
 
+from local_operator.browser_bridge import state as state_store
 from local_operator.browser_bridge.daemon import create_app, pairing_status
 from local_operator.browser_bridge.protocol import PROTO_VERSION
 
@@ -274,3 +276,185 @@ async def test_await_lock_key_evicted_on_normal_and_error_exits(
         Request(id="r-timeout", method="await_access", params={"url": "https://x.example"})
     )
     assert service._tab_locks == {}
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_loop_survives_publish_failure(tmp_path: Path, monkeypatch) -> None:
+    """RC1: a transient publish error must not kill the heartbeat writer.
+
+    The incident: ENOSPC escaped ``while True: publish(); sleep()``, the task
+    died, and nothing restarted it — so ``state.available()`` was False for
+    every session on the machine for the daemon's whole life while ``/health``
+    kept answering 200. The loop must absorb the error, keep ticking, and
+    republish once writes succeed again.
+    """
+    import asyncio
+
+    from local_operator.browser_bridge import daemon as daemon_module
+
+    monkeypatch.setattr(state_store, "HEARTBEAT_INTERVAL_S", 0.01)
+    service = daemon_module.BridgeService(root=tmp_path)
+    service.link.websocket = object()  # type: ignore[assignment]
+
+    calls = {"n": 0}
+    real_publish = state_store.publish
+
+    def flaky(state_value, root=None):  # type: ignore[no-untyped-def]
+        calls["n"] += 1
+        if calls["n"] <= 3:
+            raise OSError(28, "No space left on device")
+        return real_publish(state_value, root)
+
+    monkeypatch.setattr(state_store, "publish", flaky)
+    task = asyncio.create_task(service._heartbeat())
+    try:
+        # Long enough for the failures AND several successful ticks after.
+        for _ in range(200):
+            await asyncio.sleep(0.01)
+            if calls["n"] > 6:
+                break
+        assert not task.done(), "heartbeat task died on a transient publish error"
+        assert state_store.available(tmp_path), "heartbeat never recovered after writes resumed"
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_supervised_loop_keeps_running_after_repeated_failures(tmp_path: Path) -> None:
+    """The class of bug, not the one syscall: no supervisory loop may exit."""
+    import asyncio
+
+    from local_operator.browser_bridge import daemon as daemon_module
+
+    service = daemon_module.BridgeService(root=tmp_path)
+    seen = {"n": 0}
+
+    async def always_raises() -> None:
+        seen["n"] += 1
+        raise RuntimeError("boom")
+
+    # Backoff is capped per failure; shrink it so the test is fast.
+    task = asyncio.create_task(service._supervise("test", always_raises))
+    try:
+        for _ in range(300):
+            await asyncio.sleep(0.01)
+            if seen["n"] >= 2:
+                break
+        assert seen["n"] >= 2, "supervisor stopped re-running a failing iteration"
+        assert not task.done()
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_supervised_loop_still_honours_cancellation(tmp_path: Path) -> None:
+    """Shutdown depends on cancellation winning over the catch-all."""
+    import asyncio
+
+    from local_operator.browser_bridge import daemon as daemon_module
+
+    service = daemon_module.BridgeService(root=tmp_path)
+
+    async def forever() -> None:
+        await asyncio.sleep(3600)
+
+    task = asyncio.create_task(service._supervise("test", forever))
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+def test_publish_safely_swallows_oserror_and_reports_failure(tmp_path: Path, monkeypatch) -> None:
+    """A failed cache write is logged and absorbed, never propagated."""
+    from local_operator.browser_bridge import daemon as daemon_module
+
+    service = daemon_module.BridgeService(root=tmp_path)
+
+    def boom(state_value, root=None):  # type: ignore[no-untyped-def]
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(state_store, "publish", boom)
+    assert service.publish_safely() is False
+    monkeypatch.undo()
+    assert service.publish_safely() is True
+
+
+def test_driven_tabs_are_tracked_per_tab_and_cleared_on_close() -> None:
+    """RC3/RC4: closing one tab clears exactly that tab, not the world."""
+    from local_operator.browser_bridge import daemon as daemon_module
+
+    link = daemon_module.ExtensionLink()
+    assert link.current_url == ""
+
+    link.note_driven("bridge:1:aa", "https://one.example", "One")
+    link.note_driven("bridge:2:bb", "https://two.example", "Two")
+    assert len(link.driven) == 2
+    # Most recent wins the single-slot compatibility view.
+    assert link.current_url == "https://two.example"
+
+    link.note_closed("bridge:2:bb")
+    assert len(link.driven) == 1
+    assert link.current_url == "https://one.example"
+
+    # The user's exact complaint: the last tab closing must clear "driving".
+    link.note_closed("bridge:1:aa")
+    assert link.driven == {}
+    assert link.current_url == ""
+    assert link.current_title == ""
+
+
+def test_handleless_update_refreshes_rather_than_forking_a_phantom() -> None:
+    """A `goto` result carries no handle; it must not double-count the tab."""
+    from local_operator.browser_bridge import daemon as daemon_module
+
+    link = daemon_module.ExtensionLink()
+    link.note_driven("bridge:1:aa", "https://one.example", "One")
+    link.note_driven("", "https://one.example/next", "Next")
+    assert len(link.driven) == 1
+    assert link.current_url == "https://one.example/next"
+
+
+def test_tab_closed_event_clears_driven_state_over_the_socket(tmp_path: Path) -> None:
+    """End to end over the real websocket: tab_closed empties `driving`."""
+    app = create_app(root=tmp_path)
+    with TestClient(app) as client:
+        with client.websocket_connect("/extension", headers={"origin": ORIGIN}) as socket:
+            socket.send_json(
+                {
+                    "event": "hello",
+                    "proto": PROTO_VERSION,
+                    "token": "",
+                    "extension_version": "0.1.6",
+                    "browser": "Chrome/152",
+                }
+            )
+            socket.receive_json()
+            socket.send_json(
+                {
+                    "event": "tab_update",
+                    "tab": "bridge:7:cc",
+                    "url": "https://example.com",
+                    "title": "Example",
+                }
+            )
+            for _ in range(50):
+                if client.get("/health").json()["current_url"]:
+                    break
+                time.sleep(0.02)
+            health = client.get("/health").json()
+            assert health["current_url"] == "https://example.com"
+            assert len(health["driven_tabs"]) == 1
+
+            socket.send_json({"event": "tab_closed", "tab": "bridge:7:cc"})
+            for _ in range(50):
+                if not client.get("/health").json()["current_url"]:
+                    break
+                time.sleep(0.02)
+            cleared = client.get("/health").json()
+            assert cleared["current_url"] == ""
+            assert cleared["driven_tabs"] == []

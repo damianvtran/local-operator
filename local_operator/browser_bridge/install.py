@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -90,6 +91,110 @@ def health(port: int = DEFAULT_PORT, timeout: float = 3.0) -> dict[str, Any] | N
             return value if isinstance(value, dict) else None
     except Exception:  # noqa: BLE001 - a probe answers absent rather than raising
         return None
+
+
+def stale_heartbeat_age(root: Path | None = None) -> float | None:
+    """Heartbeat age when the discovery file is stale but the daemon is alive.
+
+    ``None`` whenever there is nothing worth reporting (no daemon, or a fresh
+    heartbeat). This is the diagnostic that makes the incident's central
+    contradiction visible: ``status`` reads the live socket, every session
+    reads this file, and when the file stops being refreshed the two disagree
+    silently — status says "connected" while every session falls back to cmux.
+    """
+    try:
+        status_value, current = state_store.liveness(root)
+    except Exception:  # noqa: BLE001 - a diagnostic never raises
+        return None
+    if status_value is not state_store.Liveness.STALE or current is None:
+        return None
+    return state_store.heartbeat_age(current)
+
+
+def repair(port: int | None = None, root: Path | None = None) -> dict[str, Any]:
+    """Reconcile the daemon's advertised state against reality.
+
+    The user's remedy in the incident was "there isn't one": the bridge
+    advertised a tab that no longer existed and a heartbeat that had stopped,
+    and the only lever anyone had was killing a healthy daemon. This asks the
+    daemon to prune what reality does not back and to republish a fresh
+    heartbeat, then reports what it cleaned.
+
+    Safe while sessions are live: the daemon's ``/repair`` closes no tab,
+    cancels no in-flight command, and touches no pairing.
+    """
+    current = state_store.read(root)
+    resolved_port = port or (current.port if current else DEFAULT_PORT)
+    steps: list[str] = []
+    if current is None:
+        return {
+            "ok": False,
+            "steps": steps,
+            "error": "no bridge daemon state found; 'lop browser install' starts it.",
+        }
+    age = state_store.heartbeat_age(current)
+    steps.append(f"daemon pid {current.pid} on port {resolved_port}, heartbeat {age:.0f}s old")
+    if not state_store.pid_alive(current.pid):
+        return {
+            "ok": False,
+            "steps": steps,
+            "error": (
+                f"daemon pid {current.pid} is not running; run 'lop browser restart' "
+                "to start a fresh one."
+            ),
+        }
+    try:
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{resolved_port}/repair", data=b"", method="POST"
+        )
+        with urllib.request.urlopen(request, timeout=5.0) as response:
+            payload: Any = json.loads(response.read().decode())
+    except urllib.error.HTTPError as error:
+        if error.code == 404:
+            # The daemon answers, but predates /repair. Restarting is the right
+            # advice and the reason matters: this is exactly the long-running
+            # daemon whose heartbeat died, so it is the one most likely to be
+            # running older code than the CLI asking it to repair itself.
+            return {
+                "ok": False,
+                "steps": steps,
+                "error": (
+                    f"the daemon on port {resolved_port} is running a build with no "
+                    "/repair endpoint (it predates this fix). Run 'lop browser restart' "
+                    "to load the current build."
+                ),
+            }
+        return {
+            "ok": False,
+            "steps": steps,
+            "error": f"daemon returned HTTP {error.code} on port {resolved_port}.",
+        }
+    except Exception as error:  # noqa: BLE001 - report, do not raise, at a CLI edge
+        return {
+            "ok": False,
+            "steps": steps,
+            "error": (
+                f"daemon is not answering on port {resolved_port} ({error}); "
+                "run 'lop browser restart'."
+            ),
+        }
+    cleared = payload.get("cleared_tabs") or []
+    if cleared:
+        for url in cleared:
+            steps.append(f"cleared phantom driven tab: {url}")
+    else:
+        steps.append("no phantom driven tabs to clear")
+    steps.append(f"driven tabs now: {payload.get('driven_tabs', 0)}")
+    if payload.get("heartbeat_republished"):
+        fresh = state_store.read(root)
+        refreshed = state_store.heartbeat_age(fresh) if fresh else None
+        steps.append(
+            "heartbeat republished"
+            + (f" (now {refreshed:.0f}s old)" if refreshed is not None else "")
+        )
+    else:
+        steps.append("heartbeat could NOT be republished — check disk space and permissions")
+    return {"ok": True, "steps": steps, "error": ""}
 
 
 def install(port: int = DEFAULT_PORT, *, dry_run: bool = False) -> dict[str, object]:
