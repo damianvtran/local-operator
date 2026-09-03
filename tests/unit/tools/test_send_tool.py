@@ -259,6 +259,11 @@ async def test_ambiguous_target_returns_candidates_and_asks_for_a_pid() -> None:
     assert "retry with pid=<n>" in result.text
     assert "multi session 0" in result.text
     assert "multi session 1" in result.text
+    # Review round 1, BLOCKER-2: the minimal edit a model makes to its previous
+    # call is to KEEP `target` and add `pid`, which the conflict rule now
+    # refuses. The instruction must name the removal, or it teaches the error.
+    assert "drop `target`" in result.text
+    assert "passing both is refused" in result.text
 
 
 @pytest.mark.asyncio

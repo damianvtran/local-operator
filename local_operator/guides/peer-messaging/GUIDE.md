@@ -213,31 +213,58 @@ sessions, `lop send` prints the candidates and exits non-zero asking you to
 disambiguate with `--pid`. If the only match is `wedged`, it says so rather
 than hanging on a dial.
 
-**With `--pid` or `--session`, pipe the body — a lone positional is read as the
-target, not the message.** `send` declares `target` and `message` as two
-optional positionals, so a *single* positional alongside `--pid`/`--session`
-binds to `target`, leaving `message` empty; the command then looks for a body
-on stdin, finds a terminal, and exits 1 with `no message given`. Nothing is
-delivered. Piping the body is the clean form:
+**Address the session exactly one way.** A `--pid`/`--session` selector already
+names the recipient, so a positional alongside one is the MESSAGE, not a second
+address:
 
 ```
-echo "the deploy finished; verify prod" | lop send --pid 12345 --wake   # works
-echo "gates are green" | lop send --session 7c44b23dc86f                # works
-lop send --pid 12345 --wake "the deploy finished; verify prod"          # exits 1
+lop send --pid 12345 "the deploy finished; verify prod"          # body
+lop send --pid 12345 --wake "the deploy finished; verify prod"   # body
+lop send "release cutter" "the deploy finished; verify prod"     # target + body
 ```
 
-A *second* positional does fill `message`, so a placeholder target delivers —
-the selector wins, because the resolver checks `--pid`/`--session` before it
-ever looks at `target`:
+Passing a positional *target* **and** a selector names two different sessions,
+so it is refused rather than resolved — the selector would otherwise win
+silently and deliver to a session the command does not appear to name:
 
 ```
-lop send ignored "the deploy finished; verify prod" --pid 12345         # works
+$ lop send "release cutter" "gates are green" --pid 12345
+ambiguous recipient: 'release cutter' and --pid 12345 name different sessions.
+Drop one — `lop send --pid 12345 'gates are green'` to address by pid, or
+`lop send 'release cutter' 'gates are green'` to address by name
 ```
 
-That works, but it reads as though it addresses `ignored`; prefer the piped
-form. The plain positional form (`lop send "<target>" "message"`) is unaffected
-— both positionals are filled, so it stays the form to reach for at a
-terminal.
+Nothing is delivered there and the exit status is 1. `--pid` and `--session`
+are mutually exclusive too; argparse rejects that pair at parse time. When a
+substring matches several sessions, `lop send` lists them and asks you to
+**replace** the target with a `--pid` — appending the flag to the command you
+just typed produces exactly the refused form above.
+
+A blank selector (`--session ''`) is an error rather than a silent fallback to
+substring matching; drop the flag if you meant to address by name.
+
+**Pipe the body when it is long** or when it comes out of another command — not
+because the argument form does not work. Both forms are fully supported:
+
+```
+echo "the deploy finished; verify prod" | lop send --pid 12345 --wake
+git log -1 --stat | lop send "release cutter"
+```
+
+**Do not pipe a body and type one at the same time.** With a selector, a
+positional and a piped body are two candidate messages, so `lop send` refuses
+rather than picking a winner — silently discarding the payload you did not get
+is worse than a retype:
+
+```
+$ git log -1 --stat | lop send "release cutter" --pid 12345
+ambiguous body: 'release cutter' and the piped input both look like the message.
+Drop one — `lop send --pid 12345` to send the piped input, or
+`lop send --pid 12345 'release cutter'` with nothing piped to send 'release cutter'
+```
+
+Without a selector both positional slots are filled, so `lop send NAME "body"`
+with a pipe is unambiguous and the typed body wins.
 
 ### What the human sees
 
@@ -258,9 +285,12 @@ lop send "peer-send design" "gates are green, ready for review"
 # Wake an idle session to act now
 lop send "release cutter" --wake "the deploy finished; verify prod"
 
-# Wake an idle session addressed by exact pid — body on stdin, per the
-# grammar note above
-echo "the deploy finished; verify prod" | lop send --pid 12345 --wake
+# Wake an idle session addressed by exact pid — with a selector, the single
+# positional IS the body
+lop send --pid 12345 --wake "the deploy finished; verify prod"
+
+# Refused: a positional target AND a selector name two different sessions
+lop send "release cutter" "gates are green" --pid 12345   # exit 1, nothing sent
 
 # Redirect a session mid-turn
 lop send "ingest refactor" --now "hold off — the schema changed"
