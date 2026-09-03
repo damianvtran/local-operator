@@ -322,6 +322,26 @@ each workflow's own `git merge-base --is-ancestor HEAD origin/main` check.
 The launch decision now rides on the reviewed-merge-to-main process plus that
 WIF ref pin.
 
+The environment-scoped variable check is enforced by a **job topology**, not by
+an API call, and removing either half silently disarms it. Each store workflow
+runs a `preflight` job that deliberately has **no `environment:` key**: outside
+the environment a correctly-scoped variable resolves to the empty string, while
+a repository- or organization-scoped one is visible to every job and so resolves
+non-empty and fails the release. The deploying job (`stage`/`promote`) then
+`needs: preflight` and asserts the same names resolve non-empty inside the
+environment. Do not delete the `preflight` job, give it an `environment:`, add
+an `if:`/`continue-on-error:` to either job, or point its checkout at
+`inputs.ref` — each of those removes the only guard against a repo-scoped
+variable steering a release. `extension/tests/release.test.mjs` asserts all of
+this, so a change that breaks the topology fails the extension suite.
+
+The reason it is a topology rather than an API call: `GET
+/repos/{o}/{r}/environments/{env}/variables` requires the `environments=read`
+permission, which a workflow `GITHUB_TOKEN` cannot be granted at all (a
+`permissions: write-all` job still receives 403 and its granted-permission list
+contains no `Environments` entry). See the header of
+`extension/scripts/verify-release-environment.sh`.
+
 Define these environment variables (identifiers, not secrets) on **each** of
 `chrome-web-store` and `chrome-web-store-production`:
 
@@ -353,7 +373,10 @@ account scoped with the same `attribute.repository_id` value. Do **not**
 configure required reviewers on either GitHub environment — the human approval
 gate was removed by operator decision on 2026-09-03 (see above); each
 environment keeps its custom deployment branch policy allowing exactly `main`
-and its environment-scoped variables. Dispatch both workflows from `main` —
+(a policy of type `branch`, never a tag named `main`, and never a glob such as
+`main*`) and its environment-scoped variables. Define the release variables on
+the environment only — defining any of them at repository or organization scope
+fails the `preflight` job by design. Dispatch both workflows from `main` —
 the WIF ref condition and each workflow's own main-ancestry check reject
 anything else.
 
