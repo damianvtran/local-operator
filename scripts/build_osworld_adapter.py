@@ -89,22 +89,27 @@ _ADAPTER_PYPROJECT = (
 )
 
 
-def _adapter_version() -> str:
-    """The adapter distribution version declared in its pyproject.
+def _adapter_version() -> str | None:
+    """The adapter distribution version declared in its pyproject, or None.
 
     Read from source rather than from ``importlib.metadata`` on purpose: this
     script runs from the repository against a workspace that is built BEFORE
     (or without) the wheel being installed into the caller's interpreter, so
     the installed distribution is the wrong authority and may not exist at all.
-    A read failure is not fatal -- ``--version`` is still explicit on the
-    documented command line -- but it must not silently produce a wrong
-    attestation, so the fallback is an obviously-unreal marker.
+
+    Returns None rather than a placeholder when the declaration cannot be read.
+    A placeholder would flow into ``_release_digest`` and mint a real,
+    well-formed workspace attesting a version that does not exist -- and since
+    ``adapter-release.json`` carries ONLY the digest (``discovery`` rejects any
+    other key), the artifact could not record its own doubt even if we wanted
+    it to. An unattributable attestation is worse than no artifact, so the
+    caller refuses to build instead.
     """
 
     try:
         return str(tomllib.loads(_ADAPTER_PYPROJECT.read_text())["project"]["version"])
     except (OSError, KeyError, tomllib.TOMLDecodeError):
-        return "unknown"
+        return None
 
 
 class VerificationFailed(Exception):
@@ -301,16 +306,61 @@ def main(argv: list[str] | None = None) -> int:
         default=Path(os.environ.get("OSWORLD_INPUTS_ROOT", _DEFAULT_INPUTS_ROOT)),
     )
     parser.add_argument("--release-pin", type=Path, default=_DEFAULT_PIN)
-    # Defaults to the adapter's OWN declared version rather than a literal.
-    # The version is an input to ``_release_digest``, so a stale literal here
-    # silently mints a workspace whose release_digest attests a distribution
-    # version that was never built -- a wrong attestation that no digest check
-    # can catch, because every digest is internally consistent with it. Read
-    # from pyproject.toml so the default cannot drift from the wheel again
-    # (it already had: the literal still said 0.1.0 after the 0.1.1 bump).
-    parser.add_argument("--version", default=_adapter_version())
+    # Left with NO argparse default: the adapter's own declared version is
+    # resolved below so that "not passed" stays distinguishable from "passed
+    # a value equal to the default". The version is an input to
+    # ``_release_digest``, so a value that does not match the distribution
+    # actually built mints a workspace attesting a version that never existed
+    # -- a wrong attestation no digest check can catch, because every digest
+    # is internally consistent with it. That already happened once: the
+    # literal default still said 0.1.0 after the 0.1.1 bump.
+    parser.add_argument("--version", default=None)
+    parser.add_argument(
+        "--allow-version-mismatch",
+        action="store_true",
+        help="permit --version to differ from the adapter's declared version "
+        "(for attesting a build of a version other than this tree's)",
+    )
     parser.add_argument("--package-digest", default="0" * 64)
     args = parser.parse_args(argv)
+
+    # Resolve the attested version under one rule: it must agree with what the
+    # tree declares, unless the operator says out loud that it should not.
+    # Building a version OTHER than the tree's is legitimate (re-attesting an
+    # older wheel against the same corpus), but it is a deliberate act, not
+    # something to accept silently -- silently accepting a mismatched value is
+    # the same shape as the stale-default defect this script already had.
+    declared = _adapter_version()
+    version = args.version if args.version is not None else declared
+    if version is None:
+        print(
+            "build_osworld_adapter: cannot determine the adapter version "
+            f"({_ADAPTER_PYPROJECT} is unreadable or declares none) and no "
+            "--version was given. Refusing to build: the version is an input "
+            "to release_digest, and adapter-release.json carries only that "
+            "digest, so the workspace could not record that its attestation "
+            "is unattributable.",
+            file=sys.stderr,
+        )
+        return 2
+    if args.version is not None and declared is not None and args.version != declared:
+        if not args.allow_version_mismatch:
+            print(
+                f"build_osworld_adapter: --version {args.version!r} disagrees with the "
+                f"version the adapter declares ({declared!r} in {_ADAPTER_PYPROJECT}). "
+                "release_digest attests the distribution that was built, so a "
+                "mismatch produces a workspace claiming a version nobody can "
+                "verify. Pass --allow-version-mismatch if that is deliberate.",
+                file=sys.stderr,
+            )
+            return 2
+        # Deliberate and stated: still say so, because the resulting digest is
+        # not reproducible from this tree alone.
+        print(
+            f"build_osworld_adapter: attesting {args.version!r} while this tree "
+            f"declares {declared!r} (--allow-version-mismatch).",
+            file=sys.stderr,
+        )
 
     pin = json.loads(Path(args.release_pin).read_bytes())
     if pin.get("release") != args.benchmark_release:
@@ -331,7 +381,7 @@ def main(argv: list[str] | None = None) -> int:
         out=args.out,
         facts=facts,
         release=args.benchmark_release,
-        version=args.version,
+        version=version,
         package_digest=args.package_digest,
     )
     print(
