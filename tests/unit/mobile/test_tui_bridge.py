@@ -163,7 +163,17 @@ async def test_tui_auto_registers_and_answers_control() -> None:
 
         from local_operator.session.runtime import registry
 
+        # The registrant EXISTING and its record being on disk are two
+        # different async steps: publication is a thread hop, so on a slow
+        # runner the scan lands in between and reads an empty store. Poll for
+        # the state the assertion is about (CI shard 0, 3.12) rather than
+        # betting the first scan wins the race.
         records = registry.scan()
+        for _ in range(50):
+            if records:
+                break
+            await pilot.pause(0.1)
+            records = registry.scan()
         assert records, "no discovery record published"
         record, state = records[0]
         assert state == "live"
