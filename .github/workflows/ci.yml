@@ -179,10 +179,9 @@ jobs:
           "
 
       - name: Run test shard with coverage
-        env:
-          COVERAGE_FILE: .coverage.${{ matrix.python-version }}.${{ matrix.shard }}
         run: |
           pytest $(cat shard_tests.txt | tr '\n' ' ') --cov --cov-fail-under=0 --cov-report=
+          mv .coverage .coverage.${{ matrix.python-version }}.${{ matrix.shard }}
 
       - name: Upload shard coverage data
         uses: actions/upload-artifact@v4
@@ -190,6 +189,7 @@ jobs:
           name: coverage-data-${{ matrix.python-version }}-${{ matrix.shard }}
           path: .coverage.${{ matrix.python-version }}.${{ matrix.shard }}
           retention-days: 1
+          include-hidden-files: true
 
   coverage-report:
     runs-on: ubuntu-latest
@@ -222,6 +222,7 @@ jobs:
 
       - name: Combine coverage and check threshold
         run: |
+          ls -la
           coverage combine .coverage.${{ matrix.python-version }}.*
           coverage report --fail-under=80
           coverage html
