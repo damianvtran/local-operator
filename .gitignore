@@ -10,6 +10,14 @@ __pycache__/
 .DS_Store
 dist/
 node_modules/
+# pnpm's content-addressable store. Normally it lives once under ~/Library or
+# ~/.local/share and never appears here — but pnpm hard-links from the store
+# into node_modules, and hard links cannot cross filesystems, so a checkout on
+# a DIFFERENT filesystem than the home store (a `git worktree add /tmp/...`,
+# which is how this repo is routinely worked) makes pnpm fall back to a local
+# store beside the package. That is 34 MB of regenerable cache that a
+# `git add -A` in such a worktree would otherwise commit.
+.pnpm-store/
 local-operator-extension.zip
 # google-github-actions/auth creates these only when credential-file export is
 # enabled; ignore them defensively so a local workflow experiment cannot commit

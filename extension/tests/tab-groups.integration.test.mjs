@@ -248,3 +248,145 @@ test("ordinary command respects manual ungrouping while resume rejoins", async (
     assert.equal(chrome.groupCalls.length, 2, "explicit resume is the rejoin point");
   } finally { await bundle.close(); chrome.restore(); }
 });
+
+// --- retitle: the late-arriving session title (the `LO · Session` bug) ---
+//
+// A conversation names itself asynchronously, a second or two into its first
+// turn, which is normally AFTER the opening `browser open` created the group.
+// The group therefore latched the open-time label and, for a session that only
+// opened/screenshotted/closed, never issued another command to self-heal on.
+// `retitle` is the host's explicit push for exactly that window.
+
+test("retitle renames a group that latched the label from before naming", async () => {
+  const chrome = installChrome();
+  const bundle = await loadModule();
+  try {
+    const owned = surface(1);
+    chrome.seed(owned, { id: 1, windowId: 1 });
+    // Opened before the title existed: the tool's fallback label is all it had.
+    await bundle.loaded.reconcileTabGroup(owned, params("A", "lop-tabgroup"), true);
+    assert.equal(chrome.groups.get(10).title, "LO · lop-tabgroup");
+
+    const token = `bridge:1:${owned.nonce}`;
+    const result = await bundle.loaded.retitle({
+      tab: token,
+      ...params("A", "Fix tab group naming"),
+    });
+
+    assert.equal(chrome.groups.get(10).title, "LO · Fix tab group naming");
+    assert.equal(result.title, "LO · Fix tab group naming", "reports the applied label");
+    assert.equal(chrome.groupCalls.length, 1, "a rename must not create or rejoin a group");
+    assert.equal(chrome.surface(1).groupAppliedLabel, "LO · Fix tab group naming");
+  } finally { await bundle.close(); chrome.restore(); }
+});
+
+test("retitle leaves a personal group the user moved the tab into alone", async () => {
+  const chrome = installChrome();
+  const bundle = await loadModule();
+  try {
+    const owned = surface(1);
+    chrome.seed(owned, { id: 1, windowId: 1 });
+    await bundle.loaded.reconcileTabGroup(owned, params("A", "Session"), true);
+    chrome.moveToGroup(1, 77);
+    const updatesBefore = chrome.updateCalls.length;
+
+    // Not `explicit`: a rename carries no navigation intent, so it must never
+    // pull a tab back out of a group the user chose for it.
+    const result = await bundle.loaded.retitle({
+      tab: `bridge:1:${owned.nonce}`,
+      ...params("A", "Named later"),
+    });
+
+    assert.equal(chrome.updateCalls.length, updatesBefore, "must not touch a personal group");
+    assert.equal(chrome.groups.get(77).title, "Personal");
+    assert.equal(chrome.groupCalls.length, 1, "must not re-home the tab");
+    // "" means "nothing was renamed", per the handler's contract. The stored
+    // groupAppliedLabel is deliberately NOT cleared on this path (it is how a
+    // later explicit resume recognises the group it once owned), so the handler
+    // must not echo it back as though this call had applied it.
+    assert.equal(result.title, "", "a declined rename reports nothing renamed");
+  } finally { await bundle.close(); chrome.restore(); }
+});
+
+test("retitle carries the same identity boundary as every other command", async () => {
+  const chrome = installChrome();
+  const bundle = await loadModule();
+  try {
+    const mine = surface(1);
+    chrome.seed(mine, { id: 1, windowId: 1 });
+    await bundle.loaded.reconcileTabGroup(mine, params("A", "Mine"), true);
+
+    // A guessed or stale token resolves to nothing rather than to some other
+    // session's tab. Exact-token lookup is the capability boundary here, the
+    // same one command dispatch uses: the nonce is part of the key, so a
+    // handle a session was never given cannot name a surface at all.
+    const missing = await bundle.loaded.retitle({
+      tab: "bridge:1:guessed-nonce",
+      ...params("B", "Stolen"),
+    });
+    assert.equal(missing.title, "");
+    assert.equal(chrome.groups.get(10).title, "LO · Mine");
+
+    // A caller-invented identity is refused: `trustedOwner` requires the
+    // daemon-supplied `session:` requester, which the model cannot forge
+    // because the tool builds it from the host's context, never from an
+    // argument. No requester means no reconcile at all.
+    await bundle.loaded.retitle({
+      tab: `bridge:1:${mine.nonce}`,
+      requester: "spoofed",
+      session_label: "Spoofed",
+    });
+    assert.equal(chrome.groups.get(10).title, "LO · Mine");
+
+    // Holding the EXACT token does re-own the group — deliberately unchanged
+    // from the pre-existing `reconcileCommandTab` behaviour, and not a
+    // widening: that token is already the capability to drive the tab (goto,
+    // click, screenshot), so renaming its chrome is strictly less than what
+    // its holder can already do. Pinned so the equivalence is explicit.
+    await bundle.loaded.retitle({ tab: `bridge:1:${mine.nonce}`, ...params("B", "Handover") });
+    assert.equal(chrome.surface(1).ownerKey, "session:B");
+    assert.equal(chrome.groups.get(10).title, "LO · Handover");
+  } finally { await bundle.close(); chrome.restore(); }
+});
+
+test("retitle stays best-effort when the group APIs are absent or refuse", async () => {
+  for (const options of [{ APIs: false }, { updateReject: true }]) {
+    const chrome = installChrome(options);
+    const bundle = await loadModule();
+    try {
+      const owned = surface(1);
+      chrome.seed(owned, { id: 1, windowId: 1, active: false });
+      await assert.doesNotReject(
+        bundle.loaded.retitle({ tab: `bridge:1:${owned.nonce}`, ...params("A", "Named") }),
+      );
+      assert.equal((await chrome.tabs.get(1)).active, false, "renaming never activates the tab");
+    } finally { await bundle.close(); chrome.restore(); }
+  }
+});
+
+test("an unnamed session's cwd label distinguishes what a bare fallback does not", async () => {
+  const chrome = installChrome();
+  const bundle = await loadModule();
+  try {
+    // The reported bug: three sessions, all unnamed, all sending the bare
+    // fallback, so ordinal de-duplication produced three groups that named
+    // nothing. The tool now sends each session's cwd basename instead, and the
+    // extension carries them through as three distinct base titles.
+    for (const [tabId, owner, label] of [[1, "A", "minervaai"], [2, "B", "local-operator"], [3, "C", "workspace"]]) {
+      const owned = surface(tabId);
+      chrome.seed(owned, { id: tabId, windowId: 1 });
+      await bundle.loaded.reconcileTabGroup(owned, params(owner, label), true);
+    }
+    const titles = [10, 11, 12].map((id) => chrome.groups.get(id).title);
+    assert.deepEqual(titles, ["LO · minervaai", "LO · local-operator", "LO · workspace"]);
+    assert.equal(new Set(titles).size, 3, "distinct sessions must read as distinct groups");
+
+    // The bare fallback still de-duplicates for genuinely label-less sessions.
+    const rootA = surface(4); const rootB = surface(5);
+    chrome.seed(rootA, { id: 4, windowId: 1 }); chrome.seed(rootB, { id: 5, windowId: 1 });
+    await bundle.loaded.reconcileTabGroup(rootA, params("D", ""), true);
+    await bundle.loaded.reconcileTabGroup(rootB, params("E", ""), true);
+    assert.equal(chrome.groups.get(13).title, "LO · Session");
+    assert.equal(chrome.groups.get(14).title, "LO · Session (2)");
+  } finally { await bundle.close(); chrome.restore(); }
+});

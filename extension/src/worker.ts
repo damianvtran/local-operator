@@ -11,7 +11,7 @@ import { clearAllAccessGrants, revokeExactOrigin, revokeLoopbackHost } from "./a
 import { ACCESS_EXPIRY_ALARM } from "./approval-store";
 import { expireAccessRequest, resolveOrigin, restoreAccessQueue, setPendingObserver } from "./origins";
 import { DEFAULT_PORT, getLocal } from "./state";
-import { reconcileCommandTab } from "./tab-groups";
+import { reconcileCommandTab, retitle } from "./tab-groups";
 import {
   RECONNECT_ALARM_NAME,
   RECONNECT_ALARM_PERIOD_MINUTES,
@@ -46,6 +46,10 @@ const HANDLERS: Record<
   request_access: requestAccess,
   await_access: awaitAccess,
   cancel_access: cancelAccessCommand,
+  // Presentation-only rename of an already-open tab's group, for a session
+  // title that arrived after the tab was created. It drives no tab and reads
+  // no page, so unlike every other handler it needs no surface admission.
+  retitle,
 };
 
 // How long a dial may sit unresolved before we force it closed and retry. A
@@ -176,7 +180,11 @@ async function dispatch(request: { id: string; method: string; params: Record<st
   try {
     // Rename propagation is presentation-only and deliberately precedes every
     // owned-tab command; failures never mask the command's real result.
-    if (request.method !== "open") await reconcileCommandTab(request.params);
+    // `retitle` is excluded because reconciling IS its handler — riding this
+    // hook too would run the same serialized reconcile twice per push.
+    if (request.method !== "open" && request.method !== "retitle") {
+      await reconcileCommandTab(request.params);
+    }
     const result = await handler(request.params, request.id);
     // Push the driven page so the daemon (and the Connected popup) can show
     // the human what the agent is on (finding U3).

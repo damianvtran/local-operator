@@ -708,6 +708,16 @@ class ToolContext(BaseModel):
     # and had its tools denied with no prompt shown to anyone.
     job_id: str | None = None
     has_ui: bool = False
+    # Live read of ``session_name``, for the display-only consumers that must
+    # not see a stale title. ``session_name`` above is a SNAPSHOT: the session
+    # rebuilds this context once per turn (``Session._build_tool_context``),
+    # and a conversation is titled ASYNCHRONOUSLY a second or two into its
+    # first turn — so a tool that read the snapshot during the very turn the
+    # title landed got the empty string it was built with. Every browser tab
+    # group opened in an opening turn latched the bare fallback label that way.
+    # Optional and display-only for the same reason ``session_name`` is:
+    # identity and authorization continue to use ``session_id``.
+    session_name_provider: Callable[[], str] | None = None
     # Resolver hook for lazy internal URLs (``skill://`` and ``guide://``);
     # returns content or None when the URL is not handled. Installed by session.
     resolve_internal_url: Callable[[str], str | None] | None = None

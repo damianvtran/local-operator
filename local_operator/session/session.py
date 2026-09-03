@@ -3252,8 +3252,58 @@ class Session:
                     get_recorder().note_session_name(self.session_id, stored)
                 except Exception:  # noqa: BLE001 — analytics is best-effort
                     logger.debug("analytics: note_session_name failed", exc_info=True)
+            # Rename the browser tab group this session already opened. The
+            # title normally lands a second or two INTO the first turn, which is
+            # after an opening "look at this page" created the group, so without
+            # a push the group keeps the label the session had at open time.
+            # Every ordinary browser command reconciles the group as a side
+            # effect, but open -> screenshot -> close issues none, so that
+            # session never self-heals. Fire-and-forget for the same reason the
+            # journal write is: this runs on the TUI's synchronous paint path
+            # (``_store_title``, ``_cmd_rename``), which cannot await, and tab
+            # chrome must never delay or fail a rename.
+            self._push_browser_title()
         self.refresh_frontend_state()
         return stored
+
+    def _push_browser_title(self) -> None:
+        """Best-effort rename of the open browser tab group; never raises.
+
+        Skipped entirely when this session has no tab open, which is the common
+        case: a session that never browses issues no RPC at all. The import is
+        function-local to match ``_close_browser_surface`` next door rather than
+        to save anything — ``tools.builtin`` is already imported at module scope
+        here (see the top of this file), so unlike that sibling's claim there is
+        no import cost to defer (QA round 1).
+        """
+        if not self._browser.surface_id:
+            return
+
+        async def _push() -> None:
+            try:
+                from local_operator.tools.builtin import retitle_browser_surface
+
+                await retitle_browser_surface(self._browser, self._build_tool_context())
+            except Exception:  # noqa: BLE001 — tab chrome is never worth a failure
+                logger.debug("could not push the session title to the browser", exc_info=True)
+
+        # Through the tracked task group, so disposal cancels it: unlike the
+        # title's journal write, a rename that misses because the session is
+        # closing costs nothing — the tab is going away with it.
+        try:
+            self._spawn_background(_push())
+        except RuntimeError:
+            # No running loop (a session constructed and named outside one) —
+            # the same case ``_spawn_conversation_name_write`` guards one method
+            # below, and for the same reason: ``_spawn_background`` falls back
+            # to ``ensure_future``, which raises without a loop. The guard has
+            # to sit at the SCHEDULING call, because the swallow inside
+            # ``_push`` is inside the coroutine and this raises before it ever
+            # runs. A rename is decoration; ``set_conversation_name`` runs on
+            # the TUI's synchronous paint path and must return the stored title
+            # rather than take its caller down with it. ``_spawn_background``
+            # closes both coroutines before re-raising, so nothing leaks.
+            logger.debug("no running loop; skipped the browser tab-group rename")
 
     def _spawn_conversation_name_write(self) -> None:
         """Start (or coalesce onto) the background journal write for the title.
@@ -4989,7 +5039,22 @@ class Session:
         if self._task_group is not None:
             task = self._task_group.create_task(_guarded())
         else:
-            task = asyncio.ensure_future(_guarded())
+            wrapper = _guarded()
+            try:
+                task = asyncio.ensure_future(wrapper)
+            except RuntimeError:
+                # No running loop: ``ensure_future`` raises, and BOTH coroutines
+                # are already built — the wrapper here and the ``coro`` the
+                # caller handed us. Closing them is the same courtesy the
+                # disposed branch above pays, and for the same reason: an
+                # un-awaited coroutine is reported by asyncio at GC time,
+                # blaming the session for work it never agreed to run. Re-raised
+                # afterwards so a caller that genuinely needs a loop still hears
+                # about it; the callers for which this is merely decoration
+                # (``_push_browser_title``) catch it themselves.
+                wrapper.close()
+                coro.close()
+                raise
         self._background_tasks.add(task)
 
         def _on_done(finished: asyncio.Task[Any]) -> None:
@@ -5022,6 +5087,13 @@ class Session:
             # Re-read the live holder every turn so generated, user-set, and
             # resumed titles reach display-only browser metadata after renames.
             session_name=self.conversation_name,
+            # Per-turn is not enough on its own: this context is a SNAPSHOT
+            # taken once at turn start, and the naming errand lands a second or
+            # two into the FIRST turn — so a browse in that turn read "" even
+            # after the title existed, and the tab group latched the fallback
+            # label for the life of the tab. The callable re-reads the holder at
+            # tool-call time. Display-only, like ``session_name`` itself.
+            session_name_provider=lambda: self.conversation_name,
             agent_id=self._agent_id,
             has_ui=self._has_ui,
             resolve_internal_url=self._skill_resolver,

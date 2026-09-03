@@ -24,6 +24,7 @@ and each has a test below:
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
 import time
 from pathlib import Path
@@ -433,3 +434,172 @@ async def test_a_resumed_session_findable_by_either_name_after_reindex(tmp_path)
     digests = build_index(tmp_path, [rows[0].id])
     assert search_digests(digests, "classifier") == {rows[0].id}
     assert search_digests(digests, "load test review") == {rows[0].id}
+
+
+@pytest.mark.asyncio
+async def test_a_landing_title_renames_an_open_browser_tab_group(tmp_path, monkeypatch) -> None:
+    """The title has to reach browser chrome that was created before it existed.
+
+    A conversation names itself a second or two INTO its first turn, which is
+    normally after an opening "look at this page" already created the tab group
+    — so the group latched the label the session had at open time (the bare
+    fallback) and, for an open→screenshot→close session, no later command ever
+    came along to reconcile it. Three concurrent sessions read ``LO · Session``,
+    ``LO · Session (2)`` and ``LO · Session (3)`` for exactly that reason.
+    """
+    pushed: list[tuple[str, str]] = []
+
+    async def fake_retitle(state: Any, context: Any) -> None:
+        pushed.append((state.surface_id, context.session_name))
+
+    monkeypatch.setattr("local_operator.tools.builtin.retitle_browser_surface", fake_retitle)
+
+    session = _session(tmp_path)
+    await session.async_init()
+    session._browser.surface_id = "bridge:5:n0nce"
+
+    session.set_conversation_name("Fix the tab groups", user_set=False)
+    # Fire-and-forget through the session's task group: the rename must not sit
+    # in front of the paint path that stored the title.
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert pushed == [("bridge:5:n0nce", "Fix the tab groups")]
+
+    # A no-op store (same name again) journals nothing and pushes nothing —
+    # otherwise every turn's re-title check would re-push an unchanged label.
+    pushed.clear()
+    session.set_conversation_name("Fix the tab groups", user_set=False)
+    await asyncio.sleep(0)
+    assert pushed == []
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_session_with_no_open_tab_pushes_no_rename(tmp_path, monkeypatch) -> None:
+    """The overwhelmingly common case must cost nothing — not even the import."""
+    called = False
+
+    async def fake_retitle(state: Any, context: Any) -> None:
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr("local_operator.tools.builtin.retitle_browser_surface", fake_retitle)
+    session = _session(tmp_path)
+    await session.async_init()
+    session.set_conversation_name("No browsing here", user_set=False)
+    await asyncio.sleep(0)
+    assert called is False
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_failing_rename_never_costs_the_title(tmp_path, monkeypatch) -> None:
+    """Tab chrome is presentation; a push that blows up must not lose the name."""
+
+    async def boom(state: Any, context: Any) -> None:
+        raise RuntimeError("extension went away")
+
+    monkeypatch.setattr("local_operator.tools.builtin.retitle_browser_surface", boom)
+    session = _session(tmp_path)
+    await session.async_init()
+    session._browser.surface_id = "bridge:5:n0nce"
+    stored = session.set_conversation_name("Survives the failure", user_set=True)
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert stored == "Survives the failure"
+    assert session.conversation_name == "Survives the failure"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_tool_context_reads_the_live_title_not_a_stale_snapshot(tmp_path) -> None:
+    """``_build_tool_context`` is a per-TURN snapshot, so the browser label has
+    to reach through it to the live holder — that is the latch race itself."""
+    session = _session(tmp_path)
+    await session.async_init()
+    context = session._build_tool_context()
+    assert context.session_name == ""
+    assert context.session_name_provider is not None
+    assert context.session_name_provider() == ""
+
+    # Named after the context was built, exactly as the naming errand does.
+    session.set_conversation_name("Named mid-turn", user_set=False)
+    assert context.session_name == "", "the snapshot itself is expected to be stale"
+    assert context.session_name_provider() == "Named mid-turn"
+    await session.dispose()
+
+
+def _clear_the_thread_event_loop() -> None:
+    """Make "no running loop" a PRECONDITION rather than an inherited accident.
+
+    ``asyncio.ensure_future`` raises without a loop only on Python 3.14 (the
+    runtime the operator actually runs); on 3.12/3.13 it raises just when no
+    loop is *set on the thread*. The unit matrix is 3.12-only, where these
+    guards were therefore armed purely by ``pytest-asyncio`` clearing the loop
+    after some earlier async test — so they caught the regression by FILE ORDER,
+    and running either test in isolation, or reordering it ahead of the async
+    ones, would have silently disarmed it on CI while it still fired on 3.14
+    (QA round 2, Q6).
+
+    Clearing it here makes the condition explicit on every interpreter and
+    ordering. Restoring is unnecessary: pytest-asyncio installs a fresh loop for
+    each async test, and the sync tests here never want one.
+    """
+    asyncio.set_event_loop(None)
+
+
+def test_naming_a_browsing_session_outside_a_loop_does_not_raise(tmp_path) -> None:
+    """A rename must never take down its caller for want of an event loop.
+
+    Deliberately NOT ``async``: the whole point is the loop-less case.
+    ``set_conversation_name`` is called from the TUI's SYNCHRONOUS paint path
+    (``_store_title``, ``_cmd_rename``), and a session can be constructed and
+    named outside a running loop — which is exactly the case
+    ``_spawn_conversation_name_write`` has always guarded. The browser rename
+    reaches ``_spawn_background`` -> ``asyncio.ensure_future``, which raises
+    ``RuntimeError`` there, and the swallow inside the pushed coroutine cannot
+    help because the raise happens at SCHEDULING time, before it ever runs.
+
+    Regression guard: on the first draft of this feature the call below raised
+    ``RuntimeError: There is no current event loop`` where ``main`` returned the
+    title, for any session that had a browser tab open.
+    """
+    _clear_the_thread_event_loop()
+    session = _session(tmp_path)
+    # A session that IS browsing: the guard only matters once a surface exists,
+    # because the no-tab path returns before it ever tries to schedule.
+    session._browser.surface_id = "bridge:5:n0nce"
+
+    stored = session.set_conversation_name("Named with no loop", user_set=True)
+
+    assert stored == "Named with no loop"
+    assert session.conversation_name == "Named with no loop"
+
+
+def test_a_loopless_spawn_leaves_no_unawaited_coroutine(tmp_path, recwarn) -> None:
+    """The declined rename must not be reported by asyncio at GC time.
+
+    ``_spawn_background`` builds its ``_guarded`` wrapper BEFORE calling
+    ``ensure_future``, so a raise there stranded two coroutines — the wrapper
+    and the caller's — and Python blames the session for work it deliberately
+    declined to schedule. Both are closed on that path now; this pins it,
+    because an un-awaited-coroutine warning surfaces at an unrelated GC point
+    and is miserable to trace back.
+    """
+    _clear_the_thread_event_loop()
+    session = _session(tmp_path)
+    session._browser.surface_id = "bridge:5:n0nce"
+
+    session.set_conversation_name("Named with no loop", user_set=True)
+    gc.collect()
+
+    unawaited = [
+        w
+        for w in recwarn.list
+        if issubclass(w.category, RuntimeWarning) and "never awaited" in str(w.message)
+        # The title's own journal write has its own long-standing guard with the
+        # same shape; this test is about the browser rename's coroutines.
+        and "_persist_conversation_name" not in str(w.message)
+    ]
+    assert unawaited == [], [str(w.message) for w in unawaited]
