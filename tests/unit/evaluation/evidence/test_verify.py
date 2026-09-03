@@ -15,6 +15,8 @@ from local_operator.evaluation.evidence.models import (
     CleanupPayload,
     ContextCompactionPayload,
     EnvironmentStepPayload,
+    EventKind,
+    EventPayload,
     EventRecord,
     FinalizationIntent,
     LifecycleTransitionPayload,
@@ -863,3 +865,183 @@ print(json.dumps(loaded))
             "local_operator.evaluation",
         ):
             assert "local_operator.evaluation.evidence.models" not in result.stdout
+
+
+def _interrupted_bundle(
+    tmp_path: Path,
+    *,
+    failure_kind: str | None,
+    scored: bool = False,
+) -> Path:
+    """A bundle whose last step is an ordinary non-terminal one.
+
+    ``failure_kind`` None models an episode claiming it ended deliberately;
+    a value models one that was interrupted (crash, outage, cancel).
+    """
+
+    root = tmp_path / "bundle"
+    clock = iter(range(1, 1000))
+    with EvidenceWriter.create(root, manifest(), RedactionSet.from_resolved_values(())) as writer:
+        action = writer.publish_artifact(b"{}", media_type="application/json")
+
+        def at() -> int:
+            return next(clock)
+
+        def append(kind: EventKind, payload: EventPayload) -> None:
+            moment = at()
+            writer.append(kind, payload, monotonic_ns=moment, wall_time_ms=moment)
+
+        append(
+            "preflight",
+            PreflightPayload(
+                sealed_preflight_id=DIGEST, plan_id=DIGEST, receipt_ids=(), passed=True
+            ),
+        )
+        append(
+            "budget_commitment",
+            BudgetCommitmentPayload(
+                commitment_id=DIGEST,
+                budget_id=manifest().budget_id,
+                reservation_ids=(),
+                reserved_summary_digest=DIGEST,
+            ),
+        )
+        append(
+            "lifecycle_transition",
+            LifecycleTransitionPayload(
+                previous_state_id=None, state_id=DIGEST, state="running", commitment_id=DIGEST
+            ),
+        )
+        append("observation", ObservationPayload(observation_id="obs-0", sequence=0))
+        append(
+            "action_batch",
+            ActionBatchPayload(
+                action_batch_id="batch-0",
+                observation_id="obs-0",
+                action_count=1,
+                action_artifact=action,
+            ),
+        )
+        append(
+            "environment_step",
+            EnvironmentStepPayload(
+                step_id="step-0",
+                action_batch_id="batch-0",
+                receipt_id=DIGEST,
+                input_observation_id="obs-0",
+                output_observation_id="obs-1",
+                terminated=False,
+                truncated=False,
+            ),
+        )
+        append("observation", ObservationPayload(observation_id="obs-1", sequence=1))
+        score = (
+            ScoreArtifact(status="scored", binary=1)
+            if scored
+            else ScoreArtifact(status="unscored", reason="crash")
+        )
+        moment = at()
+        writer.begin_finalization(
+            "final",
+            "score-op" if scored else None,
+            (
+                FinalizationIntent(kind="score", scorer_id="scorer", scorer_version="1")
+                if scored
+                else FinalizationIntent(kind="unscored")
+            ),
+            monotonic_ns=moment,
+            wall_time_ms=moment,
+        )
+        if scored:
+            moment = at()
+            writer.record_scoring_result(
+                ScoringResultPayload(
+                    finalization_id="final", scoring_operation_id="score-op", score=score
+                ),
+                monotonic_ns=moment,
+                wall_time_ms=moment,
+            )
+        moment = at()
+        writer.record_reconciliation(
+            ReconciliationPayload(
+                reconciliation_id=DIGEST,
+                budget_id=manifest().budget_id,
+                commitment_id=DIGEST,
+                reportable=False,
+                provider_cost_microusd=0,
+                environment_cost_microusd=0,
+                total_cost_microusd=0,
+            ),
+            monotonic_ns=moment,
+            wall_time_ms=moment,
+        )
+        moment = at()
+        writer.record_cleanup(
+            CleanupPayload(
+                cleanup_result_id=DIGEST,
+                cleanup_plan_id=DIGEST,
+                receipt_ids=(),
+                rescue_required=False,
+            ),
+            monotonic_ns=moment,
+            wall_time_ms=moment,
+        )
+        moment = at()
+        writer.record_final_lifecycle(
+            LifecycleTransitionPayload(
+                previous_state_id=DIGEST,
+                state_id="a" * 64,
+                state="completed",
+                finalization_id="final",
+                preflight_seal_id=DIGEST,
+                commitment_id=DIGEST,
+                reconciliation_id=DIGEST,
+                reconciliation_reportable=False,
+                score_id=score.score_id,
+                cleanup_result_id=DIGEST,
+                rescue_required=False,
+                failure_kind=failure_kind,  # pyright: ignore[reportArgumentType]
+            ),
+            monotonic_ns=moment,
+            wall_time_ms=moment,
+        )
+    return root
+
+
+@pytest.mark.parametrize("failure_kind", ["crash", "infrastructure", "model", "cancelled"])
+def test_interrupted_episode_keeps_its_non_terminal_last_step(
+    tmp_path: Path, failure_kind: str
+) -> None:
+    """An episode that was stopped cannot also have ended deliberately.
+
+    Regression for ep-ffda3fc88f81: requiring a terminal step or a finish
+    action here made every interrupted run unsealable, so a paid 16-step
+    episode was thrown away wholesale.
+    """
+
+    root = _interrupted_bundle(tmp_path, failure_kind=failure_kind)
+    assert "finalization_invalid" not in codes(root)
+
+
+def test_completed_episode_still_needs_a_deliberate_ending(tmp_path: Path) -> None:
+    """The exemption is keyed on ``failure_kind``, so a clean run is unaffected.
+
+    Mutation guard: dropping the ``failure_kind`` condition and exempting every
+    terminal bundle would let an episode that simply stopped stepping claim a
+    normal completion.
+    """
+
+    root = _interrupted_bundle(tmp_path, failure_kind=None)
+    assert "finalization_invalid" in codes(root)
+
+
+def test_interruption_cannot_launder_a_scored_result(tmp_path: Path) -> None:
+    """A scored result never rides the interruption exemption.
+
+    The runner only seals a score with ``failure_kind=None``; this pins that a
+    bundle claiming BOTH a score and an interruption is still rejected, so the
+    exemption cannot be used to report a truncated run as a real score.
+    """
+
+    root = _interrupted_bundle(tmp_path, failure_kind="crash", scored=True)
+    assert "finalization_invalid" in codes(root)

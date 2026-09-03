@@ -792,7 +792,39 @@ def _verify_semantics(
             issues.error("receipt_binding_invalid", terminal_location)
         if len(terminal_states) != 1:
             issues.error("finalization_invalid", terminal_location)
-        if environment_step_seen and not last_step_terminal and not finish_action_seen:
+        # "Every episode that stepped ended deliberately" holds only for an
+        # episode that was ALLOWED to end deliberately. A run interrupted
+        # mid-loop -- an adapter crash, a provider outage, an operator cancel --
+        # stops after an ordinary non-terminal step, with no terminal step and
+        # no finish action, because the thing that would have produced one is
+        # exactly what broke. Requiring the deliberate ending there made every
+        # such bundle unsealable AND unabandonable, so a real paid episode that
+        # died at step 17 of 60 destroyed the 16 steps of evidence it had already
+        # bought (observed as ep-ffda3fc88f81: `abandonment_failed`, score null,
+        # 37 artifacts stranded). The interruption is recorded by the terminal
+        # snapshot's ``failure_kind``, which the runner sets on precisely the
+        # failure and cancellation paths and leaves None on a clean completion.
+        #
+        # The exemption is deliberately narrower than "failure_kind is set". A
+        # bundle that claims BOTH an interruption and a score would otherwise
+        # launder a run that stopped early into a reportable result -- the
+        # score would be computed over a state the episode never deliberately
+        # reached. An interrupted episode is unscored by construction
+        # (``_finalize_failure`` seals ``ScoreArtifact(status="unscored")``),
+        # so requiring that here costs the real path nothing and keeps the
+        # laundering shape rejected.
+        unscored = (
+            not starts and not results and (outcome is None or outcome.result.status != "scored")
+        )
+        interrupted = (
+            len(terminal_states) == 1 and terminal_states[0].failure_kind is not None and unscored
+        )
+        if (
+            environment_step_seen
+            and not last_step_terminal
+            and not finish_action_seen
+            and not interrupted
+        ):
             issues.error("finalization_invalid", terminal_location)
         if terminal_output_observation is not None and not terminal_output_resolved:
             issues.error("receipt_binding_invalid", terminal_location)
