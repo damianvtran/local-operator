@@ -692,11 +692,18 @@ class RemoteSession:
                 return
             approved = await call_approval_gate(handler, pending.title, pending.detail)
             await client.approval_answer(pending.request_id, approved)
-        except (asyncio.CancelledError, RuntimeError):
+        except (asyncio.CancelledError, RuntimeError, ConnectionError):
             # Cancellation means another front end settled it. RuntimeError is
             # the owner's stale-request answer to the losing race. Both are an
             # ordinary first-valid-answer-wins outcome; the projection removes
             # the card.
+            #
+            # ConnectionError is the STOP path: settling a parked gate wakes
+            # this task, which then tries to post its answer to an owner that
+            # is gone. That is the expected end of a normal /stop, so letting
+            # it escape only reached asyncio's default handler as a
+            # "Task exception was never retrieved" traceback in the log
+            # (round-6 NIT-3).
             pass
         finally:
             if self._gate_key == self._gate_identity(pending):
@@ -737,7 +744,9 @@ class RemoteSession:
                     values[0],
                     question_index=pending.question_index,
                 )
-        except (asyncio.CancelledError, RuntimeError):
+        except (asyncio.CancelledError, RuntimeError, ConnectionError):
+            # Same three outcomes as the approval gate above, including the
+            # stop path's dead-owner post (round-6 NIT-3).
             pass
         finally:
             if self._gate_key == self._gate_identity(pending):

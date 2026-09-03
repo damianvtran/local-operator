@@ -829,3 +829,86 @@ async def test_a_failed_stop_does_not_claim_the_next_one() -> None:
         await pilot.pause()
         painted = [b._text for b in app.query(NoticeBlock) if "was stopped" in b._text]
         assert "from another terminal" in painted[-1], painted
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_session_settles_its_ask_picker() -> None:
+    """A stop settles the ask picker as well as the approval card.
+
+    Round-6 MAJOR-6: the round-5 fix added `_deny_queued_approvals()` without
+    its sibling `_settle_ask_picker()`, so a parked picker survived the stop
+    holding key routing. `enter` then recorded a choice nobody made, and — the
+    worse half — the message typed afterwards was swallowed entirely, with no
+    user block and no refusal, reopening round-4's MAJOR-3 hole for this
+    state. Every other turn-ending path in the app settles these together.
+    """
+    from local_operator.harness.types import AskOption, AskQuestion
+
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _booted(app, pilot, session)
+        question = AskQuestion(
+            id="req-ask-1",
+            question="ship it?",
+            options=[AskOption(label="yes"), AskOption(label="no")],
+        )
+        pending = asyncio.ensure_future(app.request_user_choice([question]))
+        for _ in range(60):
+            await pilot.pause()
+            if app._ask_screen is not None:
+                break
+        assert app._ask_screen is not None, "the picker never mounted"
+
+        app._stopped_session_id = "sess"
+        app._on_watched_session_stopped()
+        for _ in range(6):
+            await pilot.pause()
+        # No key-routing surface survives the session it belongs to.
+        assert app._live_prompt() is None, "a parked prompt outlived the stop"
+        await asyncio.wait_for(pending, 2)
+
+        # And the message typed after the stop is answered, not swallowed.
+        await pilot.press("enter")
+        for _ in range(6):
+            await pilot.pause()
+        notices = [b._text for b in app.query(NoticeBlock) if "was stopped" in b._text]
+        assert notices, "the stop notice never painted"
+
+
+@pytest.mark.asyncio
+async def test_a_mid_turn_stop_does_not_add_a_bare_interrupted_row() -> None:
+    """The per-card mark explains the stop; a standalone row restates it.
+
+    Round-6 MINOR-7: D5-1's one-word fix (keeping the retired-card COUNT that
+    `_on_agent_end` reads) had no test, so reverting it left the whole suite
+    green — which is exactly how the defect was introduced in the first place.
+    """
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _booted(app, pilot, session)
+        # A live tool card, mounted the way the app tracks one.
+        from local_operator.tui.widgets.tool_card import ToolCard
+
+        card = ToolCard("call-1", "bash", {"command": "sleep 30"})
+        app._tool_cards["call-1"] = card
+        app._append_block(card)
+        for _ in range(4):
+            await pilot.pause()
+
+        app._stopped_session_id = "sess"
+        app._on_watched_session_stopped()
+        for _ in range(4):
+            await pilot.pause()
+        # The retired card is what the aborted-turn branch reads to decide it
+        # has already been explained; dropping the count re-adds the bare row.
+        assert app._interrupted_cards >= 1, "the retired card was not counted"
+
+        from local_operator.tui.events import TurnEnded
+
+        app.post_message(TurnEnded(aborted=True, error=None))
+        for _ in range(8):
+            await pilot.pause()
+        bare = [b for b in app.query(NoticeBlock) if b._text == "interrupted"]
+        assert not bare, "a bare interrupted row was added beside the per-card mark"

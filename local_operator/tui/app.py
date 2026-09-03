@@ -3111,14 +3111,31 @@ class OperatorApp(App[None]):
         # viewer with a second bare "interrupted" row where the owner's own
         # /stop settles to one dim receipt.
         self._interrupted_cards = self._retire_live_tool_cards()
-        # A parked gate must not outlive its session. Left live, the docked
-        # card keeps its key routing, so the user's next keystroke is read as
-        # an ANSWER: the `y` of a typed word approved the tool and the
-        # transcript kept a receipt saying so, for a decision nobody made and
-        # an owner that is gone (round-5 MAJOR-4). `_deny_queued_approvals`
-        # rather than `_settle_live_approval` because a stop ENDS the turn —
-        # the asks queued behind the visible one must not mount either.
+        # No parked gate may outlive its session. Left live, a docked card
+        # keeps its key routing, so the user's next keystroke is read as an
+        # ANSWER — the `y` of a typed word approved a tool, and the picker's
+        # `enter` recorded a choice — for a decision nobody made and an owner
+        # that is gone (round-5 MAJOR-4, round-6 MAJOR-6). Worse, the parked
+        # card also swallows the message typed after it, which is the honest
+        # refusal this whole surface exists to deliver.
+        #
+        # The THREE calls are one set, not a list to pick from: they are what
+        # every other turn-ending path here settles together
+        # (`_stop_local_session`, `_reload_session`, the Ctrl+C abort,
+        # `on_unmount`), and this handler is a turn-ending path. Splitting the
+        # set is how the same defect surfaced three rounds running, one branch
+        # over each time — `_live_prompt` names the two key-routing surfaces
+        # and the key prompt parks a login the same way.
+        #
+        # `_deny_queued_approvals` rather than `_settle_live_approval` because
+        # a stop ENDS the turn: the asks queued behind the visible one must
+        # not mount either. `_settle_shell_command` is deliberately NOT here —
+        # a bang-mode job runs in this process against this cwd and is not
+        # ended by the owner's session dying, and this handler is a
+        # synchronous socket callback that cannot await it anyway.
         self._deny_queued_approvals()
+        self._settle_ask_picker()
+        self._settle_key_prompt()
         self._refresh_working_activity()
         self._paint_watched_stop_notice()
 
