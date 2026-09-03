@@ -5454,9 +5454,59 @@ class OperatorApp(App[None]):
                 # when the record is in hand.
                 self._run_session_transition(self._attach_or_refuse(config_dir(), concrete, owner))
                 return
+        self._detach_or_stop_outgoing()
         self._session_factory = lambda: self._resume_factory(resume_id)  # type: ignore[misc]
         notice(f"resuming session {resume_id}…")
         self._run_session_transition(self._reload_session())
+
+    def _detach_or_stop_outgoing(self) -> None:
+        """Decide what happens to the session being LEFT by a /resume.
+
+        Under the viewer model this is a real choice for the first time.
+        Disposing a viewer only closes its socket — the runtime keeps working
+        — so switching conversations no longer ends the one you switch away
+        from. That is the point of a session that outlives the terminal, and
+        it is the default (``session.background_on_resume``).
+
+        Set it False and /resume STOPS the outgoing session instead, for
+        anyone who would rather a conversation they walked away from stop
+        spending tokens. Only a session with a live turn is worth stopping; an
+        idle runtime reaps itself within the drain either way.
+
+        Best-effort throughout: a failure here must never block the resume the
+        user actually asked for.
+        """
+        session = self._session
+        if session is None or not bool(getattr(session, "is_remote", False)):
+            return
+        try:
+            from local_operator.session.runtime.control import (
+                DEFAULT_BACKGROUND_ON_RESUME,
+            )
+
+            # Read at COMMAND time through the same accessor `/fork` uses,
+            # which is what the section's LIVE scope promises: an edit takes
+            # effect on the very next /resume in this same session.
+            section = self._config_values().get("session")
+            configured = DEFAULT_BACKGROUND_ON_RESUME
+            if isinstance(section, dict) and "background_on_resume" in section:
+                configured = bool(section["background_on_resume"])
+        except Exception:  # noqa: BLE001 — an unreadable setting keeps the default
+            configured = True
+        if configured:
+            return
+        probed = getattr(session, "request_stop", None)
+        if not callable(probed):
+            return
+        request_stop = cast(Callable[[], Awaitable[Any]], probed)
+
+        async def stop_outgoing() -> None:
+            try:
+                await request_stop()
+            except Exception:  # noqa: BLE001 — never block the incoming resume
+                logger.debug("stopping the outgoing session failed", exc_info=True)
+
+        self.run_worker(stop_outgoing(), group="resume-stop", exclusive=False)
 
     def _run_session_transition(self, operation: Awaitable[None]) -> None:
         """Run one session replacement behind the standard composer boundary.

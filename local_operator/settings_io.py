@@ -296,6 +296,17 @@ SECTIONS: tuple[Section, ...] = (
         Scope.LIVE,
         "Concurrency cap and the model each effort tier runs on.",
     ),
+    # Its own section rather than a row under "Session", and the reason is the
+    # SCOPE: scope is uniform within a section by construction, "Session" is
+    # NEW_SESSIONS, and these keys take effect on the very next /resume in this
+    # same terminal. Filing a live key under a section labelled "new sessions"
+    # is exactly the painted lie AGENTS.md warns about — split the section.
+    Section(
+        "runtime",
+        "Runtime",
+        Scope.LIVE,
+        "How sessions behave when you leave them.",
+    ),
     # LIVE: the session re-coerces its ``CompactionSettings`` on every change,
     # and all three trigger checks read that attribute at check time.
     Section(
@@ -691,6 +702,20 @@ SETTINGS: tuple[Setting, ...] = (
         default=False,
         help="Write the conversation to disk as it goes.",
         choices=_bool_choices("save automatically", "save on request"),
+    ),
+    # -- runtime ------------------------------------------------------------
+    Setting(
+        key="session.background_on_resume",
+        path=("session", "background_on_resume"),
+        section="runtime",
+        label="Keep working after /resume",
+        kind=Kind.BOOL,
+        default=True,
+        help="Leave a running turn working when you switch away from its session.",
+        choices=_bool_choices(
+            "keep the turn running in the background",
+            "stop the turn when you leave the session",
+        ),
     ),
     # -- subagents ----------------------------------------------------------
     Setting(
