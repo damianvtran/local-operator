@@ -218,7 +218,7 @@ episode needs no environment variables at all:
 python ~/local-operator/scripts/run_episode.py \
     --selector ~/worktrees/osworld/workspaces/0.1.1/selector.json \
     --task-id task_001 \
-    --route openrouter/deepseek/deepseek-v4-flash-vision-exp \
+    --route openrouter/google/gemini-3.8-flash \
     --run-root ~/worktrees/osworld/runs/$(date +%Y%m%d-%H%M%S) \
     --infra AWS_REGION=us-east-1 \
     --infra AWS_SUBNET_ID=subnet-f2f9adad \
@@ -242,8 +242,8 @@ a result and cannot be mistaken for one.
 The sealed `requested_route.model_id` is a **lossless fold** of the model id
 (`RouteIdentity` fields cannot carry `/`): `_` → `__`, `/` → `_s`, anything
 else outside `[A-Za-z0-9.:-]` → `_x<hh>` per UTF-8 byte, so
-`deepseek/deepseek-v4-flash-vision-exp` seals as
-`deepseek_sdeepseek-v4-flash-vision-exp` and `runner.route_ids.unfold_model_id`
+`google/gemini-3.8-flash` seals as
+`google_sgemini-3.8-flash` and `runner.route_ids.unfold_model_id`
 recovers it exactly. The manifest metadata also carries the raw id as
 `route_model_id`, so a reader never has to decode by hand.
 
