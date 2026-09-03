@@ -472,6 +472,26 @@ class TranscriptBlock(Static):
             self._settled_rows_cache = _count_rows(self._content, self.size.width or 80)
         return self._settled_rows_cache
 
+    def _set_authored_height(self, rows: int) -> None:
+        """Pin the block's height to ``rows`` of CONTENT plus its own padding.
+
+        A block that authors its own rows KNOWS its height, so it writes it
+        rather than being measured. The subtlety is that Textual's ``height``
+        is the widget's OUTER height — padding included — while ``rows`` is
+        the text the block just laid out. Writing the bare count under
+        ``display.comfortable_rows`` reserved a padding row without growing
+        the block, so the last row of prose was pushed into the dock's seam
+        and the "exactly one ground row above the composer" guarantee broke
+        (``test_composer_seam``).
+
+        Reading the padding back off ``styles`` rather than knowing the
+        setting keeps the arithmetic honest for free: the stylesheet stays
+        the single place the cell count is declared, and a rule that changes
+        it needs no edit here.
+        """
+        padding = self.styles.padding
+        self.styles.height = rows + padding.top + padding.bottom
+
     def spans_multiple_rows(self) -> bool:
         """True when the block currently renders taller than a single row.
 
@@ -1036,7 +1056,7 @@ class UserBlock(TranscriptBlock):
         body = max((self.size.width or 80) - self.RULE_COLS, self.MIN_BODY)
         gutter = self.RULE + " " * (self.RULE_COLS - cell_len(self.RULE))
         rows = self._rows(body)
-        self.styles.height = len(rows)
+        self._set_authored_height(len(rows))
         # The receipt is the app talking, so it wears the app's receipt ink -
         # the same `muted` the notice tier uses - not the prose ink of the
         # prompt it sits inside. In the user's own colour it read as a second
@@ -1865,7 +1885,7 @@ class PeerMessageBlock(TranscriptBlock):
 
         rows: list[tuple[str, bool]] = [(row, True) for row in header_rows]
         rows.extend((row, False) for row in body_rows)
-        self.styles.height = len(rows)
+        self._set_authored_height(len(rows))
 
         line = Text(no_wrap=True, overflow="ellipsis")
         for index, (row, is_header) in enumerate(rows):
@@ -2392,9 +2412,54 @@ class TranscriptView(ScrollableContainer):
         """Mount a held batch, with ONE settle pass and ONE empty-state remeasure."""
         if not blocks:
             return
+        # Decided BEFORE the mount, not after. The question "was the reader at
+        # the end" has to be asked while the answer still means something: a
+        # batch that grows the extent leaves the viewport measurably far from
+        # the new end, so asking afterwards reports "scrolled up" for a reader
+        # who never moved.
+        was_at_tail = self._tail_anchor.following or self.is_near_bottom()
         self.mount_all(blocks)
         self.call_after_refresh(self._settle_gaps, blocks)
         self._remeasure_empty_state()
+        # Then land on the tail, AFTER the settle pass above.
+        #
+        # `_size_updated` is the anchor for growth that happens while the view
+        # is following, but a replay is not that case: the batch mounts, and
+        # only then does each block author its own height from the rows it
+        # laid out (`_set_authored_height`). Those writes land after the
+        # extent this mount computed, so the viewport is left wherever the
+        # pre-settlement extent put it — which was the tail only because,
+        # before blocks carried padding, the two numbers happened to agree.
+        # Under `display.comfortable_rows` every block is a row taller and a
+        # resumed session opened 30 rows short of its own end.
+        #
+        # Deferred rather than immediate for the reason `_scroll_to_tail`
+        # states in reverse: it scrolls to the extent as measured RIGHT NOW,
+        # so it has to run after the authored heights, not with them.
+        self.call_after_refresh(self._land_on_tail, was_at_tail)
+
+    def _land_on_tail(self, was_at_tail: bool) -> None:
+        """Re-follow the tail once a batch's blocks have authored their heights.
+
+        ``was_at_tail`` is sampled by the caller before the mount, because by
+        the time this runs the extent has already moved out from under the
+        viewport. A reader who deliberately scrolled up before the batch
+        arrived is not overruled; one who never moved is carried to the end.
+
+        Re-ARMS the anchor rather than only scrolling once. A block authors
+        its height from the rows it laid out (``_set_authored_height``), and
+        those writes land across several layout passes — so a single scroll
+        here targets whatever the extent happens to be at this instant and is
+        left behind by the growth that follows. Re-arming hands the job to
+        ``_size_updated``, which is the one place that already follows every
+        extent change and is documented as THE anchor point; the scroll below
+        just lands the current frame so the viewport is never visibly short
+        while the remaining passes settle.
+        """
+        if not was_at_tail:
+            return
+        self._tail_anchor.resync(at_end=True)
+        self._scroll_to_tail()
 
     def prepend_blocks(
         self, blocks: Sequence[TranscriptBlock], *, anchor_offset: float | None = None
