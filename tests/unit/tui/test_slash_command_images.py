@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import base64
 import io
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -31,6 +30,7 @@ from local_operator.agents import AgentEditFields, AgentRegistry
 from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.editor import Editor
+from tests.unit.tui._scratch import scratch_dir
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
 
@@ -95,7 +95,7 @@ async def test_team_request_carries_the_pasted_image(tmp_path) -> None:
     """`/team <name> <request>` sends the screenshot the request cites."""
     path = _png(tmp_path / "shot.png", 1568, 410)
     session = FakeSession()
-    reg = TeamRegistry(Path(tempfile.mkdtemp()))
+    reg = TeamRegistry(scratch_dir())
     reg.create_team(
         TeamEditFields(name="ops", manager="manager", members=[TeamMember(role="coder")])
     )
@@ -136,7 +136,7 @@ async def test_team_without_a_request_sends_nothing(tmp_path) -> None:
     """
     path = _png(tmp_path / "shot.png")
     session = FakeSession()
-    reg = TeamRegistry(Path(tempfile.mkdtemp()))
+    reg = TeamRegistry(scratch_dir())
     reg.create_team(
         TeamEditFields(name="ops", manager="manager", members=[TeamMember(role="coder")])
     )
@@ -174,7 +174,7 @@ async def test_team_request_carries_multiple_images_in_text_order(tmp_path) -> N
     first = _png(tmp_path / "a.png", 40, 20)
     second = _png(tmp_path / "b.png", 80, 60)
     session = FakeSession()
-    reg = TeamRegistry(Path(tempfile.mkdtemp()))
+    reg = TeamRegistry(scratch_dir())
     reg.create_team(
         TeamEditFields(name="ops", manager="manager", members=[TeamMember(role="coder")])
     )
@@ -212,7 +212,7 @@ async def test_team_marker_in_the_name_position_is_not_an_image(tmp_path) -> Non
     """
     path = _png(tmp_path / "shot.png")
     session = FakeSession()
-    reg = TeamRegistry(Path(tempfile.mkdtemp()))
+    reg = TeamRegistry(scratch_dir())
     reg.create_team(
         TeamEditFields(name="ops", manager="manager", members=[TeamMember(role="coder")])
     )
@@ -242,7 +242,7 @@ async def test_agent_message_carries_the_pasted_image(tmp_path) -> None:
     """`/agent <name> <message>` sends the screenshot the message cites."""
     path = _png(tmp_path / "shot.png", 1568, 410)
     session = FakeSession()
-    session.agent_registry = _agent_registry(Path(tempfile.mkdtemp()))
+    session.agent_registry = _agent_registry(scratch_dir())
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(120, 40)) as pilot:
         await _boot(pilot, app)

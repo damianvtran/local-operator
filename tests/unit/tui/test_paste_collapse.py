@@ -20,8 +20,6 @@ synchronously right after posting.
 
 from __future__ import annotations
 
-import tempfile
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -45,6 +43,7 @@ from local_operator.tui.widgets.editor import (
     expand_pastes,
     strip_paste_citations,
 )
+from tests.unit.tui._scratch import scratch_dir
 from tests.unit.tui.conftest import TCSS_PATH
 from tests.unit.tui.test_app_pilot import FakeSession, _factory, _transcript_text
 
@@ -1021,7 +1020,7 @@ async def test_team_request_carries_the_pasted_payload() -> None:
     """
     payload = _lines(40)
     session = FakeSession()
-    registry = TeamRegistry(Path(tempfile.mkdtemp()))
+    registry = TeamRegistry(scratch_dir())
     registry.create_team(
         TeamEditFields(name="ops", manager="manager", members=[TeamMember(role="coder")])
     )

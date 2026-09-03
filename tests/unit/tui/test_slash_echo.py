@@ -16,7 +16,6 @@ to keep a default for the picker fixtures that have no opinion at all.
 from __future__ import annotations
 
 import asyncio
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -30,6 +29,7 @@ from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView, UserBlock
 from local_operator.tui.widgets.usage_panel import UsagePanel
 from local_operator.tui.widgets.welcome import WelcomeView
+from tests.unit.tui._scratch import scratch_dir
 from tests.unit.tui.test_app_pilot import FakeProviderController, FakeSession, _factory
 
 #: The settled policy, one row per registry entry.
@@ -327,8 +327,7 @@ async def test_bare_team_lists_without_a_user_row() -> None:
 
     session = FakeSession()
     # In-memory: point the registry at a throwaway dir via the session.
-    tmp = tempfile.mkdtemp()
-    registry = TeamRegistry(Path(tmp))
+    registry = TeamRegistry(scratch_dir())
     registry.create_team(
         TeamEditFields(
             name="feature-release",
@@ -358,7 +357,7 @@ async def test_team_request_attaches_and_sends() -> None:
     from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
 
     session = FakeSession()
-    registry = TeamRegistry(Path(tempfile.mkdtemp()))
+    registry = TeamRegistry(scratch_dir())
     registry.create_team(
         TeamEditFields(
             name="feature-release",
@@ -397,7 +396,7 @@ async def test_inline_team_reassembles_to_the_front_and_then_sends_under_the_man
     from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
 
     session = FakeSession()
-    registry = TeamRegistry(Path(tempfile.mkdtemp()))
+    registry = TeamRegistry(scratch_dir())
     registry.create_team(
         TeamEditFields(
             name="feature-release",
@@ -461,7 +460,7 @@ async def test_completing_a_team_name_keeps_the_parked_hint_in_the_real_app() ->
     from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
 
     session = FakeSession()
-    registry = TeamRegistry(Path(tempfile.mkdtemp()))
+    registry = TeamRegistry(scratch_dir())
     registry.create_team(
         TeamEditFields(name="security", manager="manager", members=[TeamMember(role="coder")])
     )
@@ -493,7 +492,7 @@ async def test_session_adoption_catches_up_team_picker_and_name_highlight() -> N
     from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
 
     session = FakeSession()
-    registry = TeamRegistry(Path(tempfile.mkdtemp()))
+    registry = TeamRegistry(scratch_dir())
     registry.create_team(
         TeamEditFields(
             name="lopdev",
@@ -625,7 +624,7 @@ def _picker_geometry(
 async def test_session_adoption_catches_up_agent_picker_without_geometry_change() -> None:
     """U2-1: `/agent aud` reserves one row until the registry arrives."""
     session = FakeSession()
-    session.agent_registry = _agent_registry(tempfile.mkdtemp())
+    session.agent_registry = _agent_registry(str(scratch_dir()))
     release = asyncio.Event()
 
     async def delayed_factory() -> FakeSession:
@@ -703,10 +702,10 @@ async def test_pending_name_tab_is_noop_then_completes_after_adoption(
     from local_operator.teams import TeamEditFields, TeamRegistry
 
     session = FakeSession()
-    teams = TeamRegistry(Path(tempfile.mkdtemp()))
+    teams = TeamRegistry(scratch_dir())
     teams.create_team(TeamEditFields(name="lopdev", manager="manager"))
     session.team_registry = teams
-    session.agent_registry = _agent_registry(tempfile.mkdtemp())
+    session.agent_registry = _agent_registry(str(scratch_dir()))
     release = asyncio.Event()
 
     async def delayed_factory() -> FakeSession:
@@ -747,10 +746,10 @@ async def test_pending_name_enter_is_noop_until_rows_arrive(command: str, query:
     from local_operator.teams import TeamEditFields, TeamRegistry
 
     session = FakeSession()
-    teams = TeamRegistry(Path(tempfile.mkdtemp()))
+    teams = TeamRegistry(scratch_dir())
     teams.create_team(TeamEditFields(name="lopdev", manager="manager"))
     session.team_registry = teams
-    session.agent_registry = _agent_registry(tempfile.mkdtemp())
+    session.agent_registry = _agent_registry(str(scratch_dir()))
     release = asyncio.Event()
 
     async def delayed_factory() -> FakeSession:
@@ -817,7 +816,7 @@ async def test_pending_name_row_collapses_on_escape_and_stays_dismissed_after_ad
     from local_operator.teams import TeamEditFields, TeamRegistry
 
     session = FakeSession()
-    registry = TeamRegistry(Path(tempfile.mkdtemp()))
+    registry = TeamRegistry(scratch_dir())
     registry.create_team(TeamEditFields(name="lopdev", manager="manager"))
     session.team_registry = registry
     release = asyncio.Event()
@@ -864,7 +863,7 @@ async def test_adopted_empty_roster_does_not_leave_a_pending_name_row() -> None:
     from local_operator.teams import TeamRegistry
 
     session = FakeSession()
-    session.team_registry = TeamRegistry(Path(tempfile.mkdtemp()))
+    session.team_registry = TeamRegistry(scratch_dir())
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(120, 40)) as pilot:
         await _boot(pilot, app)
@@ -894,7 +893,7 @@ async def test_a_second_inline_command_of_the_same_kind_is_plain_argument_text()
     from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
 
     session = FakeSession()
-    registry = TeamRegistry(Path(tempfile.mkdtemp()))
+    registry = TeamRegistry(scratch_dir())
     registry.create_team(
         TeamEditFields(name="alpha", manager="manager", members=[TeamMember(role="coder")])
     )
@@ -989,7 +988,7 @@ async def test_bare_agent_lists_without_a_user_row() -> None:
     specialists appear — a plain conversational agent stays private."""
 
     session = FakeSession()
-    session.agent_registry = _agent_registry(tempfile.mkdtemp())
+    session.agent_registry = _agent_registry(str(scratch_dir()))
     app = OperatorApp(lambda: _factory(session))
     # Tall on purpose: the listing carries the six packaged starters too, and
     # the transcript keeps scrolled to the bottom, so a short frame would have
@@ -1012,7 +1011,7 @@ async def test_agent_name_alone_attaches_without_a_turn() -> None:
     """`/agent <name>` adopts the profile and prints the notice — no prompt."""
 
     session = FakeSession()
-    session.agent_registry = _agent_registry(tempfile.mkdtemp())
+    session.agent_registry = _agent_registry(str(scratch_dir()))
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(120, 40)) as pilot:
         await _boot(pilot, app)
@@ -1037,7 +1036,7 @@ async def test_agent_message_attaches_and_sends() -> None:
     a turn — the `/team <name> <request>` shape, including a specialist."""
 
     session = FakeSession()
-    session.agent_registry = _agent_registry(tempfile.mkdtemp())
+    session.agent_registry = _agent_registry(str(scratch_dir()))
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(120, 40)) as pilot:
         await _boot(pilot, app)
@@ -1054,7 +1053,7 @@ async def test_agent_rejects_unknown_and_private_names() -> None:
     exact name must not be enough to pull its prompt into this session."""
 
     session = FakeSession()
-    session.agent_registry = _agent_registry(tempfile.mkdtemp())
+    session.agent_registry = _agent_registry(str(scratch_dir()))
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(120, 40)) as pilot:
         await _boot(pilot, app)
@@ -1073,7 +1072,7 @@ async def test_agent_clear_detaches_the_active_profile() -> None:
     back on its base instructions. `clear` is the detach verb, not a name to
     look up, so nothing is "attached" by it."""
     session = FakeSession()
-    session.agent_registry = _agent_registry(tempfile.mkdtemp())
+    session.agent_registry = _agent_registry(str(scratch_dir()))
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(120, 40)) as pilot:
         await _boot(pilot, app)
@@ -1103,7 +1102,7 @@ async def test_agent_none_is_an_alias_for_clear() -> None:
     """`/agent none` detaches too, so a user reaching for either word lands on
     base instructions rather than an 'unknown agent' warning."""
     session = FakeSession()
-    session.agent_registry = _agent_registry(tempfile.mkdtemp())
+    session.agent_registry = _agent_registry(str(scratch_dir()))
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(120, 40)) as pilot:
         await _boot(pilot, app)
@@ -1122,7 +1121,7 @@ async def test_agent_with_no_instructions_says_nothing_was_applied() -> None:
     NOT claim to be active — the notice states nothing was applied, and with a
     message the message is still sent (labelled as carrying no persona)."""
     session = FakeSession()
-    session.agent_registry = _agent_registry(tempfile.mkdtemp())
+    session.agent_registry = _agent_registry(str(scratch_dir()))
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(120, 40)) as pilot:
         await _boot(pilot, app)
@@ -1225,7 +1224,7 @@ def test_agent_and_team_listing_headers_outrank_their_entries() -> None:
     # /team gets the identical treatment (needs a real team object).
     from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
 
-    registry = TeamRegistry(Path(tempfile.mkdtemp()))
+    registry = TeamRegistry(scratch_dir())
     team = registry.create_team(
         TeamEditFields(
             name="feature-release", manager="manager", members=[TeamMember(role="coder")]
@@ -1433,7 +1432,7 @@ async def _team_picker_geometry(match_count: int, *, delayed: bool) -> dict[str,
 
     names = ["lopdev", "lopsec", "lopops", "lopqa"][:match_count]
     session = FakeSession()
-    registry = TeamRegistry(Path(tempfile.mkdtemp()))
+    registry = TeamRegistry(scratch_dir())
     for name in (*names, "other"):  # `other` never matches `lop`
         registry.create_team(TeamEditFields(name=name, manager="manager"))
     session.team_registry = registry

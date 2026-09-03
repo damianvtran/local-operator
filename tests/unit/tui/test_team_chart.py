@@ -16,20 +16,18 @@ screen where a horizontal scrollbar is a bug).
 
 from __future__ import annotations
 
-import tempfile
-from pathlib import Path
-
 import pytest
 
 from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
 from local_operator.tui.app import ORG_CHART_LAYOUT_CLASS, OperatorApp
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.transcript import TranscriptView, UserBlock
+from tests.unit.tui._scratch import scratch_dir
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
 
 def _registry(*teams: TeamEditFields) -> TeamRegistry:
-    reg = TeamRegistry(Path(tempfile.mkdtemp()))
+    reg = TeamRegistry(scratch_dir())
     for fields in teams:
         reg.create_team(fields)
     return reg
