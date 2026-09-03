@@ -226,15 +226,33 @@ class Pong(WireModel):
 
 
 class TabClosed(WireModel):
+    """Extension -> daemon: one driven tab is gone.
+
+    Emitted from the extension's top-level ``chrome.tabs.onRemoved`` /
+    ``onReplaced`` listeners and on an explicit ``close``, so a tab closed by
+    the USER clears the daemon's driven record too. Nothing sent this event
+    before, which is why ``status`` could advertise a tab that had been closed
+    hours earlier. ``tab`` names the surface so one session's close cannot
+    blank another session's still-live tab; an empty value means "unknown",
+    which the daemon treats as clear-all.
+    """
+
     event: Literal["tab_closed"] = "tab_closed"
-    tab: str
+    tab: str = ""
 
 
 class TabUpdate(WireModel):
     """Extension -> daemon: the driven tab navigated. Lets the daemon report the
-    current page to the Connected popup without an extra RPC (finding U3)."""
+    current page to the Connected popup without an extra RPC (finding U3).
+
+    ``tab`` is the surface handle: driven pages are tracked PER TAB, because a
+    single global slot showed whichever tab was touched last as though it were
+    the one bound tab. Defaulted for compatibility with an older extension that
+    sent no handle.
+    """
 
     event: Literal["tab_update"] = "tab_update"
+    tab: str = ""
     url: str = ""
     title: str = ""
 

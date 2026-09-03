@@ -10,8 +10,9 @@ import { BridgeCommandError } from "./cdp";
 import { clearAllAccessGrants, revokeExactOrigin, revokeLoopbackHost } from "./access-grants";
 import { ACCESS_EXPIRY_ALARM } from "./approval-store";
 import { expireAccessRequest, resolveOrigin, restoreAccessQueue, setPendingObserver } from "./origins";
-import { DEFAULT_PORT, getLocal } from "./state";
+import { DEFAULT_PORT, getLocal, isRedactedToken } from "./state";
 import { reconcileCommandTab, retitle } from "./tab-groups";
+import { reclaimRemovedTab } from "./tab-lifecycle";
 import {
   RECONNECT_ALARM_NAME,
   RECONNECT_ALARM_PERIOD_MINUTES,
@@ -189,7 +190,36 @@ async function dispatch(request: { id: string; method: string; params: Record<st
     // Push the driven page so the daemon (and the Connected popup) can show
     // the human what the agent is on (finding U3).
     if (typeof result.url === "string" && result.url) {
-      send({ event: "tab_update", url: result.url, title: String(result.title ?? "") });
+      // Carry the surface handle so the daemon tracks this tab individually.
+      // Without it the daemon kept ONE global "driving" slot that the most
+      // recent command overwrote, which framed a multi-tab world as a single
+      // binding. `goto` returns no handle, so echo the request's own tab.
+      //
+      // Only a FULL handle may key a driven record. A handle-less `status`
+      // answers with a REDACTED token (an unproven caller must not receive the
+      // drive capability), and forwarding that string created a second key for
+      // a tab already tracked under its full token — a duplicate that survived
+      // the real close and advertised a dead URL forever, which is the phantom
+      // this change removes. A redacted token is therefore reported as no
+      // handle at all, so the daemon refreshes the most recent record instead
+      // of forking one.
+      const raw = typeof result.tab === "string" ? result.tab : String(request.params.tab ?? "");
+      const handle = isRedactedToken(raw) ? "" : raw;
+      send({ event: "tab_update", tab: handle, url: result.url, title: String(result.title ?? "") });
+    }
+    // An explicit `close` retires the surface, so tell the daemon now rather
+    // than relying on the onRemoved listener: chrome.tabs.remove fires
+    // onRemoved too, but announcing here keeps the driven record accurate even
+    // if the worker is torn down before that event is delivered.
+    // Prefer the handle the command RESOLVED (`closed`) over the one the
+    // request carried: `close` legitimately accepts no `tab` param (the
+    // pre-multi-tab shape that closes the sole surface), and announcing ""
+    // there tells the daemon to blank EVERY driven record, other sessions'
+    // live tabs included. The command knows exactly which surface it retired,
+    // so it says so and the daemon drops precisely that one.
+    if (request.method === "close") {
+      const closed = typeof result.closed === "string" ? result.closed : String(request.params.tab ?? "");
+      send({ event: "tab_closed", tab: isRedactedToken(closed) ? "" : closed });
     }
     await respond({ id: request.id, ok: true, result });
   } catch (error) {
@@ -360,6 +390,40 @@ alive = true;
 void restoreAccessQueue()
   .catch((error) => console.warn("approval queue restore failed", error))
   .finally(() => void connect());
+
+// TOP-LEVEL REGISTRATION IS LOAD-BEARING (MV3): a service worker is torn down
+// when idle and re-instantiated by an event, and only listeners registered
+// during that synchronous first evaluation are wired up to wake it. Registered
+// inside a callback or after an await, this listener would silently not exist
+// for the very events it must catch — the same lifecycle reasoning reconnect.ts
+// applies to timers. It is deliberately not behind a connection check: a tab
+// closed while the socket is down must still be reclaimed locally, and the
+// daemon clears its own driven records on disconnect anyway.
+//
+// This is what makes "the user closed the tab" reach the daemon at all. Before
+// it, nothing ever sent tab_closed and `status` advertised a dead tab forever.
+chrome.tabs.onRemoved.addListener((tabId) => {
+  void reclaimRemovedTab(tabId)
+    .then((token) => {
+      // Only OUR surfaces are announced: the user's own tabs are not ours to
+      // report, and announcing one would clear a driven record still in use.
+      if (token) send({ event: "tab_closed", tab: token });
+    })
+    .catch((error) => console.warn("tab close reclaim failed", error));
+});
+
+// A tab REPLACED (prerender activation, or a crashed tab restored under a new
+// id) keeps the page but retires the old tab id, so the surface bound to that
+// id is dead exactly as if it had been removed. Chrome fires no onRemoved for
+// the replaced id, so without this the surface would linger as a ghost against
+// the cap until some later command happened to notice.
+chrome.tabs.onReplaced.addListener((_addedTabId, removedTabId) => {
+  void reclaimRemovedTab(removedTabId)
+    .then((token) => {
+      if (token) send({ event: "tab_closed", tab: token });
+    })
+    .catch((error) => console.warn("tab replace reclaim failed", error));
+});
 
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === "session" && changes.accessQueue) {
