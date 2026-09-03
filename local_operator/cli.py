@@ -480,6 +480,57 @@ def build_cli_parser() -> argparse.ArgumentParser:
     )
     sessions_parser.add_argument("--json", action="store_true", help="machine-readable output")
 
+    # The kill switch (design §12): end a session from outside it. Top-level
+    # like `lop sessions` and `lop send` — the coherence triple is "what is
+    # running / talk to it / end it" — and deliberately NOT the
+    # `lop mobile start|stop|restart` shape, which manages the daemon
+    # service rather than a session.
+    stop_parser = subparsers.add_parser(
+        "stop",
+        help="Stop a running lop session (graceful, then signals)",
+        parents=[parent_parser],
+    )
+    stop_parser.add_argument(
+        "target",
+        nargs="?",
+        help="conversation-name / session-id / pid / cwd substring (case-insensitive)",
+    )
+    stop_parser.add_argument("--pid", type=int, help="target by exact pid")
+    stop_parser.add_argument("--session", dest="session", help="target by exact session id")
+    stop_parser.add_argument(
+        "--all",
+        dest="stop_all",
+        action="store_true",
+        help="stop every session on this machine (prompts on a TTY; --yes to skip)",
+    )
+    stop_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="skip the --all confirmation (required when stdin is not a TTY)",
+    )
+    stop_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="machine-readable outcome per target",
+    )
+    stop_parser.add_argument(
+        "--timeout",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help="graceful-op wait per session before escalating (default 10)",
+    )
+    stop_parser.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "after the socket times out, escalate to signals using the "
+            "record's own fields as identity — for a heartbeating-but-"
+            "starved process the socket cannot reach (use after the plain "
+            "stop refused with a fresh heartbeat)"
+        ),
+    )
+
     # Exec command for single execution mode
     # PyPI upgrade. Not ``lop-update`` (hyphen), which archives local git
     # ``main`` into the uv-tool env — opposite audience, never invoked here.
@@ -1477,6 +1528,168 @@ def sessions_command(args: argparse.Namespace) -> int:
             f"{_format_duration(row['heartbeat_age_s']):>7}"
         )
     return 0
+
+
+def stop_command(args: argparse.Namespace) -> int:
+    """``lop stop`` — end a running session from outside it (§12).
+
+    The CLI front end of the one kill-switch implementation
+    (``session/runtime/control.py``): graceful stop op → identity-confirmed
+    SIGTERM → SIGKILL, refusing to signal any target whose identity cannot
+    be confirmed over its own control socket.
+
+    Exit codes: **0** every requested stop resolved, **1** no target matched
+    (nothing was running under that name), **2** partial — at least one stop
+    resolved and at least one refused, so a script can tell "wrong name"
+    from "one agent would not die" without parsing prose.
+
+    Imports stay function-local (the CLI startup path must stay light — see
+    ``tests/unit/test_import_graph.py``): the control module is import-light
+    itself, but ``asyncio`` and the resolver are pulled only when a stop is
+    actually being made.
+    """
+    import asyncio
+
+    from local_operator.mobile.peer_send import candidate_lines
+    from local_operator.paths import config_dir
+    from local_operator.session.runtime import control
+
+    timeout_s = args.timeout if args.timeout and args.timeout > 0 else control.DEFAULT_TIMEOUT_S
+
+    if getattr(args, "stop_all", False):
+        # Confirmation: a prompt on a TTY, a hard refusal in a pipe without
+        # --yes. `lop stop --all` from a script can end a dozen agents, so a
+        # pipe must never inherit a terminal's y/N affordance — it would hang
+        # waiting on stdin nobody is watching, or worse, read the piped body
+        # the user meant for something else.
+        targets = control._stop_targets(config_dir(), own_pid=None)
+        # An empty machine is a no-op in every mode (D2-3): check before
+        # the TTY gate so a pipe without --yes still exits 0, not the refusal.
+        if not targets:
+            print("no sessions to stop")
+            return 0
+        if not args.yes:
+            if not sys.stdin.isatty():
+                _peer_red(
+                    "stdin is not a terminal — pass --yes to stop every session without a prompt"
+                )
+                return 1
+            # The listing is the confirmation, as in the TUI: consent to
+            # "every session" is only informed when the user can see which.
+            print(f"will stop {len(targets)} session{'s' if len(targets) != 1 else ''}:")
+            for line in candidate_lines(targets, indent="  ", prefix="pid"):
+                print(line)
+            count = len(targets)
+            # Disclose --force IN the question: consent to "stop everything"
+            # is not consent to "signal everything whose socket is silent",
+            # and the flag was typed once at the top of a command whose
+            # listing may be long (round-3 U3-3).
+            forced_part = " (--force: signal any that will not answer)" if args.force else ""
+            try:
+                answer = input(
+                    f"stop {'all ' if count != 1 else ''}{count} lop session"
+                    f"{'s' if count != 1 else ''} on this machine{forced_part}? [y/N] "
+                )
+            except EOFError:
+                # Ctrl+D: not a yes. A traceback would exit 1 with noise and
+                # nothing stopped; a clean abort says the same thing plainly.
+                print("aborted")
+                return 1
+            if answer.strip().lower() not in ("y", "yes"):
+                print("aborted")
+                return 1
+        outcomes = asyncio.run(
+            control.stop_all(
+                own_pid=None,
+                timeout_s=timeout_s,
+                only_pids={rec.pid for rec in targets},
+                force=args.force,
+                _root=config_dir(),
+            )
+        )
+        return _report_stops(outcomes, args.json, summary=True)
+
+    record, candidates, error = _resolve_stop_target(args)
+    if candidates:
+        print(f"{len(candidates)} sessions match; disambiguate with --pid:", file=sys.stderr)
+        for line in candidate_lines(candidates, indent="  ", prefix="--pid"):
+            print(line, file=sys.stderr)
+        return 1
+    if error or record is None:
+        _peer_red(error or "no target resolved")
+        return 1
+
+    outcome = asyncio.run(
+        control.stop_session(record, timeout_s=timeout_s, force=args.force, _root=config_dir())
+    )
+    return _report_stops([outcome], args.json)
+
+
+def _resolve_stop_target(
+    args: argparse.Namespace,
+) -> "tuple[Any | None, list[Any], str]":
+    """Resolve a ``lop stop`` target through the `send` vocabulary.
+
+    The same shared resolver `lop send` uses, so every way of addressing a
+    peer — name, substring, session id, pid — behaves identically across
+    `send` and `stop`. Only the hint strings differ (the stop parser's own
+    flags).
+    """
+    from local_operator.mobile.peer_send import resolve_peer_target
+
+    return resolve_peer_target(
+        target=args.target,
+        pid=args.pid,
+        session=args.session,
+        pid_hint="--pid",
+        session_hint="--session",
+        # Wedged sessions are stoppable (the ladder's signal rungs exist for
+        # them); `send` keeps refusing them because nobody would read it.
+        include_wedged=True,
+    )
+
+
+def _report_stops(outcomes: list[Any], as_json: bool, *, summary: bool = False) -> int:
+    """Paint the stop outcomes and derive the exit code.
+
+    0 clean (every outcome resolved, including "already exited"), 2 partial
+    (some refused), never 1 here — 1 belongs to resolution failures above.
+    A kill rung is reported as what it is; the code stays 0 because from the
+    caller's side the agent IS stopped, which is the thing they asked for.
+    ``summary`` (the ``--all`` path) always prints the grouped line, so an
+    empty run says "no sessions to stop" instead of nothing.
+    """
+    if as_json:
+        import json as _json
+
+        print(
+            _json.dumps(
+                [
+                    {
+                        "pid": o.pid,
+                        "session_id": o.session_id,
+                        "name": o.name,
+                        "method": o.method,
+                        "line": o.line,
+                        "wakes_dormant": o.wakes_dormant,
+                    }
+                    for o in outcomes
+                ],
+                indent=2,
+            )
+        )
+    else:
+        for outcome in outcomes:
+            print(outcome.line)
+        if summary:
+            from local_operator.session.runtime.control import summarize
+
+            print(summarize(outcomes))
+    # Only a refusal (identity unconfirmed, nothing signalled) is partial;
+    # "gone" (already exited) is a clean resolution — the method says which,
+    # so no receipt text is parsed here.
+    refused = any(o.method == "refused" for o in outcomes)
+    return 2 if refused else 0
 
 
 def _format_duration(seconds: float) -> str:
@@ -2924,6 +3137,8 @@ def main() -> int:
             return send_command(args)
         elif args.subcommand == "sessions":
             return sessions_command(args)
+        elif args.subcommand == "stop":
+            return stop_command(args)
         elif args.subcommand == "login":
             return login_command(args)
         elif args.subcommand == "logout":

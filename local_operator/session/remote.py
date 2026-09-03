@@ -62,7 +62,11 @@ from local_operator.harness.types import (
     Usage,
     WakeDeliveredEvent,
 )
-from local_operator.mobile.attach_client import AttachClient, find_owner_record
+from local_operator.mobile.attach_client import (
+    STOPPED_REASON,
+    AttachClient,
+    find_owner_record,
+)
 from local_operator.mobile.types import (
     ContinuationCommand,
     PendingRequest,
@@ -159,6 +163,20 @@ class RemoteSession:
         self._session_id = session_id
         self._takeover_factory = takeover_factory
         self._client: AttachClient | None = None
+        #: True once THIS follower asked the owner to stop the session
+        #: (``request_stop`` acked) or the wire evidence says the session was
+        #: deliberately ended (the owner served the stop and unpublished).
+        #: Owner loss after THAT is the request landing, not a death:
+        #: ``_recover_owner`` must not take over the conversation a stop
+        #: just ended (it would republish a live record for a stopped
+        #: session, and its next prompt would be refused against the
+        #: ``stopped_at`` marker the stop stamped).
+        self._deliberate_stop = False
+        #: Told to the app when this viewer's session ends deliberately, so
+        #: the screen can say so instead of reporting an owner-death recovery
+        #: that is not happening.
+        self._stopped_callback: Callable[[], Any] | None = None
+        self._stopped_announced = False
         # The projection callback authenticates the welcome identity only. Full
         # TUI semantics come exclusively from the canonical v5 state stream.
         self._frontend_future: asyncio.Future[FrontendSync] | None = None
@@ -674,11 +692,18 @@ class RemoteSession:
                 return
             approved = await call_approval_gate(handler, pending.title, pending.detail)
             await client.approval_answer(pending.request_id, approved)
-        except (asyncio.CancelledError, RuntimeError):
+        except (asyncio.CancelledError, RuntimeError, ConnectionError):
             # Cancellation means another front end settled it. RuntimeError is
             # the owner's stale-request answer to the losing race. Both are an
             # ordinary first-valid-answer-wins outcome; the projection removes
             # the card.
+            #
+            # ConnectionError is the STOP path: settling a parked gate wakes
+            # this task, which then tries to post its answer to an owner that
+            # is gone. That is the expected end of a normal /stop, so letting
+            # it escape only reached asyncio's default handler as a
+            # "Task exception was never retrieved" traceback in the log
+            # (round-6 NIT-3).
             pass
         finally:
             if self._gate_key == self._gate_identity(pending):
@@ -719,7 +744,9 @@ class RemoteSession:
                     values[0],
                     question_index=pending.question_index,
                 )
-        except (asyncio.CancelledError, RuntimeError):
+        except (asyncio.CancelledError, RuntimeError, ConnectionError):
+            # Same three outcomes as the approval gate above, including the
+            # stop path's dead-owner post (round-6 NIT-3).
             pass
         finally:
             if self._gate_key == self._gate_identity(pending):
@@ -730,21 +757,135 @@ class RemoteSession:
     def _on_disconnected(self, _reason: str) -> None:
         if self._disposed or self._recovering:
             return
+        # A disconnect that follows OUR stop request (or arrives after the
+        # owner already unpublishes) is the deliberate-stop landing: the
+        # session ended on purpose, so there is no owner to recover and no
+        # transcript lease to win. Stay a viewer showing the cold session —
+        # the same shape bare /stop leaves an owner in. The record scan in
+        # `_recover_owner` would otherwise rediscover nothing and take over.
+        # The owner announced the stop on the wire before closing (the
+        # ``stopping`` frame the client turns into this reason). That covers
+        # the cases the local flag cannot: another TUI's /stop all, or a shell
+        # `lop stop`, hitting a session THIS viewer merely watches — including
+        # a session with no wakes, which leaves no on-disk marker to consult.
+        if _reason == STOPPED_REASON:
+            self._deliberate_stop = True
+        if self._deliberate_stop:
+            self._owner_ready.set()  # prompts route to the stopped notice
+            # A stop ENDS the turn, exactly as a death does. Without this the
+            # facade reports is_streaming forever — nothing else can clear it,
+            # because every other writer of that flag is fed by the owner
+            # whose socket just closed — so the spinner never stops and the
+            # next message routes into the steer branch, is dropped on the
+            # floor, and is receipted as "sends when this step finishes" for a
+            # step that ended (round-4 MAJOR-3/D4-1). The honest refusal lives
+            # on the prompt path, and this is what lets a message reach it.
+            self._end_turn_locally()
+            self._notify_stopped()
+            return
         self._recovering = True
         self._owner_ready.clear()
-        # A killed owner factually aborted the in-flight turn. Mark it through
-        # the normal event path; no card/banner or attach vocabulary appears.
-        if self._streaming:
-            self._emit_or_buffer(
-                AgentEndEvent(aborted=True, generation=self._generation, error=None)
-            )
-            self._streaming = False
+        self._end_turn_locally()
         self._recovery_task = asyncio.create_task(self._recover_owner())
 
+    def _end_turn_locally(self) -> None:
+        """End an in-flight turn the owner can no longer end itself.
+
+        Both terminal outcomes need it and neither can get it from the owner:
+        a killed owner factually aborted the turn, and a stopped one ended the
+        whole session under it. Marked through the normal event path so no
+        card/banner or attach vocabulary appears — the transcript reads as an
+        ordinary aborted turn, which is what it is.
+        """
+        if not self._streaming:
+            return
+        self._emit_or_buffer(AgentEndEvent(aborted=True, generation=self._generation, error=None))
+        self._streaming = False
+
+    async def _session_was_stopped(self) -> bool:
+        """True when the disconnect's cause is a DELIBERATE stop, not owner death.
+
+        Two shapes, one meaning — the session ended on purpose, so there is
+        nothing to recover:
+
+        1. This follower issued the stop itself (``_deliberate_stop``, set in
+           ``request_stop`` before the op is sent).
+        2. Someone ELSE stopped the session (another TUI's ``/stop all``, a
+           shell ``lop stop``) while this follower watched: the stop stamps
+           ``stopped_at`` on the wake-index entry (a durable, transcript-
+           derived marker — survives the owner's exit, readable before any
+           reconnect), and the owner never rediscovers. Both conditions
+           together are the deliberate-stop wire shape: a dead owner leaves
+           the marker absent, a stopped one leaves it set.
+        """
+        if self._deliberate_stop:
+            return True
+        from local_operator.wakes import store as wake_store
+
+        entry = await asyncio.to_thread(wake_store.read_entry, self._config_dir, self._session_id)
+        if entry is None or not entry.get("stopped_at"):
+            return False
+        # The marker says stopped; confirm nobody re-opened it in the
+        # meantime (an open clears ``stopped_at``). If an owner is live and
+        # reachable, this is a re-open — recover normally.
+        record, _ = await asyncio.to_thread(find_owner_record, self._config_dir, self._session_id)
+        return record is None
+
+    def _unavailable_reason(self) -> str:
+        """Why this facade cannot reach its owner right now, in the user's terms.
+
+        A DELIBERATE stop and a dropped connection are opposite facts and
+        must not share one sentence: "reconnecting" tells the user to wait
+        for something that is never coming back, on the one path where the
+        honest answer ("it was stopped; /resume reopens it") is already
+        written for the owner's own screen.
+        """
+        if self._deliberate_stop:
+            return "this session was stopped"
+        return "session owner is reconnecting"
+
+    def _notify_stopped(self) -> None:
+        """Tell the app once that this viewer's session ended deliberately.
+
+        Fired exactly once per facade: the two recognition points (the
+        owner's announcement on the wire, and the wake-marker inference)
+        both route here, and either may run first.
+        """
+        if self._stopped_announced:
+            return
+        self._stopped_announced = True
+        callback = self._stopped_callback
+        if callback is None:
+            return
+        try:
+            callback()
+        except Exception:  # noqa: BLE001 — a viewer notice must not break teardown
+            logger.debug("stopped-session callback failed", exc_info=True)
+
     async def _recover_owner(self) -> None:
+        if self._deliberate_stop:
+            # The disconnect came from the stop this follower issued (or that
+            # landed while it watched): the session is cold, not orphaned.
+            # Nothing to recover — the transcript stays on screen and
+            # /resume (or a peer's /resume) is the way back. A takeover here
+            # would win the lease, republish a live record for a session the
+            # user just stopped, and let a later `lop stop --all` SIGTERM
+            # this terminal for a record it never made.
+            self._owner_ready.set()  # prompts route to the stopped notice
+            return
         delay = 0.1
         try:
             while not self._disposed:
+                # A stop by someone else while we watched: the transcript's
+                # ``stopped_at`` marker plus no live owner is the deliberate
+                # shape. Read it once at the top of each pass — cheap (one
+                # small file, threaded) and it is what keeps the takeover
+                # from resurrecting a session a kill switch just ended.
+                if not self._deliberate_stop and await self._session_was_stopped():
+                    self._deliberate_stop = True
+                    self._owner_ready.set()  # prompts route to the stopped notice
+                    self._notify_stopped()
+                    return
                 record, _ = await asyncio.to_thread(
                     find_owner_record, self._config_dir, self._session_id
                 )
@@ -813,6 +954,20 @@ class RemoteSession:
 
     def set_takeover_callback(self, callback: Callable[[Any], Any]) -> None:
         self._takeover_callback = callback
+
+    def set_stopped_callback(self, callback: Callable[[], Any]) -> None:
+        """Install the app's handler for "the session I am watching ended".
+
+        The sibling of :meth:`set_takeover_callback`, for the opposite
+        outcome. Takeover says "the owner died, you are the owner now";
+        this says "the owner ENDED this session on purpose, stay a viewer of
+        something cold". The app needs the distinction to say the true thing
+        on screen: without it a viewer paints nothing at the moment the stop
+        lands and then answers every later message with the owner-death
+        wording, promising a reconnection that will never come (round-3
+        D3-1/Q3-2/U3-1).
+        """
+        self._stopped_callback = callback
 
     def set_cancel_resolution(self, resolver: Callable[[int], None] | None) -> None:
         """Install the app's handler for an owner-confirmed subagent cancel count.
@@ -926,7 +1081,7 @@ class RemoteSession:
     ) -> str:
         client = self._client
         if client is None:
-            raise ConnectionError("session owner is reconnecting")
+            raise ConnectionError(self._unavailable_reason())
         # The authoritative request currently returns a settled answer. Feed it
         # through the normal delta callback once so the existing aside widget
         # uses the same rendering path without inventing remote-only UI state.
@@ -949,7 +1104,7 @@ class RemoteSession:
         """
         client = self._client
         if client is None:
-            raise ConnectionError("session owner is reconnecting")
+            raise ConnectionError(self._unavailable_reason())
         await client.adopt_aside(
             [
                 message.model_dump(mode="json")
@@ -998,7 +1153,7 @@ class RemoteSession:
     async def compact_now(self) -> CompactionOutcome:
         client = self._client
         if client is None or self._recovering or not client.connected:
-            return CompactionOutcome(False, "unavailable", "session owner is reconnecting")
+            return CompactionOutcome(False, "unavailable", self._unavailable_reason())
         try:
             detail = await client.slash("compact", "")
         except ConnectionError:
@@ -1006,7 +1161,7 @@ class RemoteSession:
             # transport's own ``not attached`` must never surface as a
             # compaction receipt, so race the same rewrite the routed-slash
             # seam performs above.
-            return CompactionOutcome(False, "unavailable", "session owner is reconnecting")
+            return CompactionOutcome(False, "unavailable", self._unavailable_reason())
         return CompactionOutcome(True, detail=detail)
 
     # -- driving turns ------------------------------------------------------
@@ -1048,7 +1203,7 @@ class RemoteSession:
             return
         client = self._client
         if client is None or not client.connected:
-            raise ConnectionError("session owner is reconnecting")
+            raise ConnectionError(self._unavailable_reason())
         images_wire = [_image_to_wire(image) for image in (images or [])]
         command = (
             ContinuationCommand(
@@ -1116,6 +1271,35 @@ class RemoteSession:
     def abort(self, reason: str = "interrupted") -> None:
         if self._client is not None:
             asyncio.create_task(self._client.abort())
+
+    async def request_stop(self) -> str:
+        """Stop the session this follower is watching — deliberately.
+
+        Marks the intent BEFORE the op is sent: the owner's graceful stop
+        closes this very socket, and the disconnect handler must read that
+        EOF as the stop landing, not as owner death to recover from.
+
+        ...and CLEARS it again if the request failed, which is the other half
+        of that bargain. Both failure shapes are reachable and both tell the
+        user the stop did not happen — no client attached, and an owner too
+        old to know the op answering unknown-op — so latching the flag on
+        them would silently disable owner-death recovery for the rest of the
+        session: the user keeps working in a viewer that will never take over
+        when its owner is genuinely killed hours later (round-3 MAJOR-1).
+        Only a stop that was actually ACCEPTED may suppress recovery.
+
+        The wire variant — another process stopped the owner while this
+        follower watched — arrives instead as the owner's ``stopping``
+        announcement, which ``_on_disconnected`` reads.
+        """
+        self._deliberate_stop = True
+        try:
+            if self._client is None:
+                raise ConnectionError("not attached")
+            return await self._client.request_stop()
+        except BaseException:
+            self._deliberate_stop = False
+            raise
 
     def cancel_subagents(self, reason: str = "interrupted") -> int:
         """Optimistic cancel: returns the running count the offer promised.

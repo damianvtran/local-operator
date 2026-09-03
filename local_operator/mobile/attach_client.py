@@ -58,6 +58,10 @@ from local_operator.session.runtime.registry import scan
 #: surfaces as an error rather than a hang.
 ACK_TIMEOUT_S = 15.0
 
+#: Disconnect reason marking a DELIBERATE stop, as opposed to owner death.
+#: Consumers compare against this exact string to decide whether to recover.
+STOPPED_REASON = "owner stopped the session"
+
 
 def find_owner_record(config_dir: Path, session_id: str) -> tuple[SessionRecord | None, int | None]:
     """Locate the discovery record of the live process hosting ``session_id``.
@@ -276,6 +280,15 @@ class AttachClient:
                     self._frontend_sequence = sequence
                     if self._on_frontend_update is not None:
                         self._on_frontend_update(data)
+                elif op == "stopping":
+                    # The owner is ending this session ON PURPOSE (a /stop
+                    # anywhere: this viewer, another TUI's /stop all, a shell
+                    # lop stop). Carried in the disconnect reason rather than a
+                    # new callback because every consumer already reads that
+                    # string, and the EOF it precedes is moments away — a
+                    # viewer that mistakes it for owner death takes over a
+                    # session the user just ended (U2-4).
+                    reason = STOPPED_REASON
                 elif op in ("ack", "error", "result"):
                     future = self._pending.pop(frame.get("req"), None)
                     if future is not None and not future.done():
@@ -401,6 +414,19 @@ class AttachClient:
 
     async def abort(self) -> str:
         return await self._request("abort")
+
+    async def request_stop(self) -> str:
+        """Ask the owner to stop itself — the follower's bare ``/stop``.
+
+        The graceful rung of the kill switch, dialled from the viewer that
+        is looking at the session rather than by a third party: the owner's
+        runtime runs deny-gates → dispose → unpublish → exit. An owner too
+        old to know the op answers the standard unknown-op error, which the
+        caller surfaces as the upgrade hint — the follower never escalates
+        to a signal against its own owner (that decision belongs to the
+        owner's machine, through ``lop stop`` or ``/stop <target>``).
+        """
+        return await self._request("stop")
 
     async def slash(
         self,

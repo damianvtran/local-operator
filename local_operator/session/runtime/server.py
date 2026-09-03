@@ -108,6 +108,13 @@ _EVENT_QUEUE_MAX = 64
 # rather than a one-line receipt: they reply with a ``result`` frame so the
 # invoker renders the outcome locally instead of the owner's transcript
 # printing it.
+#: How long ``announce_stop`` will wait for its frame to be handed to the
+#: transport on the thread-hosted path. Bounds a courtesy write against a
+#: stalled viewer: the caller is the TUI's event loop during a /stop, so this
+#: is a frozen-UI budget, not a delivery guarantee. A viewer that misses the
+#: frame degrades to the pre-announcement behaviour; the stop is unaffected.
+_ANNOUNCE_WRITE_TIMEOUT_S = 0.25
+
 _PAYLOAD_OPS = {"slash_result", "cancel_subagents"}
 
 
@@ -200,6 +207,18 @@ class SessionHandle(Protocol):
         model change): the runtime pushes whatever changed."""
         ...
 
+    # -- the kill switch: graceful self-stop (optional, probed) --------------
+    # request_stop() -> None: deny parked gates, abort the turn, dispose the
+    # session and begin the runtime's own shutdown, so the ``stop`` control
+    # op ends this runtime the way SIGTERM would. Probed with getattr like
+    # every optional capability below so reduced handles (tests, older
+    # bridges) keep satisfying the protocol: a handle without it answers the
+    # ``stop`` op with the unknown-op error, and the caller's escalation
+    # ladder (session/runtime/control.py) proceeds to identity-confirmed
+    # SIGTERM — which the runtime's signal handler has always honoured.
+    # Sync and non-raising by contract: called ON the runtime loop from the
+    # dispatch, and a stop that faults here is still a stop.
+    #
     # -- v4 optional capabilities (probed with getattr, never required) -------
     # subscribe_events(on_event) -> unsubscribe: feed the host session's raw
     #   AgentEvent stream, serialized (``model_dump(mode="json")``) on the
@@ -339,6 +358,97 @@ class RuntimeServer:
             return
         self._loop = asyncio.get_running_loop()
         await self._serve()
+
+    def announce_stop(self) -> None:
+        """Tell every attached viewer this session is ending DELIBERATELY.
+
+        THE single emitter of the ``stopping`` frame, called by both triggers:
+        the control-op path (a peer's ``lop stop``, another TUI's
+        ``/stop all``) and the owner's own bare ``/stop``, which runs its
+        teardown locally and never dispatches an op. Round 3 found that second
+        route silent, so a follower watching an owner that stopped itself saw
+        a plain EOF and took over the session the user had just ended — U2-4
+        surviving on a different path.
+
+        Must be called BEFORE the teardown that closes these sockets. Safe
+        twice: a viewer reads the frame only as "the disconnect coming next
+        is deliberate", so a duplicate is a no-op.
+
+        There is deliberately no on-disk fallback. A wakeless session has no
+        wake-index entry at all (``write_entry`` removes the file when a
+        session has no schedules), so the wire is the only channel covering
+        every session — which is why the marker approach was dropped.
+
+        Safe from any thread, like :meth:`close`, and best-effort by
+        contract: a viewer that never receives it degrades to the pre-round-2
+        behaviour, which is strictly better than a stop failing because one
+        socket was slow.
+        """
+        if self._closed.is_set():
+            return
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            return
+        frame = {"op": "stopping", "session_id": self._record.session_id}
+        if self._on_owner_loop():
+            # An in-process runtime shares the TUI's loop, so the owner's own
+            # /stop arrives HERE, from a synchronous caller whose very next
+            # statement tears the sockets down. Awaiting a drain is therefore
+            # not available and scheduling a task is too late — the teardown
+            # would win the race. ``write`` is synchronous (it buffers into
+            # the transport), and a transport closed afterwards still flushes
+            # what it holds, so writing inline is what actually gets the frame
+            # to the viewer ahead of the EOF it must explain.
+            self._write_now(frame)
+            return
+        # The THREAD-HOSTED path, which is the one production takes: the TUI
+        # hosts its registrant with `.start()`, and the caller is a coroutine
+        # on the TUI's own event loop. Awaiting a drain here froze that loop
+        # for up to two seconds against a viewer whose receive window was full
+        # (round-4 MINOR-3, the #401 class) — on a path whose whole contract
+        # is that announcing must never make a stop slower.
+        #
+        # The same reasoning the inline branch rests on applies once the write
+        # is on the right thread: ``write`` only buffers, and a transport
+        # closed afterwards still flushes what it holds. So hand the write to
+        # the runtime's loop and wait only for it to have BEEN WRITTEN, with a
+        # bound far below any user-perceptible pause. Missing that bound costs
+        # a viewer its explanation, never the stop.
+        written = threading.Event()
+
+        def _write_and_signal() -> None:
+            try:
+                self._write_now(frame)
+            finally:
+                written.set()
+
+        try:
+            loop.call_soon_threadsafe(_write_and_signal)
+        except RuntimeError:
+            # Loop already closing: nothing is listening that could care.
+            return
+        if not written.wait(timeout=_ANNOUNCE_WRITE_TIMEOUT_S):
+            logger.debug("stop announcement did not reach viewers before the teardown")
+
+    def _write_now(self, frame: dict[str, Any]) -> None:
+        """Buffer one frame to every viewer without awaiting a drain.
+
+        PRECONDITION: must run ON the runtime's event loop. Both callers
+        satisfy it — the in-process branch is already there, and the
+        thread-hosted branch hands this to the loop with
+        ``call_soon_threadsafe`` — and it is what makes skipping
+        ``conn.send_lock`` sound: no other coroutine can be mid-write at that
+        instant, so a partially-written frame is impossible, and taking the
+        lock would require awaiting, which the synchronous caller cannot do.
+        Called from any other thread the lock-free write would be unsafe
+        (round-4 NIT-2: the guarantee belongs to the call site, not the
+        method, and saying so is what stops the next reuse from breaking it).
+        """
+        for conn in list(self._clients.values()):
+            try:
+                conn.writer.write(json.dumps(frame).encode() + b"\n")
+            except Exception:  # noqa: BLE001 — announcing is best-effort
+                logger.debug("stop announcement write failed", exc_info=True)
 
     def close(self) -> None:
         """Unpublish and shut down. Safe from any thread, safe twice.
@@ -723,8 +833,12 @@ class RuntimeServer:
                 detail = await self._dispatch(op, frame)
             await self._send_to(conn, {"op": "ack", "req": req, "detail": detail})
             # Mutations change the projection; push what every front end
-            # should see.
-            if op not in ("watch", "unwatch"):
+            # should see. ``stop`` is exempt: its whole job is to END the
+            # session, so a post-ack refresh would re-read a host that is
+            # mid-dispose (the TUI's handle raises "session is still
+            # starting" the moment its session reference drops) — the ack is
+            # the reply and the ladder's exit-wait is the confirmation.
+            if op not in ("watch", "unwatch", "stop"):
                 await self._handle.refresh()
                 await self._push()
         except Exception as exc:  # noqa: BLE001 — the error IS the reply
@@ -840,6 +954,40 @@ class RuntimeServer:
                 wake=bool(frame.get("wake", False)),
                 sender=frame.get("sender") or {},
             )
+        if op == "stop":
+            # PR 3 (the kill switch): the graceful rung of the stop ladder
+            # (session/runtime/control.py). The plan is deny parked gates →
+            # abort/dispose the session → release the lease → unpublish the
+            # record → exit, executed by the host's ``request_stop`` hook
+            # (OwnedSessionHandle.request_stop owns the ordering); all this
+            # dispatch does is trigger it and ack, so the ack reaching the
+            # caller means "the stop is underway", not "it finished" — the
+            # ladder's timeout decides what a slow exit costs.
+            #
+            # Optional capability, probed: a host that predates the hook (a
+            # reduced test handle, an old TUI bridge) answers with an error,
+            # which the ladder treats as a scheduled miss and proceeds to
+            # identity-confirmed SIGTERM. Additive on the wire — no
+            # PROTOCOL_VERSION bump, for the same reason ``peer_message``
+            # needed none: an old runtime's unknown-op error is exactly the
+            # answer the ladder is built to continue from.
+            request_stop = getattr(h, "request_stop", None)
+            if not callable(request_stop):
+                raise ValueError("this owner cannot stop itself gracefully")
+            # Tell every attached viewer the disconnect they are about to see
+            # is DELIBERATE, before the session goes away. Without this a
+            # follower cannot distinguish a stop from owner death and its
+            # recovery takes over the session a user just ended — republishing
+            # a live record for a cold session (U2-4). Announced BEFORE the
+            # hook runs because the hook's own teardown closes these sockets.
+            # An old viewer ignores the unknown frame, so this stays additive.
+            await self._broadcast({"op": "stopping", "session_id": self._record.session_id})
+            result = request_stop()
+            if inspect.isawaitable(result):
+                result = await result
+            # The host's own line when it gives one (a TUI owner names the
+            # session and the reopen command), else the bare progress word.
+            return str(result) if isinstance(result, str) and result else "stopping"
         raise ValueError(f"unknown op: {op!r}")
 
     async def _dispatch_payload(self, op: str, frame: dict[str, Any]) -> Any:

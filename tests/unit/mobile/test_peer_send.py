@@ -134,6 +134,31 @@ def test_a_blank_target_beside_a_selector_is_not_a_conflict(fake_scan) -> None:
     assert error == ""
 
 
+def test_an_all_digit_target_resolves_as_a_pid(fake_scan) -> None:
+    """The pid every listing shows (`lop sessions`, the picker, the
+    disambiguation rows) resolves when typed back as a bare target — for
+    `send` and `stop` alike (U2 / Q1-4)."""
+    a = _Record(48213, conversation_name="alpha")
+    b = _Record(20, conversation_name="beta", session_id="48213")
+    fake_scan([(a, "live"), (b, "live")])
+    record, candidates, error = peer_send.resolve_peer_target(target="48213")
+    assert record is a and candidates == [] and error == ""
+    # A wedged pid is reported as such through the pid path, not as "no match".
+    fake_scan([(a, "wedged")])
+    record, _c, error = peer_send.resolve_peer_target(target="48213")
+    assert record is None and "wedged" in error
+    record, _c, error = peer_send.resolve_peer_target(target="48213", include_wedged=True)
+    assert record is a
+
+
+def test_digits_that_are_not_a_pid_fall_through_to_the_substring_match(fake_scan) -> None:
+    """A numeric session id or name still resolves when no record has that pid."""
+    b = _Record(20, conversation_name="beta", session_id="777")
+    fake_scan([(b, "live")])
+    record, _c, error = peer_send.resolve_peer_target(target="777")
+    assert record is b and error == ""
+
+
 def test_session_id_matches_exactly(fake_scan) -> None:
     a = _Record(10, session_id="exact-id")
     fake_scan([(a, "live")])
