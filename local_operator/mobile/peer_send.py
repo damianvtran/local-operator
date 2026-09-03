@@ -49,11 +49,43 @@ def resolve_peer_target(
     session_id, then the cwd basename. Only ``live`` records are eligible (a
     ``wedged`` owner will not service the socket promptly; ``stale`` is dead).
 
+    A selector (``pid``/``session``) alongside a ``target`` substring is REFUSED
+    rather than resolved. The two name different sessions, and the precedence
+    above would silently prefer the selector — delivering to a session the call
+    does not appear to name, and reporting success. That is a wrong-recipient
+    hazard, not an ergonomic wart, so it lives here in the shared core: a
+    conflict rule that existed only in ``cli.py`` would falsify this module's
+    claim to be the single source of truth and leave the ``send`` tool teaching
+    a different rule from the command.
+
     Returns ``(record, candidates, error)``: exactly one of ``record`` or
     ``error`` is meaningful; ``candidates`` is populated on an ambiguous substring
     so the caller can list them for disambiguation. The shape is identical for the
     CLI and the tool — only how each SURFACES the outcome differs.
+
+    The conflict wording uses the caller's own ``pid_hint``/``session_hint``
+    grammar for the same reason the "no target given" line does. The CLI never
+    reaches these branches in practice — ``cli._bind_send_positionals`` refuses
+    first, with a richer message that prints two retypeable command lines, and
+    argparse's mutually-exclusive group rejects pid+session at parse time — so
+    these are the tool's phrasing. Keeping them here anyway is the point: the
+    rule holds for ANY caller, including one added later that has no parser in
+    front of it.
     """
+    # Before any scan: a conflicting address is refused while the call is still
+    # inert, so no registry read and no dial can happen on an ambiguous request.
+    if pid is not None and session:
+        return None, [], f"pass either {pid_hint} or {session_hint}, not both"
+    if (pid is not None or session) and (target or "").strip():
+        return (
+            None,
+            [],
+            (
+                "pass either a target substring or an exact pid/session, not both — "
+                "they name different sessions"
+            ),
+        )
+
     scanned = registry.scan(config_dir())
     live = [(rec, state) for rec, state in scanned if state == "live"]
 

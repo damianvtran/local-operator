@@ -52,13 +52,85 @@ def fake_scan(monkeypatch):
     return install
 
 
-def test_pid_wins_over_everything(fake_scan) -> None:
+def test_pid_with_a_target_substring_is_refused_as_ambiguous(fake_scan) -> None:
+    """A selector AND a substring name two different sessions, so the resolver
+    refuses instead of applying precedence.
+
+    This used to assert the opposite ("pid wins over everything"), which is the
+    behaviour that made `lop send other-name "body" --pid N` deliver to pid N
+    and report success while reading as though it addressed other-name. The
+    precedence is fine when only one address is given; silently picking a winner
+    between two is the wrong-recipient hazard. See docs/design/peer-send.md
+    §4.3.
+    """
     a = _Record(10, conversation_name="alpha")
     b = _Record(20, conversation_name="beta")
     fake_scan([(a, "live"), (b, "live")])
     record, candidates, error = peer_send.resolve_peer_target(pid=20, target="alpha")
+    assert record is None
+    assert candidates == []
+    assert "not both" in error
+
+
+def test_session_with_a_target_substring_is_refused_as_ambiguous(fake_scan) -> None:
+    a = _Record(10, conversation_name="alpha", session_id="exact-id")
+    fake_scan([(a, "live")])
+    record, _c, error = peer_send.resolve_peer_target(session="exact-id", target="alpha")
+    assert record is None
+    assert "not both" in error
+
+
+def test_pid_and_session_together_is_refused(fake_scan) -> None:
+    """The CLI can never reach this (argparse's mutually-exclusive group rejects
+    the pair at parse time), but the tool has no parser in front of it."""
+    a = _Record(10, session_id="exact-id")
+    fake_scan([(a, "live")])
+    record, _c, error = peer_send.resolve_peer_target(pid=10, session="exact-id")
+    assert record is None
+    assert "not both" in error
+
+
+def test_conflict_error_uses_the_callers_own_grammar(fake_scan) -> None:
+    """The CLI's hints must survive into the pid+session wording, the same way
+    they already do for "no target given"."""
+    fake_scan([])
+    _r, _c, error = peer_send.resolve_peer_target(
+        pid=10, session="exact-id", pid_hint="--pid", session_hint="--session"
+    )
+    assert error == "pass either --pid or --session, not both"
+
+
+def test_a_conflict_is_refused_before_the_registry_is_scanned(monkeypatch) -> None:
+    """The refusal has to be free: nothing resolved, nothing read, nothing
+    dialled on an ambiguously addressed call."""
+
+    def _boom(*_a, **_k):
+        raise AssertionError("registry must not be scanned on a conflicting address")
+
+    monkeypatch.setattr(peer_send.registry, "scan", _boom)
+    record, _c, error = peer_send.resolve_peer_target(pid=20, target="alpha")
+    assert record is None
+    assert "not both" in error
+
+
+def test_pid_still_resolves_when_it_is_the_only_address(fake_scan) -> None:
+    """The precedence path itself is untouched for a single-address call."""
+    a = _Record(10, conversation_name="alpha")
+    b = _Record(20, conversation_name="beta")
+    fake_scan([(a, "live"), (b, "live")])
+    record, candidates, error = peer_send.resolve_peer_target(pid=20)
     assert record is b
     assert candidates == []
+    assert error == ""
+
+
+def test_a_blank_target_beside_a_selector_is_not_a_conflict(fake_scan) -> None:
+    """An empty/whitespace target is absence, not a competing address — the tool
+    may pass target="" rather than omitting the field."""
+    b = _Record(20, conversation_name="beta")
+    fake_scan([(b, "live")])
+    record, _c, error = peer_send.resolve_peer_target(pid=20, target="   ")
+    assert record is b
     assert error == ""
 
 

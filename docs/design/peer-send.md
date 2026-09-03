@@ -587,6 +587,116 @@ the body from stdin when `message` is omitted (`lop send mytarget < note.txt`),
 which is the ergonomic path for an agent piping a longer note. `--pid`/`--session`
 override the positional `target`.
 
+#### Revision: argument grammar
+
+**The "`--pid`/`--session` override the positional `target`" rule above shipped
+and was wrong.** It is recorded here rather than deleted because the sentence
+reads as obviously correct and is how this defect gets re-derived.
+
+Two optional positionals plus a selector flag is not a grammar argparse can
+resolve. argparse fills `target` first, always, so `lop send --pid N "hello"`
+bound `"hello"` to `target`, left `message` empty, and exited 1 with `no message
+given (pass it as an argument or pipe it on stdin)` — an error that is not
+merely unhelpful but **false**, since the user did pass it as an argument. That
+was the exact invocation this guide documented. Worse, the "override" behaviour
+made `lop send other-name "body" --pid N` deliver to pid N, exit 0, and read as
+though it addressed `other-name`: a wrong-recipient hazard, and with
+`--wake`/`--now` it had already interrupted the wrong session by the time the
+success line printed.
+
+The rule now:
+
+1. `--pid` and `--session` are mutually exclusive (an argparse
+   `add_mutually_exclusive_group`, which produces a better error than a
+   hand-written check).
+2. With a selector present: two positionals → **refused** as an ambiguous
+   recipient (exit 1, nothing resolved and nothing dialled); one positional →
+   it is the **message**; none → body from stdin.
+3. With no selector: first positional is the target, second is the message —
+   unchanged.
+4. With a selector, a typed positional **and** a piped stdin body are
+   **refused** as an ambiguous body. See below.
+5. An empty or whitespace positional target is **absence**, matching the shared
+   core's `(target or "").strip()`; an explicitly-passed but blank `--session`
+   is an error rather than a silent fall-back to substring matching.
+
+#### The stdin seam (review round 1, BLOCKER-1)
+
+The first cut of this rule read stdin *after* binding, and it lost payloads.
+`git log --stat | lop send alpha --pid 10` — the form the CLI's own ambiguity
+guidance leads a user to type — bound `alpha` to `message`, never looked at
+stdin, and delivered the literal string `alpha` at **exit 0** with a success
+line. That is strictly worse than the defect this revision fixes: the original
+was loud (exit 1, nothing sent), this was silent and destroyed the piped data.
+
+The cause is ordering. Rule 4 as originally drafted said stdin is read "only
+when no message positional survives rebinding", but the binder made one survive
+*before* it could know whether stdin held anything, so the rule could never
+fire. **The binder therefore takes the piped body as an INPUT** — a
+`stdin_body` parameter, keeping it pure and testable — rather than having the
+caller apply stdin as a fallback afterwards.
+
+Given both, the choice was to pick a winner or to refuse. **Refuse.** Two
+candidate bodies is the same "the command names two things" shape as two
+candidate recipients, and it gets the same answer for the same reason: whichever
+body loses is discarded silently, and a silently discarded payload is exactly
+the bug class this whole revision exists to remove. A loud error costs a retype.
+This deliberately supersedes proposal §8 case 10, which specified that the typed
+argument wins.
+
+**`isatty()` is not the discriminator.** It returns False for an empty redirect
+(`</dev/null`) exactly as it does for a pipe carrying data, so keying off it
+would turn every `lop send --pid N "hi" </dev/null` into an ambiguity error.
+Only actual bytes count as a piped body. stdin is also read only when at most
+one positional was typed, so `slow-producer | lop send NAME "body"` does not
+block on output that cannot change the outcome.
+
+#### The recovery seam (review round 1, BLOCKER-2)
+
+The ambiguity refusal made the *pre-existing* disambiguation guidance a dead
+end. `N sessions match; disambiguate with --pid:` invited the user to re-run
+with the flag appended — producing `NAME BODY --pid N`, the exact form now
+refused. The tool surface was worse, because its reader is a model making the
+minimal edit to its previous call: keep `target`, add `pid`.
+
+Both surfaces now say **replace**, not add: the CLI prints `replace the target
+with one of these:` plus a worked `lop send --pid N <body>` example, and the
+tool says `drop \`target\` and retry with pid=<n> instead (passing both is
+refused)`. Any refusal that a recovery path can walk a user into has to state
+the form that works, not merely the address that failed.
+
+The rebinding lives in `cli._bind_send_positionals`, a pure namespace-in /
+tuple-out function, for the same reason `resolve_peer_target` is a core:
+argparse is the wrong place to express a rule that depends on which flags are
+present. The *conflict* half also lives in `mobile/peer_send.resolve_peer_target`
+so the `send` tool inherits it — a conflict rule that existed only in `cli.py`
+would falsify that module's claim to be the single source of truth.
+
+**Two alternatives look obviously right and are both wrong. Do not re-adopt
+them without re-running these probes.**
+
+- **`message` as `nargs="*"`, joined into a body.** A single `nargs="*"`
+  positional **cannot** absorb words that appear after an optional flag.
+  Measured: `["peer", "--wake", "act on this now"]` → `SystemExit(2)`,
+  `error: unrecognized arguments: act on this now`. That breaks
+  `lop send "<target>" --wake "…"` and `--now "…"`, three documented forms that
+  work today. Disqualifying on its own.
+- **`message` as `argparse.REMAINDER`.** Measured:
+  `["peer", "--wake", "act on this now"]` → `message=['--wake', 'act on this
+  now']`. `--wake` is swallowed **into the body**: the command parses, exits 0,
+  delivers — and the delivery mode silently degrades from wake to mailbox with
+  the flag text pasted into the message. A currently-working invocation starts
+  quietly doing the wrong thing, which is worse than the bug being fixed.
+
+`-m/--message` was also considered and rejected as the primary fix: it leaves
+the natural form (`lop send --pid N "hello"`) broken unless the user learns a
+second flag, and it fights every send-style Unix command (`mail`, `write`,
+`wall`, `notify-send`, `gh pr comment -b`) where the body is a positional.
+
+A dash-leading body beside a selector needs `--`
+(`lop send --pid N -- "--dashy"`). That is argparse's standard behaviour and
+deliberately not special-cased; a bespoke escape would be a second grammar.
+
 Dispatch in `main()` beside the others (`cli.py:2099`): `elif args.subcommand ==
 "send": return send_command(args)`.
 
