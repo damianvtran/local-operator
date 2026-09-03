@@ -196,7 +196,9 @@ async def _read_frames_until(dial: _Dial, predicate: Any, timeout_s: float) -> A
     skipping = False
 
     async def _next_line() -> bytes:
-        nonlocal buf, skipping
+        # `buf` is mutated in place, never rebound, so it needs no nonlocal;
+        # `skipping` is a reassigned flag and does.
+        nonlocal skipping
         while True:
             nl = buf.find(b"\n")
             if nl != -1:
