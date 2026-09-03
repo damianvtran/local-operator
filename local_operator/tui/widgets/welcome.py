@@ -29,11 +29,15 @@ Five things make this a design decision rather than a splash screen:
   deviates because the product owner asked for a *centered* view and a border
   would violate the density contract. Structure comes from the logo lockup,
   the tint ramp, and one blank row between sections.
-- **No accent.** The one green is reserved for the running indicator, links,
-  the focused chevron, and the command picker's selected row. The wordmark is
-  the brightest thing here (``fg``) precisely because it is a single row; the
-  four-row mark sits a step back at ``muted`` so a boot frame is not a wall
-  of bright blocks.
+- **No accent.** The one green is reserved for the sites ``local_operator.tcss``
+  enumerates, and a boot frame is none of them. Named by REFERENCE rather than
+  restated here: this used to list "the running indicator, links, the focused
+  chevron, and the command picker's selected row", and by the time the chevron
+  had given its site back and links had settled on ``signal``, two of those
+  four were wrong. A budget restated in five files is a budget enforced in
+  none. The wordmark is the brightest thing here (``fg``) precisely because it
+  is a single row; the four-row mark sits a step back at ``muted`` so a boot
+  frame is not a wall of bright blocks.
 - **It degrades in a fixed order.** Terminals are not a fixed canvas, so the
   view sheds decoration before information: the logo goes first, the hints
   second, the status rows last, and the credential warning never — a

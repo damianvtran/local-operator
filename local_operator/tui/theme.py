@@ -176,10 +176,70 @@ DEFAULT_THEME = "dark"
 #: palette author's typo, not an extension point).
 SEMANTIC_TOKENS: tuple[str, ...] = tuple(_SEMANTIC_ALIASES["dark"])
 
+#: Tokens a theme MAY set but need not — the total-function contract above
+#: applies only to :data:`SEMANTIC_TOKENS`. The tool-category family is the
+#: first entry: absent, `register_theme` fills each from its source token so
+#: all 54 existing palettes keep working with zero edits (§3's "no palette
+#: rewrite" rule) and the default look does not change for a theme that has
+#: not opted in. Present, the author's value wins outright — the derivation
+#: never overrides an explicit choice. A theme may still not invent tokens
+#: outside this set plus :data:`SEMANTIC_TOKENS`; that half of the gate stays
+#: total.
+OPTIONAL_TOKENS: tuple[str, ...] = (
+    # The tool-category family. A settled tool row's NAME is currently one
+    # grey for every tool, so a ledger cannot be scanned for "what did this
+    # actually do to my machine" — only the failed row and the running row
+    # carry any hue at all.
+    #
+    # These are their own tokens rather than a reuse of `warning`/`accent`
+    # for a reason worth keeping: those names have contracts (`warning` means
+    # a warning happened; `accent` is "the one green: live indicator, focus"),
+    # and binding tool identity to them means a theme author tuning `warning`
+    # for alarm legibility silently retunes tool names. A token that means
+    # what it says can be tuned for the job it actually does.
+    #
+    # The CATEGORY axis is not invented here: `glyphs.PLAIN_TOOL_ICONS`
+    # already groups its fallbacks by shell/read/mutate/search/meta for the
+    # same reason, so this reuses that vocabulary instead of minting a rival.
+    "tool-read",
+    "tool-mutate",
+    "tool-exec",
+    "tool-meta",
+)
+
+#: Derivation sources for the tool-category family, in the ramp's own terms.
+#: Conservative on purpose — `read` and `meta` land on tokens whose existing
+#: contracts already fit (`signal` is "links, file paths"; `label` is "violet
+#: meta"), and the two categories with no natural home lean on the neutral
+#: ramp rather than borrowing an OUTCOME hue, because a row that changed a
+#: file is not a warning and must not look like one. A theme that wants four
+#: loud categories authors them.
+_TOOL_CATEGORY_SOURCE: dict[str, str] = {
+    "tool-read": "signal",
+    "tool-mutate": "muted",
+    "tool-exec": "muted",
+    "tool-meta": "label",
+}
+
 #: Palette hexes must be exactly ``#rrggbb``. Short forms and named colors are
 #: rejected at registration: the TCSS variable block and the terminal-theme
 #: mapping both slice these strings positionally.
 _HEX_RE = re.compile(r"#[0-9a-fA-F]{6}")
+
+
+def _fill_tool_categories(tokens: dict[str, str]) -> None:
+    """Give a ramp its tool-category tokens, leaving authored values alone.
+
+    Mutates in place. Each missing token takes its source token's value
+    (:data:`_TOOL_CATEGORY_SOURCE`), so a theme that never heard of this
+    family renders exactly as it does today:
+    `read` picks up the reference hue it already uses for file paths, `meta`
+    the violet it already uses for meta, and `mutate`/`exec` stay on the
+    neutral ramp. No theme changes appearance unless it opts in.
+    """
+    for token, source in _TOOL_CATEGORY_SOURCE.items():
+        if token not in tokens and source in tokens:
+            tokens[token] = tokens[source]
 
 
 @dataclass(frozen=True)
@@ -210,10 +270,18 @@ def _builtin_spec(name: str, label: str, description: str, dark: bool) -> ThemeS
     The two brand ramps keep their raw-token + alias form because the raw
     names (``amber``, ``paper``, ``ink``) are pinned by tests and still
     emitted as TCSS variables; everything else registers semantic-only.
+
+    Built directly rather than through :func:`register_theme` (there is
+    nothing to validate — the alias map is this module's own data), so the
+    optional-token fill-in that function does for curated palettes is
+    repeated here: neither brand ramp authors the tool-category family in
+    :data:`BRAND_TOKENS`, so both get the derived values, same as any curated
+    theme that does not opt in.
     """
     tokens = {
         semantic: BRAND_TOKENS[name][raw] for semantic, raw in _SEMANTIC_ALIASES[name].items()
     }
+    _fill_tool_categories(tokens)
     return ThemeSpec(name=name, label=label, description=description, dark=dark, tokens=tokens)
 
 
@@ -267,15 +335,28 @@ def register_theme(spec: ThemeSpec) -> None:
     A theme is data, so every mistake a palette author can make is caught
     HERE, at registration, rather than at render time in whichever widget
     first asks for the missing token.
+
+    :data:`SEMANTIC_TOKENS` stays a total function — every one of the 23 is
+    still required, and an unrecognised key is still rejected. The gate's
+    total-ness now spans two sets rather than one: a key must be in
+    ``SEMANTIC_TOKENS`` or :data:`OPTIONAL_TOKENS` to be accepted, and every
+    name in ``SEMANTIC_TOKENS`` (never an optional one) must be present. An
+    optional token a theme omits is filled in below from its deriver rather
+    than left missing — the CALLER (every other reader in this module) still
+    sees a total ``spec.tokens`` and never has to branch on whether a theme
+    opted in. The tool-category family is what ``OPTIONAL_TOKENS`` carries
+    today; another would need its own fill wired in here alongside it.
     """
     if spec.name in _THEMES:
         raise ValueError(f"theme {spec.name!r} is already registered")
     missing = [token for token in SEMANTIC_TOKENS if token not in spec.tokens]
     if missing:
         raise ValueError(f"theme {spec.name!r} is missing tokens: {', '.join(missing)}")
-    unknown = [token for token in spec.tokens if token not in SEMANTIC_TOKENS]
+    allowed = set(SEMANTIC_TOKENS) | set(OPTIONAL_TOKENS)
+    unknown = [token for token in spec.tokens if token not in allowed]
     if unknown:
         raise ValueError(f"theme {spec.name!r} has unknown tokens: {', '.join(unknown)}")
+    _fill_tool_categories(spec.tokens)
     malformed = [
         f"{token}={value!r}" for token, value in spec.tokens.items() if not _HEX_RE.fullmatch(value)
     ]
@@ -358,6 +439,13 @@ def tcss_variable_map(theme: str | None = None) -> dict[str, str]:
 
     Textual injects these via ``App.get_css_variables``; the TCSS file then
     references ``var(--lo-<name>)`` and never a literal hex.
+
+    Optional tokens (``OPTIONAL_TOKENS``) are emitted alongside the required
+    ones: ``get_tokens`` on the two brand ramps answers with the RAW
+    ``BRAND_TOKENS`` vocabulary, which never authors the tool-category family
+    (the fill runs in :func:`_builtin_spec`, not in ``BRAND_TOKENS`` itself),
+    so without this the sheet's ``$lo-tool-*`` would be undefined for
+    ``dark`` and ``light`` alone even though every curated theme resolves it.
     """
     name = theme or _current_theme
     variables: dict[str, str] = {}
@@ -365,6 +453,8 @@ def tcss_variable_map(theme: str | None = None) -> dict[str, str]:
         variables[f"lo-{token}"] = hex_value
     for semantic in SEMANTIC_TOKENS:
         variables[f"lo-{semantic}"] = semantic_color(semantic, name)
+    for optional in OPTIONAL_TOKENS:
+        variables[f"lo-{optional}"] = semantic_color(optional, name)
     return variables
 
 

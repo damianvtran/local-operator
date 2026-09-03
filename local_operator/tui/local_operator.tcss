@@ -30,13 +30,13 @@
  *     the moment the user takes it back. (It used to say "a turn is live",
  *     which was not true of site 4 and so was not true of the frames: a picker
  *     highlight is not liveness, it is the other half of the same sentence.)
- *     It is spent on exactly four sites, and the list is exhaustive —
+ *     It is spent on exactly five sites, and the list is exhaustive —
  *     `grep -rn 'accent' local_operator/tui`
  *     plus `$lo-accent` in this file should find no others. Grep the WORD, not
  *     `semantic_color("accent")`: shimmer.py reaches it through its own
  *     `_style("accent")` helper and command_picker.py through
  *     `semantic_color("accent" if selected else "fg")`, so the narrower pattern
- *     silently misses two of the four and reads as a clean audit.
+ *     silently misses two of the five and reads as a clean audit.
  *       1. the working line's shimmer crest      (shimmer.py)
  *       2. a running tool's glyph                (widgets/tool_card.py)
  *       3. the status band's streaming spinner   (widgets/status_line.py)
@@ -61,10 +61,21 @@
  *          paints them in three different row kinds at once, and a reader
  *          auditing the frame would otherwise count three new accent sites
  *          against a list claiming to be exhaustive (design round 1, D5).
- *     It was FIVE until the focused input chevron gave its site back. Focus is
- *     not liveness, and painting both green put a green chevron two rows above
- *     the band's green spinner meaning something else (D5, round 11). Focus is
- *     a brightness step in the neutral ramp now — see `#prompt-chevron`.
+ *       5. a markdown h1                        (markdown_theme.py)
+ *          The one site that is NOT liveness, and it is admitted knowingly.
+ *          h1, h2 and strong all painted `fg` bold — the same pixels — so a
+ *          long answer had no top-level anchor, and the neutral ramp had no
+ *          rung left to buy one with (h2-h6 already spend three). Structure
+ *          at the top of a document is worth one hue; h2-h6 stay neutral and
+ *          this does not generalise to a heading palette. Cheapest site to
+ *          give back if it reads badly — `label` is the alternative.
+ *     It was FIVE, then FOUR when the focused input chevron gave its site
+ *     back — focus is not liveness, and painting both green put a green
+ *     chevron two rows above the band's green spinner meaning something else
+ *     (D5, round 11). Focus is a brightness step in the neutral ramp now —
+ *     see `#prompt-chevron`. It is FIVE again because h1 was added on the
+ *     budget written up in `docs/proposals/theme-colour-budget.md`; that is a
+ *     budget decision, deliberately taken, not a site that crept in.
  *     Everything else is warm neutrals. Links and file paths are the `signal`
  *     blue and deliberately NOT green; `/usage` provider headings are `label`;
  *     the brand glyph in the band is `muted`, because a mark that is always on
@@ -197,14 +208,20 @@ TranscriptBlock, UserBlock, NoticeBlock, RichBlock, AssistantBlock, ToolCard, Wa
     margin-top: 1;
 }
 
-/* The prompt's own ink. The gutter bar and the prose are both styled per-span
- * by the widget (see `UserBlock` in widgets/transcript.py, which owns the
- * treatment because it has to wrap the text itself to keep the bar on every
- * row), so this is the base the sheet would fall back to and the one place a
- * reader grepping the stylesheet for "user" finds the pointer. There is
- * deliberately no background here: elevation-as-a-background-step is spent in
- * full on the tool ledger, whose FILL carries the outcome, and a second slab
- * kind on the same surface turns the transcript into a stack of cards. */
+/* The prompt's own ink. The gutter bar and the prose are both styled
+ * per-span by the widget (see `UserBlock` in widgets/transcript.py, which
+ * owns the treatment because it has to wrap the text itself to keep the bar
+ * on every row); this is the base the sheet would fall back to and the one
+ * place a reader grepping the stylesheet for "user" finds the pointer.
+ *
+ * NO background. A `tint-user` ground shipped briefly and was removed on
+ * review: a tinted band behind every prompt reads as a slab in a transcript
+ * whose only other fill is the tool ledger, and the two competed. The
+ * gutter bar already marks a prompt on every wrapped row, and the adaptive
+ * `.gap-above` rule already brackets it, so the ground was a third cue for
+ * something two were carrying. What the removal keeps from that argument:
+ * the ledger's fill carries the OUTCOME, and nothing else in the transcript
+ * should wear a fill that could be mistaken for it. */
 UserBlock {
     color: $lo-fg;
 }

@@ -179,10 +179,47 @@ PALETTES: list[ThemeSpec] = [
             "signal": "#41787a",  # foam #56949f: 3.14:1 (< 4), held off pine
             "label": "#7d6694",  # iris #907aa9: 3.47:1 (< 4) — 7.8 ΔE
             "tint-danger": "#f6e2e3",
-            "tint-select": "#f0e8e3",  # rose cast, just under the paper
-            "tint-select-hi": "#e8ddd6",
+            # Selection/focus, AUTHORED rather than left on the rose cast.
+            # `#f0e8e3` measured ΔE 1.71 from `surface` — a focused tool row
+            # was indistinguishable from an unfocused one, and dawn was the
+            # only theme with the defect (dark 8.54, github-light 8.74,
+            # solarized-light 6.65). The paper has no well to sink into, so
+            # the step is bought in CHROMA at near-constant luminance.
+            #
+            # IRIS: dawn's canonical meta accent, already what `label`
+            # spends, which makes it the right hue for a selection that is
+            # chrome rather than content. Measured: ΔE 10.05 from `surface`,
+            # at 1.157:1 against `bg` — well inside the 2.2 tint ceiling.
+            "tint-select": "#e9e2f2",
+            "tint-select-hi": "#ded2ee",
             "tint-attach": "#e8eef0",  # foam-leaning wash
             "tint-attach-hi": "#d2e0e2",
+            # The user's own prompt ground. The per-theme derivation solves
+            # for maximum separation and lands on green-teal (159°) here,
+            # which is correct by the metric and wrong for the eye: it fights
+            # the warm paper. Blue is the one hue family dawn's palette does
+            # not already spend — love/gold/rose are warm, pine/foam sit at
+            # 180-200°, iris is violet — so a cool cast separates from the
+            # ground instead of competing with it. Measured: ΔE 10.0 from
+            # `bg` and 9.8 from its worst rival ground, both above the §9
+            # floors, at 245° — the best of the blues tested (230/245/260).
+            # Tool categories. The derivation leaves mutate/exec on the
+            # neutral ramp, which is the safe default for 54 themes but keeps
+            # dawn's ledger a single grey. Dawn has six solved accents and was
+            # spending two, so these are authored from the canonical set it
+            # already carries: foam for reading, gold for changing a file,
+            # iris for running something, rose for coordination.
+            #
+            # Every value is a token dawn has already solved for WCAG on this
+            # paper (all four measure >= 4.31:1 on `surface`), the four
+            # separate from each other by >= 22.1 ΔE00, and each stays >= 11.6
+            # ΔE00 from BOTH outcome hues — a category must never be mistaken
+            # for a verdict. `success` is deliberately not reused here: it is
+            # the ✓ one column to the right on the same row.
+            "tool-read": "#41787a",  # foam — same hue as file paths, deliberately
+            "tool-mutate": "#9e6200",  # gold
+            "tool-exec": "#7d6694",  # iris
+            "tool-meta": "#a8594f",  # rose
         },
     ),
 ]

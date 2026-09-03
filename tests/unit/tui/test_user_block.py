@@ -305,7 +305,7 @@ async def test_a_prompt_in_the_nested_subagent_body_paints_every_row_it_reserves
 
 
 def test_the_rule_never_spends_the_accent() -> None:
-    """The accent green is spent on four sites and means "a turn is live".
+    """The accent green is spent on five sites and means "a turn is live".
 
     A green column beside every prompt would be the largest accent surface in
     the app and would mean nothing — see the exhaustive list in
