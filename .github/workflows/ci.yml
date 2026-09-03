@@ -140,67 +140,17 @@ jobs:
         
   test:
     runs-on: ubuntu-latest
-    # ~23 min is the honest ceiling for a healthy run of this stage, so 40 is a
-    # backstop for a hang and not a limit healthy work can reach. It is
-    # load-bearing: a `test (3.13)` job once hung and held one of the account's
-    # 20 concurrency slots for 3h38m, because with no `timeout-minutes` the
-    # GitHub default is SIX HOURS. The suite's own failure modes assert or
-    # error in seconds; only a deadlock gets here.
-    timeout-minutes: 40
+    # Sharded across 5 parallel jobs to bring individual test runner execution
+    # time safely within the 7-9 minute window while staying well within the
+    # 20-job concurrency budget. Timeout set to 15m.
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
         # BOTH ends of `requires-python` on `main`, the minimum only on pull
         # requests.
-        #
-        # The rule this preserves is unchanged: testing only the minimum lets a
-        # 3.13-only typing feature ship, and testing only the newest lets a
-        # 3.12 incompatibility ship, so the declared range has to be the tested
-        # range or the classifier is a guess. `main` therefore still tests the
-        # full declared range, and no commit reaches a release without both
-        # ends having run on it.
-        #
-        # What changes is WHEN the 3.13 leg runs on feature work. This stage is
-        # ~23 min and was the single largest consumer of a 20-job account-wide
-        # concurrency cap; at two legs per run it alone could exceed the whole
-        # account's parallelism during a busy review cycle, and the queueing
-        # delayed every other branch AND the release pipeline. Running one leg
-        # per PR commit halves that.
-        #
-        # The cost, stated plainly: a 3.13-ONLY break is now caught when the PR
-        # merges to `main` rather than on the PR itself. That is a real
-        # reduction in per-PR gate strength.
-        #
-        # It was accepted on MEASURED grounds, not on the intuition that such
-        # breaks are rare. Surveying recent CI runs where BOTH legs actually
-        # reported a pass/fail (excluding cancelled legs), 3.13-only reds are a
-        # MINORITY of 3.12-only reds — measured repeatedly at roughly 1:2 to
-        # 1:7 depending on the window, and never once inverted. So the 3.13 leg
-        # is not carrying a unique load; if anything the 3.12 leg catches more.
-        #
-        # Deliberately a RATIO and not a fixed count: this repo merges fast
-        # enough that any absolute number is stale within hours, and two
-        # independent surveys of overlapping windows disagreed on the count
-        # while agreeing on the direction. The direction is the load-bearing
-        # part and it has held at every window measured.
-        #
-        # What decided it is WHY those reds happen: each was `1 failed` out of
-        # ~9000, on a DIFFERENT timing-sensitive test (transcript selection,
-        # resume-subagents, tui responsiveness), never the same test twice, and
-        # none was a genuine 3.13 language or typing incompatibility. One was
-        # confirmed by reading the log to be a composer-height timing assertion
-        # (test_transcript_selection.py:2243). They are flakes on a slow,
-        # loaded runner — the class of defect #461 ("wait on conditions instead
-        # of the clock") addresses.
-        #
-        # So relegating this leg to `main` takes a source of flaky reds out of
-        # the review loop while keeping the real incompatibility gate — which
-        # has not fired in this window — on every merge. If a true 3.13-only
-        # incompatibility ever DOES reach `main`, put "3.13" back into the
-        # pull_request arm rather than reaching for more concurrency; the flakes
-        # are the thing to fix first, and they are a separate concern from this
-        # workflow (see dev-test-determinism).
         python-version: ${{ github.event_name == 'pull_request' && fromJSON('["3.12"]') || fromJSON('["3.12", "3.13"]') }}
+        shard: [0, 1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v4
 
@@ -208,25 +158,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-          # Restores pip's HTTP cache. Measured saving is SMALL — install is
-          # ~15-20 s of a ~23 min job — so this is emphatically not what fixes
-          # the queue; it removes a PyPI round trip and one network flake mode
-          # per job.
-          #
-          # Known limitation, stated so nobody reads more into this than it
-          # delivers: the key is `pyproject.toml`, and this project pins none of
-          # its 19 runtime dependencies (`>=` throughout) and has no lockfile.
-          # The key therefore only changes when that FILE changes, while the
-          # resolved wheels drift underneath it as upstreams release. The cache
-          # decays into staleness rather than staying current.
-          #
-          # That is safe, not merely tolerable: this is pip's HTTP download
-          # cache, not a restored site-packages. pip still resolves against the
-          # index on every run and reuses a cached download only when the
-          # resolution asks for that exact artifact, so a stale entry cannot pin
-          # an old version into a build or otherwise poison a run. Adding a
-          # lockfile would make this caching genuinely effective, and is the
-          # right fix if install time ever becomes material here.
           cache: pip
           cache-dependency-path: pyproject.toml
 
@@ -235,28 +166,69 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
 
-      - name: Run tests with coverage
-        # pytest-cov (not `coverage run -m pytest`) because the suite now runs
-        # under xdist: coverage has to be collected inside each worker
-        # subprocess and merged, which pytest-cov does automatically and a
-        # top-level `coverage run` cannot. `-n auto` (from addopts) gives one
-        # worker per logical core — 4 on GitHub's ubuntu-latest. The 80% floor
-        # is enforced by `fail_under` in [tool.coverage.report], so the step no
-        # longer parses the percentage out of the report by hand.
-        #
-        # Do NOT oversubscribe (`-n` greater than the core count) here. It looks
-        # tempting because the suite is wait-bound, and it does help on a
-        # many-core dev box that still has idle cores at `-n 8`. On this 4-vCPU
-        # runner it does not: it left wall time unchanged and starved three
-        # timing-sensitive tests (a parked job, a late-parking tool, a held
-        # key) whose deadlines are real wall clock, turning them red. One worker
-        # per core is the stable point.
+      - name: Partition test suite
         run: |
-          pytest --cov --cov-report=term-missing:skip-covered --cov-report=html
+          python -c "
+          import glob, sys
+          files = sorted(glob.glob('tests/unit/**/test_*.py', recursive=True))
+          shard = ${{ matrix.shard }}
+          total = 5
+          selected = [f for i, f in enumerate(files) if i % total == shard]
+          with open('shard_tests.txt', 'w') as f:
+              f.write('\n'.join(selected) + '\n')
+          print(f'Shard {shard+1}/{total} collected {len(selected)} test files')
+          "
+
+      - name: Run test shard with coverage
+        run: |
+          pytest $(cat shard_tests.txt | tr '\n' ' ') --cov --cov-fail-under=0 --cov-report=
+          mv .coverage .coverage.${{ matrix.python-version }}.${{ matrix.shard }}
+
+      - name: Upload shard coverage data
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-data-${{ matrix.python-version }}-${{ matrix.shard }}
+          path: .coverage.${{ matrix.python-version }}.${{ matrix.shard }}
+          retention-days: 1
+          include-hidden-files: true
+
+  coverage-report:
+    runs-on: ubuntu-latest
+    needs: test
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ${{ github.event_name == 'pull_request' && fromJSON('["3.12"]') || fromJSON('["3.12", "3.13"]') }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Download all shard coverage data
+        uses: actions/download-artifact@v4
+        with:
+          pattern: coverage-data-${{ matrix.python-version }}-*
+          merge-multiple: true
+
+      - name: Combine coverage and check threshold
+        run: |
+          ls -la
+          coverage combine .coverage.${{ matrix.python-version }}.*
+          coverage report --fail-under=80
+          coverage html
 
       - name: Upload coverage report
-        # `if: always()` so a coverage-threshold failure still uploads the HTML,
-        # which is exactly when you want to see which lines dropped.
         if: always()
         uses: actions/upload-artifact@v4
         with:
