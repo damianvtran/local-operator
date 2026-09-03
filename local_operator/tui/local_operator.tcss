@@ -209,6 +209,21 @@ UserBlock {
     color: $lo-fg;
 }
 
+/* The prompt's half of `display.comfortable_rows`, so a prompt and an action
+ * row keep one vertical rhythm rather than the setting splitting them.
+ *
+ * VERTICAL ONLY, and that is a constraint rather than a preference. The block
+ * wraps its own text (the gutter bar has to land on every wrapped row) and
+ * measures with `self.size.width`, which INCLUDES horizontal padding, while
+ * `render()` is handed the CONTENT width. Left/right padding here would leave
+ * the widget wrapping to a width two cells wider than it is given, and the
+ * prompt renders as a tinted band with no prose in it. Top/bottom padding is
+ * safe: the block is `height: auto` and writes its own height from the row
+ * count, so vertical padding grows it instead of clipping it. */
+.comfortable-rows UserBlock {
+    padding: 1 0 0 0;
+}
+
 NoticeBlock {
     color: $lo-dim;
 }
@@ -280,6 +295,47 @@ ToolCard, WakeBlock {
  * is the same. */
 ToolCard.tool-expanded, WakeBlock.wake-expanded {
     height: auto;
+}
+
+/* COMFORTABLE DENSITY (`display.comfortable_rows`, default ON). One padding
+ * row above and below an action's summary.
+ *
+ * This is a HIT TARGET, not decoration. The whole row is the click surface
+ * for expand/collapse (`ExpandableActionBlock.on_click` is on the widget, so
+ * padding rows are inside it), and at one cell tall that target was a single
+ * terminal line: a click a row off either landed on a neighbouring action or
+ * fell through to the transcript. Three rows triples the target without
+ * moving a single glyph — the summary is still exactly one row of text, so
+ * the ledger's one-line-per-action reading is unchanged.
+ *
+ * `height: 2` is `1 + padding-top`. Textual sizes a fixed-height widget
+ * INCLUDING its padding, so the two move together or the summary clips. The
+ * class carries BOTH or neither.
+ *
+ * TOP ONLY, and that is a correctness requirement rather than a taste call.
+ * The dock guarantees EXACTLY ONE ground row between the last block and the
+ * composer (`test_composer_seam`, which counts blank rows by walking the
+ * composed frame). A bottom padding row is blank, so a padded last block read
+ * as a five-row seam and the guarantee broke. Padding the top only buys the
+ * same separation between neighbouring rows — every row still gains a cell of
+ * air above it — while the block still ENDS on its summary, so the seam below
+ * the ledger is the dock's one row and nothing else.
+ *
+ * The cost is real: a twelve-row ledger occupies thirty-six rows, so less
+ * history fits on a screen. That is why this is a setting rather than a
+ * decision made for everyone — a user who reads a long ledger more often
+ * than they click one turns it off.
+ *
+ * Expanded rows are exempt: they are already `height: auto` and content-sized,
+ * and the payload gives the pointer plenty to hit. */
+.comfortable-rows ToolCard, .comfortable-rows WakeBlock {
+    height: 2;
+    padding: 1 0 0 0;
+}
+
+.comfortable-rows ToolCard.tool-expanded, .comfortable-rows WakeBlock.wake-expanded {
+    height: auto;
+    padding: 1 0 0 0;
 }
 
 /* State reaches the GROUND, not just the glyph: a live action sits one step

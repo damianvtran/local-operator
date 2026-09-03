@@ -773,7 +773,13 @@ async def test_hidden_after_the_first_transcript_block() -> None:
         transcript = app.query_one(TranscriptView)
         block = transcript.blocks()[0]
         assert block.region.y == transcript.content_region.y
-        assert block.region.height == 1
+        # One row of PROSE. The height is the block's outer box, so under
+        # `display.comfortable_rows` it also carries the padding row that
+        # buys the click target — asserting a bare 1 would pin the density
+        # setting rather than the thing this test is about, which is that the
+        # retired welcome leaves no row behind (the `y` assertion above).
+        padding = block.styles.padding
+        assert block.region.height == 1 + padding.top + padding.bottom
 
 
 @pytest.mark.asyncio

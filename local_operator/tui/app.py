@@ -143,6 +143,7 @@ from local_operator.tui.markdown_theme import (
     install_markdown_theme,
 )
 from local_operator.tui.notify import Notifier, notifications_enabled
+from local_operator.tui.settings import settings_get
 from local_operator.tui.terminal_title import (
     TerminalTitle,
     cwd_label,
@@ -1221,6 +1222,17 @@ ACTIVITY_APPROVAL = "approval"
 #: which RE-DERIVES it from those live facts; the several call sites ask it to
 #: recompute rather than each setting the class from what it believes.
 BOOT_LAYOUT_CLASS = "boot"
+
+#: Class the Screen carries while ``display.comfortable_rows`` is on, which is
+#: the default. Same device as the boot class: a display MODE is one class on
+#: the Screen and the padding itself is the stylesheet's problem, so nothing
+#: here knows a cell count and the setting cannot drift from the rule.
+#:
+#: On the Screen rather than per block because the blocks are built at
+#: different times — a card mounted mid-turn would otherwise have to ask the
+#: setting for itself, and a live toggle would have to walk and re-tag every
+#: block already on screen instead of flipping one class.
+COMFORTABLE_ROWS_CLASS = "comfortable-rows"
 
 #: Class the Screen carries while the full-page subagent view is open. Same
 #: device as the boot class — a mode is one class on the Screen and the rest is
@@ -2658,6 +2670,7 @@ class OperatorApp(App[None]):
         except Exception:
             pass  # headless consoles without a pushable theme keep defaults
         self.ansi_theme_dark = _brand_terminal_theme()
+        self._sync_row_density_class()
 
         transcript = self._transcript_view()
         transcript.set_on_clear(self._on_transcript_cleared)  # TUI-009 hook
@@ -9713,6 +9726,24 @@ class OperatorApp(App[None]):
             self._sync_boot_column_width(max(0, self.size.width - SCREEN_INSET))
         self._sync_boot_layout()
 
+    def _sync_row_density_class(self) -> None:
+        """Put ``Screen.comfortable-rows`` on iff the setting says so.
+
+        Re-derived from the stored flag rather than toggled, so the startup
+        path and the live-apply path cannot disagree — the same discipline
+        :meth:`_sync_boot_layout_class` states for the boot class.
+
+        Guarded because it runs on the mount path: a screen that is not up
+        yet (headless construction, an early failure) must not cost a boot.
+        """
+        try:
+            self.screen.set_class(
+                bool(settings_get("display.comfortable_rows", True)),
+                COMFORTABLE_ROWS_CLASS,
+            )
+        except Exception:  # noqa: BLE001 — density is cosmetic; never fail a boot for it
+            logger.debug("settings: row density class not applied", exc_info=True)
+
     def _sync_boot_layout_class(self) -> None:
         """Put ``Screen.boot`` on only while no full-page MODE is up.
 
@@ -12071,6 +12102,12 @@ class OperatorApp(App[None]):
         try:
             if message.key == "tui.theme" and message.value:
                 self._apply_theme(str(message.value))
+            elif message.key == "display.comfortable_rows":
+                # Layout, not ink: the padding lives in the stylesheet behind
+                # one Screen class, so flipping the class is the whole apply
+                # and every block already on screen re-lays out with it. A
+                # repaint would re-ink content that has not changed colour.
+                self._sync_row_density_class()
             elif message.key.startswith("display."):
                 # The display flags are read through the cached fast path, which
                 # `settings_io` already invalidated; the widgets that resolved a

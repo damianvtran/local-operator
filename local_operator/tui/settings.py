@@ -30,6 +30,14 @@ from typing import Any
 #: :func:`_defaults`); this dict is not consulted at runtime.
 _DEFAULT_NOTES: dict[str, Any] = {
     "display.shimmer": True,
+    # One padding row above and below a tool row and a user prompt
+    # (`.comfortable-rows` in the stylesheet). Defaults ON because the row is
+    # the click target for expand/collapse and one cell is a hard thing to
+    # hit — a click a row off lands on the neighbouring action or falls
+    # through to the transcript. OFF is the density trade: a twelve-row
+    # ledger fits in twelve rows instead of thirty-six, for a user who reads
+    # more ledger than they click.
+    "display.comfortable_rows": True,
     # Nerd Font glyphs on tool rows. Default is None = AUTO: unset means
     # `tui/glyphs.py` decides from the terminal-emulator env markers (a
     # bundled Nerd symbol fallback font is enumerable per emulator), so a

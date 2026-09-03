@@ -112,6 +112,7 @@ def _consumer_defaults() -> dict[str, object]:
 #: the prose in ``_DEFAULT_NOTES`` is what documents the intent.
 _NO_SINGLE_VALUE_CONSUMER: dict[str, str] = {
     "display.shimmer": "tui/settings.py derives its defaults from this registry",
+    "display.comfortable_rows": "tui/settings.py derives its defaults from this registry",
     "display.nerd_icons": "derived; tri-state None means auto-detect, not a value",
     "display.terminal_title": "tui/settings.py derives its defaults from this registry",
     "display.images": "tui/settings.py derives its defaults from this registry",
