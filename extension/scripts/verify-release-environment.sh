@@ -37,13 +37,18 @@ get_github_json() {
 get_github_json "environments/$ENVIRONMENT_NAME" "$tmp_dir/environment.json"
 
 # Merely naming an environment in workflow YAML creates an unprotected one on a
-# typo. Required reviewers and an exact main-only deployment policy therefore
-# have to be observed through GitHub's API before OIDC authentication can run.
-jq -e '
-  (.protection_rules // [])
-  | any(.type == "required_reviewers" and ((.reviewers // []) | length > 0))
-' "$tmp_dir/environment.json" >/dev/null \
-  || fail "$ENVIRONMENT_NAME must have at least one required reviewer"
+# typo, so the exact main-only deployment policy has to be observed through
+# GitHub's API before OIDC authentication can run.
+#
+# A "required reviewers" protection rule used to be enforced here as well. It
+# was removed by operator decision on 2026-09-03 so a store release completes
+# end to end without a human approval pause. Do not re-add it thinking it was
+# lost: the retained boundary is the GCP Workload Identity Federation
+# attribute condition, which mints a token only for the pinned numeric
+# repository ID on refs/heads/main, combined with this script's exact-main
+# deployment-branch-policy check, the environment-scoped variable check below,
+# and each workflow's own merge-base ancestry check. The launch decision now
+# rides on the reviewed-merge-to-main process that the WIF ref pin enforces.
 jq -e '
   .deployment_branch_policy.protected_branches == false
   and .deployment_branch_policy.custom_branch_policies == true
@@ -73,5 +78,5 @@ while [[ $# -gt 0 ]]; do
     || fail "$name does not match the environment-scoped value on $ENVIRONMENT_NAME"
 done
 
-printf 'validated protected environment %s (required reviewer, main-only, environment-scoped variables)\n' \
+printf 'validated protected environment %s (main-only, environment-scoped variables)\n' \
   "$ENVIRONMENT_NAME"

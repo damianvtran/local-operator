@@ -305,11 +305,22 @@ client secret, refresh token, or third-party upload action, and do not bump the
 pinned action SHAs without reviewing the new revision.
 
 Both workflows **fail closed**: before authenticating they verify through the
-GitHub API that their environment exists with at least one required reviewer
-and a custom deployment branch policy allowing exactly `main`, and that every
-release variable is defined **on the environment itself**. Repository- or
-organization-scoped copies are rejected so nobody can bypass environment
-protection by defining the same names at a broader scope.
+GitHub API that their environment exists with a custom deployment branch
+policy allowing exactly `main`, and that every release variable is defined
+**on the environment itself**. Repository- or organization-scoped copies are
+rejected so nobody can bypass environment protection by defining the same
+names at a broader scope.
+
+The environments previously also carried at least one required reviewer, and
+that human gate was removed by deliberate operator decision on 2026-09-03 so
+a store release completes end to end automatically. Do not re-add it without
+reopening that decision. The protections that remain are the real boundary:
+the WIF attribute condition pinning the numeric repository ID and
+`refs/heads/main` (so only reviewed code on main can mint a token), the
+exact-main deployment branch policy, the environment-scoped variables, and
+each workflow's own `git merge-base --is-ancestor HEAD origin/main` check.
+The launch decision now rides on the reviewed-merge-to-main process plus that
+WIF ref pin.
 
 Define these environment variables (identifiers, not secrets) on **each** of
 `chrome-web-store` and `chrome-web-store-production`:
@@ -338,25 +349,31 @@ assertion.repository_id == "922327641" && assertion.ref == "refs/heads/main"
 ```
 
 Grant the pool principal `roles/iam.workloadIdentityUser` on the service
-account scoped with the same `attribute.repository_id` value. Configure
-required reviewers on both GitHub environments; production should use the
-stricter launch approvers. Dispatch both workflows from `main` — the WIF ref
-condition and each workflow's own main-ancestry check reject anything else.
+account scoped with the same `attribute.repository_id` value. Do **not**
+configure required reviewers on either GitHub environment — the human approval
+gate was removed by operator decision on 2026-09-03 (see above); each
+environment keeps its custom deployment branch policy allowing exactly `main`
+and its environment-scoped variables. Dispatch both workflows from `main` —
+the WIF ref condition and each workflow's own main-ancestry check reject
+anything else.
 
 1. Run **Chrome Web Store staged release** manually with a commit/tag already on
-   `main` and the exact manifest version. After environment approval it installs
-   frozen dependencies, runs typecheck/tests, builds exactly the source-map-free
-   zip, verifies manifest/package/input versions and an explicit zip allowlist,
-   uploads it, and submits with `STAGED_PUBLISH` at 100% deployment. If the
+   `main` and the exact manifest version. With no environment approval gate it
+   runs immediately: it installs frozen dependencies, runs typecheck/tests,
+   builds exactly the source-map-free zip, verifies manifest/package/input
+   versions and an explicit zip allowlist, uploads it, and submits with
+   `STAGED_PUBLISH` at 100% deployment. If the
    store reports the upload as asynchronous, the run fails closed — the API's
    global upload status cannot be bound to this zip — and is safe to re-run
    once processing finishes.
 2. Wait for Chrome review and verify `fetchStatus` reports that exact version as
    `STAGED`. Review the approved package/listing before launch.
-3. Run **Promote staged Chrome Web Store release** with that exact version. Its
-   separate protected production environment is the explicit launch approval;
-   it refuses non-staged, mismatched, or partially-deployed versions and
-   verifies the result is `PUBLISHED` at 100% deployment.
+3. Run **Promote staged Chrome Web Store release** with that exact version. The
+   dispatch itself is the explicit launch decision — the production
+   environment no longer pauses for a human approver (removed by operator
+   decision on 2026-09-03) — and the run refuses non-staged, mismatched, or
+   partially-deployed versions and verifies the result is `PUBLISHED` at 100%
+   deployment.
 
 The existing GitHub Release asset behavior remains unchanged and independent of
 store publication.
