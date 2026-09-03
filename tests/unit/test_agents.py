@@ -1735,6 +1735,128 @@ def test_exported_agent_archive_removes_the_temp_dir_on_error(temp_agents_dir: P
     assert not temp_dir.exists()
 
 
+@pytest.mark.parametrize(
+    "agent_name, expected_filename",
+    [
+        ("../../evil", "evil.zip"),
+        ("a/b", "b.zip"),
+        ("/etc/passwd", "passwd.zip"),
+        # A name that degenerates to nothing once separators are stripped must
+        # still yield a usable filename rather than a bare ".zip" or a path.
+        ("..", "agent.zip"),
+        ("/", "agent.zip"),
+        # Windows-style separators are normalised too: the name travels in
+        # agent.yml, so the OS that wrote it is not the OS that reads it.
+        (r"..\..\evil", "evil.zip"),
+    ],
+)
+def test_export_filename_cannot_escape_the_temp_dir(
+    temp_agents_dir: Path, tmp_path: Path, monkeypatch, agent_name: str, expected_filename: str
+):
+    """A traversal-shaped agent name must not steer the archive out of its temp dir.
+
+    The name is attacker-controllable: ``import_agent`` preserves it verbatim
+    from a downloaded agent's ``agent.yml``. With the filename derived from the
+    raw name, ``zip_path.parent`` was NOT the ``mkdtemp()`` directory — for
+    ``../../evil`` it resolved two levels up — so the cleanup
+    ``shutil.rmtree(zip_path.parent)`` deleted an unrelated tree, and the zip
+    itself was written outside the temp dir.
+
+    ``tempfile.tempdir`` is redirected into a sandbox so that a regression
+    destroys only this test's scratch space, and ``precious`` proves the blast
+    radius concretely rather than by inspecting the path alone.
+    """
+    import tempfile
+
+    sandbox = tmp_path / "sandbox"
+    scratch = sandbox / "tmp"
+    scratch.mkdir(parents=True)
+    precious = sandbox / "precious"
+    precious.mkdir()
+    (precious / "keepme.txt").write_text("do not delete", encoding="utf-8")
+    monkeypatch.setattr(tempfile, "tempdir", str(scratch))
+
+    registry = AgentRegistry(temp_agents_dir)
+    agent = _export_fixture_agent(registry, agent_name)
+
+    with registry.exported_agent_archive(agent.id) as (zip_path, filename):
+        # The filename is a plain basename, so it can never redirect the write.
+        assert filename == expected_filename
+        assert "/" not in filename and "\\" not in filename
+        assert zip_path.name == filename
+        # The archive lives inside the sandbox's temp root, not above it.
+        assert scratch in zip_path.resolve().parents
+        assert zip_path.exists()
+        temp_dir = zip_path.parent
+
+    # Cleanup removed the directory the export created...
+    assert not temp_dir.exists()
+    # ...and nothing outside it.
+    assert precious.is_dir()
+    assert (precious / "keepme.txt").read_text(encoding="utf-8") == "do not delete"
+    assert scratch.is_dir()
+
+
+def test_export_cleanup_survives_a_filename_sanitisation_regression(
+    temp_agents_dir: Path, tmp_path: Path, monkeypatch
+):
+    """Cleanup targets the directory export CREATED, not one derived from the name.
+
+    Belt and braces beside :func:`_export_archive_filename`: this simulates a
+    future regression that lets a traversal-shaped name reach the archive path
+    again, and pins that cleanup still removes only the ``mkdtemp()``
+    directory. With cleanup deriving its target from ``zip_path.parent`` this
+    deletes ``sibling`` instead; with the captured directory it cannot.
+    """
+    import tempfile
+
+    from local_operator import agents as agents_module
+
+    sandbox = tmp_path / "sandbox"
+    scratch = sandbox / "tmp"
+    scratch.mkdir(parents=True)
+    sibling = sandbox / "sibling"
+    sibling.mkdir()
+    (sibling / "keepme.txt").write_text("do not delete", encoding="utf-8")
+    monkeypatch.setattr(tempfile, "tempdir", str(scratch))
+
+    # Re-introduce the unsafe filename. Two levels up from the mkdtemp dir
+    # (``sandbox/tmp/tmpXXXX``) resolves to ``sandbox``, so a cleanup deriving
+    # its target from ``zip_path.parent`` would delete ``sibling`` with it.
+    monkeypatch.setattr(
+        agents_module, "_export_archive_filename", lambda _name: "../../regressed.zip"
+    )
+
+    # Record the directory the export actually creates, so the assertion pins
+    # that exact directory rather than inferring one from the archive path.
+    created_dirs: list[Path] = []
+    real_mkdtemp = tempfile.mkdtemp
+
+    def _recording_mkdtemp(*args, **kwargs):
+        made = real_mkdtemp(*args, **kwargs)
+        created_dirs.append(Path(made))
+        return made
+
+    monkeypatch.setattr(tempfile, "mkdtemp", _recording_mkdtemp)
+
+    registry = AgentRegistry(temp_agents_dir)
+    agent = _export_fixture_agent(registry, "RepointedName")
+
+    with registry.exported_agent_archive(agent.id) as (zip_path, _):
+        # The simulated regression really did place the archive outside the
+        # temp dir — otherwise this test would prove nothing.
+        assert zip_path.exists()
+        assert created_dirs
+        assert zip_path.resolve().parent != created_dirs[-1]
+
+    # The temp dir the export created is gone...
+    assert not created_dirs[-1].exists()
+    # ...and the unrelated sibling tree is untouched.
+    assert sibling.is_dir()
+    assert (sibling / "keepme.txt").read_text(encoding="utf-8") == "do not delete"
+    assert scratch.is_dir()
+
+
 def test_export_strips_conversation_history(temp_agents_dir: Path):
     """A published archive is the instruction set, never the operator's history."""
     registry = AgentRegistry(temp_agents_dir)

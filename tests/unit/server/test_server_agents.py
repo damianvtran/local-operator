@@ -5,6 +5,8 @@ This module contains tests for agent-related functionality, including
 creating, updating, deleting, and listing agents.
 """
 
+import io
+import zipfile
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
@@ -1470,6 +1472,67 @@ async def test_upload_agent_to_radient_reclaims_the_export_temp_dir(
     assert response.status_code == 200
     assert uploaded == [True]
     assert list(scratch.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_export_agent_download_is_safe_for_a_traversal_shaped_name(
+    test_app_client, dummy_registry: AgentRegistry, tmp_path, monkeypatch
+):
+    """The download route must not let an agent name steer its cleanup.
+
+    The name is attacker-controllable — ``import_agent`` keeps it verbatim from
+    a downloaded ``agent.yml`` — and this route reclaims the temp directory in
+    a ``BackgroundTask`` that used to target ``zip_path.parent``. For a name
+    like ``../../evil`` that parent was an unrelated directory, so serving one
+    download deleted it. Exercised through the real HTTP endpoint so the
+    BackgroundTask actually runs.
+    """
+    import tempfile
+
+    sandbox = tmp_path / "sandbox"
+    scratch = sandbox / "tmp"
+    scratch.mkdir(parents=True)
+    precious = sandbox / "precious"
+    precious.mkdir()
+    (precious / "keepme.txt").write_text("do not delete", encoding="utf-8")
+    monkeypatch.setattr(tempfile, "tempdir", str(scratch))
+
+    agent = dummy_registry.create_agent(
+        AgentEditFields(
+            name="../../evil",
+            security_prompt="Test Security",
+            hosting="openai",
+            model="gpt-4",
+            description="Traversal-shaped export name",
+            last_message=None,
+            tags=None,
+            categories=None,
+            temperature=0.7,
+            top_p=1.0,
+            top_k=None,
+            max_tokens=2048,
+            stop=None,
+            frequency_penalty=0.0,
+            presence_penalty=0.0,
+            seed=None,
+            current_working_directory=None,
+        )
+    )
+
+    response = await test_app_client.get(f"/v1/agents/{agent.id}/export")
+
+    assert response.status_code == 200
+    # A real, complete archive was served under a sanitised basename.
+    assert "evil.zip" in response.headers.get("content-disposition", "")
+    assert ".." not in response.headers.get("content-disposition", "")
+    with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+        assert archive.testzip() is None
+        assert "agent.yml" in archive.namelist()
+
+    # The temp directory is reclaimed and nothing outside it was touched.
+    assert list(scratch.iterdir()) == []
+    assert precious.is_dir()
+    assert (precious / "keepme.txt").read_text(encoding="utf-8") == "do not delete"
 
 
 @pytest.mark.asyncio

@@ -12,7 +12,7 @@ import zipfile
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from importlib.metadata import version
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import yaml
@@ -51,6 +51,52 @@ def _dill() -> Any:
             missing_extra_error("server", "Saving and loading pickled agent context")
         ) from exc
     return dill
+
+
+#: Fallback stem for an agent whose name carries no usable filename characters
+#: (a name that is entirely separators or dots). Yields ``agent.zip``.
+_DEFAULT_EXPORT_STEM = "agent"
+
+
+def _export_archive_filename(agent_name: str) -> str:
+    """Build a safe, human-readable ZIP filename from an agent name.
+
+    The agent name is **not** trusted input: ``import_agent`` preserves it
+    verbatim from a downloaded agent's ``agent.yml``, so a published agent can
+    carry a name like ``../../evil`` or ``/etc/passwd``. The filename used to
+    be the raw name with spaces substituted, which meant the archive was
+    written outside its ``mkdtemp()`` directory and, worse, that
+    ``zip_path.parent`` pointed at an unrelated directory the cleanup then
+    deleted.
+
+    Reducing the name to its basename is what makes that impossible.
+    Backslashes are folded to ``/`` first because the name travels inside an
+    archive between machines: the OS that wrote ``..\\..\\evil`` is not
+    necessarily the OS that reads it, and POSIX treats a backslash as an
+    ordinary character. Names that reduce to nothing usable (``..``, ``/``,
+    ``.``) fall back to a fixed stem so the export still produces a real file
+    rather than a bare ``.zip`` or a directory reference.
+
+    The space-to-underscore substitution is preserved: ordinary names like
+    ``My Agent`` must keep yielding ``My_Agent.zip``.
+
+    Args:
+        agent_name (str): The agent's display name, untrusted.
+
+    Returns:
+        str: A basename-only ``<stem>.zip`` filename, never a path.
+    """
+    # Normalise Windows separators before taking the basename so that
+    # PurePosixPath sees them as separators rather than name characters.
+    normalized = agent_name.replace("\\", "/").replace(" ", "_")
+    stem = PurePosixPath(normalized).name
+
+    # ``PurePosixPath('..').name`` is '..' and ``'/'.name`` is '' — neither is
+    # a usable filename, so degenerate names take the fallback stem.
+    if not stem or set(stem) == {"."}:
+        stem = _DEFAULT_EXPORT_STEM
+
+    return f"{stem}.zip"
 
 
 class AgentData(BaseModel):
@@ -1611,17 +1657,31 @@ class AgentRegistry:
             Tuple[Path, str]: The path to the ZIP file and its filename. Both
                 become invalid once the context exits.
         """
-        zip_path, filename = self.export_agent(agent_id)
+        temp_dir, zip_path, filename = self.export_agent_archive(agent_id)
         try:
             yield zip_path, filename
         finally:
+            # Remove the directory the export CREATED, never one derived from
+            # zip_path.parent: the filename comes from the agent name, which is
+            # attacker-controllable (import_agent preserves it verbatim from a
+            # downloaded agent.yml), so a traversal-shaped name once made
+            # .parent resolve outside the temp dir and delete an unrelated
+            # tree. _export_archive_filename now prevents that, and removing
+            # the captured directory keeps cleanup correct even if it ever
+            # regressed.
             # ignore_errors: cleanup must never mask the caller's own failure,
             # and a partially removed temp dir is not worth raising over.
-            shutil.rmtree(zip_path.parent, ignore_errors=True)
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
     def export_agent(self, agent_id: str) -> Tuple[Path, str]:
         """
         Export an agent's instruction set as a ZIP file.
+
+        Thin wrapper over :meth:`export_agent_archive` that drops the temporary
+        directory handle. The filename is sanitised to a bare basename, so
+        ``zip_path.parent`` *is* that directory — but a caller that has to
+        reclaim it later should prefer :meth:`export_agent_archive` and hold
+        the directory explicitly rather than re-deriving it from the path.
 
         Conversation history, execution traces, learnings, schedules, and
         pickled runtime context are stripped. A published agent is the
@@ -1649,13 +1709,39 @@ class AgentRegistry:
             KeyError: If the agent is not found
             Exception: If there is an error exporting the agent
         """
+        _temp_dir, zip_path, filename = self.export_agent_archive(agent_id)
+        return zip_path, filename
+
+    def export_agent_archive(self, agent_id: str) -> Tuple[Path, Path, str]:
+        """
+        Export an agent as a ZIP and return its temp directory alongside it.
+
+        This is the primitive behind :meth:`export_agent` and
+        :meth:`exported_agent_archive`. It exists so a caller that must reclaim
+        the temporary directory *later* — the server's streaming download
+        route, which cannot delete the file before ``FileResponse`` has sent it
+        — can hold the directory that was actually created instead of deriving
+        one from the archive path.
+
+        Args:
+            agent_id (str): The unique identifier of the agent to export
+
+        Returns:
+            Tuple[Path, Path, str]: The temporary directory the caller owns and
+                must remove, the path to the ZIP file inside it, and the
+                archive filename.
+
+        Raises:
+            KeyError: If the agent is not found
+            Exception: If there is an error exporting the agent
+        """
         # Verify the agent exists
         agent = self.get_agent(agent_id)
 
         # Create a temporary directory to store the ZIP file
         temp_dir = tempfile.mkdtemp()
         temp_dir_path = Path(temp_dir)
-        filename = f"{agent.name.replace(' ', '_')}.zip"
+        filename = _export_archive_filename(agent.name)
         zip_path = temp_dir_path / filename
 
         try:
@@ -1682,7 +1768,7 @@ class AgentRegistry:
                         continue
                     zip_file.write(item, arcname=item.name)
 
-            return zip_path, filename
+            return temp_dir_path, zip_path, filename
         except Exception as e:
             # Clean up the temporary directory if there's an error
             shutil.rmtree(temp_dir)
