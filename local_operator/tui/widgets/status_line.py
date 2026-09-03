@@ -1747,7 +1747,13 @@ class StatusLine:
                 left.append(f" {_SEP_LEFT} ", style=seam)
             left.append(f"{icon} ", style=icon_style or dim)
             left.append(text, style=style)
-        if self._starting and not self._streaming:
+        # `getattr`, not `self._starting`: `_render` is called UNBOUND against
+        # lightweight stub bands in the fork tests (`StatusLine._render(band,
+        # 120)`), which carry only the fields their case is about. Reading a
+        # new attribute directly turned three of those into AttributeErrors —
+        # a widget's renderer must tolerate the reduced hosts its own suite
+        # builds, the same way the fork/subagent fields here already do.
+        if getattr(self, "_starting", False) and not self._streaming:
             # Before the runtime exists there is nothing to report but the
             # wait itself, and the caption carries the whole meaning — so it is
             # always spelled out, unlike the working indicator whose word is
