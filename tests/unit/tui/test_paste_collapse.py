@@ -20,8 +20,6 @@ synchronously right after posting.
 
 from __future__ import annotations
 
-import tempfile
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -1012,7 +1010,7 @@ async def test_a_skill_invocation_expands_the_REQUEST_but_not_the_BODY() -> None
 
 # -- Slice B: the slash-command tail ------------------------------------------
 @pytest.mark.asyncio
-async def test_team_request_carries_the_pasted_payload() -> None:
+async def test_team_request_carries_the_pasted_payload(scratch_dir) -> None:
     """`/team <name> <request>` sends the payload the request cites.
 
     The same bug shape as the already-fixed image one: `_submit_command_prompt`
@@ -1021,7 +1019,7 @@ async def test_team_request_carries_the_pasted_payload() -> None:
     """
     payload = _lines(40)
     session = FakeSession()
-    registry = TeamRegistry(Path(tempfile.mkdtemp()))
+    registry = TeamRegistry(scratch_dir())
     registry.create_team(
         TeamEditFields(name="ops", manager="manager", members=[TeamMember(role="coder")])
     )

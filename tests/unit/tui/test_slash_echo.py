@@ -16,7 +16,7 @@ to keep a default for the picker fixtures that have no opinion at all.
 from __future__ import annotations
 
 import asyncio
-import tempfile
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -321,14 +321,13 @@ async def test_a_panel_opening_command_leaves_no_user_row() -> None:
 
 
 @pytest.mark.asyncio
-async def test_bare_team_lists_without_a_user_row() -> None:
+async def test_bare_team_lists_without_a_user_row(scratch_dir) -> None:
     """`/team` is a listing; the listing is the receipt."""
     from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
 
     session = FakeSession()
     # In-memory: point the registry at a throwaway dir via the session.
-    tmp = tempfile.mkdtemp()
-    registry = TeamRegistry(Path(tmp))
+    registry = TeamRegistry(scratch_dir())
     registry.create_team(
         TeamEditFields(
             name="feature-release",
@@ -353,12 +352,12 @@ async def test_bare_team_lists_without_a_user_row() -> None:
 
 
 @pytest.mark.asyncio
-async def test_team_request_attaches_and_sends() -> None:
+async def test_team_request_attaches_and_sends(scratch_dir) -> None:
     """`/team <name> <request>` stamps the team and sends the request as a turn."""
     from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
 
     session = FakeSession()
-    registry = TeamRegistry(Path(tempfile.mkdtemp()))
+    registry = TeamRegistry(scratch_dir())
     registry.create_team(
         TeamEditFields(
             name="feature-release",
@@ -382,7 +381,9 @@ async def test_team_request_attaches_and_sends() -> None:
 
 
 @pytest.mark.asyncio
-async def test_inline_team_reassembles_to_the_front_and_then_sends_under_the_manager() -> None:
+async def test_inline_team_reassembles_to_the_front_and_then_sends_under_the_manager(
+    scratch_dir,
+) -> None:
     """The end-to-end mid-trajectory gesture the user asked to confirm.
 
     A user types a message, remembers to route it to a team, appends ``/team``
@@ -397,7 +398,7 @@ async def test_inline_team_reassembles_to_the_front_and_then_sends_under_the_man
     from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
 
     session = FakeSession()
-    registry = TeamRegistry(Path(tempfile.mkdtemp()))
+    registry = TeamRegistry(scratch_dir())
     registry.create_team(
         TeamEditFields(
             name="feature-release",
@@ -447,7 +448,7 @@ async def test_inline_team_reassembles_to_the_front_and_then_sends_under_the_man
 
 
 @pytest.mark.asyncio
-async def test_completing_a_team_name_keeps_the_parked_hint_in_the_real_app() -> None:
+async def test_completing_a_team_name_keeps_the_parked_hint_in_the_real_app(scratch_dir) -> None:
     """D5 regression (design review round 3), asserted against the REAL app.
 
     Picking a team name at the START of the buffer fills ``/team <name> `` and
@@ -461,7 +462,7 @@ async def test_completing_a_team_name_keeps_the_parked_hint_in_the_real_app() ->
     from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
 
     session = FakeSession()
-    registry = TeamRegistry(Path(tempfile.mkdtemp()))
+    registry = TeamRegistry(scratch_dir())
     registry.create_team(
         TeamEditFields(name="security", manager="manager", members=[TeamMember(role="coder")])
     )
@@ -488,12 +489,12 @@ async def test_completing_a_team_name_keeps_the_parked_hint_in_the_real_app() ->
 
 
 @pytest.mark.asyncio
-async def test_session_adoption_catches_up_team_picker_and_name_highlight() -> None:
+async def test_session_adoption_catches_up_team_picker_and_name_highlight(scratch_dir) -> None:
     """Typing `/team lop` before boot must recover when the registry appears."""
     from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
 
     session = FakeSession()
-    registry = TeamRegistry(Path(tempfile.mkdtemp()))
+    registry = TeamRegistry(scratch_dir())
     registry.create_team(
         TeamEditFields(
             name="lopdev",
@@ -622,10 +623,12 @@ def _picker_geometry(
 
 
 @pytest.mark.asyncio
-async def test_session_adoption_catches_up_agent_picker_without_geometry_change() -> None:
+async def test_session_adoption_catches_up_agent_picker_without_geometry_change(
+    scratch_dir,
+) -> None:
     """U2-1: `/agent aud` reserves one row until the registry arrives."""
     session = FakeSession()
-    session.agent_registry = _agent_registry(tempfile.mkdtemp())
+    session.agent_registry = _agent_registry(str(scratch_dir()))
     release = asyncio.Event()
 
     async def delayed_factory() -> FakeSession:
@@ -697,16 +700,16 @@ async def test_session_adoption_catches_up_agent_picker_without_geometry_change(
     [("team", "lop", "lopdev"), ("agent", "aud", "auditor")],
 )
 async def test_pending_name_tab_is_noop_then_completes_after_adoption(
-    command: str, query: str, expected: str
+    command: str, query: str, expected: str, scratch_dir
 ) -> None:
     """U2-2: pending Tab preserves exact text/caret; real rows restore Tab."""
     from local_operator.teams import TeamEditFields, TeamRegistry
 
     session = FakeSession()
-    teams = TeamRegistry(Path(tempfile.mkdtemp()))
+    teams = TeamRegistry(scratch_dir())
     teams.create_team(TeamEditFields(name="lopdev", manager="manager"))
     session.team_registry = teams
-    session.agent_registry = _agent_registry(tempfile.mkdtemp())
+    session.agent_registry = _agent_registry(str(scratch_dir()))
     release = asyncio.Event()
 
     async def delayed_factory() -> FakeSession:
@@ -742,15 +745,17 @@ async def test_pending_name_tab_is_noop_then_completes_after_adoption(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("command", "query"), [("team", "lop"), ("agent", "aud")])
-async def test_pending_name_enter_is_noop_until_rows_arrive(command: str, query: str) -> None:
+async def test_pending_name_enter_is_noop_until_rows_arrive(
+    command: str, query: str, scratch_dir
+) -> None:
     """U2-2: pending Enter never submits or clears the delayed query."""
     from local_operator.teams import TeamEditFields, TeamRegistry
 
     session = FakeSession()
-    teams = TeamRegistry(Path(tempfile.mkdtemp()))
+    teams = TeamRegistry(scratch_dir())
     teams.create_team(TeamEditFields(name="lopdev", manager="manager"))
     session.team_registry = teams
-    session.agent_registry = _agent_registry(tempfile.mkdtemp())
+    session.agent_registry = _agent_registry(str(scratch_dir()))
     release = asyncio.Event()
 
     async def delayed_factory() -> FakeSession:
@@ -812,12 +817,14 @@ async def test_pending_name_placeholder_is_not_mouse_selectable(command: str, qu
 
 
 @pytest.mark.asyncio
-async def test_pending_name_row_collapses_on_escape_and_stays_dismissed_after_adoption() -> None:
+async def test_pending_name_row_collapses_on_escape_and_stays_dismissed_after_adoption(
+    scratch_dir,
+) -> None:
     """Esc releases D1's reserve; the late registry must not resurrect it."""
     from local_operator.teams import TeamEditFields, TeamRegistry
 
     session = FakeSession()
-    registry = TeamRegistry(Path(tempfile.mkdtemp()))
+    registry = TeamRegistry(scratch_dir())
     registry.create_team(TeamEditFields(name="lopdev", manager="manager"))
     session.team_registry = registry
     release = asyncio.Event()
@@ -859,12 +866,12 @@ async def test_pending_name_row_collapses_on_escape_and_stays_dismissed_after_ad
 
 
 @pytest.mark.asyncio
-async def test_adopted_empty_roster_does_not_leave_a_pending_name_row() -> None:
+async def test_adopted_empty_roster_does_not_leave_a_pending_name_row(scratch_dir) -> None:
     """A genuinely empty adopted roster is final, not an eternal blank hole."""
     from local_operator.teams import TeamRegistry
 
     session = FakeSession()
-    session.team_registry = TeamRegistry(Path(tempfile.mkdtemp()))
+    session.team_registry = TeamRegistry(scratch_dir())
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(120, 40)) as pilot:
         await _boot(pilot, app)
@@ -883,7 +890,7 @@ async def test_adopted_empty_roster_does_not_leave_a_pending_name_row() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_second_inline_command_of_the_same_kind_is_plain_argument_text() -> None:
+async def test_a_second_inline_command_of_the_same_kind_is_plain_argument_text(scratch_dir) -> None:
     """Once a prompt command is engaged at the front, a second occurrence of the
     same command inside its argument is plain text — no picker, no re-engagement.
 
@@ -894,7 +901,7 @@ async def test_a_second_inline_command_of_the_same_kind_is_plain_argument_text()
     from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
 
     session = FakeSession()
-    registry = TeamRegistry(Path(tempfile.mkdtemp()))
+    registry = TeamRegistry(scratch_dir())
     registry.create_team(
         TeamEditFields(name="alpha", manager="manager", members=[TeamMember(role="coder")])
     )
@@ -984,12 +991,12 @@ def _agent_registry(tmp: str):
 
 
 @pytest.mark.asyncio
-async def test_bare_agent_lists_without_a_user_row() -> None:
+async def test_bare_agent_lists_without_a_user_row(scratch_dir) -> None:
     """`/agent` is a listing; the listing is the receipt. Only roles and
     specialists appear — a plain conversational agent stays private."""
 
     session = FakeSession()
-    session.agent_registry = _agent_registry(tempfile.mkdtemp())
+    session.agent_registry = _agent_registry(str(scratch_dir()))
     app = OperatorApp(lambda: _factory(session))
     # Tall on purpose: the listing carries the six packaged starters too, and
     # the transcript keeps scrolled to the bottom, so a short frame would have
@@ -1008,11 +1015,11 @@ async def test_bare_agent_lists_without_a_user_row() -> None:
 
 
 @pytest.mark.asyncio
-async def test_agent_name_alone_attaches_without_a_turn() -> None:
+async def test_agent_name_alone_attaches_without_a_turn(scratch_dir) -> None:
     """`/agent <name>` adopts the profile and prints the notice — no prompt."""
 
     session = FakeSession()
-    session.agent_registry = _agent_registry(tempfile.mkdtemp())
+    session.agent_registry = _agent_registry(str(scratch_dir()))
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(120, 40)) as pilot:
         await _boot(pilot, app)
@@ -1032,12 +1039,12 @@ async def test_agent_name_alone_attaches_without_a_turn() -> None:
 
 
 @pytest.mark.asyncio
-async def test_agent_message_attaches_and_sends() -> None:
+async def test_agent_message_attaches_and_sends(scratch_dir) -> None:
     """`/agent <name> <message>` stamps the profile then sends the message as
     a turn — the `/team <name> <request>` shape, including a specialist."""
 
     session = FakeSession()
-    session.agent_registry = _agent_registry(tempfile.mkdtemp())
+    session.agent_registry = _agent_registry(str(scratch_dir()))
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(120, 40)) as pilot:
         await _boot(pilot, app)
@@ -1049,12 +1056,12 @@ async def test_agent_message_attaches_and_sends() -> None:
 
 
 @pytest.mark.asyncio
-async def test_agent_rejects_unknown_and_private_names() -> None:
+async def test_agent_rejects_unknown_and_private_names(scratch_dir) -> None:
     """An unknown name warns; so does a PRIVATE conversational agent — its
     exact name must not be enough to pull its prompt into this session."""
 
     session = FakeSession()
-    session.agent_registry = _agent_registry(tempfile.mkdtemp())
+    session.agent_registry = _agent_registry(str(scratch_dir()))
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(120, 40)) as pilot:
         await _boot(pilot, app)
@@ -1068,12 +1075,12 @@ async def test_agent_rejects_unknown_and_private_names() -> None:
 
 
 @pytest.mark.asyncio
-async def test_agent_clear_detaches_the_active_profile() -> None:
+async def test_agent_clear_detaches_the_active_profile(scratch_dir) -> None:
     """U1: `/agent clear` detaches the active profile and reports the session is
     back on its base instructions. `clear` is the detach verb, not a name to
     look up, so nothing is "attached" by it."""
     session = FakeSession()
-    session.agent_registry = _agent_registry(tempfile.mkdtemp())
+    session.agent_registry = _agent_registry(str(scratch_dir()))
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(120, 40)) as pilot:
         await _boot(pilot, app)
@@ -1099,11 +1106,11 @@ async def test_agent_clear_detaches_the_active_profile() -> None:
 
 
 @pytest.mark.asyncio
-async def test_agent_none_is_an_alias_for_clear() -> None:
+async def test_agent_none_is_an_alias_for_clear(scratch_dir) -> None:
     """`/agent none` detaches too, so a user reaching for either word lands on
     base instructions rather than an 'unknown agent' warning."""
     session = FakeSession()
-    session.agent_registry = _agent_registry(tempfile.mkdtemp())
+    session.agent_registry = _agent_registry(str(scratch_dir()))
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(120, 40)) as pilot:
         await _boot(pilot, app)
@@ -1117,12 +1124,12 @@ async def test_agent_none_is_an_alias_for_clear() -> None:
 
 
 @pytest.mark.asyncio
-async def test_agent_with_no_instructions_says_nothing_was_applied() -> None:
+async def test_agent_with_no_instructions_says_nothing_was_applied(scratch_dir) -> None:
     """A2: a role/specialist that resolves but carries no instructions must
     NOT claim to be active — the notice states nothing was applied, and with a
     message the message is still sent (labelled as carrying no persona)."""
     session = FakeSession()
-    session.agent_registry = _agent_registry(tempfile.mkdtemp())
+    session.agent_registry = _agent_registry(str(scratch_dir()))
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(120, 40)) as pilot:
         await _boot(pilot, app)
@@ -1188,7 +1195,7 @@ def _first_text_styles(block) -> list[tuple[str, Style]]:
     return out
 
 
-def test_agent_and_team_listing_headers_outrank_their_entries() -> None:
+def test_agent_and_team_listing_headers_outrank_their_entries(scratch_dir) -> None:
     """D1: the section header must read as a header, not as one more entry.
 
     Indentation alone did not separate them — header and entry names shared the
@@ -1225,7 +1232,7 @@ def test_agent_and_team_listing_headers_outrank_their_entries() -> None:
     # /team gets the identical treatment (needs a real team object).
     from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
 
-    registry = TeamRegistry(Path(tempfile.mkdtemp()))
+    registry = TeamRegistry(scratch_dir())
     team = registry.create_team(
         TeamEditFields(
             name="feature-release", manager="manager", members=[TeamMember(role="coder")]
@@ -1422,7 +1429,9 @@ def _dock_geometry(app: OperatorApp, editor: Editor) -> dict[str, int]:
     }
 
 
-async def _team_picker_geometry(match_count: int, *, delayed: bool) -> dict[str, int]:
+async def _team_picker_geometry(
+    match_count: int, *, delayed: bool, scratch_dir: Callable[[], Path]
+) -> dict[str, int]:
     """Settle `/team lop` against ``match_count`` matching rows and measure.
 
     ``delayed`` selects the arm: False adopts the session BEFORE the query is
@@ -1433,7 +1442,7 @@ async def _team_picker_geometry(match_count: int, *, delayed: bool) -> dict[str,
 
     names = ["lopdev", "lopsec", "lopops", "lopqa"][:match_count]
     session = FakeSession()
-    registry = TeamRegistry(Path(tempfile.mkdtemp()))
+    registry = TeamRegistry(scratch_dir())
     for name in (*names, "other"):  # `other` never matches `lop`
         registry.create_team(TeamEditFields(name=name, manager="manager"))
     session.team_registry = registry
@@ -1472,7 +1481,7 @@ async def _team_picker_geometry(match_count: int, *, delayed: bool) -> dict[str,
 @pytest.mark.asyncio
 @pytest.mark.parametrize("match_count", [1, 2, 3])
 async def test_delayed_and_direct_team_picker_settle_at_identical_geometry(
-    match_count: int,
+    match_count: int, scratch_dir: Callable[[], Path]
 ) -> None:
     """R7-3: catch-up must land the dock exactly where the direct path does.
 
@@ -1482,8 +1491,8 @@ async def test_delayed_and_direct_team_picker_settle_at_identical_geometry(
     two rows the dock kept the shorter list's lift and floated `-5` rows with
     an empty band under the status line.
     """
-    direct = await _team_picker_geometry(match_count, delayed=False)
-    delayed = await _team_picker_geometry(match_count, delayed=True)
+    direct = await _team_picker_geometry(match_count, delayed=False, scratch_dir=scratch_dir)
+    delayed = await _team_picker_geometry(match_count, delayed=True, scratch_dir=scratch_dir)
     assert delayed == direct, f"delayed arm reflowed: {delayed} != {direct}"
     # Pin the ABSOLUTE frame, not just the agreement between the two arms: two
     # arms that agree on a WRONG geometry is exactly the regression this
@@ -1501,7 +1510,9 @@ async def test_delayed_and_direct_team_picker_settle_at_identical_geometry(
 
 
 @pytest.mark.asyncio
-async def test_team_picker_absolute_geometry_matches_at_rest_composition() -> None:
+async def test_team_picker_absolute_geometry_matches_at_rest_composition(
+    scratch_dir: Callable[[], Path],
+) -> None:
     """R7-3: the picker must not shift the dock away from where boot put it.
 
     The reflow was only visible against an ABSOLUTE reference, so this test
@@ -1519,7 +1530,9 @@ async def test_team_picker_absolute_geometry_matches_at_rest_composition() -> No
 
     for match_count in (1, 2, 3):
         for delayed in (False, True):
-            geometry = await _team_picker_geometry(match_count, delayed=delayed)
+            geometry = await _team_picker_geometry(
+                match_count, delayed=delayed, scratch_dir=scratch_dir
+            )
             # One match still fits under the at-rest splash budget; more rows
             # legitimately buy space from the composition's lift. Either way the
             # band never falls BELOW where boot placed it, which is what a dock

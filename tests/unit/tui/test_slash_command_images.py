@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import base64
 import io
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -91,11 +90,11 @@ async def _paste(app: OperatorApp, pilot, text: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_team_request_carries_the_pasted_image(tmp_path) -> None:
+async def test_team_request_carries_the_pasted_image(tmp_path, scratch_dir) -> None:
     """`/team <name> <request>` sends the screenshot the request cites."""
     path = _png(tmp_path / "shot.png", 1568, 410)
     session = FakeSession()
-    reg = TeamRegistry(Path(tempfile.mkdtemp()))
+    reg = TeamRegistry(scratch_dir())
     reg.create_team(
         TeamEditFields(name="ops", manager="manager", members=[TeamMember(role="coder")])
     )
@@ -127,7 +126,7 @@ async def test_team_request_carries_the_pasted_image(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_team_without_a_request_sends_nothing(tmp_path) -> None:
+async def test_team_without_a_request_sends_nothing(tmp_path, scratch_dir) -> None:
     """A bare attach (`/team ops` with no request) sends no turn, no image.
 
     Guards the resolve-from-text rule from the other side: the image marker
@@ -136,7 +135,7 @@ async def test_team_without_a_request_sends_nothing(tmp_path) -> None:
     """
     path = _png(tmp_path / "shot.png")
     session = FakeSession()
-    reg = TeamRegistry(Path(tempfile.mkdtemp()))
+    reg = TeamRegistry(scratch_dir())
     reg.create_team(
         TeamEditFields(name="ops", manager="manager", members=[TeamMember(role="coder")])
     )
@@ -160,7 +159,7 @@ async def test_team_without_a_request_sends_nothing(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_team_request_carries_multiple_images_in_text_order(tmp_path) -> None:
+async def test_team_request_carries_multiple_images_in_text_order(tmp_path, scratch_dir) -> None:
     """Two images, but only the one the REQUEST text still cites is sent.
 
     Locks the resolve-from-text contract the fix leans on: markers are keys, not
@@ -174,7 +173,7 @@ async def test_team_request_carries_multiple_images_in_text_order(tmp_path) -> N
     first = _png(tmp_path / "a.png", 40, 20)
     second = _png(tmp_path / "b.png", 80, 60)
     session = FakeSession()
-    reg = TeamRegistry(Path(tempfile.mkdtemp()))
+    reg = TeamRegistry(scratch_dir())
     reg.create_team(
         TeamEditFields(name="ops", manager="manager", members=[TeamMember(role="coder")])
     )
@@ -202,7 +201,7 @@ async def test_team_request_carries_multiple_images_in_text_order(tmp_path) -> N
 
 
 @pytest.mark.asyncio
-async def test_team_marker_in_the_name_position_is_not_an_image(tmp_path) -> None:
+async def test_team_marker_in_the_name_position_is_not_an_image(tmp_path, scratch_dir) -> None:
     """F2: an image marker where the NAME goes resolves nothing and finds no team.
 
     Pins the (correct, but silent) behaviour that only the request TAIL carries
@@ -212,7 +211,7 @@ async def test_team_marker_in_the_name_position_is_not_an_image(tmp_path) -> Non
     """
     path = _png(tmp_path / "shot.png")
     session = FakeSession()
-    reg = TeamRegistry(Path(tempfile.mkdtemp()))
+    reg = TeamRegistry(scratch_dir())
     reg.create_team(
         TeamEditFields(name="ops", manager="manager", members=[TeamMember(role="coder")])
     )
@@ -238,11 +237,11 @@ async def test_team_marker_in_the_name_position_is_not_an_image(tmp_path) -> Non
 
 
 @pytest.mark.asyncio
-async def test_agent_message_carries_the_pasted_image(tmp_path) -> None:
+async def test_agent_message_carries_the_pasted_image(tmp_path, scratch_dir) -> None:
     """`/agent <name> <message>` sends the screenshot the message cites."""
     path = _png(tmp_path / "shot.png", 1568, 410)
     session = FakeSession()
-    session.agent_registry = _agent_registry(Path(tempfile.mkdtemp()))
+    session.agent_registry = _agent_registry(scratch_dir())
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(120, 40)) as pilot:
         await _boot(pilot, app)

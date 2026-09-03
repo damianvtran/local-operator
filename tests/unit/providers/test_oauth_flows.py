@@ -1412,7 +1412,7 @@ class TestZaiSignInMintsADurableKey:
         assert access.kind == "oauth"
         assert access.email == "damian@example.com"
 
-    async def test_identity_survives_a_response_with_no_user_block(self) -> None:
+    async def test_identity_survives_a_response_with_no_user_block(self, tmp_path) -> None:
         """Z6: Z.AI's `user` block is optional PER RESPONSE, not per account.
 
         Keying dedupe on `email`/`account_id` therefore gives an identity that
@@ -1424,13 +1424,10 @@ class TestZaiSignInMintsADurableKey:
         proceed without them -- so they are the stable identity, and
         `_identity_key_for` reads `org_id` ahead of `email`.
         """
-        import tempfile
-        from pathlib import Path
-
         from local_operator.providers.auth_store import AuthStore
         from local_operator.providers.oauth.zai import ZaiOAuthFlow
 
-        store = AuthStore(db_path=Path(tempfile.mkdtemp()) / "auth.db")
+        store = AuthStore(db_path=tmp_path / "auth.db")
         for attempt in range(5):
             calls: list[str] = []
             transport = self._transport(calls, existing_key=True)
@@ -1457,7 +1454,7 @@ class TestZaiSignInMintsADurableKey:
         assert len(rows) == 1, [(r.id, r.data.get("email")) for r in rows]
         assert await store.get_api_key("zai") == "key-id.sec-ret"
 
-    async def test_the_identity_does_not_route_to_codex(self) -> None:
+    async def test_the_identity_does_not_route_to_codex(self, tmp_path) -> None:
         """The identity must not be stored under `org_id`, however natural the name.
 
         `OpenAICompatClient` treats an OAuth credential carrying an `org_id` as
@@ -1467,9 +1464,6 @@ class TestZaiSignInMintsADurableKey:
         looking like a naming choice, so this asserts the wire result rather
         than the field name alone.
         """
-        import tempfile
-        from pathlib import Path
-
         from local_operator.harness.types import ChatRequest, Message, TextContent
         from local_operator.model.configure import build_model_spec
         from local_operator.providers.auth_store import AuthStore
@@ -1483,7 +1477,7 @@ class TestZaiSignInMintsADurableKey:
         creds = await flow.exchange_token("c", "s", "http://localhost:54548/callback")
         creds["authorized_at"] = 1
 
-        store = AuthStore(db_path=Path(tempfile.mkdtemp()) / "auth.db")
+        store = AuthStore(db_path=tmp_path / "auth.db")
         store.upsert_credential("zai", creds)
         access = await store.get_oauth_access("zai")
         assert access is not None

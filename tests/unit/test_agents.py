@@ -1654,11 +1654,12 @@ def test_import_agent_and_export_agent_roundtrip(temp_agents_dir: Path):
             current_working_directory="/tmp",
         )
     )
-    # Export the agent
-    zip_path, filename = registry.export_agent(agent.id)
-    assert zip_path.exists()
-    # Import the agent (should create a new agent with a new id)
-    imported_agent = registry.import_agent(zip_path)
+    # Export the agent. The import happens inside the block because the
+    # archive must still exist while it is read.
+    with registry.exported_agent_archive(agent.id) as (zip_path, filename):
+        assert zip_path.exists()
+        # Import the agent (should create a new agent with a new id)
+        imported_agent = registry.import_agent(zip_path)
     assert imported_agent.id == agent.id
     assert imported_agent.name == agent.name
     assert imported_agent.security_prompt == agent.security_prompt
@@ -1668,10 +1669,6 @@ def test_import_agent_and_export_agent_roundtrip(temp_agents_dir: Path):
     assert imported_agent.last_message == ""
     assert imported_agent.tags == agent.tags
     assert imported_agent.categories == agent.categories
-    # export_agent hands ownership of the temp dir to the caller; this test is
-    # one of those callers, so it cleans up rather than adding to the leak the
-    # exported_agent_archive tests below exist to prevent.
-    shutil.rmtree(zip_path.parent, ignore_errors=True)
 
 
 def _export_fixture_agent(registry: AgentRegistry, name: str):
@@ -1777,21 +1774,23 @@ def test_export_strips_conversation_history(temp_agents_dir: Path):
             agent_system_prompt="You review Python.",
         ),
     )
-    zip_path, _ = registry.export_agent(agent.id)
-    with zipfile.ZipFile(zip_path, "r") as archive:
-        names = set(archive.namelist())
-    assert "agent.yml" in names
-    assert "system_prompt.md" in names
-    assert "conversation.jsonl" not in names
-    assert "execution_history.jsonl" not in names
-    assert "learnings.jsonl" not in names
-    assert "schedules.jsonl" not in names
-    assert "context.pkl" not in names
-    assert "current_plan.txt" not in names
-    assert "instruction_details.txt" not in names
-    with zipfile.ZipFile(zip_path, "r") as archive:
-        dumped = yaml.safe_load(archive.read("agent.yml"))
-    assert dumped["last_message"] == ""
+    # The archive is read entirely within this block, so the context manager
+    # owns its temp dir — the bare export_agent() left one behind per run.
+    with registry.exported_agent_archive(agent.id) as (zip_path, _):
+        with zipfile.ZipFile(zip_path, "r") as archive:
+            names = set(archive.namelist())
+        assert "agent.yml" in names
+        assert "system_prompt.md" in names
+        assert "conversation.jsonl" not in names
+        assert "execution_history.jsonl" not in names
+        assert "learnings.jsonl" not in names
+        assert "schedules.jsonl" not in names
+        assert "context.pkl" not in names
+        assert "current_plan.txt" not in names
+        assert "instruction_details.txt" not in names
+        with zipfile.ZipFile(zip_path, "r") as archive:
+            dumped = yaml.safe_load(archive.read("agent.yml"))
+        assert dumped["last_message"] == ""
 
 
 def test_import_strips_history_from_an_older_archive(temp_agents_dir: Path):
@@ -1921,20 +1920,23 @@ def test_upload_agent_to_radient_new_and_overwrite(tmp_path: Path):
             current_working_directory=None,
         )
     )
-    zip_path, _ = registry.export_agent(agent.id)
-
-    radient_client = MagicMock()
-    # New agent upload
-    radient_client.upload_agent_to_marketplace.return_value = "market-id"
-    result = registry.upload_agent_to_radient(radient_client, None, zip_path)
-    assert result == "market-id"
-    radient_client.upload_agent_to_marketplace.assert_called_once_with(zip_path)
-    # Overwrite agent upload
-    radient_client.reset_mock()
-    radient_client.overwrite_agent_in_marketplace.return_value = None
-    result = registry.upload_agent_to_radient(radient_client, "existing-id", zip_path)
-    assert result is None
-    radient_client.overwrite_agent_in_marketplace.assert_called_once_with("existing-id", zip_path)
+    # Mirrors the production upload callers, which hold the archive only for
+    # the duration of the upload and let the context manager reclaim it.
+    with registry.exported_agent_archive(agent.id) as (zip_path, _):
+        radient_client = MagicMock()
+        # New agent upload
+        radient_client.upload_agent_to_marketplace.return_value = "market-id"
+        result = registry.upload_agent_to_radient(radient_client, None, zip_path)
+        assert result == "market-id"
+        radient_client.upload_agent_to_marketplace.assert_called_once_with(zip_path)
+        # Overwrite agent upload
+        radient_client.reset_mock()
+        radient_client.overwrite_agent_in_marketplace.return_value = None
+        result = registry.upload_agent_to_radient(radient_client, "existing-id", zip_path)
+        assert result is None
+        radient_client.overwrite_agent_in_marketplace.assert_called_once_with(
+            "existing-id", zip_path
+        )
 
 
 def test_download_agent_from_radient(tmp_path: Path):
@@ -1966,8 +1968,9 @@ def test_download_agent_from_radient(tmp_path: Path):
             current_working_directory=None,
         )
     )
-    zip_path, _ = registry.export_agent(agent.id)
-    zip_bytes = zip_path.read_bytes()
+    # Only the BYTES outlive the block, so the archive itself is reclaimed.
+    with registry.exported_agent_archive(agent.id) as (zip_path, _):
+        zip_bytes = zip_path.read_bytes()
     # Mock radient_client
     radient_client = MagicMock()
 

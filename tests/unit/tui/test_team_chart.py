@@ -16,7 +16,7 @@ screen where a horizontal scrollbar is a bug).
 
 from __future__ import annotations
 
-import tempfile
+import itertools
 from pathlib import Path
 
 import pytest
@@ -27,9 +27,38 @@ from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.transcript import TranscriptView, UserBlock
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
+#: Root for this module's throwaway registries, repointed per test by the
+#: autouse fixture below. The registry helpers are module-level functions
+#: called from ~21 sites, several of them indirectly through
+#: ``_nested_registry``, so threading a fixture argument through every caller
+#: would be far more churn than the leak warrants. A bare
+#: ``tempfile.mkdtemp()`` here leaked 21 directories per run of this file,
+#: because nothing ever unlinks one.
+_SCRATCH_ROOT: list[Path] = []
+_SCRATCH_SEQ = itertools.count()
+
+
+@pytest.fixture(autouse=True)
+def _scratch_root(tmp_path: Path) -> None:
+    """Point the registry helpers at this test's own ``tmp_path``.
+
+    pytest rotates ``tmp_path`` (it keeps the last three runs), so the
+    directories are reclaimed without per-test bookkeeping.
+    """
+    _SCRATCH_ROOT.clear()
+    _SCRATCH_ROOT.append(tmp_path)
+
+
+def _scratch() -> Path:
+    """A fresh disposable directory under the running test's tmp_path."""
+    root = _SCRATCH_ROOT[0] if _SCRATCH_ROOT else Path(".")
+    path = root / f"registry-{next(_SCRATCH_SEQ)}"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
 
 def _registry(*teams: TeamEditFields) -> TeamRegistry:
-    reg = TeamRegistry(Path(tempfile.mkdtemp()))
+    reg = TeamRegistry(_scratch())
     for fields in teams:
         reg.create_team(fields)
     return reg
