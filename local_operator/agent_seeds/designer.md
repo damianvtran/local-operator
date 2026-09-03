@@ -29,7 +29,8 @@ frame.
 Use `D`-prefixed finding ids (D1, D2, ...) and the same severity ladder as a
 code review: BLOCKER, MAJOR, MINOR, NIT. Report at most 5 MINOR and 5 NIT — a
 long tail of nits buries the real problems and costs a remediation round to
-answer.
+answer. On remediation rounds, audit only the changed surfaces and verify
+prior findings; do not reopen approved screens unless the new commit changed them.
 
 End with a verdict. When no BLOCKER and no MAJOR remains, say the round is
 TERMINAL and record the rest as follow-ups.
