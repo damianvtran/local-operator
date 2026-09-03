@@ -696,6 +696,26 @@ async def test_boot_typing_sends_prompt() -> None:
         assert len(transcript.blocks()) == 1
 
 
+async def _await_session(app: Any, pilot: Any) -> None:
+    """Pause until the boot task has actually built the session.
+
+    Same hazard as ``_await_setup_state`` below, on the other branch of boot.
+    ``app._session`` is set by a worker task, and a command that reaches the
+    app before it lands is REFUSED ("session is still starting…") rather than
+    queued — so a test that sends a slash command after a single
+    ``pilot.pause()`` asserts on the refusal's after-state and fails only
+    under load. Two of these were caught in CI shards on separate runs
+    (`/model default`, `/model saved`) while passing in isolation every time.
+
+    Polling for the state the test depends on removes the timing from the
+    assertion while still failing, on timeout, if the session never arrives.
+    """
+    for _ in range(200):
+        await pilot.pause()
+        if getattr(app, "_session", None) is not None:
+            return
+
+
 async def _await_setup_state(app: Any, pilot: Any) -> None:
     """Pause until the boot task has actually reached the setup state.
 
@@ -7155,7 +7175,7 @@ async def test_switching_confirms_access_instead_of_warning_about_it() -> None:
     ctrl = _AccessController(stored=("openrouter", "anthropic"))
     app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
     async with app.run_test(size=(90, 24)) as pilot:
-        await pilot.pause()
+        await _await_session(app, pilot)
         app._run_slash_command("/model anthropic/claude-opus-5")
         await pilot.pause()
         text = _transcript_text(app)
@@ -7172,7 +7192,7 @@ async def test_switching_without_a_credential_names_the_one_fix() -> None:
     ctrl = _AccessController()
     app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
     async with app.run_test(size=(90, 24)) as pilot:
-        await pilot.pause()
+        await _await_session(app, pilot)
         app._run_slash_command("/model anthropic/claude-opus-5")
         await pilot.pause()
         text = _transcript_text(app)
@@ -7281,7 +7301,7 @@ async def test_a_failed_credential_check_is_reported_as_itself() -> None:
     ctrl = _AccessController(store_error=True)
     app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
     async with app.run_test(size=(90, 24)) as pilot:
-        await pilot.pause()
+        await _await_session(app, pilot)
         app._run_slash_command("/model anthropic/claude-opus-5")
         await pilot.pause()
         text = _transcript_text(app)
@@ -7939,7 +7959,7 @@ async def test_a_bare_model_names_the_current_pair_and_the_command_that_keeps_it
     ctrl = _AccessController()
     app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
     async with app.run_test(size=(90, 24)) as pilot:
-        await pilot.pause()
+        await _await_session(app, pilot)
         app._run_slash_command("/model")
         await pilot.pause()
         await pilot.pause()
@@ -8100,7 +8120,7 @@ async def test_a_switch_admits_it_is_session_only_and_names_the_persist_command(
     ctrl = _AccessController(stored=("openrouter", "anthropic"))
     app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
     async with app.run_test(size=(90, 24)) as pilot:
-        await pilot.pause()
+        await _await_session(app, pilot)
         app._run_slash_command("/model anthropic/claude-opus-5")
         await pilot.pause()
         text = _transcript_text(app)
@@ -8130,7 +8150,7 @@ async def test_model_default_confirms_both_keys_and_the_file_it_wrote(
     ctrl = _AccessController(stored=("openrouter", "anthropic"))
     app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
     async with app.run_test(size=(90, 24)) as pilot:
-        await pilot.pause()
+        await _await_session(app, pilot)
         app._run_slash_command("/model default anthropic/claude-opus-5")
         await pilot.pause()
         text = _transcript_text(app)
@@ -8175,7 +8195,7 @@ async def test_model_default_alone_confirms_and_writes_nothing(
             if app._session is not None:
                 break
         app._run_slash_command("/model anthropic/claude-opus-5")
-        await pilot.pause()
+        await _await_session(app, pilot)
         app._run_slash_command("/model default")
         await pilot.pause()
         text = _transcript_text(app)
@@ -8206,9 +8226,9 @@ async def test_model_saved_switches_to_the_configured_default(
     ctrl = _AccessController(stored=("openrouter", "anthropic"))
     app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
     async with app.run_test(size=(90, 24)) as pilot:
-        await pilot.pause()
+        await _await_session(app, pilot)
         app._run_slash_command("/model openrouter/deepseek/deepseek-chat")
-        await pilot.pause()
+        await _await_session(app, pilot)
         app._run_slash_command("/model saved")
         await pilot.pause()
         label = session.model_label
@@ -8226,7 +8246,7 @@ async def test_model_saved_says_so_when_no_default_is_configured(
     ctrl = _AccessController(stored=("openrouter", "anthropic"))
     app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
     async with app.run_test(size=(90, 24)) as pilot:
-        await pilot.pause()
+        await _await_session(app, pilot)
         app._run_slash_command("/model saved")
         await pilot.pause()
         text = _transcript_text(app)
@@ -8247,7 +8267,7 @@ async def test_model_default_explicit_selector_still_writes(
     ctrl = _AccessController(stored=("openrouter", "anthropic"))
     app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
     async with app.run_test(size=(90, 24)) as pilot:
-        await pilot.pause()
+        await _await_session(app, pilot)
         app._run_slash_command("/model default anthropic/claude-opus-5")
         await pilot.pause()
     written = yaml.safe_load((tmp_path / "config.yml").read_text())["values"]
@@ -8270,7 +8290,7 @@ async def test_model_picker_d_saves_the_highlighted_row_as_default(
     ctrl = _AccessController(stored=("openrouter", "anthropic"))
     app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
     async with app.run_test(size=(90, 30)) as pilot:
-        await pilot.pause()
+        await _await_session(app, pilot)
         app._run_slash_command("/model")
         await pilot.pause()
         await pilot.pause()
@@ -8300,7 +8320,7 @@ async def test_every_model_default_surface_says_it_the_same_way() -> None:
     ctrl = _AccessController(stored=("openrouter", "anthropic"))
     app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
     async with app.run_test(size=(90, 30)) as pilot:
-        await pilot.pause()
+        await _await_session(app, pilot)
         app._run_slash_command("/model")
         await pilot.pause()
         await pilot.pause()
@@ -8358,7 +8378,7 @@ async def test_a_mid_turn_switch_says_when_it_starts_applying() -> None:
     ctrl = _AccessController(stored=("openrouter", "anthropic"))
     app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
     async with app.run_test(size=(90, 24)) as pilot:
-        await pilot.pause()
+        await _await_session(app, pilot)
         app._run_slash_command("/model anthropic/claude-opus-5")
         await pilot.pause()
         text = _unwrapped(_transcript_text(app))
@@ -8408,7 +8428,7 @@ async def test_model_default_mid_turn_also_says_when_it_applies(
     ctrl = _AccessController(stored=("openrouter", "anthropic"))
     app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
     async with app.run_test(size=(90, 24)) as pilot:
-        await pilot.pause()
+        await _await_session(app, pilot)
         app._run_slash_command("/model default anthropic/claude-opus-5")
         await pilot.pause()
         text = _unwrapped(_transcript_text(app))
@@ -8453,7 +8473,7 @@ async def test_an_idle_switch_does_not_talk_about_steps() -> None:
     ctrl = _AccessController(stored=("openrouter", "anthropic"))
     app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
     async with app.run_test(size=(90, 24)) as pilot:
-        await pilot.pause()
+        await _await_session(app, pilot)
         app._run_slash_command("/model anthropic/claude-opus-5")
         await pilot.pause()
         text = _unwrapped(_transcript_text(app))
