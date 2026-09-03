@@ -7369,6 +7369,115 @@ class TaskParams(BaseModel):
         return self
 
 
+def _coerce_job_targets(value: Any) -> Any:
+    """Accept the string shapes models emit for job ids instead of a bare id or array.
+
+    Observed live in transcripts (e.g. with Gemini 3.8 Flash, or when quoting):
+    models pass ``job_id`` as a stringified list ``'["id1", "id2"]'`` or
+    unquoted bracketed string ``'[id1, id2]'``, or a single element list / string.
+    Unwraps JSON lists, unquoted bracketed strings, and lists with stringified items.
+    """
+
+    def _parse_str(text: str) -> list[str]:
+        text = text.strip()
+        if not text:
+            return []
+        if text.startswith("["):
+            try:
+                parsed = json.loads(text)
+            except ValueError:
+                parsed = None
+            if isinstance(parsed, list):
+                res: list[str] = []
+                for item in parsed:
+                    if isinstance(item, str):
+                        res.extend(_parse_str(item))
+                return res
+            inner = text[1:]
+            if inner.endswith("]"):
+                inner = inner[:-1]
+            items = [item.strip().strip("'\"") for item in inner.split(",")]
+            res = []
+            for item in items:
+                if item:
+                    res.extend(_parse_str(item) if item.startswith("[") else [item])
+            return res
+        return [text]
+
+    if isinstance(value, str):
+        items = _parse_str(value)
+        if len(items) == 1:
+            return items[0]
+        if len(items) > 1:
+            return items
+        return value
+    if isinstance(value, (list, tuple)):
+        items = []
+        for x in value:
+            if isinstance(x, str):
+                items.extend(_parse_str(x))
+            else:
+                items.append(x)
+        if len(items) == 1 and isinstance(items[0], str):
+            return items[0]
+        return items
+    return value
+
+
+def _coerce_single_job_id(value: Any) -> Any:
+    """Unwrap a single job ID from string, bracketed string, or list."""
+    if value is None:
+        return None
+    coerced = _coerce_job_targets(value)
+    if isinstance(coerced, list):
+        if len(coerced) == 1 and isinstance(coerced[0], str):
+            return coerced[0]
+        if len(coerced) == 0:
+            return ""
+        # If multiple were somehow provided to a single-id field, pick the first
+        return coerced[0] if isinstance(coerced[0], str) else str(coerced[0])
+    return coerced
+
+
+def _resolve_job_target(target: str, jobs: Any, comms: Any = None) -> tuple[str | None, str | None]:
+    """Resolve a target (canonical ID or label) to a canonical job ID.
+
+    Priority:
+    1. Direct match in jobs manager (ID).
+    2. Subagent comms resolution if comms available (resolves label or ID).
+    3. Label match among jobs in `jobs.list()`. If multiple match, prioritize running
+       jobs (`job.status == 'running'`), matching comms.resolve behavior.
+    Returns (job_id, error_message).
+    """
+    target = target.strip()
+    if not target:
+        return None, "empty target"
+    if jobs.get(target) is not None:
+        return target, None
+    if comms is not None and hasattr(comms, "resolve"):
+        try:
+            resolved, error = comms.resolve(target)
+            if error is None and len(resolved) == 1:
+                return resolved[0], None
+        except Exception:
+            pass
+    try:
+        all_jobs = jobs.list()
+    except Exception:
+        all_jobs = []
+    matches = [j for j in all_jobs if getattr(j, "label", None) == target]
+    if len(matches) == 1:
+        return matches[0].id, None
+    if len(matches) > 1:
+        live = [j for j in matches if getattr(j, "status", None) == "running"]
+        if len(live) == 1:
+            return live[0].id, None
+        if len(live) > 1:
+            return live[0].id, None
+        return matches[0].id, None
+    return None, f"unknown job {target}"
+
+
 class WaitParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -7379,6 +7488,12 @@ class WaitParams(BaseModel):
             "each child in turn."
         )
     )
+
+    @field_validator("job_id", mode="before")
+    @classmethod
+    def _coerce_job_id(cls, value: Any) -> Any:
+        return _coerce_job_targets(value)
+
     wait_ms: int = Field(
         # The ceiling and the default are sized to the work agents actually
         # await, not to a round-trip latency. Measured on this host's own
@@ -7419,6 +7534,12 @@ class JobsParams(BaseModel):
         default=None,
         description="Job to peek at or cancel (required for those ops).",
     )
+
+    @field_validator("job_id", mode="before")
+    @classmethod
+    def _coerce_job_id(cls, value: Any) -> Any:
+        return _coerce_single_job_id(value)
+
     since: int | None = Field(
         default=None,
         description=(
@@ -7577,11 +7698,22 @@ async def execute_wait(
             "wait",
             "job tracking is not available in this session (no job manager attached).",
         )
-    job_ids = [params.job_id] if isinstance(params.job_id, str) else list(params.job_id)
-    job_ids = [job_id for job_id in dict.fromkeys(job_ids) if job_id]
-    if not job_ids:
+    raw_ids = [params.job_id] if isinstance(params.job_id, str) else list(params.job_id)
+    raw_ids = [target for target in dict.fromkeys(raw_ids) if target]
+    if not raw_ids:
         return _error(tool_call_id, "wait", "no job id given")
-    missing = [job_id for job_id in job_ids if jobs.get(job_id) is None]
+
+    comms = context.subagent_comms if context else None
+    job_ids: list[str] = []
+    missing: list[str] = []
+    for target in raw_ids:
+        canonical_id, _err = _resolve_job_target(target, jobs, comms)
+        if canonical_id is not None and jobs.get(canonical_id) is not None:
+            if canonical_id not in job_ids:
+                job_ids.append(canonical_id)
+        else:
+            missing.append(target)
+
     if missing:
         return _error(tool_call_id, "wait", f"unknown job {', '.join(missing)}")
 
@@ -7988,11 +8120,15 @@ async def execute_jobs(
         # ``Session`` builds its own ``AsyncJobManager`` and nothing reassigns
         # a child's, so a child's manager never holds its parent's rows and
         # there is no cross-session id to reach in the first place.
-        job = jobs.get(params.job_id)
+        comms = context.subagent_comms if context else None
+        target = params.job_id
+        canonical_id, _err = _resolve_job_target(target, jobs, comms)
+        job = jobs.get(canonical_id) if canonical_id else None
         if job is None:
             return _error(tool_call_id, "jobs", f"unknown job {params.job_id}")
+        effective_id = job.id
         if params.op == "cancel":
-            cancelled = await jobs.cancel(params.job_id)
+            cancelled = await jobs.cancel(effective_id)
             if not cancelled:
                 # cancel() refuses a job that already settled, which is not a
                 # failure worth erroring on: the caller wanted it stopped and
@@ -8001,14 +8137,14 @@ async def execute_jobs(
                 return _text(
                     tool_call_id,
                     "jobs",
-                    f"job {params.job_id} was not cancelled (status: {job.status})",
-                    details={"job_id": params.job_id, "status": job.status, "cancelled": False},
+                    f"job {effective_id} was not cancelled (status: {job.status})",
+                    details={"job_id": effective_id, "status": job.status, "cancelled": False},
                 )
             return _text(
                 tool_call_id,
                 "jobs",
-                f"cancelled job {params.job_id} ({job.label})",
-                details={"job_id": params.job_id, "cancelled": True},
+                f"cancelled job {effective_id} ({job.label})",
+                details={"job_id": effective_id, "cancelled": True},
             )
         return _peek_job(tool_call_id, jobs, job, params.since or 0, context)
 

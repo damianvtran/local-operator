@@ -687,3 +687,91 @@ async def test_peek_and_cancel_reach_jobs_the_listing_shows(tmp_path):
     cancelled = await _call(tools, "jobs", {"op": "cancel", "job_id": grandchild}, context)
     assert cancelled.is_error is False, "cancel could not address a job the listing showed"
     await manager.dispose()
+
+
+@pytest.mark.asyncio
+async def test_wait_and_jobs_coercion_and_label_resolution(tmp_path):
+    """Test job_id stringified list coercion and label resolution across wait and jobs."""
+    manager = AsyncJobManager()
+    quick_id = manager.register("task", "worker-fast", _quick_runner)
+    slow_id = manager.register("task", "worker-slow", _slow_runner)
+
+    context = ToolContext(cwd=str(tmp_path), session_id="s", jobs=manager)
+    tools = _tools(context)
+
+    # 1. wait with stringified list JSON: '["<job_id>"]'
+    waited_json = await _call(
+        tools, "wait", {"job_id": f'["{quick_id}"]', "wait_ms": 1000}, context
+    )
+    assert waited_json.is_error is False
+    assert waited_json.details is not None
+    assert waited_json.details["status"] == "completed"
+
+    # 2. wait with unquoted brackets: '[<job_id>]'
+    waited_unquoted = await _call(
+        tools, "wait", {"job_id": f"[{quick_id}]", "wait_ms": 1000}, context
+    )
+    assert waited_unquoted.is_error is False
+
+    # 3. wait with list of ids: ['<id1>', '<id2>']
+    waited_list = await _call(
+        tools, "wait", {"job_id": [quick_id, slow_id], "wait_ms": 1000}, context
+    )
+    assert waited_list.is_error is False
+    assert waited_list.details is not None
+    assert waited_list.details["status"] == "completed"
+
+    # 4. wait by label (worker-fast)
+    waited_by_label = await _call(
+        tools, "wait", {"job_id": "worker-fast", "wait_ms": 1000}, context
+    )
+    assert waited_by_label.is_error is False
+    assert waited_by_label.details is not None
+    assert waited_by_label.details["status"] == "completed"
+
+    # 5. jobs(op="peek") and jobs(op="cancel") with stringified list and by label
+    peek_json = await _call(tools, "jobs", {"op": "peek", "job_id": f'["{slow_id}"]'}, context)
+    assert peek_json.is_error is False
+
+    peek_label = await _call(tools, "jobs", {"op": "peek", "job_id": "worker-slow"}, context)
+    assert peek_label.is_error is False
+
+    cancel_label = await _call(tools, "jobs", {"op": "cancel", "job_id": "worker-slow"}, context)
+    assert cancel_label.is_error is False
+    assert (cancel_label.details or {})["cancelled"] is True
+
+    # 6. wait with truly unknown job still returns clean error
+    unknown_wait = await _call(
+        tools, "wait", {"job_id": '["nonexistent-job-xyz"]', "wait_ms": 100}, context
+    )
+    assert unknown_wait.is_error is True
+    assert "unknown job nonexistent-job-xyz" in unknown_wait.text
+
+    await manager.dispose()
+
+
+@pytest.mark.asyncio
+async def test_wait_by_label_prioritizes_running_job(tmp_path):
+    """When multiple jobs share a label, running job is prioritized over settled."""
+    manager = AsyncJobManager()
+    settled_id = manager.register("task", "duplicate-worker", _quick_runner)
+
+    def _settled() -> bool:
+        j = manager.get(settled_id)
+        return j is not None and j.status == "completed"
+
+    await wait_for(_settled)
+
+    running_id = manager.register("task", "duplicate-worker", _slow_runner)
+    await asyncio.sleep(0)
+
+    context = ToolContext(cwd=str(tmp_path), session_id="s", jobs=manager)
+    tools = _tools(context)
+
+    # Cancel by label should target the running job
+    cancelled = await _call(tools, "jobs", {"op": "cancel", "job_id": "duplicate-worker"}, context)
+    assert cancelled.is_error is False
+    assert (cancelled.details or {})["cancelled"] is True
+    assert (cancelled.details or {})["job_id"] == running_id
+
+    await manager.dispose()
