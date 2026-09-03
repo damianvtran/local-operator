@@ -140,8 +140,9 @@ jobs:
         
   test:
     runs-on: ubuntu-latest
-    # Sharded across 4 parallel jobs to bring test execution time from ~33m down
-    # to ~8-9m. Timeout set to 15m (generous buffer for an ~8m run).
+    # Sharded across 5 parallel jobs to bring individual test runner execution
+    # time safely within the 7-9 minute window while staying well within the
+    # 20-job concurrency budget. Timeout set to 15m.
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -149,7 +150,7 @@ jobs:
         # BOTH ends of `requires-python` on `main`, the minimum only on pull
         # requests.
         python-version: ${{ github.event_name == 'pull_request' && fromJSON('["3.12"]') || fromJSON('["3.12", "3.13"]') }}
-        shard: [0, 1, 2, 3]
+        shard: [0, 1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v4
 
@@ -171,7 +172,7 @@ jobs:
           import glob, sys
           files = sorted(glob.glob('tests/unit/**/test_*.py', recursive=True))
           shard = ${{ matrix.shard }}
-          total = 4
+          total = 5
           selected = [f for i, f in enumerate(files) if i % total == shard]
           with open('shard_tests.txt', 'w') as f:
               f.write('\n'.join(selected) + '\n')
