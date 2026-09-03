@@ -355,3 +355,50 @@ async def test_model_default_persists_for_a_local_runtime(tmp_path: Path, monkey
             "a runtime that published its record on THIS machine is local, "
             "so /model default must persist rather than refuse"
         )
+
+
+@pytest.mark.asyncio
+async def test_a_viewer_defers_naming_to_the_runtime(tmp_path: Path, monkeypatch) -> None:
+    """Naming belongs to the process that owns the provider.
+
+    `OwnedSessionHandle.prompt` calls its own `_maybe_name_conversation`, so
+    the title is generated beside the transcript that stores it. A viewer must
+    not race that — and cannot: `RemoteSession.complete_once` raises by
+    construction ("provider errands run on the session owner"), so leaving the
+    viewer's naming worker enabled started a worker on every first message
+    that could only ever fail.
+
+    The PROVISIONAL name still shows, because that is local and needs no
+    provider call: it is what stops the tab reading `lo › <cwd>` for the whole
+    length of the opening turn.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _seed_transcript(tmp_path, "s1")
+
+    from local_operator.tui.app import OperatorApp
+
+    viewer = await RemoteSession.cold(
+        "s1", config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+    )
+
+    async def factory():
+        return viewer
+
+    app = OperatorApp(factory)
+    started: list[str] = []
+
+    async def fail_if_called(text, complete):  # noqa: ANN001
+        started.append(text)
+        raise AssertionError("a viewer must not run a provider naming errand")
+
+    monkeypatch.setattr("local_operator.session.naming.generate_title", fail_if_called)
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(30):
+            await pilot.pause()
+
+        app._maybe_name_conversation("refactor the YAML loader please")
+        for _ in range(10):
+            await pilot.pause()
+
+    assert started == [], "the viewer started a naming errand it cannot complete"

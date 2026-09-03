@@ -11501,6 +11501,23 @@ class OperatorApp(App[None]):
             # that is the re-title path, which has its own throttle.
             self._maybe_retitle_conversation(text)
             return
+        if bool(getattr(session, "is_remote", False)):
+            # NAMING BELONGS TO THE RUNTIME NOW.
+            # ``OwnedSessionHandle.prompt`` calls its own
+            # ``_maybe_name_conversation``, so the title is generated beside
+            # the transcript that stores it, by the process that owns the
+            # provider. A viewer must not race that: its ``complete_once``
+            # raises by construction ("provider errands run on the session
+            # owner"), so leaving this path enabled started a worker on every
+            # first message that could only ever fail, and the band would have
+            # shown the provisional excerpt until the runtime's real title
+            # arrived anyway.
+            #
+            # The PROVISIONAL name still shows: that is local, needs no
+            # provider call, and is what stops the tab reading ``lo › <cwd>``
+            # for the length of the opening turn.
+            self._show_provisional_name(text)
+            return
         if self._name_requested:
             return
         self._name_requested = True
