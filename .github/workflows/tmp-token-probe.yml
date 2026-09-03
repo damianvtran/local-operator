@@ -1,10 +1,10 @@
 name: TEMP token permission probe
 
 # TEMPORARY diagnostic workflow, deleted before this branch's PR is finalised.
-# Round 2 probes the redesign premise: are environment-scoped variables really
-# invisible to a job that does not reference the environment? That difference is
-# what replaces the ungrantable environments=read API check.
-# Touches no secrets, no external service, uploads nothing.
+# Round 3 checks the remaining redesign question: is the repository-scoped
+# variables endpoint reachable from a workflow token (an alternative way to
+# prove "not defined at repository scope"), and does the preflight differential
+# job behave as designed. Touches no secrets and uploads nothing.
 
 on:
   push:
@@ -12,52 +12,20 @@ on:
       - dev-store-verify-403
 
 jobs:
-  outside-environment:
+  repo-variables-endpoint:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
+    permissions: write-all
     steps:
-      - name: vars visible WITHOUT an environment
-        env:
-          CWS_PUBLISHER_ID: ${{ vars.CWS_PUBLISHER_ID }}
-          CWS_EXTENSION_ID: ${{ vars.CWS_EXTENSION_ID }}
-          GCP_WIF_PROVIDER: ${{ vars.GCP_WIF_PROVIDER }}
-          CWS_SERVICE_ACCOUNT: ${{ vars.CWS_SERVICE_ACCOUNT }}
-        run: |
-          for n in CWS_PUBLISHER_ID CWS_EXTENSION_ID GCP_WIF_PROVIDER CWS_SERVICE_ACCOUNT; do
-            v="${!n}"
-            if [[ -n "$v" ]]; then echo "OUTSIDE $n = VISIBLE (len ${#v})"; else echo "OUTSIDE $n = EMPTY"; fi
-          done
-
-  inside-environment:
-    runs-on: ubuntu-latest
-    environment: chrome-web-store
-    permissions:
-      contents: read
-      actions: read
-    steps:
-      - name: vars visible WITH the environment
-        env:
-          CWS_PUBLISHER_ID: ${{ vars.CWS_PUBLISHER_ID }}
-          CWS_EXTENSION_ID: ${{ vars.CWS_EXTENSION_ID }}
-          GCP_WIF_PROVIDER: ${{ vars.GCP_WIF_PROVIDER }}
-          CWS_SERVICE_ACCOUNT: ${{ vars.CWS_SERVICE_ACCOUNT }}
-        run: |
-          for n in CWS_PUBLISHER_ID CWS_EXTENSION_ID GCP_WIF_PROVIDER CWS_SERVICE_ACCOUNT; do
-            v="${!n}"
-            if [[ -n "$v" ]]; then echo "INSIDE $n = VISIBLE (len ${#v})"; else echo "INSIDE $n = EMPTY"; fi
-          done
-      - name: environment + branch policy endpoints under actions:read
+      - name: repo-scoped variables endpoint under write-all
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
-          for p in "environments/chrome-web-store" \
-                   "environments/chrome-web-store/deployment-branch-policies?per_page=100"; do
+          for p in "actions/variables?per_page=100" "actions/variables/CWS_PUBLISHER_ID"; do
             echo "=== $p"
-            curl -sS --fail-with-body \
+            curl -sS -D - -o /dev/null \
               -H "Authorization: Bearer $GITHUB_TOKEN" \
               -H 'Accept: application/vnd.github+json' \
               -H 'X-GitHub-Api-Version: 2022-11-28' \
               "https://api.github.com/repos/$GITHUB_REPOSITORY/$p" \
-              | jq -c '{deployment_branch_policy, total_count, branch_policies}'
+              | grep -iE '^HTTP|x-accepted-github-permissions' || true
           done
