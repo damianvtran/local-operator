@@ -409,7 +409,13 @@ def installer_argv(
     executable: str | None = None,
 ) -> list[str]:
     if kind is InstallKind.UV_TOOL:
-        return ["uv", "tool", "upgrade", "local-operator"]
+        # Re-install with --force rather than `uv tool upgrade`:
+        # `uv tool upgrade` fails when installed from a temporary git snapshot
+        # (the build directory no longer exists) or when installed with an exact
+        # version pin (`specifier = "==..."` in uv-receipt.toml causes "Nothing to upgrade").
+        # `uv tool install --force local-operator` always fetches and replaces with
+        # the latest PyPI distribution regardless of previous installation receipt.
+        return ["uv", "tool", "install", "--force", "local-operator"]
     if kind is InstallKind.PIPX:
         return ["pipx", "upgrade", "local-operator"]
     if kind is InstallKind.PIP:
@@ -451,7 +457,7 @@ def tui_installer_failure(kind: InstallKind) -> str:
     elif kind is InstallKind.PIP:
         hint = "python -m pip install -U local-operator"
     else:
-        hint = "uv tool upgrade local-operator"
+        hint = "uv tool install --force local-operator"
     return f"upgrade failed; try `{hint}` in a shell"
 
 

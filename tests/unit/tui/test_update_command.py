@@ -458,7 +458,7 @@ async def test_installer_failure_names_a_shell_retry() -> None:
                 if any("upgrade failed" in text for text in _notices(app)):
                     break
             notices = _notices(app)
-            assert any("uv tool upgrade local-operator" in text for text in notices)
+            assert any("uv tool install --force local-operator" in text for text in notices)
             assert app.query_one(WelcomeView).display is True
             assert app.return_code != REEXEC_CODE
 

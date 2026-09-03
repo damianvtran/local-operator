@@ -355,7 +355,7 @@ def test_perform_upgrade_runs_detected_argv() -> None:
 
     out = perform_upgrade(target="0.28.0", kind=InstallKind.UV_TOOL, run=run)
     assert out == "0.28.0"
-    assert seen == [["uv", "tool", "upgrade", "local-operator"]]
+    assert seen == [["uv", "tool", "install", "--force", "local-operator"]]
 
     seen.clear()
     perform_upgrade(target="0.28.0", kind=InstallKind.PIPX, run=run)
@@ -379,13 +379,19 @@ def test_perform_upgrade_nonzero_installer() -> None:
 
 
 def test_installer_argv_matches_kind() -> None:
-    assert installer_argv(InstallKind.UV_TOOL) == ["uv", "tool", "upgrade", "local-operator"]
+    assert installer_argv(InstallKind.UV_TOOL) == [
+        "uv",
+        "tool",
+        "install",
+        "--force",
+        "local-operator",
+    ]
 
 
 def test_tui_refusal_copy_is_user_facing() -> None:
     assert "repo checkout" in tui_editable_refusal()
     assert "lop-update" in tui_editable_refusal()
-    assert "uv tool upgrade local-operator" in tui_installer_failure(InstallKind.UV_TOOL)
+    assert "uv tool install --force local-operator" in tui_installer_failure(InstallKind.UV_TOOL)
     assert "pipx upgrade local-operator" in tui_installer_failure(InstallKind.PIPX)
 
 
