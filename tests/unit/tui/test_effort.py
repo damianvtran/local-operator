@@ -576,3 +576,35 @@ def test_the_overlays_own_effort_wins_even_on_the_parents_model() -> None:
     assert "lo" in shown
     # The parent's `high` must not leak through the overlay's own reading.
     assert "high" not in shown
+
+
+@pytest.mark.asyncio
+async def test_apply_frontend_state_preserves_auto_effort_label() -> None:
+    """Frontend state sync must derive the effort label via ``_effort_label`` rather
+    than a raw string read of ``reasoning_effort``. Models booting unset with a ladder
+    (every OpenRouter reasoning model) carry ``reasoning_effort=None`` and must render
+    ``auto`` on the status band rather than having the segment clobbered to empty string.
+    """
+    from local_operator.session.frontend_state import (
+        FrontendModelSpec,
+        FrontendSessionState,
+    )
+
+    session = EffortSession("openrouter", "google/gemini-3.8-flash")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _boot(pilot, app)
+        assert app._status is not None
+        assert app._status._effort == "auto"
+
+        # Simulate the periodic or event-driven frontend state update
+        state = FrontendSessionState(
+            session_id="session-1",
+            epoch="1",
+            effective_model=FrontendModelSpec(**session.model.model_dump()),
+        )
+        app._apply_frontend_state(state)
+        await pilot.pause()
+
+        assert app._status._effort == "auto"
+        assert "auto" in _band(app)
