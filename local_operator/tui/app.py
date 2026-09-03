@@ -16143,7 +16143,7 @@ class OperatorApp(App[None]):
 
     @staticmethod
     def _usage_data_fetched_ms(reports: list[Any]) -> float:
-        """The NEWEST report's ``fetched_at`` as an epoch-ms clock reading.
+        """The newest CONFIRMED ``fetched_at`` as an epoch-ms clock reading.
 
         The title's age answers "when were these numbers last confirmed?" — a
         property of the SET — so it is measured from the most recent successful
@@ -16163,16 +16163,47 @@ class OperatorApp(App[None]):
         A per-account miss is a normal, designed-for state here — accounts are
         probed and served independently — so it must not be reported as "nothing
         has updated in two hours". The individual staleness is not lost by this:
-        ``usage_panel._account_status_note`` renders ``last known 2h ago`` on the
-        stuck block itself, which is both more specific and attached to the rows
-        it actually qualifies.
+        ``usage_panel._account_status_note`` marks every block this stamp does
+        not speak for, using the value returned here as its comparison point, so
+        a row older than the title always says so on its own line.
 
-        Honest when the whole set is stale: with nothing refreshed the newest
-        stamp is still old, so the title reports the true age rather than
-        ``just now``. Falls back to the wall clock (age ≈ 0) only when no report
-        carries a usable timestamp at all.
+        **Only a confirmation counts.** A failing account's report is not
+        evidence of freshness even though it carries a ``fetched_at``: a report
+        served from last-good keeps the stamp of its last SUCCESS (fine, but it
+        is not new), and ``ProviderController._mark_account_failure`` stamps a
+        never-successful account's stub with ``now_ms`` — the moment of a FAILED
+        probe, on a report with no limits at all. Counting that stub would let
+        the title read ``just now`` sourced from an account that has never once
+        reported a number, which one new login during an outage is enough to
+        trigger. So reports with a failure streak are excluded from the maximum.
+
+        Honest when the whole set is stale: if nothing is confirmed, the newest
+        stamp of the failing set is used instead, so a wholly-degraded panel
+        reports the true age of its last-good numbers rather than ``just now``.
+        Falls back to the wall clock (age ≈ 0) only when no report carries a
+        usable timestamp at all.
         """
-        stamps = [int(getattr(report, "fetched_at", 0) or 0) for report in reports]
+
+        def _stamp(report: Any) -> int:
+            return int(getattr(report, "fetched_at", 0) or 0)
+
+        def _confirmed(report: Any) -> bool:
+            return int(getattr(report, "consecutive_failures", 0) or 0) <= 0 and not getattr(
+                report, "usage_unavailable", False
+            )
+
+        confirmed = [_stamp(report) for report in reports if _confirmed(report)]
+        confirmed = [stamp for stamp in confirmed if stamp > 0]
+        if confirmed:
+            return float(max(confirmed))
+        # Nothing was confirmed. Fall back to the newest LAST-GOOD stamp so the
+        # title still states a real age (the whole-set-stale case) instead of
+        # claiming a freshness no account supports. Only reports that actually
+        # carry numbers qualify: a failure stub has no limits, so its stamp
+        # measures the moment a probe failed rather than the age of any data,
+        # and letting it win here would reintroduce the very `just now` this
+        # method exists to refuse.
+        stamps = [_stamp(report) for report in reports if getattr(report, "limits", None)]
         stamps = [stamp for stamp in stamps if stamp > 0]
         if not stamps:
             return time.time() * 1000

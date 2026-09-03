@@ -9,9 +9,11 @@ differ only by the code under test.
 | `before.svg` | `origin/main`: the title reads `Usage  2h ago` above five Anthropic accounts refreshed 1.8 minutes earlier |
 | `before-stuck-account.svg` | The same frame scrolled to the bottom: `kimi cred:8 · last known 2h ago` — the one account the header was reporting |
 | `after.svg` | This branch, same state: the title reads `Usage  1m ago` |
-| `after-stuck-account.svg` | The same, scrolled: the header is fresh and the stuck block still says `last known 2h ago` |
-| `*.png` | The same four frames rendered, so they are viewable inline |
-| `usage_shot.py` | Reproduces all four frames (run from the worktree root) |
+| `after-stuck-account.svg` | The same, scrolled: the header is fresh, carries `· 1 stale`, and the stuck block says `last known 2h ago` in amber with a dimmed status dot |
+| `before-short-pane.svg` / `after-short-pane.svg` | The 100x18 frame from design finding D1, where the row budget squeezes the note out: on `main` nothing marks the stale block; here the pinned `· 1 stale` and the dimmed dot survive |
+| `*.png` | The same frames rendered, so they are viewable inline |
+| `usage_shot.py` | Reproduces every frame (run from the worktree root) |
+| `rasterise.py` | SVG → PNG without collapsing the spacing (see below) |
 | `verify_refresh.py` | Drives the real `r` key against a controller with one permanently-stuck account, printing the header's `fetched_ms` after each press |
 
 ## The reported state, from the operator's own cache
@@ -91,3 +93,39 @@ did not make the screen scrollable (the failure mode AGENTS.md records from the
 usage-card round). Five consecutive captures are byte-identical apart from the
 boot splash's animating glyph colour, which drifts the same way on `origin/main`
 — the panel itself is settled, with no post-paint reflow.
+
+## Round 1 review follow-ups
+
+The first round of this PR moved the header to the newest stamp, which made the
+per-account note load-bearing: it is what stops a block the title does not
+describe from being read at the title's age. Review found three ways that
+marking could be absent, and the design round found two more where it was
+present but not legible. All are closed, and re-verified here:
+
+```
+R1  a stale row with consecutive_failures == 0 renders unmarked
+      note rendered : 'last known 3h ago'          (was '')
+R2  a never-successful account's failed-probe stamp becomes the header
+      header WITHOUT stub : 2h ago
+      header WITH    stub : 2h ago                 (was 'just now')
+D1  the note dropped by compaction while its stale meter survives
+      misread frames: 0 / 90 sizes swept           (was 18 / 40)
+```
+
+`verify_refresh.py` still shows the originally reported bug fixed, now with the
+title naming its own exception:
+
+```
+after open      : 'Usage  just now  · 1 stale'  fetched_ms=…000000
+after r #1      : 'Usage  just now  · 1 stale'  fetched_ms=…300000
+after r #2      : 'Usage  just now  · 1 stale'  fetched_ms=…600000
+```
+
+**On the PNGs.** The first round's PNGs collapsed every two-space separator
+(`Usage1m ago`, `rrefresh`), which is exactly the property a design reviewer
+inspects. The cause is not a missing font: Textual writes each styled run as its
+own `<text>` node and encodes the gaps as leading `&#160;`, and librsvg applies
+XML whitespace collapsing unless the element opts out, then stretches what
+remains to satisfy `textLength`. `rasterise.py` adds `xml:space="preserve"` to a
+COPY before converting, so the committed SVGs stay byte-identical to Textual's
+export and remain authoritative.

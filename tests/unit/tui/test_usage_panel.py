@@ -14,10 +14,12 @@ from contextlib import asynccontextmanager
 
 import pytest
 from rich.cells import cell_len
+from rich.style import Style
 from textual.app import App, ComposeResult
 from textual.containers import Container
 
 from local_operator.providers.usage import UsageAmount, UsageLimit, UsageReport
+from local_operator.tui import theme as theme_mod
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.usage_panel import (
@@ -45,8 +47,10 @@ from tests.unit.tui.test_app_pilot import FakeSession, _factory
 WIDTH = 76
 
 
-def _lines(reports, width: int = WIDTH, now: float = 0.0) -> list[str]:
-    return [line.plain for line in build_usage_body(reports, width, now).lines]
+def _lines(
+    reports, width: int = WIDTH, now: float = 0.0, header_ms: float | None = None
+) -> list[str]:
+    return [line.plain for line in build_usage_body(reports, width, now, header_ms).lines]
 
 
 def _report(*limits, provider: str = "anthropic", notes: str | None = None, identity=None):
@@ -1472,6 +1476,13 @@ async def test_panel_width_caps_on_a_laptop_and_holds_on_eighty_cols() -> None:
 # to.
 
 
+def _ink(style) -> str:  # noqa: ANN001 — Style | str, as Rich hands it back
+    """Hex of a span's foreground, matching ``test_band_panels._ink``."""
+    resolved = Style.parse(style) if isinstance(style, str) else style
+    assert resolved.color is not None and resolved.color.triplet is not None
+    return resolved.color.triplet.hex.lower()
+
+
 def _aged(report, fetched_at: float):
     """A report stamped at ``fetched_at``, since ``_report`` builds live ones."""
     report.fetched_at = int(fetched_at)
@@ -1504,7 +1515,7 @@ def test_one_stuck_account_does_not_pin_the_header_to_its_age() -> None:
 
     fetched_ms = OperatorApp._usage_data_fetched_ms([*fresh, stuck])
 
-    assert fetched_ms == fresh[0].fetched_at
+    assert fetched_ms == max(report.fetched_at for report in fresh)
     # What the title actually renders, not just the millisecond arithmetic.
     assert format_age(now - fetched_ms) == "1m ago"
 
@@ -1531,8 +1542,9 @@ def test_the_stuck_account_still_carries_its_own_last_known_note() -> None:
     stuck.consecutive_failures = 1
 
     reports = [fresh, stuck]
-    lines = _lines(reports, now=now)
-    title_age = format_age(now - OperatorApp._usage_data_fetched_ms(reports))
+    header_ms = OperatorApp._usage_data_fetched_ms(reports)
+    lines = _lines(reports, now=now, header_ms=header_ms)
+    title_age = format_age(now - header_ms)
 
     assert title_age == "1m ago"
     assert any("last known 2h ago" in line for line in lines), lines
@@ -1557,7 +1569,7 @@ def test_a_wholly_stale_set_still_reports_its_real_age() -> None:
 
     fetched_ms = OperatorApp._usage_data_fetched_ms(stale)
 
-    assert fetched_ms == stale[0].fetched_at  # the newest of the stale set
+    assert fetched_ms == max(report.fetched_at for report in stale)
     assert format_age(now - fetched_ms) == "2h ago"
 
 
@@ -1571,3 +1583,237 @@ def test_reports_without_a_usable_stamp_fall_back_to_the_wall_clock() -> None:
     assert OperatorApp._usage_data_fetched_ms(unstamped) == pytest.approx(
         _time.time() * 1000, abs=5_000
     )
+
+
+# -- what the header stops speaking for must say so itself --------------------
+#
+# Round 1 review (R1/R2) and design review (D1/D2/D3). Taking the newest stamp
+# makes the title a statement about the SET, which is only honest while every
+# block the title does not describe is marked. These pin the three ways that
+# marking was reachable-but-absent: a stale row with no failure streak, a
+# synthetic stamp from a probe that never succeeded, and a layout free to
+# discard the note while keeping the meter it qualifies.
+
+
+def test_a_silently_stale_row_is_marked_even_with_no_failure_streak() -> None:
+    """R1: the note's trigger is "the title does not speak for this row".
+
+    An expired cache row round-trips through ``include_expired=True`` with
+    ``consecutive_failures == 0`` and ``usage_unavailable`` false, and the
+    lease-loser branch returns the stale payload verbatim. Keyed on the
+    counters alone, such a row renders completely unmarked beside a fresh
+    sibling under a ``just now`` header — stale numbers with nothing on screen
+    saying so.
+    """
+    now = 200 * 60_000.0
+    fresh = _aged(
+        _report(_percent("a:5h", "5 hour", 20.0, shared=True), identity="a@x"),
+        now - 20_000,
+    )
+    silent = _aged(
+        _report(
+            _percent("kimi:5h", "5 hour", 64.0, shared=True),
+            provider="kimi",
+            identity="cred:8",
+        ),
+        now - 180 * 60_000,
+    )
+    # The distinguishing fact: no failure counters are set on this row at all.
+    assert silent.consecutive_failures == 0
+    assert silent.usage_unavailable is False
+
+    reports = [fresh, silent]
+    header_ms = OperatorApp._usage_data_fetched_ms(reports)
+    lines = _lines(reports, now=now, header_ms=header_ms)
+
+    assert format_age(now - header_ms) == "just now"
+    assert any("last known 3h ago" in line for line in lines), lines
+    # And the fresh sibling is still not labelled.
+    assert sum("last known" in line for line in lines) == 1, lines
+
+
+def test_a_row_level_with_the_header_is_not_marked_stale() -> None:
+    """The other side of R1: the mark must mean something.
+
+    Reports fetched in the same round differ by milliseconds, and below a
+    minute ``format_age`` renders both the title and the row as ``just now``.
+    A note there would contradict a title that agrees with it.
+    """
+    now = 200 * 60_000.0
+    reports = [
+        _aged(
+            _report(_percent(f"a:5h:{index}", "5 hour", 20.0, shared=True), identity=f"a{index}@x"),
+            now - 1.8 * 60_000 - index * 40,  # same round, milliseconds apart
+        )
+        for index in range(3)
+    ]
+    header_ms = OperatorApp._usage_data_fetched_ms(reports)
+
+    assert not any("last known" in line for line in _lines(reports, now=now, header_ms=header_ms))
+
+
+def test_a_failed_probe_stamp_never_becomes_the_header() -> None:
+    """R2: ``max`` must count confirmations, not the clock reading of a miss.
+
+    ``_mark_account_failure`` stamps a never-successful account's stub with
+    ``now_ms`` — the moment the probe FAILED — on a report carrying no limits.
+    Counted, it lets the title read ``just now`` sourced from an account that
+    has never once reported a number, which one new login during an outage is
+    enough to trigger.
+    """
+    now = 200 * 60_000.0
+    last_good = [
+        _aged(
+            _report(_percent(f"a:5h:{index}", "5 hour", 20.0, shared=True), identity=f"a{index}@x"),
+            now - 125 * 60_000,
+        )
+        for index in range(3)
+    ]
+    for report in last_good:
+        report.consecutive_failures = 2
+
+    stub = _report(provider="kimi", identity="cred:9")  # no limits: never succeeded
+    stub.fetched_at = int(now)  # the time of the FAILED probe
+    stub.consecutive_failures = 1
+
+    honest = OperatorApp._usage_data_fetched_ms(last_good)
+    with_stub = OperatorApp._usage_data_fetched_ms([*last_good, stub])
+
+    assert format_age(now - honest) == "2h ago"
+    # The stub must not move the header off the true age of the real numbers.
+    assert with_stub == honest, format_age(now - with_stub)
+
+
+def test_a_confirmed_account_outranks_a_last_good_one_of_the_same_age() -> None:
+    """The confirmation filter is about provenance, not recency.
+
+    A last-good report keeps the stamp of its last SUCCESS, which is a real
+    reading but not a new one. When anything was actually confirmed, that is
+    what the title reports.
+    """
+    now = 200 * 60_000.0
+    confirmed = _aged(
+        _report(_percent("a:5h", "5 hour", 20.0, shared=True), identity="a@x"),
+        now - 30 * 60_000,
+    )
+    newer_but_failing = _aged(
+        _report(_percent("k:5h", "5 hour", 64.0, shared=True), provider="kimi", identity="cred:8"),
+        now - 10 * 60_000,
+    )
+    newer_but_failing.consecutive_failures = 1
+
+    fetched_ms = OperatorApp._usage_data_fetched_ms([confirmed, newer_but_failing])
+
+    assert fetched_ms == confirmed.fetched_at
+    assert format_age(now - fetched_ms) == "30m ago"
+
+
+def test_the_stale_note_survives_compaction_with_the_meters_it_qualifies() -> None:
+    """D1: a short pane may not keep the stale meter and drop its warning.
+
+    ``_window_rows`` compacts an over-tall block to the heading plus the rows
+    whose index is a cut point. Before this, the account note was not one, so a
+    short pane rendered a 169-minute-old meter with no staleness note anywhere
+    on screen, under a title reading ``1m ago``.
+    """
+    now = 200 * 60_000.0
+    stuck = _aged(
+        _report(
+            _percent("kimi:7d", "7 day", 64.0, shared=True),
+            provider="kimi",
+            identity="cred:8",
+        ),
+        now - 169 * 60_000,
+    )
+    stuck.consecutive_failures = 1
+
+    body = build_usage_body([stuck], WIDTH, now, now - 1.8 * 60_000)
+    note_index = next(index for index, line in enumerate(body.lines) if "last known" in line.plain)
+
+    # The cut set is what `_window_rows` retains; the note has to be in it.
+    assert note_index + 1 in body.cuts, sorted(body.cuts)
+
+
+def test_a_degraded_account_is_marked_without_reading_the_note() -> None:
+    """D2: the block's highest-contrast elements must not say "healthy".
+
+    A stale account kept the same success-green status dot as a live one, so
+    the only thing marking it was a dim sentence in the panel's decoration
+    colour. The mark drops to the dim ramp instead; the bar keeps its quota
+    tint, because the fill still measures what it measures.
+    """
+    now = 200 * 60_000.0
+    healthy = _aged(
+        _report(_percent("a:5h", "5 hour", 20.0, shared=True), identity="a@x"),
+        now - 1.8 * 60_000,
+    )
+    stuck = _aged(
+        _report(_percent("k:5h", "5 hour", 64.0, shared=True), provider="kimi", identity="cred:8"),
+        now - 169 * 60_000,
+    )
+    stuck.consecutive_failures = 1
+
+    body = build_usage_body([healthy, stuck], WIDTH, now, healthy.fetched_at)
+    meters = [line for line in body.lines if "5 hour" in line.plain and "●" in line.plain]
+    healthy_mark, stale_mark = (_ink(line.spans[0].style) for line in meters)
+
+    assert healthy_mark != stale_mark
+    assert stale_mark == theme_mod.semantic_color("dim").lower()
+    # The note itself is promoted off the decoration ramp (D2).
+    note = next(line for line in body.lines if "last known" in line.plain)
+    assert _ink(note.style) == theme_mod.semantic_color("warning").lower()
+
+
+@pytest.mark.asyncio
+async def test_the_title_names_how_many_accounts_it_does_not_speak_for() -> None:
+    """D3: a bare age never said WHAT was that age.
+
+    The suffix is pinned chrome, so unlike the per-account note it cannot be
+    scrolled past or dropped by the row budget — which is what makes a short
+    pane honest even when the block's own note is off screen.
+    """
+    now = 200 * 60_000.0
+    fresh = _aged(
+        _report(_percent("a:5h", "5 hour", 20.0, shared=True), identity="a@x"),
+        now - 1.8 * 60_000,
+    )
+    stuck = _aged(
+        _report(_percent("k:5h", "5 hour", 64.0, shared=True), provider="kimi", identity="cred:8"),
+        now - 169 * 60_000,
+    )
+    stuck.consecutive_failures = 1
+
+    async with _panel_app() as panel:
+        panel.set_clock(now)
+        panel.show_reports([fresh, stuck], now_ms=fresh.fetched_at)
+        title = panel.render_lines_for_test()[0]
+        # A healthy set says nothing extra — the suffix is an exception report.
+        panel.show_reports([fresh], now_ms=fresh.fetched_at)
+        healthy_title = panel.render_lines_for_test()[0]
+
+    assert "1m ago" in title and "1 stale" in title, title
+    assert "stale" not in healthy_title, healthy_title
+
+
+def test_the_unavailable_note_keeps_its_age_on_a_narrow_card() -> None:
+    """D4: shorten the note under pressure rather than clipping its age.
+
+    ``usage unavailable — last known 2h ago`` is 37 cells and truncates from
+    the right, so a narrow card kept the label and dropped the age — the half
+    a reader can act on.
+    """
+    now = 200 * 60_000.0
+    report = _aged(
+        _report(_percent("k:7d", "7 day", 64.0, shared=True), provider="kimi", identity="cred:8"),
+        now - 120 * 60_000,
+    )
+    report.usage_unavailable = True
+    report.consecutive_failures = 5
+
+    narrow = next(line for line in _lines([report], width=30, now=now) if "unavailable" in line)
+    wide = next(line for line in _lines([report], width=76, now=now) if "unavailable" in line)
+
+    assert "2h ago" in narrow, narrow
+    assert "…" not in narrow, narrow
+    # The full sentence is still preferred wherever it fits.
+    assert wide.strip() == "usage unavailable — last known 2h ago", wide
