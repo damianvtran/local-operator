@@ -28,7 +28,13 @@ from local_operator.session.runtime.types import PROTOCOL_VERSION, SessionRecord
 
 
 class _Server:
-    """Stands in for the RuntimeServer the handle publishes through."""
+    """Stands in for the RuntimeServer the handle publishes through.
+
+    Deliberately answers by COUNT only (no ``watching_surfaces``): this is
+    the shape an older release published, so these cases also pin the
+    handle's compatibility fallback for a registrant that cannot name the
+    kinds of surface watching it.
+    """
 
     def __init__(self, attached: int = 0) -> None:
         self._attached = attached
@@ -140,7 +146,7 @@ def test_an_attached_viewer_is_not_also_toasted(monkeypatch) -> None:
     sent: list[tuple[str, str]] = []
     monkeypatch.setattr(
         "local_operator.tui.notify.detached_notify",
-        lambda title, body: sent.append((title, body)) or True,
+        lambda title, body, **kwargs: sent.append((title, body)) or True,
         raising=False,
     )
     handle = _handle(monkeypatch, attached=1)
@@ -154,7 +160,7 @@ def test_a_detached_session_notifies_out_of_band(monkeypatch) -> None:
     sent: list[tuple[str, str]] = []
     monkeypatch.setattr(
         "local_operator.tui.notify.detached_notify",
-        lambda title, body: sent.append((title, body)) or True,
+        lambda title, body, **kwargs: sent.append((title, body)) or True,
         raising=False,
     )
     handle = _handle(monkeypatch, attached=0)
@@ -271,3 +277,34 @@ def test_a_timed_out_gate_reaches_the_model_on_replay() -> None:
     text = block.text
     assert "expired" in text and "not a decision" in text
     assert "bash" in text
+
+
+def test_a_phone_watching_parks_for_the_configured_day(monkeypatch) -> None:
+    """Reachability is not "a terminal is attached".
+
+    Once announcements route by surface, a session the PHONE is watching has
+    somebody who can answer the card — so it parks for the configured day
+    like an attached viewer, rather than falling back to the short cap that
+    exists for a question nobody can ever see.
+    """
+    from local_operator.session.runtime.owned import OwnedSessionHandle
+
+    class _KindAware:
+        def watching_surfaces(self):
+            return frozenset({"daemon"})
+
+        def set_record_pending(self, pending):
+            return None
+
+    handle = OwnedSessionHandle.__new__(OwnedSessionHandle)
+    handle._registrant = _KindAware()  # type: ignore[attr-defined]
+    monkeypatch.setattr(
+        OwnedSessionHandle, "_unattended_gate_hours", lambda self: 24, raising=False
+    )
+    # Notifications OFF: proves the park comes from the watching phone and not
+    # from an out-of-band toast being available.
+    monkeypatch.setattr(
+        "local_operator.tui.notify.notifications_enabled", lambda: False, raising=False
+    )
+
+    assert handle._gate_timeout_s() == 24 * 3600.0

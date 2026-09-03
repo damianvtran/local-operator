@@ -492,3 +492,64 @@ def test_a_failing_notifier_spawn_is_silent(monkeypatch: Any) -> None:
 
     monkeypatch.setattr("local_operator.proc.subprocess.Popen", boom)
     _spawn_detached(["notify-send", "hi"])  # must not raise
+
+
+def test_the_click_through_reopens_the_session_through_the_fork_machinery() -> None:
+    """Clicking the toast must land on ``lop --resume <id>``, not a new session.
+
+    The argv comes from ``broadcast.resume_argv``, which is a safety boundary:
+    it replays a transcript and waits: no prompt, no ``--exec``, nothing that
+    continues an interrupted turn unattended. Asserted here because this is a
+    second caller of that boundary and the property has to hold for both.
+    """
+    from local_operator.tui.notify import resume_click_command
+
+    argv = resume_click_command("abc123def456")
+
+    assert argv[-2:] == ["--resume", "abc123def456"]
+    assert not any(part in ("--exec", "-e") for part in argv)
+
+
+def test_a_clickable_toast_launches_only_on_the_default_action() -> None:
+    """A dismissed toast must launch nothing.
+
+    ``notify-send --action`` prints the invoked action's key and exits, so the
+    launch is guarded on that exact output: a dismissal prints nothing, the
+    test fails, and the shell exits without reaching the launcher.
+    """
+    from local_operator.tui.notify import _clickable_notify_command
+
+    argv = _clickable_notify_command(
+        "/usr/bin/notify-send", "lop needs you", "bash: rm -rf build/", "abc123def456"
+    )
+
+    assert argv[0:2] == ["sh", "-c"]
+    script = argv[2]
+    assert "= default ]" in script, script
+    assert "--action=default=" in script
+    assert "--resume abc123def456" in script
+    # The title is model-derived; option parsing must still be terminated.
+    assert " -- " in script
+
+
+def test_an_old_notify_send_without_action_support_gets_the_plain_toast(monkeypatch) -> None:
+    """libnotify < 0.8 treats ``--action`` as an unknown option and delivers
+    NOTHING, so an unprobed flag is the difference between a clickable toast
+    and a silently missing one."""
+    import subprocess
+
+    import local_operator.tui.notify as notify_mod
+
+    class _Result:
+        stdout = "Usage: notify-send [OPTION...]\n  --urgency\n"
+        stderr = ""
+
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Result())
+    assert notify_mod._notify_send_supports_actions("/usr/bin/notify-send") is False
+
+    class _Modern:
+        stdout = "Usage: notify-send [OPTION...]\n  --action=KEY=LABEL\n"
+        stderr = ""
+
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Modern())
+    assert notify_mod._notify_send_supports_actions("/usr/bin/notify-send") is True

@@ -807,3 +807,122 @@ def test_next_wake_due_at_reads_the_live_scheduler() -> None:
         assert handle.next_wake_due_at() is None
     finally:
         loop.close()
+
+
+@pytest.mark.asyncio
+async def test_a_parked_gate_spawns_no_desktop_notifier_under_the_suite_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The suite must never put a toast on the developer's real desktop.
+
+    A runtime with no attached client announces a parked gate through
+    ``detached_notify``, which on darwin spawns a real ``osascript display
+    notification``. Six tests in this file drive real gates with zero attached
+    clients, so before the suite-wide gate they delivered 100 genuine
+    notifications to Notification Centre — titled "lop needs you", bodies
+    taken verbatim from these fixtures.
+
+    Nothing about a green suite reveals that: the spawn is fire-and-forget and
+    every failure is swallowed by ``detached_notify``'s contract. This test is
+    the tripwire — it asserts on the SPAWN, which is the only observable the
+    leak has, so a future change that reintroduces an ungated OS-facing path
+    fails here instead of on the operator's screen.
+
+    The gate itself lives in ``tests/conftest.py::isolate_environment``
+    (autouse), which is what makes the whole suite silent; this asserts that
+    gate is actually in force on the production announce path.
+    """
+    spawned: list[list[str]] = []
+
+    def _record(argv: list[str], *args: Any, **kwargs: Any) -> bool:
+        spawned.append(argv)
+        return True
+
+    monkeypatch.setattr(owned_mod, "spawn_detached", _record, raising=False)
+    import local_operator.tui.notify as notify_mod
+
+    monkeypatch.setattr(notify_mod, "spawn_detached", _record, raising=False)
+
+    handle, session = make_handle()
+    # No attached clients: this is exactly the condition that routes the
+    # announcement out of band to the OS.
+    assert handle._attached_clients() == 0
+    handle._announce_pending("approval", "bash", "rm -rf build/")
+    await asyncio.sleep(0)
+
+    assert spawned == [], f"the suite spawned an OS notifier: {spawned}"
+
+
+@pytest.mark.parametrize(
+    ("watching", "expect_toast"),
+    [
+        (frozenset({"attach"}), False),
+        (frozenset({"daemon"}), False),
+        (frozenset({"attach", "daemon"}), False),
+        (frozenset(), True),
+    ],
+)
+@pytest.mark.asyncio
+async def test_a_pending_announcement_routes_to_whoever_is_watching(
+    monkeypatch: pytest.MonkeyPatch,
+    watching: frozenset[str],
+    expect_toast: bool,
+) -> None:
+    """A notification goes to the surface that is watching; the OS is the
+    fallback for nobody, not the default.
+
+    The old test was ``attached_clients() > 0``, which counts terminals only —
+    so a user whose PHONE was watching got a desktop toast for a card already
+    on their phone, on the one surface they were not looking at. Both watching
+    surfaces already deliver this card (the terminal paints it in-band, the
+    mobile relay carries it in the projection push ``_notify`` has already
+    made), which is why routing is a predicate and not a second transport.
+    """
+    import local_operator.tui.notify as notify_mod
+
+    monkeypatch.delenv("LOCAL_OPERATOR_NO_NOTIFICATIONS", raising=False)
+    spawned: list[list[str]] = []
+    monkeypatch.setattr(
+        notify_mod, "_spawn_detached_ok", lambda argv: bool(spawned.append(argv)) or True
+    )
+
+    handle, _session = make_handle()
+
+    class _Registrant:
+        record = type("R", (), {"session_id": "route0000001"})()
+
+        def watching_surfaces(self) -> frozenset[str]:
+            return watching
+
+        def set_record_pending(self, kind: str | None) -> None:
+            return None
+
+    handle._registrant = _Registrant()
+    handle._announce_pending("approval", "bash", "rm -rf build/")
+
+    assert bool(spawned) is expect_toast
+
+
+@pytest.mark.asyncio
+async def test_an_old_registrant_without_surface_kinds_keeps_the_previous_behaviour() -> None:
+    """A runtime published by an older release cannot answer by kind.
+
+    It still knows the attach COUNT, and treating "a terminal is attached" as
+    "something is watching" reproduces the previous behaviour exactly rather
+    than inventing a toast that release never sent.
+    """
+    handle, _session = make_handle()
+
+    class _OldRegistrant:
+        def attach_clients(self) -> int:
+            return 1
+
+    handle._registrant = _OldRegistrant()
+    assert handle._watching_surfaces() == frozenset({"attach"})
+
+    class _OldIdle:
+        def attach_clients(self) -> int:
+            return 0
+
+    handle._registrant = _OldIdle()
+    assert handle._watching_surfaces() == frozenset()

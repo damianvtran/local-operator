@@ -82,7 +82,9 @@ from __future__ import annotations
 import logging
 import os
 import re
+import shlex
 import shutil
+import subprocess
 import sys
 import uuid
 from typing import Callable, Literal, Mapping
@@ -465,7 +467,7 @@ def osascript_command(title: str, body: str) -> list[str]:
     return ["osascript", "-e", script]
 
 
-def detached_notify(title: str, body: str) -> bool:
+def detached_notify(title: str, body: str, *, session_id: str = "") -> bool:
     """Tell the user out of band about a session they are not looking at.
 
     The in-band paths above write escape sequences to a TERMINAL, which is
@@ -491,6 +493,12 @@ def detached_notify(title: str, body: str) -> bool:
         notifier = shutil.which("notify-send")
         if not notifier:
             return False
+        # Linux CAN carry an activation: `notify-send --action` prints the
+        # invoked action's key on stdout, so a tiny waiter turns a click into
+        # the resume launch. Only when a session was named — a toast with no
+        # session has nothing to reopen.
+        if session_id and _notify_send_supports_actions(notifier):
+            return _spawn_detached_ok(_clickable_notify_command(notifier, title, body, session_id))
         return _spawn_detached_ok(desktop_notify_command(notifier, title, body, URGENCY))
     except Exception:  # noqa: BLE001 — a toast must never affect its caller
         logger.debug("detached notification failed", exc_info=True)
@@ -500,6 +508,75 @@ def detached_notify(title: str, body: str) -> bool:
 def _spawn_detached_ok(argv: list[str]) -> bool:
     """``spawn_detached`` reporting whether the child started."""
     return bool(spawn_detached(argv))
+
+
+def _notify_send_supports_actions(notifier: str) -> bool:
+    """Whether this ``notify-send`` understands ``--action``.
+
+    The flag is a recent (libnotify 0.8) addition, and an older binary treats
+    it as an unknown option and delivers NOTHING — so a version probe is the
+    difference between a clickable toast and a silently missing one. Probed
+    from ``--help`` rather than a version parse because distributions patch
+    the version string more freely than the option table.
+    """
+    try:
+        result = subprocess.run(  # noqa: S603 — fixed argv, no shell
+            [notifier, "--help"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except Exception:  # noqa: BLE001 — an unprobeable notifier is an old one
+        return False
+    return "--action" in (result.stdout + result.stderr)
+
+
+def resume_click_command(session_id: str) -> list[str]:
+    """argv that reopens ``session_id`` in the user's terminal.
+
+    Reuses the fork machinery wholesale — ``spawn.registry.active_backend``
+    picks Ghostty/kitty/WezTerm/Apple Terminal exactly as ``/fork`` does, and
+    ``broadcast.resume_argv`` builds the restore-and-idle line behind its
+    safety boundary (no prompt, no ``--exec``). Writing a second launcher
+    here would mean a second set of emulator quirks to keep in step, and a
+    second place for the "never resume execution unattended" rule to be
+    forgotten.
+
+    Pure: returns the argv so it can be asserted without launching anything.
+    """
+    from local_operator.multiplexer.broadcast import resume_argv
+
+    return list(resume_argv(session_id))
+
+
+def _clickable_notify_command(notifier: str, title: str, body: str, session_id: str) -> list[str]:
+    """``notify-send`` argv whose default action reopens the session.
+
+    ``--action=default=…`` makes the whole toast clickable (rather than
+    adding a button), which is what "click the notification to get back to
+    the session" means. ``notify-send`` prints the invoked action's key and
+    exits, so the launch rides a tiny ``sh -c`` waiter: no daemon, nothing
+    retained, and a toast that is merely dismissed exits without launching.
+    """
+    launch = " ".join(shlex.quote(part) for part in resume_click_command(session_id))
+    inner = " ".join(
+        shlex.quote(part)
+        for part in [
+            notifier,
+            "--app-name",
+            APP_NAME,
+            f"--urgency={URGENCY}",
+            "--expire-time=5000",
+            "--action=default=Open session",
+            "--",
+            title or APP_NAME,
+            body,
+        ]
+    )
+    # Only `default` launches: any other output (a dismissal prints nothing)
+    # falls through and the shell exits.
+    return ["sh", "-c", f'[ "$({inner})" = default ] && exec {launch}']
 
 
 def desktop_notify_command(

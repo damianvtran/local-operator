@@ -296,6 +296,15 @@ class RuntimeServer:
             handle._registrant = self  # type: ignore[attr-defined]
         except Exception:  # noqa: BLE001 — an unwritable handle simply cannot publish
             logger.debug("handle does not accept a registrant back-reference", exc_info=True)
+        # With the back-reference in place the handle can answer "is anyone
+        # watching?", which is what the model needs in its prompt so a
+        # detached session does not ask a question nobody can answer.
+        installer = getattr(handle, "_install_interactivity_probe", None)
+        if callable(installer):
+            try:
+                installer()
+            except Exception:  # noqa: BLE001 — a probe is never worth a runtime
+                logger.debug("could not install the interactivity probe", exc_info=True)
         seed = handle.session_projection_seed
         seed.kind = kind
         # The projection fold is an OPTIONAL, injected collaborator. A caller
@@ -913,6 +922,23 @@ class RuntimeServer:
         an interactive viewer holds the runtime warm; ``daemon`` clients never
         do. Also the attach-cap count."""
         return sum(1 for c in self._clients.values() if c.kind == "attach")
+
+    def watching_surfaces(self) -> frozenset[str]:
+        """Which KINDS of surface are watching this session right now.
+
+        Notification routing needs the kind, not the count: a question goes to
+        whatever is actually watching, and only falls out to the OS when
+        nothing is. ``attach`` is a terminal viewer, which paints the card
+        in-band; ``daemon`` is the mobile relay, which carries the same card
+        to the phone through the projection it is already subscribed to. A
+        count cannot tell those apart, which is why ``_announce_pending``
+        used to send a desktop toast to a user whose phone was watching.
+
+        Deliberately the live connection table rather than a cached flag:
+        surfaces come and go constantly, and a stale answer here means a
+        notification delivered to a surface that has gone away.
+        """
+        return frozenset(c.kind for c in self._clients.values())
 
     async def _on_request(self, frame: dict[str, Any], conn: _ClientConn) -> None:
         op = str(frame.get("op") or "")

@@ -1120,6 +1120,12 @@ def _make_system_blocks_provider(
             team_brief=team_brief,
             agent_brief=agent_brief,
             model_label=model_label,
+            # Read LIVE, at turn start: the answer changes whenever a viewer
+            # attaches or detaches, and reading it here is what keeps the
+            # cost O(1) in the number of those events (round 2, operator
+            # requirement 4). Absent a probe this is True, so every host that
+            # is not a detached runtime is unaffected.
+            interactive=(goal_state.is_interactive() if goal_state is not None else True),
         )
 
     return provider

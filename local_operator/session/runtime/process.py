@@ -34,8 +34,8 @@ and during an upgrade a daemon of one version spawns a child of another.
 from __future__ import annotations
 
 import asyncio
-import logging
 import inspect
+import logging
 import os
 import signal
 import sys

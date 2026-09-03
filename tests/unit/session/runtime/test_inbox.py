@@ -179,8 +179,8 @@ def test_the_drain_reads_a_property_the_session_exposes(tmp_path: Path) -> None:
     import asyncio
     from typing import Any
 
-    from local_operator.session.runtime.process import _drain_inbox_into
     from local_operator.session.runtime.inbox import InboxLine, append_inbox
+    from local_operator.session.runtime.process import _drain_inbox_into
     from local_operator.session.transcript import Transcript
 
     class _Handle:

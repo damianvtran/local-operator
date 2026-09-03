@@ -941,13 +941,21 @@ class OwnedSessionHandle(SessionHandle):
             # because the policy stopped reading it.
             return PENDING_REQUEST_TIMEOUT_S
         parked = self._parked_timeout_s()
-        if self._attached_clients() > 0:
+        if self._watching_surfaces():
+            # A terminal OR the phone is watching: the card is on a screen
+            # somebody has. Note this is deliberately kind-agnostic — the
+            # question is "can this reach a person", and both surfaces can.
             return parked
         # Nothing is presenting the card. A parked gate is still preferable to
         # a denial when the user has an out-of-band way to be told about it
         # (the desktop notification), so the configured cap applies here too —
         # the short cap is reserved for the case where notification is off and
         # nobody could learn of the question at all.
+        #
+        # REACHABILITY IS NOT THE NOTIFY FLAG ALONE. Once announcements route
+        # by surface, "reachable" means "some surface is watching OR an OS
+        # notification can actually be delivered" — the watching case is
+        # handled above, and this is the remaining out-of-band leg.
         from local_operator.tui.notify import notifications_enabled
 
         try:
@@ -985,6 +993,53 @@ class OwnedSessionHandle(SessionHandle):
         except Exception:  # noqa: BLE001 — a bad setting must not pin a turn
             logger.debug("could not read runtime.unattended_gate_timeout", exc_info=True)
         return DEFAULT_UNATTENDED_GATE_TIMEOUT_H
+
+    def _install_interactivity_probe(self) -> None:
+        """Let the MODEL know whether anyone can answer a question.
+
+        The runtime is the only component that knows — it owns the control
+        socket's connection table — and the session's goal-state holder is
+        the established seam for live session state reaching the next turn's
+        prompt (the same route ``/goal`` and ``/team`` use). Installing a
+        probe rather than pushing a value keeps this O(1) in attach churn:
+        the prompt closure asks at turn start, so a viewer that comes and
+        goes fifty times costs exactly one line of context, and no transcript
+        row is ever written for an attach or a detach.
+        """
+        holder = getattr(self._session, "_goal_state", None)
+        if holder is None or not hasattr(holder, "interactive_probe"):
+            return
+        try:
+            holder.interactive_probe = lambda: bool(self._watching_surfaces())
+        except Exception:  # noqa: BLE001 — an unsettable holder is not fatal
+            logger.debug("could not install the interactivity probe", exc_info=True)
+
+    def _watching_surfaces(self) -> frozenset[str]:
+        """Which kinds of surface are watching, for notification routing.
+
+        Falls back to the attach COUNT when the registrant is too old to
+        answer by kind: a runtime published by an older release still knows
+        how many terminals are attached, and treating "some terminal" as
+        "something is watching" preserves the previous behaviour exactly
+        rather than inventing a toast that release never sent.
+        """
+        server = self._registrant
+        reader = getattr(server, "watching_surfaces", None)
+        if callable(reader):
+            try:
+                return frozenset(cast("frozenset[str]", reader()))
+            except Exception:  # noqa: BLE001 — routing must never raise into a gate
+                logger.debug("could not read the watching surfaces", exc_info=True)
+        return frozenset({"attach"}) if self._attached_clients() > 0 else frozenset()
+
+    def _session_id_for_resume(self) -> str:
+        """The id a notification's click-through reopens, best effort."""
+        server = self._registrant
+        record = getattr(server, "record", None)
+        session_id = getattr(record, "session_id", "") or ""
+        if session_id:
+            return str(session_id)
+        return str(getattr(self._session, "session_id", "") or "")
 
     def _attached_clients(self) -> int:
         """How many front ends could present a card right now."""
@@ -1050,15 +1105,29 @@ class OwnedSessionHandle(SessionHandle):
                 setter(kind)
             except Exception:  # noqa: BLE001
                 logger.debug("could not publish the pending state", exc_info=True)
-        if self._attached_clients() > 0:
-            # Someone is looking at it: the viewer paints the card in-band and
-            # a second, out-of-band toast for the same question is noise.
+        # ROUTE TO WHATEVER IS WATCHING; fall out to the OS only when nothing
+        # is. The old test was `attached_clients() > 0`, which counts only
+        # terminals — so a user whose PHONE was watching got a desktop toast
+        # for a card already on their phone, and the desktop was the one
+        # surface they were not looking at.
+        #
+        # Both watching surfaces deliver this card already, by different
+        # means: an attached terminal paints it in-band, and the mobile relay
+        # (a ``daemon`` client) carries it in the projection push that
+        # ``_notify`` has already made. Neither needs a second channel, which
+        # is why this is a routing decision and not a new transport.
+        surfaces = self._watching_surfaces()
+        if surfaces:
             return
         try:
             from local_operator.tui.notify import detached_notify
 
             name = getattr(self._session, "conversation_name", "") or "lop"
-            detached_notify(f"{name} needs you", f"{title}: {detail}".strip().rstrip(":"))
+            detached_notify(
+                f"{name} needs you",
+                f"{title}: {detail}".strip().rstrip(":"),
+                session_id=self._session_id_for_resume(),
+            )
         except Exception:  # noqa: BLE001 — a toast must never affect the gate
             logger.debug("detached notification failed", exc_info=True)
 
