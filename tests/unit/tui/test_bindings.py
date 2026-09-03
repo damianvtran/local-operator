@@ -27,6 +27,7 @@ Four things asserted here:
 from __future__ import annotations
 
 import ast
+from collections.abc import Iterator
 
 import pytest
 from rich.style import Style
@@ -36,7 +37,7 @@ from local_operator.tui.bindings import BINDINGS, BY_ELEMENT, Binding, Role, Sur
 
 
 @pytest.fixture(autouse=True)
-def _restore_theme() -> None:
+def _restore_theme() -> Iterator[None]:
     """`theme.current_theme()` is a module singleton (see `test_theme.py`);
     this file switches it repeatedly and must not leak a choice into whatever
     test runs next in the same process."""
@@ -103,7 +104,12 @@ def test_ground_hex_matches_style_for_every_ground_binding() -> None:
     for theme_name in ("dark", "light", "rose-pine-dawn"):
         theme.set_theme(theme_name)
         for element in ground_elements:
-            assert bindings.ground_hex(element) == bindings.style(element).bgcolor.name
+            bgcolor = bindings.style(element).bgcolor
+            # rich's Style.bgcolor is Color | None; a GROUND binding always sets
+            # it, so this narrows the type for pyright rather than guarding a
+            # real runtime possibility.
+            assert bgcolor is not None
+            assert bindings.ground_hex(element) == bgcolor.name
 
 
 def test_ground_hex_rejects_a_non_ground_element() -> None:
