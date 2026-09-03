@@ -792,18 +792,31 @@ def _verify_semantics(
             issues.error("receipt_binding_invalid", terminal_location)
         if len(terminal_states) != 1:
             issues.error("finalization_invalid", terminal_location)
-        # "Every episode that stepped ended deliberately" holds only for an
-        # episode that was ALLOWED to end deliberately. A run interrupted
-        # mid-loop -- an adapter crash, a provider outage, an operator cancel --
-        # stops after an ordinary non-terminal step, with no terminal step and
-        # no finish action, because the thing that would have produced one is
-        # exactly what broke. Requiring the deliberate ending there made every
-        # such bundle unsealable AND unabandonable, so a real paid episode that
-        # died at step 17 of 60 destroyed the 16 steps of evidence it had already
-        # bought (observed as ep-ffda3fc88f81: `abandonment_failed`, score null,
-        # 37 artifacts stranded). The interruption is recorded by the terminal
-        # snapshot's ``failure_kind``, which the runner sets on precisely the
-        # failure and cancellation paths and leaves None on a clean completion.
+        # An episode that ran environment steps must show WHY it stopped
+        # stepping: either the environment ended the rollout
+        # (terminated/truncated) or the agent chose to stop (a `finish` batch).
+        # Without one of those, a bundle truncated mid-rollout would otherwise
+        # seal as if the run had reached its own conclusion.
+        #
+        # That invariant holds only for an episode that was ALLOWED to end
+        # deliberately. A run interrupted mid-loop -- an adapter crash, a
+        # provider outage, an operator cancel -- stops after an ordinary
+        # non-terminal step, with no terminal step and no finish action,
+        # because the thing that would have produced one is exactly what
+        # broke. Requiring the deliberate ending there made every such bundle
+        # unsealable AND unabandonable -- unscoreable rather than merely
+        # unscored -- so a real paid episode that died at step 17 of 60
+        # destroyed the 16 steps of evidence it had already bought (observed
+        # as ep-ffda3fc88f81: `abandonment_failed`, score null, 37 artifacts
+        # stranded).
+        #
+        # The interruption is recorded by the terminal snapshot's
+        # ``failure_kind``, which the runner sets on precisely the failure and
+        # cancellation paths and leaves None on a clean completion. It is not a
+        # weaker explanation than a rollout-completion marker: it is written
+        # only by ``record_final_lifecycle`` under the finalizing marker, and
+        # it rides inside the hash-chained event payload, so it cannot be
+        # added to an existing bundle without breaking the chain.
         #
         # The exemption is deliberately narrower than "failure_kind is set". A
         # bundle that claims BOTH an interruption and a score would otherwise
