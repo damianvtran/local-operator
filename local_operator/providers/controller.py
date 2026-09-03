@@ -26,7 +26,7 @@ from local_operator.harness.types import ModelSpec
 from local_operator.model.configure import (  # noqa: F401  (used by callers)
     build_model_spec,
 )
-from local_operator.model.discovery import available_models
+from local_operator.model.discovery import available_models, invalidate_listing
 from local_operator.model.naming import model_label
 from local_operator.model.registry import static_models
 from local_operator.providers.registry import (
@@ -311,11 +311,17 @@ class ProviderController:
                 self.auth_store.upsert_credential(
                     storage, {"key": result, "source": "login", "type": "api_key"}
                 )
+                invalidate_listing(storage)
                 return f"Stored API key for '{storage}'."
             return f"Login for '{storage}' produced no key; nothing stored."
 
         result.setdefault("authorized_at", int(time.time() * 1000))
         self.auth_store.upsert_credential(storage, result)
+        # The new credential may list DIFFERENT models than the one it replaced
+        # -- a different account, a different plan, or simply a catalogue that
+        # grew while the old listing sat in cache. Nothing about a TTL can
+        # observe that, so the login event has to say so itself.
+        invalidate_listing(storage)
         identity = result.get("email") or result.get("account_id") or result.get("org_name") or ""
         suffix = f" ({identity})" if identity else ""
         msg = f"Logged in to '{storage}'{suffix}."
@@ -336,6 +342,10 @@ class ProviderController:
             )
         if removed == 0:
             raise ValueError(f"No stored credentials for '{provider_id}'.")
+        # Symmetrical with login: a catalogue fetched under the credential just
+        # removed must not decide what the NEXT credential can select.
+        for target in sorted(targets):
+            invalidate_listing(target)
         return f"Removed {removed} credential(s) for '{provider_id}'."
 
     # -- usage -------------------------------------------------------------

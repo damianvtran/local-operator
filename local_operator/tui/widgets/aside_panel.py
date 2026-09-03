@@ -64,12 +64,15 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from rich.cells import cell_len
+from rich.console import Console
+from rich.markdown import Markdown
 from rich.style import Style
 from rich.text import Text
 from textual.widgets import Static
 
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets import overlay
+from local_operator.tui.widgets.assistant import flatten
 from local_operator.tui.widgets.tool_card import truncate_cells
 
 #: The card takes the COMPOSER's width and the composer's left and right
@@ -130,17 +133,20 @@ SQUEEZE_ROWS = PANEL_HEIGHT_MARGIN + CHROME_ROWS + PANEL_PADDING_ROWS + 2
 
 #: The prompt the side question is wrapped in. Three instructions, each earning
 #: its line: OFF THE RECORD so the model does not treat the question as a new
-#: task and start narrating a plan; no tools because none are sent (the request
-#: carries an empty catalogue and ``tool_choice="none"``) and a model that
-#: tried would produce a tool call nobody executes; and answer-from-context
-#: because the whole reason to ask here rather than in the chat is that the
-#: agent already knows.
+#: task and start narrating a plan; TEXT ONLY because the request does carry
+#: the live tool catalogue (it has to, to stay on the working turn's cache
+#: prefix) and on Anthropic even ``tool_choice`` reads ``auto`` on the wire
+#: (see ``Session.complete_aside``), so the prompt is the model-facing half of
+#: "calls nothing" and a call it makes anyway is discarded unread; and
+#: answer-from-context because the whole reason to ask here rather than in the
+#: chat is that the agent already knows.
 ASIDE_PROMPT = """<aside>
 The user has stepped aside to ask you something about this session. This is OFF
 THE RECORD: neither their question nor your answer joins the conversation, and
 no work is being asked for. Answer from the context you already have, briefly
-and directly, in prose. Do not use tools, do not propose a plan, and do not ask
-a follow-up question. If your context does not answer it, say so plainly.
+and directly, in prose. Answer in text only: do not call any tool (a tool call
+here is discarded unread), do not propose a plan, and do not ask a follow-up
+question. If your context does not answer it, say so plainly.
 Question:
 {question}
 </aside>"""
@@ -151,8 +157,11 @@ Question:
 #: (``UserBlock.RULE`` / ``SPINE_INDENT``), not the composer's ``❯``, which
 #: marks a row being typed. An aside question is sent the moment Enter lands,
 #: so the card uses the same spine at the same column — and a forked exchange
-#: then renders in the transcript exactly as it looked on the card, which is
-#: what "keep this" ought to look like. The card is already told apart from the
+#: then renders in the transcript as it looked on the card, which is what
+#: "keep this" ought to look like. The ANSWER holds up its half of that by
+#: rendering as markdown here too (:meth:`AsidePanel._markdown_rows`); it used
+#: to arrive as literal ``**bold**``, so identical words changed shape the
+#: moment ``^f`` moved them. The card is already told apart from the
 #: transcript by the two things the design system reserves for that (the
 #: ``$lo-overlay`` elevation step and the title row); a third differentiator
 #: spelled in a glyph that already means something else would be a second
@@ -297,7 +306,31 @@ class AsidePanel(Static):
         #: grows as the composer wraps without resizing this card, so Textual
         #: emits no resize event for it and the app has to ask.
         self._layout_shown: tuple[int, int, int] | None = None
+        #: Rendered answer rows, keyed by the three things they depend on:
+        #: ``(text, width, theme epoch)``. See :meth:`_markdown_rows` for why
+        #: it is here and :meth:`_body` for why it cannot grow.
+        self._answer_cache: dict[tuple[str, int, int], list[Text]] = {}
+        #: Keys :meth:`_markdown_rows` reached during the paint in progress.
+        self._used_answers: set[tuple[str, int, int]] = set()
+        #: Bumped by every edit to the exchange — a question appended, a delta
+        #: streamed, an answer settled or failed, the card opened or closed.
+        #: It is what tells :meth:`_flat_body` its memo is stale, so the
+        #: counter has to move on EVERY mutation; a missed bump paints the old
+        #: rows. Mutating ``_turns`` without going through one of those methods
+        #: is therefore not supported, and the tests that assign ``_turns``
+        #: directly go through :meth:`_invalidate_flat` for the same reason.
+        self._revision = 0
+        #: The last :meth:`_flat_body` result and the inputs it was built from,
+        #: ``(width, theme epoch, revision)``. Flattening renders every turn,
+        #: so without this a scroll — which changes none of those three — pays
+        #: to re-render the whole exchange to learn row counts it already had.
+        self._flat_memo: tuple[tuple[int, int, int], _FlatBody] | None = None
         self.display = False
+
+    def _invalidate_flat(self) -> None:
+        """Mark the flattened exchange stale. Cheap, and called on every edit."""
+        self._revision += 1
+        self._flat_memo = None
 
     # -- state ---------------------------------------------------------------
     @property
@@ -320,16 +353,27 @@ class AsidePanel(Static):
         self._turns = []
         self._notice = ""
         self._scroll_back_rows = 0
+        self._answer_cache.clear()
+        self._invalidate_flat()
         self._generation += 1
         self.display = True
         self._repaint()
 
     def close(self) -> None:
-        """Hide the card and discard the exchange — that is what dismiss means."""
+        """Hide the card and discard the exchange — that is what dismiss means.
+
+        The rendered-answer cache is discarded WITH it. A dismissed exchange
+        that lives on in a cache is the trace this surface promises not to
+        leave, and the paint-scoped prune cannot reach it: ``_repaint`` returns
+        early on a hidden card, so nothing would run to drop it.
+        """
         self._generation += 1
         self._turns = []
         self._notice = ""
         self._scroll_back_rows = 0
+        self._answer_cache.clear()
+        self._used_answers.clear()
+        self._invalidate_flat()
         self.display = False
 
     def ask(self, question: str) -> int:
@@ -349,6 +393,7 @@ class AsidePanel(Static):
         # newest" is what they mean and the offset counts back FROM the newest.
         self._scroll_back_rows = 0
         self._turns.append(AsideTurn(question=question))
+        self._invalidate_flat()
         self.display = True
         self._repaint()
         return self._generation
@@ -369,6 +414,12 @@ class AsidePanel(Static):
         # not the rule — holding the ROWS still is.
         anchored = len(self._flat_body().lines) if self._scroll_back_rows else 0
         self._turns[-1].answer += delta
+        # BETWEEN the two measurements, and that placement is the whole point:
+        # `anchored` is the pre-delta height and the count below is the
+        # post-delta one, so the memo has to be dropped here or the second
+        # `_flat_body()` returns the first one's rows and the difference is
+        # always zero — which is exactly the drift this branch exists to undo.
+        self._invalidate_flat()
         if anchored:
             # NOT reset, and now not drifted either. `ask` already put the
             # reader on the new question, so the only way the offset is
@@ -402,6 +453,10 @@ class AsidePanel(Static):
         turn.state = "done" if turn.answer.strip() else "error"
         if turn.state == "error":
             turn.error = "the model returned nothing"
+        # The settled text routinely differs from what streamed (and is often
+        # shorter), and the state row under it changes with `turn.state`, so
+        # both the row COUNT and the rows themselves can move here.
+        self._invalidate_flat()
         self._repaint()
 
     def fail_answer(self, generation: int, message: str) -> None:
@@ -411,6 +466,8 @@ class AsidePanel(Static):
         turn = self._turns[-1]
         turn.state = "error"
         turn.error = message
+        # The error rows are part of the answer block, so this changes height.
+        self._invalidate_flat()
         self._repaint()
 
     def fork_messages(self) -> list[tuple[str, str]]:
@@ -661,8 +718,31 @@ class AsidePanel(Static):
         a fragment still never appears without the question that produced it.
         That is why ``heads`` is carried here — it is the only thing left that
         knows which question a row belongs to once the rows are one list.
+
+        MEMOISED, because this renders every turn and the row cut cannot ask
+        for fewer: to know where a row window starts you need the row counts of
+        everything above it. That is a real cost the turn walk did not pay
+        (it stopped at the first turn that did not fit), and left uncached it
+        lands on gestures that change nothing about the rows — a wheel step, a
+        page chord, the clamp in ``_scroll_by`` — each of which would re-render
+        the whole exchange to learn numbers it just computed. Measured at 120
+        turns, flattening cold is 34.9 ms against 0.5 ms for the memo, and the
+        exchange is uncapped: 300 turns is 72.8 ms, which is past the 30 ms
+        ``STALL_MS`` bar in ``tests/unit/test_tui_responsiveness.py``.
+
+        The key is every input the rows are built from. ``_revision`` covers
+        the exchange itself (see :meth:`_invalidate_flat`); width and the theme
+        epoch are the two the rows are folded and coloured for, and they are
+        the same pair :meth:`_markdown_rows` keys its own cache on — a resize
+        or a theme change misses both, which is correct, because both change
+        what a row looks like. The two caches are layers of one thing: this one
+        skips the assembly, that one skips the markdown render underneath it.
         """
         width = self._content_width()
+        key = (width, theme_mod.get_theme_epoch(), self._revision)
+        memo = self._flat_memo
+        if memo is not None and memo[0] == key:
+            return memo[1]
         fg = Style(color=theme_mod.semantic_color("fg"))
         dim = Style(color=theme_mod.semantic_color("dim"))
         danger = Style(color=theme_mod.semantic_color("danger"))
@@ -681,9 +761,10 @@ class AsidePanel(Static):
             head_start = len(flat.lines) + len(rows)
             rows.extend(question)
             flat.heads.append((head_start, head_start + len(question)))
-            rows.extend(self._answer_rows(turn, width, fg, dim, danger))
+            rows.extend(self._answer_rows(turn, width, dim, danger))
             flat.lines.extend(rows)
             flat.owners.extend([index] * len(rows))
+        self._flat_memo = (key, flat)
         return flat
 
     def _window(
@@ -811,6 +892,39 @@ class AsidePanel(Static):
         return rows, first, end, hidden_turns
 
     def _body(self) -> AsideBody:
+        """The visible rows, and the paint-scoped bound on the answer cache.
+
+        The cache is rebuilt to exactly what THIS paint reached. Keying on the
+        text means a streaming answer mints a fresh key per delta, so a cache
+        that only ever inserted would hold every prefix of every answer for as
+        long as the card is open; dropping whatever the paint did not touch
+        bounds it without a policy.
+
+        What it bounds it AT changed with the row window. The turn walk it was
+        written for rendered only the turns it could show, so the cache held a
+        card's worth; :meth:`_flat_body` renders the whole exchange because a
+        row cut cannot know where the window starts without the row counts.
+        The cache is what keeps that affordable — a turn's rows are rendered
+        once and read back on every later paint — so the prune still runs, and
+        still drops answers no longer on the card, but the paint it is scoped
+        to is now the exchange rather than the window.
+        """
+        self._used_answers = set()
+        memo = self._flat_memo
+        body = self._visible_rows()
+        # ONLY when this paint actually flattened. On a memo hit nothing calls
+        # `_markdown_rows`, so `_used_answers` is empty and pruning against it
+        # would evict the entire cache — and the next real flatten would then
+        # re-render every answer, which is the cost both caches exist to avoid.
+        # `is not memo` is the test for "rebuilt": `_flat_body` stores a fresh
+        # `_FlatBody` when it misses, so identity changes exactly then.
+        if self._flat_memo is not memo:
+            self._answer_cache = {
+                key: rows for key, rows in self._answer_cache.items() if key in self._used_answers
+            }
+        return body
+
+    def _visible_rows(self) -> AsideBody:
         """The visible rows: a ROW window onto the tail of the exchange.
 
         Tail-anchored rather than paged, and that is the difference between
@@ -853,9 +967,7 @@ class AsidePanel(Static):
         rows.extend(Text(f"{ANSWER_INDENT}{line}", style=text_style) for line in wrapped[1:])
         return rows
 
-    def _answer_rows(
-        self, turn: AsideTurn, width: int, fg: Style, dim: Style, danger: Style
-    ) -> list[Text]:
+    def _answer_rows(self, turn: AsideTurn, width: int, dim: Style, danger: Style) -> list[Text]:
         body = max(1, width - len(ANSWER_INDENT))
         if turn.state == "error" and not turn.answer.strip():
             return self._error_rows(turn.error or "the aside failed", body, danger)
@@ -863,7 +975,10 @@ class AsidePanel(Static):
         if not text:
             waiting = "thinking…" if turn.state == "running" else "no answer"
             return [Text(f"{ANSWER_INDENT}{waiting}", style=dim)]
-        rows = [Text(f"{ANSWER_INDENT}{line}", style=fg) for line in _wrap(text, body)]
+        # Copied because the renderer hands back its CACHED list, and the
+        # status rows below are appended per state — mutating it in place would
+        # leave a stale "…" welded onto the answer the next paint reads back.
+        rows = list(self._markdown_rows(text, body))
         if turn.state == "running":
             rows.append(Text(f"{ANSWER_INDENT}…", style=dim))
         elif turn.state == "cancelled":
@@ -871,6 +986,84 @@ class AsidePanel(Static):
         elif turn.state == "error":
             rows.extend(self._error_rows(turn.error, body, danger))
         return rows
+
+    def _markdown_rows(self, text: str, body: int) -> list[Text]:
+        """The answer as MARKDOWN rows, indented onto the card's text column.
+
+        The answer is model prose, and every other surface that shows model
+        prose renders it (``AssistantBlock`` at
+        :meth:`AssistantBlock._flat_rows`). Rendered here through the SAME
+        :func:`flatten` rather than a second renderer, so a code span, a bullet
+        and a heading are the one shape everywhere — and so ``^f``, which hands
+        this exact string to an ``AssistantBlock``, cannot change how the words
+        look on their way into the chat.
+
+        The QUESTION deliberately stays plain (see :meth:`_question_rows`).
+
+        Width is the body column, not the card: :func:`flatten` bakes the width
+        in AND pads every row out to it, so rendering at ``_content_width()``
+        and then adding ``ANSWER_INDENT`` would push each row two cells past
+        the card's own edge.
+
+        The pad is KEPT. It is what makes a fenced code block a rectangle: rich
+        paints the block's fill onto the pad, so cropping it leaves a ragged
+        dark band with the card's ``$lo-overlay`` showing through the notch at
+        the end of every short line. On prose rows the pad carries no
+        background, so against the card fill it is invisible — the cost is
+        trailing spaces on a copied row, which
+        ``TranscriptBlock.get_selection`` already drops for the transcript's
+        own padded rows.
+
+        CACHED, because ``_repaint`` runs on every streamed delta and repaints
+        the whole card: the streaming turn is one render, but the settled turns
+        beside it would be re-rendered from text that cannot have changed.
+        Measured at a 120-column card over a 636-character answer in 106
+        deltas, the median repaint went 0.21 ms plain to 0.75 ms markdown; with
+        the cache the settled turns are dictionary hits and only the live
+        answer renders.
+
+        The cache is a warm-path optimisation and NOT the bound on this cost.
+        It cannot be: width is in the key, so a resize misses every key at
+        once. What bounds the work is :meth:`_visible_rows` rendering only the
+        turns the card shows — read its note for the measurements, which is
+        where a paint that rendered 120 answers to show one question was
+        costing 117 ms.
+
+        Keyed on ``(text, width, theme epoch)`` — the three inputs
+        :func:`flatten` bakes in. Width because it is folded into the rows
+        (``sync_layout``/``on_resize`` repaint, and a stale key would paint the
+        old fold at the new width); the theme epoch for the reason
+        ``AssistantBlock`` drops its frozen renderable on one (TUI-016), the
+        ramp the code spans were coloured from having moved.
+        """
+        key = (text, body, theme_mod.get_theme_epoch())
+        self._used_answers.add(key)
+        cached = self._answer_cache.get(key)
+        if cached is not None:
+            return cached
+        indent = Text(ANSWER_INDENT)
+        rows: list[Text] = []
+        for line in flatten(Markdown(text), body, self._flat_console()).split("\n"):
+            row = indent.copy()
+            row.append_text(line)
+            rows.append(row)
+        self._answer_cache[key] = rows
+        return rows
+
+    def _flat_console(self) -> Console | None:
+        """The app's console, or ``None`` when the card is detached.
+
+        Same bargain ``AssistantBlock._flat_console`` makes, for the same
+        reason: the app's console carries the brand markdown theme and the
+        terminal's encoding, so the card's code spans match the transcript's.
+        A card built before mount, or held directly by a test, has no app —
+        :func:`flatten` then falls back to a private console carrying the same
+        theme, so the rows are the same either way.
+        """
+        try:
+            return self.app.console
+        except Exception:
+            return None
 
     @staticmethod
     def _error_rows(message: str, body: int, danger: Style) -> list[Text]:
@@ -1063,9 +1256,15 @@ def _wrap(text: str, width: int) -> list[str]:
     """Wrap prose to ``width``, preserving the blank lines between paragraphs.
 
     ``textwrap`` on the whole string would collapse the paragraph breaks a
-    model uses for structure, which is most of the shape a plain-text answer
-    has. Lists survive for the same reason: each source line is wrapped on its
-    own, so a ``- item`` keeps its own row.
+    writer uses for structure, which is most of the shape text carries when
+    nothing is interpreting it. Lists survive for the same reason: each source
+    line is wrapped on its own, so a ``- item`` keeps its own row.
+
+    This is the VERBATIM path, and the two callers left on it are the ones
+    whose text must not be reinterpreted: the user's own question (an asterisk
+    they typed is an asterisk they meant) and an error message (a provider's
+    stack trace is not markup). The ANSWER is model prose and renders as
+    markdown — see :meth:`AsidePanel._markdown_rows`.
     """
     out: list[str] = []
     for line in text.splitlines():

@@ -681,3 +681,39 @@ def invalidate(key: str, *, cache_dir: Path | None = None) -> None:
         _cache_path(key, cache_dir).unlink(missing_ok=True)
     except OSError as exc:  # pragma: no cover - read-only cache dir
         logger.debug("could not invalidate %s catalogue: %s", key, exc)
+
+
+def invalidate_documents(storage_id: str, *, cache_dir: Path | None = None) -> int:
+    """Drop EVERY listing document belonging to ``storage_id``. Returns the count.
+
+    One credential identity can own several documents, because
+    ``discovery._cache_key`` isolates a listing by credential scope: an
+    API-key catalogue (``openai.listing``), an OAuth catalogue served by a
+    different host (``kimi.oauth.listing``), and one document per ChatGPT
+    account (``openai.oauth.<hash>.listing``). A caller reacting to a
+    CREDENTIAL CHANGE cannot know which of those the new credential will
+    resolve to -- that is decided later, by ``_serves_account_scoped_catalogue``
+    against the stored row -- so targeting a single key would leave the document
+    the next listing actually reads untouched, which is the whole failure this
+    exists to prevent.
+
+    The dot separator is load-bearing rather than incidental: ``openai.*`` cannot
+    match ``openai-device.listing.json``, so a provider whose id is a prefix of
+    another's keeps its own documents. That matters here because those two ARE
+    one credential identity and are meant to share a document, while ``zai`` and
+    ``zai-oauth`` are not.
+    """
+    directory = cache_dir or default_cache_dir()
+    dropped = 0
+    try:
+        for document in directory.glob(f"{storage_id}.*listing.json"):
+            try:
+                document.unlink(missing_ok=True)
+                dropped += 1
+            except OSError:  # pragma: no cover - vanished under us
+                continue
+    except OSError as exc:  # pragma: no cover - unreadable cache dir
+        # A stale catalogue is a bad day; a login that fails because the cache
+        # directory is read-only is a worse one.
+        logger.debug("could not invalidate %s catalogue documents: %s", storage_id, exc)
+    return dropped

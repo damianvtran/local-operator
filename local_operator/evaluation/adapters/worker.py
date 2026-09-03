@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
 from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any, cast
@@ -14,7 +15,6 @@ from local_operator.evaluation.adapters.api import (
     METHOD_STATES,
     PARAM_MODELS,
     RESULT_MODELS,
-    AckResult,
     AdapterMethod,
     AdapterSelector,
     AdapterState,
@@ -24,6 +24,7 @@ from local_operator.evaluation.adapters.api import (
     Handshake,
     HelloParams,
     PythonRuntime,
+    RescuableAdapter,
     RescueDescriptor,
     canonical_params_digest,
 )
@@ -54,6 +55,17 @@ MAX_REPLAY = 128
 # records are never evicted because losing one would turn a retry into a second
 # side effect; bounded exhaustion poisons before dispatch instead.
 MAX_OPERATION_RECORDS = 4096
+
+
+class AdapterRescueUnsupported(RuntimeError):
+    """The selected adapter cannot accept the rescue handoff.
+
+    Its own type (rather than a bare RuntimeError) so the worker's generic
+    adapter-error path reports it as a normal, replied-to failure instead of
+    a channel-killing protocol error: the parent must receive an answer it can
+    attribute, because a rescue that silently timed out is indistinguishable
+    from a slow one and hides the fact that nothing can be torn down.
+    """
 
 
 @dataclass(frozen=True)
@@ -235,6 +247,24 @@ class Worker:
             return
         except RpcProtocolError:
             raise
+        except AdapterRescueUnsupported:
+            # The ONE adapter-side failure whose reason crosses the wire. The
+            # blanket redaction below exists because adapter exceptions may
+            # carry reprs, paths, or environment values; this message is a
+            # fixed string raised by the worker itself with no adapter-supplied
+            # content, so naming it leaks nothing. It has to be named: a rescue
+            # that cannot start must tell the operator WHY, or a descriptor
+            # that can never be torn down looks like a transient failure.
+            response = self._write_error(
+                request,
+                "invalid_state",
+                "adapter does not implement begin_rescue",
+                digest=digest,
+                operation_id=operation_id,
+            )
+            if rescue_action_id is not None:
+                self._record_rescue_action(rescue_action_id, params, request.method, response)
+            return
         except (AdapterDiscoveryError, Exception):
             # Adapter exceptions may contain reprs, paths, environment values, or
             # tracebacks.  The wire exposes only a closed code and fixed text.
@@ -331,11 +361,40 @@ class Worker:
                 != canonical_digest("adapter-rescue-handshake-v1", self._handshake)
             ):
                 raise RpcProtocolError("rescue pins differ from the exact handshake")
-            # This transition grants cleanup routing only. Adapter code is not
-            # invoked, so it cannot create resources or resolve persisted refs.
+            # The pin checks above are the security boundary and run FIRST:
+            # nothing below may observe a descriptor whose selector/handshake
+            # digests did not match the exact worker this process handshook as.
             self._rescue_descriptor = params.descriptor
             self._rescue_actions.clear()
-            return AckResult()
+            # The adapter MUST see begin_rescue. It is the only call that
+            # carries the descriptor's infra_values plus the freshly resolved
+            # ``params.secrets``, and therefore the only opportunity a rescue
+            # worker has to build a teardown provider -- it never ran prepare
+            # or reset_start, so it holds no credential from any other source.
+            # Storing the descriptor and returning Ack without forwarding left
+            # the adapter's provider None, so every cleanup action took the
+            # "could not look" branch and reported attempted/terminate-
+            # unconfirmed. A sweep then never confirmed teardown and never
+            # discarded the descriptor -- and, far worse, a genuinely leaked
+            # instance was never terminated, because no provider existed to
+            # terminate it. Observed against episode ep-6ea01a117eee.
+            assert self._adapter is not None
+            if not isinstance(self._adapter, RescuableAdapter):
+                # Loud, not silent. An adapter that cannot accept the rescue
+                # handoff cannot tear anything down, and returning a clean Ack
+                # here would let the sweep report an orderly "attempted" for a
+                # resource nobody can release. Checked HERE rather than at
+                # load: rescue is optional for an ordinary episode and
+                # required only once one is actually requested.
+                #
+                # Raised as an ADAPTER error, not RpcProtocolError: a protocol
+                # error tears the channel down without a reply, so the parent
+                # only ever sees an opaque TimeoutError and the operator loses
+                # the reason. This path must name itself all the way out to the
+                # sweep entry, which is the whole point of failing loudly.
+                raise AdapterRescueUnsupported("adapter does not implement begin_rescue")
+            result = await self._adapter.begin_rescue(params)
+            return cast(ProtocolModel, result)
         assert self._adapter is not None
         handler = getattr(self._adapter, method)
         result = await handler(params)
@@ -408,6 +467,10 @@ def _descriptor(name: str) -> int:
 
 
 def main() -> int:
+    # The launcher passes ``-B``; this is the in-process guarantee of the same
+    # thing, so a worker started any other way (a test harness, a debugger)
+    # still never writes bytecode into the verified workspace it runs in.
+    sys.dont_write_bytecode = True
     request_fd = _descriptor(REQUEST_FD_ENV)
     response_fd = _descriptor(RESPONSE_FD_ENV)
     # stdout belongs to diagnostics, never framing.  Redirect it before metadata

@@ -53,27 +53,32 @@ live root against it at every `reset_start`.
 ```sh
 cd benchmarks/osworld_v2_adapter
 
-# 1. lock (in the source tree)
-uv lock                                     # writes uv.lock (committed)
+# 1. lock (in the source tree). The committed uv.lock pins the harness; bump
+#    it so the locked local-operator is not the stale 0.44.26 (which predates
+#    schema 1.2 the worker speaks).
+uv lock --upgrade-package local-operator   # writes uv.lock (committed)
 
 # 2. build the wheel
 uv build --wheel --out-dir dist/
 
 # 3. create the dedicated interpreter + install the locked set.
-#    --copies is REQUIRED: python_executable must be a real file, not a
-#    symlink (discovery._symlink_free).
-uv venv --python 3.12 --copies /opt/lop-adapters/osworld-v2/0.1.0/venv
-uv pip install --python /opt/lop-adapters/osworld-v2/0.1.0/venv/bin/python \
-    --no-deps dist/lop_osworld_v2_adapter-0.1.0-py3-none-any.whl
-uv pip install --python /opt/lop-adapters/osworld-v2/0.1.0/venv/bin/python \
+#    --copies is REQUIRED (python_executable must be a real file, not a
+#    symlink — discovery._symlink_free), but current uv's `venv` has NO
+#    `--copies` flag (that is uv pip's install link-mode). Use the stdlib
+#    venv, which DOES copy. `--without-pip` because uv pip installs the rest
+#    and the uv-managed interpreter's ensurepip can SIGABRT on macOS.
+python3.12 -m venv --copies --without-pip /opt/lop-adapters/osworld-v2/0.1.1/venv
+uv pip install --python /opt/lop-adapters/osworld-v2/0.1.1/venv/bin/python \
+    --no-deps dist/lop_osworld_v2_adapter-0.1.1-py3-none-any.whl
+uv pip install --python /opt/lop-adapters/osworld-v2/0.1.1/venv/bin/python \
     -r <(uv export --frozen --no-emit-project)
-uv pip install --python /opt/lop-adapters/osworld-v2/0.1.0/venv/bin/python \
+uv pip install --python /opt/lop-adapters/osworld-v2/0.1.1/venv/bin/python \
     local-operator==<harness version>
 
 # 3b. for the PAID path only: OSWorld itself is an extra (~380 packages) that
 #     the cloud-free wheel does not need. Install it into the same venv.
-uv pip install --python /opt/lop-adapters/osworld-v2/0.1.0/venv/bin/python \
-    "lop-osworld-v2-adapter[osworld] @ dist/lop_osworld_v2_adapter-0.1.0-py3-none-any.whl"
+uv pip install --python /opt/lop-adapters/osworld-v2/0.1.1/venv/bin/python \
+    "lop-osworld-v2-adapter[osworld] @ dist/lop_osworld_v2_adapter-0.1.1-py3-none-any.whl"
 
 # 4. materialise the workspace from the verified inputs root (no download;
 #    writes adapter-release.json, benchmark_release.json, task_hashes.json,
@@ -82,7 +87,7 @@ python ~/local-operator/scripts/build_osworld_adapter.py \
     --benchmark-release osworld-v2-2026.08.08 \
     --inputs-root ~/worktrees/osworld \
     --package-digest <package_digest from step 5> \
-    --out ~/worktrees/osworld/workspaces/0.1.0
+    --out ~/worktrees/osworld/workspaces/0.1.1
 
 # 5. compute the three digests the AdapterSelector needs
 python - <<'PY'
@@ -91,7 +96,7 @@ from local_operator.evaluation.adapters.discovery import (
     distribution_digest, workspace_digest,
 )
 print("package_digest  ", distribution_digest(PathDistribution(<dist-info path>)))
-print("workspace_digest", workspace_digest("/opt/lop-adapters/osworld-v2/0.1.0/workspace"))
+print("workspace_digest", workspace_digest("/opt/lop-adapters/osworld-v2/0.1.1/workspace"))
 PY
 ```
 
@@ -180,7 +185,7 @@ episode needs no environment variables at all:
 
 ```sh
 python ~/local-operator/scripts/run_episode.py \
-    --selector ~/worktrees/osworld/workspaces/0.1.0/selector.json \
+    --selector ~/worktrees/osworld/workspaces/0.1.1/selector.json \
     --task-id task_001 \
     --route openrouter/deepseek/deepseek-v4-flash-vision-exp \
     --run-root ~/worktrees/osworld/runs/$(date +%Y%m%d-%H%M%S) \
@@ -242,6 +247,59 @@ python ~/local-operator/scripts/osworld_rescue_sweep.py --rescue-root <run-root>
 It spawns the exact pinned worker per descriptor, re-resolves the descriptor's
 secret refs from the credential store, reconciles every action, and unlinks
 the descriptor **only** when the aggregate is complete.
+
+The sweep takes no `--region`, unlike the audit below: each descriptor
+already carries the episode's `AWS_REGION` in its `infra_values`, and the
+worker reconciles in that region. Passing one would only invite a mismatch
+between where the operator thinks the instance is and where the descriptor
+says it is.
+
+The sweep re-hashes the pinned workspace before it will spawn the worker, so
+the workspace must still match the selector's `workspace_digest`. Bytecode
+caches never count: `__pycache__/` and `*.pyc` are excluded from the digest
+by rule, and the worker is launched with `-B` so it writes none — upstream's
+`instantiate_task` imports the task module from the workspace, and in the
+first paid episode the cache that import left behind made the sweep refuse
+("adapter workspace content digest differs") for an instance that was in
+fact already terminated. Anything else that changes under the workspace is a
+genuine drift and the sweep will (rightly) refuse; restore the workspace from
+the verified inputs root and sweep again.
+
+**Upstream's cache lives OUTSIDE the workspace for the same reason.**
+`DesktopEnv`'s default `cache_dir="cache"` is resolved against the worker's
+cwd — and the cwd IS the pinned workspace. The first paid episode's
+`_download_setup` wrote `cache/001/…calendar.ics` and `…thunderbird-profile.tar.gz`
+there, which the digest (correctly) does NOT ignore, so the rescue sweep
+refused even though the instance was already terminated. The adapter now hands
+`DesktopEnv` an ABSOLUTE, per-episode cache root at
+`<artifact_root>/../osworld-cache/<episode_id>` — beside the artifact root, not
+inside it (the bundle verifier walks the artifact directory and refuses any
+non-digest entry), and per-episode so two episodes running the same task never
+share a cache — upstream's `reset_cache_dir` only reassigns the attribute
+(`controllers/setup.py:55-56`) and clears nothing, so the isolation has to come
+from the path. The cache root is durable (it is a sibling under the run root,
+which `run_episode.py` puts through `refuse_volatile_root`, so it can never be
+`/tmp`) and is minted at `reset_start`, never in `prepare`.
+
+**The episode's cache root is also its working directory.** Routing `cache_dir`
+fixes the one write path we observed; it does not fix the class. Several
+upstream helpers open a hard-coded RELATIVE name with the builtin `open` at
+module scope — `temp.pdf` (`evaluators/metrics/vscode.py:210`),
+`temp_extracted_<n>.jpeg` (`slides.py:2051`), an epub's `<name>.dir`
+(`others.py:64-72`) — and they never consult the env object, so no attribute
+the adapter installs on it can intercept them. Since a relative write resolves
+against the cwd, `reset_start` moves the worker's cwd to the episode cache root
+and `close` puts it back. Any relative write by any upstream path, known or
+not, therefore lands in the episode's scratch dir rather than the pin. This is
+safe because the workspace is never reached via the cwd: `instantiate_task`
+loads task modules by absolute location, the worker runs with `-I` so the cwd
+is not on `sys.path`, and both the worker's digest re-check and the rescue
+sweep hash `selector.workspace`, an absolute path.
+
+If a future upstream path still manages to write into the workspace, the
+digest re-check is what surfaces it: the worker (and `sweep-rescue`) refuse
+with `adapter workspace content digest differs`. Restore the workspace from
+the verified inputs root and sweep again.
 
 ## Leak audit (operator command)
 

@@ -27,6 +27,7 @@ import pytest
 
 from local_operator.harness.types import Message, Usage
 from local_operator.tui.app import RESIZE_REFIT_DELAY_S, OperatorApp
+from local_operator.tui.widgets import aside_panel as aside_panel_module
 from local_operator.tui.widgets.aside_panel import (
     ASIDE_COPY_KEY,
     PANEL_HEIGHT_MARGIN,
@@ -684,11 +685,15 @@ def test_a_long_exchange_pins_the_owning_question_and_counts_questions() -> None
     to. Inside one answer there is no question to count and the marker switches
     to lines; that is
     ``test_one_long_answer_states_the_rows_it_withheld``.
+
+    The answer is a LIST because the answer renders as markdown: twelve
+    repetitions of a bare word are one paragraph to a markdown parser, which
+    folds to a single row and leaves nothing to overflow.
     """
     panel = AsidePanel()
     panel.display = True
     panel._turns = [
-        AsideTurn(question=f"question {index}?", answer="line\n" * 12, state="done")
+        AsideTurn(question=f"question {index}?", answer="- line\n" * 12, state="done")
         for index in range(6)
     ]
     rendered = panel.render_lines_for_test()
@@ -703,7 +708,7 @@ def test_a_long_exchange_pins_the_owning_question_and_counts_questions() -> None
     panel._scroll_by(8)
     rendered = panel.render_lines_for_test()
     assert rendered[3].startswith("▌ question 4?")
-    assert rendered[4].strip() == "line"
+    assert rendered[4].strip() == "• line"
 
 
 def test_one_long_answer_states_the_rows_it_withheld() -> None:
@@ -996,11 +1001,15 @@ def test_the_wheel_walks_back_through_earlier_questions() -> None:
 
     The wheel and not ↑/↓: those belong to the focused composer's prompt
     history, and the aside's premise is that the user keeps typing there.
+
+    A LIST for the reason
+    ``test_a_long_exchange_cuts_on_a_turn_boundary_and_counts_questions``
+    records: the answer is markdown, so a tall turn has to be tall AS markdown.
     """
     panel = AsidePanel()
     panel.display = True
     panel._turns = [
-        AsideTurn(question=f"question {index}?", answer="line\n" * 12, state="done")
+        AsideTurn(question=f"question {index}?", answer="- line\n" * 12, state="done")
         for index in range(6)
     ]
     assert "question 5?" in "\n".join(panel.render_lines_for_test())
@@ -1026,3 +1035,339 @@ def test_a_fork_refusal_is_stated_on_the_card_not_in_the_transcript() -> None:
     # And it clears the moment the user does the thing it asked for.
     panel.ask("why?")
     assert not any("nothing to fork" in line for line in panel.render_lines_for_test())
+
+
+# -- the answer is markdown, the question is not ---------------------------
+def test_the_answer_renders_as_markdown_not_as_its_own_source() -> None:
+    """Model prose on the card is prose, the same as everywhere else it shows.
+
+    The card used to wrap the answer as plain text, so the markdown a model
+    writes reached the user as literal source — backticks around `code`,
+    asterisks around **bold**, a `-` where the transcript draws a bullet. The
+    same string handed to an `AssistantBlock` by `^f` rendered properly, so
+    identical words changed shape the moment the user kept them.
+    """
+    panel = AsidePanel()
+    panel.display = True
+    panel._turns = [
+        AsideTurn(
+            question="how does it work?",
+            answer=(
+                "Call `run_turn()`, which is **not** re-entrant:\n"
+                "\n"
+                "- drains deltas\n"
+                "- flushes cards\n"
+            ),
+            state="done",
+        )
+    ]
+    body = "\n".join(panel.render_lines_for_test())
+
+    # The markup is gone...
+    assert "`run_turn()`" not in body
+    assert "**not**" not in body
+    assert "- drains deltas" not in body
+    # ...and what it MEANT is on the card.
+    assert "run_turn()" in body
+    assert "not" in body
+    assert "•" in body, "a list item renders as a bullet, as it does in the transcript"
+    assert "drains deltas" in body
+
+
+def test_the_question_is_never_markdown_rendered() -> None:
+    """The question is the user's own typed input echoed back.
+
+    `_question_rows` mirrors `UserBlock`'s spine deliberately, and running the
+    user's keystrokes through a markdown parser would eat the asterisks and
+    underscores out of a question that is ABOUT them — "what does **kwargs
+    mean" is a question this surface exists to be asked.
+    """
+    panel = AsidePanel()
+    panel.display = True
+    panel._turns = [
+        AsideTurn(question="what does **kwargs mean in `f(**kwargs)`?", answer="a.", state="done")
+    ]
+    body = "\n".join(panel.render_lines_for_test())
+
+    assert "**kwargs" in body
+    assert "`f(**kwargs)`" in body
+
+
+def test_an_error_is_shown_verbatim_rather_than_parsed() -> None:
+    """A provider's failure text is a diagnostic, not markup to interpret."""
+    panel = AsidePanel()
+    panel.display = True
+    generation = panel.ask("why?")
+    panel.fail_answer(generation, "no handler for `__call__` in **provider**")
+    body = "\n".join(panel.render_lines_for_test())
+
+    assert "`__call__`" in body
+    assert "**provider**" in body
+
+
+def test_the_rendered_rows_are_the_rows_the_card_is_pinned_to() -> None:
+    """Markdown changes how many rows an answer occupies, and the card is
+    sized to its CONTENT — so the count has to be the real, final one.
+
+    `_repaint` pins `styles.height` to the painted rows plus the gutter. A
+    renderer that returned rows the card did not paint (or vice versa) would
+    clip its own last line or reserve a row of empty overlay over the chat.
+    """
+    panel = AsidePanel()
+    panel.display = True
+    panel._turns = [
+        AsideTurn(
+            question="q?",
+            answer="intro:\n\n- one\n- two\n\nand a `tail`.\n",
+            state="done",
+        )
+    ]
+    rows = panel._compose_rows()
+
+    assert len(rows) == len(panel.render_lines_for_test())
+    # Every row is one painted line: a row carrying an embedded newline would
+    # make the height pin disagree with what lands on screen.
+    assert not any("\n" in row.plain for row in rows)
+
+
+def test_a_half_arrived_fence_never_swallows_the_prose_before_it() -> None:
+    """A dangling ``` or ** is a normal intermediate state while streaming.
+
+    The parser reads an unclosed fence as a code block running to the end of
+    the text, which restyles the tail — the transcript's own `AssistantBlock`
+    does exactly the same mid-stream. What must NOT happen is text going
+    missing: the sentence the user has already read stays on the card through
+    every intermediate state.
+    """
+    panel = AsidePanel()
+    panel.display = True
+    generation = panel.ask("how do I re-enter?")
+    answer = "Stop it first:\n\n```python\nloop.stop()\n```\n\nThen **re-enter** it.\n"
+
+    seen = ""
+    for index in range(0, len(answer), 4):
+        seen += answer[index : index + 4]
+        panel.append_answer(generation, answer[index : index + 4])
+        body = "\n".join(panel.render_lines_for_test())
+        if "Stop it first" in seen:
+            assert "Stop it first" in body, f"prose vanished at {seen!r}"
+
+    panel.settle_answer(generation, answer)
+    body = "\n".join(panel.render_lines_for_test())
+    assert "loop.stop()" in body
+    assert "Then re-enter it." in body
+    assert "```" not in body
+
+
+def test_a_settled_answer_is_not_re_rendered_on_every_delta() -> None:
+    """`_repaint` runs per streamed delta and repaints the WHOLE card.
+
+    Without a cache the turns ABOVE the streaming one are re-rendered from
+    text that cannot have changed, and the cost is linear in the exchange's
+    length: measured at a 120-column card, 0.75 ms per repaint with nothing
+    above it against 17.6 ms at 21 turns, past the 30 ms bar
+    `test_tui_responsiveness` holds the loop to. The cache is keyed on
+    `(text, width, theme epoch)` — the three inputs `flatten` bakes in.
+    """
+    panel = AsidePanel()
+    panel.display = True
+    panel._turns = [
+        AsideTurn(question=f"q{index}?", answer=f"answer `{index}`", state="done")
+        for index in range(4)
+    ]
+    panel.render_lines_for_test()
+    settled = dict(panel._answer_cache)
+    assert settled, "settled answers are cached"
+
+    # A delta on a NEW turn reuses every settled render rather than redoing it.
+    panel._turns.append(AsideTurn(question="q4?", answer="streaming"))
+    panel.render_lines_for_test()
+    assert all(panel._answer_cache.get(key) is rows for key, rows in settled.items())
+
+
+def test_the_cache_cannot_grow_without_bound_while_an_answer_streams() -> None:
+    """Keyed on the TEXT, so every delta mints a fresh key.
+
+    An insert-only cache would hold every prefix of every answer for as long
+    as the card is open. The paint drops whatever it did not touch, which
+    bounds it at the visible turns without needing a size policy.
+    """
+    panel = AsidePanel()
+    panel.display = True
+    panel._turns = [AsideTurn(question="q?")]
+    answer = "a sentence that arrives a few characters at a time, as they do.\n"
+
+    sizes = []
+    for index in range(0, len(answer), 4):
+        panel._turns[-1].answer += answer[index : index + 4]
+        panel.render_lines_for_test()
+        sizes.append(len(panel._answer_cache))
+
+    assert max(sizes) == 1, f"one live answer, one entry — saw {max(sizes)}"
+
+
+def test_dismissing_the_aside_drops_the_rendered_answers_too() -> None:
+    """ "No trace" covers the render cache, not just the turns.
+
+    `close()` has to clear it explicitly: `_repaint` returns early on a hidden
+    card, so the paint-scoped prune never runs to drop it.
+    """
+    panel = AsidePanel()
+    panel.display = True
+    panel._turns = [AsideTurn(question="q?", answer="an answer with `code`", state="done")]
+    panel.render_lines_for_test()
+    assert panel._answer_cache
+
+    panel.close()
+    assert panel._answer_cache == {}
+
+
+@pytest.mark.asyncio
+async def test_a_resize_refolds_the_answer_rather_than_reusing_the_old_width() -> None:
+    """`flatten` bakes the width in, so the cache key carries it.
+
+    A cache keyed on the text alone would paint the old fold at the new width
+    — rows either overflowing the card's column or stopping short of it — and
+    nothing about the card would say why. Driven through the real app because
+    the width comes from the composer's column, which only a laid-out screen
+    has.
+    """
+    session = AsideSession(
+        answer=(
+            "A sentence long enough to fold differently at sixty columns than at "
+            "a hundred and twenty, with `code` in it."
+        ),
+    )
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        panel = await _open_with_question(pilot, app, "how wide is this?")
+        wide = [key[1] for key in panel._answer_cache]
+        assert wide, "the settled answer is cached at the width it was folded at"
+
+        await pilot.resize_terminal(60, 24)
+        deadline = time.monotonic() + 5.0
+        while True:
+            await pilot.pause()
+            narrow = [key[1] for key in panel._answer_cache]
+            if narrow and narrow != wide:
+                break
+            assert time.monotonic() < deadline, f"the answer never refolded: {narrow} == {wide}"
+            await asyncio.sleep(RESIZE_REFIT_DELAY_S)
+
+        # And the rows it painted fit the card it was refolded for.
+        assert max(narrow) < max(wide)
+        rows = panel.render_lines_for_test()
+        assert max(len(row) for row in rows) <= panel.panel_width()
+
+
+def test_a_repeat_paint_does_not_re_render_the_exchange() -> None:
+    """The card must not do work proportional to the exchange on every paint.
+
+    The guard this replaces asserted the narrower fact that a paint renders
+    only the turns it can show, which the TURN walk could promise because it
+    stopped at the first turn that did not fit. A ROW cut cannot: to know where
+    a row window starts you need the row counts of everything above it, so
+    `_flat_body` renders the whole exchange once by construction. Asserting the
+    old ratio now would be asserting the row window does not exist.
+
+    What the guard was actually protecting is the cost, and that survives
+    intact — the card repaints on every streamed delta, the turn count is
+    uncapped, so what must not scale is the REPEAT paint. That is what is
+    pinned here, and it is pinned the same way: as a ratio, so the test says
+    what is wrong (work proportional to the whole exchange) rather than how
+    fast this machine is.
+
+    Measured at a 120x40 card over realistic answers, the first paint costs
+    31 ms at 120 turns and 78 ms at 300 — real, and inherent to the row cut —
+    while every later paint is 0.02 ms and a streamed delta is 0.74 ms, because
+    `_flat_body` is memoised on `(width, theme epoch, revision)` and
+    `_markdown_rows` caches underneath it. Against the 30 ms `STALL_MS` bar in
+    `tests/unit/test_tui_responsiveness.py`, the cost that repeats is what
+    decides whether the user feels it.
+
+    Both halves are asserted, because they fail differently: a missed
+    `_invalidate_flat` makes the memo stale (wrong rows, caught by the
+    correctness tests around it), while a memo keyed on something that changes
+    every paint makes it useless (caught here).
+    """
+    panel = AsidePanel()
+    panel.display = True
+    panel._turns = [
+        AsideTurn(question=f"question {index}?", answer=f"answer `{index}` here", state="done")
+        for index in range(50)
+    ]
+    panel._invalidate_flat()
+
+    # Two counters, because the two caches fail independently and the cheap
+    # one masks the expensive one. `flatten` is the markdown render, which
+    # `_answer_cache` already prevents repeating; `_answer_rows` is the
+    # per-turn ASSEMBLY the flatten memo is what avoids. Counting only the
+    # former passes with the memo deleted outright — the assembly is what
+    # scales with the exchange once the renders are cached.
+    assembled: list[int] = []
+    rendered_md: list[int] = []
+    original_rows = AsidePanel._answer_rows
+    original_flatten = aside_panel_module.flatten
+
+    def counted_rows(self, turn, width, dim, danger):
+        assembled.append(1)
+        return original_rows(self, turn, width, dim, danger)
+
+    def counted_flatten(*args, **kwargs):
+        rendered_md.append(1)
+        return original_flatten(*args, **kwargs)
+
+    panel.render_lines_for_test()  # the one paint that pays for the flatten
+
+    AsidePanel._answer_rows = counted_rows
+    aside_panel_module.flatten = counted_flatten
+    try:
+        panel.render_lines_for_test()
+        assert assembled == [], (
+            f"a repeat paint re-assembled {len(assembled)} answers — the flatten "
+            "memo is not holding, so every paint walks the whole exchange"
+        )
+
+        # A streamed delta drops the memo, so the exchange IS re-assembled —
+        # and that is the point of the second counter: assembly comes back from
+        # `_answer_cache`, so no matter how long the exchange is, exactly one
+        # answer reaches the markdown renderer. This is what fails if the memo
+        # is ever made to evict that cache.
+        generation = panel.ask("what changed?")
+        rendered_md.clear()
+        panel.append_answer(generation, "a token")
+        panel.render_lines_for_test()
+        assert len(rendered_md) <= 1, (
+            f"a streamed delta rendered {len(rendered_md)} answers — only the "
+            "live turn's text changed, so the rest must come from the cache"
+        )
+    finally:
+        AsidePanel._answer_rows = original_rows
+        aside_panel_module.flatten = original_flatten
+
+
+def test_the_flatten_memo_is_dropped_when_the_exchange_changes() -> None:
+    """A memo that outlives its input paints rows the exchange no longer has.
+
+    The risk the memo introduces, asserted directly rather than through a
+    height: every mutation path has to reach `_invalidate_flat`, and the one
+    that is easy to get wrong is `append_answer`, which measures the flattened
+    height on BOTH sides of the delta to hold a parked reader still.
+    """
+    panel = AsidePanel()
+    panel.display = True
+    generation = panel.ask("why?")
+    panel.append_answer(generation, "- one\n")
+    before = len(panel._flat_body().lines)
+
+    panel.append_answer(generation, "- two\n- three\n")
+    after = len(panel._flat_body().lines)
+    assert after > before, "the flatten memo survived a streamed delta"
+
+    panel.settle_answer(generation, "- one\n")
+    assert len(panel._flat_body().lines) < after, "the memo survived a settle"
+
+    panel.close()
+    panel.open()
+    assert panel._flat_body().lines == [], "the memo survived the card closing"

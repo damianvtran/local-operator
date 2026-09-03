@@ -190,6 +190,15 @@ class CallSnapshot:
     # a future caller that priced off-thread itself). The normal recording path
     # leaves this False so the store prices from the model + token counts.
     priced: bool = False
+    # The 1-hour-TTL slice of ``cache_write_tokens`` (Anthropic
+    # ``cache_creation.ephemeral_1h_input_tokens``), a SUBSET of it. Kept as
+    # its own column rather than folded in because it is priced at 2x base
+    # where a 5m write is 1.25x, and the point of the large-context 1h TTL is
+    # a trade that has to stay measurable after the fact. 0 on every other
+    # provider and on pre-1h Anthropic responses. NOTE: ``price_snapshot``
+    # still prices ALL writes at the 5m rate; splitting the rate is a
+    # follow-up, and this column is what makes it possible.
+    cache_write_1h_tokens: int = 0
     # Provider-reported dollar cost for this call (OpenRouter ``usage.cost``,
     # any compat provider that precomputes billing). Copied off ``Usage.usd_cost``
     # at record time so ``price_snapshot`` can prefer it over the registry table

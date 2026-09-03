@@ -3462,8 +3462,9 @@ async def test_codex_5_6_stream_skips_reasoning_items() -> None:
 # tools block is the FRONT of every provider's cache prefix, so a future
 # refactor that silently dropped `body["tools"]` for a `tool_choice="none"`
 # request would reintroduce the exact prompt-cache regression these tests
-# guard. Each of the three wires must emit the tools AND pin the choice to
-# "none" (the aside reads the turn and calls nothing).
+# guard. Each of the three wires must emit the tools. The OpenAI and Gemini
+# wires pin the choice to "none" (the aside reads the turn and calls nothing);
+# Anthropic deliberately does NOT — see the block below.
 # ---------------------------------------------------------------------------
 
 
@@ -3523,13 +3524,99 @@ def test_anthropic_emits_tools_with_tool_choice_none_and_keeps_cache_control() -
     )
     body = AnthropicClient()._build_body(request)
     assert [t["name"] for t in body["tools"]] == ["bash", "read"]
-    assert body["tool_choice"] == {"type": "none"}
+    # NOT {"type": "none"}: see test_anthropic_tool_choice_none_with_tools_rides_the_turns_auto.
+    assert body["tool_choice"] == {"type": "auto"}
     # The message-tail cache_control placement is unchanged by restoring tools:
     # the tools block sits AHEAD of system+messages in the prefix, so the
     # existing breakpoint policy (last block of the final message, and the
     # prior user turn) must still hold.
     assert "cache_control" in body["messages"][-1]["content"][-1]
     assert "cache_control" in body["messages"][0]["content"][-1]
+
+
+# ---------------------------------------------------------------------------
+# Anthropic tool_choice: "none" with tools present goes out as the turn's
+# "auto".
+#
+# Anthropic renders `tool_choice` into the MESSAGES level of its cache
+# hierarchy (docs, "What invalidates the cache": Tool choice — tools ✓,
+# system ✓, messages ✘). An aside/advisor sending `{"type": "none"}` against a
+# working turn that sent `{"type": "auto"}` therefore kept only the
+# tools+system head warm and re-wrote every message block — measured at a
+# quarter of all daily cache-write tokens across the fleet. The fix is for the
+# aside's body to be byte-identical to the turn's prefix, which means the same
+# `tool_choice`; the "calls nothing" contract is enforced by the callers
+# ignoring tool-call deltas (`Session.complete_aside`,
+# `Session.advise_compaction`). The no-tools callers never reach the branch and
+# must keep carrying no `tool_choice` key at all.
+# ---------------------------------------------------------------------------
+
+
+def _anthropic_request(
+    tool_choice: Literal["auto", "none", "required"], *, tools: list[AgentTool]
+) -> ChatRequest:
+    return ChatRequest(
+        model=_spec(provider="anthropic"),
+        system_blocks=["instructions"],
+        messages=[Message.user("first"), Message.assistant("mid"), Message.user("why?")],
+        tools=tools,
+        tool_choice=tool_choice,
+    )
+
+
+def test_anthropic_tool_choice_none_with_tools_rides_the_turns_auto() -> None:
+    """The aside body must equal the turn body: same tools, same tool_choice."""
+    client = AnthropicClient()
+    turn = client._build_body(_anthropic_request("auto", tools=_aside_tools()))
+    aside = client._build_body(_anthropic_request("none", tools=_aside_tools()))
+    assert aside["tool_choice"] == {"type": "auto"}
+    # Byte-identical prefix, not merely an equal tool_choice: any other key
+    # that differed would break the messages cache just the same.
+    assert aside == turn
+
+
+def test_anthropic_tool_choice_mapping_with_tools() -> None:
+    cases: list[tuple[Literal["auto", "none", "required"], dict[str, str]]] = [
+        ("auto", {"type": "auto"}),
+        ("none", {"type": "auto"}),
+        ("required", {"type": "any"}),
+    ]
+    for choice, expected in cases:
+        body = AnthropicClient()._build_body(_anthropic_request(choice, tools=_aside_tools()))
+        assert body["tool_choice"] == expected, choice
+
+
+def test_anthropic_tool_choice_none_without_tools_sends_no_tool_choice_key() -> None:
+    """Naming, the compaction summary and the server operator send tools=[]
+    with tool_choice="none"; they carry neither key, before and after."""
+    body = AnthropicClient()._build_body(_anthropic_request("none", tools=[]))
+    assert "tools" not in body
+    assert "tool_choice" not in body
+
+
+def test_other_wires_keep_a_literal_none_with_tools() -> None:
+    """The mapping is Anthropic-only. OpenAI-compatible wires document no
+    cache penalty for tool_choice, and Gemini's mode MUST stay NONE because
+    its default with tools present is to allow calls."""
+    openai_request = ChatRequest(
+        model=_spec(provider="openai"),
+        messages=[Message.user("why?")],
+        tools=_aside_tools(),
+        tool_choice="none",
+    )
+    assert OpenAICompatClient("https://x")._build_body(openai_request)["tool_choice"] == "none"
+    assert (
+        OpenAICompatClient("https://x")._build_responses_body(openai_request)["tool_choice"]
+        == "none"
+    )
+    google_request = ChatRequest(
+        model=_spec(provider="google", model_id="gemini-2.5-pro"),
+        messages=[Message.user("why?")],
+        tools=_aside_tools(),
+        tool_choice="none",
+    )
+    body = GoogleClient()._build_body(google_request)
+    assert body["toolConfig"]["functionCallingConfig"]["mode"] == "NONE"
 
 
 def test_google_emits_tools_and_pins_function_calling_to_none() -> None:
@@ -3566,3 +3653,257 @@ def test_google_function_calling_mode_maps_auto_and_required() -> None:
             )
         )
         assert body["toolConfig"]["functionCallingConfig"]["mode"] == mode
+
+
+# ---------------------------------------------------------------------------
+# Anthropic 1-hour prompt-cache TTL for large contexts
+# ---------------------------------------------------------------------------
+
+
+def _every_cache_control(body: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every ``cache_control`` marker in a body, system blocks and messages.
+
+    The wire constraint is request-wide (a 1h marker may not follow a 5m one),
+    so the assertions below inspect EVERY marker rather than sampling one.
+    """
+    markers = [e["cache_control"] for e in body.get("system", []) if "cache_control" in e]
+    for message in body["messages"]:
+        content = message.get("content")
+        if isinstance(content, list):
+            markers.extend(b["cache_control"] for b in content if "cache_control" in b)
+    return markers
+
+
+def _large_context_request() -> ChatRequest:
+    return ChatRequest(
+        model=_spec(provider="anthropic"),
+        system_blocks=["instructions", "inventory", "skills", "env"],
+        messages=[Message.user("first"), Message.assistant("mid"), Message.user("second")],
+    )
+
+
+def test_anthropic_ttl_off_sends_no_ttl_keys() -> None:
+    """Threshold 0 (and the constructor default) keeps the historical body:
+    markers exist, none carries a ``ttl`` — even with a huge hint."""
+    request = _large_context_request().model_copy(update={"context_tokens_hint": 900_000})
+    for client in (AnthropicClient(), AnthropicClient(cache_ttl_1h_min_context_tokens=0)):
+        body = client._build_body(request)
+        markers = _every_cache_control(body)
+        assert markers, "the breakpoint policy itself must be untouched"
+        assert all(m == {"type": "ephemeral"} for m in markers)
+        assert "ttl" not in json.dumps(body)
+
+
+def test_anthropic_ttl_hint_above_threshold_marks_every_breakpoint_1h() -> None:
+    """Above the threshold EVERY marker carries ``ttl: 1h`` and none is 5m —
+    Anthropic rejects a 1h entry that follows a shorter one."""
+    client = AnthropicClient(cache_ttl_1h_min_context_tokens=150_000)
+    request = _large_context_request().model_copy(update={"context_tokens_hint": 150_000})
+    body = client._build_body(request, oauth=True)
+    markers = _every_cache_control(body)
+    assert len(markers) >= 3  # system head + last message + previous user turn
+    assert all(m == {"type": "ephemeral", "ttl": "1h"} for m in markers)
+
+
+def test_anthropic_ttl_hint_below_threshold_stays_5m() -> None:
+    client = AnthropicClient(cache_ttl_1h_min_context_tokens=150_000)
+    request = _large_context_request().model_copy(update={"context_tokens_hint": 149_999})
+    markers = _every_cache_control(client._build_body(request))
+    assert markers and all(m == {"type": "ephemeral"} for m in markers)
+
+
+def test_anthropic_ttl_without_hint_falls_back_to_byte_estimate() -> None:
+    """No hint (first call, fork) → ``len(json)/4`` decides. A 2 KB body reads
+    as ~500 tokens; the same body with a 4k-token threshold stays 5m and with
+    a 100-token threshold goes 1h, so the estimate is what flipped it."""
+    request = ChatRequest(
+        model=_spec(provider="anthropic"),
+        system_blocks=["x" * 1_000, "inventory", "skills", "env"],
+        messages=[Message.user("a" * 1_000), Message.assistant("mid"), Message.user("second")],
+    )
+    assert request.context_tokens_hint is None
+    small_threshold = AnthropicClient(cache_ttl_1h_min_context_tokens=100)
+    assert all(
+        m == {"type": "ephemeral", "ttl": "1h"}
+        for m in _every_cache_control(small_threshold._build_body(request))
+    )
+    big_threshold = AnthropicClient(cache_ttl_1h_min_context_tokens=4_000)
+    assert all(
+        m == {"type": "ephemeral"} for m in _every_cache_control(big_threshold._build_body(request))
+    )
+
+
+def test_anthropic_ttl_estimate_excludes_base64_image_payloads() -> None:
+    """The fallback byte estimate must not count base64 image data (F3).
+
+    Anthropic bills an image by pixel area (~≤1.6k tokens), not by the bytes
+    its base64 spelling takes in the serialized body. A naive ``len(json)/4``
+    turns one ~1 MB screenshot into ~330k \"tokens\" and flips an image-bearing
+    first/fork request to 1h on a prompt that is really tiny. The estimate
+    swaps each image payload for a flat per-image allowance instead, wherever
+    the image sits (message content or tool-result content)."""
+    image = ImageContent(data="a" * 1_400_000, mime_type="image/png")  # ~1 MB decoded
+    with_image = ChatRequest(
+        model=_spec(provider="anthropic"),
+        system_blocks=["instructions", "inventory", "skills", "env"],
+        messages=[Message.user("first"), Message.assistant("mid"), Message.user("second")],
+    ).model_copy(
+        update={"messages": [Message(role="user", content=[TextContent(text="look"), image])]}
+    )
+    without_image = with_image.model_copy(update={"messages": [Message.user("look")]})
+    two_images = with_image.model_copy(
+        update={
+            "messages": [Message(role="user", content=[TextContent(text="look"), image, image])]
+        }
+    )
+    # Sanity: the payload is what dominates the serialized bytes — dropping it
+    # must shrink the body by two orders of magnitude, or the test proves
+    # nothing about the estimate.
+    client = AnthropicClient()
+    with_bytes = len(json.dumps(client._build_body(with_image), default=str))
+    without_bytes = len(json.dumps(client._build_body(without_image), default=str))
+    assert with_bytes > 100 * without_bytes
+
+    # Threshold the naive estimate would blow past (1.4M base64 chars / 4 ≈
+    # 350k \"tokens\") but the real prompt (~1.6k for the image + a tiny body)
+    # cannot reach: the request stays 5m.
+    stayed_5m = AnthropicClient(cache_ttl_1h_min_context_tokens=50_000)
+    markers = _every_cache_control(stayed_5m._build_body(with_image))
+    assert markers and all(m == {"type": "ephemeral"} for m in markers)
+    # The allowance itself is counted, not just dropped: two images (2 x 1.6k
+    # + body ≈ 3.3k) clear a 3k bar while the single-image body (≈1.7k) does
+    # not — the estimate stays order-correct in image count.
+    low_bar = AnthropicClient(cache_ttl_1h_min_context_tokens=3_300)
+    assert all(
+        m == {"type": "ephemeral"} for m in _every_cache_control(low_bar._build_body(with_image))
+    )
+    tipped = AnthropicClient(cache_ttl_1h_min_context_tokens=3_000)
+    assert all(
+        m == {"type": "ephemeral", "ttl": "1h"}
+        for m in _every_cache_control(tipped._build_body(two_images))
+    )
+
+
+def test_anthropic_ttl_estimate_counts_tools_too() -> None:
+    """Tools sit at position 0 of the cached prefix, so the byte estimate has
+    to include them: a tool-heavy first request must not be undercounted."""
+    tools = [
+        AgentTool(
+            name=f"tool{i}",
+            description="d" * 400,
+            parameters={"type": "object", "properties": {}},
+            execute=_aside_execute,
+        )
+        for i in range(10)
+    ]
+    slim = ChatRequest(
+        model=_spec(provider="anthropic"),
+        system_blocks=["instructions", "inventory", "skills", "env"],
+        messages=[Message.user("first"), Message.assistant("mid"), Message.user("second")],
+    )
+    heavy = slim.model_copy(update={"tools": tools})
+    client = AnthropicClient(cache_ttl_1h_min_context_tokens=800)
+    assert all(m == {"type": "ephemeral"} for m in _every_cache_control(client._build_body(slim)))
+    assert all(
+        m == {"type": "ephemeral", "ttl": "1h"}
+        for m in _every_cache_control(client._build_body(heavy))
+    )
+
+
+def test_anthropic_ttl_keeps_the_breakpoint_budget() -> None:
+    """The TTL rides on the existing markers; it must not add any. Nine system
+    blocks + two message targets still fit MAX_CACHE_BREAKPOINTS."""
+    client = AnthropicClient(cache_ttl_1h_min_context_tokens=1)
+    request = ChatRequest(
+        model=_spec(provider="anthropic"),
+        system_blocks=[f"block-{i}" for i in range(9)],
+        messages=[Message.user("first"), Message.assistant("mid"), Message.user("second")],
+        context_tokens_hint=500_000,
+    )
+    markers = _every_cache_control(client._build_body(request, oauth=True))
+    assert len(markers) == AnthropicClient.MAX_CACHE_BREAKPOINTS
+    assert all(m["ttl"] == "1h" for m in markers)
+    rendered = AnthropicClient._system_blocks([f"b{i}" for i in range(9)], ttl="1h")
+    assert sum("cache_control" in b for b in rendered) == AnthropicClient.MAX_CACHE_BREAKPOINTS
+
+
+def test_client_for_spec_passes_anthropic_ttl_threshold() -> None:
+    client = client_for_spec(
+        _spec(provider="anthropic", model_id="claude-opus-4-8"),
+        anthropic_cache_ttl_1h_min_context_tokens=123_456,
+    )
+    assert isinstance(client, AnthropicClient)
+    assert client._cache_ttl_1h_min_context_tokens == 123_456
+
+
+async def test_anthropic_usage_parses_cache_creation_ttl_split() -> None:
+    """``usage.cache_creation`` splits the write count by TTL; both slices land
+    on the Usage event and the sum still equals ``cache_write_tokens``."""
+    body = _sse(
+        [
+            {
+                "type": "message_start",
+                "message": {
+                    "usage": {
+                        "input_tokens": 10,
+                        "cache_read_input_tokens": 1_800,
+                        "cache_creation_input_tokens": 248,
+                        "cache_creation": {
+                            "ephemeral_5m_input_tokens": 148,
+                            "ephemeral_1h_input_tokens": 100,
+                        },
+                    }
+                },
+            },
+            {"type": "content_block_start", "index": 0, "content_block": {"type": "text"}},
+            {"type": "content_block_delta", "index": 0, "delta": {"text": "ok"}},
+            {"type": "message_delta", "delta": {"stop_reason": "end_turn"}},
+        ]
+    )
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(
+            200, content=body, headers={"content-type": "text/event-stream"}
+        )
+    )
+    client = AnthropicClient(http_client=httpx.AsyncClient(transport=transport))
+    events = await _collect(
+        client.stream(
+            ChatRequest(model=_spec(provider="anthropic"), messages=[Message.user("hi")]), "sk-ant"
+        )
+    )
+    usage = [e for e in events if isinstance(e, StreamEndEvent)][-1].usage
+    assert usage is not None
+    assert usage.cache_write_tokens == 248
+    assert usage.cache_write_5m_tokens == 148
+    assert usage.cache_write_1h_tokens == 100
+    assert usage.cache_write_5m_tokens + usage.cache_write_1h_tokens == usage.cache_write_tokens
+    assert usage.context_tokens == 10 + 1_800 + 248
+
+
+async def test_anthropic_usage_without_cache_creation_object_leaves_split_zero() -> None:
+    """Older API versions omit the object; the split must read 0, not raise."""
+    body = _sse(
+        [
+            {
+                "type": "message_start",
+                "message": {"usage": {"input_tokens": 5, "cache_creation_input_tokens": 40}},
+            },
+            {"type": "message_delta", "delta": {"stop_reason": "end_turn"}},
+        ]
+    )
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(
+            200, content=body, headers={"content-type": "text/event-stream"}
+        )
+    )
+    client = AnthropicClient(http_client=httpx.AsyncClient(transport=transport))
+    events = await _collect(
+        client.stream(
+            ChatRequest(model=_spec(provider="anthropic"), messages=[Message.user("hi")]), "sk-ant"
+        )
+    )
+    usage = [e for e in events if isinstance(e, StreamEndEvent)][-1].usage
+    assert usage is not None
+    assert usage.cache_write_tokens == 40
+    assert usage.cache_write_5m_tokens == 0
+    assert usage.cache_write_1h_tokens == 0

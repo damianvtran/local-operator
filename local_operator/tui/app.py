@@ -160,7 +160,6 @@ from local_operator.tui.widgets.editor import (
     SHELL_PLACEHOLDER,
     ArgumentHighlightChanged,
     ArgumentQueryOpened,
-    Attachment,
     Editor,
     EditorCopied,
     EditorCopyStale,
@@ -170,11 +169,13 @@ from local_operator.tui.widgets.editor import (
     EditorSubmitted,
     InlineCommandRequested,
     InterruptRequested,
+    Marked,
     ModelQueryOpened,
     RefreshArgumentChoices,
     ShellModeChanged,
     SkillQueryOpened,
     StopRequested,
+    expand_pastes,
     resolve_markers,
 )
 from local_operator.tui.widgets.image_block import ImageBlock
@@ -992,7 +993,9 @@ LOOP_JUDGE_PROMPT = (
     "  VERDICT: CONTINUE\n"
     "Then, on the next line, one short sentence of reason. Judge strictly: "
     "answer ACHIEVED only if the goal is fully and verifiably met, not merely "
-    "in progress. If unsure, answer CONTINUE."
+    "in progress. If unsure, answer CONTINUE. Answer in text only and do not "
+    "call any tool: this is a verdict on the conversation above, and a tool "
+    "call here is discarded unread."
 )
 
 #: Consecutive-judge-failure breaker for goal mode. There is deliberately NO
@@ -2166,7 +2169,7 @@ class OperatorApp(App[None]):
         #: `""` as its sentinel — that field's emptiness is load-bearing and
         #: mutation-tested (round 13), and widening it to a tuple would move
         #: the check every one of those tests makes.
-        self._images_held_for_compaction: dict[int, Attachment] = {}
+        self._images_held_for_compaction: dict[int, Marked] = {}
         #: This session's OWN spend, accumulated per turn. The number the band
         #: shows is this plus every child's — see :meth:`_spend_total`.
         self._total_cost: float = 0.0
@@ -2203,7 +2206,7 @@ class OperatorApp(App[None]):
         #: notice they share. Cleared wherever the blocks are removed (session
         #: swap, `/clear`) for the same reason `_queued_steer_notices` is.
         self._held_steer_blocks: list[
-            tuple[Message, UserBlock, list[ImageBlock], NoticeBlock, dict[int, Attachment]]
+            tuple[Message, UserBlock, list[ImageBlock], NoticeBlock, dict[int, Marked]]
         ] = []
         #: Rows whose turn ended before any boundary drained them: they now read
         #: `still queued — sends with your next message`, and the message really
@@ -2616,7 +2619,7 @@ class OperatorApp(App[None]):
         #: nothing, and Enter sent the words alone. Worse, an image pasted
         #: INSIDE the aside took number 1, so the restored marker resolved to
         #: the aside's image instead (review round 17).
-        self._aside_draft_images: dict[int, Attachment] = {}
+        self._aside_draft_images: dict[int, Marked] = {}
         #: Whether bang-mode was ON when the aside borrowed the composer. The
         #: aside disables the gesture for the life of the card, but the command
         #: the user had half typed is stashed and returned verbatim — returning
@@ -6004,7 +6007,7 @@ class OperatorApp(App[None]):
         return RichBlock(Group(*rows))
 
     def _submit_command_prompt(
-        self, request: str, attachments: Mapping[int, Attachment] | None
+        self, request: str, attachments: Mapping[int, Marked] | None
     ) -> None:
         """Send a prompt-carrying slash command's argument as a real user turn.
 
@@ -6022,15 +6025,27 @@ class OperatorApp(App[None]):
         layered persona), and three copies of "which text resolves the markers"
         is exactly the kind of drift the composer's single ``resolve_markers``
         walk exists to prevent.
+
+        A collapsed PASTE is spliced here for the same reason its image sibling
+        is resolved here: the request tail is the text the user typed around the
+        marker, and without the splice ``/team backend <[Paste #1, 240 lines]>``
+        reaches the manager as that bare string — the exact bug shape
+        ``on_editor_submitted`` documents as already fixed for images. The
+        markers are resolved from the CHIP text, before the splice, because
+        ``resolve_markers`` orders images by where the citation sits and a
+        payload spliced in ahead of one would move it.
         """
         images = resolve_markers(request, attachments or {})
-        self._submit_prompt(request, images, attachments)
+        expanded = expand_pastes(request, attachments or {})
+        # `typed=` keeps the naming split: the chip line names the thread, the
+        # payload is what the model is sent.
+        self._submit_prompt(expanded, images, attachments, typed=request)
 
     def _cmd_team(
         self,
         arg: str,
         notice: NoticeFn,
-        attachments: Mapping[int, Attachment] | None = None,
+        attachments: Mapping[int, Marked] | None = None,
     ) -> None:
         """``/team`` — list; ``/team <name> <request>`` — talk to the manager.
 
@@ -6327,7 +6342,7 @@ class OperatorApp(App[None]):
         self,
         arg: str,
         notice: NoticeFn,
-        attachments: Mapping[int, Attachment] | None = None,
+        attachments: Mapping[int, Marked] | None = None,
     ) -> None:
         """``/agent`` — list; ``/agent <name> [<message>]`` — adopt a profile.
 
@@ -7658,7 +7673,19 @@ class OperatorApp(App[None]):
         # one keystroke away and it is the only way out, which is the whole
         # bargain a modal surface makes.
         if self._aside_is_open():
-            self._ask_aside(text)
+            # EXPANDED, and this is the earliest exit that needs it: the aside
+            # branch returns before the splice at the foot of this method, so a
+            # collapsed paste asked about inside a `/btw` card reached
+            # `complete_aside` as the bare `[Paste #1, 240 lines]` chip.
+            #
+            # Worse than a dropped image, and the reason this is the one exit
+            # that cannot be left for later: the composer clears on submit and
+            # `_record_history` strips the citation, so there is no chip in
+            # history, no map entry and no Up-arrow — the payload is
+            # UNRECOVERABLE rather than merely absent (review round 2,
+            # BLOCKER-1). The aside is also the surface a user is most likely to
+            # paste a log into, since it exists for "what is this?".
+            self._ask_aside(expand_pastes(text, message.attachments))
             return
         if message.shell:
             if self._shell_card is not None:
@@ -7709,7 +7736,47 @@ class OperatorApp(App[None]):
         # composer owns — but it is NOT a command: it produces a prompt, so it
         # falls through to the ordinary submit with an expanded payload rather
         # than dispatching anything of its own.
-        self._submit_prompt(text, images, message.attachments, sent=self._expand_invocation(text))
+        #
+        # A COLLAPSED PASTE is expanded here too, and here is the only place it
+        # can be: the editor posts the CHIP text — `[Paste #1, 240 lines]` — so
+        # without this splice the model receives that string and never the log
+        # the user pasted. App-side rather than in `Editor._submit` because this
+        # is where the display/sent split already lives, and because the two
+        # `consumes_prompt` slash commands need the same call at a different
+        # point (`_submit_command_prompt`).
+        #
+        # Parsed from the TYPED text, spliced into the REQUEST: the ordering is
+        # load-bearing and `_expand_invocation` documents why.
+        # `typed=` carries the chip line on for NAMING only — the expanded
+        # payload is what the row shows and what the model gets, but titling a
+        # conversation after a pasted stack trace is not what the user asked.
+        sent = self._expand_invocation(text, message.attachments)
+        # An INVOCATION keeps the typed line as its row; everything else shows
+        # the expanded text (design §2.5).
+        #
+        # §2.5's `text == sent` rule bought replay consistency for ordinary
+        # prompts, and it does not reach this path: `$skill` already has a
+        # display/sent split — `sent` is the rendered body, the row is the typed
+        # line, and `_typed_line_of` exists to keep a resumed row from becoming
+        # the whole SKILL.md. Expanding the row here made live and REPLAY
+        # disagree for the paste case alone, because `render_invocation` records
+        # the typed line in the payload's `invocation=` attribute and replay
+        # repaints from that (review round 2, MAJOR-2).
+        #
+        # The attribute is deliberately NOT expanded to close it from the other
+        # side: it travels inside the payload the model receives, so a payload
+        # carrying the paste in both the request and the attribute would send it
+        # TWICE, on every turn of that message's life, to fix a transcript row.
+        # Showing the typed line instead makes paste and non-paste `$skill`
+        # behave identically and makes the two rows agree by construction.
+        row = text if sent is not None else expand_pastes(text, message.attachments)
+        self._submit_prompt(
+            row,
+            images,
+            message.attachments,
+            sent=sent,
+            typed=text,
+        )
 
     def on_inline_command_requested(self, message: InlineCommandRequested) -> None:
         """Run a slash command spliced out of the MIDDLE of a draft.
@@ -7738,6 +7805,15 @@ class OperatorApp(App[None]):
         if self._aside_is_open():
             # Defensive only — see the docstring. Route to the aside rather than
             # silently dispatching a command the user cannot see they issued.
+            #
+            # No paste expansion, and none is reachable: this carries the
+            # COMMAND TOKEN only (``/team ops``), spliced out of the draft by
+            # `Editor._run_inline_command`, while the message and its markers
+            # stay in the composer. A chip cannot be inside the token —
+            # `slash_token_span` ends the token at its line, and a
+            # ``consumes_prompt`` command reassembles to the front instead of
+            # dispatching inline at all. The draft is expanded when the user
+            # sends it, through the ordinary submit.
             self._ask_aside(command_text)
             return
         self._run_slash_command(command_text)
@@ -10554,9 +10630,10 @@ class OperatorApp(App[None]):
         self,
         text: str,
         images: list[ImageContent] | None = None,
-        attachments: Mapping[int, Attachment] | None = None,
+        attachments: Mapping[int, Marked] | None = None,
         *,
         sent: str | None = None,
+        typed: str = "",
     ) -> None:
         """Paint one user prompt and dispatch it.
 
@@ -10573,9 +10650,20 @@ class OperatorApp(App[None]):
         against it. Conversation NAMING deliberately keeps the display text —
         titling a thread from an injected skill body would name it after the
         skill's prose instead of the user's request.
+
+        ``typed`` is the SAME split one level further out, for naming alone. A
+        collapsed paste is expanded before it gets here (``on_editor_submitted``),
+        so ``text`` is now the payload and a thread opened with "why does this
+        fail?" plus 500 log lines would be titled after the stack trace. The
+        chip line the user actually wrote comes in here instead. ``""`` — every
+        caller that never collapsed anything — means "the text is what was
+        typed", so the default leaves the existing paths untouched. Naming only:
+        the row, the echo, the steer queue and the compaction hold all keep
+        reading ``text``/``sent``, because those must agree with what was sent.
         """
         images = images or []
         sent = text if sent is None else sent
+        named = typed or text
         user_block = UserBlock(text, len(images))
         self._append_block(user_block)
         # The pictures themselves, under the prompt that cites them. The
@@ -10585,7 +10673,15 @@ class OperatorApp(App[None]):
         # the user typed around); the images render in citation order, the
         # same order `resolve_markers` sent them in, labeled by the text's own
         # marker numbers.
-        image_blocks = self._append_image_blocks(images, marker_text=text)
+        #
+        # Labelled from `named`, the TYPED line, for the reason
+        # `on_compaction_ended` gives about the same walk: an `[Image #N]`
+        # inside an EXPANDED paste payload (a log quoting a previous prompt is
+        # the realistic case) is not a citation the user wrote, and counting it
+        # here would shift every label one to the right — the positional defect
+        # review round 2 (F9) fixed once already. `named` is `text` wherever
+        # nothing was collapsed, so every other caller is unchanged.
+        image_blocks = self._append_image_blocks(images, marker_text=named)
         if self._session is None:
             self._append_block(NoticeBlock("session is still starting…", "warning"))
             return
@@ -10664,7 +10760,7 @@ class OperatorApp(App[None]):
             )
             # Still worth a title: the steering message can be the first thing
             # in the conversation that actually says what the task is.
-            self._maybe_name_conversation(text)
+            self._maybe_name_conversation(named)
             return
         # A COMPACTION holds the same lock a turn does, and `is_streaming` is
         # False for it (no turn is running), so without this the fall-through
@@ -10685,21 +10781,31 @@ class OperatorApp(App[None]):
             self._prompt_held_for_compaction = sent
             # Only when they differ, so the common path leaves this empty and
             # the hand-back below falls through to the held prompt itself.
-            self._typed_held_for_compaction = text if sent != text else ""
+            #
+            # `named`, not `text`: with a collapsed paste BOTH strings are the
+            # expanded payload, and the two consumers of this field each need
+            # the chip line instead. `on_compaction_ended` walks it for image
+            # citations (a `[Image #N]` inside a pasted log is not one the user
+            # wrote, and counting it reorders the attachments — the defect that
+            # handler already records for skill bodies), and the session-swap
+            # hand-back loads it into the composer, where returning 500 expanded
+            # lines instead of the chip would make the user delete by hand
+            # exactly what the collapse existed to spare them.
+            self._typed_held_for_compaction = named if sent != named else ""
             # From the MESSAGE, not from the widget: the composer clears itself
             # synchronously after posting and Textual delivers on a later tick,
             # so re-reading it here saw an empty map and queued the prompt
             # without its screenshot (review round 19).
             self._images_held_for_compaction = dict(attachments or {})
             self._append_block(NoticeBlock("queued — sends when compaction finishes", "note"))
-            self._maybe_name_conversation(text)
+            self._maybe_name_conversation(named)
             return
         self._start_turn(sent, images)
         # AFTER the turn is dispatched, and then concurrently with it: the
         # title is decoration, so it must never sit in front of the user's
         # first reply — but it must also not wait for the whole turn, which is
         # what used to make it arrive minutes late.
-        self._maybe_name_conversation(text)
+        self._maybe_name_conversation(named)
 
     def _start_turn(self, text: str, images: list[ImageContent] | None = None) -> None:
         """Run one user prompt as a turn, reporting a failure as a notice.
@@ -12524,7 +12630,7 @@ class OperatorApp(App[None]):
         if marker_text:
             from local_operator.tui.widgets.editor import IMAGE_MARKER
 
-            indices = [int(match.group(1)) for match in IMAGE_MARKER.finditer(marker_text)]
+            indices = [int(match.group("index")) for match in IMAGE_MARKER.finditer(marker_text)]
         mounted: list[ImageBlock] = []
         for index, image in enumerate(images):
             if len(images) <= 1:
@@ -12673,7 +12779,7 @@ class OperatorApp(App[None]):
         return RichBlock(Group(*rows))
 
     def _run_slash_command(
-        self, text: str, attachments: Mapping[int, Attachment] | None = None
+        self, text: str, attachments: Mapping[int, Marked] | None = None
     ) -> None:
         """Dispatch a typed slash command (with arguments) to its handler.
 
@@ -12702,6 +12808,33 @@ class OperatorApp(App[None]):
         entry = slash_command_for(text)
         command = f"/{entry.name}" if entry is not None else parts[0].lower()
         arg = parts[1].strip() if len(parts) > 1 else ""
+        # The argument of a ``consumes_prompt`` command with its collapsed
+        # pastes spliced back in. That flag's own definition is "this argument
+        # is free text destined for a model" (``autocomplete.py``), which is
+        # exactly the condition under which a ``[Paste #N, 240 lines]`` chip has
+        # to become its payload before anything reads it.
+        #
+        # Derived from the FLAG rather than from a list of command names,
+        # because the per-command form is what let this ship broken: the two
+        # commands that submit a prompt were spliced while ``/goal`` stored the
+        # bare chip as the standing objective — which then rides the system
+        # prompt's volatile tail on every later turn and every compaction, one
+        # paste poisoning the session with a dead reference (review round 2,
+        # MAJOR-1). A seventh ``consumes_prompt`` command inherits the splice
+        # instead of repeating the bug.
+        #
+        # Commands WITHOUT the flag deliberately keep the raw ``arg``: their
+        # arguments are selectors and names (``/model``, ``/resume``), where a
+        # marker cites nothing and expanding it would corrupt the lookup.
+        #
+        # ``/team`` and ``/agent`` are the one intended divergence, and they use
+        # ``arg`` below rather than this: both resolve IMAGE markers from their
+        # request tail, and ``resolve_markers`` orders those by where the
+        # citation sits, so a payload spliced in ahead of one would reorder the
+        # pictures. They expand downstream instead, in
+        # ``_submit_command_prompt``, after that walk has run — same property,
+        # one step later, for a reason the walk itself imposes.
+        prompt_arg = expand_pastes(arg, attachments) if attachments else arg
         notice = self._notice
 
         # A RemoteSession keeps process/terminal commands local, but every
@@ -12802,7 +12935,7 @@ class OperatorApp(App[None]):
         elif command == "/resume":
             self._cmd_resume(arg, notice)
         elif command == "/fork":
-            self._cmd_fork(arg, notice)
+            self._cmd_fork(prompt_arg, notice)
         elif command == "/rename":
             self._cmd_rename(arg, notice)
         elif command == "/model":
@@ -12832,14 +12965,15 @@ class OperatorApp(App[None]):
             else:
                 notice("context breakdown unavailable.")
         elif command == "/goal":
-            self._cmd_goal(arg, notice)
+            self._cmd_goal(prompt_arg, notice)
         elif command == "/loop":
-            self._cmd_loop(arg, notice)
+            self._cmd_loop(prompt_arg, notice)
         elif command == "/btw":
             # The RAW line, not just the argument: `/btw` is the one command
             # that has to retract its own entry from the prompt history, and
-            # what was recorded is what the user typed.
-            self._cmd_btw(arg, text)
+            # what was recorded is what the user typed — so ``text`` stays the
+            # chip line while the QUESTION carries the payload.
+            self._cmd_btw(prompt_arg, text)
         elif command == "/compact":
             self._cmd_compact()
         elif command == "/copy":
@@ -17274,8 +17408,10 @@ class OperatorApp(App[None]):
                 self._skills_by_name = {}
         return self._skills_by_name
 
-    def _expand_invocation(self, text: str) -> str | None:
-        """Expand a leading ``$skill`` into skill body + request, or ``None``.
+    def _expand_invocation(
+        self, text: str, attachments: Mapping[int, Marked] | None = None
+    ) -> str | None:
+        """Expand a leading ``$skill``, splicing pastes into the REQUEST only.
 
         ``None`` means "not an invocation, send the text unchanged" — the
         answer for ordinary prose, for ``$100``, and for any ``$word`` that is
@@ -17287,6 +17423,35 @@ class OperatorApp(App[None]):
         A body that cannot be read is not a silent failure: the notice says so
         and the raw text goes through untouched, because swallowing the user's
         request would be the worse half of the trade.
+
+        **The ORDER is the whole point** (design §2.6). ``parse_invocation``
+        reads the TYPED text — the chip line, pastes still collapsed — and the
+        payloads go in afterwards, into ``invocation.request`` alone. Two
+        consequences, both wanted:
+
+        - A draft that STARTS with ``[Paste #1, …]`` is not an invocation, and
+          must not become one. Expanding first and parsing after would let a
+          pasted document whose first line reads ``$research …`` fire a skill
+          nobody asked for.
+        - Expansion never reaches the SKILL.md body. That is the mirror of the
+          image defect ``on_compaction_ended`` records (a ``[Image #N]`` inside
+          a body shifted the citation positions and sent the attachments in the
+          wrong order): scoping the splice to the request closes the same hole
+          by construction rather than by hoping bodies never contain
+          ``[Paste #N]``.
+
+        ``SkillInvocation`` is a ``NamedTuple``, so the request is swapped with
+        ``_replace`` and every other field — ``typed`` above all, which is what
+        replay repaints the user's row from — rides through untouched. The
+        ``invocation=`` attribute ``typed`` feeds therefore keeps the CHIP, and
+        must: it travels INSIDE the payload the model receives, so expanding it
+        would send the paste twice on every turn of that message's life, to fix
+        a transcript row (review round 2, MAJOR-2). The live row is put back on
+        the typed line instead, which is what makes it agree with replay.
+
+        ``attachments`` is optional because a caller with no composer map behind
+        it still has a well-defined answer: nothing resolves, and the text goes
+        through as written.
         """
         skills = self._discovered_skills()
         if not skills:
@@ -17298,6 +17463,9 @@ class OperatorApp(App[None]):
             invocation = parse_invocation(text, skills)
             if invocation is None:
                 return None
+            invocation = invocation._replace(
+                request=expand_pastes(invocation.request, attachments or {})
+            )
             body = resolve_skill_url(f"skill://{invocation.skill.name}", skills)
             if not _skill_body_has_content(body):
                 # NOT a silent fall-through. Returning None here sends the raw

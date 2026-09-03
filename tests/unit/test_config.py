@@ -59,7 +59,10 @@ def test_config_manager_initialization(temp_config_dir):
     assert config_manager.get_config_value("conversation_length") == DEFAULT_CONFIG.get_value(
         "conversation_length"
     )
-    assert config_manager.get_config_value("providers") == {"openai": {"api": "responses"}}
+    assert config_manager.get_config_value("providers") == {
+        "openai": {"api": "responses"},
+        "anthropic": {"cache_ttl_1h_min_context_tokens": 150_000},
+    }
 
 
 def test_config_managers_do_not_share_nested_defaults(temp_config_dir):
@@ -194,7 +197,10 @@ def test_config_manager_load_partial_values(temp_config_dir):
         "detail_length"
     )
     assert config_manager.get_config_value("model_name") == DEFAULT_CONFIG.get_value("model_name")
-    assert config_manager.get_config_value("providers") == {"openai": {"api": "responses"}}
+    assert config_manager.get_config_value("providers") == {
+        "openai": {"api": "responses"},
+        "anthropic": {"cache_ttl_1h_min_context_tokens": 150_000},
+    }
 
 
 def test_config_manager_update_config(temp_config_dir):

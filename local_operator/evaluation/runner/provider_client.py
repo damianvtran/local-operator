@@ -5,9 +5,11 @@ episode cannot inherit the operator's live configuration. That constraint has
 to break somewhere for a real run, and it breaks here, behind
 :class:`~local_operator.evaluation.runner.model.EpisodeModelClient`.
 
-Strict decision parsing also lives here rather than in the runner core. The
-runner treats a malformed decision as a provider failure, so the parsing rules
-and the provider that produced them stay in the same module.
+Strict decision parsing also lives here rather than in the runner core. A
+malformed decision is surfaced as :class:`DecisionRejected` -- a billed call
+whose reply is unusable -- which the runner records and retries with the
+rejection fed back, so the parsing rules and the feedback that corrects them
+stay in the same module.
 
 **Context management** also lives here, on the central compaction engine
 (``local_operator.compaction``) rather than a second implementation. The
@@ -33,6 +35,7 @@ from local_operator.evaluation.evidence.models import RouteIdentity
 from local_operator.evaluation.protocol import ActionBatch, ComputerAction, Observation
 from local_operator.evaluation.runner.model import (
     CompactionRecord,
+    DecisionRejected,
     EpisodeTurn,
     ModelDecision,
     ModelUsage,
@@ -55,6 +58,12 @@ DEFAULT_KEEP_RECENT_FRAMES = 3
 #: batched into rebuilds instead of done per turn.
 DEFAULT_REBUILD_EVERY_FRAMES = 8
 
+#: Longest slice of a rejected reply replayed into the context as the model's
+#: own words before the correction. The reply has to be there -- the model
+#: must see WHAT it said to fix it -- but a runaway reply (a provider's
+#: max-token wall of prose) must not cost the whole window on the retry.
+MAX_REJECTED_REPLY_CHARS = 4_000
+
 #: Rendered in place of an observation's text when it is byte-identical to the
 #: previous turn's. The adapter owns observation text and the runner never
 #: second-guesses it; this is the one append-only-safe dedup, because it only
@@ -72,11 +81,12 @@ _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]*")
 def _action_schema_lines() -> list[str]:
     """Describe every action kind by reading the protocol models themselves.
 
-    A parse failure is TERMINAL for an episode -- there is no retry and no
-    repair -- so a prompt that under-specifies the wire shape is a correctness
-    defect, not prompt polish. Deriving the text from ``ComputerAction`` means a
-    new action kind or a changed literal cannot silently drift out of the
-    instructions the model is given.
+    A parse failure costs a billed corrective re-prompt at best and the
+    episode at worst (``EpisodeConfig.max_decision_retries``), so a prompt
+    that under-specifies the wire shape is a correctness defect, not prompt
+    polish. Deriving the text from ``ComputerAction`` means a new action kind
+    or a changed literal cannot silently drift out of the instructions the
+    model is given.
     """
 
     lines: list[str] = []
@@ -133,6 +143,17 @@ it, and "[screenshot omitted ...]" marks an older screenshot that a newer one
 has replaced. A message starting <previous-context-summary> summarises turns
 that are no longer shown.
 
+Every observation lists its frames on a "Frames:" line as "<frame_id>
+(<width>x<height>)", one per attached screenshot, in order. Any action that
+takes a "frame_id" MUST use one of the ids named on the CURRENT observation's
+"Frames:" line, exactly as written, and its x/y must lie inside that frame's
+width and height (0-based). Never invent a frame id or number the frames
+yourself.
+
+If a reply of yours is rejected, the next user message starts "Your previous
+reply was rejected:" and names the defect. Reply again for the SAME
+observation with a corrected batch; nothing was executed.
+
 Reply with a single JSON object and nothing else, with no prose and no code
 fence:
 
@@ -185,7 +206,7 @@ def parse_decision(
     observation is stale, and executing it would apply a decision made about a
     screen the environment has already moved past. ``ActionBatch.validate_for``
     rejects that at the adapter boundary, so the failure is surfaced here where
-    it can be attributed to the provider.
+    it can be attributed to the model and fed back to it.
     """
 
     try:
@@ -332,6 +353,7 @@ class _ContextBuilder:
             # part of the observation that followed it -- "the state after
             # that answer was delivered", as the system prompt promises.
             lines.append(f"Answer from the user: {previous.ask_answer}")
+        lines.append(f"Frames: {_frames_line(observation)}")
         lines.extend(["", rendered_text])
         content: list[Any] = [TextContent(text="\n".join(lines))]
         for frame in observation.frames:
@@ -347,6 +369,32 @@ class _ContextBuilder:
                 )
             )
         return Message(role="user", content=content)
+
+    def append_rejection(self, reply: str, diagnostic: str) -> None:
+        """Fold a rejected reply into the history so the next call corrects it.
+
+        Appended, never substituted: the bad reply goes in as the assistant's
+        own words and the diagnostic as the user turn that follows, which is
+        the only append-only way to tell the model what was wrong. The next
+        ``decide`` for the same observation then sends
+        ``user(observation) / assistant(bad) / user(rejection)`` and, once it
+        answers well, the runner's close of the turn appends that good batch
+        after the rejection -- a conversation that reads exactly as it
+        happened. The rendered/closed cursors are indices into the TURN
+        history, not into ``_messages``, so the extra pair does not disturb
+        them.
+        """
+        from local_operator.harness.types import Message, TextContent
+
+        shown = reply
+        if len(shown) > MAX_REJECTED_REPLY_CHARS:
+            shown = shown[:MAX_REJECTED_REPLY_CHARS] + "\n[... reply truncated]"
+        # A provider refuses an empty assistant message; a reply that was all
+        # whitespace is replayed as a marker so the pair stays well-formed.
+        self._messages.append(
+            Message(role="assistant", content=[TextContent(text=shown or "(empty reply)")])
+        )
+        self._messages.append(Message(role="user", content=[TextContent(text=diagnostic)]))
 
     def frames_in_history(self) -> int:
         from local_operator.compaction.pruning import count_frame_messages
@@ -457,18 +505,38 @@ class ProviderModelClient:
         if extra_usage is not None:
             usage = _add_usage(usage, extra_usage)
             cost_micros += extra_cost
-        return parse_decision(
-            text.strip(),
-            observation,
-            route=self._route,
-            usage=usage,
-            cost_micros=cost_micros,
-            stop_reason=stop_reason,
-            provider_request_id=provider_request_id,
-            prompt_cache_key=self._prompt_cache_key,
-            context_tokens=_estimate_context(messages),
-            compaction=compaction,
-        )
+        try:
+            return parse_decision(
+                text.strip(),
+                observation,
+                route=self._route,
+                usage=usage,
+                cost_micros=cost_micros,
+                stop_reason=stop_reason,
+                provider_request_id=provider_request_id,
+                prompt_cache_key=self._prompt_cache_key,
+                context_tokens=_estimate_context(messages),
+                compaction=compaction,
+            )
+        except DecisionParseError as error:
+            # The call happened and was billed; only the reply is unusable.
+            # Fold the rejection into the history NOW, before the runner
+            # decides whether to re-call, so a re-call for the same observation
+            # is corrective by construction. The billing provenance rides on
+            # the exception so the runner can write this attempt's triple.
+            diagnostic = _rejection_prompt(str(error), observation)
+            self._context.append_rejection(text, diagnostic)
+            raise DecisionRejected(
+                diagnostic,
+                route=self._route,
+                usage=usage,
+                cost_micros=cost_micros,
+                stop_reason=stop_reason,
+                provider_request_id=provider_request_id,
+                prompt_cache_key=self._prompt_cache_key,
+                context_tokens=_estimate_context(messages),
+                compaction=compaction,
+            ) from error
 
     async def _maybe_compact(self) -> tuple[CompactionRecord | None, ModelUsage | None, int]:
         """Run one compaction pass when the frame budget or the token threshold says so.
@@ -744,6 +812,44 @@ class ProviderModelClient:
                 # is worth carrying when the wire client reports one.
                 provider_request_id = _provider_request_id(event.provider_payload)
         return text, usage, cost_micros, stop_reason, provider_request_id, context_tokens
+
+
+def _frames_line(observation: Observation) -> str:
+    """``id (WxH)`` for every frame, or ``none`` when the observation has none.
+
+    This line is the frame-id CONTRACT made visible. The protocol lets an
+    adapter name its frames however it likes (OSWorld publishes ``screen``;
+    the test adapters publish ``frame-<n>``), and ``ActionBatch.validate_for``
+    refuses any id the observation does not carry -- so a model that was never
+    told the ids can only guess. The first paid episode guessed ``"1"``. The
+    geometry is the model-visible size because that is the coordinate space
+    the model's x/y are validated against.
+    """
+
+    if not observation.frames:
+        return "none"
+    return ", ".join(
+        f"{frame.frame_id} ({frame.geometry.model_visible.width}x"
+        f"{frame.geometry.model_visible.height})"
+        for frame in observation.frames
+    )
+
+
+def _rejection_prompt(reason: str, observation: Observation) -> str:
+    """The user turn that asks for a corrected reply.
+
+    Restates the observation id and the frame ids because those are the two
+    facts a rejected reply most often got wrong, and because the correction
+    is the LAST message in the request: a model reads it more reliably than
+    the same facts several messages up.
+    """
+
+    return (
+        f"Your previous reply was rejected: {reason}\n"
+        "Nothing was executed. Reply again for this same observation "
+        f"(Observation ID: {observation.observation_id}; Frames: "
+        f"{_frames_line(observation)}) with a corrected JSON batch and nothing else."
+    )
 
 
 def create_provider_model_client(

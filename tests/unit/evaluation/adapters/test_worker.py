@@ -248,6 +248,15 @@ class RescueAdapter:
     def __init__(self, metadata: AdapterMetadata) -> None:
         self.metadata = metadata
         self.cleanup_calls: list[str] = []
+        self.begin_rescue_calls: list[BeginRescueParams] = []
+
+    async def begin_rescue(self, params: BeginRescueParams) -> AckResult:
+        # Recorded so the worker test can assert the handoff actually reached
+        # adapter code. A rescue worker builds its teardown provider here and
+        # nowhere else, so an adapter that is never called can only report
+        # "could not look" for every action.
+        self.begin_rescue_calls.append(params)
+        return AckResult()
 
     async def cleanup(self, params: CleanupParams) -> CleanupResult:
         action_id = params.action_ids[0]
