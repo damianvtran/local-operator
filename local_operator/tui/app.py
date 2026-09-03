@@ -3048,9 +3048,7 @@ class OperatorApp(App[None]):
             model_name=str(
                 getattr(getattr(state, "effective_model", None), "display_name", "") or ""
             ),
-            effort=str(
-                getattr(getattr(state, "effective_model", None), "reasoning_effort", "") or ""
-            ),
+            effort=_effort_label(state),
             agent_profile=str(getattr(state, "active_agent", "") or ""),
             team=str(getattr(state, "active_team", "") or ""),
             cwd=str(getattr(state, "cwd", "") or ""),
