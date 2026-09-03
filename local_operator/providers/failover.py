@@ -313,6 +313,15 @@ class ProviderError(RenderedStreamError):
         self.retryable = retryable
         self.retry_after_ms = retry_after_ms
         self.auth_error = auth_error
+        #: Stamped at construction so the flag travels with the exception across
+        #: the layer boundary (see ``RenderedStreamError.connectivity_loss``):
+        #: the harness must decide whether an interrupted turn is continuable,
+        #: and it cannot import this module to ask. Computed by the SAME
+        #: classifier every other call site uses rather than re-derived, so
+        #: there is still exactly one definition of "the machine is offline".
+        #: Safe to evaluate here — the classifier reads only ``status`` and
+        #: ``message``, both already assigned above.
+        self.connectivity_loss = is_connectivity_loss(self)
 
     def __str__(self) -> str:
         """``<kind> (HTTP <status>, retry in <wait>): <the provider's words>``.

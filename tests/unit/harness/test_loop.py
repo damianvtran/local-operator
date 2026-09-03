@@ -15,6 +15,7 @@ import pytest
 import local_operator.harness.loop as loop_module
 from local_operator.harness.loop import (
     ABORT_DRAIN_TIMEOUT_S,
+    MAX_CONNECTIVITY_CONTINUATIONS,
     STEERING_INTERRUPT_POLL_S,
     AgentLoop,
     LoopContext,
@@ -2793,3 +2794,297 @@ async def test_a_raising_fork_predicate_never_breaks_the_turn():
 
     assert executed == ["echo"]
     assert any(isinstance(m, Message) and m.text == "done" for m in messages)
+
+
+# ---------------------------------------------------------------------------
+# Mid-stream connectivity loss: the laptop closed at home, opened at work
+# ---------------------------------------------------------------------------
+
+
+class FailingStream:
+    """Fake stream_fn whose Nth call dies PART WAY THROUGH the answer.
+
+    The failure is raised after the deltas have already been yielded, which is
+    the only shape that matters here: with nothing forwarded the provider layer
+    retries in place and the loop never sees a failure at all.
+    """
+
+    def __init__(
+        self, failures: list[BaseException | None], *, partial: str = "The answer is "
+    ) -> None:
+        self.failures = failures
+        self.partial = partial
+        self.requests: list[ChatRequest] = []
+
+    def __call__(self, request: ChatRequest, signal: AbortSignal | None):
+        index = len(self.requests)
+        self.requests.append(request)
+        failure = self.failures[index] if index < len(self.failures) else None
+
+        async def gen():
+            if failure is not None:
+                yield StreamTextDelta(delta=self.partial)
+                raise failure
+            yield StreamTextDelta(delta="42.")
+            yield StreamEndEvent(stop_reason="stop")
+
+        return gen()
+
+    def history(self, index: int) -> list[str]:
+        """``role:text`` of the messages the Nth request carried."""
+        return [f"{m.role}:{m.text}" for m in self.requests[index].messages]
+
+
+def _offline() -> ProviderError:
+    """The wrapped error a closed-then-moved laptop actually produces."""
+    error = ProviderError(
+        None,
+        "ConnectError: [Errno 8] nodename nor servname provided, or not known",
+        retryable=True,
+        kind="transient",
+    )
+    assert error.connectivity_loss, "fixture must be classified as a connectivity loss"
+    return error
+
+
+@pytest.mark.asyncio
+async def test_connectivity_loss_after_deltas_continues_the_turn() -> None:
+    """THE REPORTED BUG: the network changed mid-answer and killed the session.
+
+    The provider layer cannot retry this — the deltas are already on the user's
+    screen — so before this fix the run ended with `stop_reason="error"`. Now
+    the partial answer is committed as history and the turn continues, so the
+    user sees ONE uninterrupted answer.
+    """
+    stream = FailingStream([_offline(), None])
+    config = make_config(stream)
+
+    events = []
+    async for event in AgentLoop().run([Message.user("go")], LoopContext(), config, None):
+        events.append(event)
+
+    # The run did NOT end in an error: that is the whole fix.
+    ends = [e for e in events if isinstance(e, AgentEndEvent)]
+    assert len(ends) == 1
+    assert ends[0].error is None
+    assert ends[0].aborted is False
+
+    # The user sees the partial answer and its continuation, each exactly once.
+    on_screen = "".join(e.delta for e in events if e.type == "message_update")
+    assert on_screen == "The answer is 42."
+
+    # A visible notice explains the seam rather than the text silently jumping.
+    notices = [e.text for e in events if isinstance(e, NoticeEvent)]
+    assert any("network connection lost" in text for text in notices)
+
+    # THE NO-DUPLICATION INVARIANT, asserted structurally: the retry carries the
+    # partial answer as HISTORY, so the model writes the remainder instead of
+    # re-streaming what was already read.
+    history = stream.history(1)
+    assert history[:2] == ["user:go", "assistant:The answer is "]
+
+    # And it asks for a CONTINUATION rather than leaving the partial answer as a
+    # trailing assistant turn. That shape is load-bearing, not cosmetic: a
+    # trailing assistant message is a "prefill", which current Claude models
+    # reject with HTTP 400 ("Prefilling assistant messages is not supported for
+    # this model") — so the default model of this harness would turn a
+    # recoverable blip into a hard failure. Ending on a user turn also keeps the
+    # role alternation Anthropic documents.
+    assert len(history) == 3
+    assert history[2].startswith("user:")
+    assert "cut off" in history[2]
+
+    # The partial text keeps its trailing space, so the transcript is exactly
+    # what the user read. Legal only because the assistant turn is not final.
+    assert stream.requests[1].messages[-2].text == "The answer is "
+    assert stream.requests[1].messages[-1].role == "user"
+
+
+@pytest.mark.asyncio
+async def test_connectivity_loss_does_not_duplicate_the_partial_text() -> None:
+    """The continuation must never re-render text already in the transcript.
+
+    Asserted on the FINAL assembled messages as well as on the stream, because
+    a duplicate that only shows up in the persisted transcript is still a
+    duplicate the user reads on reload.
+    """
+    stream = FailingStream([_offline(), None])
+    config = make_config(stream)
+
+    messages = await AgentLoop().run_to_end([Message.user("go")], LoopContext(), config, None)
+
+    assistant_text = "".join(
+        m.text for m in messages if isinstance(m, Message) and m.role == "assistant"
+    )
+    assert assistant_text == "The answer is 42."
+    assert assistant_text.count("The answer is ") == 1
+
+
+@pytest.mark.asyncio
+async def test_mid_stream_5xx_after_deltas_still_ends_the_run() -> None:
+    """A PROVIDER failure mid-answer keeps the old terminal behaviour.
+
+    The distinction the fix rests on: an offline machine means nothing was wrong
+    with the request, so re-asking is the entire fix. A 500 means the provider
+    DID answer — replaying that turn would re-bill it and paper over a failure
+    the user needs to see.
+    """
+    boom = ProviderError(500, "internal server error", retryable=True)
+    assert not boom.connectivity_loss
+    stream = FailingStream([boom, None])
+    config = make_config(stream)
+
+    events = []
+    async for event in AgentLoop().run([Message.user("go")], LoopContext(), config, None):
+        events.append(event)
+
+    ends = [e for e in events if isinstance(e, AgentEndEvent)]
+    assert len(ends) == 1
+    assert ends[0].error is not None
+    assert "internal server error" in ends[0].error
+    # It never retried: one request only.
+    assert len(stream.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_connectivity_continuation_budget_surfaces_a_bounded_error() -> None:
+    """A genuinely dead network must END the run, not retry forever.
+
+    Every attempt fails offline, so the run exhausts
+    MAX_CONNECTIVITY_CONTINUATIONS and then surfaces the provider's own
+    diagnostic error — bounded, named, and not a hang.
+    """
+    failures: list[BaseException | None] = [_offline() for _ in range(20)]
+    stream = FailingStream(failures)
+    config = make_config(stream)
+
+    events = []
+    async for event in AgentLoop().run([Message.user("go")], LoopContext(), config, None):
+        events.append(event)
+
+    ends = [e for e in events if isinstance(e, AgentEndEvent)]
+    assert len(ends) == 1
+    assert ends[0].error is not None
+    assert "Errno 8" in ends[0].error
+    # Bounded: the initial attempt plus exactly the continuation budget.
+    assert len(stream.requests) == MAX_CONNECTIVITY_CONTINUATIONS + 1
+
+
+@pytest.mark.asyncio
+async def test_connectivity_continuation_drops_truncated_tool_calls() -> None:
+    """A tool call still streaming when the socket died is DROPPED, not run.
+
+    Its arguments are truncated JSON: executing it would run a call the model
+    never finished asking for. Dropping it also keeps the wire legal — no
+    tool_use block means no unmatched tool_result.
+    """
+    executed: list[str] = []
+
+    class _PartialCallStream:
+        def __init__(self) -> None:
+            self.requests: list[ChatRequest] = []
+
+        def __call__(self, request: ChatRequest, signal: AbortSignal | None):
+            index = len(self.requests)
+            self.requests.append(request)
+
+            async def gen():
+                if index == 0:
+                    yield StreamTextDelta(delta="reading it ")
+                    # Arguments cut mid-JSON by the network going away.
+                    yield tool_call_delta(0, id="c1", name="echo", args='{"text": "hal')
+                    raise _offline()
+                yield StreamTextDelta(delta="done")
+                yield StreamEndEvent(stop_reason="stop")
+
+            return gen()
+
+    stream = _PartialCallStream()
+    config = make_config(stream)
+
+    messages = await AgentLoop().run_to_end(
+        [Message.user("go")], LoopContext(tools=[echo_tool(executed)]), config, None
+    )
+
+    # The half-dictated call never ran.
+    assert executed == []
+    # And no assistant message carries it, so the wire stays legal.
+    assert all(
+        not m.tool_calls for m in messages if isinstance(m, Message) and m.role == "assistant"
+    )
+    assert any(isinstance(m, Message) and m.text == "done" for m in messages)
+
+
+@pytest.mark.asyncio
+async def test_connectivity_loss_before_any_delta_is_unchanged() -> None:
+    """The pre-first-token case belongs to the PROVIDER layer and must stay
+    there: nothing was forwarded, so the driver retries in place and the loop
+    never sees a failed turn at all. Asserted here so the harness fix cannot
+    quietly start intercepting a case it does not own."""
+
+    class _EmptyThenOk:
+        def __init__(self) -> None:
+            self.requests: list[ChatRequest] = []
+
+        def __call__(self, request: ChatRequest, signal: AbortSignal | None):
+            self.requests.append(request)
+
+            async def gen():
+                # No delta before the end: the provider layer's own retry would
+                # have handled a failure here, so the loop sees a clean turn.
+                yield StreamTextDelta(delta="42.")
+                yield StreamEndEvent(stop_reason="stop")
+
+            return gen()
+
+    stream = _EmptyThenOk()
+    config = make_config(stream)
+
+    events = []
+    async for event in AgentLoop().run([Message.user("go")], LoopContext(), config, None):
+        events.append(event)
+
+    assert len(stream.requests) == 1
+    assert [e.text for e in events if isinstance(e, NoticeEvent)] == []
+
+
+@pytest.mark.asyncio
+async def test_connectivity_continuation_request_is_wire_legal_for_anthropic() -> None:
+    """The continuation must SERIALIZE legally, not merely look right in the loop.
+
+    Two Anthropic rules make the obvious implementation — leave the partial
+    answer as the last message and re-send — a hard 400, which would convert a
+    recoverable network blip into a dead run on this harness's own default
+    model:
+
+    * a trailing assistant message is a PREFILL, and current Claude models
+      answer "Prefilling assistant messages is not supported for this model";
+    * a final assistant message may not end in whitespace, and an interrupted
+      delta ("The answer is ") is precisely how one is produced.
+
+    Asserted through the REAL client body builder rather than by re-reading the
+    loop's own list, because the serializer is where the rule actually bites.
+    """
+    from local_operator.providers.clients import AnthropicClient
+
+    stream = FailingStream([_offline(), None])
+    config = make_config(stream)
+    await AgentLoop().run_to_end([Message.user("go")], LoopContext(), config, None)
+
+    retry_request = stream.requests[1]
+    body = AnthropicClient("https://api.anthropic.com")._build_body(
+        ChatRequest(
+            model=ModelSpec(provider="anthropic", model_id="claude-opus-5"),
+            messages=retry_request.messages,
+        )
+    )
+    roles = [entry["role"] for entry in body["messages"]]
+
+    # Not a prefill: the request ends on a user turn.
+    assert roles[-1] == "user"
+    # Roles alternate, which is what Anthropic documents for its turn model.
+    assert roles == ["user", "assistant", "user"]
+    # The one assistant turn is not final, so its trailing space is legal and
+    # the transcript can stay byte-identical to what was displayed.
+    assistant_text = body["messages"][1]["content"][0]["text"]
+    assert assistant_text == "The answer is "

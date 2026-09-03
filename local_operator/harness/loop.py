@@ -140,6 +140,39 @@ STEERING_INTERRUPT_POLL_S = 0.25
 #: without burning the user's quota on a model that cannot answer today.
 MAX_EMPTY_TRUNCATION_RETRIES = 2
 
+#: How many times ONE run will continue a turn that the network cut short —
+#: the laptop closed at home and opened at work, which is minutes of no route
+#: to anywhere.
+#:
+#: The provider layer already waits that reconnect out patiently
+#: (``CONNECTIVITY_MAX_RETRIES``, ~9 minutes of backoff against the SAME
+#: target). This is the outer budget for the case that wait was not enough, and
+#: it is deliberately small: each continuation buys another full patient wait,
+#: so three is ~27 minutes of tolerated outage — past any plausible commute —
+#: while still bounded, because a genuinely dead network has to surface an
+#: error rather than pin the session in a silent retry forever.
+#:
+#: Only a CONNECTIVITY loss is continued, never an ordinary stream error. When
+#: the machine is offline nothing was wrong with the request, the credential or
+#: the provider, so re-asking is the whole fix; a 5xx or a refusal means the
+#: provider DID answer, and replaying that turn would re-bill it to hide a
+#: failure the user needs to see.
+MAX_CONNECTIVITY_CONTINUATIONS = 3
+
+#: What the loop tells the model after the network cut its answer short.
+#:
+#: Phrased as an instruction about what the USER can see, because that is the
+#: constraint the model cannot infer: the partial text is in the transcript and
+#: has already been read, so restarting the answer would show it twice. It is a
+#: user-role message rather than a bare trailing assistant turn on purpose —
+#: see the call site: prefilling is rejected by current Claude models.
+CONNECTIVITY_CONTINUATION_PROMPT = (
+    "[system] Your previous response was cut off mid-sentence by a network "
+    "interruption. The partial text above has already been shown to the user. "
+    "Continue it seamlessly from exactly where it stopped — do not repeat any "
+    "of it, do not restart, and do not apologise or mention the interruption."
+)
+
 
 def _lower_effort(model: "ModelSpec") -> str | None:
     """The effort one rung below ``model.reasoning_effort`` on its own ladder.
@@ -488,6 +521,11 @@ class AgentLoop:
         # that DID produce text or calls is truncated, not silent, and keeps
         # the old pair-and-stop behaviour.
         empty_truncation_retries = 0
+        # Turns this run has continued after the network cut them short. Run-
+        # scoped, not per-turn: a laptop carried between networks can interrupt
+        # the same run more than once, and the budget bounds the RUN's total
+        # tolerance for that rather than handing each turn a fresh allowance.
+        connectivity_continuations = 0
         # The effort ceiling an empty-truncation retreat imposed; rides on
         # every request under it so the session's frozen auto-effort cannot
         # raise the retry back to the rung that produced nothing.
@@ -538,6 +576,7 @@ class AgentLoop:
                             return
 
                     assistant, stop_reason, stream_error = None, "stop", None
+                    turn_connectivity_loss = False
                     async for event in self._model_turn(
                         context,
                         config,
@@ -555,10 +594,104 @@ class AgentLoop:
                                 event.stop_reason,
                                 event.error,
                             )
+                            turn_connectivity_loss = event.connectivity_loss
                         else:
                             yield event
                     if assistant is None:
                         raise RuntimeError("model turn produced no assistant message")
+
+                    if turn_connectivity_loss:
+                        # THE NETWORK WENT AWAY MID-TURN — the laptop was closed
+                        # at home and opened at work. The provider layer has
+                        # already spent its patient budget waiting for a route
+                        # back (~9 min of connectivity backoff), and there is
+                        # still none, so this is the outer, coarser retry.
+                        #
+                        # Only reachable once output was already forwarded: with
+                        # nothing forwarded, the failover driver retries in place
+                        # and the turn never ends this way. That is exactly why
+                        # the driver CANNOT fix this case itself — those deltas
+                        # are already in the user's transcript, so re-issuing the
+                        # same request there would stream them a second time
+                        # (the invariant `test_a_turn_does_NOT_replay_output_the_
+                        # user_already_read` locks down). Continuing HERE is what
+                        # makes a retry safe: the partial answer is committed to
+                        # the context as an assistant message just below, so the
+                        # next request carries it as history and the model writes
+                        # only the REMAINDER. Nothing the user has read is
+                        # re-rendered, because the continuation is a new message
+                        # rather than a replay of the old one.
+                        #
+                        # The cost of that safety is honesty about the seam: the
+                        # model resumes from the text, not from its own hidden
+                        # state, so a sentence cut mid-word is continued rather
+                        # than rewritten. That beats the alternative this
+                        # replaces, which was ending the entire run.
+                        if connectivity_continuations < MAX_CONNECTIVITY_CONTINUATIONS:
+                            connectivity_continuations += 1
+                            # Dangling tool calls are DROPPED, not paired. A call
+                            # whose arguments were still streaming when the socket
+                            # died is truncated JSON — executing it would run a
+                            # tool the model never finished asking for. Clearing
+                            # them also keeps the wire legal without synthetic
+                            # results: no tool_use block means no unmatched
+                            # tool_result, and the retry re-decides what to call.
+                            assistant.tool_calls = []
+                            if assistant.text:
+                                # The partial answer becomes history, which is
+                                # what makes the continuation additive instead of
+                                # a replay.
+                                #
+                                # The partial text is committed VERBATIM,
+                                # trailing space and all, so the transcript is
+                                # byte-for-byte what the user actually read. That
+                                # is safe only because of the continuation
+                                # message appended directly below: Anthropic
+                                # rejects trailing whitespace on a FINAL
+                                # assistant message ("final assistant content
+                                # cannot end with trailing whitespace"), and an
+                                # interrupted delta is exactly how one is
+                                # produced — but this message is never final, so
+                                # the rule does not apply and nothing has to be
+                                # trimmed away from what was displayed.
+                                context.messages.append(assistant)
+                                new_messages.append(assistant)
+                                # A CONTINUATION INSTRUCTION, not a bare trailing
+                                # assistant turn. Leaving the partial answer last
+                                # is "prefilling", which current Claude models
+                                # refuse outright ("Prefilling assistant messages
+                                # is not supported for this model", HTTP 400) —
+                                # so the very models this harness defaults to
+                                # would turn a recoverable network blip into a
+                                # hard failure. A user-role instruction is legal
+                                # on every wire, keeps the alternation Anthropic
+                                # documents, and states the constraint the model
+                                # must respect: continue, do not restart, because
+                                # the user has ALREADY READ the text above.
+                                context.messages.append(
+                                    Message.user(CONNECTIVITY_CONTINUATION_PROMPT)
+                                )
+                            # No text and no calls? The message is DROPPED rather
+                            # than committed: there is nothing to continue from,
+                            # and an assistant message with no content blocks is
+                            # rejected outright on the Anthropic wire
+                            # ("text content blocks must be non-empty"), which
+                            # would kill the very run this is rescuing. The retry
+                            # simply re-asks the original question.
+                            yield NoticeEvent(
+                                text=(
+                                    "network connection lost mid-response — "
+                                    "reconnected, continuing where it left off"
+                                ),
+                                kind="warning",
+                            )
+                            has_more_tool_calls = True
+                            continue
+                        # Budget spent and still offline: fall through to the
+                        # terminal branch below, which surfaces the provider's
+                        # own diagnostic error. A dead network must end the run
+                        # with a bounded, named failure rather than retry forever.
+
                     if assistant.usage is not None and assistant.usage.context_tokens:
                         # Only a REPORTED count advances the hint: a wire that
                         # omits it must not blank a figure the previous call
@@ -873,6 +1006,9 @@ class AgentLoop:
         provider_payload: dict[str, Any] | None = None
         stop_reason = "stop"
         error: str | None = None
+        # Set only by the except arm below, from the exception's own flag: the
+        # harness cannot import ``providers`` to classify this itself.
+        connectivity_loss = False
 
         yield TurnStartEvent()
         yield MessageStartEvent(message=assistant)
@@ -1040,6 +1176,19 @@ class AgentLoop:
             )
             stop_reason = "aborted" if (signal is not None and signal.aborted) else "error"
             error = error or str(exc)
+            # A stream the NETWORK cut, as opposed to one a provider failed. Read
+            # off the exception rather than re-classified here: the single
+            # definition lives in ``providers.failover.is_connectivity_loss`` and
+            # rides out on ``RenderedStreamError.connectivity_loss``. ``getattr``
+            # because this arm also catches defects and third-party exceptions,
+            # which carry no such attribute.
+            #
+            # Not applied to an ABORT: the user pressed the key, and a turn they
+            # stopped must stay stopped even if a connectivity error is what the
+            # cancelled socket happened to raise on its way out.
+            connectivity_loss = stop_reason == "error" and bool(
+                getattr(exc, "connectivity_loss", False)
+            )
 
         if signal is not None and signal.aborted:
             # A stream CUT by the abort ends without its ``StreamEndEvent``, so
@@ -1114,7 +1263,12 @@ class AgentLoop:
             pass
 
         yield MessageEndEvent(message=assistant)
-        yield _ModelTurnResult(message=assistant, stop_reason=stop_reason, error=error)
+        yield _ModelTurnResult(
+            message=assistant,
+            stop_reason=stop_reason,
+            error=error,
+            connectivity_loss=connectivity_loss,
+        )
 
     @staticmethod
     def _assemble_tool_call(state: dict[str, Any]) -> ToolCall:
@@ -2161,3 +2315,7 @@ class _ModelTurnResult:
     message: Message
     stop_reason: str
     error: str | None = None
+    #: The stream died because the MACHINE was offline, not because the provider
+    #: answered badly. Carried out to the run loop, which continues such a turn
+    #: instead of ending the run on it — see ``MAX_CONNECTIVITY_CONTINUATIONS``.
+    connectivity_loss: bool = False
