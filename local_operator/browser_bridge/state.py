@@ -7,6 +7,7 @@ session can never consume a half-written key or port.
 
 from __future__ import annotations
 
+import enum
 import json
 import os
 import tempfile
@@ -92,17 +93,68 @@ def pid_alive(pid: int) -> bool:
     return True
 
 
-def available(root: Path | None = None, *, now: float | None = None) -> bool:
-    """Cheap file-only availability gate used while constructing every session."""
-    current = read(root)
-    if current is None:
-        return False
+def heartbeat_age(current: BridgeState, *, now: float | None = None) -> float:
+    """Seconds since the daemon last republished. Negative ages clamp to 0.
+
+    Clock skew (or a state file written by a daemon whose clock ran ahead) must
+    never read as "fresher than fresh" and must never render as a negative age
+    in diagnostics, so the floor is 0.
+    """
     timestamp = time.time() if now is None else now
-    return (
-        current.extension_connected
-        and pid_alive(current.pid)
-        and timestamp - current.heartbeat_at <= HEARTBEAT_TIMEOUT_S
-    )
+    return max(0.0, timestamp - current.heartbeat_at)
+
+
+class Liveness(enum.Enum):
+    """What the discovery FILE alone can honestly conclude about the daemon.
+
+    The file heartbeat is a liveness PROXY, and it lies in both directions: it
+    goes stale while the daemon is perfectly healthy (the heartbeat writer can
+    die on its own — see ``BridgeService._supervise``, or the daemon can be
+    SIGSTOPped) and it stays fresh for a few seconds after a daemon is killed.
+    Collapsing that into one bool is what made a healthy daemon read as a
+    permanent "no": every session silently fell back to cmux while
+    ``lop browser status`` — which reads the LIVE ``/health`` socket — kept
+    reporting the extension connected, and nothing reconciled the two.
+
+    So the file answers three states, not two, and the caller decides how much
+    a given answer is worth paying for:
+
+    - ``ABSENT``  no daemon, or no browser attached. A definite no; never probe.
+    - ``FRESH``   heartbeat inside the timeout. A definite yes; never probe.
+    - ``STALE``   heartbeat expired but the pid is ALIVE and an extension was
+      attached when the file was last written. Genuinely unknown from the file:
+      only a socket round-trip can settle it (``bridge_browser_reachable``).
+    """
+
+    ABSENT = "absent"
+    FRESH = "fresh"
+    STALE = "stale"
+
+
+def liveness(
+    root: Path | None = None, *, now: float | None = None
+) -> tuple[Liveness, BridgeState | None]:
+    """Classify the daemon from the file alone: no socket, no subprocess."""
+    current = read(root)
+    if current is None or not current.extension_connected or not pid_alive(current.pid):
+        return Liveness.ABSENT, current
+    if heartbeat_age(current, now=now) <= HEARTBEAT_TIMEOUT_S:
+        return Liveness.FRESH, current
+    return Liveness.STALE, current
+
+
+def available(root: Path | None = None, *, now: float | None = None) -> bool:
+    """Cheap file-only availability gate used while constructing every session.
+
+    Deliberately still FILE-ONLY and still false for a stale heartbeat: this
+    runs while constructing every session and on the `createIf` tool-gating
+    path, where a blocking socket probe would tax startup for every session on
+    the machine. A stale-but-alive daemon is rescued on the browser path
+    instead, by :func:`~local_operator.browser_bridge.backend.
+    bridge_browser_reachable`, which pays for one bounded probe only when it is
+    about to condemn the bridge.
+    """
+    return liveness(root, now=now)[0] is Liveness.FRESH
 
 
 def remove(root: Path | None = None) -> None:

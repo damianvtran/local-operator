@@ -6039,6 +6039,54 @@ def bridge_browser_available() -> bool:
     return available()
 
 
+async def bridge_browser_reachable() -> bool:
+    """Browser-path availability: the file probe, plus one socket confirmation.
+
+    Used instead of :func:`bridge_browser_available` everywhere a browser
+    ACTION decides which backend to use, because the cheap file probe reports a
+    healthy daemon as gone once its heartbeat writer stops. It only pays for a
+    socket when it is about to condemn a bridge whose pid is alive.
+
+    The cheap check runs FIRST and short-circuits, so the common case costs
+    exactly what it did before and no socket is opened. The probe exists only
+    to ACQUIT a daemon the file was about to condemn.
+    """
+    if bridge_browser_available():
+        return True
+    from local_operator.browser_bridge.backend import (
+        bridge_browser_reachable as reachable,
+    )
+
+    return await reachable()
+
+
+def _bridge_demotion_hint() -> str:
+    """Why the extension is not being used, when it looked like it should be.
+
+    A session that had been driving the extension and then finds it
+    unavailable used to get a bare "not supported on the cmux backend", with
+    nothing linking that to the bridge having gone away. That is what led an
+    agent to conclude the bridge was "bound" by an orphan tab and abandon it
+    for a whole session. Naming the demotion and the one-line repair turns an
+    hour of guessing into a single command.
+    """
+    from local_operator.browser_bridge import state as state_store
+
+    try:
+        status, current = state_store.liveness()
+    except Exception:  # noqa: BLE001 - a diagnostic may never raise
+        return ""
+    if status is state_store.Liveness.STALE and current is not None:
+        age = state_store.heartbeat_age(current)
+        return (
+            f" NOTE: this session was DEMOTED from the extension to cmux — the bridge daemon "
+            f"(pid {current.pid}) is running but its discovery heartbeat is {age:.0f}s stale, "
+            "so it advertised itself as unavailable. Run 'lop browser status --repair' to "
+            "reconcile it, then retry."
+        )
+    return ""
+
+
 def _browser_requester(context: ToolContext | None, tool_call_id: str) -> str:
     """The session-scoped identity the extension binds approvals to.
 
@@ -6831,7 +6879,10 @@ async def execute_browser(
             f"unknown action: {action} (expected one of {', '.join(BROWSER_ACTIONS)})",
         )
     cmux_available = cmux_browser_available()
-    bridge_available = bridge_browser_available()
+    # The socket-confirming probe, not the bare file check: a healthy daemon
+    # whose heartbeat writer stopped must not silently demote this session to
+    # cmux. It costs a round-trip only in the stale-but-alive case.
+    bridge_available = await bridge_browser_reachable()
     if not cmux_available and not bridge_available:
         return _error(
             tool_call_id,
@@ -6862,7 +6913,7 @@ async def execute_browser(
                 f"'{action}' is not supported on the cmux backend — cmux has no "
                 "site-permission prompts; navigation works directly. This action only "
                 "exists for the Local Operator browser extension ('lop browser status' / "
-                "'lop browser install').",
+                "'lop browser install')." + _bridge_demotion_hint(),
             )
         return await _bridge_access(tool_call_id, action, params, context)
 
@@ -6903,7 +6954,7 @@ async def execute_browser(
                 "'tabs' is not supported on the cmux backend — use the Local Operator "
                 "browser extension (run 'lop browser status' / 'lop browser install' to "
                 "set it up). cmux has no multi-tab surface registry, so this action only "
-                "works through the extension bridge.",
+                "works through the extension bridge." + _bridge_demotion_hint(),
             )
         return await _bridge_tabs(tool_call_id, state)
     if not state.surface_id:
@@ -6921,7 +6972,7 @@ async def execute_browser(
             f"'{action}' is not supported on the cmux backend — use the Local Operator "
             "browser extension (run 'lop browser status' / 'lop browser install' to set it "
             "up). cmux has no console-log tap or background-tab scroll primitive, so this "
-            "action only works through the extension bridge.",
+            "action only works through the extension bridge." + _bridge_demotion_hint(),
         )
     # ONE liveness probe here rather than one per action body, and never inside
     # a poll loop: cmux answers a dead handle by silently retargeting the

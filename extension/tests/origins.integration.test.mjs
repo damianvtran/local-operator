@@ -60,6 +60,13 @@ function installChromeStub(actionFailures = new Set(), notificationFailures = ne
       onEvent: { addListener: () => {}, removeListener: () => {} },
       onDetach: { addListener: () => {} }, sendCommand: async () => ({}),
     },
+    // The worker registers tab-lifecycle listeners at TOP LEVEL (MV3 requires
+    // it: only listeners present during the first synchronous evaluation wake
+    // a suspended worker), so they are wired up merely by importing it.
+    tabs: {
+      get: async () => ({}), remove: async () => {},
+      onRemoved: { addListener: () => {} }, onReplaced: { addListener: () => {} },
+    },
     notifications: {
       create: async (...args) => {
         notificationCalls.push(["create", args]);

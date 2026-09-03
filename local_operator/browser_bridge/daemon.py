@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import errno
 import hashlib
 import json
 import logging
@@ -17,8 +18,9 @@ import os
 import secrets
 import time
 from contextlib import asynccontextmanager, suppress
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Awaitable, Callable
 
 import uvicorn
 from pydantic import ValidationError
@@ -54,6 +56,10 @@ PAIR_TTL_S = 120.0
 PAIR_MAX_ATTEMPTS = 5
 PAIRING_FILENAME = "browser/pairing.json"
 PENDING_FILENAME = "run/browser/pairing-pending.json"
+#: Ceiling on the supervisor's per-failure backoff. A loop whose iteration
+#: keeps raising must not spin a core or flood the log, but must still recover
+#: promptly once the cause clears, so the delay grows to this and stops.
+SUPERVISOR_BACKOFF_CAP_S = 30.0
 #: Poll granularity for the extendable command wait. A pending future is
 #: normally resolved by the receive loop the instant the response lands; this
 #: only bounds how quickly a deadline EXTENSION (awaiting_origin) is noticed.
@@ -108,6 +114,21 @@ def reset_pairing(root: Path | None = None) -> None:
             path.unlink()
 
 
+#: Key for driven-tab records that arrive without a surface handle (an older
+#: extension build). One reserved key keeps a mixed-version pair reporting a
+#: single driven tab rather than one phantom per navigation.
+_UNKEYED_TAB = ""
+
+
+@dataclass
+class DrivenTab:
+    """One tab the extension is currently driving, as last reported."""
+
+    url: str
+    title: str
+    updated_at: float
+
+
 class ExtensionLink:
     """The one connected extension plus in-flight request correlation."""
 
@@ -122,13 +143,77 @@ class ExtensionLink:
         # this to extend the deadline past the base command timeout (A3), and
         # the popup/status surfaces read it so a pending approval is visible.
         self.awaiting_origin: dict[str, str] = {}
-        # Last known URL/title of the tab the agent drives, pushed by the
-        # extension so the Connected popup and `status` can show the human WHAT
-        # is being driven — the tab is inactive, so the debugger infobar alone
-        # is not a signal the user sees (finding U3).
-        self.current_url = ""
-        self.current_title = ""
+        # Last known URL/title PER DRIVEN TAB, keyed by the extension's surface
+        # handle, pushed by the extension so the Connected popup and `status`
+        # can show the human WHAT is being driven — the tab is inactive, so the
+        # debugger infobar alone is not a signal the user sees (finding U3).
+        #
+        # Per-tab rather than one global slot: sessions get a tab each (up to
+        # MAX_SURFACES), so a single last-writer-wins field showed whichever
+        # tab was touched most recently as though it were THE bound tab. When
+        # that tab then closed without anything clearing the field, `status`
+        # advertised a URL whose tab — and whose server — were long gone, which
+        # read to both the user and the agent as a system-wide lock held by a
+        # phantom. A dict makes "how many tabs are driven" answerable, and
+        # makes closing one tab clear exactly that tab.
+        self.driven: dict[str, DrivenTab] = {}
         self.send_lock = asyncio.Lock()
+
+    @property
+    def current_url(self) -> str:
+        """Most recently driven live tab's URL, or "" when none is driven.
+
+        Kept as a property because /health, the popup, and `status` are an
+        established contract; "" now genuinely means "nothing is driven"
+        rather than "nobody has updated this field yet".
+        """
+        latest = self._latest_driven()
+        return latest.url if latest else ""
+
+    @property
+    def current_title(self) -> str:
+        latest = self._latest_driven()
+        return latest.title if latest else ""
+
+    def _latest_driven(self) -> DrivenTab | None:
+        return max(self.driven.values(), key=lambda tab: tab.updated_at, default=None)
+
+    def note_driven(self, tab: str, url: str, title: str) -> None:
+        """Record/refresh one driven tab.
+
+        The handle is absent in two cases, and conflating them would invent
+        phantoms — the exact class of bug this change removes:
+
+        - An OLDER extension that only ever sent a bare ``tab_update``. There
+          is no handle to be had, so those collapse onto one reserved key and a
+          mixed-version pair reports a single driven tab, not one entry per
+          navigation.
+        - A handle-less command RESULT (``goto`` returns url/title but no
+          ``tab``) arriving just after the worker's keyed ``tab_update`` for
+          the same navigation. Creating an unkeyed entry there would double-
+          count one tab. So when tabs are already tracked, a handle-less update
+          REFRESHES the most recent one instead of adding to the map.
+        """
+        key = tab or _UNKEYED_TAB
+        if not tab and self.driven:
+            latest = self._latest_driven()
+            key = next((k for k, v in self.driven.items() if v is latest), _UNKEYED_TAB)
+        self.driven[key] = DrivenTab(url=url, title=title, updated_at=time.time())
+
+    def note_closed(self, tab: str) -> None:
+        """Drop one closed tab, or every tab when the handle is unknown.
+
+        A handle-less ``tab_closed`` comes either from an older extension or
+        from a teardown that could not name the surface; blanking everything is
+        the safe reading there, because the alternative (keeping entries alive)
+        is exactly the phantom this fixes. A handle-carrying event drops only
+        that tab, so one session closing its tab never blanks another's.
+        """
+        if tab:
+            self.driven.pop(tab, None)
+            self.driven.pop(_UNKEYED_TAB, None)
+        else:
+            self.driven.clear()
 
     async def send(self, payload: dict[str, Any]) -> None:
         websocket = self.websocket
@@ -145,8 +230,9 @@ class ExtensionLink:
                 future.set_exception(RuntimeError("extension disconnected"))
         self.pending.clear()
         self.awaiting_origin.clear()
-        self.current_url = ""
-        self.current_title = ""
+        # Nothing is driven once the browser is gone: the surfaces live in the
+        # extension's session storage and do not outlive the connection.
+        self.driven.clear()
 
 
 class BridgeService:
@@ -165,6 +251,9 @@ class BridgeService:
         self._heartbeat_task: asyncio.Task[None] | None = None
         self._ping_task: asyncio.Task[None] | None = None
         self._revoke_task: asyncio.Task[None] | None = None
+        # Consecutive failed discovery-file writes, so recovery can be logged
+        # once rather than on every tick (see publish_safely).
+        self._publish_failures = 0
         # Per-tab command serialization. v1 is explicitly a SINGLE active
         # browser surface (one extension, one dedicated tab): the design's
         # "session->tab table" is deferred, and instead of silently
@@ -181,19 +270,113 @@ class BridgeService:
         self.state.browser_name = self.link.browser
         state_store.publish(self.state, self.root)
 
-    async def _heartbeat(self) -> None:
-        while True:
+    def publish_safely(self) -> bool:
+        """Publish discovery state, absorbing a failed write instead of raising.
+
+        Every event-driven caller (pairing, connect, disconnect, tab updates)
+        used to publish inline and unguarded. A single failed write there took
+        down whichever coroutine happened to be running, and on the heartbeat
+        path it killed the only task that refreshes the file — after which
+        ``state.available()`` was false for EVERY session on the machine, for
+        the rest of the daemon's life, while ``/health`` kept answering 200.
+        That contradiction is the whole incident (a full disk raised ENOSPC out
+        of ``tempfile.mkstemp``; nothing restarted the writer or logged that it
+        had gone).
+
+        Publishing is a best-effort CACHE refresh, never a correctness
+        requirement: the daemon's authoritative state lives in memory and is
+        served by ``/health``. So a failed write is logged and swallowed, and
+        the next heartbeat tick retries — which is what makes recovery
+        automatic once the disk drains.
+        """
+        try:
             self.publish()
-            await asyncio.sleep(state_store.HEARTBEAT_INTERVAL_S)
+            if self._publish_failures:
+                logger.warning(
+                    "browser bridge state file writable again after %d failed attempt(s)",
+                    self._publish_failures,
+                )
+                self._publish_failures = 0
+            return True
+        except OSError as error:
+            self._publish_failures += 1
+            # ENOSPC is the one a user can actually act on, and it is what
+            # bit this machine, so it gets its own actionable line rather than
+            # being buried in a generic write failure.
+            if error.errno == errno.ENOSPC:
+                logger.error(
+                    "browser bridge cannot write %s: the disk is full. Sessions will fall "
+                    "back to cmux until space is freed; the daemon keeps serving /health "
+                    "and recovers on its own once the write succeeds.",
+                    state_store.state_path(self.root),
+                )
+            else:
+                logger.warning(
+                    "browser bridge state publish failed (attempt %d); retrying next tick",
+                    self._publish_failures,
+                    exc_info=True,
+                )
+        except Exception:  # noqa: BLE001 - a cache refresh may never kill a loop
+            self._publish_failures += 1
+            logger.warning(
+                "browser bridge state publish failed unexpectedly (attempt %d)",
+                self._publish_failures,
+                exc_info=True,
+            )
+        return False
+
+    async def _supervise(self, name: str, body: Callable[[], Awaitable[None]]) -> None:
+        """Run one iteration-based background loop forever, come what may.
+
+        The three background loops here are LIVENESS infrastructure: if one
+        exits, the daemon does not crash and nothing notices — it just quietly
+        stops doing its job, which is strictly worse than a crash because the
+        process keeps answering /health as though it were healthy. That is how
+        a full disk turned into "every session falls back to cmux forever while
+        status says the extension is connected".
+
+        So no per-iteration exception may end a loop. Cancellation still ends
+        it promptly (shutdown depends on that), and a genuinely persistent
+        failure is rate-limited in the log rather than spun on — a tight retry
+        loop against a broken syscall would burn a core and flood the log.
+        """
+        failures = 0
+        while True:
+            try:
+                await body()
+                failures = 0
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - a supervisory loop must not die
+                failures += 1
+                logger.warning(
+                    "browser bridge %s loop iteration failed (%d consecutive); continuing",
+                    name,
+                    failures,
+                    exc_info=True,
+                )
+                # Back off a little on a persistently failing iteration so a
+                # synchronous failure cannot become a busy loop, capped so
+                # recovery is still prompt once the cause clears.
+                await asyncio.sleep(min(SUPERVISOR_BACKOFF_CAP_S, float(failures)))
+
+    async def _heartbeat_tick(self) -> None:
+        self.publish_safely()
+        await asyncio.sleep(state_store.HEARTBEAT_INTERVAL_S)
+
+    async def _ping_tick(self) -> None:
+        await asyncio.sleep(PING_INTERVAL_S)
+        if self.link.websocket is not None:
+            try:
+                await self.link.send({"event": "ping"})
+            except Exception:  # noqa: BLE001 - receive loop owns teardown
+                logger.debug("browser extension ping failed", exc_info=True)
+
+    async def _heartbeat(self) -> None:
+        await self._supervise("heartbeat", self._heartbeat_tick)
 
     async def _ping(self) -> None:
-        while True:
-            await asyncio.sleep(PING_INTERVAL_S)
-            if self.link.websocket is not None:
-                try:
-                    await self.link.send({"event": "ping"})
-                except Exception:  # noqa: BLE001 - receive loop owns teardown
-                    logger.debug("browser extension ping failed", exc_info=True)
+        await self._supervise("ping", self._ping_tick)
 
     def _live_pairing_matches(self) -> bool:
         """Whether the ON-DISK pairing still authorizes the connected extension.
@@ -224,27 +407,35 @@ class BridgeService:
                 # popup renders \"waiting to pair\" rather than a mystery drop.
                 await websocket.close(code=4003)
         self.link.disconnect()
-        self.publish()
+        self.publish_safely()
+
+    async def _revocation_tick(self) -> None:
+        await asyncio.sleep(REVOKE_WATCH_S)
+        if (
+            self.link.websocket is not None
+            and self.link.paired
+            and not self._live_pairing_matches()
+        ):
+            logger.info("pairing revoked on disk; closing the live extension socket")
+            await self.revoke()
 
     async def _watch_revocation(self) -> None:
         """Poll the pairing file so an out-of-process revoke severs a live link.
 
         Cheap (one stat-and-parse every few seconds) and only acts on the
         transition from paired-with-file to paired-without-file, so it never
-        fights the handshake that is mid-flight.
+        fights the handshake that is mid-flight. Supervised: a transient read
+        error must not silently disarm revocation for the daemon's lifetime,
+        which would leave a revoked browser able to drive until it reconnected.
         """
-        while True:
-            await asyncio.sleep(REVOKE_WATCH_S)
-            if (
-                self.link.websocket is not None
-                and self.link.paired
-                and not self._live_pairing_matches()
-            ):
-                logger.info("pairing revoked on disk; closing the live extension socket")
-                await self.revoke()
+        await self._supervise("revocation-watch", self._revocation_tick)
 
     async def startup(self) -> None:
-        self.publish()
+        # Startup publishes through the guarded path too: a daemon that cannot
+        # write its discovery file on a full disk must still boot and serve
+        # /health, so that `lop browser status` and the tool's socket probe can
+        # both still reach it and report the truth.
+        self.publish_safely()
         self._heartbeat_task = asyncio.create_task(self._heartbeat())
         self._ping_task = asyncio.create_task(self._ping())
         self._revoke_task = asyncio.create_task(self._watch_revocation())
@@ -358,7 +549,7 @@ class BridgeService:
         with suppress(OSError):
             _pending_path(self.root).unlink()
         self.link.paired = True
-        self.publish()
+        self.publish_safely()
         return PairResult(ok=True, token=token)
 
     async def extension(self, websocket: WebSocket) -> None:
@@ -393,7 +584,7 @@ class BridgeService:
         self.link.paired = self._valid_saved_token(extension_id, hello.token)
         if not self.link.paired:
             self._ensure_pending(extension_id)
-        self.publish()
+        self.publish_safely()
         await self.link.send(HelloAck(paired=self.link.paired).model_dump(mode="json"))
         try:
             while True:
@@ -413,7 +604,7 @@ class BridgeService:
                     request_id = str(frame.get("id", ""))
                     if request_id:
                         self.link.awaiting_origin[request_id] = str(frame.get("origin", ""))
-                        self.publish()
+                        self.publish_safely()
                     continue
                 if frame.get("event") == "awaiting_origin_cleared":
                     # The extension's queue entry for this command is gone
@@ -424,7 +615,7 @@ class BridgeService:
                     request_id = str(frame.get("id", ""))
                     if request_id and request_id in self.link.awaiting_origin:
                         self.link.awaiting_origin.pop(request_id, None)
-                        self.publish()
+                        self.publish_safely()
                     continue
                 if frame.get("event") == "unpair":
                     # The options page "Unpair this browser" reaches the daemon
@@ -435,14 +626,20 @@ class BridgeService:
                 if frame.get("event") == "tab_update":
                     # Pushed by the extension on navigation so the popup reflects
                     # the driven site promptly even between commands (U3).
-                    self.link.current_url = str(frame.get("url", ""))
-                    self.link.current_title = str(frame.get("title", ""))
-                    self.publish()
+                    self.link.note_driven(
+                        str(frame.get("tab", "")),
+                        str(frame.get("url", "")),
+                        str(frame.get("title", "")),
+                    )
+                    self.publish_safely()
                     continue
                 if frame.get("event") == "tab_closed":
-                    self.link.current_url = ""
-                    self.link.current_title = ""
-                    self.publish()
+                    # The extension reports the CLOSED SURFACE by handle, so
+                    # only that tab is dropped: with several sessions driving a
+                    # tab each, blanking everything on one close (as this did)
+                    # would have reported the survivors as gone.
+                    self.link.note_closed(str(frame.get("tab", "")))
+                    self.publish_safely()
                     continue
                 if frame.get("event") in ("pong", "origin_decision"):
                     continue
@@ -455,9 +652,13 @@ class BridgeService:
                 if response.ok and response.result:
                     url = response.result.get("url")
                     if isinstance(url, str) and url:
-                        self.link.current_url = url
                         title = response.result.get("title")
-                        self.link.current_title = title if isinstance(title, str) else ""
+                        handle = response.result.get("tab")
+                        self.link.note_driven(
+                            handle if isinstance(handle, str) else "",
+                            url,
+                            title if isinstance(title, str) else "",
+                        )
                 self.link.awaiting_origin.pop(response.id, None)
                 future = self.link.pending.pop(response.id, None)
                 if future is not None and not future.done():
@@ -467,7 +668,7 @@ class BridgeService:
         finally:
             if self.link.websocket is websocket:
                 self.link.disconnect()
-                self.publish()
+                self.publish_safely()
 
     async def rpc(self, http_request: HttpRequest) -> JSONResponse:
         supplied = http_request.headers.get("x-bridge-key", "")
@@ -650,7 +851,69 @@ class BridgeService:
                 "browser": self.link.browser,
                 "current_url": self.link.current_url,
                 "current_title": self.link.current_title,
+                # How many tabs are driven, and their URLs. `current_url` alone
+                # framed a multi-tab world as one binding, so a stale value
+                # read as a system-wide lock; the count lets `status` say "no
+                # tabs driven" (or name all of them) truthfully.
+                "driven_tabs": [
+                    {"url": tab.url, "title": tab.title}
+                    for tab in sorted(
+                        self.link.driven.values(), key=lambda t: t.updated_at, reverse=True
+                    )
+                ],
                 "pending_origin": pending[0] if pending else "",
+            }
+        )
+
+    async def repair(self, _request: HttpRequest) -> JSONResponse:
+        """Reconcile advertised state against reality, and report what changed.
+
+        The incident left the user with no way to say "clear whatever you think
+        you are holding": the daemon advertised a driven tab that no longer
+        existed and a heartbeat that had stopped, and the only remedy anyone
+        could think of was killing a healthy daemon.
+
+        Safe while sessions are live, by construction: it asks the EXTENSION
+        which surfaces really exist and drops only the records that reality
+        does not back. It never closes a tab, never touches pairing, and never
+        cancels an in-flight command — so a session driving a live tab keeps
+        driving it. Unauthenticated like /health because it is loopback-only
+        and confers no drive capability.
+        """
+        cleaned: list[str] = []
+        before = dict(self.link.driven)
+        if self.link.websocket is not None and before:
+            # The extension's own live-surface listing is the ground truth;
+            # anything we advertise that it does not list is a ghost. `tabs`
+            # prunes dead surfaces extension-side as it lists, so this also
+            # reclaims handles leaked by a session that died without `close`.
+            try:
+                request = Request(id=f"repair-{secrets.token_hex(4)}", method="tabs", params={})
+                raw = await self._dispatch_serialized(request)
+                payload: Any = json.loads(bytes(raw.body).decode("utf-8"))
+                listed = (payload.get("result") or {}).get("tabs", []) if payload.get("ok") else []
+                live_urls = {
+                    str(entry.get("url", "")) for entry in listed if isinstance(entry, dict)
+                }
+                for key, tab in before.items():
+                    if tab.url and tab.url not in live_urls:
+                        self.link.driven.pop(key, None)
+                        cleaned.append(tab.url)
+            except Exception:  # noqa: BLE001 - repair must never fail loudly
+                logger.warning("browser bridge repair could not list tabs", exc_info=True)
+        elif before:
+            # No browser attached: nothing can be driven, so every record is a
+            # ghost by definition.
+            cleaned = [tab.url for tab in before.values() if tab.url]
+            self.link.driven.clear()
+        republished = self.publish_safely()
+        return JSONResponse(
+            {
+                "status": "ok",
+                "cleared_tabs": cleaned,
+                "driven_tabs": len(self.link.driven),
+                "heartbeat_republished": republished,
+                "extension_connected": self.link.websocket is not None,
             }
         )
 
@@ -669,6 +932,7 @@ def create_app(port: int = DEFAULT_PORT, root: Path | None = None) -> Starlette:
     app = Starlette(
         routes=[
             Route("/health", service.health, methods=["GET"]),
+            Route("/repair", service.repair, methods=["POST"]),
             Route("/rpc", service.rpc, methods=["POST"]),
             WebSocketRoute("/extension", service.extension),
         ],
