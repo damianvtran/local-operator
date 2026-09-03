@@ -719,6 +719,16 @@ SETTINGS: tuple[Setting, ...] = (
     ),
     # -- subagents ----------------------------------------------------------
     Setting(
+        key="session.reap_unused",
+        path=("session", "reap_unused"),
+        section="session",
+        label="Remove unused sessions",
+        kind=Kind.BOOL,
+        default=True,
+        help="Delete old session directories that never received a message.",
+        choices=_bool_choices("remove them on startup", "keep every directory"),
+    ),
+    Setting(
         key="runtime.unattended_gate_timeout",
         path=("runtime", "unattended_gate_timeout"),
         section="runtime",
