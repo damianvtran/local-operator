@@ -41,6 +41,11 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 from local_operator.ansi import sanitize_prompt_line
 from local_operator.harness.types import AgentMessage, Message
 
+# Imported as an alias: ``config_dir`` is a parameter/local name in other
+# functions here, and a module-level import of the same spelling would read
+# like one of them.
+from local_operator.paths import config_dir as app_config_dir
+
 # Pure path policy, no engine — see local_operator/resume.py for why it is
 # its own module rather than living here.
 from local_operator.resume import resume_dir
@@ -683,11 +688,6 @@ def load_user_instructions(agent_prompt: str = "") -> str:
     ``utf-8-sig`` strips a BOM that a Windows editor writes; without it the
     ``\ufeff`` survives into the prompt ahead of the first rule.
     """
-    # Imported as an alias: ``config_dir`` is a local parameter name in two
-    # other functions here, and a module-level import of the same spelling
-    # would read like one of them.
-    from local_operator.paths import config_dir as app_config_dir
-
     parts: list[str] = []
     # ``is_file()`` follows symlinks deliberately: pointing the file at a
     # dotfiles checkout is a normal way to version instructions.
@@ -1971,6 +1971,37 @@ def attach_stream_dispose(session: Session, stream_fn: SessionStreamFn) -> None:
     session.add_dispose_hook(stream_fn.close)
 
 
+def attach_config_watch(session: Session, config_dir: Path) -> None:
+    """Subscribe ``session`` to live ``config.yml`` changes; unsubscribe on dispose.
+
+    The config-watch seam (see :mod:`local_operator.config_watch`). Starts the
+    PROCESS's watcher if this is the first session to ask — ``start`` is
+    idempotent, so a ``/new`` in the same process finds it running — and hangs
+    the session's listener on it. The watcher itself is process-scoped and is
+    NOT stopped on dispose: the next session in this process needs it, and the
+    loop closing reaps the task. Only the subscription is per-session, which
+    is why the unsubscriber and not a ``stop`` is the dispose hook.
+
+    Every front end (TUI, headless, exec worker, owned phone session) reaches
+    this through ``create_session``, so they all follow config for free.
+    ``RemoteSession`` followers never get here: the owner applies the change
+    and the follower renders what the owner projects.
+
+    Degrades to "this session does not follow config" on any failure rather
+    than failing the boot: a watcher that cannot start (no loop in an unusual
+    embedding, a config directory that cannot be opened) leaves the session
+    exactly as it was before this seam existed.
+    """
+    try:
+        from local_operator.config_watch import process_watcher
+
+        watcher = process_watcher(config_dir)
+        watcher.start(asyncio.get_running_loop())
+        session.add_dispose_hook(watcher.subscribe(session._apply_config_change))
+    except Exception:  # noqa: BLE001 — boot must not depend on the watcher
+        logger.warning("config watcher could not be attached to the session", exc_info=True)
+
+
 async def create_session(
     args: argparse.Namespace,
     config_manager: ConfigManager,
@@ -2099,6 +2130,12 @@ async def create_session(
     # Stream seam: release the session's shared httpx connection pool on
     # dispose (one leaked pool per turn on the server facade otherwise).
     attach_stream_dispose(session, plan.session_kwargs["stream_fn"])
+    # Config seam: follow ``config.yml`` while the session lives, so an edit in
+    # another pane (or on the page in this one) reaches compaction, retry and
+    # the job cap without a ``/new``. The manager's directory, not
+    # ``paths.config_dir()``: they agree in production, and where a caller
+    # passed a manager on another directory that is the file to follow.
+    attach_config_watch(session, Path(getattr(config_manager, "config_dir", app_config_dir())))
 
     # MCP seam (MCP-20): merge discovered MCP tools in, subscribe to live
     # changes, and fold server teardown into session.dispose. Degrades to

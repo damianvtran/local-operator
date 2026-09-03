@@ -1933,5 +1933,25 @@ class TestUsageAwareFirstPick:
         assert store._usage_aware_pick is False
         stream2 = SessionStreamFn(store, {}, "s2")
         assert store._usage_aware_pick is True
+
+        # And it must be RE-pushed when a live config change rebinds the
+        # settings mapping (review round 2 B1, guarded here per round 3 M1).
+        # This is the one ``retry.*`` key the cascade does not re-read off the
+        # mapping — the store copies it into its own state — so a rebind that
+        # only swapped ``_settings`` moved what ``RetrySettings`` reported while
+        # the cascade kept using the stale flag.
+        #
+        # Asserted against the REAL ``SessionStreamFn`` and the REAL store on
+        # purpose: the equivalent probe in ``test_config_live.py`` runs against
+        # a hand-written double whose own ``apply_settings`` re-pushes the flag,
+        # so deleting the production line left that suite green.
+        stream2.apply_settings({"retry": {"usageAwareAccountPick": False}})
+        assert store._usage_aware_pick is False, "apply_settings did not re-push the opt-out"
+        stream2.apply_settings({"retry": {"usageAwareAccountPick": True}})
+        assert store._usage_aware_pick is True, "the re-push is one-way"
+        # ``None`` is "no settings", which restores the store's ON default
+        # rather than freezing the last value.
+        stream2.apply_settings(None)
+        assert store._usage_aware_pick is True
         # Close the streams' http clients without awaiting: no loop is running.
         del stream, stream2

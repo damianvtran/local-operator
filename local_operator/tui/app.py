@@ -1930,6 +1930,9 @@ class OperatorApp(App[None]):
         self._session: SessionProtocol | None = None
         self._controller: EventController | None = None
         self._status: StatusLine | None = None
+        #: Unsubscribes this app from the process config watcher (see
+        #: :meth:`_watch_config`). ``None`` until the first session is adopted.
+        self._unsubscribe_config_watch: Callable[[], None] | None = None
         #: The window/tab title writer, or ``None`` when there is no terminal
         #: to title (headless) or the user turned it off. Held by the app,
         #: which owns the terminal, and lent to the band, which owns the state
@@ -2924,6 +2927,10 @@ class OperatorApp(App[None]):
         session.set_ask_handler(self._request_user_choice_on_app_loop)
         self._controller = EventController(session, self)
         self._controller.subscribe()
+        # Beside the event controller because it answers the same question for
+        # a different source: the controller renders what the SESSION says, this
+        # renders what the CONFIG FILE says (a change from another pane).
+        self._watch_config()
         assert self._status is not None
         self._status.update(
             # The EFFECTIVE label: a resumed session that was serving from a
@@ -5421,8 +5428,96 @@ class OperatorApp(App[None]):
             self._system_notice("new session unavailable: no session-capable launcher", "warning")
             return
         self._session_factory = lambda: self._resume_factory(None)  # type: ignore[misc]
+        # Reload the launch-time config manager BEFORE the rebuild, for the
+        # same load-bearing reason `_leave_setup_state_and_boot` documents: the
+        # factory closes over a manager captured at launch, so without this the
+        # "new" session boots on the values the process started with.
+        #
+        # Design review round 1 (D1) / QA round 2 (Q1) drove the real path and
+        # proved the gap: an out-of-process write to `hosting` followed by
+        # `/new` built with the OLD value. That was survivable while nothing
+        # said otherwise, but the config-change notice now tells the user in so
+        # many words that a NEW_SESSIONS key "takes effect on /new" — including
+        # `tool_approval_mode`, where believing it and being wrong is a safety
+        # problem. Making the promise true is the honest fix; wording around it
+        # would leave `/new` quietly serving stale settings.
+        # GUARDED, because that reload is destructive on a malformed file
+        # (review round 3, B1). In production `_on_config_changed` is
+        # `ConfigManager.reload` → `_load_config`, which RAISES on a non-mapping
+        # `values:` and MOVES the user's config.yml aside on a YAML error. This
+        # PR makes that story likelier, not rarer: the watcher deliberately
+        # holds a broken file in silence, so the user's first hint that they
+        # fat-fingered an edit would be `/new` — the command this feature's own
+        # notice sends them to — either dying or replacing every setting they
+        # have with defaults. Refusing to reload here keeps the module's
+        # never-move-the-user's-file contract intact at the exact moment the
+        # watcher is protecting it.
+        #
+        # The watcher answers the question because it already encodes the rule
+        # set; the `try` covers the RAISING failures that remain (a version
+        # migration writing to a read-only dir, a `metadata:` block hand-written
+        # without `created_at`). Both paths still build the session — on the
+        # last good values, which is what the watcher has been serving all
+        # along — rather than leaving the user with no new session and an
+        # unexplained traceback.
+        #
+        # The guard NARROWS the destructive window, it does not close it
+        # (review round 4): between the check and `_load_config`'s own read,
+        # another process can land a malformed atomic replace, and the `try`
+        # cannot catch that because the move-aside "succeeds". That window is
+        # ~2ms of `reload()` against `main`'s unconditional exposure, so this
+        # is strictly a shrink; closing it entirely needs a non-destructive
+        # reload on `ConfigManager`, which is a change to that class rather
+        # than to this call site.
+        self._reload_config_for_new_session(notice)
         notice("starting a new session…")
         self._run_session_transition(self._reload_session())
+
+    def _reload_config_for_new_session(self, notice: NoticeFn) -> None:
+        """Adopt on-disk config for the session `/new` is about to build.
+
+        Two consumers, both of which `/new` must reach for its own notice to be
+        true, and neither of which the other covers:
+
+        * the launch-time ``ConfigManager`` the session factory closed over —
+          `hosting`, `model_name`, `auto_save_conversation`, `web_*.enabled`;
+        * the TUI's own approval gate, which is process state rather than
+          session state and is otherwise written only by
+          ``_load_approvals_default`` at mount (review round 3, Q3). Missing it
+          meant `tool_approval_mode` was the ONE key of the four whose "takes
+          effect on /new" promise was not kept — and the one where believing it
+          and being wrong is a safety problem, in both directions: a tightened
+          `auto → ask` left the new session auto-approving writes with no
+          prompt.
+
+        Refuses the reload outright when the file on disk is not parseable,
+        because `ConfigManager._load_config` would move it aside and continue
+        from defaults (B1). Says so rather than failing silently: a user who
+        just broke their config while trying to change a setting needs to know
+        that is why the change did not take.
+        """
+        if self._on_config_changed is None:
+            return
+        from local_operator.config_watch import process_watcher
+
+        try:
+            if not process_watcher().config_is_readable():
+                notice(
+                    "config.yml is not readable — starting on the last good "
+                    "settings; fix the file and run /new again",
+                    "warning",
+                )
+                return
+            self._on_config_changed()
+        except Exception:  # noqa: BLE001 — a bad config must never break /new
+            logger.warning(
+                "config reload before /new failed; building on the last good values",
+                exc_info=True,
+            )
+            return
+        # Only after a successful reload: the gate must not adopt a value the
+        # factory did not.
+        self._load_approvals_default()
 
     def _cmd_fork(self, arg: str, notice: NoticeFn) -> None:
         """``/fork [message]`` — branch this conversation into a new session.
@@ -9685,13 +9780,29 @@ class OperatorApp(App[None]):
         take down a working prompt. Imported at the call site, like that one, so
         the TUI's import cost does not carry the config stack for a command most
         sessions never run.
+
+        Written through the ``settings_io`` FACADE rather than
+        ``manager.set_config_value`` (review round 1, M2). The facade is what
+        marks a write as this process's own: it notifies the config watcher,
+        which fans the change out with ``source="local"``, which is how
+        :meth:`_on_config_change` knows the receipt below has already told the
+        user and stays quiet. Writing underneath it made this process's own
+        write arrive through the poll as ``source="disk"`` — indistinguishable
+        from another pane's edit — so the notice had to special-case the key,
+        and that special case then silenced the genuine cross-process change on
+        the one setting where not knowing is a safety problem. Going through
+        the facade removes the need for the special case rather than tuning it.
         """
         try:
+            from local_operator import settings_io
             from local_operator.config import ConfigManager
             from local_operator.paths import config_dir
 
             manager = ConfigManager(config_dir())
-            manager.set_config_value("tool_approval_mode", mode_word(auto))
+            setting = settings_io.resolve_key("tool_approval_mode")
+            if setting is None:  # pragma: no cover - the key is in the registry
+                raise KeyError("tool_approval_mode is not a registered setting")
+            settings_io.write_setting(manager, setting, mode_word(auto))
             return _home_relative(str(manager.config_file)), ""
         except Exception as error:  # config write failure
             return "", (
@@ -10493,6 +10604,9 @@ class OperatorApp(App[None]):
             self._status.dispose()
         if self._controller is not None:
             self._controller.dispose()
+        if self._unsubscribe_config_watch is not None:
+            self._unsubscribe_config_watch()
+            self._unsubscribe_config_watch = None
         unsubscribe_frontend = getattr(self, "_unsubscribe_frontend", None)
         if callable(unsubscribe_frontend):
             unsubscribe_frontend()
@@ -12728,6 +12842,163 @@ class OperatorApp(App[None]):
         a dispatch. One implementation means every path renders notices the same.
         """
         self._append_block(NoticeBlock(body, kind))
+
+    def _watch_config(self) -> None:
+        """Subscribe the APP to live ``config.yml`` changes. Idempotent.
+
+        The session's own subscription (``session_factory.attach_config_watch``)
+        applies the values; this one is the USER-FACING half — it tells the
+        user why behaviour just changed under them, and applies the two groups
+        only the TUI owns (``display.*``, ``tui.theme``) when another process
+        wrote them. Registered once per app rather than per session because
+        the app outlives its sessions (``/new``, ``/resume``) and one line per
+        change is the contract; the subscription is dropped on unmount.
+
+        Goes through :func:`process_watcher` rather than the session because a
+        ``RemoteSession`` follower has no watcher of its own, yet its user
+        still edits config and still deserves the notice. ``start`` is
+        idempotent, so calling it here is what makes a follower-only process
+        poll at all.
+        """
+        if self._unsubscribe_config_watch is not None:
+            return
+        try:
+            from local_operator.config_watch import process_watcher
+
+            watcher = process_watcher()
+            watcher.start(asyncio.get_running_loop())
+            self._unsubscribe_config_watch = watcher.subscribe(self._on_config_change)
+        except Exception:  # noqa: BLE001 — a missing notice must not break adoption
+            logger.debug("config watcher unavailable to the TUI", exc_info=True)
+
+    def _on_config_change(self, change: Any) -> None:
+        """React to a ``config.yml`` change, on the app loop.
+
+        Invoked on the loop thread by construction (the watcher ticks on the
+        loop it was started on, and ``notify_local`` hops there), so widgets
+        are touched directly without ``call_from_thread``.
+
+        ``source == "local"`` is silent and applies nothing: the page or the
+        command in THIS process already showed its own result and already
+        repainted (``_persist_theme`` follows ``_apply_theme``;
+        ``settings_io`` already dropped the display cache). Announcing it
+        again would be the line the user just read, twice.
+
+        For a change from another process, ONE notice per change listing the
+        registry keys compactly, with the keys whose section is not LIVE named
+        separately as taking effect on ``/new`` — the honest answer for
+        ``tool_approval_mode``, which the design deliberately keeps
+        build-time. ``changed_keys`` is per registry key, so a write that only
+        bumped ``metadata.last_modified`` never reaches here and produces no
+        line. Then the two TUI-owned groups are applied: the display cache is
+        dropped so the next paint re-reads, and the theme is switched through
+        the same orchestrator ``/theme`` uses. An unknown theme name on disk is
+        reported rather than raised — a config bug should not take down the
+        listener.
+        """
+        if getattr(change, "source", "disk") == "local":
+            return
+        changed = sorted(getattr(change, "changed_keys", ()))
+        if not changed:
+            return
+        from local_operator import settings_io
+
+        # Partitioned by the ACTUAL scope, three ways (design review round 1,
+        # D1). The registry has three scopes and `/settings` renders all three,
+        # but this line used to test one bit — `is LIVE` — and told the user
+        # everything else "takes effect on /new". That was false in two
+        # directions at once: a NEW_LAUNCH key (`hosting`, `model_name`) needs a
+        # relaunch, not a `/new`, and a `retired` key does nothing at all, so
+        # the harness was promising that a key it documents as inert would
+        # start working. The two surfaces contradicting each other is what made
+        # it obvious; a promise the harness cannot keep costs it the credibility
+        # of the live half too.
+        scope_of = {section.name: section.scope for section in settings_io.SECTIONS}
+        live: list[str] = []
+        new_sessions: list[str] = []
+        relaunch: list[str] = []
+        retired: list[str] = []
+        for key in changed:
+            setting = settings_io.resolve_key(key)
+            section = setting.section if setting is not None else None
+            scope = scope_of.get(section) if section is not None else None
+            if section == "retired":
+                retired.append(key)
+            elif scope is settings_io.Scope.LIVE:
+                live.append(key)
+            elif scope is settings_io.Scope.NEW_LAUNCH:
+                relaunch.append(key)
+            else:
+                new_sessions.append(key)
+        parts: list[str] = []
+        if live:
+            # "applied:" leads rather than trailing as "— applied" (design
+            # review round 1, D5). The suffix form put the verdict at the end of
+            # an unbounded key list, so in a ~10-column band it wrapped onto its
+            # own line behind a dangling em-dash that read as truncation. This
+            # also front-loads the answer to "did it take effect?" instead of
+            # burying it after up to six key names.
+            parts.append(f"applied: {', '.join(live)}")
+        # Verb agreement per clause (design review round 1, D7). Each of these
+        # was only ever exercised with one key, and the multi-key form is the
+        # COMMON one for at least `hosting, model_name` — the pair a user
+        # changes together when they switch models. A sentence whose whole job
+        # is to be trusted about what did and did not happen cannot visibly
+        # disagree with itself.
+        if new_sessions:
+            verb = "takes" if len(new_sessions) == 1 else "take"
+            parts.append(f"{', '.join(new_sessions)} {verb} effect on /new")
+        if relaunch:
+            verb = "needs" if len(relaunch) == 1 else "need"
+            parts.append(f"{', '.join(relaunch)} {verb} a relaunch")
+        if retired:
+            tail = (
+                "is retired and does nothing" if len(retired) == 1 else "are retired and do nothing"
+            )
+            parts.append(f"{', '.join(retired)} {tail}")
+        # The approval mode names its VALUE and raises the severity (design
+        # review round 1, D2). "changed" is not actionable for a two-valued
+        # safety switch: the user in the other pane cannot tell whether
+        # approvals were tightened or loosened, and "every tool now runs
+        # without asking" is the fact worth interrupting someone for. The local
+        # receipt for the identical transition is already amber, so leaving the
+        # REMOTE one — where the user did not act and has no other cue — as dim
+        # grey inverted the priority.
+        kind = "info"
+        if "tool_approval_mode" in changed:
+            values = getattr(change, "values", {})
+            mode = str(values.get("tool_approval_mode", "")).strip().lower()
+            if mode == "auto":
+                parts.append("tool approvals now auto — every tool runs without asking")
+                kind = "warning"
+            elif mode == "ask":
+                parts.append("tool approvals now ask — tools prompt before running")
+                kind = "warning"
+            # The running session's gate deliberately does NOT move here: the
+            # key is NEW_SESSIONS and cell A4 of QA round 2 pins that. Only the
+            # cached default is refreshed, so a later bare `/approvals` reports
+            # what a new session would actually boot with instead of the value
+            # this process read at mount.
+            if mode in ("auto", "ask"):
+                self._approvals_default_auto = mode == "auto"
+        self._system_notice("config.yml changed: " + "; ".join(parts), kind)
+
+        if any(key.startswith("display.") for key in changed):
+            try:
+                from local_operator.tui.settings import settings_reload
+
+                settings_reload()
+            except Exception:  # noqa: BLE001 — the cache drop is best-effort
+                logger.debug("display settings cache could not be dropped", exc_info=True)
+        if "tui.theme" in changed:
+            values = getattr(change, "values", {})
+            tui_block = values.get("tui") if isinstance(values, Mapping) else None
+            wanted = tui_block.get("theme") if isinstance(tui_block, Mapping) else None
+            if isinstance(wanted, str) and wanted and wanted != theme_mod.current_theme():
+                try:
+                    self._apply_theme(wanted)
+                except KeyError:
+                    self._system_notice(f"theme: unknown theme {wanted!r} in config.yml", "warning")
 
     def _system_notice(self, body: str, kind: NoticeKind = "info") -> None:
         """A notice about the HARNESS that leaves the empty state intact.
@@ -15703,17 +15974,16 @@ class OperatorApp(App[None]):
         with nothing configured at all, and "you have no cascade, here is the key
         that would create one" is the useful answer for them.
 
-        Reads the SESSION's captured routing settings, not ``config.yml``, for
-        the reason recorded on ``Session.routing_settings``: the stream snapshots
-        its settings at build time and nothing watches the file, so a listing
-        built from disk confirms cascade edits the running session will not
-        honour. That is worst for the user who followed this command's own
-        "ask the agent to change…" hint. The on-disk copy is still read, but
-        only to DETECT that divergence and say so; it never silently replaces
-        what the session will do.
+        Reads the SESSION's routing settings (``Session.routing_settings``),
+        not ``config.yml`` directly: that is the mapping the stream will
+        actually route on. The two agree by construction now that the process
+        config watcher rebinds the stream's mapping on every file change
+        (``SessionStreamFn.apply_settings``), which is why this no longer reads
+        the file to flag drift — the "stale · /reload" row it used to paint
+        described a gap that no longer exists. Falls back to disk only for a
+        host that cannot say what it routes on (an older stream, a test
+        double).
         """
-        from local_operator.config import ConfigManager
-        from local_operator.paths import config_dir
         from local_operator.providers.failover import (
             DEFAULT_CHAIN_KEY,
             RetrySettings,
@@ -15785,37 +16055,26 @@ class OperatorApp(App[None]):
 
         rows: list[tuple[str, str]] = [("primary", primary_detail)]
 
-        # THE SESSION'S snapshot, with the file read only to detect drift.
+        # THE SESSION'S live mapping (kept current by the config watcher).
         session_settings = getattr(session, "routing_settings", None)
-        disk_settings = ConfigManager(config_dir()).get_config().values
         if session_settings is None:
             # A host that cannot say what it routes on (an older stream, a test
             # double). Falling back to disk is the only answer available, and it
             # is the answer this command shipped with.
-            session_settings = disk_settings
-            drifted = False
-        else:
-            # Compare only what routing reads. A `tui.theme` edit is not a
-            # routing change and must not raise a "/reload to apply" flag.
-            drifted = RetrySettings.from_settings(session_settings) != RetrySettings.from_settings(
-                disk_settings
-            )
+            from local_operator.config import ConfigManager
+            from local_operator.paths import config_dir
+
+            session_settings = ConfigManager(config_dir()).get_config().values
         retry = RetrySettings.from_settings(session_settings)
 
         def close(extra: list[tuple[str, str]], hint: str) -> list[tuple[str, str]]:
-            """Finish the tree: drift flag, then the agent affordance.
+            """Finish the tree with the agent affordance.
 
-            Both belong in EVERY state, not just the populated one. The user
+            It belongs in EVERY state, not just the populated one. The user
             staring at "no chain" is the one who most needs to know the agent
-            will write the config for them, and a stale listing is most
-            misleading exactly when it shows a cascade that looks new.
+            will write the config for them.
             """
             out = rows + extra
-            if drifted:
-                # Named on its own row rather than folded into the hint: it is a
-                # fact about this listing's accuracy, and `/reload` is the step
-                # that makes the on-disk cascade the one that actually routes.
-                out.append(("stale", "config.yml changed since this session started · /reload"))
             # The hint is an escape hatch, not a route. With an EMPTY name its
             # text landed at the exact x of every row name while wearing the
             # terminal `└─` glyph, so it read as one more cascade entry. Giving

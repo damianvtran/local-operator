@@ -1568,6 +1568,30 @@ async def test_scope_tags_share_one_column() -> None:
 
 
 @pytest.mark.asyncio
+async def test_the_retired_section_does_not_promise_a_relaunch_will_help() -> None:
+    """Design round 2, D8 — the tag must not contradict the notice.
+
+    `retired` carries `Scope.NEW_LAUNCH`, so the shared renderer tagged it
+    `takes effect: new launch` — promising that a relaunch makes these keys
+    work, one line above its own description saying they do nothing, and about
+    the same keys the config-change notice now calls "retired and does
+    nothing". Asserted on the rendered line rather than the section object,
+    because the defect was in what the page SAYS.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._open_settings_view()
+        view = app.query_one(SettingsView)
+        await pilot.pause()
+        lines = view.render_lines_for_test()
+        header = next((line for line in lines if "Retired" in line), None)
+        assert header is not None, "the Retired header did not render"
+        assert "takes effect: never" in header, header
+        assert "new launch" not in header, header
+
+
+@pytest.mark.asyncio
 async def test_the_longest_label_is_not_clipped_mid_parenthetical() -> None:
     """Design round 1, D4 — ``Connectivity backoff cap (ms)`` fitted in the
     column and was still cut to ``(m…``, an opened parenthetical that never

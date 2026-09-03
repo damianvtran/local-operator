@@ -6,9 +6,16 @@ lookup falls back to its default.
 
 This module READS. Writes go through ``local_operator.settings_io``, which the
 ``/settings`` page and ``lop config edit`` both drive, and which calls
-:func:`settings_reload` afterwards — that is still the ONLY invalidator of the
-cache below, so a write that skipped it would leave the running TUI painting
-the old flag and the change would look lost until relaunch.
+:func:`settings_reload` afterwards — so a write that skipped it would leave the
+running TUI painting the old flag and the change would look lost until
+relaunch.
+
+There is now a SECOND invalidator: the TUI's config-watch listener calls
+:func:`settings_reload` when another process changes a ``display.*`` key. That
+distinction matters to :func:`_load`, not just as trivia — the first
+invalidator only ever fires after a write this process just made, so the file
+was well-formed by construction, while the second fires on bytes the user may
+be part-way through hand-editing.
 
 The keys here are LITERAL dotted top-level keys: ``values["display.shimmer"]``,
 not ``values["display"]["shimmer"]``. See ``settings_io`` for why that
@@ -79,14 +86,42 @@ def _defaults() -> dict[str, Any]:
 
 
 def _load() -> dict[str, Any]:
-    """Read ``values`` once; any failure yields pure defaults."""
+    """Read ``values`` once; any failure yields pure defaults.
+
+    Prefers the config WATCHER's already-validated snapshot over constructing a
+    ``ConfigManager`` (review round 4, B3). The manager's constructor runs
+    ``_load_config``, which MOVES a malformed ``config.yml`` aside to
+    ``config.yml.bad.<ts>`` and continues from defaults — and the ``except``
+    below cannot catch that, because from Python's point of view the move-aside
+    succeeded. Destroying the user's settings from a paint path is not a
+    trade-off this module gets to make.
+
+    The exposure is new and specific: this cache used to be invalidated only by
+    ``settings_io._store``, a write THIS process had just performed, so the
+    bytes were well-formed by construction. The config watcher now invalidates
+    it on ANOTHER process's write, which is exactly the case where the file on
+    disk is arbitrary — the user's next hand-edit may be mid-save, truncated or
+    mis-indented, and the watcher deliberately holds such a file in silence.
+
+    ``existing_watcher`` rather than ``process_watcher``, matching
+    ``settings_io._notify_watcher``: a CLI process that never started a watcher
+    must not build one from a paint path, and falls back to the manager — which
+    is safe there precisely because no watcher means no cross-process
+    invalidation to race with.
+    """
     values: dict[str, Any] = {}
     try:
-        from local_operator.config import ConfigManager
+        from local_operator.config_watch import existing_watcher
         from local_operator.paths import config_dir
 
-        manager = ConfigManager(config_dir())
-        values = dict(manager.get_config().values)
+        directory = config_dir()
+        watcher = existing_watcher(directory)
+        if watcher is not None:
+            values = dict(watcher.values)
+        else:
+            from local_operator.config import ConfigManager
+
+            values = dict(ConfigManager(directory).get_config().values)
     except Exception:
         values = {}
     return {key: values.get(key, default) for key, default in _defaults().items()}
