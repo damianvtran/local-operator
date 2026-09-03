@@ -2171,6 +2171,7 @@ def test_a_stale_document_degrades_to_the_table_rather_than_lying(tmp_path) -> N
     assert len(client.calls) == 1
     assert rows[0].reasoning_efforts == ("low", "high")
 
+
 # -- implausible advertised output caps ---------------------------------------
 
 
