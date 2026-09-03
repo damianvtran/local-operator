@@ -113,6 +113,78 @@ GEMINI_MAX_PAGES = 25
 #: 32k-output model at 4k, so an exact 4096 loses to a larger bundled value.
 LYING_MAX_TOKENS = 4096
 
+#: Fraction of the context window above which a LISTING'S advertised output cap
+#: is treated as a routing artifact rather than a limit worth seeding a spec
+#: with. See :func:`sane_listing_max_tokens` for why the line sits here.
+IMPLAUSIBLE_MAX_TOKENS_RATIO = 0.85
+
+#: What an implausible cap is reduced TO, as a fraction of the window. Leaves
+#: half the window for prompt and half for output — generous for any real
+#: workload, and the reduction is a FLOOR under the request-time clamp in
+#: ``providers.clients``, not the number that finally goes on the wire.
+REDUCED_MAX_TOKENS_RATIO = 0.5
+
+
+def sane_listing_max_tokens(max_tokens: int, context_window: int) -> int:
+    """A listing's output cap, reduced when it is an implausible share of the window.
+
+    Second line of defence behind the request-time clamp in
+    ``providers.clients._effective_max_tokens``. That clamp is the real fix
+    because it alone knows the prompt size; this one exists so an absurd number
+    never reaches a ``ModelSpec`` in the first place, which protects the paths
+    that never build a request body — the picker's displayed limits, any
+    provider we never measure, and anything that reads ``max_output_tokens``
+    directly.
+
+    Providers count ``prompt + max_tokens`` against the window at admission, so
+    a cap at 0.9 of the window leaves 10% for input. OpenRouter advertises
+    ``meta/muse-spark-1.3`` as ``context_length: 1048576`` with
+    ``top_provider.max_completion_tokens: 943718``, and a real session 400'd at
+    ~113k of input on a 1M model.
+
+    The threshold is measured, not guessed. Across the 419 live OpenRouter rows
+    that quote both numbers, the ratio distribution has an empty band exactly
+    where this line sits:
+
+    * **~80 rows sit at exactly 0.9** — ``x-ai/grok-4.6`` (500000/450000),
+      ``x-ai/grok-4.20`` (2000000/1800000), ``openai/gpt-oss-120b``
+      (131072/117964). A round 0.9 across unrelated vendors is a gateway
+      formula, not 80 independent engineering decisions.
+    * **Nothing at all sits above 0.9**, so the guard has no upper tail.
+    * **The band 0.80 < r < 0.87 is empty.** Below it sits a dense, plainly
+      deliberate Mistral cluster at exactly 0.800 (``mistral-large``
+      128000/102400), which must not be touched and is not. Above it the next
+      rows are 0.870 (``nvidia/nemotron-3-nano``) and 0.879
+      (``meta-llama/llama-3.3-70b``, ``stepfun/step-3.7-flash``). 0.85 splits
+      that empty band.
+
+    The 0.87-0.88 rows ARE reduced, and deliberately so rather than as an
+    accepted false positive: ``llama-3.3-70b`` at 131072/115200 leaves 15,872
+    tokens of prompt on a 128k model, which fails on any real agent turn. After
+    the guard it serves 65,536 output tokens with 65,536 of prompt room — a cap
+    no ordinary turn reaches, in exchange for a window that is usable at all.
+    Every row this reduces has the same shape; none loses output capacity a
+    caller could realistically have spent.
+
+    Crucially this takes ``max_tokens`` from a LISTING only, never from the
+    bundled registry. 52 shipped rows exceed this ratio legitimately — ``gpt-4o``
+    is 128000/128000 and every ``grok-3`` row is 1.0 — because a hand-transcribed
+    registry entry states the model's documented maximum rather than a gateway's
+    formula. Applying the ratio there would reduce specs that work correctly
+    today, which is exactly the regression this must not cause.
+
+    A large cap on a large window is NOT the target and must keep working: a
+    model serving 64k output on a 200k window is 0.32 and passes untouched.
+    """
+    if max_tokens <= 0 or context_window <= 0:
+        # Nothing to compare against. Zero is this module's "unknown", and
+        # inventing a limit from an unknown is how the -1 sentinel bugs started.
+        return max_tokens
+    if max_tokens <= int(context_window * IMPLAUSIBLE_MAX_TOKENS_RATIO):
+        return max_tokens
+    return int(context_window * REDUCED_MAX_TOKENS_RATIO)
+
+
 #: Stamped into every cached listing document and required when one is read back.
 #: Bump it whenever a transport starts capturing a FIELD, or a MEANING, that the
 #: previous writer could not express.
@@ -1257,10 +1329,30 @@ def _merge_one(row: DiscoveredModel, info: ModelInfo | None) -> DiscoveredModel:
     """
     if info is None:
         # Live-only: a model the registry has never heard of, which is exactly
-        # the case this module exists to surface.
-        return row
+        # the case this module exists to surface — and exactly the case the
+        # output-cap guard is FOR, since there is no bundled value to fall back
+        # on and nothing else downstream re-examines the number. muse-spark
+        # reaches the spec through this branch.
+        sane_max = sane_listing_max_tokens(
+            _positive_int(row.max_tokens), _positive_int(row.context_window)
+        )
+        if sane_max == row.max_tokens:
+            return row
+        return dataclasses.replace(row, max_tokens=sane_max)
 
-    live_max = _positive_int(row.max_tokens)
+    # Reduced BEFORE the 4096 comparison below, and before it can win over the
+    # static value: an implausible live cap is a bad answer whichever branch
+    # consumes it. The window used is the one this merge will actually publish,
+    # so the ratio is judged against the same pair that ends up on the row.
+    #
+    # One coincidence worth naming: on an 8192 window a 0.9 cap (7372) reduces to
+    # exactly 4096, so a reduced value can LAND ON the lying-default sentinel and
+    # hand the branch below to a larger bundled cap. That outcome is correct
+    # rather than merely tolerable — a hand-transcribed registry entry states the
+    # model's documented maximum, which is better information than either the
+    # gateway's formula or this guard's halving.
+    merged_window = _positive_int(row.context_window) or _positive_int(info.context_window)
+    live_max = sane_listing_max_tokens(_positive_int(row.max_tokens), merged_window)
     static_max = _positive_int(info.max_tokens)
     if live_max == LYING_MAX_TOKENS and static_max > live_max:
         # OpenAI-compat gateways hardcode 4096 in their listing regardless of the

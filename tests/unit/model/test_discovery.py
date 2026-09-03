@@ -2170,3 +2170,65 @@ def test_a_stale_document_degrades_to_the_table_rather_than_lying(tmp_path) -> N
     assert status == "ok"
     assert len(client.calls) == 1
     assert rows[0].reasoning_efforts == ("low", "high")
+
+
+# -- implausible advertised output caps ---------------------------------------
+
+
+def test_merge_reduces_an_output_cap_that_is_nine_tenths_of_the_window() -> None:
+    """The muse-spark shape, verbatim from OpenRouter's listing.
+
+    ``context_length: 1048576`` beside ``max_completion_tokens: 943718`` reserves
+    90% of the window for output, leaving ~104k of prompt on a 1M model. A real
+    session 400'd at ~113k of input. ~80 rows in the live catalogue carry this
+    exact 0.9 ratio, so it is a gateway formula rather than a stated limit.
+    """
+    merged = merge_models(
+        {},
+        [DiscoveredModel(id="meta/muse-spark-1.3", context_window=1_048_576, max_tokens=943_718)],
+    )
+
+    assert merged[0].max_tokens == 524_288
+    # The property that actually matters: prompt room is now half the window
+    # rather than a tenth of it.
+    assert merged[0].context_window - merged[0].max_tokens >= 500_000
+
+
+def test_merge_leaves_a_legitimately_large_output_cap_alone() -> None:
+    """A model genuinely serving 64k of output on a 200k window is 0.32 and must
+    pass through untouched — the guard targets the window-fraction formula, not
+    large caps as such."""
+    merged = merge_models({}, [DiscoveredModel(id="m", context_window=200_000, max_tokens=64_000)])
+
+    assert merged[0].max_tokens == 64_000
+
+
+def test_merge_leaves_the_mistral_four_fifths_cluster_alone() -> None:
+    """``mistralai/mistral-large`` is 128000/102400 — exactly 0.8, a dense and
+    plainly deliberate cluster in the live catalogue that sits below the line."""
+    merged = merge_models({}, [DiscoveredModel(id="m", context_window=128_000, max_tokens=102_400)])
+
+    assert merged[0].max_tokens == 102_400
+
+
+def test_merge_reduces_an_implausible_cap_even_beside_a_registry_row() -> None:
+    """The guard runs on BOTH merge branches. A live-only row takes the early
+    return, so a rule applied only to the reconciled branch would miss exactly
+    the unshipped models this module exists to surface — and vice versa."""
+    static = {"m": _info("m", context_window=500_000, max_tokens=8_192)}
+    merged = merge_models(
+        {**static}, [DiscoveredModel(id="m", context_window=500_000, max_tokens=450_000)]
+    )
+
+    assert merged[0].max_tokens == 250_000
+
+
+def test_merge_keeps_a_static_output_cap_that_exceeds_the_ratio() -> None:
+    """The ratio judges LISTINGS, never the bundled registry. 52 shipped rows
+    exceed it legitimately — ``gpt-4o`` is 128000/128000 — because a
+    hand-transcribed entry states the model's documented maximum. Reducing those
+    would shrink specs that work correctly today."""
+    static = {"m": _info("m", context_window=128_000, max_tokens=128_000)}
+    merged = merge_models(static, None)
+
+    assert merged[0].max_tokens == 128_000
