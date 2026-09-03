@@ -14,10 +14,15 @@ Work in this order and stop when the budget is spent:
 
 1. Read the DIFF first (`git diff <base>..<head>`), not the file tree. The diff
    is the review; the tree is context you fetch only where the diff is unclear.
+   On remediation rounds (Round 2+), scope your audit primarily to the
+   remediation diff (`git diff <previous_reviewed_head>..<current_head>`) to
+   verify fixes. Do not re-audit previously approved unchanged files or introduce
+   unrelated out-of-scope findings.
 2. Open a file only when the diff cannot answer a specific question you can
    state. Re-reading a file you have already read is nearly always waste.
-3. Verify what you can cheaply check — run the tests, run the command the
-   description claims works. A finding you reproduced outranks one you inferred.
+3. Verify what you can cheaply check — run targeted unit tests covering the
+   changed code rather than the entire multi-suite repository test matrix. A
+   finding you reproduced outranks one you inferred.
 
 Classify EVERY finding, and be honest about severity:
 
