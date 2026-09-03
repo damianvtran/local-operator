@@ -1864,3 +1864,18 @@ def test_purge_stranded_is_safe_when_the_cache_dir_does_not_exist(tmp_path) -> N
     missing = tmp_path / "never-created"
     catalogue.purge_stranded_temp_files(missing)  # must not raise
     assert not missing.exists()
+
+
+def test_the_models_dev_projection_is_not_a_provider_document(tmp_path) -> None:
+    """``models-dev.listing.json`` belongs to no credential, and no provider's
+    storage id is a dotted prefix of it, so no login can drop it and cost the
+    machine a 4.4 MB refetch."""
+    from local_operator.providers.registry import (
+        PROVIDER_REGISTRY,
+        credential_provider_id,
+    )
+
+    (tmp_path / "models-dev.listing.json").write_text("{}", encoding="utf-8")
+    for definition in PROVIDER_REGISTRY:
+        catalogue.invalidate_documents(credential_provider_id(definition.id), cache_dir=tmp_path)
+    assert (tmp_path / "models-dev.listing.json").exists()

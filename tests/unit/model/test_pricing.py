@@ -157,11 +157,13 @@ def test_current_generation_claude_is_priced(
 # The catalogue fallback (a placeholder self-heals)
 # ---------------------------------------------------------------------------
 #
-# Leg 2 of resolution is the provider-neutral models.dev catalogue
-# (`_from_price_catalogue`), NOT the OpenRouter listing: a user signed in only to
-# Anthropic must get correct prices for a model released this morning without
-# another aggregator's document being fresh. Leg 3 (`_from_aggregator_catalogue`)
-# survives for an aggregator's OWN ids only.
+# Leg 2 of resolution is the ranked keyless chain (`_from_price_catalogue` →
+# `prices.price_row`): models.dev FIRST, and OpenRouter's public listing under the
+# vendor namespace ONLY when models.dev has no priced row. A user signed in only
+# to Anthropic gets a release-day price from models.dev without another
+# aggregator's document being fresh — and a gap in models.dev alone does not
+# unprice the model, because the independent secondary still answers. Leg 3
+# (`_from_aggregator_catalogue`) survives for an aggregator's OWN ids only.
 
 
 def _catalogue(*rows: DiscoveredModel):
@@ -231,10 +233,11 @@ def test_the_input_price_fallback_survives_a_listing_with_no_write_price() -> No
 
 
 def test_a_direct_provider_is_priced_from_the_neutral_catalogue_not_openrouter() -> None:
-    """Zero OpenRouter requests on an Anthropic-only install.
+    """Zero OpenRouter requests on an Anthropic-only install when models.dev answers.
 
     The provider's own listing answers unpriced (as Anthropic's does), models.dev
-    prices it, and the aggregator listing is never consulted for a direct id.
+    prices it, and the OpenRouter document is never read for a direct id the
+    primary already priced.
     """
     invalidate_model_info_cache()
     unpriced = DiscoveredModel(id="claude-nova-6", context_window=1_000_000, max_tokens=128_000)
@@ -275,7 +278,8 @@ def test_openrouter_ids_still_fall_back_to_their_own_listing() -> None:
 
 
 def test_the_aggregator_leg_refuses_a_direct_provider() -> None:
-    """The namespace map that priced `anthropic/*` from OpenRouter is gone."""
+    """Leg 3 never prices a direct id: OpenRouter reaches those only as the
+    SECONDARY step of leg 2's chain, behind models.dev, never on its own."""
     placeholder = ModelInfo(id="claude-nova-6", name="x", description="")
     row = DiscoveredModel(id="anthropic/claude-nova-6", input_price=7.0)
     with _catalogue(row) as listing:

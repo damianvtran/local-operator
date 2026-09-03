@@ -23,6 +23,7 @@ fuzzy over the string the user can actually see (``provider/id``) — type
 from __future__ import annotations
 
 import dataclasses
+import math
 import re
 from typing import Callable
 
@@ -159,6 +160,15 @@ def format_price_pair(input_price: float, output_price: float) -> str:
     treating a missing price as zero would advertise a paid model as free, which
     is the one error in this column a user would act on. So an absent price is
     blank and only a genuine pair of zeroes says ``free``.
+
+    This function takes no "is it free" flag ON PURPOSE, even though that fact
+    now travels as one (:attr:`DiscoveredModel.free`). ``0.0`` reaching here
+    ALREADY means "stated free, or a keyless provider whose zero is real":
+    ``providers.controller._price`` is the single place that decides, and it
+    maps everything else to ``-1.0``. Re-deciding here would be a second, easily
+    divergent statement of the same rule — and the reason the ``free`` label was
+    dead in the first place was that the two layers disagreed, not that this one
+    was wrong.
     """
     if input_price < 0 or output_price < 0:
         return ""
@@ -167,19 +177,72 @@ def format_price_pair(input_price: float, output_price: float) -> str:
     return f"${_trim_price(input_price)}/{_trim_price(output_price)}"
 
 
-def _trim_price(value: float) -> str:
-    """Prices without trailing noise: ``3``, ``0.6``, ``15``, ``18.8``.
+def _is_parenthesised_tail(name: str) -> bool:
+    """Whether ``name`` already ENDS in a parenthetical, so wrapping it doubles up.
 
-    One decimal is kept above ten when the value has one, because rounding is not
-    free here: `$18.75` became `$19`, which reads as a real quoted price that the
-    provider does not charge. A column is allowed to be terse; it is not allowed
-    to be wrong.
+    True for ``GLM-5.2 (Token Plan)`` and ``Claude Opus 4.5 (2025-11-01)``; false
+    for a plain ``GPT-4.1 mini`` and for anything whose brackets are unbalanced,
+    which is where a naive "ends with `)`" test would strip a bracket the name
+    needs. The scan is balanced rather than a regex so a nested pair inside the
+    qualifier cannot fool it.
+    """
+    if not name.endswith(")"):
+        return False
+    depth = 0
+    for index, char in enumerate(name):
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth < 0:
+                return False
+            # The outermost group closed before the end: the name continues
+            # past its own parenthetical (``(preview) thing``), so it is not a
+            # trailing qualifier and must keep the wrapper.
+            if depth == 0 and index != len(name) - 1:
+                return False
+    # A group must actually have opened somewhere after the first character;
+    # a name that IS one bracketed span (``(Token Plan)``) is already annotated.
+    return depth == 0 and "(" in name
+
+
+def _trim_price(value: float) -> str:
+    """Prices without trailing noise: ``3``, ``0.6``, ``15``, ``18.8``, ``0.075``.
+
+    Rounding is not free here: `$18.75` became `$19`, which reads as a real
+    quoted price that the provider does not charge. A column is allowed to be
+    terse; it is not allowed to be wrong. That argument does not stop at one
+    cent, which is where a flat two decimals broke it — `0.075` printed `$0.07`,
+    a 6.7% under-quote on exactly the cheap models a user picks BECAUSE of the
+    price, and in one list `gpt-5.2:batch` (0.875) rounded up to `$0.88` while
+    `gpt-5.1:batch` (0.625) rounded down to `$0.62`, two adjacent rows resolving
+    the same half-cent in opposite directions.
+
+    So: one decimal above ten, and THREE SIGNIFICANT FIGURES below it, which is
+    a relative bound rather than an absolute one and therefore says the same
+    thing about a $5 model and a $0.05 one. Measured over every price in the
+    real models.dev and OpenRouter catalogues (244 distinct values), it drops
+    the worst error from 20% to 0.44% and costs the widest pair three cells —
+    `$0.0481/0.193` at 13, still inside a column that carries `$1.25/10` beside
+    it and clears the 60-column layout, where the id truncates before the
+    numbers are touched (``_NUMBERS_MIN_WIDTH``).
+
+    ``%g`` would also switch to exponent form, which is unreadable in a price
+    column; it cannot trigger here (it needs a value below 1e-4 or above 1e5,
+    and the catalogue's range is 0.017 to 600) but the format is pinned to ``f``
+    after the rounding so a future outlier degrades to a long number rather than
+    to ``1e-05``.
     """
     if value == int(value):
         return f"{int(value)}"
     if value >= 10:
         return f"{value:.1f}"
-    return f"{value:.2f}".rstrip("0").rstrip(".")
+    # Round to 3 s.f., then render as a plain decimal and strip the padding.
+    # ``math.floor(log10)`` gives the exponent; ``2 - exponent`` is the decimal
+    # count that leaves three figures (0.075 -> exp -2 -> 4dp -> "0.0750").
+    exponent = math.floor(math.log10(abs(value)))
+    decimals = max(0, 2 - exponent)
+    return f"{round(value, decimals):.{decimals}f}".rstrip("0").rstrip(".")
 
 
 #: `(tier, -score, version_key, row)` — the shape `rank_rows` sorts.
@@ -610,7 +673,16 @@ class ModelPicker(Static):
             # secondary aid that cannot be read should not spend cells.
             if room >= cell_len(name) + 2:
                 line.append(" " * _COLUMN_GAP, style=bg)
-                line.append(f"({name})", style=provider_style)
+                # A name that is ITSELF one parenthetical does not get a second
+                # pair: `GLM-5.2 (Token Plan)` read `(GLM-5.2 (Token Plan))`,
+                # and the stray `))` looks like a rendering fault rather than a
+                # qualifier. Only a name whose trailing `)` closes a group that
+                # opens mid-name is unwrapped — `Claude Opus 4.5 (2025-11-01)`
+                # qualifies, a hypothetical `(preview) thing` does not, so the
+                # brackets can never be dropped from a name that needs them to
+                # read as an annotation at all.
+                wrapped = name if _is_parenthesised_tail(name) else f"({name})"
+                line.append(wrapped, style=provider_style)
         if mark:
             line.append(mark, style=mark_style)
         if numbers:

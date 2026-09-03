@@ -1,4 +1,5 @@
-"""Provider-neutral prices and limits from models.dev, cached like a listing.
+"""Provider-neutral prices and limits: models.dev first, OpenRouter's public
+listing second, cached like a listing.
 
 WHY THIS EXISTS
 ---------------
@@ -19,6 +20,21 @@ model ships (verified: ``anthropic.models["claude-fable-5-1"]`` carried
 10/50/0.25/12.5 and a 1M/128k limit on its release date). It answers a weak
 ETag and honours ``If-None-Match`` with a 0-byte 304, so keeping it fresh
 hourly costs one header round trip per machine.
+
+WHY TWO SOURCES
+---------------
+One community-maintained JSON is one point of failure: a day-0 gap (the row
+not merged yet), a shape drift, or the host being down all land as "unpriced"
+for every direct provider at once. OpenRouter's public ``/api/v1/models`` is an
+INDEPENDENT keyless document that quotes prices for the same models under a
+per-vendor namespace (``anthropic/claude-fable-5.1``), so it is the secondary
+leg of a ranked chain (:func:`price_row`): models.dev answers first; OpenRouter
+is consulted ONLY for an id models.dev has no PRICED row for; the shipped
+registry is what the caller falls back to when both miss. OpenRouter never
+overrides a price models.dev or the provider's own listing quoted, and it
+stays the authority for ``openrouter/*`` ids, which never enter this chain.
+Both documents sit under the same stale-while-revalidate, lease and ``want_id``
+machinery, so neither adds a request to a path that already has an answer.
 
 WHAT IS STORED
 --------------
@@ -43,8 +59,11 @@ OpenAI-compatible listing and only ever widening.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
-from collections.abc import Mapping
+import math
+import time
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -60,6 +79,7 @@ from local_operator.model.catalogue import (
 from local_operator.model.discovery import (
     DEFAULT_TIMEOUT_S,
     DiscoveredModel,
+    _bills_in_tokens,
     _positive_float,
     _positive_int,
 )
@@ -78,7 +98,20 @@ PRICE_CATALOGUE_KEY = "models-dev.listing"
 #: reason ``discovery.LISTING_CAPTURE_VERSIONS`` exists: a reader that starts
 #: needing a field the writer did not record must be able to force one refetch
 #: rather than serve zeros for a day. Version 1 is the five-field projection.
-PRICE_CATALOGUE_CAPTURE = 1
+#:
+#: Version 2 adds ``output_modalities``, which :func:`_row` needs to decide
+#: whether a stated zero may be displayed as ``free`` (see
+#: :func:`_bills_in_tokens`). A version-1 document carries no modality at all, so
+#: the permissive default would let it keep claiming ``free`` for the very rows
+#: this gate exists to silence — the lyria pair, which models.dev also quotes at
+#: $0/0. The bump is what makes the fix take effect on an existing install
+#: rather than a day later. It costs ONE unconditional refetch per install, on
+#: whichever surface reads the document first: single-id resolution repairs it
+#: in-call (:func:`_models_dev_providers`) and the picker's bulk read repairs it
+#: off-loop (:func:`_repair_unusable_capture`). Both drop the document before
+#: refetching, so the stale ETag cannot turn the repair into a 304 that rewrites
+#: the same unusable capture.
+PRICE_CATALOGUE_CAPTURE = 2
 
 #: A local (canonical) provider id, mapped to the models.dev provider keys that
 #: describe the same models — FIRST MATCH WINS, per model id. The local id is the
@@ -114,11 +147,85 @@ _PRICE_CATALOGUE_KEYS: dict[str, tuple[str, ...]] = {
     "openrouter": ("openrouter",),
 }
 
+#: The models.dev keys whose ``0/0`` means "billed in plan credits", NOT "free".
+#:
+#: These catalogues describe subscription plans: the vendor genuinely does not
+#: quote a USD-per-token rate, so models.dev records zeros as a way of saying
+#: "not priced in dollars". A row from one of them therefore STATES a zero and
+#: still has an unknowable cost — the one shape where the stated-zero signal
+#: must not become the word ``free`` on screen, because the user IS paying, just
+#: not per token. The distinction is per KEY rather than per row because it is a
+#: property of the billing arrangement the catalogue describes: every id under
+#: ``alibaba-token-plan`` is credit-billed and every id under ``zai`` is not,
+#: whatever their individual costs happen to be.
+#:
+#: Contrast ``zai``/``moonshotai``/``google``, which are pay-per-token
+#: catalogues: a zero there is a quoted zero (``zai/glm-4.7-flash`` is $0 on
+#: Z.AI's own pricing page) and is exactly what ``free`` is for.
+_PLAN_BILLED_KEYS: frozenset[str] = frozenset(
+    {"alibaba-token-plan", "kimi-for-coding", "zai-coding-plan"}
+)
+
 #: Every models.dev key the projection keeps, derived from the map above so the
 #: two cannot disagree about what is on disk.
 _PROJECTED_PROVIDERS: frozenset[str] = frozenset(
     key for keys in _PRICE_CATALOGUE_KEYS.values() for key in keys
 )
+
+#: A direct provider's id, mapped to the namespace OpenRouter publishes the same
+#: models under — the SECONDARY leg of :func:`price_row`. Only a provider whose
+#: OWN listing quotes no prices needs an entry, which is every direct provider in
+#: this tree. The aggregators are deliberately absent: their own listing IS the
+#: priced one, and ``openrouter/*`` ids already carry their namespace.
+#:
+#: Spelled out rather than derived because three of the namespaces are renames
+#: (``x-ai``, ``qwen``, ``moonshotai``), verified against
+#: ``GET https://openrouter.ai/api/v1/models`` on 2026-09-02; a derived guess
+#: would silently price a model from whatever else happened to match.
+#:
+#: ``alibaba-token-plan`` has NO entry on purpose. models.dev quotes its models
+#: as 0/0 because the plan bills credits rather than USD per token, and that zero
+#: is the intended answer ("cost unknown"). Falling through to ``qwen/`` here
+#: would print the pay-per-token USD rate for a plan the user is not paying it
+#: on — precisely the number this chain must never invent.
+OPENROUTER_NAMESPACE: dict[str, str] = {
+    "anthropic": "anthropic",
+    "openai": "openai",
+    "google": "google",
+    "deepseek": "deepseek",
+    "mistral": "mistralai",
+    "xai": "x-ai",
+    "alibaba": "qwen",
+    "kimi": "moonshotai",
+    "zai": "z-ai",
+}
+
+#: The OpenRouter document's name in the catalogue cache, for the keyless read
+#: the secondary leg performs. Same key ``discovery._cache_key`` derives for the
+#: provider's own listing (no credential, so no scope suffix): the picker's
+#: OpenRouter rows and this leg share ONE document on disk.
+OPENROUTER_CATALOGUE_KEY = "openrouter.listing"
+
+#: Relative gap past which two sources pricing the same id are logged as
+#: disagreeing. Diagnostic only — nothing acts on it — so a loose bound that
+#: ignores rounding (models.dev quotes $10, OpenRouter 1e-5/token) is the point.
+PRICE_DISAGREEMENT_RATIO = 0.05
+
+
+def _output_modalities(modalities: Any) -> list[str]:
+    """models.dev's ``modalities.output`` as a list of strings, else ``[]``.
+
+    Normalised on the way IN so the on-disk document carries the same shape
+    :func:`_bills_in_tokens` reads off an OpenRouter ``architecture`` mapping,
+    and the two sources answer the free question through one predicate. An empty
+    list is the "said nothing" case that predicate treats as text.
+    """
+    if not isinstance(modalities, Mapping):
+        return []
+    output = modalities.get("output")
+    if not isinstance(output, (list, tuple)):
+        return []
+    return [item for item in output if isinstance(item, str)]
 
 
 def project(body: Mapping[str, Any], etag: str | None) -> dict[str, Any]:
@@ -152,6 +259,13 @@ def project(body: Mapping[str, Any], etag: str | None) -> dict[str, Any]:
                 "release_date": (
                     model.get("release_date") if isinstance(model.get("release_date"), str) else ""
                 ),
+                # models.dev nests the same fact OpenRouter puts under
+                # ``architecture``: ``modalities.output``. Carried so ``_row``
+                # can refuse to call a per-artifact-billed model free — it
+                # quotes the lyria pair at $0/0 exactly as OpenRouter does, so
+                # without this the second source would reintroduce the claim the
+                # first one now refuses to make.
+                "output_modalities": _output_modalities(model.get("modalities")),
             }
         providers[provider_key] = projected
     return {"capture": PRICE_CATALOGUE_CAPTURE, "etag": etag, "providers": providers}
@@ -209,21 +323,86 @@ def _usable(payload: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
     return providers if isinstance(providers, Mapping) else None
 
 
-def _row(model_id: str, entry: Mapping[str, Any]) -> DiscoveredModel:
-    """One projected entry as the struct every other resolution leg speaks."""
+def _stated_price(value: object) -> float | None:
+    """``value`` as a price models.dev actually STATED, or ``None``.
+
+    Deliberately not :func:`_positive_float`, which collapses "stated zero",
+    "absent" and "malformed" into the same ``0.0`` — this module's whole
+    ranking turns on keeping the first apart from the other two. A bool is an
+    int subclass and a ``True`` price is nonsense; a negative or non-finite
+    number is not a price any vendor can charge, so both read as UNSTATED and
+    the chain keeps looking rather than recording a zero the vendor never said.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    if not math.isfinite(number) or number < 0:
+        return None
+    return number
+
+
+def _row(model_id: str, entry: Mapping[str, Any], key: str = "") -> DiscoveredModel:
+    """One projected entry as the struct every other resolution leg speaks.
+
+    ``key`` is the models.dev catalogue the entry was found under, and it decides
+    what a stated zero MEANS: a plan catalogue (:data:`_PLAN_BILLED_KEYS`) quotes
+    zeros because it bills credits rather than dollars, so its rows stop the
+    chain exactly as before but are never marked ``free`` for display.
+
+    Two facts live in a ``cost`` mapping and the chain needs them apart:
+
+    * **models.dev STATED a price** — both ``input`` and ``output`` are real
+      numbers. That alone is what stops the chain (see :func:`_priced`): a
+      quoted price is an answer whatever its value.
+    * **the stated price is ZERO** — both of those numbers are exactly ``0``.
+      Only then is the row marked with :data:`_STATED_ZERO`, because only then
+      does the struct lose the fact: a ``DiscoveredModel`` spells "free" and
+      "unknown" the same way (``0.0``), so a symmetric zero would otherwise
+      read as "nobody said anything" and fall through to the secondary.
+
+    An ASYMMETRIC row (``input: 0, output: 15``) is stated but not zero, so it
+    keeps its numbers and stops the chain on the ordinary positive-leg test —
+    marking it would flatten a real $15 output price to free. Anything else —
+    a missing or empty ``cost``, or one without numeric ``input`` and
+    ``output`` — stays ``0.0`` and therefore "unanswered".
+    """
     cost = entry.get("cost")
     cost = cost if isinstance(cost, Mapping) else {}
     limit = entry.get("limit")
     limit = limit if isinstance(limit, Mapping) else {}
     cache_read = _positive_float(cost.get("cache_read"))
     name = entry.get("name")
+    stated_input = _stated_price(cost.get("input"))
+    stated_output = _stated_price(cost.get("output"))
+    stated_zero = stated_input == 0.0 and stated_output == 0.0
+    input_price = _positive_float(cost.get("input"))
+    output_price = _positive_float(cost.get("output"))
     return DiscoveredModel(
         id=model_id,
         name=name if isinstance(name, str) else "",
         context_window=_positive_int(limit.get("context")),
         max_tokens=_positive_int(limit.get("output")),
-        input_price=_positive_float(cost.get("input")),
-        output_price=_positive_float(cost.get("output")),
+        input_price=_STATED_ZERO if stated_zero else input_price,
+        output_price=_STATED_ZERO if stated_zero else output_price,
+        # Nearly the same fact as the marker, in the field that OUTLIVES this
+        # module. ``_STATED_ZERO`` is an in-flight marker the chain strips on
+        # the way out (:func:`_unmark`) and answers "does this row stop the
+        # chain"; ``free`` is the durable statement a display reads and answers
+        # "may this row say the word". They differ on exactly the plan
+        # catalogues, whose zeros are an answer to the first question and not to
+        # the second — a credit-billed model's real cost is unknowable, and
+        # printing ``free`` for it would be a lie the user could act on.
+        # The third way a stated zero fails to mean "free", beside a plan
+        # catalogue: a model whose product is not tokens. models.dev quotes the
+        # lyria pair at $0/0 per token while OpenRouter bills them per song and
+        # per clip, so without this gate the secondary leg would restate the
+        # claim the primary now withholds. One predicate, shared with the wire
+        # parser (see :func:`_bills_in_tokens`).
+        free=(
+            stated_zero
+            and key not in _PLAN_BILLED_KEYS
+            and _bills_in_tokens({"output_modalities": entry.get("output_modalities")})
+        ),
         cache_read_price=cache_read,
         cache_write_price=_positive_float(cost.get("cache_write")),
         # Never from here: a second-hand catalogue cannot issue the provider's
@@ -241,6 +420,10 @@ def _lookup(providers: Mapping[str, Any], provider: str, model_id: str) -> Disco
     and the dotted/dashed rewrites in :func:`id_spellings`. For ``openrouter``
     the id already carries its ``vendor/`` namespace, which is how models.dev
     keys that provider too, so no namespace mapping is needed.
+
+    The MATCHED key is handed to :func:`_row`, not just the entry: whether a
+    stated zero may be displayed as ``free`` depends on which catalogue answered
+    (see :data:`_PLAN_BILLED_KEYS`), and this is the only place that knows.
     """
     for key in _PRICE_CATALOGUE_KEYS.get(provider, ()):
         models = providers.get(key)
@@ -249,13 +432,198 @@ def _lookup(providers: Mapping[str, Any], provider: str, model_id: str) -> Disco
         for spelling in id_spellings(model_id):
             entry = models.get(spelling)
             if isinstance(entry, Mapping):
-                return _row(spelling, entry)
+                return _row(spelling, entry, key)
         wanted = normalised_id(model_id)
         for candidate, entry in models.items():
             if isinstance(candidate, str) and isinstance(entry, Mapping):
                 if normalised_id(candidate) == wanted:
-                    return _row(candidate, entry)
+                    return _row(candidate, entry, key)
     return None
+
+
+#: The in-flight marker for "models.dev priced this id and the price is zero".
+#: A listing row's PRICE FIELDS conflate "free" with "unknown" (0.0 either way),
+#: so a stated zero cannot survive the trip through them; the marker lets the
+#: chain tell the two apart internally and is stripped by :func:`_unmark` before
+#: a row leaves this module. Module-private: no caller ever sees a negative
+#: price.
+#:
+#: Purely in-flight, and NOT how the fact reaches a display —
+#: :attr:`DiscoveredModel.free` is, set beside this marker in :func:`_row` and
+#: never stripped. The two answer different questions (see the comment there),
+#: which is why both exist rather than one doing double duty.
+#:
+#: NOT the same ``-1.0`` as ``providers.controller._price``'s UNKNOWN sentinel,
+#: which the picker renders blank. The two spell opposite facts — "the vendor
+#: stated zero" here, "nobody knows" there — and they never meet, because
+#: :func:`_unmark` strips this one before any row reaches that function. Widen
+#: either one's reach and they collide silently, so keep them apart.
+_STATED_ZERO = -1.0
+
+
+def _stated_zero(row: DiscoveredModel | None) -> bool:
+    """Whether ``row`` carries the marker — i.e. models.dev said 0/0 on purpose.
+
+    Both legs, because :func:`_row` only marks a row whose stated ``input`` and
+    ``output`` are BOTH zero; a half-marked row cannot be constructed.
+    """
+    return row is not None and row.input_price == _STATED_ZERO and row.output_price == _STATED_ZERO
+
+
+def _unmark(row: DiscoveredModel | None) -> DiscoveredModel | None:
+    """The chain's exit: a stated-zero marker back to the ``0.0`` the struct speaks.
+
+    ``price_row`` and ``price_catalogue_row`` both return through this so the
+    marker cannot leak to a caller. ``0.0`` is the same zero the registry uses.
+
+    ``free`` is deliberately NOT stripped with it: ``dataclasses.replace``
+    carries it through, and it is what tells the display apart the two things
+    this ``0.0`` could mean. ``providers.controller._price`` still maps a bare
+    ``0.0`` to its own ``-1.0`` unknown marker for any provider that wants an
+    API key — blank beats printing a third party's rate for the vendor's own
+    endpoint — but it now consults ``free`` first, so a vendor-quoted zero
+    reaches the picker as the word instead of an empty cell.
+    """
+    if _stated_zero(row):
+        assert row is not None  # for the type checker; ``_stated_zero`` implies it
+        return dataclasses.replace(row, input_price=0.0, output_price=0.0)
+    return row
+
+
+def _priced(row: DiscoveredModel | None) -> bool:
+    """Whether a row answers the MONEY question — i.e. models.dev STATED a price.
+
+    The chain exits on "stated", not on "non-zero" and not on "zero": a quoted
+    price is an answer whatever its value, and the OpenRouter secondary — which
+    prices the same weights hosted by a THIRD party — must never overwrite one.
+    The two shapes a stated price takes are tested separately here because the
+    struct records them differently:
+
+    * a positive leg (``2.5/15``, and also the asymmetric ``0/15``) survives
+      into the struct as itself, so the ordinary positive-leg test finds it;
+    * a symmetric zero (``zai/glm-4.7-flash``, ``kimi-for-coding/k3``: free, or
+      billed in plan credits) cannot, so :func:`_row` marks it and
+      :func:`_stated_zero` reads the marker back.
+
+    Those two are exhaustive over stated prices: :func:`_stated_price` refuses
+    negatives and non-finite values, so a stated row always has a positive leg
+    or is marked. Only an ABSENT price — no entry, or no ``cost`` mapping
+    (``google/gemma-4-31b-it``) — leaves the money question open.
+
+    An OpenRouter row passes through :func:`openrouter_lookup` unchanged and
+    carries no marker, so for it this is the plain positive-leg test: a
+    zero-priced OpenRouter route is not trusted to price the vendor's own API.
+    """
+    return row is not None and (row.input_price > 0 or row.output_price > 0 or _stated_zero(row))
+
+
+def openrouter_lookup(
+    rows: Iterable[DiscoveredModel], provider: str, model_id: str
+) -> DiscoveredModel | None:
+    """``provider/model_id`` in OpenRouter's rows, under the vendor namespace.
+
+    Priced rows only: an unpriced OpenRouter row is a routing stub that can answer
+    neither question a price lookup asks, and matching one would shadow a
+    better-spelled sibling further down the candidate list. Spellings come from
+    :func:`id_spellings` (``claude-fable-5-1`` → ``claude-fable-5.1``), the same
+    map the models.dev lookup trusts, and the date-suffixed forms are tried
+    before the stripped ones for the reason that function documents.
+
+    Returns ``None`` for a provider with no namespace — the aggregators, whose
+    ``openrouter/*`` ids are their own listing's business, and plan providers
+    whose USD rate must not be borrowed (see :data:`OPENROUTER_NAMESPACE`).
+    """
+    namespace = OPENROUTER_NAMESPACE.get(provider)
+    if namespace is None:
+        return None
+    wanted = {f"{namespace}/{spelling}" for spelling in id_spellings(model_id)}
+    for row in rows:
+        if row.id in wanted and _priced(row):
+            return row
+    return None
+
+
+def _disagree(primary: DiscoveredModel, secondary: DiscoveredModel) -> bool:
+    for mine, theirs in (
+        (primary.input_price, secondary.input_price),
+        (
+            primary.output_price,
+            secondary.output_price,
+        ),
+    ):
+        if (
+            mine > 0
+            and theirs > 0
+            and abs(mine - theirs) / max(mine, theirs) > (PRICE_DISAGREEMENT_RATIO)
+        ):
+            return True
+    return False
+
+
+def price_row(
+    provider: str,
+    model_id: str,
+    *,
+    models_dev: Mapping[str, Any] | None,
+    openrouter: Iterable[DiscoveredModel] | None,
+) -> DiscoveredModel | None:
+    """THE ranked price chain over two pre-read documents, or ``None``.
+
+    Pure: it reads nothing and fetches nothing, which is what lets the resolver
+    (one id, budgeted, may fetch) and the picker's row builder (hundreds of
+    ids, one read per document, never fetches) share it without drifting.
+
+    1. models.dev (``models_dev``: the projection's ``providers`` map) — first
+       refusal. A row here is the answer outright, INCLUDING one that states
+       ``0/0``: the vendor quoted zero (or bills by plan credits) and the
+       secondary's third-party hosting rate must not replace it. The zero
+       arrives marked (:data:`_STATED_ZERO`) and is stripped on the way out,
+       so callers see the same ``0.0`` they always have.
+    2. OpenRouter (``openrouter``: the public listing's rows) — ONLY when
+       models.dev has no row answering the money question: a day-0 gap, a
+       cost-less stub, a shape drift, or the host being down. It fills the
+       money; limits models.dev already gave (from a cost-less stub, say) are
+       kept because the primary's limits are native while OpenRouter
+       advertises the widest window across its routes.
+    3. ``None`` — the caller keeps whatever the shipped registry says.
+
+    When both price an id and disagree by more than
+    :data:`PRICE_DISAGREEMENT_RATIO`, the fact is logged at debug and nothing
+    else happens: the primary still wins. The log is how a drifting source gets
+    noticed without either source being allowed to "correct" the other.
+    """
+    primary = _lookup(models_dev, provider, model_id) if models_dev is not None else None
+    secondary = openrouter_lookup(openrouter, provider, model_id) if openrouter else None
+    if _priced(primary):
+        assert primary is not None  # for the type checker; ``_priced`` implies it
+        if secondary is not None and _disagree(primary, secondary):
+            logger.debug(
+                "price sources disagree for %s/%s: models.dev %s/%s vs openrouter %s/%s",
+                provider,
+                model_id,
+                primary.input_price,
+                primary.output_price,
+                secondary.input_price,
+                secondary.output_price,
+            )
+        return _unmark(primary)
+    if secondary is None:
+        return _unmark(primary)
+    if primary is None:
+        return secondary
+    # A models.dev stub with limits but no cost, and an OpenRouter price: take the
+    # money from the secondary and keep the primary's native limits where it has
+    # them. Every field is "first source that has it", never a blend.
+    # ``free`` rides with the MONEY, so it comes from the secondary along with
+    # the prices and is never taken from the primary: the primary reaching here
+    # is by definition one that answered no money question at all (an empty
+    # ``cost``), so it has nothing to say about whether the model is free.
+    return dataclasses.replace(
+        secondary,
+        name=primary.name or secondary.name,
+        context_window=primary.context_window or secondary.context_window,
+        max_tokens=primary.max_tokens or secondary.max_tokens,
+    )
 
 
 def price_catalogue_row(
@@ -266,29 +634,155 @@ def price_catalogue_row(
     ttl_s: float = DEFAULT_TTL_S,
     cache_dir: Path | None = None,
 ) -> DiscoveredModel | None:
-    """Prices and limits for ``provider/model_id`` from models.dev, or ``None``.
+    """Prices and limits for ``provider/model_id`` through the ranked chain.
 
-    Never raises. ``timeout`` bounds the ONE request this may make and is the
-    caller's remaining resolution budget (see ``configure._remaining_budget``);
-    a cold machine with no document pays one 4.4 MB download inside it.
+    Never raises. ``timeout`` bounds the requests this may make and is the
+    caller's remaining resolution budget (see ``configure._remaining_budget``),
+    shared across both legs: a cold machine with no models.dev document pays
+    one 4.4 MB download inside it, and the OpenRouter leg gets what is left.
 
-    The ``want_id`` rule from discovery applies here too: an id absent from a
-    document at least ``MISS_REFETCH_MIN_AGE_S`` old is refetched once,
-    synchronously — for this document that is usually a 0-byte 304 unless the
-    row really did just land, which is the case this exists for.
+    The ``want_id`` rule from discovery applies to both documents: an id absent
+    from a document at least ``MISS_REFETCH_MIN_AGE_S`` old is refetched once,
+    synchronously — for models.dev that is usually a 0-byte 304 unless the row
+    really did just land, which is the case this exists for.
+
+    The OpenRouter document is read ONLY when models.dev has no row answering
+    the money question — and a stated ``0/0`` ANSWERS it, so a vendor-free or
+    plan-billed model never touches the secondary either. A resolution
+    models.dev answers costs no second parse, no second request, nothing on
+    the paint path in the common case.
     """
     if provider not in _PRICE_CATALOGUE_KEYS:
         return None
+    started = time.monotonic()
     try:
-        return _price_catalogue_row(provider, model_id, timeout, ttl_s, cache_dir)
+        models_dev = _models_dev_providers(provider, model_id, timeout, ttl_s, cache_dir)
     except Exception as exc:  # noqa: BLE001 — a price is never worth a failed start
         logger.debug("models.dev catalogue unavailable for %s/%s: %s", provider, model_id, exc)
+        models_dev = None
+    # The single "is the primary's answer complete" decision lives HERE so the
+    # document read and the read-OpenRouter skip share one rule. The final
+    # assembly — primary wins, secondary fills, limits merge — is all in
+    # ``price_row``; this function only decides which documents it sees.
+    primary = _lookup(models_dev, provider, model_id) if models_dev is not None else None
+    if _priced(primary):
+        return price_row(provider, model_id, models_dev=models_dev, openrouter=None)
+    openrouter: list[DiscoveredModel] | None = None
+    namespace = OPENROUTER_NAMESPACE.get(provider)
+    if namespace is not None:
+        try:
+            openrouter = openrouter_rows(
+                want_id=f"{namespace}/{model_id}",
+                # What the primary left of the caller's budget, floored above
+                # zero for the reason ``configure._remaining_budget`` gives.
+                timeout=max(0.01, timeout - (time.monotonic() - started)),
+                ttl_s=ttl_s,
+                cache_dir=cache_dir,
+            )
+        except Exception as exc:  # noqa: BLE001 — same rule as the primary
+            logger.debug("openrouter catalogue unavailable for %s/%s: %s", provider, model_id, exc)
+    return price_row(provider, model_id, models_dev=models_dev, openrouter=openrouter)
+
+
+def openrouter_rows(
+    *,
+    want_id: str | None = None,
+    timeout: float = DEFAULT_TIMEOUT_S,
+    ttl_s: float = DEFAULT_TTL_S,
+    cache_dir: Path | None = None,
+) -> list[DiscoveredModel]:
+    """OpenRouter's public rows via discovery, credential-free.
+
+    Goes through ``available_models`` rather than reading the document directly
+    so the SAME stale-while-revalidate, lease and capture-version rules govern
+    it as when the picker lists the ``openrouter`` provider — one document, one
+    state machine. ``want_id`` is the NAMESPACED spelling (``anthropic/…``) so
+    the miss-refetch rule fires for the row we are about to look up; the
+    spelling map is applied by ``discovery._lists_id`` on the other side.
+    Imported lazily: discovery pulls in httpx and this module is on the
+    resolution path of CLI invocations that never need a listing.
+    """
+    from local_operator.model.discovery import available_models
+
+    rows, _status = available_models(
+        "openrouter",
+        api_key=None,
+        timeout=timeout,
+        ttl_s=ttl_s,
+        cache_dir=cache_dir,
+        want_id=want_id,
+    )
+    return rows
+
+
+def models_dev_providers(
+    *, ttl_s: float = DEFAULT_TTL_S, cache_dir: Path | None = None
+) -> Mapping[str, Any] | None:
+    """The projection's ``providers`` map from DISK ONLY, or ``None``.
+
+    For a caller that is about to price many ids at once (the picker's row
+    builder) and must not put a fetch on its path: it reads what is there,
+    whatever its age, and NEVER fetches synchronously. A document from a capture
+    this reader cannot use reads as absent, and is dropped so the next read
+    finds a repairable state — see :func:`_repair_unusable_capture`.
+    """
+    try:
+        payload = peek_listing(PRICE_CATALOGUE_KEY, cache_dir=cache_dir).payload
+        providers = _usable(payload)
+        if providers is None and payload is not None:
+            _repair_unusable_capture(cache_dir)
+        return providers
+    except Exception as exc:  # noqa: BLE001 — a price is never worth a failed paint
+        logger.debug("models.dev catalogue unreadable: %s", exc)
         return None
 
 
-def _price_catalogue_row(
+def _repair_unusable_capture(cache_dir: Path | None) -> None:
+    """Drop a document this reader's capture rejects and refetch it OFF-loop.
+
+    WHY: the picker reads through :func:`models_dev_providers`, which is
+    peek-only, so before this a capture bump had no repair path on the surface
+    it exists to fix. The drop-and-refetch lived only in
+    :func:`_models_dev_providers`, reachable from single-id resolution — and
+    that leg is itself gated behind ``configure._needs_enrichment``, so an
+    operator whose default model the registry fully describes could open
+    ``/model`` for days and keep seeing the rows the stale capture unprices
+    (8 of them at the 1→2 bump: gpt-5.3-codex-spark and the grok-4.20 trio
+    across two provider spellings). "The fix ships and changes nothing" is
+    precisely what the capture stamp exists to prevent, so the picker surface
+    needs the same recovery ``discovery._available_models`` performs.
+
+    IT CANNOT STALL A PAINT. Both halves are non-blocking: ``invalidate`` is one
+    ``unlink``, and ``_schedule_revalidate`` hands the 4.4 MB GET to a daemon
+    thread and returns. The caller is unaffected either way — it already has its
+    answer (``None``), which is what an unusable document meant before.
+
+    ORDER IS LOAD-BEARING: the drop must precede the schedule. ``_fetch`` sends
+    ``If-None-Match`` from the document on disk, so scheduling against the stale
+    one invites a 304, which hands the SAME capture-1 payload back to be
+    rewritten — repaired never, re-attempted forever. Dropping first takes the
+    ETag with it and makes the refetch unconditional, so the document that lands
+    is stamped with the current capture.
+
+    IT CANNOT LOOP. A successful refetch is usable, so this branch is not
+    re-entered. A failed one leaves no document, and an absent document is the
+    ordinary cold miss the single-id path already owns — this branch needs a
+    payload to fire. Between those, ``_schedule_revalidate``'s own in-flight set
+    and ``REVALIDATE_BACKOFF_S`` bound an offline machine to one thread per five
+    minutes however often the picker repaints.
+    """
+    invalidate(PRICE_CATALOGUE_KEY, cache_dir=cache_dir)
+    _schedule_revalidate(
+        PRICE_CATALOGUE_KEY, lambda: _fetch(DEFAULT_TIMEOUT_S, cache_dir), cache_dir
+    )
+
+
+def _models_dev_providers(
     provider: str, model_id: str, timeout: float, ttl_s: float, cache_dir: Path | None
-) -> DiscoveredModel | None:
+) -> Mapping[str, Any] | None:
+    """The projection's ``providers`` map, read through the SWR state machine
+    with the ``want_id`` miss rule armed for ``provider/model_id``."""
+
     def fetch() -> dict[str, Any]:
         # On the calling path: the leg's budget (3 s at most, less when the
         # provider's own listing spent some of the shared deadline).
@@ -345,4 +839,4 @@ def _price_catalogue_row(
                 PRICE_CATALOGUE_KEY, lambda: _fetch(DEFAULT_TIMEOUT_S, cache_dir), cache_dir
             )
         return None
-    return _lookup(providers, provider, model_id)
+    return providers
