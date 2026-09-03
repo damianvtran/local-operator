@@ -9,12 +9,14 @@ contains the secret.
 
 from __future__ import annotations
 
+import tempfile
+from pathlib import Path
+
 import pytest
 
 from local_operator.harness.types import CustomMessage, StreamEndEvent
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.key_prompt import MASK_CHAR, KeyPromptBlock
-from tests.unit.tui._scratch import scratch_dir
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 from tests.unit.tui.test_slash_echo import _boot, _notice_texts, _submit
 
@@ -90,7 +92,9 @@ async def test_storing_a_credential_announces_it_to_the_session_journal() -> Non
     # A REAL session, not the FakeSession the pilot tests boot with: the
     # journal lives on Session (``journal_credential_change``), and the fake
     # has no journal to call.
-    real = make_real_session(scratch_dir(), ScriptedStream([[StreamEndEvent(stop_reason="stop")]]))
+    real = make_real_session(
+        Path(tempfile.mkdtemp()), ScriptedStream([[StreamEndEvent(stop_reason="stop")]])
+    )
     secret = "ghp_never_in_the_journal"
 
     real.journal_credential_change("GITHUB_TOKEN")
