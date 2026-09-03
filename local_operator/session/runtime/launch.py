@@ -59,6 +59,13 @@ DEFAULT_DEADLINE_S = 30.0
 _POLL_INITIAL_S = 0.05
 _POLL_FACTOR = 1.7
 _POLL_CAP_S = 1.0
+#: How many runtimes one engage may spawn before it stops trying. Only the
+#: FIRST spawn is ordinary; the rest are respawns after a candidate proved to
+#: have died during construction. Three is enough to ride out a transient
+#: (a momentarily unreadable credential file, a port in TIME_WAIT) while
+#: keeping a genuinely unconstructable session from respawning for the whole
+#: deadline and burying its real error under a crash loop.
+_MAX_SPAWNS = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -266,6 +273,10 @@ async def engage_runtime(
     deadline = time.monotonic() + deadline_s
     delay = _POLL_INITIAL_S
     spawned = False
+    # Counted separately from ``spawned`` because a respawn after a candidate
+    # died mid-construction is a different event from the first spawn, and
+    # only the retries need a cap. See the respawn branch below.
+    spawns = 0
     last_error: Exception | None = None
     # Deferred materialisation is exactly the speculative case: a warm engage
     # must not create a session directory for a draft the user may abandon.
@@ -289,7 +300,7 @@ async def engage_runtime(
                 last_error = exc
                 logger.debug("engage: dial failed for %s; retrying", session_id, exc_info=True)
 
-        if not spawned:
+        if not spawned or spawns < _MAX_SPAWNS:
             holder = await asyncio.to_thread(_lease_holder, config_dir, session_id)
             if holder is not None:
                 # STARTING: a contender holds the transcript but has not
@@ -297,10 +308,38 @@ async def engage_runtime(
                 # so wait for its record instead. This is the whole reason the
                 # loop looks at the lease at all.
                 logger.debug("engage: %s is starting under pid %s; waiting", session_id, holder)
-            else:
+            elif not spawned:
                 logger.debug("engage: spawning a runtime for %s", session_id)
                 await asyncio.to_thread(_spawn_runtime, session_id, cwd, defer_materialise=defer)
                 spawned = True
+                spawns += 1
+            else:
+                # THE CANDIDATE WE SPAWNED IS GONE. No record exists, and
+                # nobody holds the lease — which together provably mean the
+                # winner died DURING construction (`process.py`'s own `return
+                # 2`, an OOM kill, a bad credential, an MCP hang taking the
+                # process down). This is not the designed-loser path: a loser
+                # exits 0 without ever holding the lease, and the winner it
+                # lost to still holds it, so this branch cannot fire for one.
+                #
+                # Round 1 (R1) measured the cost of not covering it: the
+                # caller sat in the `spawned=True` branch for the full 30 s
+                # deadline and then failed, while a fresh candidate would have
+                # acquired the lease immediately — the inverse failure of the
+                # invariant this module exists for ("at most one runtime, AND
+                # at least one when one is owed").
+                #
+                # Bounded because a session that cannot construct at all
+                # (missing credential, unreadable transcript) would otherwise
+                # respawn until the deadline, turning one clear failure into a
+                # crash loop. After the cap the loop waits out the deadline as
+                # before and reports the original error.
+                logger.info(
+                    "engage: the candidate for %s died during construction; respawning",
+                    session_id,
+                )
+                await asyncio.to_thread(_spawn_runtime, session_id, cwd, defer_materialise=defer)
+                spawns += 1
 
         await asyncio.sleep(min(delay, max(0.0, deadline - time.monotonic())))
         delay = min(delay * _POLL_FACTOR, _POLL_CAP_S)

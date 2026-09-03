@@ -18,6 +18,7 @@ subprocess, never call it.
 
 from __future__ import annotations
 
+import os
 import plistlib
 import sys
 from pathlib import Path
@@ -133,3 +134,56 @@ def test_install_never_raises_even_on_an_unwritable_target(
     outcome = ensure_supervisor_installed(tmp_path / "config")
     assert outcome.installed is False
     assert outcome.reason
+
+
+def test_the_guard_holds_when_the_redirected_home_is_inside_the_real_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The failure mode the other guard test structurally cannot reach.
+
+    Round 1 (R4): the guard asked whether the plist path was *under* the real
+    passwd home, which is a LOCATION test. Set `TMPDIR` inside `$HOME` — not
+    exotic; it is how you avoid `/var/folders` cleanup races — and pytest's
+    `tmp_path`, and so a patched `Path.home()`, lands inside the real home and
+    satisfies containment. The guard would then wave a real launchd bootstrap
+    through against a directory about to be deleted, which is the exact
+    incident it exists to prevent.
+
+    Every existing test uses `tmp_path`, whose location follows `TMPDIR`, so
+    none of them can express this. This one builds the pathological home
+    explicitly under the REAL passwd home and asserts the guard still refuses.
+    """
+    import pwd
+
+    from local_operator.wakes.install import _launchd_is_addressable
+
+    real_home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+    # A path shaped like the dangerous case. Never created: the guard is a
+    # pure path comparison, and this test must not write into the real home.
+    pathological = real_home / "tmp-pytest-sandbox" / "home"
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: pathological))
+
+    assert _launchd_is_addressable() is False, (
+        "a redirected home INSIDE the real home was accepted as addressable; "
+        "the guard has regressed from an identity test to a location test"
+    )
+
+
+def test_the_guard_accepts_only_the_genuine_home(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The positive half: the guard is not vacuously False.
+
+    Without this, replacing the body with `return False` would pass every
+    other test in this file while silently disabling install-on-demand for
+    every real user.
+    """
+    import pwd
+
+    from local_operator.wakes.install import _launchd_is_addressable, is_supported
+
+    if not is_supported():
+        pytest.skip("launchd guard is only meaningful on darwin with launchctl")
+
+    real_home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: real_home))
+
+    assert _launchd_is_addressable() is True

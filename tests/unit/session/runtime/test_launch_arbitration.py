@@ -26,6 +26,7 @@ from typing import Any
 import pytest
 
 from local_operator.session.runtime.launch import (
+    _MAX_SPAWNS,
     PeerMessageErrand,
     PromptErrand,
     WarmErrand,
@@ -361,3 +362,46 @@ async def test_engage_times_out_rather_than_spinning_forever(tmp_path: Path, mon
             config_dir=tmp_path,
             deadline_s=0.5,
         )
+
+
+@pytest.mark.asyncio
+async def test_a_candidate_that_dies_during_construction_is_respawned(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The inverse failure: no runtime when one is owed.
+
+    A candidate that wins the lease and then dies mid-construction (`process.py`
+    returning 2, an OOM kill, a bad credential) leaves no record and no lease
+    holder. Round 1 (R1) measured the caller sitting in the `spawned=True`
+    branch for the FULL 30 s deadline before failing, while a fresh candidate
+    would have acquired the lease immediately.
+
+    Distinguishing this from the STARTING case is what makes the respawn safe:
+    STARTING has a live lease holder, this has none. The test asserts the
+    respawn happens AND that it is bounded, since a session that can never
+    construct must report its error rather than loop.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions").mkdir(parents=True, exist_ok=True)
+
+    attempts: list[str] = []
+
+    def dies_during_construction(session_id: str, cwd: str, *, defer_materialise: bool) -> None:
+        """Take the lease, then vanish — publishing no record."""
+        from local_operator.session_lease import acquire_session_lease
+
+        attempts.append(session_id)
+        lease = acquire_session_lease(tmp_path / "sessions" / session_id)
+        lease.release()
+
+    monkeypatch.setattr(
+        "local_operator.session.runtime.launch._spawn_runtime", dies_during_construction
+    )
+
+    with pytest.raises(TimeoutError):
+        await engage_runtime(
+            SESSION_ID, str(tmp_path), WarmErrand(), config_dir=tmp_path, deadline_s=6.0
+        )
+
+    assert len(attempts) > 1, "a dead candidate was never respawned; R1 has regressed"
+    assert len(attempts) <= _MAX_SPAWNS, "respawning is unbounded; a broken session crash-loops"

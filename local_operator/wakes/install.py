@@ -68,9 +68,21 @@ def _launchd_is_addressable() -> bool:
     whose plist path was under ``/private/var/folders/…/pytest-of-damian/``.
 
     So the plist is written wherever ``plist_path()`` says, but launchd is
-    only ADDRESSED when that path is inside the real passwd home. The file
-    half of the installer stays fully testable; the half that reaches outside
-    the process refuses to run under a redirected home.
+    only ADDRESSED when that path is the one the real passwd home produces.
+    The file half of the installer stays fully testable; the half that reaches
+    outside the process refuses to run under a redirected home.
+
+    IDENTITY, NOT LOCATION. This asked ``is_relative_to(real_home)`` until
+    round 1 (R4) showed it fails OPEN whenever a redirected home lands inside
+    the real one — `TMPDIR` set under ``$HOME`` is not exotic (it is how you
+    avoid ``/var/folders`` cleanup races), and it makes pytest's ``tmp_path``,
+    and therefore a patched ``Path.home()``, satisfy a containment test. That
+    re-arms precisely the incident above, and no test using ``tmp_path`` could
+    catch it because ``tmp_path`` follows ``TMPDIR`` too.
+
+    Comparing against the path BUILT from the passwd entry closes it: a
+    redirected home produces a different path wherever it points, so the only
+    way to satisfy this is to genuinely be the real home.
     """
     import pwd
 
@@ -79,7 +91,8 @@ def _launchd_is_addressable() -> bool:
     except (KeyError, OSError):
         return False
     try:
-        return plist_path().resolve().is_relative_to(real_home)
+        expected = (real_home / "Library" / "LaunchAgents" / f"{LABEL}.plist").resolve()
+        return plist_path().resolve() == expected
     except (OSError, ValueError):
         return False
 
