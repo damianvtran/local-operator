@@ -158,10 +158,12 @@ class PickerMode(Enum):
     COMMAND = "command"
     ARGUMENT = "argument"
     #: The ``$skill`` manual-invocation list. A third mode rather than a reuse
-    #: of ``COMMAND`` because the two complete differently: a command word is
-    #: inline and caret-anchored, while a ``$`` token is only ever the FIRST
-    #: token of the buffer, and Enter on a skill row must not run anything —
-    #: an invocation produces a PROMPT the user still has to write.
+    #: of ``COMMAND`` because the two complete differently. Both are inline and
+    #: caret-anchored, but a ``$`` token that is NOT at the buffer start ranks
+    #: by CASE-SENSITIVE prefix and only when the query carries a lowercase
+    #: letter (:func:`skill_suggestions`), and Enter on a skill row must
+    #: not run anything — an invocation produces a PROMPT the user still has to
+    #: write.
     SKILL = "skill"
 
 
@@ -202,15 +204,16 @@ class SlashContext(NamedTuple):
     end: int
 
 
-#: A slash opens a command only at a WORD BOUNDARY: the buffer start, or right
+#: A sigil opens a token only at a WORD BOUNDARY: the line start, or right
 #: after whitespace. This is what keeps ``src/foo`` and ``and/or`` from opening
 #: the picker — the ``/`` there is glued to a preceding non-space character, so
 #: it is punctuation inside a word, not the start of a command. The rule is the
 #: same one a shell or an editor command palette uses to tell a path apart from
 #: a command, and it is the ONE thing that makes inline detection safe to run on
-#: every keystroke of ordinary prose.
+#: every keystroke of ordinary prose. ``$`` leans on it harder still: it is the
+#: whole reason ``costs$5`` and ``a$b`` cannot open a skill list.
 def _is_boundary(line: str, index: int) -> bool:
-    """Whether ``line[index]`` (a ``/``) begins a fresh token."""
+    """Whether ``line[index]`` (a sigil) begins a fresh token."""
     return index == 0 or line[index - 1].isspace()
 
 
@@ -272,21 +275,39 @@ def _active_slash(line: str, column: int, commands: frozenset[str] = frozenset()
     the last-slash-before-caret rule apply. Empty ``commands`` (the pure-parser
     default) disables claiming and keeps the simple behaviour.
     """
-    slashes = _boundary_slashes(line)
+    claim = _claiming_command(line, commands)
     candidate: int | None = None
-    for index in slashes:
-        word, sep, _ = line[index + 1 :].partition(" ")
-        if sep and commands and word.lower() in commands:
-            # A recognised, terminated command. Its argument runs to the end of
-            # the line, so if the caret is anywhere past this slash it is inside
-            # THIS command — return it and stop, ignoring every later slash.
-            if column > index:
-                return index
-            # Caret is before this command entirely; nothing earlier can claim.
-            return candidate
+    for index in _boundary_slashes(line):
+        if index == claim:
+            # The claiming command's argument runs to the end of the line, so a
+            # caret past this slash is inside THIS command and every later slash
+            # is argument text. A caret before it is outside the claim entirely,
+            # and nothing earlier can claim, so the running candidate stands.
+            return index if column > index else candidate
         if index <= column:
             candidate = index
     return candidate
+
+
+def _claiming_command(line: str, commands: frozenset[str] = frozenset()) -> int | None:
+    """Index of the boundary ``/`` whose command has CLAIMED the rest of ``line``.
+
+    A recognised command word terminated by a space owns everything after it as
+    its argument; the earliest one on the line wins. ``None`` when no command has
+    claimed — including the pure-parser default of an empty vocabulary.
+
+    Factored out because ``$`` needs the same answer (see :func:`skill_token`):
+    now that a skill token is inline, ``/team ops $research`` is possible, and a
+    second copy of this rule for the other sigil is how the two lists would end
+    up disagreeing about who owns one caret.
+    """
+    if not commands:
+        return None
+    for index in _boundary_slashes(line):
+        word, sep, _ = line[index + 1 :].partition(" ")
+        if sep and word.lower() in commands:
+            return index
+    return None
 
 
 def slash_context(
@@ -448,45 +469,96 @@ def slash_argument(
     return None if context is None else context.value
 
 
-def skill_token(text: str, cursor: int | None = None) -> SlashContext | None:
-    """The ``$skill`` token being typed at the start of the buffer, or ``None``.
+def skill_token(
+    text: str, cursor: int | None = None, commands: frozenset[str] = frozenset()
+) -> SlashContext | None:
+    """The ``$skill`` token being typed at the caret, or ``None``.
 
-    The ``$`` counterpart to :func:`slash_context`, and deliberately STRICTER
-    than it in two ways.
+    The ``$`` counterpart to :func:`slash_context`, and now inline on the same
+    terms: a user who has typed a message can append ``$research`` at the caret,
+    or drop one at the start of a later line, and get the list. Reaching for a
+    skill after writing the request is the ordinary way people work, and
+    requiring the sigil first meant retyping the draft around it.
 
-    It is **not inline**. A ``/`` opens a command anywhere a boundary allows,
-    because a user who has typed a message may still want to route it. A ``$``
-    is only an invocation as the buffer's FIRST token: mid-draft, ``$`` is
-    overwhelmingly money or a shell variable, and there is no second syntax to
-    disambiguate them. Restricting the position is what removes the need for an
-    escape rule — ``a $5 coffee`` cannot be a token by construction.
+    The **word BOUNDARY** rule is what makes that safe, and it is the same rule
+    (:func:`_is_boundary`) that keeps ``src/foo`` from opening a command list:
+    a ``$`` glued to a preceding non-space character is punctuation inside a
+    word, never a sigil. ``costs$5`` and ``a$b`` therefore cannot open the list
+    at all. A boundary ``$`` followed by money (``costs $5``) DOES open it, and
+    that is harmless by the same argument the vocabulary has always carried:
+    ``5`` matches no skill name, so the list comes back empty and closes itself.
+    Nothing is ever captured that is not a discovered skill.
 
     It is **word-phase only**, like :func:`slash_context`: the terminating
     space means the user has moved on to the request, where a skill list is
     stale advice.
 
+    ``commands`` is the recognised command vocabulary, and it arbitrates against
+    ``/``. Once a recognised command on the line has been TERMINATED by a space
+    it owns the rest of that line as its argument (see :func:`_active_slash`), so
+    the ``$`` in ``/team ops $research`` is argument text the user is writing,
+    not a skill token competing for the same picker. That claim is the ONLY
+    overlap the two sigils can have now that ``$`` is inline; without it the two
+    lists would fight over one caret. Empty ``commands`` (the pure-parser
+    default) disables claiming, matching every other parser here.
+
     ``query`` is ``""`` for a bare ``$``, which opens the list on the full set.
     The caret must be INSIDE the token; moving it out into the request closes
     the list, which is what makes the picker phase a property of the parse.
 
-    LEADING WHITESPACE is skipped, matching both :func:`slash_context` (which
-    opens on ``  /he``) and the submit-side parser in
-    :mod:`local_operator.skills.invoke`, which ``lstrip``s. Requiring column 0
-    made the two disagree: ``  $research fix`` offered no list while still
-    expanding on Enter, so the invocation fired with no UI cue that it would.
-    Only spaces and tabs are skipped \u2014 a ``$`` after a NEWLINE is on a second
-    line and is not the buffer's first token.
+    LEADING WHITESPACE is preserved rather than special-cased: an indented
+    ``  $research`` is a boundary ``$`` on its line like any other, so the
+    picker still opens on it and still agrees with the submit-side parser in
+    :mod:`local_operator.skills.invoke`, which ``lstrip``s.
     """
-    indent = len(text) - len(text.lstrip(" \t"))
-    if not text.startswith("$", indent):
+    line, line_start, column = _line_of_cursor(text, cursor)
+    # A recognised, terminated command claims the rest of its line, so a `$`
+    # inside its argument is plain text. The slash parsers read the same claim
+    # through `_active_slash`, so the two sigils cannot disagree about who owns
+    # the caret.
+    claim = _claiming_command(line, commands)
+    if claim is not None and column > claim:
         return None
-    cursor = len(text) if cursor is None else cursor
-    end = indent + 1
-    while end < len(text) and not text[end].isspace():
+    dollar = _active_sigil(line, column, "$")
+    if dollar is None:
+        return None
+    end = dollar + 1
+    while end < len(line) and not line[end].isspace():
         end += 1
-    if cursor > end:
+    if column > end:
         return None
-    return SlashContext(indent, text[indent + 1 : end], end)
+    return SlashContext(line_start + dollar, line[dollar + 1 : end], line_start + end)
+
+
+def skill_token_is_leading(text: str, token: SlashContext) -> bool:
+    """Whether ``token`` opens ``text``, ignoring leading whitespace.
+
+    THE definition of "leading" for the ``$`` grammar, in one place because two
+    separate decisions turn on it and they must not drift: whether the fuzzy
+    matcher may run (:func:`skill_suggestions`) and whether accepting a row has
+    to reassemble the buffer (:func:`_reassembled_skill`). Both are asking the
+    same question — is this token already the prefix the anchored submit-side
+    parser reads? — so both read the same answer.
+
+    Whitespace-only lead, matching ``parse_invocation``'s ``lstrip``: an
+    indented ``  $research`` is still the buffer's first token.
+    """
+    return not text[: token.start].strip()
+
+
+def _active_sigil(line: str, column: int, sigil: str) -> int | None:
+    """Index of the boundary ``sigil`` the cursor is editing, or ``None``.
+
+    The sigil-agnostic core of :func:`_active_slash`'s last-token-before-caret
+    rule, without the command-claiming clause: ``$`` has no vocabulary of its
+    own to terminate a token with, so the LAST boundary sigil at or before the
+    caret is always the one being edited (``$a $re|`` is ``$re``).
+    """
+    candidate: int | None = None
+    for index, char in enumerate(line):
+        if char == sigil and _is_boundary(line, index) and index <= column:
+            candidate = index
+    return candidate
 
 
 class CompletionMode(Enum):
@@ -542,9 +614,28 @@ def completion_for(
     parse the caller would otherwise have had to repeat.
     """
     if mode is CompletionMode.SKILL:
-        token = skill_token(text, caret)
+        token = skill_token(text, caret, known)
         if token is None:
             return None
+        # INLINE ENGAGE, modelled exactly as NAME_ARGUMENT models it below. A
+        # `$` is inline now, so a draft can survive OUTSIDE the token — either
+        # before it (`fix this $res`) or on another line — and the submit-side
+        # parser is still ANCHORED at the buffer start on purpose (see
+        # `local_operator.skills.invoke`: an anchored parser is what keeps a
+        # pasted document whose line 3 reads `$research …` from firing a skill
+        # nobody asked for). Reassembly is what bridges the two: the token moves
+        # to the FRONT with the surviving draft as its request, so the anchored
+        # parser sees exactly the shape it was written for.
+        #
+        # Modelled HERE rather than only in `Editor._complete_skill` because the
+        # composer's inline GHOST is derived from this same call; a renderer-side
+        # exception would reintroduce the two-implementations drift this helper
+        # exists to prevent (the B1 note below). As there, the result is NOT an
+        # append, so `ghost_for`'s `startswith` rule withholds the ghost of its
+        # own accord — the honest outcome for a whole-buffer reordering.
+        reassembled = _reassembled_skill(text, token, row_name)
+        if reassembled is not None:
+            return reassembled
         # Same trailing-space contract as the command word: it terminates the
         # token, closes the list, and opens the request. The suffix beyond the
         # token is preserved because a user can complete a `$skill` typed in
@@ -596,6 +687,46 @@ def completion_for(
         if outside:
             return _reassembled_completion(filled, caret_after, known)
     return filled, caret_after
+
+
+def _reassembled_skill(text: str, token: SlashContext, row_name: str) -> tuple[str, int] | None:
+    """Move an inline ``$`` token to the FRONT, surviving draft as its request.
+
+    ``None`` whenever nothing but whitespace precedes the token, which is the
+    ONLY case reassembly is for. A token that already opens the draft is already
+    the prefix the submit parser wants, so the span replacement in
+    :func:`completion_for` is the whole answer — for the bare ``$res`` and
+    equally for ``$res fix bug``, whose request already sits in the right place
+    and must be preserved verbatim rather than rebuilt. What inline detection
+    newly allows is prose BEFORE the token (``fix this $res``, or a ``$``
+    opening line 2), and that is exactly the shape an anchored parser cannot
+    read. Testing the text before the token, rather than "any draft outside it",
+    is what keeps this branch to the case it exists for.
+
+    Computed from the ORIGINAL text rather than from a filled buffer (the way
+    :func:`_reassembled_completion` has to be): the ``$`` token's span is known
+    before the name is inserted, since ``row_name`` replaces the token whole and
+    cannot move its start. One derivation, no re-parse.
+
+    The trailing space leaves the caret in the request with its separator
+    already typed — the same place ``$research `` parks it on the bare path — so
+    continuing to type the request is the same gesture whether or not a draft
+    was reassembled into it. It costs nothing downstream: ``parse_invocation``
+    strips the request.
+    """
+    if skill_token_is_leading(text, token):
+        return None
+    # One adjoining separator goes with the token, the same rule the slash
+    # splice and reassembly use, so ``msg $res`` and ``$res\nmsg`` both collapse
+    # to just ``msg`` instead of leaving the gap the token used to occupy.
+    start, end = token.start, token.end
+    if start > 0 and text[start - 1] in " \t\n":
+        start -= 1
+    elif end < len(text) and text[end] in " \t\n":
+        end += 1
+    rest = (text[:start] + text[end:]).strip()
+    assembled = f"${row_name} {rest} "
+    return assembled, len(assembled)
 
 
 def _reassembled_completion(
@@ -688,6 +819,118 @@ def command_suggestions(query: str, commands: list[SlashCommand]) -> list[tuple[
     lowered = query.lower()
     prefixed = [pair for pair in matches if pair[0].lower().startswith(lowered)]
     return prefixed or matches
+
+
+def skill_suggestions(
+    query: str, choices: list[ArgumentChoice], inline: bool
+) -> list[tuple[str, ArgumentChoice]]:
+    """``$skill`` rows for ``query`` — LOWERCASE-EVIDENCE PREFIX when inline.
+
+    At the START of the buffer a ``$`` is unambiguous — the user typed a sigil
+    first and nothing else can be meant, which is exactly what the anchored
+    submit-side parser relies on — so the full case-insensitive fuzzy matcher
+    runs there: ``$rsrch`` still finds ``research``, ``$Research`` at a sentence
+    start still works, and a bare ``$`` still opens the whole catalogue to
+    browse. INLINE, the sigil's position tells you nothing, and money or a shell
+    variable is the overwhelmingly more likely reading.
+
+    Matching inline is actively harmful rather than merely noisy, because a
+    non-empty match set is what keeps the picker OPEN, an open SKILL list makes
+    Enter complete a row instead of submitting (see the key routing in
+    ``Editor``), and the draft is then rewritten to ``$<skill> <prose> `` with
+    nothing sent and no undo — ``ctrl+z`` does not recover it. So the question
+    this function answers is not "what ranks well" but "is there POSITIVE
+    EVIDENCE the user meant a skill". Two conditions carry that evidence:
+
+    1. The query contains a LOWERCASE LETTER. Skill names are lowercase by
+       convention; shell and environment variables are uppercase by an equally
+       strong one (``$PATH``, ``$HOME``, ``$DEBUG``, ``$LANG``).
+    2. The query is a CASE-SENSITIVE PREFIX of the name.
+
+    Testing evidence on the QUERY — what the user typed — rather than trusting
+    the vocabulary is what makes this robust, and it is the correction to an
+    earlier version of this rule that rested on skill names being lowercase.
+    Nothing enforces that: ``discovery`` takes frontmatter ``name`` or the
+    directory name with only ``.strip()``, so a skill really can be called
+    ``DEBUG`` or ``AWS_PROFILE_SWITCHER``. Condition 1 holds regardless, because
+    it never consults the name. Enforcing lowercase at discovery instead was
+    rejected: it would silently rewrite user-supplied names that ``skill://``
+    URLs, the conflict detector and the rendered payload all echo back, which is
+    a far wider blast radius than a composer ranking rule deserves.
+
+    Together the two conditions close four distinct ways a non-invocation used
+    to reach a row inline. Each was found in a separate review round, which is
+    why they are enumerated rather than summarised:
+
+    - SUBSEQUENCE. ``translate to $LANG`` scored ``LANG`` against ``planning``
+      (l-a-n-g, clearing :data:`FUZZY_MIN_QUERY_CHARS`). Condition 2 removes it.
+    - CASE-FOLDED PREFIX. ``"DEBUG".lower()`` IS ``"debug"``, so ``echo $DEBUG``
+      reached a ``debug`` skill. Condition 2, being case-sensitive, removes it.
+    - UPPERCASE-NAMED SKILL. A skill named ``DEBUG`` made ``$DEBUG`` a
+      case-sensitive prefix again, voiding the rule above. Condition 1 removes
+      it, because the evidence is read off the query.
+    - CASELESS TOKENS, which no case rule can help with because they have no
+      case at all: an EMPTY query (a bare trailing ``$`` in ``the price is $``,
+      which returned the entire vocabulary), and digit or underscore tokens
+      (``costs $5`` against a skill named ``5things``, ``$_private``). Condition
+      1 removes both — neither contains a lowercase letter. That the money case
+      is caught by the same clause matters: money is the founding justification
+      for this whole grammar being narrow.
+
+    The empty-query case deserves its reasoning recorded, because the user
+    passes through it on every keystroke of a legitimate inline ``$research``.
+    The list simply arrives one keystroke later inline than it does leading: ``$``
+    shows nothing, ``$r`` shows the matches. That is the right trade — mid-prose
+    a bare ``$`` is money or the start of a variable far more often than an
+    invocation, the cost of waiting one character is a keystroke while the cost
+    of guessing wrong is the user's draft, and the list still appears long before
+    the name is finished. At the LEADING position a bare ``$`` remains an
+    unambiguous request to see the catalogue, and still opens the full list.
+
+    ``startswith`` rather than ``casefold`` is deliberate and load-bearing for
+    Unicode safety: it does no case folding at all, so no FOLDING match can
+    arise — the Turkish dotless-i and the ``ß``/``SS`` expansions never open a
+    row a byte-comparison would not. ``$İ`` and ``$STRASSE`` return nothing
+    because they carry no lowercase letter (condition 1 below), not because of
+    anything Unicode-specific. A bare ``$ß`` DOES open a row against a skill
+    literally named ``ßeta`` — ``ß`` is a lowercase letter and a case-sensitive
+    prefix, so that is the accepted prefix class documented below, not a folding
+    surprise. Do not "improve" ``startswith`` into a folding comparison.
+
+    Tokens in a script WITHOUT case (CJK, Arabic, Hebrew, Thai) can never open a
+    row inline at any length, since condition 1 is never satisfied — unlike
+    ``$5things`` which recovers at its second character. That fails safe (Enter
+    sends the prose) and the leading position still lists everything, so it is a
+    known corner, not a defect.
+
+    What this deliberately does NOT cover, stated at its true width: ANY
+    lowercase-containing token that is a case-sensitive prefix of ANY skill name
+    matches inline. This is PREFIX matching, not equality, so it is wider than
+    "a skill named exactly ``path``" — ``pathfinder`` catches ``$path``,
+    ``language-tutor`` catches ``$lang``, ``terminal`` catches ``$term``, and
+    ``shellcheck`` catches ``$shell``. Lowercase environment variables such as
+    ``$http_proxy`` and ``$ld_library_path`` are genuinely in this class. It is
+    accepted rather than unnoticed: closing it would need a rule that outranks
+    the user's own vocabulary, and the same trade is already documented in
+    :mod:`local_operator.skills.invoke` as "do not name a skill after an
+    environment variable".
+    """
+    if not inline:
+        return argument_suggestions(query, choices)
+    # Condition 1, and the reason it is tested on the query rather than the
+    # name: an empty query and a caseless one (``$5``, ``$_private``) both fail
+    # it, which is what makes the money guard and the bare-``$`` guard the same
+    # clause rather than three special cases.
+    if not any(char.islower() for char in query):
+        return []
+    # Condition 2. Ranked by the shared scorer, then FILTERED — not a separate
+    # prefix scorer — so row ORDER stays the one the user learned from every
+    # other list; the gate only removes rows the scorer reached by subsequence
+    # or by case-folding. ``pair[0]`` is the choice's NAME, never the alias that
+    # matched (``match_choices`` always returns the name), so if skill rows ever
+    # gain aliases an alias-only match is filtered out here -- fail-CLOSED, the
+    # safe direction for a gate whose whole job is to not open on a non-name.
+    return [pair for pair in match_choices(query, choices) if pair[0].startswith(query)]
 
 
 def argument_suggestions(
@@ -803,6 +1046,11 @@ class CommandPicker(Static):
         self._suppress_report = False
         self._commands: list[SlashCommand] = []
         self._command_names: frozenset[str] = frozenset()
+        #: Whether the ``$`` token the SKILL list is showing for sits INLINE
+        #: rather than at the buffer start. Latched by ``sync_skills`` so the
+        #: app's one-tick-later ``set_choices`` refill re-derives under the same
+        #: prefix gate; see :func:`skill_suggestions` for what that gate stops.
+        self._skill_inline: bool = False
         self._choices: list[ArgumentChoice] = []
         self._mode = PickerMode.COMMAND
         self._matches: list[_Suggestion] = []
@@ -867,7 +1115,16 @@ class CommandPicker(Static):
         # the user types another character. Gating this on ARGUMENT alone is
         # exactly why a bare ``$`` painted nothing.
         if self._mode in (PickerMode.ARGUMENT, PickerMode.SKILL):
-            matches = argument_suggestions(self._query, self._choices)
+            # SKILL re-derives through its own gate: this refill lands a tick
+            # after the keystroke that opened the list, so reaching for
+            # ``argument_suggestions`` here would restore the fuzzy rows
+            # ``sync_skills`` had just excluded and hand an inline ``$LANG``
+            # back the open list that makes Enter rewrite the draft.
+            matches = (
+                skill_suggestions(self._query, self._choices, self._skill_inline)
+                if self._mode is PickerMode.SKILL
+                else argument_suggestions(self._query, self._choices)
+            )
             seeding = highlight is not None and not self._query and not self._chosen_by_hand
             if seeding:
                 # Silence `_apply`'s own report: it fires for row 0 before the
@@ -1072,14 +1329,29 @@ class CommandPicker(Static):
         scorer that ranks commands and providers — ``$cr`` finds
         ``code-review`` by the rule the user already learned from ``/lgt``
         finding ``logout``.
+
+        ``cursor`` locates the active ``$`` token now that one can sit anywhere a
+        boundary allows, exactly as :meth:`sync` locates an inline ``/``. The
+        recognised vocabulary comes from this picker's own registry, so a ``$``
+        inside an engaged command's argument reads as plain text here for the
+        same reason it does there.
         """
-        token = skill_token(text, cursor)
+        token = skill_token(text, cursor, self._command_names)
         if token is None:
             self._dismissed_query = None
             self._mode = PickerMode.SKILL
             self._close()
             return
-        self._apply(PickerMode.SKILL, token.query, argument_suggestions(token.query, self._choices))
+        # Remembered, not just used: ``set_choices`` re-derives this same list
+        # one message-loop tick later (the app answers ``SkillQueryOpened``
+        # asynchronously) and has no text to re-parse, so a gate applied only
+        # here would be silently undone by the refill.
+        self._skill_inline = not skill_token_is_leading(text, token)
+        self._apply(
+            PickerMode.SKILL,
+            token.query,
+            skill_suggestions(token.query, self._choices, self._skill_inline),
+        )
 
     def sync_argument(self, query: str) -> None:
         """Re-derive the ARGUMENT suggestions for the current command.

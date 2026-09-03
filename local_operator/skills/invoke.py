@@ -24,18 +24,58 @@ it to the model together with the request. Three properties are deliberate:
 
 The recognition rule is narrow on purpose, because ``$`` is also money and
 also shell. A token is an invocation only when it is the FIRST token of the
-buffer, and only when what follows the ``$`` matches a DISCOVERED SKILL NAME.
-``$100 for the redesign`` matches no skill and is plain prose; so is a stray
-``$`` alone. That is what keeps this from needing an escape rule: the
-vocabulary decides, so nothing that is not a skill name is ever captured.
+text being submitted, and only when what follows the ``$`` matches a
+DISCOVERED SKILL NAME. ``$100 for the redesign`` matches no skill and is plain
+prose; so is a stray ``$`` alone. That is what keeps this from needing an
+escape rule: the vocabulary decides, so nothing that is not a skill name is
+ever captured.
+
+**The position rule is enforced by the COMPOSER, not by this parser being the
+only grammar there is.** The composer's picker opens on a ``$`` anywhere a word
+boundary allows, and accepting a row REASSEMBLES the draft — the token moves to
+the front with the surviving prose as its request, staged for the user to read
+and send (``command_picker.completion_for``'s ``SKILL`` branch, and
+``Editor._complete_skill``). So the user can reach a skill mid-sentence while
+what arrives HERE is still a prefix. Keeping this parser anchored is therefore
+not a limitation to be lifted later; it is what buys two properties that inline
+matching would cost:
+
+- A pasted document whose line 3 reads ``$research …`` never fires a skill
+  nobody asked for (see ``app._expand_invocation``, which parses the TYPED line
+  before pastes are spliced in for exactly this reason).
+- The money / shell-variable guard stays trivially safe HERE. Because this
+  parser only ever looks at offset 0, ``a $5 coffee`` and ``echo $PATH`` are
+  prose by construction: no rule has to be argued about, because there is no
+  position at which they could match.
+
+Which layer enforces what is worth being exact about, since the composer now
+has a grammar of its own. THIS module decides what a submitted string MEANS,
+and it is anchored. The composer decides what OPENS A LIST, and it is inline —
+so it carries the mid-draft half of the shell-variable guard that anchoring
+gives this module for free: an inline ``$`` ranks by CASE-SENSITIVE PREFIX and
+only when the typed query contains a LOWERCASE LETTER
+(``command_picker.skill_suggestions``), because any match there kept the picker
+open and turned the user's Enter into a completion that rewrote their draft
+instead of sending it (``$LANG`` reaching a ``planning`` skill, ``$DEBUG``
+reaching ``debug``, and a bare trailing ``$`` reaching the entire vocabulary).
+Fuzzy and case-insensitive matching both survive at the leading position, where
+a ``$`` typed first is unambiguous.
+
+The caveat below therefore has a WIDER inline reach than "a skill named after a
+variable", and it is worth being exact: inline matching is by PREFIX, so any
+lowercase-containing token that prefixes any skill name matches — ``$path``
+reaches ``pathfinder``, ``$lang`` reaches ``language-tutor``, and lowercase
+environment variables like ``$http_proxy`` are in the same class. Accepted for
+the same reason as below: the vocabulary is the user's, and no rule here can
+outrank it.
 
 The converse is worth stating plainly: matching is case-insensitive and the
 vocabulary is user-controlled, so a skill actually NAMED ``path`` or ``editor``
-would make ``$PATH is unset`` or ``$EDITOR is vim`` invoke it. Nothing here can
-tell those apart from a deliberate invocation — the name is the whole grammar —
-and the transcript row shows what was typed either way, so the user can see it
-happened. Naming a skill after a common environment variable is the thing to
-avoid.
+would make ``$PATH is unset`` or ``$EDITOR is vim`` invoke it — at the LEADING
+position, where this parser looks. Nothing here can tell those apart from a
+deliberate invocation — the name is the whole grammar — and the transcript row
+shows what was typed either way, so the user can see it happened. Naming a
+skill after a common environment variable is the thing to avoid.
 """
 
 from __future__ import annotations
@@ -52,9 +92,11 @@ from local_operator.skills.discovery import Skill
 #: token — ``$research.`` parses the name ``research.``, misses the vocabulary
 #: and is sent as prose, which is the safe direction but not a sentence that
 #: invokes. ``$research,`` DOES work, since ``,`` is outside the class.
-#: Anchored at the start:
-#: an invocation is a prefix, never something found mid-draft. A ``$`` followed
-#: by nothing usable does not match at all.
+#: Anchored at the start: what is SUBMITTED is a prefix, because the composer
+#: reassembles an inline ``$`` to the front before Enter (see the module
+#: docstring). A ``$`` still sitting mid-draft at submit time was never engaged
+#: through the picker and is prose. A ``$`` followed by nothing usable does not
+#: match at all.
 _INVOCATION_RE = re.compile(r"^\$([A-Za-z0-9][A-Za-z0-9._-]*)")
 
 #: The opening tag of a rendered payload, capturing the typed line stored in
@@ -91,6 +133,11 @@ def parse_invocation(text: str, skills: Mapping[str, Skill]) -> SkillInvocation 
     skill name, or when the name is followed immediately by a word character
     the pattern would have to swallow. Never raises: an unparseable draft is
     always just a draft.
+
+    Deliberately ANCHORED even though the composer's picker is inline: the
+    composer reassembles the token to the front before submit, so a ``$`` that
+    is still mid-text when this runs is prose the user typed, not an invocation
+    they engaged. See the module docstring for the two properties that buys.
 
     Matching is case-insensitive because skill names are lower-case by
     convention while a sentence-start ``$Research`` is a natural thing to type,
