@@ -187,3 +187,29 @@ def test_the_guard_accepts_only_the_genuine_home(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: real_home))
 
     assert _launchd_is_addressable() is True
+
+
+def test_the_write_guard_refuses_config_dirs_outside_the_real_home(
+    tmp_path: Path,
+) -> None:
+    """The round-2 escape: real HOME, redirected config dir.
+
+    The round-1 guard covered the `launchctl` call but not the WRITE, and the
+    write is the half that escapes that combination: `plist_path()` is the
+    real `~/Library/LaunchAgents` whenever HOME is real, so a sandbox run
+    planted a supervised unit in the operator's live launchd domain, pointed
+    at a store that dies with the sandbox.
+
+    Asserted on the decision predicate rather than by running the installer
+    against the real home: a test that exercises the escape end to end would
+    REPRODUCE the incident on the very machine it guards if the guard ever
+    regressed. The predicate is the whole decision — the branch that consumes
+    it is two lines.
+    """
+    import pwd
+
+    from local_operator.wakes.install import _config_lives_in_real_home
+
+    real_home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+    assert _config_lives_in_real_home(tmp_path / "sandbox-cfg") is False
+    assert _config_lives_in_real_home(real_home / ".local-operator") is True

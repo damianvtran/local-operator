@@ -1667,11 +1667,13 @@ def sessions_command(args: argparse.Namespace) -> int:
 def _wake_create(args: argparse.Namespace) -> int:
     """``lop wake create <session> "<when>" "<message>"``.
 
-    Writes into the SAME derived index every other path writes, and installs
-    the supervisor on demand exactly as a session-created schedule does — so
-    a wake made here fires for a closed session, which is the entire promise
-    of the feature. Doing it any other way would make this subcommand a
-    second, quieter way to schedule something that never runs.
+    Persists through the TRANSCRIPT first, exactly like the in-session wake
+    tool (``Session._persist_wake_schedules``), because the transcript entry
+    is the source of truth: a session rebuilds its derived index entry from it
+    on every open, so an index-only write is adopted as nothing and deleted
+    by the next open (round 2, U4/Q9 — the wake was scheduled, the runtime
+    started, and the self-prompt was gone). The index write and the
+    install-on-demand hook ride after it, best-effort, as they do there.
 
     A session that does not exist is refused rather than created: the wake
     index keys on a session id, and an id with no transcript would produce a
@@ -1710,7 +1712,20 @@ def _wake_create(args: argparse.Namespace) -> int:
         return 1
 
     entry = read_entry(root, session_id) or {}
-    existing = [dict(s) for s in (entry.get("schedules") or ()) if isinstance(s, dict)]
+
+    # Existing schedules come from the TRANSCRIPT, not the index: the index
+    # is derived and may lag (or be absent), and the append below REPLACES
+    # the session's schedule list, so reading a stale source would silently
+    # cancel live reminders — the same hazard the in-session persist guards.
+    from local_operator.harness.wake import WAKE_SCHEDULES_CUSTOM_TYPE
+    from local_operator.session.transcript import Transcript
+
+    transcript = Transcript(session_dir)
+    latest = transcript.latest_custom_entry(WAKE_SCHEDULES_CUSTOM_TYPE)
+    existing: list[dict[str, Any]] = []
+    if latest is not None:
+        details = dict(latest.payload.get("details", {}))
+        existing = [dict(s) for s in details.get("schedules", []) if isinstance(s, dict)]
     # Per-session handles (``w1``…), matching the in-session numbering so the
     # id a user sees here is the id `/wake` would have given it.
     schedule = WakeSchedule(
@@ -1719,11 +1734,24 @@ def _wake_create(args: argparse.Namespace) -> int:
         next_due_at=due_at,
         created_at=now_ms,
     )
+    combined = [*existing, schedule.model_dump()]
+
+    # TRANSCRIPT FIRST, then the derived index — the same order as
+    # ``Session._persist_wake_schedules``. The append is the only step allowed
+    # to fail the command: an index written without it is a wake the next
+    # open deletes, which is exactly the round-2 defect.
+    import asyncio as _asyncio
+
+    async def _append() -> None:
+        await transcript.append_custom(WAKE_SCHEDULES_CUSTOM_TYPE, {"schedules": combined})
+
+    _asyncio.run(_append())
+
     written = write_entry(
         root,
         session_id,
         cwd=str(entry.get("cwd") or session_dir),
-        schedules=[*existing, schedule],
+        schedules=combined,
     )
 
     installed_reason = ""

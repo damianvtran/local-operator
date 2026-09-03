@@ -181,8 +181,16 @@ def _lease_holder(config_dir: Path, session_id: str) -> int | None:
     return pid if _pid_state(pid) == "live" else None
 
 
-def _spawn_runtime(session_id: str, cwd: str, *, defer_materialise: bool) -> None:
+def _spawn_runtime(
+    session_id: str, cwd: str, *, defer_materialise: bool
+) -> "subprocess.Popen[bytes]":
     """Start one detached runtime candidate for ``session_id``.
+
+    Returns the ``Popen`` so the engage loop can tell a candidate that is
+    still CONSTRUCTING from one that died: the lease is acquired a few
+    hundred milliseconds after the exec, and in that window (no record) and
+    (no lease) is true of a perfectly healthy candidate — so liveness of the
+    process we spawned is the only sound death signal (round 2, Q8).
 
     Only routing data enters the environment — prompt text, images and command
     identity travel over the authenticated loopback socket, never through
@@ -199,7 +207,7 @@ def _spawn_runtime(session_id: str, cwd: str, *, defer_materialise: bool) -> Non
         # A parent that set this for an earlier speculative engage must not
         # leak it into a runtime that has real work to do.
         env.pop("LOP_RUNTIME_DEFER_MATERIALISE", None)
-    subprocess.Popen(  # noqa: S603 — fixed argv, no shell
+    return subprocess.Popen(  # noqa: S603 — fixed argv, no shell
         [sys.executable, "-m", "local_operator.session.runtime.process"],
         env=env,
         stdin=subprocess.DEVNULL,
@@ -273,6 +281,9 @@ async def engage_runtime(
     deadline = time.monotonic() + deadline_s
     delay = _POLL_INITIAL_S
     spawned = False
+    # The Popen of the most recent candidate, so the respawn branch can tell
+    # a live constructor from a dead one without reading the lease.
+    candidate: "subprocess.Popen[bytes] | None" = None
     # Counted separately from ``spawned`` because a respawn after a candidate
     # died mid-construction is a different event from the first spawn, and
     # only the retries need a cap. See the respawn branch below.
@@ -310,24 +321,29 @@ async def engage_runtime(
                 logger.debug("engage: %s is starting under pid %s; waiting", session_id, holder)
             elif not spawned:
                 logger.debug("engage: spawning a runtime for %s", session_id)
-                await asyncio.to_thread(_spawn_runtime, session_id, cwd, defer_materialise=defer)
+                candidate = await asyncio.to_thread(
+                    _spawn_runtime, session_id, cwd, defer_materialise=defer
+                )
                 spawned = True
                 spawns += 1
-            else:
-                # THE CANDIDATE WE SPAWNED IS GONE. No record exists, and
-                # nobody holds the lease — which together provably mean the
-                # winner died DURING construction (`process.py`'s own `return
-                # 2`, an OOM kill, a bad credential, an MCP hang taking the
-                # process down). This is not the designed-loser path: a loser
-                # exits 0 without ever holding the lease, and the winner it
-                # lost to still holds it, so this branch cannot fire for one.
+            elif candidate is not None and candidate.poll() is not None:
+                # THE CANDIDATE WE SPAWNED IS GONE. It exited while no record
+                # exists and nobody holds the lease — a winner dying DURING
+                # construction (`process.py`'s own `return 2`, an OOM kill, a
+                # bad credential, an MCP hang taking the process down). This
+                # is not the designed-loser path: a loser exits 0 without ever
+                # holding the lease, and the winner it lost to still holds it,
+                # so this branch cannot fire for one.
                 #
-                # Round 1 (R1) measured the cost of not covering it: the
-                # caller sat in the `spawned=True` branch for the full 30 s
-                # deadline and then failed, while a fresh candidate would have
-                # acquired the lease immediately — the inverse failure of the
-                # invariant this module exists for ("at most one runtime, AND
-                # at least one when one is owed").
+                # ``poll() is not None`` is the death signal, not the absence
+                # of a lease: the lease is acquired a few hundred milliseconds
+                # after the exec, and in that window (no record) and (no
+                # lease) is true of a perfectly healthy candidate. Round 1's
+                # R1 fix read that window as death and respawned on EVERY
+                # engage — three processes per first message, two of them
+                # doomed (round 2, Q8). A LIVE candidate is by definition
+                # still constructing, so the loop waits for its record like
+                # any other contender.
                 #
                 # Bounded because a session that cannot construct at all
                 # (missing credential, unreadable transcript) would otherwise
@@ -335,10 +351,13 @@ async def engage_runtime(
                 # crash loop. After the cap the loop waits out the deadline as
                 # before and reports the original error.
                 logger.info(
-                    "engage: the candidate for %s died during construction; respawning",
+                    "engage: the candidate for %s died during construction (rc=%s); respawning",
                     session_id,
+                    candidate.returncode,
                 )
-                await asyncio.to_thread(_spawn_runtime, session_id, cwd, defer_materialise=defer)
+                candidate = await asyncio.to_thread(
+                    _spawn_runtime, session_id, cwd, defer_materialise=defer
+                )
                 spawns += 1
 
         await asyncio.sleep(min(delay, max(0.0, deadline - time.monotonic())))

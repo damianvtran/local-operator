@@ -611,14 +611,23 @@ class OwnedSessionHandle(SessionHandle):
             return f"prompt queued ({position})"
         return "prompt admitted"
 
-    @staticmethod
-    def _observe_prompt_drain(task: asyncio.Task[None]) -> None:
+    def _observe_prompt_drain(self, task: asyncio.Task[None]) -> None:
         if task.cancelled():
             return
         try:
             task.exception()
         except asyncio.CancelledError:
             return
+        # The record's ``busy`` bit must settle when the LAST turn settles,
+        # and the fold's events cannot say that: the final AgentEndEvent is
+        # emitted while ``_is_streaming`` is still True (the pipeline resets
+        # it in a ``finally`` after the loop returns), so the last
+        # event-driven publish carries True and nothing after it fires.
+        # Round 2 (U6) measured the consequence — a session that had fully
+        # unwound kept reading ``busy=True`` until the next event. The drain
+        # task's completion is the one moment that is by definition after
+        # every turn it ran.
+        self._publish_busy()
 
     def _maybe_name_conversation(self, text: str) -> None:
         """Name a still-unnamed conversation from its first real prompt.

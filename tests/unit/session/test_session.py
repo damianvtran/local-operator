@@ -744,9 +744,10 @@ async def test_resume_aggregates_overdue_wakes_into_one_catchup(tmp_path):
     session._handle_missed_wakes()
     assert not stream.requests
 
-    # Pump after grace with the catch-up still pending: the shim swallows
-    # the scheduler's per-schedule fires (still zero requests), but the
-    # one-shot still retires and the recurring one still advances —
+    # Pump after grace with the catch-up still pending: the re-armed folded
+    # fires deliver the ONE aggregated catch-up (a cold runtime has no later
+    # trigger to do it — round 2, U4/Q9), and never one turn per schedule.
+    # The one-shot still retires and the recurring one still advances —
     # suppression must never leave a schedule stuck re-firing. Grace expiry
     # is simulated by zeroing BOTH the deadline and the grace-shifted
     # re-arm (the pump's own due check still honours next_due_at).
@@ -758,15 +759,16 @@ async def test_resume_aggregates_overdue_wakes_into_one_catchup(tmp_path):
         ]
     )
     await session._wake.pump()
-    assert not stream.requests
+    await wait_for(lambda: bool(stream.requests))
     remaining = {s.id: s for s in session.wake_scheduler.schedules}
     assert "w1" not in remaining  # retired
     assert remaining["w2"].fired_count == 1 and remaining["w2"].next_due_at > now
 
-    # The next handling delivers the aggregated catch-up exactly once.
+    # A second pump of the same folded fires and further handlings deliver
+    # nothing more: the catch-up is exactly one turn.
+    await session._wake.pump()
     session._handle_missed_wakes()
     session._handle_missed_wakes()  # idempotent — no second delivery
-    await wait_for(lambda: bool(stream.requests))
     assert len(stream.requests) == 1
     catchup_text = stream.requests[0].messages[-1].text
     assert "resumed after being closed" in catchup_text

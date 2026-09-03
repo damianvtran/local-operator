@@ -14230,7 +14230,10 @@ class OperatorApp(App[None]):
         session_id = getattr(session, "session_id", "") or ""
         if session_id:
             self._stopped_session_id = session_id
-        self._system_notice(detail or "stop requested from the owner")
+        # "owner" left the vocabulary with the owner path (round 2, N1): a
+        # stop that arrives as an announcement came from another terminal or
+        # from the runtime's own ladder, and that is what the user needs.
+        self._system_notice(detail or "stop requested from another terminal")
 
     async def _stop_target_worker(self, target: str) -> None:
         """``/stop <target>``: resolve with the `send` vocabulary, stop it.
@@ -19202,7 +19205,10 @@ class OperatorApp(App[None]):
         # unsupported warning — never "ran /…".
         return SlashResult(
             kind="notice",
-            text=f"/{command} is not available from an attached terminal — run it on the owner",
+            text=(
+                f"/{command} is not available from an attached terminal — "
+                "run it in the session's own terminal"
+            ),
             style="warning",
         )
 

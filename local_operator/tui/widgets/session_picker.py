@@ -1174,6 +1174,7 @@ class SessionPickerScreen(ModalScreen[str | None]):
         and re-scanning the registry ten times a second to discover that would
         be the picker's own idle cost.
         """
+        was_busy = any(getattr(row, "live_state", "") == "busy" for row in self._all)
         refresh = self._refresh_live_state
         if refresh is not None:
             try:
@@ -1184,9 +1185,14 @@ class SessionPickerScreen(ModalScreen[str | None]):
                 self._filtered_for = "\x00 never a real query"
             except Exception:  # noqa: BLE001 — a stale marker is not worth the picker
                 logger.debug("picker could not refresh live state", exc_info=True)
-        if not any(getattr(row, "live_state", "") == "busy" for row in self._all):
-            # Nothing is spinning. Leave the frame where it is so a session
-            # that STARTS working picks the animation up from a clean phase.
+        # Repaint while anything is spinning, AND on the tick that empties the
+        # busy set. Skipping the transition left the LAST spinner frozen on
+        # screen — and, worse, hid a needs-you marker that arrived in the same
+        # window — until the user pressed a key (round 2, D9). A session that
+        # starts working later picks the animation up from a clean phase, so
+        # leaving the frame where it is on a settled store is fine.
+        is_busy = any(getattr(row, "live_state", "") == "busy" for row in self._all)
+        if not (was_busy or is_busy):
             return
         self._frame += 1
         self._repaint()

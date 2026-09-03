@@ -386,13 +386,25 @@ async def test_a_candidate_that_dies_during_construction_is_respawned(
 
     attempts: list[str] = []
 
-    def dies_during_construction(session_id: str, cwd: str, *, defer_materialise: bool) -> None:
+    class _DeadPopen:
+        """The engage loop's death signal is ``poll() is not None`` — a live
+        constructor is by definition still constructing (round 2, Q8)."""
+
+        returncode = 2
+
+        def poll(self) -> int:
+            return self.returncode
+
+    def dies_during_construction(
+        session_id: str, cwd: str, *, defer_materialise: bool
+    ) -> _DeadPopen:
         """Take the lease, then vanish — publishing no record."""
         from local_operator.session_lease import acquire_session_lease
 
         attempts.append(session_id)
         lease = acquire_session_lease(tmp_path / "sessions" / session_id)
         lease.release()
+        return _DeadPopen()
 
     monkeypatch.setattr(
         "local_operator.session.runtime.launch._spawn_runtime", dies_during_construction

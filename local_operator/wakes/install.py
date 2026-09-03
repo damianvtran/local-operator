@@ -97,6 +97,28 @@ def _launchd_is_addressable() -> bool:
         return False
 
 
+def _config_lives_in_real_home(config_dir: Path) -> bool:
+    """Whether the supervised unit would point at a store that outlives us.
+
+    A unit supervising a config dir under ``/tmp`` or a sandbox home watches
+    a store that is deleted when the sandbox ends — a live launchd unit with
+    a corpse for a config. Containment under the passwd home is the right
+    test HERE (not the identity test ``_launchd_is_addressable`` uses) because
+    the config dir is an ordinary path the user may legitimately place
+    anywhere under their home; only dirs OUTSIDE it are the sandbox shape.
+    """
+    import pwd
+
+    try:
+        real_home = Path(pwd.getpwuid(os.getuid()).pw_dir).resolve()
+    except (KeyError, OSError):
+        return False
+    try:
+        return config_dir.resolve().is_relative_to(real_home)
+    except (OSError, ValueError):
+        return False
+
+
 def render_plist(config_dir: Path) -> dict[str, object]:
     """The whole supervised-unit plan in one pure function.
 
@@ -183,6 +205,23 @@ def ensure_supervisor_installed(config_dir: Path) -> InstallOutcome:
         addressable = _launchd_is_addressable()
         if current == wanted and (not addressable or _is_loaded()):
             return InstallOutcome(installed=True, reason="already installed")
+
+        if addressable and not _config_lives_in_real_home(config_dir):
+            # The guard used to cover the launchctl call but not the WRITE,
+            # and the write is the half that escapes: with the real HOME and
+            # a redirected config dir (a test, a sandbox, an agent's isolated
+            # store) `plist_path()` is the REAL `~/Library/LaunchAgents`, so
+            # a sandbox run planted a supervised unit in the operator's live
+            # launchd domain, pointed at a store that vanishes with the
+            # sandbox (round 2). The real domain supervises only setups whose
+            # config lives under the real home; anything else gets the same
+            # answer a redirected home gets — file half skipped, no address.
+            return InstallOutcome(
+                installed=False,
+                reason=(
+                    "config dir is outside the real home; " "not writing into the real LaunchAgents"
+                ),
+            )
 
         path.write_bytes(plistlib.dumps(wanted))
         if not addressable:

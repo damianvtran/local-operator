@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import inspect
 import os
 import signal
 import sys
@@ -297,12 +298,85 @@ async def amain() -> int:
     # deliver a note written minutes ago after one written just now.
     await _drain_inbox_into(handle)
 
+    # The wake scheduler is armed HERE, after the inbox drain and before the
+    # socket listens. A runtime the supervisor starts for an overdue wake has
+    # no errand that delivers a prompt — the WakeErrand carries nothing by
+    # design — so the wake's turn comes from the session's own catch-up path,
+    # which only runs once the scheduler is pumped. Round 2 (U4/Q9) found the
+    # cold runtime never called ``async_init``: the runtime started, idled,
+    # and exited, and a one-shot wake was consumed without ever running.
+    #
+    # After the drain so spooled quiet notes land before the wake's turn
+    # starts; before the socket so a client's prompt cannot race the catch-up.
+    # ``async_init`` is idempotent and degrades to ``ensure_future`` for
+    # background work, so a host that also calls it later changes nothing.
+    session = getattr(handle, "_session", None)
+    init = getattr(session, "async_init", None)
+    if callable(init):
+        try:
+            result = init()
+            if inspect.isawaitable(result):
+                await result
+        except Exception:  # noqa: BLE001 — an unarmable scheduler is not a dead runtime
+            logger.warning("wake scheduler did not arm at boot", exc_info=True)
+
     runtime = RuntimeServer(handle, kind="daemon")
     await runtime.start_in_process()
 
     stop = asyncio.Event()
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, stop.set)
+    if os.environ.get("LOP_RUNTIME_DEBUG_STACKS") == "1":
+        # SIGUSR1 prints every asyncio task's stack to the child log. The
+        # child has no terminal and no attached debugger, and a wedged turn
+        # (round 2, U6) is exactly the state whose cause is "which await is
+        # the turn parked in" — invisible to py-spy without root and to the
+        # main-thread faulthandler dump, which shows the loop idling under a
+        # parked task. Opt-in so a normal runtime pays nothing.
+        def _dump_task_stacks() -> None:
+            session = getattr(handle, "_session", None)
+            try:
+                subagents = session.running_subagents() if session is not None else 0
+            except Exception as exc:  # noqa: BLE001 — the dump must not die
+                subagents = f"RAISES {type(exc).__name__}: {exc}"
+            logger.info(
+                "state: streaming=%s compacting=%s lock=%s queue=%s drain_done=%s "
+                "subagents=%s is_busy=%s",
+                getattr(session, "_is_streaming", "?"),
+                getattr(session, "_compacting", "?"),
+                getattr(getattr(session, "_turn_lock", None), "locked", lambda: "?")(),
+                len(getattr(handle, "_prompt_queue", [])),
+                getattr(getattr(handle, "_prompt_drain_task", None), "done", lambda: "?")(),
+                subagents,
+                handle.is_busy(),
+            )
+            sig = getattr(session, "_signal", None)
+            logger.info(
+                "signal: present=%s aborted=%s abort_requested=%s",
+                sig is not None,
+                getattr(sig, "aborted", None),
+                getattr(session, "_abort_requested", "?"),
+            )
+            for task in asyncio.all_tasks(loop):
+                if task.done():
+                    continue
+                # The parked await is at the BOTTOM of the coroutine chain:
+                # each awaited coroutine's frame hangs off the outer one's
+                # cr_await, not its f_back, so format_stack alone prints only
+                # the outermost frame. Walk the chain to see where the turn
+                # is actually parked.
+                lines: list[str] = []
+                obj: Any = task.get_coro()
+                while obj is not None:
+                    frame = getattr(obj, "cr_frame", None) or getattr(obj, "gi_frame", None)
+                    if frame is None:
+                        break
+                    code = frame.f_code
+                    lines.append(f"  {code.co_filename}:{frame.f_lineno} in {code.co_name}")
+                    obj = getattr(obj, "cr_await", None) or getattr(obj, "gi_yieldfrom", None)
+                logger.info("task %r await-chain:\n%s", task.get_name(), "\n".join(lines))
+
+        loop.add_signal_handler(signal.SIGUSR1, _dump_task_stacks)
     # The socket ``stop`` op (the kill switch's graceful rung) and SIGTERM
     # converge on the same event, so the deny → dispose → aclose ordering
     # below runs once, identically, for both triggers.
