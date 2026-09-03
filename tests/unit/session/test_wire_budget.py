@@ -1,0 +1,419 @@
+"""The render-seam byte guard and the graduated 413 recovery, end to end.
+
+Companion to ``tests/unit/compaction/test_wire_bytes.py``, which covers the
+pure ruler/trigger/shed. What is proved HERE is the part that was broken for
+the user: a session whose history is already 34 MB on disk becomes sendable on
+its next launch, without anyone knowing to type ``/compact``, and without the
+transcript being rewritten.
+
+The failure being regressed: 42 screenshots totalling 33.9 MB against
+Anthropic's 32 MB cap wedged a session on ``invalid request (HTTP 413):
+Request exceeds the maximum size``. Every later turn failed identically —
+including ``/compact``, which has to SEND the history to summarise it — so the
+session could not recover from the inside.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from local_operator.compaction.api import CompactionSettings
+from local_operator.harness.types import (
+    AbortSignal,
+    ChatRequest,
+    ImageContent,
+    Message,
+    ModelSpec,
+    NoticeEvent,
+    StreamEndEvent,
+    StreamTextDelta,
+    TextContent,
+)
+from local_operator.providers.failover import ProviderError
+from local_operator.session.session import FRAMES_SHED_NOTICE, Session
+from local_operator.session.transcript import Transcript
+
+MODEL = ModelSpec(provider="test", model_id="m", context_window=1_000_000)
+
+#: Median base64 length of the 42 frames in the session that wedged.
+FRAME_B64 = 803_888
+
+
+def make_session(tmp_path, stream, **kwargs) -> Session:
+    return Session(
+        model=kwargs.pop("model", MODEL),
+        stream_fn=stream,
+        tools=[],
+        transcript=Transcript(tmp_path / "sess"),
+        system_blocks_provider=lambda: ["stable"],
+        **kwargs,
+    )
+
+
+def _frames(count: int, size: int = FRAME_B64) -> list[Message]:
+    """A screenshot-driving history at the measured frame size."""
+    out: list[Message] = []
+    for index in range(count):
+        out.append(
+            Message(
+                role="user",
+                content=[TextContent(text=f"shot {index}"), ImageContent(data="A" * size)],
+            )
+        )
+        out.append(Message.assistant(f"ok {index}"))
+    return out
+
+
+def _image_blocks(request: ChatRequest) -> int:
+    return sum(
+        isinstance(block, ImageContent) for message in request.messages for block in message.content
+    )
+
+
+def _request_bytes(request: ChatRequest) -> int:
+    from local_operator.compaction.api import estimate_wire_bytes
+
+    return estimate_wire_bytes(request.messages)
+
+
+class ScriptedOk:
+    """Records every request and always succeeds."""
+
+    def __init__(self) -> None:
+        self.requests: list[ChatRequest] = []
+
+    def __call__(self, request: ChatRequest, signal: AbortSignal | None):
+        self.requests.append(request)
+
+        async def gen():
+            yield StreamTextDelta(delta="ok")
+            yield StreamEndEvent(stop_reason="endTurn")
+
+        return gen()
+
+
+class RefusesOversizeRequests:
+    """A provider with a HARD byte cap, like the real one.
+
+    Refuses with Anthropic's literal 413 wording whenever the request it is
+    handed exceeds ``cap``, which is what makes this a faithful reproduction:
+    the refusal is a property of the request's SIZE, so it recurs on every
+    turn until something actually sends fewer bytes.
+    """
+
+    def __init__(self, cap: int) -> None:
+        self.cap = cap
+        self.requests: list[ChatRequest] = []
+        self.refusals = 0
+
+    def __call__(self, request: ChatRequest, signal: AbortSignal | None):
+        self.requests.append(request)
+        too_big = _request_bytes(request) > self.cap
+        if too_big:
+            self.refusals += 1
+
+        async def gen():
+            if too_big:
+                raise ProviderError(413, "Request exceeds the maximum size")
+            yield StreamTextDelta(delta="ok")
+            yield StreamEndEvent(stop_reason="endTurn")
+
+        return gen()
+
+
+# ---------------------------------------------------------------------------
+# The render seam
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_an_oversize_history_is_shed_at_the_render_seam(tmp_path):
+    """THE regression: a 34 MB history is sendable on the very next turn.
+
+    No ``/compact``, no user action, no provider round trip — the shed is a
+    local byte scan at the one seam every wire-history path converges on.
+    """
+    stream = ScriptedOk()
+    session = make_session(tmp_path, stream)
+    await session.seed_history(_frames(42))
+
+    await session.prompt("continue")
+
+    sent = _request_bytes(stream.requests[0])
+    budget = session._wire_bytes_budget()
+    assert budget == 24_000_000
+    assert sent <= budget, f"the request went out at {sent} bytes, over the {budget} budget"
+    # The RECENT frames — the ones the model is actually working with — stayed.
+    assert 25 <= _image_blocks(stream.requests[0]) <= 30
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_shed_never_touches_the_transcript(tmp_path):
+    """The contract that makes this safe: the stored frames survive, so
+    ``/export``, forks, and a later session on a provider with a larger cap
+    all still see every screenshot."""
+    stream = ScriptedOk()
+    session = make_session(tmp_path, stream)
+    await session.seed_history(_frames(42))
+
+    path = session._transcript.path
+    before = path.read_bytes()
+
+    await session.prompt("continue")
+
+    assert _image_blocks(stream.requests[0]) < 42, "nothing was shed; the test proves nothing"
+
+    # Counted over the RAW entries, not over ``build_llm_history``: the byte
+    # trigger also fires a real compaction pass on a history this size, and
+    # replay honours that pass's cut. What this test owns is the stronger and
+    # narrower claim — the stored rows are untouched, so ``/export``, a fork,
+    # and a later session on a larger-cap provider still have every frame.
+    # Image blocks are externalized to content-addressed ATTACHMENT refs on
+    # append (which is why a 34 MB history is under 1 MB on disk), so the
+    # stored form is ``{"attachment": <digest>, ...}``, not ``type: image``.
+    stored = sum(
+        1
+        for entry in session._transcript.entries()
+        for block in entry.payload.get("content", []) or []
+        if isinstance(block, dict) and ("attachment" in block or block.get("type") == "image")
+    )
+    assert stored == 42, f"the shed reached the transcript ({stored} of 42 frames left)"
+    # Append-only rather than byte-identical: a history this size ALSO trips
+    # the soft byte trigger, and that compaction pass appends its marker entry
+    # legitimately. What must never happen is an existing row being rewritten,
+    # which is what a prefix check proves and a length check would not.
+    assert path.read_bytes().startswith(before), "an existing transcript row was rewritten"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_session_under_budget_is_completely_unaffected(tmp_path):
+    """The guarantee that this changes nothing for ordinary sessions: images
+    a user pasted are distinct evidence and must never be shed for size of
+    CONTEXT, only to keep a request legal."""
+    stream = ScriptedOk()
+    session = make_session(tmp_path, stream)
+    await session.seed_history(_frames(4))
+
+    notices: list[str] = []
+    session.subscribe(lambda e: notices.append(e.text) if isinstance(e, NoticeEvent) else None)
+
+    await session.prompt("continue")
+
+    assert _image_blocks(stream.requests[0]) == 4, "an under-budget session lost a frame"
+    assert FRAMES_SHED_NOTICE not in notices
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_user_is_told_once_that_old_screenshots_were_dropped(tmp_path):
+    """Silent context loss is the main risk of shedding, so it is announced —
+    and announced ONCE, because ``_render_history`` runs several times per
+    turn and a per-render notice would repeat itself."""
+    stream = ScriptedOk()
+    session = make_session(tmp_path, stream)
+    await session.seed_history(_frames(42))
+
+    notices: list[str] = []
+    session.subscribe(lambda e: notices.append(e.text) if isinstance(e, NoticeEvent) else None)
+
+    await session.prompt("one")
+    await session.prompt("two")
+    await asyncio_yield()
+
+    assert notices.count(FRAMES_SHED_NOTICE) == 1
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_shed_can_be_turned_off(tmp_path):
+    """An operator on a provider with a larger cap keeps every frame."""
+    stream = ScriptedOk()
+    session = make_session(
+        tmp_path, stream, compaction_settings=CompactionSettings(wire_bytes_budget=0)
+    )
+    await session.seed_history(_frames(42))
+
+    await session.prompt("continue")
+
+    assert _image_blocks(stream.requests[0]) == 42
+    await session.dispose()
+
+
+# ---------------------------------------------------------------------------
+# The graduated 413 recovery
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_413_recovers_without_the_sticky_image_degrade(tmp_path):
+    """The over-reaction guard, and the reason 413 got its own predicate.
+
+    ``_images_rejected`` drops EVERY image for the whole session, forever. For
+    a size problem where shedding a few frames restores the session that is
+    catastrophically heavy-handed — and its own justification ("not a
+    preventable condition on our side") does not apply, because a 413 is
+    preventable by sending fewer bytes.
+    """
+    # A cap below the default budget, so the render seam's shed is not enough
+    # on its own and the reactive ladder has to engage.
+    stream = RefusesOversizeRequests(cap=12_000_000)
+    session = make_session(tmp_path, stream)
+    await session.seed_history(_frames(42))
+
+    await session.prompt("first")
+    assert stream.refusals == 1, "the fixture did not reproduce the refusal"
+    assert not session._images_rejected, "a 413 tripped the sticky image degrade"
+    assert session._wire_budget_override is not None, "the budget did not ratchet down"
+    assert session._wire_budget_override < 24_000_000
+
+    # The NEXT turn is correct without any re-entry into the failed turn.
+    await session.prompt("second")
+    assert _request_bytes(stream.requests[-1]) < _request_bytes(stream.requests[0])
+    assert _image_blocks(stream.requests[-1]) > 0, "images survived; only the oldest went"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_ratchet_converges_until_the_request_is_accepted(tmp_path):
+    """Each refusal is a measurement of the real cap — a proxy in front of the
+    API can refuse below the documented limit — so the budget tightens until
+    the provider accepts, rather than guessing from a per-provider table."""
+    stream = RefusesOversizeRequests(cap=8_000_000)
+    session = make_session(tmp_path, stream)
+    await session.seed_history(_frames(42))
+
+    for attempt in range(6):
+        await session.prompt(f"turn {attempt}")
+        if _request_bytes(stream.requests[-1]) <= stream.cap:
+            break
+
+    assert _request_bytes(stream.requests[-1]) <= stream.cap, "never converged"
+    assert not session._images_rejected
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_413_is_classified_with_an_actionable_hint(tmp_path):
+    """Defect 4: the model was told ``unknown`` with an empty hint and retried
+    the identical request. It is journaled as an incident the model can read."""
+    from local_operator.incidents import classify_incident
+
+    rendered = str(ProviderError(413, "Request exceeds the maximum size"))
+    incident = classify_incident(rendered)
+
+    assert incident.category == "context-length"
+    assert incident.hint, "the model was given nothing actionable"
+    assert "retry" in incident.hint.lower()
+
+
+@pytest.mark.asyncio
+async def test_an_ordinary_image_refusal_still_takes_the_sticky_degrade(tmp_path):
+    """The size ladder must not swallow the failure mode it sits in front of:
+    a genuine per-block refusal is still a poisoned image."""
+
+    class RefusesImages:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def __call__(self, request: ChatRequest, signal: AbortSignal | None):
+            self.calls += 1
+            first = self.calls == 1
+
+            async def gen():
+                if first:
+                    raise ProviderError(400, "Could not process image")
+                yield StreamTextDelta(delta="ok")
+                yield StreamEndEvent(stop_reason="endTurn")
+
+            return gen()
+
+    session = make_session(tmp_path, RefusesImages())
+    await session.seed_history(_frames(2))
+
+    await session.prompt("go")
+
+    assert session._images_rejected, "the sticky degrade stopped firing for real refusals"
+    assert session._wire_budget_override is None, "a block refusal ratcheted the byte budget"
+    await session.dispose()
+
+
+# ---------------------------------------------------------------------------
+# The byte-side anti-thrash band (the architect's top risk)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_byte_triggered_pass_still_over_budget_schedules_no_continuation(tmp_path):
+    """Risk 4, the dead-loop guard.
+
+    ``RECOVERY_BAND`` is defined on TOKENS. A byte-triggered pass leaves the
+    token residual far inside that band — 154,690 tokens is 15% of a 1M
+    window — so the token side alone would say "headroom created" and queue an
+    auto-continue, whose next turn re-fires the byte trigger on a context
+    nothing shrank. That is exactly the live dead loop ``RECOVERY_BAND`` was
+    added to prevent, reached through the new trigger.
+    """
+    from local_operator.compaction import api as compaction_api
+    from local_operator.session.session import _CompactionPlan
+
+    stream = ScriptedOk()
+    session = make_session(
+        tmp_path,
+        stream,
+        # No shed, so the render used by the band check stays over budget.
+        compaction_settings=CompactionSettings(wire_bytes_budget=0),
+    )
+    await session.seed_history(_frames(42))
+
+    settings = CompactionSettings(wire_bytes_budget=0)
+    plan = _CompactionPlan(
+        compaction_api=compaction_api,
+        settings=settings,
+        strategy="snapcompact",
+        llm_history=[],
+        cut=1,
+        context_tokens=154_690,
+        tokens_before=154_690,
+    )
+
+    # The token band passes trivially: 154,690 is well under 0.8 * 600,000.
+    threshold = compaction_api.resolve_threshold_tokens(1_000_000, settings)
+    assert 154_690 <= compaction_api.RECOVERY_BAND * threshold
+
+    # The byte band does not, because the render is still ~34 MB.
+    assert session._cleared_wire_headroom(plan) is False
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_byte_band_allows_a_continuation_once_the_payload_is_small(tmp_path):
+    """The band withholds only while the pass has genuinely not recovered."""
+    from local_operator.compaction import api as compaction_api
+    from local_operator.session.session import _CompactionPlan
+
+    session = make_session(tmp_path, ScriptedOk())
+    await session.seed_history(_frames(2))
+
+    settings = CompactionSettings()
+    plan = _CompactionPlan(
+        compaction_api=compaction_api,
+        settings=settings,
+        strategy="snapcompact",
+        llm_history=[],
+        cut=1,
+        context_tokens=1_000,
+        tokens_before=1_000,
+    )
+
+    assert session._cleared_wire_headroom(plan) is True
+    await session.dispose()
+
+
+async def asyncio_yield() -> None:
+    """Let background notice emissions land before asserting on them."""
+    import asyncio
+
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)

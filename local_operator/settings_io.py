@@ -852,6 +852,39 @@ SETTINGS: tuple[Setting, ...] = (
         help="Allow a pass at safe tool-loop boundaries, not only between turns.",
         choices=_bool_choices("compact mid-turn", "only between turns"),
     ),
+    # The two BYTE knobs. They live in this section because they are compaction
+    # triggers, but they measure a different thing from every other key here:
+    # request SIZE, not context occupancy. A screenshot-heavy conversation can
+    # sit at 15% of a 1M-token window and still exceed a provider's request
+    # cap, because images are billed by pixel area and so carry a flat token
+    # charge regardless of their byte length. The labels say "MB" for that
+    # reason — a bare number here would read as tokens like its neighbours.
+    Setting(
+        key="compaction.wire_bytes_budget",
+        path=("compaction", "wire_bytes_budget"),
+        section="compaction",
+        label="Request size limit (bytes)",
+        kind=Kind.INT,
+        default=24_000_000,
+        help=(
+            "Hard ceiling on the request. Older screenshots are dropped from the"
+            " context (never from the transcript) to stay under it. 0 disables."
+        ),
+        minimum=0,
+    ),
+    Setting(
+        key="compaction.wire_bytes_trigger",
+        path=("compaction", "wire_bytes_trigger"),
+        section="compaction",
+        label="Request size trigger (bytes)",
+        kind=Kind.INT,
+        default=16_000_000,
+        help=(
+            "Compact once the request passes this size, so a screenshot-heavy"
+            " session summarises early instead of dropping frames. 0 disables."
+        ),
+        minimum=0,
+    ),
     # -- web search ---------------------------------------------------------
     # The two ``enabled`` flags sit in ``web_tools`` (NEW_SESSIONS), apart from
     # the knobs that share their YAML block: they gate whether the tool exists

@@ -39,14 +39,15 @@ from .marker import (
     build_compaction_marker,
     render_compaction_marker,
 )
-from .pruning import prune_stale_frames, prune_tool_outputs
+from .pruning import prune_stale_frames, prune_tool_outputs, shed_frames_to_wire_budget
 from .thresholds import (
     CompactionSettings,
     compaction_context_tokens,
     resolve_strategy,
+    resolve_wire_bytes_budget,
     should_compact,
 )
-from .tokens import estimate_messages_tokens
+from .tokens import estimate_messages_tokens, estimate_wire_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -152,11 +153,32 @@ async def run_compaction_pass(
         working, frames_dropped = prune_stale_frames(
             working, keep_recent_frames=settings.keep_recent_frames
         )
+    else:
+        # (2b) Byte shed, for the surface that did NOT opt in. A session is
+        # not statically one kind or the other — the session this guard was
+        # written for was an ordinary chat for hundreds of turns and then
+        # started driving a browser, without any config changing — so the
+        # honest discriminator is the observed byte pressure, not a static
+        # per-surface guess. Under budget this is one cheap scan that changes
+        # nothing; over budget the alternative is a request the provider
+        # refuses outright, taking every frame with it.
+        working, frames_dropped = shed_frames_to_wire_budget(
+            working, budget=resolve_wire_bytes_budget(settings)
+        )
 
-    # (3) Trigger through the single resolver.
+    # (3) Trigger through the single resolver. Bytes go in as a second input
+    # to the SAME resolver rather than as a second predicate: an image-heavy
+    # history can be far under every token threshold and still be too large to
+    # send, and two functions free to disagree about when a pass is due is the
+    # drift this package forbids.
     local_estimate = estimate_messages_tokens(working)
     tokens_before = compaction_context_tokens(provider_context_tokens, local_estimate)
-    if respect_threshold and not should_compact(tokens_before, model.context_window, settings):
+    if respect_threshold and not should_compact(
+        tokens_before,
+        model.context_window,
+        settings,
+        wire_bytes=estimate_wire_bytes(working),
+    ):
         return _refused(
             working,
             "below-threshold",

@@ -462,6 +462,54 @@ def estimate_messages_tokens(messages: Sequence[Message]) -> int:
     return sum(estimate_tokens(m) for m in messages)
 
 
+def estimate_wire_bytes(messages: Sequence[Message]) -> int:
+    """Serialized request size in BYTES — deliberately NOT a token count.
+
+    A third ruler, answering the one question neither token estimator asks:
+    "will this HTTP request fit?". Keeping it separate is the whole point.
+    :data:`IMAGE_TOKEN_ESTIMATE` is a flat per-image charge because vision
+    providers bill by pixel area, so it is *correct* for billing and useless
+    as a size proxy — the session this function was written for carried 42
+    screenshots worth 50,400 accounted tokens against **33.9 MB** actually
+    sent, read as 15.5% of a 1M window while the wire was over Anthropic's
+    32 MB cap. Making ``IMAGE_TOKEN_ESTIMATE`` size-aware instead would
+    corrupt the billing ruler to fix a transport problem and silently
+    re-scale every calibrated threshold in this package.
+
+    So: a number from THIS function may only be compared against a byte
+    budget, never against a token figure. That is the same one-ruler-per-
+    comparison discipline this module's header establishes, and the mixing
+    bug it describes has already shipped twice.
+
+    Unlike the token estimators this is **exact and essentially free**: no
+    tokenizer to load, no slope to calibrate, ``len(block.data)`` *is* the
+    answer. Measured at 0.059 ms over a 546-message / 42-image history, which
+    is why the render seam can afford to run it unconditionally and why the
+    trigger can pass an exact figure where the token path needs a cheap upper
+    bound first.
+
+    Counts base64 payloads, text, and tool-call name+arguments — the three
+    things that carry real length. The surrounding JSON envelope and escaping
+    add a measured **2.2%** on top, absorbed by the budget's headroom rather
+    than modelled: a per-provider serialization model would be a constant that
+    rots, and the budget is already set well below the cap.
+    """
+    total = 0
+    for message in messages:
+        for block in message.content:
+            if isinstance(block, TextContent):
+                total += len(block.text)
+            else:
+                total += len(block.data)
+        for call in message.tool_calls or ():
+            # Prefer the provider's own rendering when we kept it: that string
+            # is literally what goes on the wire, while re-dumping the parsed
+            # arguments can differ in whitespace and key order.
+            total += len(call.name)
+            total += len(call.raw_arguments or json.dumps(call.arguments, sort_keys=True))
+    return total
+
+
 def history_chars(messages: Sequence[object]) -> int:
     """Rough size of a history in characters, for the offload decision.
 
