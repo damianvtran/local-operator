@@ -258,6 +258,28 @@ test_eval_tool.py` as **24 failures** that three agents in a row wrote off as
 somewhere real. Treat a standing block of "known environmental" failures as an
 unverified claim, not as weather.
 
+### Isolating a run: `LOCAL_OPERATOR_CONFIG_DIR` alone is not enough
+
+`LOCAL_OPERATOR_CONFIG_DIR` redirects the **config** dir. It does *not* redirect
+the **cache**: `model/catalogue.default_cache_dir()` derives its root from the
+home directory independently (and `skills/index.py` and `update.py` hardcode the
+same root, deliberately — one place to clear), so a run with only that variable
+set reads and writes `~/.local-operator/cache` while believing it is isolated.
+
+**Redirect `HOME` as well** — that is the reliable method, and it makes both
+agree:
+
+```sh
+env HOME=/tmp/iso-run LOCAL_OPERATOR_CONFIG_DIR=/tmp/iso-run/.local-operator ...
+```
+
+This is worth spelling out because the failure is silent and it produces a
+*plausible* wrong answer rather than an error. It has now cost two separate QA
+rounds a false result in the same way: an "offline" cell resolved a provider
+listing out of a catalogue cache that the same session's own earlier live calls
+had written into the real home. Any cell whose point is a cold cache needs a
+**fresh** `HOME` per cell, not merely a fresh config dir.
+
 ## Releasing the stable `lop` runtime
 
 Development and the global launcher deliberately use different installations:

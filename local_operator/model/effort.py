@@ -109,6 +109,19 @@ _OPENAI_O_SERIES = EffortSupport(("low", "medium", "high"))
 #: forward-reading ``5 and above`` arm. Patterns are ``search``ed against the
 #: lowercased id so an aggregator prefix (``anthropic/claude-opus-5``,
 #: ``openrouter/openai/gpt-5.4``) resolves to the same support as the bare id.
+#:
+#: ``[.-]`` for the generation separator, not a bare ``-``, and that is a bug
+#: fix rather than tidiness. These arms were written against Anthropic's own
+#: dated snapshot ids, which hyphenate (``claude-opus-4-6``); OpenRouter spells
+#: the same models with a DOT (``anthropic/claude-opus-4.6``). The module's
+#: opening claim — keyed on the model so a route cannot change the knob — was
+#: therefore already false by punctuation: 8 Anthropic rows (4.6/4.7/4.8 and
+#: their ``:batch`` twins) silently returned no ladder at all on the OpenRouter
+#: route, and nothing tested the dotted spelling. Widening the separator repairs
+#: them on EVERY route, including the offline one where no listing can help.
+#: The ``\d{2,3}`` bound below still does its job across the wider separator:
+#: ``claude-opus-4-20250514`` cannot reach a generation arm through ``[.-]``
+#: either, which is the regression the tests pin.
 _EFFORT_TABLE: tuple[tuple[re.Pattern[str], EffortSupport], ...] = (
     # 4.5: the generation that introduced `effort`, and the ONE arm written as a
     # tier rather than a generation range. The doc lists exactly one 4.5 model as
@@ -118,9 +131,9 @@ _EFFORT_TABLE: tuple[tuple[re.Pattern[str], EffortSupport], ...] = (
     # (an `output_config` key on every turn, unasked for). Forward-reading is the
     # right default for a generation that HAS the feature; it is the wrong one
     # for the generation where it was still being rolled out tier by tier.
-    (re.compile(r"claude-opus-4-5(?!\d)"), _ANTHROPIC_BASE),
+    (re.compile(r"claude-opus-4[.-]5(?!\d)"), _ANTHROPIC_BASE),
     # 4.6 and the Mythos preview took `max` but not `xhigh`.
-    (re.compile(r"claude-[a-z]+-4-6(?!\d)|claude-mythos-preview"), _ANTHROPIC_NO_XHIGH),
+    (re.compile(r"claude-[a-z]+-4[.-]6(?!\d)|claude-mythos-preview"), _ANTHROPIC_NO_XHIGH),
     # 4.7/4.8 and every tier at generation 5 or above take both.
     #
     # `\d{2,3}`, NOT `\d{2,}`: an unbounded run also matches the 8-digit snapshot
@@ -129,7 +142,7 @@ _EFFORT_TABLE: tuple[tuple[re.Pattern[str], EffortSupport], ...] = (
     # doc's supported list — read as "generation 4.7 or later" and sent
     # `output_config: {"effort": "high"}` on every request. Three digits is
     # generous for a generation number and cannot swallow a date.
-    (re.compile(r"claude-[a-z]+-4-(?:[7-9]|\d{2,3})(?!\d)"), _ANTHROPIC_FULL),
+    (re.compile(r"claude-[a-z]+-4[.-](?:[7-9]|\d{2,3})(?!\d)"), _ANTHROPIC_FULL),
     (re.compile(r"claude-[a-z]+-(?:[5-9]|\d{2,3})(?!\d)"), _ANTHROPIC_FULL),
     (re.compile(r"gpt-(?:[5-9]|\d{2,})"), _OPENAI_GPT5),
     (re.compile(r"(?:^|[/:-])o[1-9](?:-|$)"), _OPENAI_O_SERIES),
@@ -193,22 +206,75 @@ def resolve_effort(model_id: str, requested: str | None) -> str | None:
     Ties break DOWNWARD. A level equidistant between two rungs is a level the
     target cannot express either way, and the cheaper reading is the one the
     user can undo by pressing the key; the expensive one they pay for first.
+
+    Table-backed, and therefore the OFFLINE answer. A caller that already holds
+    a resolved ladder — anything reading ``ModelSpec.reasoning_efforts``, which
+    may have come from a provider listing rather than from this table — must
+    call :func:`resolve_effort_in` with that ladder instead, or the two derive
+    different answers for the same model. See its docstring for the split-brain
+    this prevents.
     """
     support = effort_support(model_id)
     if support is None:
         return None
+    return resolve_effort_in(support.levels, support.default, requested)
+
+
+def resolve_effort_in(
+    levels: tuple[str, ...], default: str | None, requested: str | None
+) -> str | None:
+    """:func:`resolve_effort`'s clamp against an EXPLICIT ladder.
+
+    The algorithm is the same one and lives here only once, because two callers
+    now need it against two different sources of the ladder. ``resolve_effort``
+    reads the ladder out of ``_EFFORT_TABLE``; ``failover.spec_for_target``
+    holds a ``ModelSpec`` whose ladder the provider's own listing may have
+    supplied, and clamping THAT against the table produced a genuine split
+    brain: for ``openai/gpt-5.4-pro`` the spec offers ``medium/high/xhigh``
+    while the table offers ``none/low/medium/high/xhigh``, so the table's clamp
+    could hand back ``low`` — a rung the route rejects — which the wire client
+    then drops on the membership re-check. Not a 400, which is worse: a silent
+    loss of depth beneath a status band still naming the level.
+
+    Ladder members outside :data:`EFFORT_ORDER` are SKIPPED rather than ranked.
+    The nearest-rung clamp indexes ``EFFORT_ORDER`` for every member, and an
+    unrankable word made that a ``ValueError`` — raised, in the failover path,
+    on the request that was supposed to rescue a turn. Ingest filtering
+    (``discovery._effort_ladder``) already drops unknown words before a listing
+    ladder reaches a spec, so this is defence in depth on a public function
+    whose ladder can also arrive from a caller we do not control. A ladder with
+    NO rankable member has nothing to clamp toward, so the default answers — but
+    only if the default is ITSELF on the ladder.
+
+    That membership check is the contract of the whole function: every return
+    here is a rung this target accepts, and ``default`` is the CALLER's, with
+    nothing upstream tying it to ``levels``. ``resolve_effort_in(('turbo',
+    'warp'), 'high', 'medium')`` would otherwise answer ``high``, a rung not on
+    the ladder it was asked to clamp into. Unreachable through the in-tree
+    callers today — ingest filtering means a spec-borne ladder is always
+    rankable, and the wire client re-checks membership — but a public helper
+    documented to take ladders from a caller we do not control should not hand
+    back a level the ladder denies. ``None`` (send nothing) is the honest answer
+    when the default is off-ladder.
+    """
+    if not levels:
+        return None
     if not requested:
-        return support.default
+        return default if default in levels else None
     wanted = requested.lower()
-    if wanted in support.levels:
+    if wanted in levels:
         return wanted
     if wanted not in EFFORT_ORDER:
         # Not a level at all (stale state, a hand-edited config). Nothing to
-        # clamp toward, so the model's own default is the only honest answer.
-        return support.default
+        # clamp toward, so the model's own default is the only honest answer —
+        # when it is a rung this ladder actually offers.
+        return default if default in levels else None
     rank = EFFORT_ORDER.index(wanted)
+    rankable = [name for name in levels if name in EFFORT_ORDER]
+    if not rankable:
+        return default if default in levels else None
     return min(
-        support.levels,
+        rankable,
         key=lambda name: (abs(EFFORT_ORDER.index(name) - rank), EFFORT_ORDER.index(name)),
     )
 
@@ -217,12 +283,31 @@ def next_effort(levels: tuple[str, ...], current: str | None) -> str | None:
     """The level one cycle step above ``current``, wrapping at the top.
 
     ``None`` in (nothing selected) starts at :data:`FALLBACK_START` when the
-    model has it, else the lowest level — never at whatever happens to sit at
-    index 0, which on OpenAI is ``none``: a user pressing the key to find the
-    control would have turned reasoning OFF with their first press.
+    model has it, else the lowest rung ABOVE ``none`` — never at whatever
+    happens to sit at index 0, which on OpenAI is ``none``: a user pressing the
+    key to find the control would have turned reasoning OFF with their first
+    press.
+
+    That guard used to be spelled ``FALLBACK_START in levels``, falling through
+    to ``levels[0]``, and it was insufficient the moment ladders stopped coming
+    only from the hand-transcribed table. A provider listing can state a ladder
+    with no ``medium`` at all: measured over a live 424-row OpenRouter pull, 45
+    of 153 stated ladders start at ``none`` and 8 of those lack ``medium``
+    (``mistralai/mistral-small-2603`` is ``('none','high')``), so the fallthrough
+    landed the discovery press on precisely the rung the docstring promised it
+    would never pick. Skipping ``none`` restores the stated property for any
+    ladder shape rather than for the two the table happened to contain.
+
+    ``none`` stays fully reachable — by cycling round to it, and by an explicit
+    ``/effort none``. It is a legitimate choice; it is just not one to make on
+    a user's behalf when they pressed a key to find out what the control does.
+    A ladder whose ONLY rung is ``none`` still answers ``none``, because there
+    is nothing else to offer and refusing to move would be a dead key.
     """
     if not levels:
         return None
     if current is None or current.lower() not in levels:
-        return FALLBACK_START if FALLBACK_START in levels else levels[0]
+        if FALLBACK_START in levels:
+            return FALLBACK_START
+        return next((level for level in levels if level != "none"), levels[0])
     return levels[(levels.index(current.lower()) + 1) % len(levels)]

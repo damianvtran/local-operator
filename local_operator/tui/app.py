@@ -98,7 +98,7 @@ from local_operator.logger import current_log_file
 
 # A leaf table (`re` and `dataclasses` only), so importing it here costs the
 # boot path nothing the lazy-import discipline above is protecting.
-from local_operator.model.effort import default_effort, next_effort
+from local_operator.model.effort import next_effort
 from local_operator.session import naming
 from local_operator.session.peer import PEER_MESSAGE_MESSAGE_TYPE
 from local_operator.session.protocol import SessionProtocol
@@ -14529,7 +14529,22 @@ class OperatorApp(App[None]):
             # Restores the MODEL's documented default rather than blanking the
             # field, so the band goes on naming the level actually in force —
             # `high` on Anthropic — rather than only the fact that it reasons.
-            restored = default_effort(getattr(spec, "model_id", "") or "")
+            #
+            # Off the SPEC, not re-derived from the model name. That keeps this
+            # command agreeing with the band by CONSTRUCTION, whatever the spec
+            # builder decided: both read the one field. It matters in both
+            # directions. Where the spec seeds a default (Anthropic, whose
+            # `high` is documented as identical to sending nothing) `auto`
+            # restores that level and the band names it. Where the spec seeds
+            # NOTHING — every listing-derived OpenRouter model, because sending
+            # the listing's stated `default_effort` measurably is not the same
+            # request as omitting it — `restored` is `None`, the key goes back
+            # to being omitted, and the band reads `auto`. Re-deriving from the
+            # model name here instead would reintroduce exactly the
+            # contradiction this replaced: the table answering for a model whose
+            # ladder came from a listing. It also puts the last model-name
+            # knowledge in this file back where it belongs.
+            restored = getattr(spec, "reasoning_default_effort", None)
             if not self._apply_effort(restored, remember=False):
                 self._system_notice("session cannot change model settings", "warning")
                 return
@@ -14537,8 +14552,17 @@ class OperatorApp(App[None]):
             # something. It read as a rejection before — a `_system_notice` with
             # no old value — which left the one command that withdraws a setting
             # as the only one whose receipt did not show the withdrawal.
+            #
+            # Except when nothing moved. `x → x` is the shape every other
+            # receipt in this feature uses to mean "this moved", so printing it
+            # for a level that was already the model's own default asserts a
+            # change that did not happen. The sibling `already <level>` branch
+            # below is the voice this codebase already uses for a no-op.
             destination = restored or "the provider's default"
             scope = "(the model's own default)" if restored else "(nothing sent)"
+            if restored == current:
+                notice(f"reasoning effort: already {destination} {scope}")
+                return
             notice(f"reasoning effort: {current or 'auto'} → {destination} {scope}")
             return
         if wanted not in levels:
@@ -18554,13 +18578,23 @@ class OperatorApp(App[None]):
                 style="info",
             )
         if wanted == "auto":
-            restored = default_effort(getattr(spec, "model_id", "") or "")
+            # The spec's own default, for the reason the sibling site above
+            # spells out: the table cannot answer for a listing-derived model.
+            restored = getattr(spec, "reasoning_default_effort", None)
             if not self._apply_effort(restored, remember=False):
                 return SlashResult(
                     kind="notice", text="session cannot change model settings", style="warning"
                 )
             destination = restored or "the provider's default"
             scope = "(the model's own default)" if restored else "(nothing sent)"
+            # The no-op voice, for the reason the sibling site above spells out:
+            # an arrow between two identical values reads as a change.
+            if restored == current:
+                return SlashResult(
+                    kind="notice",
+                    text=f"reasoning effort: already {destination} {scope}",
+                    style="info",
+                )
             return SlashResult(
                 kind="notice",
                 text=f"reasoning effort: {current or 'auto'} → {destination} {scope}",

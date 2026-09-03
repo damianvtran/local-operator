@@ -35,7 +35,7 @@ from local_operator.harness.types import (
     RenderedStreamError,
     StreamEvent,
 )
-from local_operator.model.effort import EFFORT_ORDER, resolve_effort
+from local_operator.model.effort import EFFORT_ORDER, resolve_effort_in
 
 if TYPE_CHECKING:  # import cycle: both modules import this one at runtime
     from local_operator.providers.auth_store import OAuthAccess, StoredCredential
@@ -1463,6 +1463,70 @@ def parse_selector(selector: str) -> tuple[str, str]:
     return provider, model_id
 
 
+def _carried_effort(base: ModelSpec, target_provider: str) -> str | None:
+    """The level a hop may carry from ``base`` onto ``target_provider``.
+
+    An AGGREGATOR target may receive a user's CHOICE but never an automatic
+    SEED. ``build_model_spec`` refuses to seed ``reasoning_effort`` on an
+    aggregator route at all — the aggregator's own default is not knowable from
+    here, and sending a level measurably is not the same request as omitting one
+    — but a failover hop reaches that same wire by a second path, so the
+    invariant has to be enforced here too or it is only half a rule.
+
+    Without this, a fallback firing was enough to switch reasoning ON for a user
+    who never touched the dial. Measured through the real ``spec_for_target``
+    and the real ``clients._reasoning_effort`` against the live 424-row
+    OpenRouter listing: 18 ``openrouter/anthropic/*`` rows received a ``high``
+    the same model does not receive when selected directly, so
+    ``openrouter/anthropic/claude-opus-5`` answered two different ways depending
+    on how it was reached. The count is 18 rather than the 8 of the previous
+    release because this branch's ladder repair gave those dotted ids a ladder,
+    and a carried level survives the wire client's membership re-check only
+    where a ladder exists.
+
+    The test for "a choice" is ``reasoning_effort != reasoning_default_effort``,
+    which is not a heuristic but the DOCUMENTED contract of that pair: the two
+    are set to the same value at build time and "diverge as soon as the user
+    picks a level" (see ``build_model_spec``), which is precisely what ``/effort
+    auto`` relies on to find its way back.
+
+    A DIRECT target is deliberately left alone and still receives
+    ``base.reasoning_effort`` as it always has. The seed is arguably not a
+    choice there either — an Anthropic base seeding ``high`` carries it onto an
+    OpenAI target, where ``high`` is a real level rather than Anthropic's
+    documented no-op, across 30 measured direct-to-direct cells. But that
+    predates this branch, is unchanged by it, and is a wire change on routes
+    this PR is not otherwise touching; it belongs to its own reviewed change,
+    not to a remediation round. Scoping the rule to aggregator targets closes
+    exactly the defect this branch opened and nothing else.
+
+    ONE case is accepted as indistinguishable: a user who explicitly picks the
+    level that already equals the model's default (cycling the ladder all the
+    way back around to ``high``) produces a spec byte-identical to the seeded
+    one — verified by comparing ``model_dump()`` of both — so that choice is
+    dropped on a hop to an aggregator. That is the right answer rather than
+    merely the cheap one: asking for the level the model already runs at asks
+    for the behaviour omission produces, so the target's own default honours it.
+    Separating the two would need a third field recording was-explicitly-set,
+    threaded through every writer, the session rebuild and the ``/model``
+    switch — real cost on every spec to preserve a distinction that is
+    unobservable on the direct route and that the no-seed rule forbids acting on
+    for an aggregator anyway. If those states ever need to differ, that field is
+    the fix; a sharper predicate here cannot be.
+    """
+    if base.reasoning_effort is None:
+        return None
+    # Imported at call time, like the sibling `build_model_spec` import below:
+    # `registry` is a heavier module and this one sits on the request path.
+    from local_operator.providers.registry import AGGREGATOR_PROVIDERS
+
+    if target_provider not in AGGREGATOR_PROVIDERS:
+        return base.reasoning_effort
+    if base.reasoning_effort == base.reasoning_default_effort:
+        return None
+    return base.reasoning_effort
+
+
 def spec_for_target(base: ModelSpec, target: FallbackTarget) -> ModelSpec:
     """Build the fallback model's OWN spec, then carry only sampling choices.
 
@@ -1477,9 +1541,14 @@ def spec_for_target(base: ModelSpec, target: FallbackTarget) -> ModelSpec:
     a 400 on the request that was supposed to rescue the turn. But dropping it
     is not right either: a cascade entry that names no effort should not cost
     the user the level they asked for wherever the fallback accepts it. So an
-    explicit ``target.effort`` wins, and otherwise :func:`resolve_effort` keeps
-    the chosen level when the fallback accepts it and falls back to that
-    model's own default when it does not.
+    explicit ``target.effort`` wins, and otherwise :func:`resolve_effort_in`
+    keeps the chosen level when the fallback accepts it and falls back to that
+    model's own default when it does not — clamped against the target spec's
+    OWN ladder, which is what keeps this from disagreeing with the model the
+    hop actually runs on (see the call site). Onto an AGGREGATOR target only the
+    user's CHOICE rides, never the automatic seed (:func:`_carried_effort`): a
+    hop must not be able to switch reasoning on for a user who never touched the
+    dial.
 
     ``supports_sampling_params`` needs no such care here, unlike in the
     clone-based version this replaced: it comes from the target's own
@@ -1499,7 +1568,28 @@ def spec_for_target(base: ModelSpec, target: FallbackTarget) -> ModelSpec:
                 # Clamped to the nearest rung rather than dropped or defaulted: see
                 # `resolve_effort` for why "the model's default" silently inverts
                 # a `none`, and why clamping preserves the direction of the ask.
-                else resolve_effort(model_id, base.reasoning_effort or target_spec.reasoning_effort)
+                #
+                # Clamped against the TARGET SPEC's ladder, not against the model
+                # id. `build_model_spec` above may have taken the ladder from the
+                # provider's own listing, while the id-keyed `resolve_effort`
+                # only ever consults the hand-transcribed table — so the two
+                # disagree exactly where the listing corrected us. For
+                # `openai/gpt-5.4-pro` the table would clamp to `low`, a rung the
+                # route rejects and the wire client silently drops on its own
+                # membership check: a loss of depth under a status band still
+                # naming the level, which is worse than a 400 because nothing
+                # reports it. The spec is the single source of truth for what
+                # this target accepts.
+                #
+                # `_carried_effort`, not `base.reasoning_effort`: onto an
+                # aggregator only a level the user actually CHOSE may ride. The
+                # seeded default would otherwise reach an aggregator wire that
+                # `build_model_spec` deliberately keeps clear of one.
+                else resolve_effort_in(
+                    target_spec.reasoning_efforts,
+                    target_spec.reasoning_default_effort,
+                    _carried_effort(base, provider) or target_spec.reasoning_effort,
+                )
             ),
         }
     )

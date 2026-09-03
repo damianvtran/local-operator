@@ -18,6 +18,7 @@ from local_operator.model.effort import (
     default_effort,
     next_effort,
     resolve_effort,
+    resolve_effort_in,
     supported_efforts,
 )
 
@@ -179,6 +180,56 @@ class TestTheCycleOrder:
         assert next_effort(supported_efforts("gpt-5.4"), None) == "medium"
         assert next_effort(supported_efforts("claude-opus-5"), None) == "medium"
 
+    def test_from_unset_it_skips_none_on_a_ladder_without_medium(self) -> None:
+        """The `medium`-only guard was insufficient once ladders stopped coming
+        only from the table.
+
+        A provider listing can state a ladder with no `medium` at all: over a
+        live 424-row OpenRouter pull, 45 of 153 stated ladders start at `none`
+        and 8 of those lack `medium` — `mistralai/mistral-small-2603` is
+        `('none','high')`. The old fallthrough to `levels[0]` landed the very
+        first `shift+tab` on `none`, silently turning reasoning OFF on a press
+        the user made to discover the control, with the status band as the only
+        receipt. That is precisely what the guard exists to prevent.
+        """
+        assert next_effort(("none", "high"), None) == "high"
+        assert next_effort(("none", "low", "high"), None) == "low"
+        # `medium` still wins when the ladder has it, including one starting at
+        # `none` — 37 of those 45 ladders are safe for this reason.
+        assert next_effort(("none", "low", "medium", "high"), None) == "medium"
+
+    def test_none_stays_reachable_by_cycling_and_when_it_is_the_only_rung(self) -> None:
+        """Skipping `none` is about the DISCOVERY press, not about denying it.
+
+        `none` is a legitimate choice — it is just not one to make on a user's
+        behalf. It stays reachable by cycling round to it and by an explicit
+        `/effort none`, and a ladder offering nothing else still answers it
+        rather than leaving the key dead.
+        """
+        assert next_effort(("none", "high"), "high") == "none"
+        assert next_effort(("none",), None) == "none"
+
+    def test_a_none_only_ladder_answers_none_from_every_entry_state(self) -> None:
+        """The one branch whose behaviour contradicts the function's headline promise.
+
+        `next_effort` promises never to hand a user `none` on a discovery press,
+        and a `('none',)` ladder is the documented exception: there is nothing
+        else to offer, so answering anything else would mean inventing a rung
+        the model rejects, and answering nothing would leave the key dead.
+
+        Pinned from ALL THREE entry states because they take three different
+        code paths — the unset fallback, the wrap arithmetic, and the
+        unrecognised-current reset — and the promise-contradicting answer has to
+        be the deliberate one on each, not an accident of one of them. No live
+        row has this shape today (0 of 21 distinct ladders in a 424-row pull),
+        which is exactly why prose alone was holding it.
+        """
+        assert next_effort(("none",), None) == "none"
+        assert next_effort(("none",), "none") == "none"
+        # A level the model no longer supports resets the cycle, and the reset
+        # lands on `none` here for want of anywhere else to land.
+        assert next_effort(("none",), "high") == "none"
+
     def test_a_level_the_model_no_longer_supports_restarts_the_cycle(self) -> None:
         """Stale state cannot wedge the key: an unrecognised current value is
         treated as unset rather than raising or sticking."""
@@ -237,3 +288,83 @@ def test_a_snapshot_date_is_not_read_as_a_generation_number() -> None:
     # …while the forward-reading intent survives: a real generation 4.10 would
     # still be read as 4.7-or-later.
     assert supported_efforts("claude-opus-4-10") == ("low", "medium", "high", "xhigh", "max")
+
+
+class TestTheDottedSpellingReachesTheSameLadder:
+    """The route invariant the module's own docstring claims, actually held.
+
+    ``effort.py`` opens by saying the table is keyed on the model rather than
+    the provider fronting it, so ``anthropic/claude-opus-5`` through OpenRouter
+    is the same model with the same knob. That was false by PUNCTUATION: the
+    arms were written against Anthropic's hyphenated snapshot ids and OpenRouter
+    spells the same generations with a dot, so eight rows silently lost their
+    ladder on the aggregator route and nothing tested the dotted spelling.
+    """
+
+    @pytest.mark.parametrize(
+        ("dotted", "hyphenated"),
+        [
+            ("anthropic/claude-opus-4.5", "claude-opus-4-5"),
+            ("anthropic/claude-opus-4.6", "claude-opus-4-6"),
+            ("anthropic/claude-sonnet-4.6", "claude-sonnet-4-6"),
+            ("anthropic/claude-opus-4.7", "claude-opus-4-7"),
+            ("anthropic/claude-opus-4.8", "claude-opus-4-8"),
+            # The `:batch` twins route to the same model and must agree with it.
+            ("anthropic/claude-opus-4.6:batch", "claude-opus-4-6"),
+        ],
+    )
+    def test_a_dot_and_a_hyphen_name_the_same_generation(
+        self, dotted: str, hyphenated: str
+    ) -> None:
+        assert supported_efforts(dotted) == supported_efforts(hyphenated)
+        assert supported_efforts(dotted) != ()
+        assert default_effort(dotted) == default_effort(hyphenated)
+
+    def test_the_wider_separator_still_cannot_swallow_a_snapshot_date(self) -> None:
+        """The `\\d{2,3}` bound is what keeps `claude-opus-4-20250514` — a
+        shipped registry row that is NOT on the doc's supported list — from
+        reading as "generation 4.7 or later" and sending an effort key on every
+        request. Widening the separator to `[.-]` must not reopen that door,
+        from either spelling."""
+        assert supported_efforts("claude-opus-4-20250514") == ()
+        assert supported_efforts("claude-sonnet-4-20250514") == ()
+        assert supported_efforts("claude-opus-4.20250514") == ()
+
+
+class TestClampingAgainstAnExplicitLadder:
+    """``resolve_effort_in`` — the clamp a caller aims at its OWN ladder.
+
+    Extracted because the ladder can now come from a provider's listing rather
+    than from the table, and a failover hop that clamps against the table while
+    the spec offers something else is a silent loss of depth beneath a status
+    band still naming the level.
+    """
+
+    def test_it_clamps_within_the_ladder_it_was_given(self) -> None:
+        """Not within the table's ladder for the same model. `gpt-5.4-pro` on
+        OpenRouter takes only medium/high/xhigh, so a carried `low` must land on
+        `medium` — the table would have kept `low`, a rung the route rejects."""
+        assert resolve_effort_in(("medium", "high", "xhigh"), "medium", "low") == "medium"
+
+    def test_an_unrankable_rung_is_skipped_rather_than_raised(self) -> None:
+        """The bug this hardening exists for: the requested word was guarded but
+        every LADDER member was fed to `EFFORT_ORDER.index` unguarded, so a
+        vocabulary this build does not know raised `ValueError` — on the
+        failover hop, i.e. on the request that was meant to rescue the turn."""
+        assert resolve_effort_in(("low", "turbo", "high"), "high", "medium") == "low"
+
+    def test_a_wholly_unrankable_ladder_falls_back_to_the_default(self) -> None:
+        """Nothing to clamp toward at all, so the caller's own default is the
+        only honest answer — never an exception."""
+        assert resolve_effort_in(("turbo", "warp"), "turbo", "medium") == "turbo"
+
+    def test_an_empty_ladder_is_a_model_with_no_knob(self) -> None:
+        assert resolve_effort_in((), None, "high") is None
+
+    def test_the_table_backed_wrapper_still_answers_identically(self) -> None:
+        """`resolve_effort` is now a thin wrapper, so one algorithm serves both
+        callers and they cannot drift apart."""
+        for requested in ("none", "low", "medium", "xhigh", "max", "turbo", None):
+            assert resolve_effort("claude-opus-5", requested) == resolve_effort_in(
+                supported_efforts("claude-opus-5"), default_effort("claude-opus-5"), requested
+            )
