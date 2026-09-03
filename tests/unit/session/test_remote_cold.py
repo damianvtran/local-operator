@@ -294,3 +294,64 @@ async def test_a_draft_warms_the_runtime_before_the_message_is_sent(
             assert editor.text == "h", "the warm-up disturbed the draft"
     finally:
         await viewer.dispose()
+
+
+@pytest.mark.asyncio
+async def test_model_default_persists_for_a_local_runtime(tmp_path: Path, monkeypatch) -> None:
+    """`/model … d` must keep working once EVERY session is remote.
+
+    The refusal was keyed on ``is_remote``, which meant "somebody else's
+    session" before the viewer model and means "any session at all" after it.
+    Left as it was, a user on their own machine \u2014 whose runtime is a child
+    process on that same machine \u2014 was told to run the command "on the
+    terminal whose launches it should govern", which was the terminal they
+    were already sitting at.
+
+    The question the refusal always meant is narrower: would this machine's
+    config write reach the runtime? A runtime that published a record HERE is
+    local, whatever transport talks to it.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _seed_transcript(tmp_path, "s1")
+
+    from local_operator.tui.app import OperatorApp
+
+    viewer = await RemoteSession.cold(
+        "s1", config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+    )
+
+    async def factory():
+        return viewer
+
+    app = OperatorApp(factory)
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(30):
+            await pilot.pause()
+
+        # No record published: the runtime is not reachable from this config,
+        # so persisting here would write the wrong machine's config.
+        assert app._session_runs_elsewhere() is True
+
+        # A record for this session id is what "local" MEANS.
+        from local_operator.session.runtime import registry
+        from local_operator.session.runtime.types import SessionRecord
+
+        registry.publish(
+            SessionRecord(
+                pid=os.getpid(),
+                kind="daemon",
+                session_id="s1",
+                conversation_name="local one",
+                cwd=str(tmp_path),
+                model_label="m",
+                control_port=1,
+                control_key="k" * 16,
+            ),
+            tmp_path,
+        )
+
+        assert app._session_runs_elsewhere() is False, (
+            "a runtime that published its record on THIS machine is local, "
+            "so /model default must persist rather than refuse"
+        )

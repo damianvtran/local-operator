@@ -3683,6 +3683,20 @@ def main() -> int:
                     # wired (RemoteSession requires a factory) and deliberately
                     # unreachable: `_can_go_cold` routes owner loss to the cold
                     # state instead of to a takeover.
+                    #
+                    # THE OWNER PATH IS GONE FROM `lop`. This factory only ever
+                    # returns a RemoteSession — attached when a live record
+                    # exists, cold otherwise — so the TUI process never builds
+                    # a `Session`, never takes the lease, and never writes the
+                    # transcript. That is what makes "at most one runtime per
+                    # session, ever" true by construction rather than by
+                    # arbitration between two kinds of writer.
+                    #
+                    # `session_factory.create_session` still exists and is
+                    # still correct for the callers that legitimately own their
+                    # session in-process: `lop exec`, the headless REPL, the
+                    # server, and the mobile daemon's own attach path. Those
+                    # are not the TUI and are deliberately left alone.
                     raise RuntimeError("a viewer never takes over a session")
 
                 record = None

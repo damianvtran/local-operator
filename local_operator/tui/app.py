@@ -5517,6 +5517,61 @@ class OperatorApp(App[None]):
 
         self.run_worker(stop_outgoing(), group="resume-stop", exclusive=False)
 
+    def _session_runs_elsewhere(self) -> bool:
+        """Whether this session's runtime is on another machine.
+
+        Under the viewer model a local session is ALSO reached over a socket,
+        so ``is_remote`` no longer distinguishes "someone else's session" from
+        "my own session, one process away". The question that still matters for
+        a config write is narrower: would writing this machine's config govern
+        the runtime? A runtime whose record this machine published is local,
+        whatever transport reaches it.
+        """
+        session = self._session
+        if session is None or not bool(getattr(session, "is_remote", False)):
+            return False
+        # A local runtime publishes a discovery record here; a genuinely
+        # foreign one does not. Absence of proof is treated as elsewhere,
+        # because wrongly persisting is the costlier of the two mistakes.
+        try:
+            from local_operator.paths import config_dir
+            from local_operator.session.runtime import registry
+
+            session_id = getattr(session, "session_id", "") or ""
+            if not session_id:
+                return True
+            # ``registry.scan`` rather than ``find_owner_record``: the latter
+            # deliberately excludes the CALLING process, which is the right
+            # answer for "who else owns this" and the wrong one here — the
+            # question is whether a record exists on this machine at all.
+            return not any(
+                getattr(record, "session_id", "") == session_id
+                for record, _state in registry.scan(config_dir())
+            )
+        except Exception:  # noqa: BLE001 — unprovable means "do not persist"
+            logger.debug("could not decide whether the runtime is local", exc_info=True)
+            return True
+
+    def _session_is_busy(self) -> bool:
+        """Whether the session is mid-turn, however that turn was started.
+
+        Deliberately asks the SESSION rather than this viewer's own state: the
+        turn may have been submitted by another terminal, or by the phone, and
+        the answer is still "yes, work is happening".
+        """
+        session = self._session
+        if session is None:
+            return False
+        for probe in ("is_busy", "busy"):
+            value = getattr(session, probe, None)
+            try:
+                resolved = value() if callable(value) else value
+            except Exception:  # noqa: BLE001 — a probe must never break a command
+                continue
+            if isinstance(resolved, bool):
+                return resolved
+        return False
+
     def _overlay_live_state(self, rows: "list[Any]") -> "list[Any]":
         """Fill in each row's runtime state, and float the ones needing a person.
 
@@ -14419,12 +14474,17 @@ class OperatorApp(App[None]):
         if lowered == "saved":
             self._cmd_model_saved(notice)
             return
-        if persist_default and bool(getattr(session, "is_remote", False)):
-            # The follower's own config write would persist a default the
-            # SESSION never switched to (the switch lives on the owner), and
-            # routing it would persist on the wrong machine. Declined
-            # explicitly — the owner's typed producer answers the same way,
-            # so both terminals state one rule (MAJOR-1, review round 2).
+        if persist_default and self._session_runs_elsewhere():
+            # Persisting writes THIS machine's config, so it only makes sense
+            # where the launches it governs happen.
+            #
+            # The test was `is_remote` until the viewer model landed, and that
+            # became wrong the moment EVERY session became remote: a user on
+            # their own machine, whose runtime is a child process on that same
+            # machine, was told to "run it on the terminal whose launches it
+            # should govern" — which is the terminal they were already sitting
+            # at. The refusal now asks the question it always meant: is the
+            # runtime somewhere this config write would not reach?
             self._system_notice(
                 "/model default persists to the local machine's config — run it "
                 "on the terminal whose launches it should govern; /model <p>/<id> "
@@ -15902,6 +15962,22 @@ class OperatorApp(App[None]):
             if self._loop_running:
                 self._loop_cancelled = True
                 notice("loop will stop after the current turn")
+            elif self._session_is_busy():
+                # A loop DRIVES the session from the terminal that started it:
+                # each iteration is an ordinary turn submitted over the socket,
+                # which is what keeps it bounded, interruptible and visible in
+                # the transcript. So a second viewer of the same session has no
+                # loop to cancel even though it can see the turns arriving, and
+                # "no loop is running" would be a flat contradiction of what is
+                # on its screen.
+                #
+                # Say where the control actually is, and name the tool that
+                # works from here: `/stop` ends the runtime from any viewer.
+                notice(
+                    "no loop is running in THIS terminal — a loop is cancelled "
+                    "where it was started, or use /stop to end the session",
+                    "warning",
+                )
             else:
                 notice("no loop is running")
             return
