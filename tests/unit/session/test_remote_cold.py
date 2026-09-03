@@ -1,0 +1,231 @@
+"""The cold viewer: a session you are looking at but not running.
+
+``lop`` boots into this state. There is no runtime, deliberately none is
+started, and the first message is what brings one into existence. These tests
+pin the three properties that makes safe:
+
+1. Opening a session creates NOTHING — no process, no directory, no lease.
+2. A cold viewer still renders: durable history, the configured model, and any
+   scheduled wakes come from disk rather than from an owner.
+3. The first mutating call engages a runtime and attaches to it, once, even
+   when several arrive together.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import os
+from pathlib import Path
+
+import pytest
+
+from local_operator.session.remote import RemoteSession
+from local_operator.session.runtime import registry
+from local_operator.session.runtime.server import RuntimeServer
+from tests.unit.session.runtime.test_server import FakeHandle
+
+SESSION_ID = "coldviewer01"
+
+
+async def _never():
+    raise AssertionError("takeover was not expected")
+
+
+def _seed_transcript(config_dir: Path, session_id: str) -> Path:
+    directory = config_dir / "sessions" / session_id
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "transcript.jsonl").write_text("", encoding="utf-8")
+    return directory
+
+
+@pytest.mark.asyncio
+async def test_a_cold_viewer_creates_no_process_and_no_directory(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Opening a terminal is not work, and must not cost a session directory."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions").mkdir(parents=True, exist_ok=True)
+
+    viewer = await RemoteSession.cold(
+        SESSION_ID, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+    )
+    try:
+        assert viewer.is_cold is True
+        assert viewer.session_id == SESSION_ID
+        # Nothing on disk, and nothing published.
+        assert list((tmp_path / "sessions").iterdir()) == []
+        assert registry.scan(tmp_path) == []
+    finally:
+        await viewer.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_cold_viewer_renders_durable_history_without_an_owner(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """`--resume` of a session nobody is running still shows the conversation."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    directory = _seed_transcript(tmp_path, SESSION_ID)
+
+    from local_operator.harness.types import Message
+    from local_operator.session.transcript import Transcript
+
+    transcript = Transcript(directory)
+    await transcript.append_message(Message.user("what did we decide?"))
+    await transcript.append_message(Message.assistant("we decided to ship it"))
+
+    viewer = await RemoteSession.cold(
+        SESSION_ID, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+    )
+    try:
+        texts = [getattr(message, "text", "") for message in viewer.history()]
+        assert "what did we decide?" in texts
+        assert "we decided to ship it" in texts
+        # Canonical state exists and names this session, so every widget reads
+        # a cold session through the same path it reads an attached one.
+        assert viewer.frontend_state.session_id == SESSION_ID
+    finally:
+        await viewer.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_cold_viewer_shows_scheduled_wakes_from_the_index(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A cold session's wakes are real and the picker/panel must see them."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _seed_transcript(tmp_path, SESSION_ID)
+
+    from local_operator.wakes.store import write_entry
+
+    write_entry(
+        tmp_path,
+        SESSION_ID,
+        cwd=str(tmp_path),
+        schedules=[
+            {
+                "id": "wake-1",
+                "message": "check the deploy",
+                "next_due_at": 4_102_444_800_000,
+                "created_at": 1,
+            }
+        ],
+    )
+
+    viewer = await RemoteSession.cold(
+        SESSION_ID, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+    )
+    try:
+        wakes = viewer.frontend_state.wakes
+        assert [wake.id for wake in wakes] == ["wake-1"]
+        assert wakes[0].message == "check the deploy"
+    finally:
+        await viewer.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_first_prompt_binds_the_viewer_to_a_runtime(tmp_path: Path, monkeypatch) -> None:
+    """The cold-to-attached seam, against a REAL server over a real socket.
+
+    ``engage_runtime`` is stubbed to start an in-process ``RuntimeServer``
+    instead of spawning a python: the seam under test is the viewer's, and a
+    real subprocess would bring a provider and ~1.2 s of construction with it.
+    Everything after the engage — the record scan, the dial, the canonical
+    sync, the history boundary — is production code.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _seed_transcript(tmp_path, "s1")
+
+    handle = FakeHandle()
+    server = RuntimeServer(handle, kind="tui")
+    engagements = 0
+
+    async def fake_engage(session_id, cwd, work, *, config_dir, deadline_s=30.0):  # noqa: ANN001
+        nonlocal engagements
+        engagements += 1
+        server.start()
+        # A real runtime claims the transcript, and ``find_owner_record``
+        # consults that liveness marker before trusting any record. Writing it
+        # is part of standing in for the process, not test scaffolding.
+        marker = config_dir / "sessions" / session_id / ".session.pid"
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(str(os.getpid()), encoding="utf-8")
+        for _ in range(200):
+            rows = registry.scan(config_dir)
+            if rows and rows[0][1] == "live":
+                return None
+            await asyncio.sleep(0.02)
+        raise AssertionError("the fake runtime never published")
+
+    monkeypatch.setattr("local_operator.session.runtime.launch.engage_runtime", fake_engage)
+
+    viewer = await RemoteSession.cold(
+        "s1", config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+    )
+    try:
+        assert viewer.is_cold is True
+
+        await viewer.prompt("start working")
+
+        assert viewer.is_cold is False, "the first prompt must bind the viewer"
+        assert engagements == 1
+        assert handle.calls[-1][0] == "prompt"
+    finally:
+        await viewer.dispose()
+        server.close()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_first_writes_engage_exactly_one_runtime(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A prompt racing the speculative warm engage must not start two runtimes.
+
+    The composer fires a warm engage on the first keystroke and the user can
+    submit before it lands, so this race is the NORMAL case rather than an
+    exotic one. ``_ensure_bound``'s lock is what makes them share one runtime.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _seed_transcript(tmp_path, "s1")
+
+    handle = FakeHandle()
+    server = RuntimeServer(handle, kind="tui")
+    engagements = 0
+
+    async def fake_engage(session_id, cwd, work, *, config_dir, deadline_s=30.0):  # noqa: ANN001
+        nonlocal engagements
+        engagements += 1
+        # A real engage takes time; without that delay the lock is never
+        # actually contended and the test would prove nothing.
+        await asyncio.sleep(0.2)
+        server.start()
+        # A real runtime claims the transcript, and ``find_owner_record``
+        # consults that liveness marker before trusting any record. Writing it
+        # is part of standing in for the process, not test scaffolding.
+        marker = config_dir / "sessions" / session_id / ".session.pid"
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(str(os.getpid()), encoding="utf-8")
+        for _ in range(200):
+            rows = registry.scan(config_dir)
+            if rows and rows[0][1] == "live":
+                return None
+            await asyncio.sleep(0.02)
+        raise AssertionError("the fake runtime never published")
+
+    monkeypatch.setattr("local_operator.session.runtime.launch.engage_runtime", fake_engage)
+
+    viewer = await RemoteSession.cold(
+        "s1", config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+    )
+    try:
+        await asyncio.gather(
+            viewer.prompt("first"),
+            viewer.prompt("second"),
+            viewer.prompt("third"),
+        )
+        assert engagements == 1, "concurrent first writes engaged more than one runtime"
+        prompts = [call for call in handle.calls if call[0] == "prompt"]
+        assert len(prompts) == 3, "every prompt must still reach the one runtime"
+    finally:
+        await viewer.dispose()
+        server.close()
