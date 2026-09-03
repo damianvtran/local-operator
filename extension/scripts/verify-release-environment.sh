@@ -26,9 +26,15 @@ set -euo pipefail
 # deployments, discussions, id-token, issues, packages, pages, pull-requests,
 # security-events, statuses, vulnerability-alerts). Measured, not assumed: a
 # probe job running with `permissions: write-all` still gets 403 on that
-# endpoint, so no scope list can fix it. The repository-scoped variables
-# endpoint is equally unreachable (403, `actions_variables=read`). This is what
-# broke run 33793517588 at the first API call.
+# endpoint, so no scope list can fix it — that job's own granted-permission
+# list contains no `Environments` entry at all. The repository-scoped variables
+# endpoint is equally unreachable (403, `actions_variables=read`).
+#
+# This is what broke run 33793517588, at the THIRD API call. The first two
+# (`environments/{env}` and its `deployment-branch-policies`) return 200 under
+# `actions: read` and are still made below; only the variables call 403s. The
+# ~0.6s step duration is three fast calls, not one — do not read that failure as
+# the environment endpoint being unreachable, because it is not.
 #
 # The two-mode differential proves the same invariant from what the runtime can
 # actually observe, which is also the thing that matters: `vars.X` resolving
@@ -37,6 +43,20 @@ set -euo pipefail
 # repository-scoped variable is visible to every job, so it would be non-empty
 # in the unscoped job and fail mode B. This checks the value the release will
 # really use rather than what a listing endpoint reports about it.
+#
+# Two limits of that design, both known and accepted rather than overlooked:
+#
+#   * The two modes read configuration at different times, so a repository-scoped
+#     variable added AFTER the preflight job passes and before the deploying job
+#     reads `vars.*` is not caught. Exploiting the window requires an actor who
+#     already holds repository-admin write; the WIF attribute condition (pinned
+#     repo ID on refs/heads/main) and the merge-base ancestry check still stand
+#     between them and a store upload. Closing it would need an atomic read the
+#     API does not offer to a workflow token.
+#   * The variable NAMES are listed per workflow, in both the preflight and the
+#     verify step. A name added to one step but not the other is simply not
+#     checked, silently. Keep the two lists in a workflow identical; the tests
+#     assert that they match, so drift fails the suite rather than a release.
 
 MODE=environment
 if [[ ${1:-} == --assert-unscoped-empty ]]; then
@@ -160,8 +180,11 @@ while [[ $# -gt 0 ]]; do
   name=$1
   value=$2
   shift 2
+  # "defined and empty" and "not defined at all" are indistinguishable here:
+  # `vars.X` resolves to the empty string for both. The message says so rather
+  # than asserting a cause it cannot tell apart; either way it fails closed.
   [[ -n "$value" ]] \
-    || fail "$name is not defined on $ENVIRONMENT_NAME (it must be defined at environment scope)"
+    || fail "$name is empty or not defined on $ENVIRONMENT_NAME (it must be defined at environment scope with a non-empty value)"
 done
 
 printf 'validated protected environment %s (main-only, environment-scoped variables)\n' \

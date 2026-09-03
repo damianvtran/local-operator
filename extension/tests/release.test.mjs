@@ -187,12 +187,6 @@ const VALID_ENVIRONMENT = {
   deployment_branch_policy: { protected_branches: false, custom_branch_policies: true },
 };
 const VALID_BRANCHES = { total_count: 1, branch_policies: [{ name: "main", type: "branch" }] };
-const VALID_VARIABLES = {
-  variables: [
-    { name: "CWS_EXTENSION_ID", value: extensionId },
-    { name: "CWS_PUBLISHER_ID", value: "publisher" },
-  ],
-};
 
 // The mock routes on the EXACT path and asserts the Authorization header. The
 // previous catch-all matched any URL and ignored auth entirely, so it answered
@@ -206,6 +200,7 @@ async function runVerifier({
   environment = VALID_ENVIRONMENT,
   branches = VALID_BRANCHES,
   status = {},
+  token = "test-token",
   args = ["CWS_EXTENSION_ID", extensionId, "CWS_PUBLISHER_ID", "publisher"],
 } = {}) {
   const requested = [];
@@ -245,7 +240,7 @@ async function runVerifier({
       cwd: import.meta.dirname + "/..",
       env: {
         ...process.env,
-        GITHUB_TOKEN: "test-token",
+        GITHUB_TOKEN: token,
         GITHUB_REPOSITORY: "owner/repository",
         GITHUB_API_URL: `http://127.0.0.1:${server.address().port}`,
       },
@@ -270,8 +265,23 @@ test("protected environment verifier accepts the exact configuration", async () 
 });
 
 test("protected environment verifier requires a custom deployment branch policy", async () => {
+  // Each case violates exactly ONE side of the `and`, so each condition is
+  // pinned individually. The single fixture that used to stand here set
+  // {protected: true, custom: false} — violating both at once, which either
+  // half rejects on its own, so deleting either condition left the suite green
+  // while the mutant accepted an environment with no branch restriction at all.
   await assert.rejects(
-    runVerifier({ environment: { deployment_branch_policy: { protected_branches: true, custom_branch_policies: false } } }),
+    runVerifier({ environment: { deployment_branch_policy: { protected_branches: true, custom_branch_policies: true } } }),
+    /must use a custom deployment branch policy/,
+  );
+  await assert.rejects(
+    runVerifier({ environment: { deployment_branch_policy: { protected_branches: false, custom_branch_policies: false } } }),
+    /must use a custom deployment branch policy/,
+  );
+  // A null policy is GitHub's representation of "every branch may deploy" —
+  // the most permissive configuration the API can report.
+  await assert.rejects(
+    runVerifier({ environment: { deployment_branch_policy: null } }),
     /must use a custom deployment branch policy/,
   );
 });
@@ -292,6 +302,20 @@ test("protected environment verifier requires exactly the main branch", async ()
     runVerifier({ branches: { total_count: 1, branch_policies: [{ name: "develop", type: "branch" }] } }),
     /must allow exactly the main branch/,
   );
+  // A TAG named `main` is the attack the `type` check exists to stop: tags are
+  // not protected by the branch rules and anyone able to push one could deploy
+  // arbitrary code. Without this case, deleting the `type` check left the suite
+  // green while the mutant accepted it.
+  await assert.rejects(
+    runVerifier({ branches: { total_count: 1, branch_policies: [{ name: "main", type: "tag" }] } }),
+    /must allow exactly the main branch/,
+  );
+  // `main*` is a glob, not the literal branch: it also matches `maintenance`,
+  // `main-hotfix` and anything else a contributor can create.
+  await assert.rejects(
+    runVerifier({ branches: { total_count: 1, branch_policies: [{ name: "main*", type: "branch" }] } }),
+    /must allow exactly the main branch/,
+  );
 });
 
 test("protected environment verifier requires every variable to resolve inside the environment", async () => {
@@ -299,7 +323,7 @@ test("protected environment verifier requires every variable to resolve inside t
   // environment at all, so this is the in-environment half of the scope check.
   await assert.rejects(
     runVerifier({ args: ["CWS_EXTENSION_ID", "", "CWS_PUBLISHER_ID", "publisher"] }),
-    /CWS_EXTENSION_ID is not defined on chrome-web-store/,
+    /CWS_EXTENSION_ID is empty or not defined on chrome-web-store/,
   );
 });
 
@@ -336,14 +360,16 @@ test("protected environment verifier fails closed on a 403 from the branch-polic
 });
 
 test("protected environment verifier fails closed when the token is rejected", async () => {
-  // The harness now checks Authorization, so a wrong token yields a real 401
-  // instead of the catch-all 200 the previous mock returned.
+  // Must reach the mock's auth branch and get a real 401. Pointing this at a
+  // dead port instead would fail on connection-refused and assert nothing about
+  // authentication, while still passing — which is what it used to do.
   await assert.rejects(
-    run("bash", ["scripts/verify-release-environment.sh", "chrome-web-store", "CWS_PUBLISHER_ID", "publisher"], {
-      cwd: import.meta.dirname + "/..",
-      env: { ...process.env, GITHUB_TOKEN: "wrong-token", GITHUB_REPOSITORY: "owner/repository", GITHUB_API_URL: "http://127.0.0.1:1" },
-    }),
-    /release environment validation failed/,
+    runVerifier({ token: "wrong-token" }),
+    (error) => {
+      assert.match(error.stderr, /GitHub returned HTTP 401 for environments\/chrome-web-store/);
+      assert.match(error.stderr, /Bad credentials/);
+      return true;
+    },
   );
 });
 
@@ -368,3 +394,121 @@ test("unscoped mode rejects malformed argument pairs", async () => {
     /expected NAME VALUE pairs/,
   );
 });
+
+// The variable-scope invariant no longer lives in a single API call that a
+// script test can cover; it lives in the SHAPE of the two workflows. If the
+// preflight job disappears, stops blocking the deploying job, gains an
+// `environment:` key (which would make its variables resolve non-empty and the
+// check vacuous), or checks out the dispatcher's ref instead of the reviewed
+// one, the guard is gone while every other test here still passes. That is
+// exactly what happened during review: deleting `needs: preflight`, or the
+// whole preflight job, left the suite at 91/91 green.
+//
+// These parse the real workflow files. A dependency-free reader is used
+// deliberately: the extension package ships no YAML parser, and adding one to
+// devDependencies to assert four properties would be a heavier change to the
+// store package's toolchain than the assertions are worth.
+const STORE_WORKFLOWS = [
+  { file: "chrome-web-store.yml", deployJob: "stage", environment: "chrome-web-store" },
+  { file: "chrome-web-store-promote.yml", deployJob: "promote", environment: "chrome-web-store-production" },
+];
+
+// Reads the `jobs:` mapping into { jobName: { lines, keys } }. Only the
+// structure these tests assert on is modelled; comments and blank lines are
+// dropped so a comment mentioning `environment:` cannot be mistaken for the key.
+function parseJobs(text) {
+  const lines = text.split("\n").filter((line) => line.trim() !== "" && !/^\s*#/.test(line));
+  const start = lines.findIndex((line) => line === "jobs:");
+  assert.notEqual(start, -1, "workflow has no jobs: block");
+  const jobs = {};
+  let current = null;
+  for (const line of lines.slice(start + 1)) {
+    const header = /^ {2}([A-Za-z0-9_-]+):\s*$/.exec(line);
+    if (header) {
+      current = header[1];
+      jobs[current] = { lines: [], keys: {} };
+      continue;
+    }
+    if (!current) continue;
+    jobs[current].lines.push(line);
+    const key = /^ {4}([A-Za-z0-9_-]+):\s*(.*)$/.exec(line);
+    if (key) jobs[current].keys[key[1]] = key[2].trim();
+  }
+  return jobs;
+}
+
+for (const { file, deployJob, environment } of STORE_WORKFLOWS) {
+  test(`${file} keeps the preflight job that proves variables are environment-scoped`, async () => {
+    const text = await readFile(new URL(`../../.github/workflows/${file}`, import.meta.url), "utf8");
+    const jobs = parseJobs(text);
+
+    // The job must exist at all — deleting it was one of the two silent kills.
+    assert.ok(jobs.preflight, `${file} must define a preflight job`);
+
+    // No `environment:` key. With one, `vars.*` would resolve non-empty inside
+    // preflight and --assert-unscoped-empty would fail on a correct config, so
+    // the only way to keep the pipeline green would be to weaken the check.
+    assert.equal(
+      jobs.preflight.keys.environment, undefined,
+      `${file}: preflight must NOT declare an environment, or its variables resolve non-empty and the scope check proves nothing`,
+    );
+
+    // It must actually run the unscoped mode.
+    assert.match(
+      jobs.preflight.lines.join("\n"), /verify-release-environment\.sh --assert-unscoped-empty/,
+      `${file}: preflight must run the verifier in --assert-unscoped-empty mode`,
+    );
+
+    // Preflight checks out the reviewed workflow ref. `ref: ${{ inputs.ref }}`
+    // here would let a dispatch supply the verifier that judges it.
+    assert.ok(
+      !/ref:\s*\$\{\{\s*inputs\.ref/.test(jobs.preflight.lines.join("\n")),
+      `${file}: preflight must check out the reviewed ref, never inputs.ref`,
+    );
+  });
+
+  test(`${file} blocks ${deployJob} on preflight`, async () => {
+    const text = await readFile(new URL(`../../.github/workflows/${file}`, import.meta.url), "utf8");
+    const jobs = parseJobs(text);
+    const deploy = jobs[deployJob];
+    assert.ok(deploy, `${file} must define the ${deployJob} job`);
+
+    // The hard dependency. Without it the two jobs run concurrently and a
+    // failing preflight no longer stops the upload.
+    assert.match(
+      deploy.keys.needs ?? "", /\bpreflight\b/,
+      `${file}: ${deployJob} must declare needs: preflight`,
+    );
+    assert.equal(deploy.keys.environment, environment);
+
+    // `if:` or `continue-on-error:` would let the deploying job proceed past a
+    // failed preflight, which is the same disarm by another route.
+    assert.equal(
+      deploy.keys.if, undefined,
+      `${file}: ${deployJob} must not carry an if: condition that could bypass a failed preflight`,
+    );
+    for (const job of ["preflight", deployJob]) {
+      assert.equal(
+        jobs[job].keys["continue-on-error"], undefined,
+        `${file}: ${job} must not set continue-on-error, which would make the gate advisory`,
+      );
+    }
+  });
+
+  test(`${file} checks the same variables in preflight and in the environment`, async () => {
+    // F4: the names are listed twice per workflow with nothing keeping them in
+    // sync, so a fifth variable added only to the deploying job would never be
+    // scope-checked. Compare the two lists rather than trusting review.
+    const text = await readFile(new URL(`../../.github/workflows/${file}`, import.meta.url), "utf8");
+    const jobs = parseJobs(text);
+    const names = (job) => [...new Set(
+      [...job.lines.join("\n").matchAll(/^\s+(CWS_[A-Z_]+|GCP_[A-Z_]+):\s*\$\{\{\s*vars\./gm)].map((m) => m[1]),
+    )].sort();
+    const preflightNames = names(jobs.preflight);
+    assert.deepEqual(
+      preflightNames, names(jobs[deployJob]),
+      `${file}: preflight and ${deployJob} must check the same variable names`,
+    );
+    assert.ok(preflightNames.length >= 4, "expected at least the four release variables");
+  });
+}

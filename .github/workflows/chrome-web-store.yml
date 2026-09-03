@@ -43,9 +43,16 @@ jobs:
       contents: read
     steps:
       # Deliberately NOT `inputs.ref`: this job runs the verifier itself, so it
-      # must come from the reviewed workflow ref rather than from the ref under
-      # release, which would otherwise let a dispatch supply its own check.
-      # `stage` builds `inputs.ref`, and gates it on its own ancestry check.
+      # takes the dispatch ref (which carries this reviewed YAML) rather than
+      # the ref under release, so a dispatch cannot point the verifier at its
+      # own script while building something else. `stage` builds `inputs.ref`
+      # and gates it on its own ancestry check.
+      #
+      # Precisely: the dispatch ref controls this YAML and the verifier
+      # together, so this is not by itself a defence against a rogue branch —
+      # the environment's main-only deployment branch policy is what refuses
+      # that, verified live (probe run 33794252670 was rejected with
+      # `Branch "dev-store-verify-403" is not allowed to deploy`).
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Require release variables to be environment-scoped only
         env:
