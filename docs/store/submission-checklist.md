@@ -28,10 +28,22 @@ them settled forever.
   pages. Documented in `guide://browser`. This is why a release that introduces
   a new permission needs a human in the dashboard.
 
+- **`main` carries v0.1.6, unsubmitted.** The tab-group naming fix bumped
+  `manifest.json`/`package.json` past the version that is sitting in review, so
+  the tree no longer matches the pending submission. This is expected — the
+  manifest tracks the code, not the review queue — and nothing auto-fires,
+  because `chrome-web-store.yml` is `workflow_dispatch` with an explicit `ref`
+  and `version` behind a protected environment. It adds **no new permission**
+  over v0.1.5, so whenever it is submitted it takes the automated path rather
+  than the manual dashboard one. No release-record entry is owed until it
+  actually ships.
+
 **Pick-up point:** watch for the v0.1.5 review decision, then run the
-post-approval steps in section 11. Sections 0–9 describe *first* publication
-and are retained as the reference for listing copy and asset requirements;
-re-walk them only when the listing, permissions, or privacy policy change.
+post-approval steps in section 11 — noting that `main` has since moved to
+v0.1.6, so a submission after that decision ships 0.1.6, not the tree as it
+stood at 0.1.5. Sections 0–9 describe *first* publication and are retained as
+the reference for listing copy and asset requirements; re-walk them only when
+the listing, permissions, or privacy policy change.
 
 ## 0. Resolve the launch assumptions
 

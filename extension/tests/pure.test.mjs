@@ -522,6 +522,14 @@ test("every wire method has a worker handler", async () => {
   assert.ok(table, "worker.ts must declare the HANDLERS table");
   // Keys are either `name,` (shorthand) or `name: fn,`; comments are ignored
   // because they legitimately mention method names in prose.
+  //
+  // The `\s{2}` anchors on the table's two-space indentation, which is a real
+  // dependency on formatting. It FAILS SAFE: a reformat to four spaces yields
+  // an empty handler set, so the assertion below reports every method as
+  // unhandled rather than silently passing — loud and diagnosable, which is why
+  // the regex is acceptable here instead of a TypeScript parser (review round
+  // 2, N6). If you are here because this test failed after a reformat, widen
+  // the indentation class rather than deleting the check.
   const handlers = new Set(
     table[1]
       .split("\n")

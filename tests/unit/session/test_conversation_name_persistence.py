@@ -530,6 +530,25 @@ async def test_the_tool_context_reads_the_live_title_not_a_stale_snapshot(tmp_pa
     await session.dispose()
 
 
+def _clear_the_thread_event_loop() -> None:
+    """Make "no running loop" a PRECONDITION rather than an inherited accident.
+
+    ``asyncio.ensure_future`` raises without a loop only on Python 3.14 (the
+    runtime the operator actually runs); on 3.12/3.13 it raises just when no
+    loop is *set on the thread*. The unit matrix is 3.12-only, where these
+    guards were therefore armed purely by ``pytest-asyncio`` clearing the loop
+    after some earlier async test — so they caught the regression by FILE ORDER,
+    and running either test in isolation, or reordering it ahead of the async
+    ones, would have silently disarmed it on CI while it still fired on 3.14
+    (QA round 2, Q6).
+
+    Clearing it here makes the condition explicit on every interpreter and
+    ordering. Restoring is unnecessary: pytest-asyncio installs a fresh loop for
+    each async test, and the sync tests here never want one.
+    """
+    asyncio.set_event_loop(None)
+
+
 def test_naming_a_browsing_session_outside_a_loop_does_not_raise(tmp_path) -> None:
     """A rename must never take down its caller for want of an event loop.
 
@@ -546,6 +565,7 @@ def test_naming_a_browsing_session_outside_a_loop_does_not_raise(tmp_path) -> No
     ``RuntimeError: There is no current event loop`` where ``main`` returned the
     title, for any session that had a browser tab open.
     """
+    _clear_the_thread_event_loop()
     session = _session(tmp_path)
     # A session that IS browsing: the guard only matters once a surface exists,
     # because the no-tab path returns before it ever tries to schedule.
@@ -567,6 +587,7 @@ def test_a_loopless_spawn_leaves_no_unawaited_coroutine(tmp_path, recwarn) -> No
     because an un-awaited-coroutine warning surfaces at an unrelated GC point
     and is miserable to trace back.
     """
+    _clear_the_thread_event_loop()
     session = _session(tmp_path)
     session._browser.surface_id = "bridge:5:n0nce"
 
