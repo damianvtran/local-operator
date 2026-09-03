@@ -130,6 +130,51 @@ export async function reconcileCommandTab(params: Record<string, unknown>): Prom
   }
 }
 
+/**
+ * `retitle` — rename this session's group after its title arrives.
+ *
+ * A conversation names itself asynchronously, usually AFTER the opening
+ * command created the group, and a session that only opens, screenshots and
+ * closes issues no later command for `reconcileCommandTab` to ride. The host
+ * therefore pushes the new label explicitly.
+ *
+ * NOT `explicit`: this carries no navigation intent, so it must obey the same
+ * rule every ordinary command does — a tab the user has since moved into a
+ * personal group is left alone rather than being pulled back out by a rename.
+ * Only open/resume may re-home a tab.
+ *
+ * Exact-token lookup is the capability boundary: a session can only rename the
+ * group of a surface whose full handle it holds, and `trustedOwner` still
+ * requires the daemon-supplied `session:` requester, so the label cannot be
+ * pushed onto another session's group.
+ *
+ * Returns the applied label purely as an observability answer for the daemon;
+ * the empty string means "nothing was renamed", never an error, because
+ * grouping is presentation and this command has no failure the caller can act
+ * on.
+ */
+export async function retitle(params: Record<string, unknown>): Promise<Record<string, unknown>> {
+  try {
+    const surface = resolveSurfaceToken(params.tab, await getSurfaces());
+    if (!surface) return { title: "" };
+    await reconcileTabGroup(surface, params, false);
+    // Re-read: reconcileTabGroup persists through its own serialized queue, so
+    // the in-hand object may predate the write it just made.
+    const updated = resolveSurfaceToken(params.tab, await getSurfaces());
+    const applied = updated?.groupAppliedLabel ?? "";
+    // Report the label only when it is the one this call asked for. On the
+    // user-moved-tab path the reconcile returns early WITHOUT clearing
+    // `groupAppliedLabel`, so the stored value is the previous title — echoing
+    // it would report a rename that deliberately did not happen, contradicting
+    // the contract above (QA round 1, Q3). Comparing against the wanted title
+    // keeps "" meaning exactly "nothing was renamed".
+    const wanted = appliedTitle(baseTitle(params), updated?.groupOrdinal ?? 1);
+    return { title: applied === wanted ? applied : "" };
+  } catch {
+    return { title: "" };
+  }
+}
+
 /** Reconcile trusted session metadata with native browser chrome.
  *
  * `explicit` is reserved for open/resume. Ordinary commands update the title

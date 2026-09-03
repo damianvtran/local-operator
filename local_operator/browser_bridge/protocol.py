@@ -56,6 +56,15 @@ METHODS = (
     # Requester-bound cancellation removes only this session's exact-origin
     # pending entry; it cannot dismiss another session's consent prompt.
     "cancel_access",
+    # Push a session title that arrived AFTER the tab was opened, so the tab
+    # group stops wearing the label the session had at open time. A
+    # conversation names itself asynchronously a second or two into its first
+    # turn, which is usually after the opening "look at this page" already
+    # created the group; every other command reconciles the group as a side
+    # effect (worker.ts dispatch), but an open -> screenshot -> close session
+    # issues no later command and so never self-healed. Presentation only: it
+    # drives no tab, reads no page, and returns nothing but the applied label.
+    "retitle",
 )
 
 
@@ -108,6 +117,11 @@ COMMAND_TIMEOUTS = {
     # never needs the awaiting_origin deadline-extension machinery above.
     "await_access": 25.0,
     "cancel_access": 20.0,
+    # retitle touches chrome.tabGroups and nothing else — no navigation, no
+    # settle, no debugger. It rides the ordinary floor rather than a tighter
+    # bound because the group queue it joins is shared and briefly serialises
+    # behind an in-flight open's own reconcile.
+    "retitle": 20.0,
 }
 
 #: Extra budget granted to a command that is BLOCKED on a human origin
