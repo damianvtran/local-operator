@@ -88,7 +88,7 @@ function installChromeStub(actionFailures = new Set(), notificationFailures = ne
     },
     runtime: {
       getURL: (path) => `chrome-extension://test/${path}`,
-      getManifest: () => ({ version: "0.1.6" }),
+      getManifest: () => ({ version: "0.1.7" }),
       onStartup: { addListener: () => {} }, onInstalled: { addListener: () => {} },
       onMessage: { addListener: () => {} }, sendMessage: async () => {},
     },

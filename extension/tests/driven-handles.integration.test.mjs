@@ -64,7 +64,7 @@ function installChrome(surfaces) {
     windows: { get: async () => ({ id: 1 }), getCurrent: async () => ({ id: 1 }) },
     runtime: {
       getURL: (p) => `chrome-extension://test/${p}`,
-      getManifest: () => ({ version: "0.1.6" }),
+      getManifest: () => ({ version: "0.1.7" }),
       onStartup: { addListener: () => {} }, onInstalled: { addListener: () => {} },
       onMessage: { addListener: () => {} }, sendMessage: async () => {},
     },
