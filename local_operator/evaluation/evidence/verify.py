@@ -792,7 +792,37 @@ def _verify_semantics(
             issues.error("receipt_binding_invalid", terminal_location)
         if len(terminal_states) != 1:
             issues.error("finalization_invalid", terminal_location)
-        if environment_step_seen and not last_step_terminal and not finish_action_seen:
+        # An episode that ran environment steps normally must show WHY it
+        # stopped stepping: either the environment ended the rollout
+        # (terminated/truncated) or the agent chose to stop (a `finish` batch).
+        # Without one of those, a bundle truncated mid-rollout would otherwise
+        # seal as if the run had reached its own conclusion.
+        #
+        # A CRASH is the third legitimate way to stop, and it leaves neither
+        # marker precisely because nothing got to decide: the last step
+        # completed, then the harness or environment broke. `failure_kind` on
+        # the terminal snapshot is that missing explanation, and it is not a
+        # weaker one -- it is written only by `record_final_lifecycle` under the
+        # finalizing marker, and it rides inside the hash-chained event payload,
+        # so it cannot be added to an existing bundle without breaking the
+        # chain. Requiring a rollout-completion marker on a crashed episode
+        # demanded evidence the crash definitionally destroys, which made every
+        # crash-terminated bundle unverifiable and therefore unsealable AND
+        # unabandonable -- unscoreable rather than merely unscored.
+        #
+        # `not results` keeps this narrow: a bundle carrying a scoring result
+        # claims a completed rollout, so it must still prove one. This admits a
+        # crash only into the unscored path, where the episode is already
+        # labelled a failure and can never be mistaken for a finished run.
+        crash_terminated = not results and any(
+            state.failure_kind is not None for state in terminal_states
+        )
+        if (
+            environment_step_seen
+            and not last_step_terminal
+            and not finish_action_seen
+            and not crash_terminated
+        ):
             issues.error("finalization_invalid", terminal_location)
         if terminal_output_observation is not None and not terminal_output_resolved:
             issues.error("receipt_binding_invalid", terminal_location)
