@@ -1251,6 +1251,7 @@ class TestLoginFlavourAliases:
             ("xai-oauth", "xai"),
             ("openai-device", "openai"),
             ("alibaba-token-plan-oauth", "alibaba-token-plan"),
+            ("radient-key", "radient"),
             # The flavour the bug was actually reported for.
             ("zai-oauth", "zai"),
         ):

@@ -1102,7 +1102,7 @@ def test_paste_key_providers_declare_that_they_require_a_prompt() -> None:
         "google",
         "mistral",
         "openrouter",
-        "radient",
+        "radient-key",
         "alibaba",
         "alibaba-token-plan",
         "alibaba-token-plan-oauth",
