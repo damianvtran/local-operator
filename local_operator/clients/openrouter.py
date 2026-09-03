@@ -97,8 +97,10 @@ class OpenRouterClient:
         headers = {
             "Authorization": f"Bearer {self.api_key.get_secret_value()}",
             "Content-Type": "application/json",
-            "X-Title": self.app_title,
             "HTTP-Referer": self.http_referer,
+            "X-OpenRouter-Title": self.app_title,
+            "X-Title": self.app_title,
+            "X-OpenRouter-Categories": "cli-agent,personal-agent",
         }
 
         try:

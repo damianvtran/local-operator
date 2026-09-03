@@ -88,6 +88,22 @@ class WireClient(Protocol):
 # ---------------------------------------------------------------------------
 
 
+def openrouter_attribution_headers() -> dict[str, str]:
+    """Attribution headers identifying Local Operator to OpenRouter.
+
+    OpenRouter uses these headers to credit requests to Local Operator in app
+    rankings and public showcase discovery. Both `X-Title` (backward-compatible
+    alias) and `X-OpenRouter-Title` (preferred modern header) are sent along with
+    the canonical referer and marketplace category tags.
+    """
+    return {
+        "HTTP-Referer": "https://local-operator.com",
+        "X-OpenRouter-Title": "Local Operator",
+        "X-Title": "Local Operator",
+        "X-OpenRouter-Categories": "cli-agent,personal-agent",
+    }
+
+
 def _error_payload(response: httpx.Response) -> Any:
     """The parsed error body, or ``None`` when it is not JSON.
 
@@ -2674,10 +2690,7 @@ def client_for_spec(
     )
     extra_headers = None
     if spec.provider == "openrouter":
-        extra_headers = {
-            "HTTP-Referer": "https://local-operator.com",
-            "X-Title": "Local Operator",
-        }
+        extra_headers = openrouter_attribution_headers()
     elif spec.provider == "kimi":
         # The OAuth grant is minted against a device fingerprint; every
         # inference call must present the same X-Msh-* headers or the provider

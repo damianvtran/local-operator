@@ -80,6 +80,18 @@ def test_list_models_success(
     with patch("requests.get", mock_requests_get):
         response = openrouter_client.list_models()
 
+    mock_requests_get.assert_called_once_with(
+        "https://openrouter.ai/api/v1/models",
+        headers={
+            "Authorization": "Bearer test_api_key",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://local-operator.com",
+            "X-OpenRouter-Title": "Local Operator",
+            "X-Title": "Local Operator",
+            "X-OpenRouter-Categories": "cli-agent,personal-agent",
+        },
+    )
+
     assert isinstance(response, OpenRouterListModelsResponse)
     assert len(response.data) == len(mock_model_data)
     for i, model in enumerate(response.data):

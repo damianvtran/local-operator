@@ -3836,6 +3836,23 @@ def test_client_for_spec_passes_anthropic_ttl_threshold() -> None:
     assert client._cache_ttl_1h_min_context_tokens == 123_456
 
 
+def test_client_for_spec_openrouter_attribution_headers() -> None:
+    """OpenRouter specs attach app attribution headers for rankings and discovery."""
+    from local_operator.providers.clients import openrouter_attribution_headers
+
+    expected = {
+        "HTTP-Referer": "https://local-operator.com",
+        "X-OpenRouter-Title": "Local Operator",
+        "X-Title": "Local Operator",
+        "X-OpenRouter-Categories": "cli-agent,personal-agent",
+    }
+    assert openrouter_attribution_headers() == expected
+
+    client = client_for_spec(_spec(provider="openrouter", model_id="anthropic/claude-3.5-sonnet"))
+    assert isinstance(client, OpenAICompatClient)
+    assert client._extra_headers == expected
+
+
 async def test_anthropic_usage_parses_cache_creation_ttl_split() -> None:
     """``usage.cache_creation`` splits the write count by TTL; both slices land
     on the Usage event and the sum still equals ``cache_write_tokens``."""
