@@ -315,9 +315,23 @@ class Transcript:
     compaction can reference ``first_kept_entry_id`` without a second mapping.
     """
 
-    def __init__(self, directory: str | Path) -> None:
+    def __init__(self, directory: str | Path, *, defer_materialise: bool = False) -> None:
         self.directory = Path(directory)
-        self.directory.mkdir(parents=True, exist_ok=True)
+        # ``defer_materialise`` is what makes a speculative runtime leave
+        # nothing behind: a viewer's first keystroke warms a runtime BEFORE
+        # the user has committed to a message, and an abandoned draft must not
+        # cost a directory on disk. Deferring is safe because the append path
+        # already recreates a vanished directory (see ``rebuild`` in
+        # ``_append``) — it has to, since another process's sweep can remove a
+        # still-empty session directory underneath a live session. So the
+        # eager mkdir here was never the thing that made writes work; it only
+        # made the directory exist earlier than any write needed it.
+        #
+        # The flag is NOT sticky: the first real append materialises the
+        # directory through that same self-healing path, after which this
+        # object behaves identically to an eagerly-materialised one.
+        if not defer_materialise:
+            self.directory.mkdir(parents=True, exist_ok=True)
         self.path = self.directory / TRANSCRIPT_FILENAME
         self._lock = asyncio.Lock()
         self._entries: list[TranscriptEntry] = []

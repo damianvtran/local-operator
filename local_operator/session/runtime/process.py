@@ -39,7 +39,7 @@ import os
 import signal
 import sys
 import time
-from typing import Awaitable, Callable, cast
+from typing import Any, Awaitable, Callable, cast
 
 logger = logging.getLogger(__name__)
 
@@ -329,7 +329,73 @@ async def amain() -> int:
         except Exception:  # noqa: BLE001
             logger.warning("child session dispose failed", exc_info=True)
     await runtime.aclose()
+
+    # THE DEFERRAL COMPLETES HERE. `LOP_RUNTIME_DEFER_MATERIALISE` keeps the
+    # transcript and the roster sidecar from creating the session directory
+    # (see `Transcript.__init__` and `_write_roster_sidecar_if_changed`), but
+    # the LEASE cannot be deferred the same way: it is the thing that
+    # arbitrates "at most one runtime per session, ever", it must exist
+    # before construction, and it lives inside the session directory.
+    #
+    # So a speculatively warmed runtime that was never given real work still
+    # holds an otherwise-empty directory while it lives, and removes it on the
+    # way out. Round 1 (R2/Q1) found the flag was written and read nowhere, so
+    # a viewer's first keystroke left `sessions/<id>/` behind for every draft
+    # the user abandoned.
+    #
+    # Deliberately narrow, because deleting a session directory is the highest
+    # -consequence operation in this file: only under the defer flag, only
+    # when no transcript was ever written, and `rmdir` (never `rmtree`) so a
+    # directory holding anything unexpected is left alone by the OS itself.
+    if os.environ.get("LOP_RUNTIME_DEFER_MATERIALISE") == "1":
+        _remove_unwritten_session_dir(handle)
     return 0
+
+
+def _remove_unwritten_session_dir(handle: Any) -> None:
+    """Drop the directory a speculative runtime created but never wrote to.
+
+    Fail-quiet by design: this runs on the exit path, and a session that
+    cannot tidy up must still exit 0. The lease files are the runtime's own
+    bookkeeping and are removed first so the `rmdir` sees a genuinely empty
+    directory — anything else present (a transcript, a spooled message, a
+    sidecar) makes `rmdir` fail with ENOTEMPTY, which is exactly the answer
+    we want.
+    """
+    from pathlib import Path
+
+    from local_operator.session_lease import LEASE_NAME, MIRROR_NAME
+
+    try:
+        session = getattr(handle, "_session", None)
+        transcript = getattr(session, "_transcript", None)
+        directory = getattr(transcript, "directory", None)
+        if directory is None:
+            return
+        directory = Path(directory)
+        # A transcript on disk means real work happened; never touch it.
+        if (directory / "transcript.jsonl").exists():
+            return
+        if directory.parent.name != "sessions":
+            return
+        for bookkeeping in tuple(directory.iterdir()):
+            # Only the runtime's own liveness bookkeeping is removable. The
+            # names are matched rather than globbed so an unfamiliar file
+            # keeps the directory alive.
+            # MIRROR_NAME and the retention module's LIVE_MARKER_NAME are the
+            # same file (".session.pid"); named via the lease module because
+            # that is what wrote it.
+            if bookkeeping.name in (LEASE_NAME, MIRROR_NAME):
+                try:
+                    bookkeeping.unlink()
+                except OSError:
+                    return
+        directory.rmdir()
+        logger.info("removed unwritten speculative session directory %s", directory.name)
+    except OSError:
+        # ENOTEMPTY (something real is in there) or a vanished directory.
+        # Both mean "leave it", and neither is worth a non-zero exit.
+        logger.debug("speculative session cleanup skipped", exc_info=True)
 
 
 def main() -> int:

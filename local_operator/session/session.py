@@ -1327,6 +1327,19 @@ def _write_roster_sidecar_if_changed(
     )
     if fingerprint == previous_fingerprint:
         return fingerprint, False
+    # An EMPTY roster that has never been written carries no information a
+    # resume could use (``_read_roster_sidecar`` treats a missing sidecar and
+    # an empty one identically), and writing it would `mkdir` the session
+    # directory. That is how a speculatively warmed runtime materialised a
+    # directory for a draft the user abandoned despite the deferral flag
+    # (round 1, Q1): the transcript correctly held off and the roster sidecar
+    # created the directory anyway.
+    #
+    # Gated on ``previous_fingerprint is None`` \u2014 never written \u2014 rather than
+    # on emptiness alone, because a roster that goes from populated back to
+    # empty MUST persist that transition to clear the stale sidecar.
+    if previous_fingerprint is None and not payload.get("jobs") and not payload.get("records"):
+        return fingerprint, False
     _write_roster_sidecar(path, payload)
     return fingerprint, True
 
