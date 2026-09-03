@@ -33,7 +33,10 @@ from typing import Any, Callable, Protocol, runtime_checkable
 
 import httpx
 
-from local_operator.providers.clients import raise_for_status
+from local_operator.providers.clients import (
+    openrouter_attribution_headers,
+    raise_for_status,
+)
 from local_operator.providers.failover import (
     ProviderError,
     backoff_delay_ms,
@@ -311,10 +314,15 @@ class ApiEmbedder:
         """
         for attempt in range(1, EMBED_MAX_ATTEMPTS + 1):
             last = attempt >= EMBED_MAX_ATTEMPTS
+            headers: dict[str, str] = {"Authorization": f"Bearer {self.api_key}"}
+            # When proxying embedding calls through OpenRouter, provide app
+            # attribution headers so requests are properly identified and ranked.
+            if "openrouter.ai" in self.base_url:
+                headers.update(openrouter_attribution_headers())
             try:
                 response = await self._client.post(
                     f"{self.base_url}/embeddings",
-                    headers={"Authorization": f"Bearer {self.api_key}"},
+                    headers=headers,
                     json={"model": self.model, "input": texts},
                     timeout=60.0,
                 )
