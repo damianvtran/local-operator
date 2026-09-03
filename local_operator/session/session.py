@@ -1378,7 +1378,7 @@ class Session:
         #: subagent (``zoom-scroll-fix``, ``bridge-qa``). A child never
         #: generates a conversation title — naming runs in the TUI host and the
         #: owned-session runtime, neither of which a one-shot child passes
-        #: through — so this plus ``parent_conversation_name`` below is the
+        #: through — so this plus ``parent_display_name`` below is the
         #: whole of its display identity. Reaches tools via
         #: ``_build_tool_context``; display-only, never an authorization input.
         job_label: str = "",
