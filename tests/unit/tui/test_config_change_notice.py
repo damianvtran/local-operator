@@ -12,6 +12,8 @@ tests are bound by loop turns, never by the 2 s cadence.
 
 from __future__ import annotations
 
+from unittest import mock
+
 import pytest
 
 from local_operator import settings_io
@@ -512,3 +514,111 @@ async def test_multi_key_clauses_agree_in_number(monkeypatch, tmp_path) -> None:
     # And the singular forms must survive the change.
     assert " needs a relaunch" not in notice
     assert " is retired and does nothing" not in notice
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shape", sorted(_MALFORMED_CONFIGS))
+async def test_a_display_repaint_after_a_fan_out_never_destroys_the_config(
+    monkeypatch, tmp_path, shape: str
+) -> None:
+    """The paint path must not move the user's `config.yml` aside.
+
+    Review round 4, B3 — the same defect class as B1, reached without any user
+    action. `tui/settings.py` caches the display flags and this PR added the
+    first invalidator that fires on ANOTHER process's write: before it, the
+    cache was dropped only by a write this process had just made, so the file
+    was well-formed by construction.
+
+    The story needs no `/new`: a display flag changes in another pane (LIVE and
+    encouraged), the cache drops, the user's next edit is mis-indented — the
+    state the watcher deliberately holds in silence — and the next shimmer or
+    glyph read repaints. `settings_get` is called from five paint paths rather
+    than every frame, so the window between the invalidation and the
+    repopulating read is unbounded in wall time.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    from local_operator.tui.settings import settings_get, settings_reload
+
+    ConfigManager(tmp_path).set_config_value("hosting", "")
+    watcher = process_watcher(tmp_path)
+    watcher.poll_now()
+
+    # Another pane flips a display flag; the listener drops this cache.
+    _write_elsewhere(tmp_path, "display.shimmer", False)
+    watcher.poll_now()
+    settings_reload()
+    assert settings_get("display.shimmer") is False
+    settings_reload()  # empty again, as it is between paints
+
+    # The user's NEXT edit is malformed. The watcher holds it silently.
+    body = _MALFORMED_CONFIGS[shape]
+    (tmp_path / "config.yml").write_text(body)
+    assert watcher.poll_now() is None, f"{shape}: the watcher adopted a malformed file"
+
+    settings_get("display.shimmer")  # the repaint
+
+    assert (
+        tmp_path / "config.yml"
+    ).read_text() == body, f"{shape}: a repaint rewrote the user's config"
+    assert not list(tmp_path.glob("*.bad*")), f"{shape}: a repaint moved config.yml aside"
+
+
+@pytest.mark.asyncio
+async def test_no_config_watch_listener_path_constructs_a_config_manager(
+    monkeypatch, tmp_path
+) -> None:
+    """The INVARIANT behind B1 and B3, rather than a third point fix.
+
+    Every blocker in this change's history has been one defect: a caller
+    reachable from a config-watch fan-out constructs a `ConfigManager`, whose
+    `_load_config` MOVES a malformed `config.yml` aside and continues from
+    defaults. Point-fixing each site leaves the generator intact — the class
+    returns the next time someone adds a consumer to the fan-out, and the
+    failure is silent, destructive, and found by a user rather than a test.
+
+    So this asserts the property directly, against the REAL listener
+    (`OperatorApp._on_config_change`) and the real repaint that follows it,
+    rather than a stand-in registered by the test — a stand-in would only ever
+    prove things about itself, and the whole point is to catch a consumer
+    nobody has written yet.
+
+    Deliberately allows the FALLBACK in `tui/settings._load`: that branch runs
+    only when no watcher exists, which is exactly when there is no
+    cross-process invalidation to race with, and removing it would break every
+    CLI process that never starts a watcher.
+    """
+    import local_operator.config as config_mod
+    from local_operator.tui import settings as tui_settings
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    real_manager = config_mod.ConfigManager
+    real_manager(tmp_path).set_config_value("hosting", "")
+
+    constructed: list[str] = []
+
+    class TattlingConfigManager(real_manager):  # type: ignore[misc, valid-type]
+        def __init__(self, *args, **kwargs):
+            constructed.append("ConfigManager")
+            super().__init__(*args, **kwargs)
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await _adopted(app, pilot)
+        # A display key, because that is the branch with a cache to drop; the
+        # assertion covers whatever else the listener does on the same change.
+        _write_elsewhere(tmp_path, "display.shimmer", False)
+        constructed.clear()
+
+        with mock.patch.object(config_mod, "ConfigManager", TattlingConfigManager):
+            change = process_watcher(tmp_path).poll_now()
+            assert change is not None, "the fan-out did not fire; this proved nothing"
+            await pilot.pause()
+            # The repaint that follows the invalidation.
+            tui_settings.settings_get("display.shimmer")
+
+    assert not constructed, (
+        "a config-watch listener path constructed a ConfigManager. Its _load_config "
+        "moves a malformed config.yml aside and continues from defaults, so this is "
+        "the B1/B3 defect class reopening. Read the watcher's validated snapshot "
+        "(existing_watcher().values) instead."
+    )

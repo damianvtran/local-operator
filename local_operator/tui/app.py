@@ -5454,11 +5454,21 @@ class OperatorApp(App[None]):
         # watcher is protecting it.
         #
         # The watcher answers the question because it already encodes the rule
-        # set; the `try` covers what remains (a version migration writing to a
-        # read-only dir, a race between the check and the read). Both paths
-        # still build the session — on the last good values, which is what the
-        # watcher has been serving all along — rather than leaving the user
-        # with no new session and an unexplained traceback.
+        # set; the `try` covers the RAISING failures that remain (a version
+        # migration writing to a read-only dir, a `metadata:` block hand-written
+        # without `created_at`). Both paths still build the session — on the
+        # last good values, which is what the watcher has been serving all
+        # along — rather than leaving the user with no new session and an
+        # unexplained traceback.
+        #
+        # The guard NARROWS the destructive window, it does not close it
+        # (review round 4): between the check and `_load_config`'s own read,
+        # another process can land a malformed atomic replace, and the `try`
+        # cannot catch that because the move-aside "succeeds". That window is
+        # ~2ms of `reload()` against `main`'s unconditional exposure, so this
+        # is strictly a shrink; closing it entirely needs a non-destructive
+        # reload on `ConfigManager`, which is a change to that class rather
+        # than to this call site.
         self._reload_config_for_new_session(notice)
         notice("starting a new session…")
         self._run_session_transition(self._reload_session())
