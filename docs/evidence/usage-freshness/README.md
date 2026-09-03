@@ -10,7 +10,7 @@ differ only by the code under test.
 | `before-stuck-account.svg` | The same frame scrolled to the bottom: `kimi cred:8 · last known 2h ago` — the one account the header was reporting |
 | `after.svg` | This branch, same state: the title reads `Usage  1m ago` |
 | `after-stuck-account.svg` | The same, scrolled: the header is fresh, carries `· 1 stale`, and the stuck block says `last known 2h ago` in amber with a dimmed status dot |
-| `before-short-pane.svg` / `after-short-pane.svg` | The 100x18 frame from design finding D1. On `main` nothing marks the stale block. Here the note survives compaction beside the meter it qualifies — round 1 dropped it at this height and leaned on the title, which is what round 2's Q5 showed was not enough — and the pinned `· 1 stale` backs it up |
+| `before-short-pane.svg` / `after-short-pane.svg` | The 100x18 frame from design finding D1. On `main` nothing marks the stale block. Here compaction is tight enough that the block keeps only its heading and the note — no meter row survives, so the quota is carried by the heading's own `7 day 64%` headline — and round 1 dropped even that note at this height, which is what round 2's Q5 showed the title alone could not cover. The pinned `· 1 stale` backs it up |
 | `after-scoped-narrow.svg` | `/usage anthropic` at 40x18 — the D6/Q5 frame. The title drops the target (which the user just typed, and every block header repeats) so `· 1 stale` cannot be truncated away |
 | `*.png` | The same frames rendered, so they are viewable inline |
 | `usage_shot.py` | Reproduces every frame (run from the worktree root) |
