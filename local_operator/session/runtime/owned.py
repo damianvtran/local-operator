@@ -30,6 +30,9 @@ from collections import deque
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, cast
 
+from local_operator.harness.approval import (
+    GATE_TIMEOUT_CUSTOM_TYPE as _GATE_TIMEOUT_CUSTOM_TYPE,
+)
 from local_operator.harness.jobs import TRAJECTORY_SEQ_KEY
 from local_operator.harness.types import AgentEvent, ModelChangeEvent
 
@@ -75,10 +78,11 @@ PENDING_REQUEST_TIMEOUT_S = 30.0
 #: terminal. `0` in the setting means never time out.
 DEFAULT_UNATTENDED_GATE_TIMEOUT_H = 24
 
-#: Transcript row appended when the cap expires. The model and the next viewer
-#: must be able to tell "the user said no" from "nobody was there" — they are
-#: different facts and only one of them is a decision.
-GATE_TIMEOUT_CUSTOM_TYPE = "gate_timed_out_unattended"
+#: Re-exported from the harness, which is the one definition all three layers
+#: (this writer, the session's model render, the TUI's user render) share.
+#: Kept as a module-level name here because it is part of this module's
+#: published surface — the tests and the mobile bridge import it from here.
+GATE_TIMEOUT_CUSTOM_TYPE = _GATE_TIMEOUT_CUSTOM_TYPE
 # Socket admission is intentionally bounded: many front ends may produce input,
 # but an abandoned automation loop must not grow one owner's memory forever.
 MAX_QUEUED_PROMPTS = 32
@@ -993,17 +997,28 @@ class OwnedSessionHandle(SessionHandle):
         this" and adjusts its plan around a choice nobody made.
         """
         transcript = getattr(self._session, "transcript", None)
-        append = getattr(transcript, "append_custom", None)
+        append = getattr(transcript, "append_message", None)
         if not callable(append):
             return
         try:
+            # A MESSAGE entry carrying a CustomMessage, not `append_custom`.
+            # `build_llm_history` ignores custom ENTRIES by design, so the row
+            # this method's own docstring promises would reach the model
+            # reached nobody — not the model, and not the viewer that replays
+            # the same history (round 1, D2/U2). A wake receipt has always
+            # taken this shape for exactly that reason.
+            from local_operator.harness.types import CustomMessage
+
             result = append(
-                GATE_TIMEOUT_CUSTOM_TYPE,
-                {
-                    "tool": tool,
-                    "description": description,
-                    "waited_s": self._gate_timeout_s() or 0.0,
-                },
+                CustomMessage(
+                    custom_type=GATE_TIMEOUT_CUSTOM_TYPE,
+                    attribution="system",
+                    details={
+                        "tool": tool,
+                        "description": description,
+                        "waited_s": self._gate_timeout_s() or 0.0,
+                    },
+                )
             )
             if inspect.isawaitable(result):
                 await result
@@ -1093,8 +1108,36 @@ class OwnedSessionHandle(SessionHandle):
     # -- internals ----------------------------------------------------------------
 
     def _notify(self) -> None:
+        self._publish_busy()
         if self._on_projection is not None:
             self._on_projection()
+
+    def _publish_busy(self) -> None:
+        """Keep the record's ``busy`` bit in step with the session.
+
+        `RuntimeServer.set_busy` existed with NO CALLER (round 1, U2), so the
+        picker's running marker was inert: a runtime grinding through a long
+        turn with no terminal open — the exact thing this release exists to
+        make possible — was indistinguishable from an idle one.
+
+        Driven from `_notify` rather than from a new observer because this
+        already runs on every session event, on the session's own loop, and it
+        is where the projection's own liveness is refreshed. `set_busy`
+        de-duplicates, so the republish costs one comparison per event and a
+        staged write only on an actual transition.
+
+        `is_busy()` is the authority rather than a second flag: it is the same
+        predicate the reaper uses to decide whether this runtime may exit, so
+        the marker and the residency decision can never disagree.
+        """
+        server = self._registrant
+        setter = getattr(server, "set_busy", None)
+        if not callable(setter):
+            return
+        try:
+            setter(self.is_busy())
+        except Exception:  # noqa: BLE001 — a stale marker is not worth a turn
+            logger.debug("could not publish the busy state", exc_info=True)
 
     def _check_loop_thread(self) -> None:
         """The registrant calls handle methods on its own loop; owned sessions

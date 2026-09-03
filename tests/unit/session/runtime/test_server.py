@@ -1097,3 +1097,54 @@ def test_fold_property_rejects_a_foreign_sink() -> None:
     assert runtime.projection_sinks_built == 0
     with pytest.raises(TypeError):
         _ = runtime.fold
+
+
+class TestLiveStateReachesTheRecord:
+    """`busy` and `detached` must track reality, not sit at their defaults.
+
+    Round 1 (U2) measured a SINGLE tuple `(False, False, None)` across a whole
+    turn and across a client attaching and leaving: `set_busy` had no caller
+    anywhere in the tree, and `detached` was computed only inside a pending
+    transition. The picker's liveness markers were therefore decorative — a
+    runtime grinding through a long turn with no terminal open, the exact thing
+    this release makes possible, looked identical to an idle one.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_new_runtime_reports_itself_detached(self) -> None:
+        """The default direction matters: no terminal has ever attached yet."""
+        server = RuntimeServer(FakeHandle(), kind="daemon")
+        assert server._record.detached is True
+
+    @pytest.mark.asyncio
+    async def test_busy_transitions_republish_the_record(self) -> None:
+        """A transition must reach the RECORD, and only a transition may.
+
+        Asserted on republish calls rather than on `_record.busy` because an
+        unstarted server has no publisher — the record is rewritten through
+        `RecordPublisher.heartbeat`, deliberately the one write path.
+        """
+        server = RuntimeServer(FakeHandle(), kind="daemon")
+        publishes: list[bool] = []
+        server._republish = lambda: publishes.append(server._busy)  # type: ignore[method-assign]
+
+        server.set_busy(True)
+        server.set_busy(True)  # unchanged: must not republish
+        server.set_busy(False)
+
+        assert publishes == [True, False]
+
+    @pytest.mark.asyncio
+    async def test_detached_is_deduplicated_on_the_boolean(self) -> None:
+        """A second terminal changes nothing a reader can see.
+
+        Asserted because the alternative — republishing per connection — puts a
+        staged write on every churn of a session with two viewers.
+        """
+        server = RuntimeServer(FakeHandle(), kind="daemon")
+        publishes: list[object] = []
+        server._republish = lambda: publishes.append(1)  # type: ignore[method-assign]
+        server._detached = False
+        server._republish_detached()  # still 0 clients -> True: one publish
+        server._republish_detached()  # unchanged: no publish
+        assert len(publishes) == 1

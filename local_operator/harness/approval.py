@@ -51,6 +51,19 @@ import inspect
 from collections.abc import Awaitable, Callable
 from typing import Literal, Union, cast
 
+#: Transcript row written when an approval gate expires with nobody attached.
+#:
+#: Lives here, beside the gate concept itself, because three layers need to
+#: agree on it and none of them may import the others: the runtime WRITES it
+#: (``session/runtime/owned.py``), the session RENDERS it for the model
+#: (``session/session.py``), and the TUI renders it for the user. A copy in
+#: any one of them would be a fourth place for the string to drift.
+#:
+#: The distinction it preserves is that an expiry is not a decision: without
+#: the row, the next turn reads a plain denial and re-plans around a choice
+#: nobody made.
+GATE_TIMEOUT_CUSTOM_TYPE = "gate_timed_out_unattended"
+
 #: The two accepted host gate shapes. Declared as a union rather than a
 #: Protocol with an optional parameter because Python cannot express "callable
 #: of two OR three arguments" in one signature, and a Protocol declaring the

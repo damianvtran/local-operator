@@ -75,6 +75,7 @@ from textual.widget import Widget
 from textual.widgets import Static
 
 from local_operator.ansi import strip_control_sequences
+from local_operator.harness.approval import GATE_TIMEOUT_CUSTOM_TYPE
 from local_operator.harness.intent import (
     ACTIVITY_RESPONDING,
     batch_activity,
@@ -963,6 +964,27 @@ def _typed_line_of(text: str) -> str | None:
         return typed_line_of(text)
     except Exception:  # noqa: BLE001 — replay must never fail on this
         return None
+
+
+def _gate_timeout_notice(details: dict[str, Any]) -> str:
+    """Say what expired, what it wanted, and that nobody chose it.
+
+    The distinction this line has to carry is denial-by-expiry versus
+    denial-by-decision: the user did not say no, they were not there. Naming
+    the tool matters for the same reason the picker's parked row wants it —
+    "a tool was denied" and "`bash rm -rf build/` was denied" are different
+    amounts of help when you are reconstructing what happened overnight.
+    """
+    tool = str(details.get("tool") or "a tool").strip()
+    description = str(details.get("description") or "").strip()
+    waited = details.get("waited_s") or 0.0
+    try:
+        hours = max(1, int(float(waited) // 3600))
+        waited_text = f"{hours}h" if hours < 24 else f"{hours // 24}d"
+    except (TypeError, ValueError):
+        waited_text = "a while"
+    subject = f"{tool} · {description}" if description else tool
+    return f"waited {waited_text} for approval with nobody attached, " f"then denied it — {subject}"
 
 
 #: The prompt each loop iteration submits. Deliberately references the
@@ -4018,6 +4040,23 @@ class OperatorApp(App[None]):
                             )
                         )
                         appended = True
+                    continue
+                # A gate that timed out unattended is the most expensive event
+                # in the detached feature — up to a day of held residency ends
+                # here — and it rendered NOWHERE (round 1, D2/U2): the user
+                # returned to a conversation that promised an action and
+                # appeared to simply stop. The payload already carried the
+                # tool, the description and the wait; only a renderer was
+                # missing.
+                #
+                # `warning` ink because it is a state the user must know about,
+                # not a receipt they can skip: a tool was denied, and denied by
+                # expiry rather than by their decision — which is the same
+                # distinction the transcript row itself exists to preserve.
+                if getattr(message, "custom_type", None) == GATE_TIMEOUT_CUSTOM_TYPE:
+                    details = getattr(message, "details", None) or {}
+                    self._append_block(NoticeBlock(_gate_timeout_notice(details), kind="warning"))
+                    appended = True
                     continue
                 role = getattr(message, "role", None)
                 if role == "tool":

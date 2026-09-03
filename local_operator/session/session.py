@@ -62,7 +62,7 @@ from local_operator.compaction.marker import (
     replayed_user_message,
 )
 from local_operator.compaction.tokens import IMAGE_TOKEN_ESTIMATE, approx_text_tokens
-from local_operator.harness.approval import ApprovalGate
+from local_operator.harness.approval import GATE_TIMEOUT_CUSTOM_TYPE, ApprovalGate
 from local_operator.harness.comms import HUB_MESSAGE_TYPE, SubagentComms
 from local_operator.harness.jobs import (
     JOB_RESULT_MESSAGE_TYPE,
@@ -515,6 +515,13 @@ def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
     ``todo_reminder`` (only the newest) becomes one too; other custom entries
     are dropped (bookkeeping never enters LLM context). ``provider_payload``
     rides along untouched.
+
+    ``gate_timed_out_unattended`` is rendered from its STRUCTURED payload
+    rather than a ``text`` field, because the same fact is phrased differently
+    for the three audiences that need it (the model here, the transcript
+    notice, the picker's parked row). It must never be dropped: an expiry that
+    reads as a plain denial makes the next turn re-plan around a decision
+    nobody made.
     """
     out: list[Message] = []
     # Only the NEWEST todo reminder survives the render. An earlier one asserts
@@ -558,6 +565,33 @@ def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
                 Message(
                     role="user",
                     content=[TextContent(text=message.details.get("text", ""))],
+                    id=message.id,
+                )
+            )
+        elif message.custom_type == GATE_TIMEOUT_CUSTOM_TYPE:
+            # An unattended gate that expired is NOT a user decision, and the
+            # difference is the whole reason the row exists: without it the
+            # next turn reads a plain denial and re-plans around a choice
+            # nobody made. Rendered here rather than carrying a `text` field
+            # like the branches below because the payload is structured (tool,
+            # description, waited_s) — the picker and the transcript notice
+            # each phrase it for their own audience, and this is the model's.
+            details = message.details or {}
+            tool = str(details.get("tool") or "a tool")
+            description = str(details.get("description") or "").strip()
+            subject = f"{tool} ({description})" if description else tool
+            out.append(
+                Message(
+                    role="user",
+                    content=[
+                        TextContent(
+                            text=(
+                                f"[system] The approval request for {subject} expired with "
+                                "nobody attached to this session and was denied automatically. "
+                                "This was a timeout, not a decision by the user."
+                            )
+                        )
+                    ],
                     id=message.id,
                 )
             )

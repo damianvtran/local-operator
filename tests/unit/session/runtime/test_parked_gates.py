@@ -219,16 +219,53 @@ async def test_a_timed_out_gate_says_nobody_was_there(tmp_path: Path, monkeypatc
     Without this row the next turn reads "the user denied this" and plans
     around a choice nobody made.
     """
-    appended: list[tuple[str, dict[str, Any]]] = []
+    appended: list[Any] = []
 
     class _Transcript:
-        async def append_custom(self, custom_type, details):  # noqa: ANN001
-            appended.append((custom_type, details))
+        async def append_message(self, message):  # noqa: ANN001
+            appended.append(message)
 
     handle = _handle(monkeypatch, attached=0, hours=0)
     handle._session = type("S", (), {"transcript": _Transcript()})()
 
     await handle._record_gate_timeout("bash", "rm -rf build/")
 
-    assert appended and appended[0][0] == GATE_TIMEOUT_CUSTOM_TYPE
-    assert appended[0][1]["tool"] == "bash"
+    # A MESSAGE entry, not `append_custom`. Round 1 (D2/U2) found the row was
+    # written where NOTHING could read it: `build_llm_history` ignores custom
+    # ENTRIES by design, so neither the model nor the viewer that replays the
+    # same history ever saw it. Asserting the entry SHAPE — not just the
+    # payload — is what keeps that from silently regressing.
+    assert appended, "the expiry was not recorded at all"
+    row = appended[0]
+    assert row.custom_type == GATE_TIMEOUT_CUSTOM_TYPE
+    assert row.details["tool"] == "bash"
+    assert row.details["description"] == "rm -rf build/"
+
+
+def test_a_timed_out_gate_reaches_the_model_on_replay() -> None:
+    """The row is only worth writing if replay surfaces it.
+
+    Round 1 (D2/U2): the row was written, and `render_history`'s allow-list —
+    whose own comment warns that "unlisted custom types are dropped" — did not
+    list it. So the model resumed reading a plain denial and re-planned around
+    a choice nobody made, which is the exact confusion the row exists to
+    prevent. Asserts the rendered TEXT distinguishes expiry from decision.
+    """
+    from local_operator.harness.approval import GATE_TIMEOUT_CUSTOM_TYPE
+    from local_operator.harness.types import CustomMessage
+    from local_operator.session.session import _default_convert_to_llm
+
+    rendered = _default_convert_to_llm(
+        [
+            CustomMessage(
+                custom_type=GATE_TIMEOUT_CUSTOM_TYPE,
+                attribution="system",
+                details={"tool": "bash", "description": "rm -rf build/", "waited_s": 86400.0},
+            )
+        ]
+    )
+
+    assert len(rendered) == 1, "the expiry row was dropped by the allow-list"
+    text = rendered[0].content[0].text
+    assert "expired" in text and "not a decision" in text
+    assert "bash" in text

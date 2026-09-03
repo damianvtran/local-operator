@@ -281,6 +281,10 @@ class RuntimeServer:
         #: fields have a defined value before the record exists.
         self._pending: str | None = None
         self._busy = False
+        #: True until a terminal attaches. A freshly spawned runtime genuinely
+        #: has no viewer, so this starts True rather than False — the old
+        #: default had every new runtime claiming a terminal it had never had.
+        self._detached = True
         self._handle = handle
         # Back-reference so the handle can publish record state it alone knows
         # about — today the parked-gate ``pending`` bit, which originates deep
@@ -320,6 +324,11 @@ class RuntimeServer:
             control_port=0,  # stamped when the listener binds
             control_key=secrets.token_hex(32),
             capabilities=([FRONTEND_CAPABILITY] if hasattr(handle, "subscribe_frontend") else []),
+            # A runtime is born with no terminal watching it. Stamped at
+            # construction rather than left to the first transition, because
+            # the window before a viewer attaches is exactly when a detached
+            # runtime is most interesting to look at.
+            detached=True,
         )
         self._publisher: RecordPublisher | None = None
         self._server: asyncio.AbstractServer | None = None
@@ -733,6 +742,12 @@ class RuntimeServer:
             wants_frontend=wants_frontend,
         )
         self._clients[id(writer)] = conn
+        # A terminal arriving flips ``detached`` (round 1, U2: it was computed
+        # only inside a pending transition, so every session claimed a viewer
+        # it might never have had). Cheap and de-duplicated — see
+        # ``_republish_detached``.
+        if kind == "attach":
+            self._republish_detached()
         if kind == "daemon":
             # The daemon is the one client that renders projections (attach
             # clients read the welcome for identity only), so its arrival is
@@ -801,6 +816,12 @@ class RuntimeServer:
         and attach-cap eviction all funnel here so the registry can never
         retain an entry whose socket is closed (the reaper counts them)."""
         self._clients.pop(id(conn.writer), None)
+        # The other half of the ``detached`` transition: the last terminal
+        # leaving is precisely when the picker must start saying "nobody is
+        # watching this". Published from the ONE removal path so no exit route
+        # (reader-loop end, shutdown, eviction) can miss it.
+        if conn.kind == "attach":
+            self._republish_detached()
         task = conn.event_writer_task
         conn.event_writer_task = None
         if task is not None:
@@ -838,6 +859,20 @@ class RuntimeServer:
         if self._pending == pending:
             return
         self._pending = pending
+        self._republish()
+
+    def _republish_detached(self) -> None:
+        """Refresh the record when the attached-terminal count crosses 0↔1.
+
+        De-duplicated on the resulting BOOLEAN rather than on the count: a
+        second terminal attaching to a session that already had one changes
+        nothing a reader can see, and republishing for it would put a staged
+        write on every connection churn.
+        """
+        detached = self.attach_clients() == 0
+        if detached == self._detached:
+            return
+        self._detached = detached
         self._republish()
 
     def set_busy(self, busy: bool) -> None:
