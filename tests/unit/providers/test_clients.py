@@ -9,6 +9,10 @@ from typing import Any, Literal
 import httpx
 import pytest
 
+from local_operator.compaction.thresholds import (
+    CompactionSettings,
+    resolve_threshold_tokens,
+)
 from local_operator.harness.types import (
     AgentTool,
     ChatRequest,
@@ -24,7 +28,6 @@ from local_operator.harness.types import (
     ToolContext,
     ToolResult,
 )
-from local_operator.compaction.thresholds import CompactionSettings, resolve_threshold_tokens
 from local_operator.providers.clients import (
     DEFAULT_ESTIMATE_SLOPE,
     MIN_OUTPUT_TOKENS,
