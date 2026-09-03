@@ -1879,3 +1879,148 @@ def test_the_models_dev_projection_is_not_a_provider_document(tmp_path) -> None:
     for definition in PROVIDER_REGISTRY:
         catalogue.invalidate_documents(credential_provider_id(definition.id), cache_dir=tmp_path)
     assert (tmp_path / "models-dev.listing.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# The reasoning-effort ladder: listing over table, and the boundary that keeps
+# an aggregator's answer off a direct provider's model
+# ---------------------------------------------------------------------------
+
+
+def test_the_listing_ladder_beats_the_hand_transcribed_table(monkeypatch, tmp_path) -> None:
+    """The reported bug and its fix, through the real spec builder.
+
+    `google/gemini-3.8-flash` matches no arm of `model.effort`'s table, so the
+    status band had no effort segment at all and `shift+tab` said "not
+    adjustable" — while OpenRouter publishes the ladder for that exact model.
+    """
+    _stub_discovery(
+        monkeypatch,
+        [
+            _row(
+                "google/gemini-3.8-flash",
+                reasoning_efforts=("low", "medium", "high"),
+                reasoning_default_effort="medium",
+            )
+        ],
+    )
+    monkeypatch.setattr(catalogue, "default_cache_dir", lambda: tmp_path)
+    configure_mod.invalidate_model_info_cache()
+
+    spec = configure_mod.build_model_spec("openrouter", "google/gemini-3.8-flash")
+
+    assert spec.reasoning_efforts == ("low", "medium", "high")
+    # Seeded, so the band states a real level from the first frame rather than
+    # `auto` — stating the level in force IS the reported bug.
+    assert spec.reasoning_effort == "medium"
+    assert spec.reasoning_default_effort == "medium"
+    assert spec.reasoning is True
+
+
+def test_the_listing_may_narrow_a_ladder_the_table_over_granted(monkeypatch, tmp_path) -> None:
+    """Precedence cuts both ways, and this direction is the evidence for it. The
+    table applies one transcribed `gpt-5.4` ladder to every `gpt-[5-9]` id;
+    OpenRouter says `gpt-5.4-pro` takes only medium/high/xhigh there. A rung the
+    route rejects is not a rung, so losing `none`/`low` is correct."""
+    _stub_discovery(
+        monkeypatch,
+        [
+            _row(
+                "openai/gpt-5.4-pro",
+                reasoning_efforts=("medium", "high", "xhigh"),
+                reasoning_default_effort="medium",
+            )
+        ],
+    )
+    monkeypatch.setattr(catalogue, "default_cache_dir", lambda: tmp_path)
+    configure_mod.invalidate_model_info_cache()
+
+    spec = configure_mod.build_model_spec("openrouter", "openai/gpt-5.4-pro")
+
+    assert spec.reasoning_efforts == ("medium", "high", "xhigh")
+    assert "none" not in spec.reasoning_efforts
+    assert "low" not in spec.reasoning_efforts
+
+
+def test_a_silent_listing_still_defers_to_the_table(monkeypatch, tmp_path) -> None:
+    """The case that must not regress, and it is the common one: 91 shipped
+    registry rows never fetch a listing, and every direct provider but Anthropic
+    publishes no reasoning field. Silence means the table answers, exactly as it
+    did before this feature existed."""
+    _stub_discovery(monkeypatch, [_row("anthropic/claude-opus-5")])
+    monkeypatch.setattr(catalogue, "default_cache_dir", lambda: tmp_path)
+    configure_mod.invalidate_model_info_cache()
+
+    spec = configure_mod.build_model_spec("openrouter", "anthropic/claude-opus-5")
+
+    assert spec.reasoning_efforts == ("low", "medium", "high", "xhigh", "max")
+    assert spec.reasoning_effort == "high"
+
+
+def test_an_aggregator_ladder_never_reaches_a_direct_providers_model(monkeypatch, tmp_path) -> None:
+    """The single most important boundary in this feature.
+
+    `_fill_from_row` is the SECOND-HAND catalogue path: it is consulted for a
+    DIRECT provider's model under `prices.OPENROUTER_NAMESPACE`, which is how an
+    `anthropic/*` id gets priced from OpenRouter's document. It deliberately
+    refuses to take capabilities, and the ladder is a capability — OpenRouter's
+    claim is first-hand only about ITS OWN route. If the ladder travelled that
+    path, an aggregator's answer would decide what `claude-opus-5` accepts on
+    Anthropic's own API. It must not, and `ModelInfo` carrying no ladder field
+    at all is what makes that unrepresentable rather than merely unwritten.
+    """
+    from local_operator.model.registry import ModelInfo
+
+    row = _row(
+        "claude-opus-5",
+        reasoning_efforts=("low", "high"),
+        reasoning_default_effort="low",
+        input_price=3.0,
+        output_price=15.0,
+    )
+    info = ModelInfo(id="claude-opus-5", name="Claude Opus 5", description="")
+
+    filled = configure_mod._fill_from_row(info, row)
+
+    assert not hasattr(filled, "reasoning_efforts"), (
+        "ModelInfo must carry no ladder field: the second-hand path is exactly "
+        "where an aggregator's route-specific answer could leak onto a direct "
+        "provider's model"
+    )
+
+    # The leak path in full: the AGGREGATOR leg reads OpenRouter's public
+    # document for a direct-provider id, and must record nothing about efforts
+    # while doing so. Only `_info_from_discovery` — the provider's own listing,
+    # read under the provider's own id — may write that memo.
+    monkeypatch.setattr(catalogue, "default_cache_dir", lambda: tmp_path)
+    configure_mod.invalidate_model_info_cache()
+
+    configure_mod._from_aggregator_catalogue("openrouter", "claude-opus-5", info)
+
+    assert configure_mod._listing_effort("anthropic", "claude-opus-5") == (None, None)
+    assert configure_mod._listing_effort("openrouter", "claude-opus-5") == (None, None)
+
+
+def test_the_ladder_memo_is_cleared_with_the_metadata_memo(monkeypatch, tmp_path) -> None:
+    """A listing read before the credential arrived states nothing, and leaving
+    that cached would keep the band on the table's answer for a full TTL bucket
+    after the user pasted the key that corrects it."""
+    _stub_discovery(
+        monkeypatch,
+        [_row("vendor/m", reasoning_efforts=("low", "high"), reasoning_default_effort="high")],
+    )
+    monkeypatch.setattr(catalogue, "default_cache_dir", lambda: tmp_path)
+    configure_mod.invalidate_model_info_cache()
+
+    configure_mod.build_model_spec("openrouter", "vendor/m")
+    assert configure_mod._listing_effort("openrouter", "vendor/m") == (("low", "high"), "high")
+
+    configure_mod.invalidate_model_info_cache()
+    assert configure_mod._listing_effort("openrouter", "vendor/m") == (None, None)
+
+
+def test_the_ladder_lookup_never_raises() -> None:
+    """It sits on the session-start path and `build_model_spec` is reachable
+    from a TUI repaint, so a failure here must cost a fallback, never a frame.
+    A cold memo is the same answer as a silent listing: the table answers."""
+    assert configure_mod._listing_effort("openrouter", "never/resolved") == (None, None)

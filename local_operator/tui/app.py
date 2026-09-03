@@ -98,7 +98,7 @@ from local_operator.logger import current_log_file
 
 # A leaf table (`re` and `dataclasses` only), so importing it here costs the
 # boot path nothing the lazy-import discipline above is protecting.
-from local_operator.model.effort import default_effort, next_effort
+from local_operator.model.effort import next_effort
 from local_operator.session import naming
 from local_operator.session.peer import PEER_MESSAGE_MESSAGE_TYPE
 from local_operator.session.protocol import SessionProtocol
@@ -14529,7 +14529,15 @@ class OperatorApp(App[None]):
             # Restores the MODEL's documented default rather than blanking the
             # field, so the band goes on naming the level actually in force —
             # `high` on Anthropic — rather than only the fact that it reasons.
-            restored = default_effort(getattr(spec, "model_id", "") or "")
+            #
+            # Off the SPEC, not re-derived from the model name. `build_model_spec`
+            # prefers a provider listing's default over the hand-transcribed
+            # table, so asking the table here answered `None` for every
+            # listing-derived model and `/effort auto` reported "nothing sent"
+            # while the band showed `medium` — the command contradicting the row
+            # above it. It also puts the last model-name knowledge in this file
+            # back where it belongs.
+            restored = getattr(spec, "reasoning_default_effort", None)
             if not self._apply_effort(restored, remember=False):
                 self._system_notice("session cannot change model settings", "warning")
                 return
@@ -18554,7 +18562,9 @@ class OperatorApp(App[None]):
                 style="info",
             )
         if wanted == "auto":
-            restored = default_effort(getattr(spec, "model_id", "") or "")
+            # The spec's own default, for the reason the sibling site above
+            # spells out: the table cannot answer for a listing-derived model.
+            restored = getattr(spec, "reasoning_default_effort", None)
             if not self._apply_effort(restored, remember=False):
                 return SlashResult(
                     kind="notice", text="session cannot change model settings", style="warning"

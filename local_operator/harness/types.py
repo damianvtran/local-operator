@@ -1577,6 +1577,18 @@ class ModelSpec(BaseModel):
     # request would silently drop.
     reasoning_efforts: tuple[str, ...] = ()
     reasoning_effort: str | None = None
+    # The level this model runs at when nothing is chosen — what ``/effort auto``
+    # RESTORES, as distinct from ``reasoning_effort`` above, which is what is
+    # selected right now. Carried on the spec rather than re-derived by the
+    # reader because the source that won is not knowable from the model name:
+    # ``build_model_spec`` prefers a provider listing's ``default_effort`` over
+    # the hand-transcribed table, so a TUI asking the table directly would
+    # answer ``None`` for a listing-derived model and report "the provider's
+    # default (nothing sent)" while the band went on showing ``medium``. Setting
+    # it once, beside the ladder it belongs to, is also what keeps model-name
+    # knowledge out of the widgets — the division ``model.effort`` claims in its
+    # own docstring and which those two sites were quietly breaking.
+    reasoning_default_effort: str | None = None
     # The model's HUMAN name as metadata resolution found it — "Claude Opus 5"
     # for ``anthropic/claude-opus-5``, "MoonshotAI: Kimi K2" for an OpenRouter
     # id no registry row covers. Carried on the spec rather than looked up by

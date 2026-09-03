@@ -109,6 +109,19 @@ _OPENAI_O_SERIES = EffortSupport(("low", "medium", "high"))
 #: forward-reading ``5 and above`` arm. Patterns are ``search``ed against the
 #: lowercased id so an aggregator prefix (``anthropic/claude-opus-5``,
 #: ``openrouter/openai/gpt-5.4``) resolves to the same support as the bare id.
+#:
+#: ``[.-]`` for the generation separator, not a bare ``-``, and that is a bug
+#: fix rather than tidiness. These arms were written against Anthropic's own
+#: dated snapshot ids, which hyphenate (``claude-opus-4-6``); OpenRouter spells
+#: the same models with a DOT (``anthropic/claude-opus-4.6``). The module's
+#: opening claim — keyed on the model so a route cannot change the knob — was
+#: therefore already false by punctuation: 8 Anthropic rows (4.6/4.7/4.8 and
+#: their ``:batch`` twins) silently returned no ladder at all on the OpenRouter
+#: route, and nothing tested the dotted spelling. Widening the separator repairs
+#: them on EVERY route, including the offline one where no listing can help.
+#: The ``\d{2,3}`` bound below still does its job across the wider separator:
+#: ``claude-opus-4-20250514`` cannot reach a generation arm through ``[.-]``
+#: either, which is the regression the tests pin.
 _EFFORT_TABLE: tuple[tuple[re.Pattern[str], EffortSupport], ...] = (
     # 4.5: the generation that introduced `effort`, and the ONE arm written as a
     # tier rather than a generation range. The doc lists exactly one 4.5 model as
@@ -118,9 +131,9 @@ _EFFORT_TABLE: tuple[tuple[re.Pattern[str], EffortSupport], ...] = (
     # (an `output_config` key on every turn, unasked for). Forward-reading is the
     # right default for a generation that HAS the feature; it is the wrong one
     # for the generation where it was still being rolled out tier by tier.
-    (re.compile(r"claude-opus-4-5(?!\d)"), _ANTHROPIC_BASE),
+    (re.compile(r"claude-opus-4[.-]5(?!\d)"), _ANTHROPIC_BASE),
     # 4.6 and the Mythos preview took `max` but not `xhigh`.
-    (re.compile(r"claude-[a-z]+-4-6(?!\d)|claude-mythos-preview"), _ANTHROPIC_NO_XHIGH),
+    (re.compile(r"claude-[a-z]+-4[.-]6(?!\d)|claude-mythos-preview"), _ANTHROPIC_NO_XHIGH),
     # 4.7/4.8 and every tier at generation 5 or above take both.
     #
     # `\d{2,3}`, NOT `\d{2,}`: an unbounded run also matches the 8-digit snapshot
@@ -129,7 +142,7 @@ _EFFORT_TABLE: tuple[tuple[re.Pattern[str], EffortSupport], ...] = (
     # doc's supported list — read as "generation 4.7 or later" and sent
     # `output_config: {"effort": "high"}` on every request. Three digits is
     # generous for a generation number and cannot swallow a date.
-    (re.compile(r"claude-[a-z]+-4-(?:[7-9]|\d{2,3})(?!\d)"), _ANTHROPIC_FULL),
+    (re.compile(r"claude-[a-z]+-4[.-](?:[7-9]|\d{2,3})(?!\d)"), _ANTHROPIC_FULL),
     (re.compile(r"claude-[a-z]+-(?:[5-9]|\d{2,3})(?!\d)"), _ANTHROPIC_FULL),
     (re.compile(r"gpt-(?:[5-9]|\d{2,})"), _OPENAI_GPT5),
     (re.compile(r"(?:^|[/:-])o[1-9](?:-|$)"), _OPENAI_O_SERIES),
@@ -193,22 +206,62 @@ def resolve_effort(model_id: str, requested: str | None) -> str | None:
     Ties break DOWNWARD. A level equidistant between two rungs is a level the
     target cannot express either way, and the cheaper reading is the one the
     user can undo by pressing the key; the expensive one they pay for first.
+
+    Table-backed, and therefore the OFFLINE answer. A caller that already holds
+    a resolved ladder — anything reading ``ModelSpec.reasoning_efforts``, which
+    may have come from a provider listing rather than from this table — must
+    call :func:`resolve_effort_in` with that ladder instead, or the two derive
+    different answers for the same model. See its docstring for the split-brain
+    this prevents.
     """
     support = effort_support(model_id)
     if support is None:
         return None
+    return resolve_effort_in(support.levels, support.default, requested)
+
+
+def resolve_effort_in(
+    levels: tuple[str, ...], default: str | None, requested: str | None
+) -> str | None:
+    """:func:`resolve_effort`'s clamp against an EXPLICIT ladder.
+
+    The algorithm is the same one and lives here only once, because two callers
+    now need it against two different sources of the ladder. ``resolve_effort``
+    reads the ladder out of ``_EFFORT_TABLE``; ``failover.spec_for_target``
+    holds a ``ModelSpec`` whose ladder the provider's own listing may have
+    supplied, and clamping THAT against the table produced a genuine split
+    brain: for ``openai/gpt-5.4-pro`` the spec offers ``medium/high/xhigh``
+    while the table offers ``none/low/medium/high/xhigh``, so the table's clamp
+    could hand back ``low`` — a rung the route rejects — which the wire client
+    then drops on the membership re-check. Not a 400, which is worse: a silent
+    loss of depth beneath a status band still naming the level.
+
+    Ladder members outside :data:`EFFORT_ORDER` are SKIPPED rather than ranked.
+    The nearest-rung clamp indexes ``EFFORT_ORDER`` for every member, and an
+    unrankable word made that a ``ValueError`` — raised, in the failover path,
+    on the request that was supposed to rescue a turn. Ingest filtering
+    (``discovery._effort_ladder``) already drops unknown words before a listing
+    ladder reaches a spec, so this is defence in depth on a public function
+    whose ladder can also arrive from a caller we do not control. A ladder with
+    NO rankable member has nothing to clamp toward, so the default answers.
+    """
+    if not levels:
+        return None
     if not requested:
-        return support.default
+        return default
     wanted = requested.lower()
-    if wanted in support.levels:
+    if wanted in levels:
         return wanted
     if wanted not in EFFORT_ORDER:
         # Not a level at all (stale state, a hand-edited config). Nothing to
         # clamp toward, so the model's own default is the only honest answer.
-        return support.default
+        return default
     rank = EFFORT_ORDER.index(wanted)
+    rankable = [name for name in levels if name in EFFORT_ORDER]
+    if not rankable:
+        return default
     return min(
-        support.levels,
+        rankable,
         key=lambda name: (abs(EFFORT_ORDER.index(name) - rank), EFFORT_ORDER.index(name)),
     )
 

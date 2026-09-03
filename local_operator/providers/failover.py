@@ -35,7 +35,7 @@ from local_operator.harness.types import (
     RenderedStreamError,
     StreamEvent,
 )
-from local_operator.model.effort import EFFORT_ORDER, resolve_effort
+from local_operator.model.effort import EFFORT_ORDER, resolve_effort_in
 
 if TYPE_CHECKING:  # import cycle: both modules import this one at runtime
     from local_operator.providers.auth_store import OAuthAccess, StoredCredential
@@ -1477,9 +1477,11 @@ def spec_for_target(base: ModelSpec, target: FallbackTarget) -> ModelSpec:
     a 400 on the request that was supposed to rescue the turn. But dropping it
     is not right either: a cascade entry that names no effort should not cost
     the user the level they asked for wherever the fallback accepts it. So an
-    explicit ``target.effort`` wins, and otherwise :func:`resolve_effort` keeps
-    the chosen level when the fallback accepts it and falls back to that
-    model's own default when it does not.
+    explicit ``target.effort`` wins, and otherwise :func:`resolve_effort_in`
+    keeps the chosen level when the fallback accepts it and falls back to that
+    model's own default when it does not — clamped against the target spec's
+    OWN ladder, which is what keeps this from disagreeing with the model the
+    hop actually runs on (see the call site).
 
     ``supports_sampling_params`` needs no such care here, unlike in the
     clone-based version this replaced: it comes from the target's own
@@ -1499,7 +1501,23 @@ def spec_for_target(base: ModelSpec, target: FallbackTarget) -> ModelSpec:
                 # Clamped to the nearest rung rather than dropped or defaulted: see
                 # `resolve_effort` for why "the model's default" silently inverts
                 # a `none`, and why clamping preserves the direction of the ask.
-                else resolve_effort(model_id, base.reasoning_effort or target_spec.reasoning_effort)
+                #
+                # Clamped against the TARGET SPEC's ladder, not against the model
+                # id. `build_model_spec` above may have taken the ladder from the
+                # provider's own listing, while the id-keyed `resolve_effort`
+                # only ever consults the hand-transcribed table — so the two
+                # disagree exactly where the listing corrected us. For
+                # `openai/gpt-5.4-pro` the table would clamp to `low`, a rung the
+                # route rejects and the wire client silently drops on its own
+                # membership check: a loss of depth under a status band still
+                # naming the level, which is worse than a 400 because nothing
+                # reports it. The spec is the single source of truth for what
+                # this target accepts.
+                else resolve_effort_in(
+                    target_spec.reasoning_efforts,
+                    target_spec.reasoning_default_effort,
+                    base.reasoning_effort or target_spec.reasoning_effort,
+                )
             ),
         }
     )

@@ -283,7 +283,53 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
         supports_responses_api = True
         supports_cache = True
     lowered = model_name.lower()
-    effort_levels = supported_efforts(model_name)
+    # The PROVIDER'S OWN listing wins where it speaks; its silence defers to the
+    # table. Same shape as `limits_from_listing`: "our transcription is
+    # second-hand, go ask" — except that here the entire table is second-hand by
+    # construction, so precedence is unconditional rather than a per-row flag
+    # that would always be true. Measured against a live 424-row OpenRouter
+    # pull: 153 models state a ladder, our table misses 99 of them outright
+    # (the reported bug: `google/gemini-3.8-flash` had no effort segment at
+    # all), and of the 54 it does cover 34 disagree — all 34 in the one arm
+    # that EXTRAPOLATES a family from a single transcribed model page, none in
+    # the arms that transcribe a specific one. That is the whole argument for
+    # precedence, and it points one way.
+    #
+    # The consequence to accept is that this can NARROW: `openai/gpt-5.4-pro`
+    # stops offering `none`/`low` on the OpenRouter route, because the router
+    # says those rungs 400 there. A rung we cannot send is not a rung.
+    listing_levels, listing_default = _listing_effort(canonical, model_name)
+    if listing_levels:
+        effort_levels = listing_levels
+        # Seeded from the listing so the band names a real level from the first
+        # frame rather than `auto` — stating the level in force is the reported
+        # bug. Weaker ground than the Anthropic seed below, and deliberately so:
+        # Anthropic DOCUMENTS `high` and omission as the same request, whereas
+        # OpenRouter's `default_effort` only describes what happens when you
+        # send nothing, so sending it explicitly *should* be a no-op but is an
+        # inference rather than a guarantee. It is being validated live: ~99
+        # models begin sending `reasoning_effort` where the key was previously
+        # omitted, 41 of them `mandatory: true` and 25 seeded at the TOP rung of
+        # their own ladder (`z-ai/glm-5.3` at `max`, the `qwen3.8-*` family at
+        # `xhigh`), which raises spend and latency on the first turn with no
+        # keystroke. If that inference turns out to be wrong, the fallback is to
+        # keep this ladder and seed `None` instead: the band then reads `auto`,
+        # the key is omitted, and `shift+tab` and `/effort` still work — the
+        # narrow fix, without the wire change.
+        reasoning_effort = listing_default
+    else:
+        # No listing, or a listing that said nothing about efforts: the
+        # hand-transcribed table, i.e. exactly today's behaviour. This is the
+        # COMMON case and the one that must not regress — 91 shipped registry
+        # rows never fetch a listing at all, and every direct provider but
+        # Anthropic publishes no reasoning field. Its seed is safe for a reason
+        # the listing branch above cannot borrow: Anthropic documents
+        # `effort: "high"` as exactly equivalent to omitting the parameter, so
+        # the seed changes no behaviour and only stops the band understating
+        # what is already in force. OpenAI, whose default varies per snapshot,
+        # is seeded with nothing for the same reason.
+        effort_levels = supported_efforts(model_name)
+        reasoning_effort = default_effort(model_name)
     # A model with an effort ladder reasons BY DEFINITION, whatever its name
     # looks like: `claude-opus-5` matches none of the markers below — it says
     # neither "thinking" nor "reasoner" — so before the ladder existed the
@@ -305,12 +351,6 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
     # pair on the mainland host — see _KIMI_PINNED_SAMPLING.
     if canonical == "kimi" and _KIMI_PINNED_SAMPLING.match(lowered):
         supports_sampling_params = False
-    # Seeded to the model's own documented default, not left unset, so the band
-    # states a real level from the first frame. Safe only because the provider
-    # says the two are the same request — Anthropic documents `effort: "high"`
-    # as exactly equivalent to omitting the parameter — which is why OpenAI,
-    # whose default varies per snapshot, is seeded with nothing instead.
-    reasoning_effort = default_effort(model_name)
     # A GUARDED read, not `info.name`. `info` is duck-typed here — the legacy
     # public helpers and the tests hand in stand-ins, and `name` is the one
     # attribute name that collides with something that is not a string on almost
@@ -366,6 +406,10 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
         supports_sampling_params=supports_sampling_params,
         reasoning_efforts=effort_levels,
         reasoning_effort=reasoning_effort,
+        # The seed and the restore point are the same value at build time; they
+        # diverge as soon as the user picks a level, which is precisely when
+        # `/effort auto` needs the original still recorded somewhere.
+        reasoning_default_effort=reasoning_effort,
         display_name=resolved_name,
     )
 
@@ -937,6 +981,11 @@ def _info_from_discovery(
         logger.debug("%s listing (%s) has no entry for %s", provider, status, model_name)
         return fallback
 
+    # Keyed on the id the CALLER asked for, not on ``row.id``: the match above
+    # may have gone through id normalisation, and ``build_model_spec`` looks the
+    # ladder up under the selector the session was started with.
+    _remember_listing_effort(provider, model_name, row)
+
     info = fallback.model_copy(deep=True)
     info.id = row.id
     info.name = row.name or info.name or row.id
@@ -1317,6 +1366,11 @@ def invalidate_model_info_cache() -> None:
     _resolve_model_info_cached.cache_clear()
     _paint_refreshing.clear()
     _paint_memo.clear()
+    # The ladder memo is fed by the same resolution, so it degrades for the same
+    # fixable reasons: a listing read with no credential yet states nothing, and
+    # leaving that cached would keep the band on the table's answer for a full
+    # bucket after the user pasted the key that would have corrected it.
+    _effort_memo.clear()
 
 
 def resolve_model_info(provider: str, model_id: str) -> ModelInfo:
@@ -1420,6 +1474,71 @@ def resolve_model_info_paint(provider: str, model_id: str) -> tuple[ModelInfo, b
     if info is None:
         return _registry_fallback(provider, model_id).model_copy(deep=True), False
     return info.model_copy(deep=True), True
+
+
+#: The effort ladder the PROVIDER'S OWN listing stated for a model, keyed the
+#: same way (and with the same TTL bucket) as ``_paint_memo``. Written only by
+#: :func:`_info_from_discovery`, which has just matched the row, so reading it
+#: costs no HTTP call, no cache read and no listing scan.
+#:
+#: A memo rather than a field on ``ModelInfo``, and that is the load-bearing
+#: decision in this feature. ``ModelInfo`` is the REGISTRY ROW type — a pydantic
+#: model with legacy consumers and duck-typed stand-ins in tests — and nothing
+#: in the shipped registry can state a ladder, so a field there would be
+#: permanently ``None`` for every bundled row and would exist only as transport
+#: between two functions in this module. More importantly it would have to be
+#: filled by :func:`_fill_from_row`, which is the SECOND-HAND catalogue path and
+#: deliberately refuses to take capabilities: that function is consulted for a
+#: DIRECT provider's model under ``prices.OPENROUTER_NAMESPACE``, so routing the
+#: ladder through it would let OpenRouter's answer about its own route decide
+#: what ``anthropic/claude-opus-5`` accepts on Anthropic's. Keeping the ladder
+#: out of ``ModelInfo`` is what makes that leak unrepresentable rather than
+#: merely unwritten.
+#:
+#: The value is ``(ladder, default)``. A miss and a listing that said nothing
+#: are the same answer — ``(None, None)`` — because both mean the same thing to
+#: the caller: defer to ``model.effort``'s table.
+_effort_memo: dict[tuple[str, str, int], tuple[tuple[str, ...] | None, str | None]] = {}
+
+
+def _listing_effort(provider: str, model_id: str) -> tuple[tuple[str, ...] | None, str | None]:
+    """What the provider's listing said this model's effort ladder is.
+
+    ``(None, None)`` when the listing said nothing, when it has not been read in
+    this TTL bucket, or when anything at all goes wrong — every one of which
+    means "the table answers", which is exactly today's behaviour. TOTAL and
+    NON-RAISING by contract: this sits on the session-start path and
+    ``build_model_spec`` is reachable from a TUI repaint, so a failure here must
+    cost a fallback, never a frame or a start.
+
+    Memo-only on purpose. The obvious alternative — read the listing here on a
+    miss — would put discovery's synchronous HTTP legs on a paint, which is the
+    freeze ``resolve_model_info_paint`` exists to prevent. A cold memo therefore
+    degrades to the hand-transcribed table, which is a correct answer rather
+    than a guess, and warms as soon as the model is resolved for real.
+    """
+    try:
+        bucket = int(time.time() // DEFAULT_TTL_S)
+        return _effort_memo.get((provider, model_id, bucket), (None, None))
+    except Exception:  # noqa: BLE001 — a display dial is never worth a failed start
+        return (None, None)
+
+
+def _remember_listing_effort(provider: str, model_id: str, row: "DiscoveredModel") -> None:
+    """Stash ``row``'s stated ladder for :func:`_listing_effort` to read.
+
+    Bounded and bucket-evicted like ``_paint_memo``: the dict has no TTL of its
+    own, and a long-lived process (the server, a scheduler worker) would
+    otherwise gain one dead entry per model per day for its whole lifetime.
+    """
+    bucket = int(time.time() // DEFAULT_TTL_S)
+    _effort_memo[(provider, model_id, bucket)] = (
+        row.reasoning_efforts,
+        row.reasoning_default_effort,
+    )
+    if len(_effort_memo) > 64:
+        for key in [key for key in _effort_memo if key[2] != bucket]:
+            del _effort_memo[key]
 
 
 def refresh_model_info_background(provider: str, model_id: str) -> None:

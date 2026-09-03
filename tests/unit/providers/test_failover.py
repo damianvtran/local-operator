@@ -4059,3 +4059,45 @@ def test_connectivity_config_bad_value_falls_back_to_default() -> None:
     )
     assert bad.connectivity_max_retries == CONNECTIVITY_MAX_RETRIES
     assert bad.connectivity_backoff_cap_ms == CONNECTIVITY_BACKOFF_CAP_MS
+
+
+def test_a_hop_clamps_against_the_targets_own_ladder_not_the_table(monkeypatch) -> None:
+    """The split brain this fix closes.
+
+    `spec_for_target` builds the target spec — whose ladder a provider listing
+    may have supplied — and then had to clamp with a table-keyed helper that
+    knew nothing about that listing. Where the two disagree the table could hand
+    back a rung the route rejects, which the wire client then drops on its own
+    membership check: a silent loss of depth beneath a status band still naming
+    the level. Worse than a 400, because nothing reports it.
+    """
+    # Patched at its SOURCE module: `spec_for_target` imports it inside the
+    # function body (a deliberate import cycle break), so the name never exists
+    # as a module attribute on `failover` to patch.
+    from local_operator.model import configure as configure_mod
+
+    # The target's REAL ladder, as a listing narrowed it: no `none`, no `low`.
+    narrowed = ModelSpec(
+        provider="openrouter",
+        model_id="openai/gpt-5.4-pro",
+        reasoning_efforts=("medium", "high", "xhigh"),
+        reasoning_effort="medium",
+        reasoning_default_effort="medium",
+    )
+    monkeypatch.setattr(
+        configure_mod, "build_model_spec", lambda provider, model_id: narrowed  # noqa: ARG005
+    )
+
+    # The table for this id still offers none/low/medium/high/xhigh, so a
+    # table-keyed clamp would have KEPT `low`.
+    from local_operator.model.effort import supported_efforts
+
+    assert "low" in supported_efforts("openai/gpt-5.4-pro"), "fixture drifted"
+
+    spec = spec_for_target(
+        ModelSpec(provider="anthropic", model_id="claude-opus-5", reasoning_effort="low"),
+        FallbackTarget("openrouter/openai/gpt-5.4-pro"),
+    )
+
+    assert spec.reasoning_effort == "medium"
+    assert spec.reasoning_effort in spec.reasoning_efforts
