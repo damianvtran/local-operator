@@ -553,3 +553,48 @@ def test_an_old_notify_send_without_action_support_gets_the_plain_toast(monkeypa
 
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Modern())
     assert notify_mod._notify_send_supports_actions("/usr/bin/notify-send") is True
+
+
+def test_the_click_opens_a_terminal_through_the_spawn_registry(monkeypatch) -> None:
+    """A notification is only sent when nothing is watching, so the click has
+    to OPEN a terminal — there is no emulator around the sender to inherit.
+
+    The backend choice is the fork machinery's, made at click time (the user
+    may have opened a terminal since the toast was posted), and the command
+    is `resume_argv`'s restore-and-idle line.
+    """
+    from local_operator.tui import resume_click
+
+    seen: dict[str, object] = {}
+
+    class _Backend:
+        def spawn(self, launch, env):  # noqa: ANN001
+            seen["argv"] = launch.argv
+            seen["session"] = launch.session_id
+            return True
+
+    monkeypatch.setattr(
+        "local_operator.spawn.registry.active_backend", lambda env: _Backend()
+    )
+
+    assert resume_click.open_session("abc123def456") is True
+    assert seen["session"] == "abc123def456"
+    assert tuple(seen["argv"])[-2:] == ("--resume", "abc123def456")
+    assert not any(part in ("--exec", "-e") for part in seen["argv"])
+
+
+def test_a_click_with_no_terminal_backend_still_launches(monkeypatch) -> None:
+    """An unrecognised emulator must not silently swallow the user's click."""
+    from local_operator.tui import resume_click
+
+    launched: list[list[str]] = []
+    monkeypatch.setattr(
+        "local_operator.spawn.registry.active_backend", lambda env: None
+    )
+    monkeypatch.setattr(
+        "local_operator.proc.spawn_detached",
+        lambda argv, *a, **k: bool(launched.append(list(argv))) or True,
+    )
+
+    assert resume_click.open_session("abc123def456") is True
+    assert launched and launched[0][-2:] == ["--resume", "abc123def456"]

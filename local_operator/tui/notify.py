@@ -487,6 +487,19 @@ def detached_notify(title: str, body: str, *, session_id: str = "") -> bool:
         return False
     try:
         if sys.platform == "darwin":
+            # PREFER OUR OWN BUNDLE. macOS attributes a notification to the
+            # process that posts it, so the `osascript` route below arrives as
+            # Script Editor — its name and its icon — however the title reads.
+            # The bundle carries our identity and can carry a click action.
+            #
+            # It is only used when it is ALREADY BUILT: `ensure_bundle`
+            # returns None on a cold machine and starts the build in the
+            # background, so this notification goes out the old way rather
+            # than waiting on a compiler in a gate path, and the next one
+            # carries the identity.
+            bundled = _identity_notifier(title, body, session_id)
+            if bundled is not None:
+                return _spawn_detached_ok(bundled)
             if not shutil.which("osascript"):
                 return False
             return _spawn_detached_ok(osascript_command(title, body))
@@ -508,6 +521,29 @@ def detached_notify(title: str, body: str, *, session_id: str = "") -> bool:
 def _spawn_detached_ok(argv: list[str]) -> bool:
     """``spawn_detached`` reporting whether the child started."""
     return bool(spawn_detached(argv))
+
+
+def _identity_notifier(title: str, body: str, session_id: str) -> list[str] | None:
+    """argv posting through our own bundle, or None to use the plain route.
+
+    Never raises and never blocks: a missing config dir, an unbuilt bundle or
+    an unbuildable machine all answer None, which is the caller's cue to fall
+    back to the behaviour that shipped before this existed.
+    """
+    try:
+        from local_operator.paths import config_dir
+        from local_operator.tui import notifier_app
+
+        app = notifier_app.ensure_bundle(config_dir())
+        if app is None:
+            return None
+        click = ""
+        if session_id:
+            click = " ".join(shlex.quote(part) for part in resume_click_command(session_id))
+        return notifier_app.notify_command(app, title, body, click)
+    except Exception:  # noqa: BLE001 — identity is a nicety; delivery is not
+        logger.debug("identity notifier unavailable", exc_info=True)
+        return None
 
 
 def _notify_send_supports_actions(notifier: str) -> bool:
@@ -543,11 +579,15 @@ def resume_click_command(session_id: str) -> list[str]:
     second place for the "never resume execution unattended" rule to be
     forgotten.
 
+    A notification is clicked when NOTHING is attached, so there is no
+    emulator around this process to detect — the click has to OPEN one. That
+    is `lop --resume` handed to the resume helper below, which asks the spawn
+    registry for the user's terminal at click time (when a terminal may well
+    be running) and falls back to the bare argv when it cannot pick one.
+
     Pure: returns the argv so it can be asserted without launching anything.
     """
-    from local_operator.multiplexer.broadcast import resume_argv
-
-    return list(resume_argv(session_id))
+    return [sys.executable, "-m", "local_operator.tui.resume_click", session_id]
 
 
 def _clickable_notify_command(notifier: str, title: str, body: str, session_id: str) -> list[str]:
