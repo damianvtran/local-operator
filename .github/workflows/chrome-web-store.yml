@@ -26,9 +26,13 @@ concurrency:
 jobs:
   stage:
     runs-on: ubuntu-latest
-    # Protect this environment with required reviewers. Uploading creates the
-    # store draft and submission, so authentication must not happen before the
-    # human release decision even though approval cannot expose a long-lived key.
+    # The environment scopes the release variables and the main-only deployment
+    # branch policy; its former required-reviewer gate was removed by operator
+    # decision on 2026-09-03 so a store release runs end to end automatically.
+    # The launch decision now rides on the reviewed-merge-to-main process,
+    # enforced by the WIF attribute condition pinning refs/heads/main and the
+    # ancestry check below. Uploading creates the store draft and submission, so
+    # only reviewed commits on main may reach the token-bearing upload client.
     environment: chrome-web-store
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -39,9 +43,10 @@ jobs:
         run: |
           set -euo pipefail
           git fetch --no-tags origin main
-          # Environment approval protects credentials, but it must not authorize
-          # arbitrary branch code. Only reviewed commits already on main may run
-          # the build and the token-bearing upload client.
+          # With no human approval gate on the environment, this ancestry check
+          # and the WIF attribute condition pinning refs/heads/main are what keep
+          # arbitrary branch code away from the credentials: only reviewed commits
+          # already on main may run the build and the token-bearing upload client.
           git merge-base --is-ancestor HEAD origin/main || {
             echo "::error::the selected ref must resolve to a commit on main"
             exit 1

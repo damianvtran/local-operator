@@ -176,14 +176,19 @@ test("promotion refuses a staged revision below 100 percent", async () => {
   );
 });
 
-test("protected environment verifier rejects missing reviewers and accepts exact configuration", async () => {
-  let protectedEnvironment = false;
+test("protected environment verifier rejects a non-custom branch policy and accepts exact configuration", async () => {
+  // The required-reviewers check was removed by operator decision on
+  // 2026-09-03 (see verify-release-environment.sh), so the rejection path now
+  // exercises the remaining environment-level guard: the custom
+  // deployment-branch-policy shape that allows exactly `main`.
+  let validBranchPolicy = false;
   const server = createServer((request, response) => {
     let payload;
     if (request.url.endsWith("/environments/chrome-web-store")) {
       payload = {
-        protection_rules: protectedEnvironment ? [{ type: "required_reviewers", reviewers: [{ id: 1 }] }] : [],
-        deployment_branch_policy: { protected_branches: false, custom_branch_policies: true },
+        deployment_branch_policy: validBranchPolicy
+          ? { protected_branches: false, custom_branch_policies: true }
+          : { protected_branches: true, custom_branch_policies: false },
       };
     } else if (request.url.includes("deployment-branch-policies")) {
       payload = { total_count: 1, branch_policies: [{ name: "main", type: "branch" }] };
@@ -210,8 +215,8 @@ test("protected environment verifier rejects missing reviewers and accepts exact
     "CWS_PUBLISHER_ID", "publisher",
   ];
   try {
-    await assert.rejects(run("bash", args, { cwd: import.meta.dirname + "/..", env }), /required reviewer/);
-    protectedEnvironment = true;
+    await assert.rejects(run("bash", args, { cwd: import.meta.dirname + "/..", env }), /custom deployment branch policy/);
+    validBranchPolicy = true;
     const result = await run("bash", args, { cwd: import.meta.dirname + "/..", env });
     assert.match(result.stdout, /validated protected environment chrome-web-store/);
   } finally {

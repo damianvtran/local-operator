@@ -22,9 +22,13 @@ concurrency:
 jobs:
   promote:
     runs-on: ubuntu-latest
-    # Promotion is a distinct, explicit launch decision. Keep this environment
-    # protected even if staging already required approval so review completion
-    # cannot make a public release happen automatically.
+    # Promotion is a distinct, explicit launch decision: dispatching this
+    # workflow is the act of publishing. The environment's former
+    # required-reviewer gate was removed by operator decision on 2026-09-03, so
+    # once dispatched, promotion completes automatically; the environment still
+    # scopes the release variables and the main-only deployment branch policy,
+    # and the launch decision rides on the reviewed-merge-to-main process plus
+    # the WIF attribute condition pinning refs/heads/main.
     environment: chrome-web-store-production
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
