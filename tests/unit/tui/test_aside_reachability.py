@@ -109,8 +109,14 @@ def _long_answer(rows: int, tag: str = "ANSWER") -> str:
     assertions means one source line and the counts are not a function of the
     terminal's column count. ``test_wrapped_prose_is_reachable_row_by_row``
     covers the case where they differ.
+
+    A markdown LIST, because the answer is rendered as markdown (#553):
+    consecutive bare lines are ONE paragraph to a parser, which reflows them
+    into as many tags as fit a row — five per row at 80 columns — and the
+    one-line-one-row premise every count here rests on is gone. A list item is
+    its own block, so the source line survives as a row.
     """
-    return "\n".join(f"{tag}-ROW-{index:03d}" for index in range(rows))
+    return "\n".join(f"- {tag}-ROW-{index:03d}" for index in range(rows))
 
 
 def _exhaust_the_wheel(panel: AsidePanel) -> set[str]:
