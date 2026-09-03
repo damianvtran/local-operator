@@ -1296,9 +1296,19 @@ def send_command(args: argparse.Namespace) -> int:
     # Only real bytes count as a piped body: `isatty()` is False for an empty
     # redirect (`</dev/null`) exactly as it is for a pipe carrying data, so it
     # cannot distinguish "piped a body" from "stdin merely is not a terminal".
+    # Decoded leniently off the BINARY stream rather than through `sys.stdin`'s
+    # strict UTF-8 text wrapper. Reading before resolution widened this from a
+    # delivery-path concern to every path: a `some-binary-producer | lop send …`
+    # (a gzip or an image piped by mistake) would raise UnicodeDecodeError out
+    # of send_command as a traceback, even when the target does not resolve and
+    # the bytes are never used. An uncaught traceback is never an acceptable
+    # user-visible failure here — the same U1 rule the delivery except-clause
+    # below follows. `errors="replace"` degrades a binary paste into the
+    # existing, well-worded `validate_peer_body` refusal instead of a new error.
     stdin_body = None
     if args.message is None and not sys.stdin.isatty():
-        stdin_body = sys.stdin.read()
+        raw = sys.stdin.buffer.read() if hasattr(sys.stdin, "buffer") else sys.stdin.read()
+        stdin_body = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else raw
 
     target, message, bind_error = _bind_send_positionals(args, stdin_body)
     if bind_error:
@@ -1317,11 +1327,21 @@ def send_command(args: argparse.Namespace) -> int:
         )
         for line in candidate_lines(candidates, indent="  ", prefix="--pid"):
             print(line, file=sys.stderr)
-        if message is not None:
-            print(
-                f"  e.g. `lop send --pid {candidates[0].pid} {shlex.quote(message)}`",
-                file=sys.stderr,
-            )
+        # The worked example must not echo the body back. For a PIPED body the
+        # right recovery is to re-pipe, not to paste — printing it would dump up
+        # to the whole 256 KB cap onto stderr and tell the user to retype what
+        # they piped. A long typed body is elided for the same reason: the line
+        # exists to show the SHAPE of the working command, not to reproduce the
+        # message the user still has one line up.
+        if stdin_body is not None:
+            example = "<your piped input> | lop send --pid " + str(candidates[0].pid)
+        elif message is not None:
+            body = message if len(message) <= 60 else message[:57] + "..."
+            example = f"lop send --pid {candidates[0].pid} {shlex.quote(body)}"
+        else:
+            example = ""
+        if example:
+            print(f"  e.g. `{example}`", file=sys.stderr)
         return 1
     if error or record is None:
         _peer_red(error or "no target resolved")

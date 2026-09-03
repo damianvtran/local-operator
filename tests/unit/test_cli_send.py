@@ -391,6 +391,115 @@ def test_flag_then_body_still_parses_with_a_positional_target() -> None:
     assert (args.target, args.message, args.steer) == ("peer", "stop, do X instead", True)
 
 
+class _BinaryStdin:
+    """A non-tty stdin carrying bytes that are not valid UTF-8.
+
+    Models a real `some-binary-producer | lop send …` (a gzip or an image piped
+    by mistake). The real `sys.stdin` is a strict-UTF-8 text wrapper over a
+    `.buffer`, so the fake has to expose the same shape for the decode path to
+    be exercised rather than bypassed.
+    """
+
+    def __init__(self, raw: bytes) -> None:
+        self.buffer = io.BytesIO(raw)
+
+    def isatty(self) -> bool:
+        return False
+
+    def read(self) -> str:  # pragma: no cover - the buffer path is the real one
+        raise AssertionError("the binary path must read sys.stdin.buffer")
+
+
+def test_a_non_utf8_pipe_is_a_clean_error_not_a_traceback(monkeypatch) -> None:
+    """Review round 2, MAJOR-1.
+
+    Reading stdin ahead of resolution widened the blast radius of a decode
+    failure: invocations that never consume the bytes (an unresolvable pid here)
+    used to print a clean red line because base never read at all, and began
+    raising UnicodeDecodeError out of ``send_command`` as a traceback. An
+    uncaught traceback is never an acceptable user-visible failure — the same U1
+    rule the delivery path already follows — so the read decodes leniently.
+    """
+    monkeypatch.setattr("sys.stdin", _BinaryStdin(b"\x1f\x8b\x08\x00\xa8\x8d\xff\xfe"))
+    args = _parse_send(["--pid", "777777"])
+    with (
+        patch(
+            "local_operator.cli._resolve_peer_target",
+            return_value=(None, [], "no session found with pid 777777"),
+        ),
+        patch("local_operator.mobile.peer_client.send_peer_message") as send,
+        patch("local_operator.cli._peer_red") as red,
+    ):
+        rc = send_command(args)
+    # The pre-existing error survives verbatim; the decode never surfaces.
+    assert rc == 1
+    send.assert_not_called()
+    assert red.call_args[0][0] == "no session found with pid 777777"
+
+
+def test_a_non_utf8_pipe_degrades_into_the_existing_body_refusal(monkeypatch) -> None:
+    """A binary body that DOES reach validation becomes the shared core's
+    existing, well-worded refusal rather than a new error class: undecodable
+    bytes replace to U+FFFD, which is a non-empty body under the cap."""
+    monkeypatch.setattr("sys.stdin", _BinaryStdin(b"\xa8\x8d\xff\xfe"))
+    args = _parse_send(["--pid", "123"])
+    record = _Record(os.getppid() + 9999)
+    with (
+        patch("local_operator.cli._resolve_peer_target", return_value=(record, [], "")),
+        patch("local_operator.mobile.peer_client.send_peer_message") as send,
+    ):
+        rc = send_command(args)
+    assert rc == 0
+    # Delivered as replacement characters, never as a crash.
+    assert "\ufffd" in send.call_args.kwargs["text"]
+
+
+def test_the_worked_example_never_echoes_a_piped_payload(monkeypatch, capsys) -> None:
+    """Architect round 2, MINOR-1.
+
+    The disambiguation example interpolated the body, so a piped payload was
+    dumped back to stderr in full (measured: a 10 KB pipe produced 10,147 bytes
+    of stderr) with an invitation to retype it — when the correct recovery for a
+    piped body is to RE-PIPE. The example now shows the shape of the working
+    command instead.
+    """
+    payload = "x" * 10000
+    monkeypatch.setattr("sys.stdin", io.StringIO(payload))
+    args = _parse_send(["alpha"])
+    candidates = [_Record(10), _Record(20)]
+    with patch("local_operator.cli._resolve_peer_target", return_value=(None, candidates, "")):
+        rc = send_command(args)
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert payload not in err
+    assert "<your piped input> | lop send --pid 10" in err
+    # The candidate list above it stays correct and complete.
+    assert "--pid 10" in err and "--pid 20" in err
+    assert len(err) < 500
+
+
+def test_a_long_typed_body_is_elided_in_the_worked_example(monkeypatch, capsys) -> None:
+    """Same reason as the piped case: the line exists to show the SHAPE of the
+    command, and the user still has their own body one line up."""
+    monkeypatch.setattr("sys.stdin", _FakeTtyStdin())
+    args = _parse_send(["alpha", "y" * 400])
+    with patch("local_operator.cli._resolve_peer_target", return_value=(None, [_Record(10)], "")):
+        send_command(args)
+    err = capsys.readouterr().err
+    assert "y" * 400 not in err
+    assert "..." in err
+
+
+def test_a_short_typed_body_is_still_shown_in_full(monkeypatch, capsys) -> None:
+    """The common case must stay genuinely helpful: a short typed body is
+    reproduced verbatim so the suggestion is copy-pasteable."""
+    monkeypatch.setattr("sys.stdin", _FakeTtyStdin())
+    args = _parse_send(["alpha", "gates are green"])
+    with patch("local_operator.cli._resolve_peer_target", return_value=(None, [_Record(10)], "")):
+        send_command(args)
+    assert "e.g. `lop send --pid 10 'gates are green'`" in capsys.readouterr().err
+
+
 def test_the_guide_quotes_the_ambiguity_error_verbatim() -> None:
     """The §6 doc lockstep, asserted rather than claimed (review round 1,
     MINOR-1).
