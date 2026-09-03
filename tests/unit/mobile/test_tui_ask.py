@@ -320,6 +320,59 @@ async def test_phone_answer_first_takes_the_terminal_card_down() -> None:
 
 
 @pytest.mark.asyncio
+async def test_the_recommended_option_reaches_the_phone_first() -> None:
+    """The phone card carries option labels and NO ``recommended`` field, so
+    POSITION is the only channel the recommendation has on this surface.
+
+    This is the reason ``AskQuestion`` hoists rather than the picker doing it:
+    a model authoring its recommendation mid-list used to have it dropped
+    silently here, because the wire has nowhere to put the marker. Asserted on
+    the serialized JSON the phone actually renders from, and the answer is then
+    sent back by LABEL — which is what keeps a reordered list correct.
+    """
+    question = AskQuestion(
+        id="stale",
+        question="What should happen to the stale rows?",
+        options=[
+            AskOption(label="Drop them", description="nothing reads the column"),
+            AskOption(label="Backfill", description="slower, keeps history"),
+            AskOption(label="Dual-write", description="safest, needs a follow-up"),
+        ],
+        recommended=2,
+    )
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(90, 30)) as pilot:
+        await pilot.pause()
+        handle = await _wait_for_handle(app, pilot)
+        control = await _control_for(app, pilot)
+        try:
+            asked = await _mount_ask(app, pilot, question)
+
+            pending = handle._fold.projection.pending
+            assert pending is not None
+            wire = pending.to_json()
+            # The recommendation is FIRST, and its consequence line came with
+            # it: a rotation moves the whole option, not just the label.
+            assert wire["options"] == [
+                {"label": "Dual-write", "description": "safest, needs a follow-up"},
+                {"label": "Drop them", "description": "nothing reads the column"},
+                {"label": "Backfill", "description": "slower, keeps history"},
+            ]
+            # There is no marker on the card to carry it instead.
+            assert "recommended" not in wire
+
+            request_id = pending.request_id
+            reply = await control.send("ask_answer", request_id=request_id, value="Dual-write")
+            assert reply["op"] == "ack" and reply["detail"] == "answered"
+            for _ in range(4):
+                await pilot.pause()
+            # Answered by LABEL, so the hoist cannot misattribute the tap.
+            assert await asyncio.wait_for(asked, 2) == {"stale": ["Dual-write"]}
+        finally:
+            control.close()
+
+
+@pytest.mark.asyncio
 async def test_secret_ask_projects_a_free_text_card_without_leaking_the_value() -> None:
     """A secret question has no options, so it projects with an empty option
     list (the phone shows a paste field); the pasted value resolves the picker

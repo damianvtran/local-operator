@@ -584,7 +584,19 @@ class AskOption(BaseModel):
 #
 # `recommended` indexes `options` and is validated rather than clamped: a silent
 # clamp would preselect and visibly endorse a DIFFERENT option than the model
-# meant to.
+# meant to. Out of range is therefore an error the model can correct, and the
+# bounds check has to run BEFORE the hoist below — reordering against an index
+# that indexes nothing would turn that error into a scramble.
+#
+# Once the index is known good the recommended option is MOVED to the top and
+# `recommended` becomes 0. Normalising in the model rather than in the picker is
+# what makes it an invariant instead of one host's habit: the mobile wire
+# (`local_operator/mobile/types.py`) carries the option labels and nothing else
+# — there is no `recommended` field on the card at all — so on the phone
+# POSITION is the only channel the recommendation has. A surface that renders
+# options in authored order would silently drop it. And even where the marker
+# does render, a recommendation the user has to hunt for three rows down is a
+# weaker recommendation than the same words at the top.
 class AskQuestion(BaseModel):
     """One question the ``ask`` tool puts to the user."""
 
@@ -604,7 +616,9 @@ class AskQuestion(BaseModel):
     )
     recommended: int | None = Field(
         default=None,
-        description="0-based index of the option you recommend; it is preselected and marked.",
+        description=(
+            "0-based index of the option you recommend; it is moved to the top and preselected."
+        ),
     )
     secret: bool = Field(
         default=False,
@@ -642,6 +656,15 @@ class AskQuestion(BaseModel):
                 f"recommended must index options (0..{len(self.options) - 1}), "
                 f"got {self.recommended}"
             )
+        if self.recommended is not None:
+            # Rotate rather than swap: the authored order of everything the
+            # model did NOT recommend is still its ranking, and a swap would
+            # promote whatever happened to sit at index 0 over the rest of it.
+            # Rotating by 0 is the identity, so an already-normalised question
+            # passes through untouched however many times it is re-validated.
+            hoisted = self.options.pop(self.recommended)
+            self.options.insert(0, hoisted)
+            self.recommended = 0
         return self
 
 

@@ -165,9 +165,10 @@ shell out to cmux or another multiplexer to message a session. Read
 
 When a decision is the user's to make, use `ask` — never write lettered options
 into your reply and wait. Put the consequence of each option in its
-description, mark the one you recommend, and ask everything you need in one
-call. If the user answers nothing, take your own recommendation, say in one
-line what you assumed, and carry on rather than asking again.
+description, mark the one you recommend — it is moved to the top of the list
+and preselected — and ask everything you need in one call. If the user answers
+nothing, take your own recommendation, say in one line what you assumed, and
+carry on rather than asking again.
 
 Most tools take `i`: a concise intent, present participle, 2–6 words, no
 period, capitalized. Name what you are accomplishing, never the tool or the
