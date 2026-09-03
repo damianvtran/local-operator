@@ -9,6 +9,7 @@ will take is indistinguishable from one that writes none.
 
 from __future__ import annotations
 
+import errno
 from pathlib import Path
 from typing import Any
 
@@ -22,7 +23,9 @@ from local_operator.evaluation.evidence.models import (
     ObservationPayload,
     ScoreArtifact,
 )
+from local_operator.evaluation.evidence.store import EvidenceWriter
 from local_operator.evaluation.evidence.verify import verify_bundle
+from local_operator.evaluation.receipts import RedactionSet
 from local_operator.evaluation.runner.episode import EpisodeRunner
 from tests.unit.evaluation.runner.conftest import (
     FakeAdapter,
@@ -910,3 +913,209 @@ async def test_zero_decision_retries_restores_one_strike(tmp_path: Path, episode
     assert outcome.status == "failed"
     assert outcome.score is not None and outcome.score.reason == "model_failure"
     assert model.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_crash_after_a_successful_step_still_seals(tmp_path: Path, episode_id: str) -> None:
+    """A run interrupted mid-loop keeps the evidence it already bought.
+
+    Regression for ep-ffda3fc88f81: a real paid episode drove 16 environment
+    steps, took an unretryable adapter error on the 17th, and lost ALL of it --
+    the bundle could neither seal nor be abandoned (``abandonment_failed``,
+    score null) because the verifier required a stepped episode to end on a
+    terminal step or a finish action, which is precisely what an interrupted
+    episode cannot produce. The failure is not adapter-specific: the same shape
+    killed a provider outage, so it is asserted here at the runner boundary.
+    """
+
+    adapter = FakeAdapter(
+        tmp_path,
+        episode_id,
+        failures={"execute": SupervisionError("worker died")},
+        fail_after={"execute": 1},
+    )
+    runner = _runner(
+        tmp_path, episode_id, adapter=adapter, model=ScriptedModel(["step", "step", "finish"])
+    )
+
+    outcome = await runner.run()
+
+    assert outcome.status == "failed"
+    root = outcome.bundle_root
+    assert root is not None
+    report = verify_bundle(root)
+    assert report.valid, [issue.code for issue in report.issues]
+    # The step that DID succeed is still in the bundle: that is the evidence
+    # the old behaviour threw away.
+    assert len(payloads(root, EnvironmentStepPayload)) == 1
+    assert outcome.score is not None and outcome.score.reason == "crash"
+
+
+@pytest.mark.asyncio
+async def test_provider_failure_after_a_step_still_seals(tmp_path: Path, episode_id: str) -> None:
+    """The same interruption through a non-adapter category."""
+
+    adapter = FakeAdapter(tmp_path, episode_id)
+    model = ScriptedModel(["step", "step", "finish"])
+    original = model.decide
+    calls = {"n": 0}
+
+    async def decide(observation: Any, history: Any) -> Any:
+        calls["n"] += 1
+        if calls["n"] > 1:
+            raise RuntimeError("provider exhausted retries")
+        return await original(observation, history)
+
+    model.decide = decide  # type: ignore[method-assign]
+    runner = _runner(tmp_path, episode_id, adapter=adapter, model=model)
+
+    outcome = await runner.run()
+
+    assert outcome.status == "failed"
+    root = outcome.bundle_root
+    assert root is not None
+    report = verify_bundle(root)
+    assert report.valid, [issue.code for issue in report.issues]
+    assert outcome.score is not None and outcome.score.reason == "infrastructure_failure"
+
+
+@pytest.mark.asyncio
+async def test_fatal_error_records_a_bounded_diagnostic_detail(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """An unretryable failure must be diagnosable without a paid rerun.
+
+    ``diagnostic_code`` is derived from the exception CLASS, so the real
+    episode recorded only "rpcremoteerror" with a null ``detail_artifact`` --
+    enough to bucket the failure, never enough to explain it.
+    """
+
+    adapter = FakeAdapter(
+        tmp_path,
+        episode_id,
+        failures={"execute": SupervisionError("worker died mid-observe")},
+        fail_after={"execute": 1},
+    )
+    runner = _runner(
+        tmp_path, episode_id, adapter=adapter, model=ScriptedModel(["step", "step", "finish"])
+    )
+
+    outcome = await runner.run()
+
+    root = outcome.bundle_root
+    assert root is not None
+    assert verify_bundle(root).valid
+    fatal = [error for error in payloads(root, ErrorPayload) if not error.retryable]
+    assert len(fatal) == 1
+    assert fatal[0].diagnostic_code == "supervisionerror"
+    detail = fatal[0].detail_artifact
+    assert detail is not None
+    text = (root / "artifacts" / detail.sha256).read_bytes().decode()
+    assert text == "SupervisionError: worker died mid-observe"
+    # Bounded: ``_diagnostic`` truncates, so a pathological message cannot
+    # inflate the bundle.
+    assert detail.byte_count <= 500
+
+
+@pytest.mark.asyncio
+async def test_fatal_diagnostic_detail_cannot_carry_a_resolved_secret(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """The detail is scanned against the episode's redaction set like any artifact."""
+
+    secret = "s3cret-value-that-must-never-land-in-a-bundle"
+    adapter = FakeAdapter(
+        tmp_path,
+        episode_id,
+        failures={"execute": SupervisionError(f"worker died using {secret}")},
+        fail_after={"execute": 1},
+    )
+    runner = EpisodeRunner(
+        build_spec(episode_id),
+        build_config(tmp_path, max_steps=4),
+        selector=selector(tmp_path),
+        model=ScriptedModel(["step", "step", "finish"]),
+        redactions=RedactionSet.from_resolved_values((secret,)),
+        launch=lambda _: adapter,
+        rescue=_rescue_ok,
+    )
+
+    outcome = await runner.run()
+
+    root = outcome.bundle_root
+    assert root is not None
+    # The leak must not reach disk anywhere in the bundle.
+    for path in root.rglob("*"):
+        if path.is_file():
+            assert secret.encode() not in path.read_bytes(), path
+    # And refusing the detail must not cost the bundle its terminal.
+    report = verify_bundle(root)
+    assert report.valid, [issue.code for issue in report.issues]
+    fatal = [error for error in payloads(root, ErrorPayload) if not error.retryable]
+    assert len(fatal) == 1
+    assert fatal[0].detail_artifact is None
+
+
+@pytest.mark.asyncio
+async def test_detail_publish_os_error_cannot_escape_the_failure_handler(
+    tmp_path: Path,
+    episode_id: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A disk failure while publishing the fatal-error detail must not lose the terminal.
+
+    Regression for the round-1 review (R1-1): ``publish_artifact`` poisons the
+    writer and re-raises a RAW ``OSError`` on ambiguous I/O (ENOSPC/EIO), and
+    ``_publish`` converts only ``EvidenceError`` -- so before the catch at the
+    detail site was widened, an OSError there escaped ``_finalize_failure`` and
+    propagated out of ``run()``: the caller got a bare exception, no
+    ``EpisodeOutcome``, and a bundle with its steps but no terminal. That is the
+    exact "failure handler destroys the bundle's terminal" shape this PR exists
+    to remove, gated on a disk error instead of an adapter error.
+
+    The promise is best-effort publication, never best-effort terminal: the
+    detail may be lost, but ``run()`` must still return a structured outcome and
+    the bundle must stay recoverable (a fresh process can still abandon it).
+    """
+
+    detail_bytes = b"SupervisionError: worker died"
+    adapter = FakeAdapter(
+        tmp_path,
+        episode_id,
+        failures={"execute": SupervisionError("worker died")},
+        fail_after={"execute": 1},
+    )
+    runner = _runner(
+        tmp_path, episode_id, adapter=adapter, model=ScriptedModel(["step", "step", "finish"])
+    )
+
+    real_publish = EvidenceWriter.publish_artifact
+
+    def faulty_publish(self: Any, source: Any, *, media_type: str, **kwargs: Any) -> Any:
+        if bytes(source) == detail_bytes:
+            # The store's real contract on ambiguous I/O: poison, then re-raise
+            # the raw OSError (store.py publish_artifact).
+            self._poison()  # pyright: ignore[reportPrivateUsage]
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return real_publish(self, source, media_type=media_type, **kwargs)
+
+    monkeypatch.setattr(EvidenceWriter, "publish_artifact", faulty_publish)
+
+    # Pre-fix this raised OSError out of run(); the fix returns an outcome.
+    outcome = await runner.run()
+
+    assert outcome.status == "abandonment_failed"
+    root = outcome.bundle_root
+    assert root is not None
+    # The evidence the episode already bought is still on disk.
+    report = verify_bundle(root)
+    assert len([e for e in report.events if isinstance(e.payload, EnvironmentStepPayload)]) == 1
+    # And the bundle is recoverable: a fresh process can still abandon it, so
+    # the terminal is reachable even though this run could not record it.
+    recovered = EvidenceWriter.open_for_abandon(root, RedactionSet.from_resolved_values(()))
+    try:
+        record = recovered.abandon("infrastructure_failure", "evidence-write-failed")
+    finally:
+        recovered.close()
+    assert record.reason == "infrastructure_failure"
+    assert verify_bundle(root).terminal_state == "abandoned"
