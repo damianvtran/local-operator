@@ -5295,11 +5295,15 @@ class Editor(TextArea):
         inside one phase does not re-open an Esc-dismissed list.
         """
         cursor = self._caret_offset()
-        # Checked FIRST and short-circuiting: a `$` token is anchored at offset
-        # 0, so it cannot overlap a slash construct, and answering it here
-        # keeps the three phases mutually exclusive without the slash parsers
-        # having to know the sigil exists.
-        if skill_token(self.text, cursor) is not None:
+        # Checked FIRST and short-circuiting, but the reason is no longer "a `$`
+        # is anchored at offset 0": it is inline now, so `/team ops $research`
+        # puts both sigils on one line. `skill_token` takes the recognised
+        # vocabulary and declines whenever a terminated command has CLAIMED the
+        # caret's position, which is the same claim `slash_context` and
+        # `slash_argument` resolve their own nested slashes with. The two answers
+        # are therefore disjoint by construction, and this order only decides who
+        # is asked first — not who wins.
+        if skill_token(self.text, cursor, self._command_names) is not None:
             return "skill"
         if (
             slash_argument(self.text, self._argument_commands, cursor, self._command_names)
@@ -5342,12 +5346,13 @@ class Editor(TextArea):
         the caret sits, not just what the buffer contains.
         """
         cursor = self._caret_offset()
-        # The `$skill` list is derived before either slash list for the reason
-        # given in `_picker_phase`: the token owns offset 0 exclusively, so
-        # there is no arbitration to do and the slash parsers stay unaware of
-        # it. The rows themselves are pushed by the app (SkillQueryOpened),
-        # exactly as an argument list's are.
-        if skill_token(self.text, cursor) is not None:
+        # The `$skill` list is derived before either slash list, and the
+        # arbitration that makes that safe is inside the parse rather than in
+        # this ordering — see `_picker_phase`: an inline `$` sitting in an
+        # engaged command's argument is claimed by that command and never
+        # answers here. The rows themselves are pushed by the app
+        # (SkillQueryOpened), exactly as an argument list's are.
+        if skill_token(self.text, cursor, self._command_names) is not None:
             if not self._skill_choices_requested:
                 self._skill_choices_requested = True
                 self.post_message(SkillQueryOpened())
@@ -6037,9 +6042,25 @@ class Editor(TextArea):
         The trailing space is deliberate and is what the picker's close depends
         on: it terminates the token, so the list drops away on the same
         keystroke that chose from it and the caret lands where the request is
-        typed. Same contract as :meth:`_complete_name_argument`, minus the
-        inline reassembly — a ``$`` token is anchored at the buffer start, so
-        there is never a preceding draft to move it in front of.
+        typed.
+
+        The same shape as :meth:`_complete_name_argument`, inline reassembly
+        included. A ``$`` is inline now, so a draft can survive outside the
+        token (``fix this $res``, or a ``$`` opening line 2); accepting a row
+        then moves the whole construct to the FRONT with that draft as the
+        request — ``$research fix this `` — and STAGES it. Nothing submits:
+        neither Tab nor Enter ever does for a skill row, because a completed
+        ``$skill `` is the opening of a prompt the user is still writing (see the
+        key routing). The user reads the assembled line and presses Enter.
+
+        Reassembly is what lets the submit-side parser stay ANCHORED at the
+        buffer start (:mod:`local_operator.skills.invoke`) while the composer is
+        inline: by the time Enter is pressed the token IS the prefix.
+
+        ``completion_for`` models both edits — the span replacement and the
+        reassembly — so the buffer written here is the exact buffer the ghost
+        predicted, structurally rather than by two edits happening to agree
+        (review round 1, B1).
         """
         completed = self._completion_for(CompletionMode.SKILL, name)
         if completed is None:
