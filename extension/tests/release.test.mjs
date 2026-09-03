@@ -493,16 +493,42 @@ for (const { file, deployJob, environment } of STORE_WORKFLOWS) {
         `${file}: ${job} must not set continue-on-error, which would make the gate advisory`,
       );
     }
+
+    // The same disarm one level down. `continue-on-error:`/`if:` on preflight's
+    // STEP, or a `|| true` appended to the verifier call, leaves preflight
+    // reporting success on a real leak while `needs: preflight` still looks
+    // intact — so check every indent inside the job, not just its job keys.
+    const preflightBody = jobs.preflight.lines.join("\n");
+    assert.ok(
+      !/^\s+continue-on-error:/m.test(preflightBody),
+      `${file}: no step in preflight may set continue-on-error`,
+    );
+    assert.ok(
+      !/^\s+if:/m.test(preflightBody),
+      `${file}: no step in preflight may carry an if: condition`,
+    );
+    // A trailing `|| true` / `|| :` swallows the verifier's non-zero exit.
+    assert.ok(
+      !/verify-release-environment\.sh[^\n]*(\|\||;)/.test(preflightBody.replace(/\\\n/g, " ")),
+      `${file}: preflight's verifier call must not be chained with || or ;, which would swallow its exit code`,
+    );
   });
 
   test(`${file} checks the same variables in preflight and in the environment`, async () => {
     // F4: the names are listed twice per workflow with nothing keeping them in
     // sync, so a fifth variable added only to the deploying job would never be
     // scope-checked. Compare the two lists rather than trusting review.
+    //
+    // Match the ARGUMENT list (`NAME "$NAME"` pairs in the `run:` block), not
+    // the `env:` mapping: the script only ever checks the names passed to it
+    // positionally, so an `env:` entry with no matching argument is not
+    // verified at all. Pinning `env:` instead left three disarms green —
+    // truncating preflight's arguments, passing `""` for all four, and adding
+    // a fifth variable to both `env:` blocks but only one argument list.
     const text = await readFile(new URL(`../../.github/workflows/${file}`, import.meta.url), "utf8");
     const jobs = parseJobs(text);
     const names = (job) => [...new Set(
-      [...job.lines.join("\n").matchAll(/^\s+(CWS_[A-Z_]+|GCP_[A-Z_]+):\s*\$\{\{\s*vars\./gm)].map((m) => m[1]),
+      [...job.lines.join("\n").matchAll(/^\s+(CWS_[A-Z_]+|GCP_[A-Z_]+) "\$\{?(?:CWS_[A-Z_]+|GCP_[A-Z_]+)\}?"/gm)].map((m) => m[1]),
     )].sort();
     const preflightNames = names(jobs.preflight);
     assert.deepEqual(
