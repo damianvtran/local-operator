@@ -77,8 +77,17 @@ _ALL_THEMES = theme.available_themes()
 
 @pytest.mark.parametrize("name", _ALL_THEMES)
 def test_theme_is_total(name: str) -> None:
+    """Every required token is present; nothing outside the known vocabulary is.
+
+    ``theme.OPTIONAL_TOKENS`` (the tool-category family) sits outside the
+    required set but is always resolved by ``register_theme`` — a theme that
+    does not author one still ends up with a filled value, so ``spec.tokens``
+    is exactly ``SEMANTIC_TOKENS | OPTIONAL_TOKENS`` for every registered
+    theme, never a partial set.
+    """
     spec = theme.theme_spec(name)
-    assert set(spec.tokens) == set(theme.SEMANTIC_TOKENS)
+    assert set(theme.SEMANTIC_TOKENS) <= set(spec.tokens)
+    assert set(spec.tokens) == set(theme.SEMANTIC_TOKENS) | set(theme.OPTIONAL_TOKENS)
     assert spec.label, f"{name} has no picker label"
     assert spec.description, f"{name} has no picker description"
 
@@ -147,6 +156,7 @@ def test_elevation_is_monotonic(name: str) -> None:
 
 @pytest.mark.parametrize("name", _ALL_THEMES)
 def test_tints_are_casts_not_slabs(name: str) -> None:
+    """Every tint stays a cast, not a slab: near the ground in luminance."""
     tokens = theme.theme_spec(name).tokens
     failures: list[str] = []
     for token in ("tint-danger", "tint-select", "tint-select-hi"):

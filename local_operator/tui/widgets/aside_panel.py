@@ -565,7 +565,7 @@ class AsidePanel(Static):
     ) -> list[Text]:
         """The question on the transcript's spine: dim mark, ``fg`` prose.
 
-        NOT the accent. The stylesheet enumerates the four sites the one green
+        NOT the accent. The stylesheet enumerates the five sites the one green
         is spent on and ends "Before adding a sixth, take one away" — and this
         would be by far the largest of them, three wrapped questions being some
         hundreds of cells. The accent also MEANS "a turn is live", which a

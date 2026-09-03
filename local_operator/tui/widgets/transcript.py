@@ -782,11 +782,21 @@ class UserBlock(TranscriptBlock):
     unmistakably the author's. A rule at column 2 with prose at 4, or prose left
     at 0, would have made the two systems share an origin and collide.
 
-    **No background tint.** Elevation-as-a-background-step is already spent, in
-    full, on the tool ledger — every tool row is a filled slab, and that fill
-    CARRIES the outcome. A second slab kind on the same surface makes the
-    transcript a stack of cards and demotes the one element whose fill means
-    something. The gutter column carries the whole signal instead.
+    **The prompt carries NO background.** Elevation-as-a-background-step is
+    already spent, in full, on the tool ledger — every tool row is a filled
+    slab, and that fill CARRIES the outcome. A second slab kind on the same
+    surface makes the transcript a stack of cards and demotes the one element
+    whose fill means something.
+
+    A ``tint-user`` ground shipped briefly against that argument, on the
+    grounds that a solved CHROMA cast is not an elevation step and so does not
+    add a second slab KIND. The measurement held up — the cast moved mean
+    ΔL* 0.39 where the ledger's fill moves 3.52 — and the frame still lost:
+    a tinted band behind every prompt read as a slab regardless of the axis it
+    was built on, and competed with the ledger for the same glance. Removed on
+    review. The gutter bar already marks a prompt on every wrapped row and the
+    adaptive ``.gap-above`` rule already brackets it; the ground was a third
+    cue for something two were carrying.
 
     **The rule is ``dim``, not the accent**, and it does not need a hue to
     carry. What makes it read is EXTENT: it is the only CONTINUOUS multi-row
@@ -802,13 +812,22 @@ class UserBlock(TranscriptBlock):
     The accent is ruled out on its own budget: it is spent on exactly five
     sites (enumerated in ``local_operator.tcss``) and means "a turn is live", so
     a green column beside every prompt would be the largest accent surface in
-    the app and would mean nothing. ``dim`` is the sheet's own separator ink and
-    measures 4.55:1 on the dark ground and 3.77:1 on paper — clearing the 3:1
-    floor for a graphical object in both ramps while staying below the body ink,
-    which the brighter neutral does not (it wins on dark and drops under the
-    floor on paper). ``▌`` (LEFT HALF BLOCK) buys the weight back through the
-    GLYPH — half a cell of solid ink, where ``│`` would draw the left edge of a
-    box the minimalism contract forbids.
+    the app and would mean nothing. That argument stands and is why the rule is
+    not the accent — but it was over-applied to mean the rule could carry no
+    hue at all, and ``dim`` is the sheet's own SEPARATOR ink: the same grey as
+    a list bullet and a settled tool row's command. The one element a reader
+    scrolls back to find was drawn in the ink used for everything incidental.
+
+    The rule is ``signal`` — the REFERENCE hue, "links, file paths", the things
+    you go back and look at. A prompt is the reference case. It is spent on the
+    RULE alone, which is the only CONTINUOUS multi-row column in the transcript
+    and therefore the cheapest place a hue can go: one half-cell per row, no
+    area, nothing tinted. ``▌`` (LEFT HALF BLOCK) buys the weight back through
+    the GLYPH — half a cell of solid ink, where ``│`` would draw the left edge
+    of a box the minimalism contract forbids. Held to the 3:1 floor a graphical
+    object answers to, ``signal`` clears it in all 54 themes (worst 4.27:1,
+    ``everforest-light``); ``dim``'s own 4.55:1 dark / 3.77:1 paper is what it
+    replaces.
 
     **Spacing is unchanged.** :attr:`SPACING_LEAD` already opens a row above
     every prompt and the block below is always a different
@@ -830,7 +849,27 @@ class UserBlock(TranscriptBlock):
     #: inlined so the two candidate weights could be rendered and COMPARED at
     #: 120 and 60 columns instead of argued about; see the class docstring for
     #: why the answer is not the accent.
-    RULE_TOKEN = "dim"
+    #:
+    #: The rule is ``signal``, not ``dim``. A prompt had no colour of its own
+    #: anywhere: the bar was the transcript's separator ink, the same grey as
+    #: a list bullet and a settled tool row's command, so the one element a
+    #: reader scrolls back to FIND was drawn in the ink used for everything
+    #: incidental. ``signal`` is the ramp's REFERENCE hue — "links, file
+    #: paths", the things you go back and look at — and a prompt is the
+    #: reference case: what you asked, which is what a scroll-back is for.
+    #:
+    #: On the RULE, not on the prose or a ground. The bar is the only
+    #: CONTINUOUS multi-row column in the transcript, so it is the cheapest
+    #: place to spend a hue — one half-cell per row, no area. ``TEXT_TOKEN``
+    #: stays ``fg`` because a prompt is body text and must not be tinted, and
+    #: a background was tried and removed (see the class docstring): a fill
+    #: behind every prompt competed with the ledger, which is the one surface
+    #: whose fill carries meaning.
+    #:
+    #: Measured as a graphical object (the 3:1 non-text floor, which is what
+    #: a solid block glyph is held to): ``signal`` clears it in all 54 themes,
+    #: worst case 4.27:1 on ``everforest-light``.
+    RULE_TOKEN = "signal"
     TEXT_TOKEN = "fg"
 
     #: Narrowest body the text is wrapped into. Below ``RULE_COLS + MIN_BODY``

@@ -33,10 +33,13 @@ across::
   ``-N`` in the danger tint, rendered ONLY when the tool result actually
   reported them (an unknown count renders nothing — never ``+0 -0``)
 - status right-aligned (D6): EMPTY while running — no trailing glyph, the
-  column stays clear until the duration lands (D28); ``✓ duration`` all
-  dim on success (D12: only failure gets color); ``✗ error`` danger with
-  the duration dim as a second run (D13); ``⊘ interrupted`` dim when the
-  turn ended before completion (TUI-019). The duration is right-justified
+  column stays clear until the duration lands (D28); the glyph carries the
+  outcome ink and the duration rides beside it as a second run — ``✓``
+  colored ``success`` with a dim duration (narrowing D12: see the rationale
+  at ``_outcome_runs`` and
+  ``bindings.BY_ELEMENT["tool.status.success_glyph"].note``); ``✗ error``
+  danger with the duration dim as a second run (D13); ``⊘ interrupted`` dim
+  when the turn ended before completion (TUI-019). The duration is right-justified
   into a fixed :data:`DURATION_COL` so the outcome glyph sits in a STABLE
   column — otherwise ``✓ 0.4s`` and ``✓ 12.3s`` put the glyph one cell
   apart, and the pass/fail scan that right-alignment exists to serve has to
@@ -93,7 +96,7 @@ from rich.text import Text
 from textual.timer import Timer
 
 from local_operator.ansi import strip_control_sequences
-from local_operator.tui import theme as theme_mod
+from local_operator.tui import bindings
 from local_operator.tui.glyphs import display_name, tool_icon
 from local_operator.tui.widgets.transcript import (
     TOOL_NAME_COL,
@@ -162,6 +165,55 @@ NOTICE_SECONDS = 2.0
 #: ten: the icon column now carries identity, and the two cells it costs come
 #: out of the name rather than out of the summary. The transcript owns the
 #: shared value and may widen it — see :attr:`TranscriptView.tool_name_col`.
+#: Tool -> ledger category, mirroring `glyphs.PLAIN_TOOL_ICONS`' own
+#: shell/read/mutate/search/meta grouping rather than inventing a second
+#: taxonomy. The axis is what the call DID to the machine, which is the
+#: question a ledger is scanned for: reading is safe, mutating is not, and
+#: executing is the one you re-read before trusting.
+#:
+#: Anything absent — an `mcp__*` call, a new builtin — falls through to
+#: `tool.row.name_settled`, the neutral this column has always used. An
+#: unclassified tool is quiet, never mis-filed.
+_TOOL_CATEGORY: dict[str, str] = {
+    "read": "tool.row.name_read",
+    "glob": "tool.row.name_read",
+    "grep": "tool.row.name_read",
+    "web_fetch": "tool.row.name_read",
+    "web_search": "tool.row.name_read",
+    "browser": "tool.row.name_read",
+    "list_variables": "tool.row.name_read",
+    "read_variable": "tool.row.name_read",
+    "write": "tool.row.name_mutate",
+    "edit": "tool.row.name_mutate",
+    "bash": "tool.row.name_exec",
+    "eval": "tool.row.name_exec",
+    "task": "tool.row.name_meta",
+    "agent": "tool.row.name_meta",
+    "hub": "tool.row.name_meta",
+    "todo": "tool.row.name_meta",
+    "send": "tool.row.name_meta",
+    "wake": "tool.row.name_meta",
+    "ask": "tool.row.name_meta",
+}
+
+
+def _category_element(tool_name: str) -> str:
+    """The binding id for ``tool_name``'s settled name span.
+
+    Case-insensitive because ``tool_name`` is MODEL-controlled — a provider
+    that echoes ``Bash`` back must land in the same category as ``bash``,
+    exactly as :func:`glyphs.tool_icon` already reasons about its own lookup.
+
+    The map stores WHOLE element ids rather than a category name spliced into
+    an f-string. The f-string version left `tool.row.name_` as the only
+    literal in the source, so the binding-table coverage gate — which reads
+    this module's AST to prove every element it paints is declared — saw a
+    prefix that matches no binding and could no longer verify the five that
+    are. A gate that cannot see the call sites is not a gate.
+    """
+    return _TOOL_CATEGORY.get(tool_name.strip().lower(), "tool.row.name_settled")
+
+
 NAME_COL = TOOL_NAME_COL
 #: The ceiling that widening respects. Past roughly this width the eye stops
 #: scanning a column of names and starts reading a list of them.
@@ -1694,8 +1746,8 @@ class ToolCard(ExpandableActionBlock):
         :data:`LIVE_MAX_LINES` for why this block keeps the end where the
         settled block keeps the beginning.
         """
-        dim = Style(color=theme_mod.semantic_color("dim"))
-        accent = Style(color=theme_mod.semantic_color("accent"))
+        dim = bindings.style("tool.live.dim")
+        accent = bindings.style("tool.live.header")
         line_width = max(1, width - 2 - OUTPUT_INDENT)
         indent = " " * OUTPUT_INDENT
         # State, then time, then the caveat — read left to right that is "it is
@@ -1718,8 +1770,8 @@ class ToolCard(ExpandableActionBlock):
             if not self._live:
                 header = f"{header} · {LIVE_HEADER_PENDING}"
         row.append("\n" + indent, style=dim)
-        # Accent, the same ink the running icon spends: this row is the card's
-        # answer to "is it alive", and it has to survive a still frame.
+        # See `bindings.BY_ELEMENT["tool.live.header"].note` for why this rides
+        # `accent`.
         row.append(truncate_cells(header, line_width), style=accent)
         if self._live_elided or self._live_dropped > 0:
             plural = "s" if self._live_dropped != 1 else ""
@@ -1746,9 +1798,9 @@ class ToolCard(ExpandableActionBlock):
         """
         if not self._args:
             return
-        dim = Style(color=theme_mod.semantic_color("dim"))
-        label = Style(color=theme_mod.semantic_color("label"))
-        body = Style(color=theme_mod.semantic_color("fg"))
+        dim = bindings.style("tool.args.dim")
+        label = bindings.style("tool.args.label")
+        body = bindings.style("tool.args.value")
         line_width = max(1, width - 2 - OUTPUT_INDENT)
         indent = " " * OUTPUT_INDENT
         for key, value in self._args.items():
@@ -1792,8 +1844,8 @@ class ToolCard(ExpandableActionBlock):
         truncates per line: one output line is one row, so the expanded
         height is exactly what the marker promises and never reflows.
         """
-        dim = Style(color=theme_mod.semantic_color("dim"))
-        body = Style(color=theme_mod.semantic_color("danger")) if self._state == "error" else dim
+        dim = bindings.style("tool.output.dim")
+        body = bindings.style("tool.output.error") if self._state == "error" else dim
         line_width = max(1, width - 2 - OUTPUT_INDENT)
         indent = " " * OUTPUT_INDENT
         shown = self._output[:EXPAND_MAX_LINES]
@@ -1808,10 +1860,10 @@ class ToolCard(ExpandableActionBlock):
 
     def _append_search_body(self, row: Text, width: int) -> None:
         """Search expansion hierarchy: titles lead, URLs signal, snippets recede."""
-        fg = Style(color=theme_mod.semantic_color("fg"), bold=True)
-        signal = Style(color=theme_mod.semantic_color("signal"))
-        muted = Style(color=theme_mod.semantic_color("muted"))
-        dim = Style(color=theme_mod.semantic_color("dim"))
+        fg = bindings.style("tool.search.title")
+        signal = bindings.style("tool.search.url")
+        muted = bindings.style("tool.search.snippet")
+        dim = bindings.style("tool.search.dim")
         line_width = max(1, width - 2 - OUTPUT_INDENT)
         indent = " " * OUTPUT_INDENT
         shown = self._output[:EXPAND_MAX_LINES]
@@ -1824,8 +1876,7 @@ class ToolCard(ExpandableActionBlock):
             elif stripped.startswith(("Provider:", "Sources:")):
                 ink = dim
             else:
-                # Snippets and the actionable footer must meet normal-text
-                # contrast; ``dim`` is reserved for structural metadata.
+                # See `bindings.BY_ELEMENT["tool.search.snippet"].note`.
                 ink = muted
             row.append("\n" + indent, style=dim)
             row.append(truncate_cells(line, line_width), style=ink)
@@ -1843,32 +1894,26 @@ class ToolCard(ExpandableActionBlock):
         normal contrast, the same hierarchy the search card uses to keep its
         structural rows from competing with the result.
         """
-        signal = Style(color=theme_mod.semantic_color("signal"))
-        muted = Style(color=theme_mod.semantic_color("muted"))
-        dim = Style(color=theme_mod.semantic_color("dim"))
-        danger = Style(color=theme_mod.semantic_color("danger"), bold=True)
+        signal = bindings.style("tool.fetch.signal")
+        muted = bindings.style("tool.fetch.snippet")
+        dim = bindings.style("tool.fetch.dim")
+        danger = bindings.style("tool.fetch.error")
         line_width = max(1, width - 2 - OUTPUT_INDENT)
         indent = " " * OUTPUT_INDENT
         shown = self._output[:EXPAND_MAX_LINES]
         for line in shown:
             stripped = line.strip()
             if stripped.startswith("⚠ HTTP"):
-                # F1: the non-2xx error row rides `danger`, bold — the strongest
-                # treatment on the card, so a block/error page cannot be mistaken
-                # for successful content. Matches the tool result's is_error flag.
+                # See `bindings.BY_ELEMENT["tool.fetch.error"].note` (F1).
                 ink = danger
             elif stripped.startswith("Fetched:"):
-                # D3: the final URL is the card's anchor, so it rides `signal`
-                # blue like web_search's URLs instead of receding into the dim
-                # metadata. The "Fetched:" label and the trailing `· status ·
-                # ctype · cache` metadata stay dim; only the URL(s) lift.
+                # See `bindings.BY_ELEMENT["tool.fetch.signal"].note` (D3).
                 self._append_fetched_row(row, line, line_width, indent, dim, signal)
                 continue
             elif stripped.startswith("Rendered:"):
                 ink = dim
             elif stripped.startswith("sparse/JS-gated"):
-                # The one advisory row earns attention: it is the signal to reach
-                # for browser, not structural chrome.
+                # See `bindings.BY_ELEMENT["tool.fetch.signal"].note`.
                 ink = signal
             else:
                 ink = muted
@@ -1923,10 +1968,10 @@ class ToolCard(ExpandableActionBlock):
         coloured line never reads as a wall of tint. The nameless ``---/+++``
         file headers are filtered out below rather than tinted.
         """
-        success = Style(color=theme_mod.semantic_color("success"))
-        danger = Style(color=theme_mod.semantic_color("danger"))
-        muted = Style(color=theme_mod.semantic_color("muted"))
-        dim = Style(color=theme_mod.semantic_color("dim"))
+        success = bindings.style("tool.diff.added")
+        danger = bindings.style("tool.diff.removed")
+        muted = bindings.style("tool.diff.hunk")
+        dim = bindings.style("tool.diff.context")
         line_width = max(1, width - 2 - OUTPUT_INDENT)
         indent = " " * OUTPUT_INDENT
         # The `---`/`+++` file headers are dropped: the tool diffs one file's
@@ -1977,17 +2022,22 @@ class ToolCard(ExpandableActionBlock):
 
     def _build_row(self, width: int) -> Text:
         """The single summary row — the ONE-LINE guarantee lives here."""
-        dim = Style(color=theme_mod.semantic_color("dim"))
-        muted = Style(color=theme_mod.semantic_color("muted"))
-        # Two-step fade on settle: the live row keeps the string green on the
-        # name and readable `muted` body text; a settled row drops both one
-        # step so the running row is the brightest thing on screen.
-        # Composing counts as live: the model is actively producing this call,
-        # and a row that dimmed while its arguments streamed would read as a
-        # finished action rather than as the one thing currently happening.
+        dim = bindings.style("tool.row.dim")
+        # See `bindings.BY_ELEMENT["tool.row.name_running"].note` for the
+        # two-step fade this implements.
         running = self._state in ("running", "composing")
-        name_style = Style(color=theme_mod.semantic_color("string")) if running else muted
-        summary_style = muted if running else dim
+        # Liveness outranks identity: a live row keeps the fade's green, and
+        # the category hue applies only once the row has settled. Two signals
+        # on one span would mean the ledger said "what kind" and "is it live"
+        # in the same place, which is how the outcome column lost its own
+        # meaning before D12 was narrowed.
+        name_style = (
+            bindings.style("tool.row.name_running")
+            if running
+            else bindings.style(_category_element(self.tool_name))
+        )
+        summary_element = "tool.row.summary_running" if running else "tool.row.summary_settled"
+        summary_style = bindings.style(summary_element)
         width = max(width - 2, 10)  # 1-cell inner padding each side (kit rule)
 
         # Status segment (right-aligned), capped at width // 3 (D8) and then
@@ -2048,12 +2098,10 @@ class ToolCard(ExpandableActionBlock):
         # back: at 46 columns the floor dropped the notice too, so activating
         # an inert row left a byte-identical frame.
         slot = ""
-        slot_token = "dim"
+        slot_element = "tool.row.slot_offer"
         remaining = max(0, width - prefix_cells - status_cells - 2)
         if self.can_expand():
-            # Generic tool output stays quiet until the row is targeted. Search
-            # sources are the primary result, not diagnostics, so their
-            # disclosure remains visible at rest and in colorless terminals.
+            # See `bindings.BY_ELEMENT["tool.row.slot_offer"].note`.
             if (
                 self.tool_name.lower() == "web_search"
                 or self._is_fetch_card
@@ -2064,13 +2112,8 @@ class ToolCard(ExpandableActionBlock):
                 if remaining - (cell_len(offer) + 1) >= _SUMMARY_FLOOR:
                     slot = offer
         elif self._notice:
-            # `muted`, one step brighter than the offer's `dim`: this is not
-            # something the eye may skip. Walk the ladder — full phrase, then
-            # the three-cell glyph — and take the first rung the row can hold
-            # with nothing reserved for the summary. Only when even ⟨∅⟩ will
-            # not fit does the answer go unsaid, and by then the row is down
-            # to its icon and its outcome anyway.
-            slot_token = "muted"
+            # See `bindings.BY_ELEMENT["tool.row.slot_notice"].note`.
+            slot_element = "tool.row.slot_notice"
             for rung in NOTICE_LADDER.get(self._notice, (self._notice,)):
                 if cell_len(rung) + 1 <= remaining:
                     slot = rung
@@ -2131,23 +2174,19 @@ class ToolCard(ExpandableActionBlock):
             summary = truncate_cells(self._summary, budget)
 
         row = _row_text()
-        # The icon carries the running state: accent while live (D26 — a still
-        # frame must read "live" without the shimmer), dim once settled. This
-        # is one of the five places in the app the accent green is spent.
-        icon_style = Style(color=theme_mod.semantic_color("accent")) if running else dim
+        # See `bindings.BY_ELEMENT["tool.row.icon_running"].note`.
+        icon_style = (
+            bindings.style("tool.row.icon_running")
+            if running
+            else bindings.style("tool.row.icon_settled")
+        )
         row.append(icon + " ", style=icon_style)
         row.append(name, style=name_style)
         row.append(" ", style=dim)
         if row_chip:
-            # Chrome quieter than the fact while live (the summary is
-            # `muted` there); one step BRIGHTER than the fact once settled,
-            # when the summary drops to `dim` — the attribution is the thing
-            # a reader scrolling back is hunting for, and a chip that faded
-            # to the same ink as the command stopped separating the two
-            # (design round 1, D1). It survives every shed rung because the
-            # budget above already paid for it.
-            chip_style = muted if not running else dim
-            row.append(row_chip, style=chip_style)
+            # See `bindings.BY_ELEMENT["tool.row.chip_running"].note`.
+            chip_element = "tool.row.chip_settled" if not running else "tool.row.chip_running"
+            row.append(row_chip, style=bindings.style(chip_element))
         row.append(summary, style=summary_style)
 
         # ONE right-aligned tail: the slot and the status share a single pad,
@@ -2161,7 +2200,7 @@ class ToolCard(ExpandableActionBlock):
             used = cell_len(row.plain)
             row.append(" " * max(1, width - used - tail_cells), style=dim)
             if slot:
-                row.append(slot, style=Style(color=theme_mod.semantic_color(slot_token)))
+                row.append(slot, style=bindings.style(slot_element))
                 row.append(" ", style=dim)
             for text, style in status_runs:
                 row.append(text, style=style)
@@ -2248,7 +2287,7 @@ class ToolCard(ExpandableActionBlock):
             elapsed = self._elapsed()
             if elapsed is None:
                 return []
-            dim = Style(color=theme_mod.semantic_color("dim"))
+            dim = bindings.style("tool.status.running_duration")
             text = format_duration(max(0, int(elapsed)))
             return [("  ", dim), (text.rjust(DURATION_COL), dim)]
         core = self._outcome_runs(cap, terse=terse)
@@ -2265,9 +2304,9 @@ class ToolCard(ExpandableActionBlock):
         """``+N`` / ``-N`` counters, tinted success/danger. Empty when unknown."""
         runs: list[tuple[str, Style]] = []
         if self._added > 0:
-            runs.append((f"+{self._added} ", Style(color=theme_mod.semantic_color("success"))))
+            runs.append((f"+{self._added} ", bindings.style("tool.status.diff_added")))
         if self._removed > 0:
-            runs.append((f"-{self._removed} ", Style(color=theme_mod.semantic_color("danger"))))
+            runs.append((f"-{self._removed} ", bindings.style("tool.status.diff_removed")))
         return runs
 
     def _outcome_runs(self, cap: int = 0, *, terse: bool = False) -> list[tuple[str, Style]]:
@@ -2294,7 +2333,7 @@ class ToolCard(ExpandableActionBlock):
         outranks explanation, because a row that cannot say which tool failed
         has stopped being a ledger entry.
         """
-        dim = Style(color=theme_mod.semantic_color("dim"))
+        dim = bindings.style("tool.status.duration")
         if self._duration is None:
             # A REPLAYED row: the transcript records what a tool did, never how
             # long it took. `self._duration or 0.0` rendered that as `0.0s`,
@@ -2317,8 +2356,9 @@ class ToolCard(ExpandableActionBlock):
                 duration = format_duration(elapsed)
             duration = duration.rjust(DURATION_COL)
         if self._state == "success":
-            # D12: success is quiet — check + duration both dim, no reason.
-            return [(f"{ICON_SUCCESS} ", dim), (duration, dim)]
+            # See `bindings.BY_ELEMENT["tool.status.success_glyph"].note`.
+            success_ink = bindings.style("tool.status.success_glyph")
+            return [(f"{ICON_SUCCESS} ", success_ink), (duration, dim)]
 
         # The GLYPH sits in the status column with the duration, not at the head
         # of the reason (D20). The right edge is where an operator scans a run
@@ -2338,10 +2378,13 @@ class ToolCard(ExpandableActionBlock):
         # carries the state alone — which it can, being distinguishable from
         # ✓ and ✗ with no colour at all.
         if self._state == "interrupted":
-            glyph, reason, tint = ICON_INTERRUPTED, "interrupted", dim
+            # `bindings.BY_ELEMENT["tool.status.interrupted"]` deliberately
+            # keeps `dim`, not a hue: see its note.
+            glyph, reason = ICON_INTERRUPTED, "interrupted"
+            tint = bindings.style("tool.status.interrupted")
             abbreviates = False
         else:
-            danger = Style(color=theme_mod.semantic_color("danger"))
+            danger = bindings.style("tool.status.error_glyph")
             glyph, reason, tint = ICON_ERROR, self._error, danger
             abbreviates = True
 
