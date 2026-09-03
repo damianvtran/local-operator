@@ -437,10 +437,18 @@ def test_a_non_utf8_pipe_is_a_clean_error_not_a_traceback(monkeypatch) -> None:
     assert red.call_args[0][0] == "no session found with pid 777777"
 
 
-def test_a_non_utf8_pipe_degrades_into_the_existing_body_refusal(monkeypatch) -> None:
-    """A binary body that DOES reach validation becomes the shared core's
-    existing, well-worded refusal rather than a new error class: undecodable
-    bytes replace to U+FFFD, which is a non-empty body under the cap."""
+def test_a_non_utf8_pipe_is_delivered_as_replacement_characters(monkeypatch) -> None:
+    """A binary body that reaches delivery is SENT as U+FFFD mojibake, not
+    refused (QA round 3, Q6).
+
+    ``validate_peer_body`` rejects only an empty or over-cap body, and
+    replacement characters are neither, so this path ends at rc=0 with degraded
+    text. Pinned explicitly because it is easy to assume the lenient decode
+    "falls through to a refusal" — it does not, and the earlier name and comment
+    here claimed exactly that. The prior behaviour was an uncaught traceback, so
+    delivering degraded text is the improvement; refusing would require
+    inventing a threshold for how much mojibake is too much.
+    """
     monkeypatch.setattr("sys.stdin", _BinaryStdin(b"\xa8\x8d\xff\xfe"))
     args = _parse_send(["--pid", "123"])
     record = _Record(os.getppid() + 9999)
@@ -478,16 +486,25 @@ def test_the_worked_example_never_echoes_a_piped_payload(monkeypatch, capsys) ->
     assert len(err) < 500
 
 
-def test_a_long_typed_body_is_elided_in_the_worked_example(monkeypatch, capsys) -> None:
-    """Same reason as the piped case: the line exists to show the SHAPE of the
-    command, and the user still has their own body one line up."""
+def test_a_long_typed_body_becomes_a_placeholder_not_a_truncation(monkeypatch, capsys) -> None:
+    """QA round 3, Q7.
+
+    A long body is replaced by ``'<your message>'``, not truncated. The line
+    exists to show the SHAPE of the command and the user still has their own
+    body one line up — but a truncation would PASTE AND RUN, silently
+    delivering a 60-character stub ending in "...". A placeholder cannot be
+    mistaken for a runnable command, which is the same reason the piped branch
+    prints ``<your piped input>``.
+    """
     monkeypatch.setattr("sys.stdin", _FakeTtyStdin())
     args = _parse_send(["alpha", "y" * 400])
     with patch("local_operator.cli._resolve_peer_target", return_value=(None, [_Record(10)], "")):
         send_command(args)
     err = capsys.readouterr().err
     assert "y" * 400 not in err
-    assert "..." in err
+    assert "'<your message>'" in err
+    # No truncated stub that could be pasted and delivered verbatim.
+    assert "yyy" not in err
 
 
 def test_a_short_typed_body_is_still_shown_in_full(monkeypatch, capsys) -> None:

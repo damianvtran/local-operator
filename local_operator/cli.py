@@ -1303,8 +1303,18 @@ def send_command(args: argparse.Namespace) -> int:
     # of send_command as a traceback, even when the target does not resolve and
     # the bytes are never used. An uncaught traceback is never an acceptable
     # user-visible failure here — the same U1 rule the delivery except-clause
-    # below follows. `errors="replace"` degrades a binary paste into the
-    # existing, well-worded `validate_peer_body` refusal instead of a new error.
+    # below follows.
+    #
+    # `errors="replace"` DELIVERS undecodable input as U+FFFD replacement
+    # characters; it does not refuse it. `validate_peer_body` rejects only an
+    # empty or over-cap body, and mojibake is neither, so mis-piping a gzip
+    # sends the peer a screenful of "�" at rc=0. That is deliberate: this is a
+    # text-messaging command, the sender sees the recipient in the success line,
+    # and no payload is lost or misdirected. Refusing on undecodable bytes
+    # instead would mean inventing a new error class here and deciding what
+    # fraction of replacements is "too much" — a guess, on a path where the
+    # user can simply look at what they piped. The prior behaviour on this path
+    # was a crash, so degraded text is strictly better.
     stdin_body = None
     if args.message is None and not sys.stdin.isatty():
         raw = sys.stdin.buffer.read() if hasattr(sys.stdin, "buffer") else sys.stdin.read()
@@ -1336,8 +1346,16 @@ def send_command(args: argparse.Namespace) -> int:
         if stdin_body is not None:
             example = "<your piped input> | lop send --pid " + str(candidates[0].pid)
         elif message is not None:
-            body = message if len(message) <= 60 else message[:57] + "..."
-            example = f"lop send --pid {candidates[0].pid} {shlex.quote(body)}"
+            # A short body is reproduced verbatim so the line pastes and works,
+            # which is what BLOCKER-2 asked for. A long one becomes a
+            # PLACEHOLDER rather than a truncation: pasting `…LLL...` would
+            # silently deliver a 60-character stub ending in an ellipsis, which
+            # is the copy-paste trap the piped branch above already avoids.
+            example = (
+                f"lop send --pid {candidates[0].pid} {shlex.quote(message)}"
+                if len(message) <= 60
+                else f"lop send --pid {candidates[0].pid} '<your message>'"
+            )
         else:
             example = ""
         if example:
