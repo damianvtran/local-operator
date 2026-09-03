@@ -570,6 +570,22 @@ def build_cli_parser() -> argparse.ArgumentParser:
         parents=[parent_parser],
     )
     wake_list.add_argument("--json", action="store_true", help="machine-readable output")
+    # `create` completes the surface: `status` says whether wakes fire,
+    # `list` says what is scheduled, and this is how a wake gets scheduled
+    # from outside a session — which is also what makes install-on-demand
+    # testable without driving a TUI.
+    wake_create = wake_sub.add_parser(
+        "create",
+        help="schedule a wake for a session (installs the supervisor on demand)",
+        parents=[parent_parser],
+    )
+    wake_create.add_argument("session", help="session id to wake")
+    wake_create.add_argument(
+        "when",
+        help='when to fire: a duration ("in 2m", "45s") or a clock time ("at 09:30")',
+    )
+    wake_create.add_argument("message", help="the self-prompt delivered when it fires")
+    wake_create.add_argument("--json", action="store_true", help="machine-readable output")
     wake_serve = wake_sub.add_parser(
         "serve",
         help="run the supervisor in the foreground (what the LaunchAgent runs)",
@@ -1648,6 +1664,100 @@ def sessions_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _wake_create(args: argparse.Namespace) -> int:
+    """``lop wake create <session> "<when>" "<message>"``.
+
+    Writes into the SAME derived index every other path writes, and installs
+    the supervisor on demand exactly as a session-created schedule does — so
+    a wake made here fires for a closed session, which is the entire promise
+    of the feature. Doing it any other way would make this subcommand a
+    second, quieter way to schedule something that never runs.
+
+    A session that does not exist is refused rather than created: the wake
+    index keys on a session id, and an id with no transcript would produce a
+    reminder the supervisor faithfully fires into nothing.
+    """
+    import time as _time
+
+    from local_operator.harness.wake import (
+        WakeSchedule,
+        parse_wake_at,
+        parse_wake_duration,
+    )
+    from local_operator.paths import config_dir
+    from local_operator.wakes.store import read_entry, write_entry
+
+    root = config_dir()
+    session_id = str(args.session)
+    session_dir = root / "sessions" / session_id
+    if not session_dir.is_dir():
+        print(f"no session {session_id!r}", file=sys.stderr)
+        return 1
+
+    now_ms = int(_time.time() * 1000)
+    raw = str(args.when).strip()
+    # "in 2m" is the phrasing the help text advertises and the one a person
+    # reaches for; the parsers below take the bare duration, so the leading
+    # preposition is stripped here rather than taught to both of them.
+    body = raw[3:].strip() if raw.lower().startswith("in ") else raw
+    if raw.lower().startswith("at "):
+        due_at = parse_wake_at(raw[3:].strip(), now_ms)
+    else:
+        duration = parse_wake_duration(body)
+        due_at = now_ms + duration if duration is not None else parse_wake_at(body, now_ms)
+    if due_at is None:
+        print(f"could not read a time from {raw!r} (try 'in 2m' or 'at 09:30')", file=sys.stderr)
+        return 1
+
+    entry = read_entry(root, session_id) or {}
+    existing = [dict(s) for s in (entry.get("schedules") or ()) if isinstance(s, dict)]
+    # Per-session handles (``w1``…), matching the in-session numbering so the
+    # id a user sees here is the id `/wake` would have given it.
+    schedule = WakeSchedule(
+        id=f"w{len(existing) + 1}",
+        message=str(args.message),
+        next_due_at=due_at,
+        created_at=now_ms,
+    )
+    written = write_entry(
+        root,
+        session_id,
+        cwd=str(entry.get("cwd") or session_dir),
+        schedules=[*existing, schedule],
+    )
+
+    installed_reason = ""
+    try:
+        from local_operator.wakes.install import ensure_supervisor_installed
+
+        installed_reason = ensure_supervisor_installed(root).reason
+    except Exception:  # noqa: BLE001
+        # A wake that is scheduled but unsupervised still fires whenever the
+        # session is open, so a failed install must not fail the command —
+        # `lop wake status` is where that gap is reported, in one place.
+        import logging as _logging
+
+        _logging.getLogger(__name__).debug("wake supervisor install failed", exc_info=True)
+
+    if getattr(args, "json", False):
+        print(
+            _json_dumps(
+                {
+                    "session_id": session_id,
+                    "wake_id": schedule.id,
+                    "next_due_at": due_at,
+                    "entry": str(written) if written else "",
+                    "supervisor": installed_reason,
+                }
+            )
+        )
+        return 0
+    print(f"{schedule.id}  {_format_due((due_at - now_ms) / 1000.0)}  {schedule.message}")
+    if installed_reason:
+        print(f"supervisor: {installed_reason}")
+    return 0
+
+
 def _wake_rows() -> "list[dict[str, Any]]":
     """Every scheduled wake on this machine, soonest first.
 
@@ -1708,6 +1818,9 @@ def wake_command(args: argparse.Namespace) -> int:
         from local_operator.wakes.supervisor import serve
 
         return _asyncio.run(serve(config_dir(), once=bool(args.once)))
+
+    if command == "create":
+        return _wake_create(args)
 
     if command == "list":
         rows = _wake_rows()
