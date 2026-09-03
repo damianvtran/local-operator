@@ -194,24 +194,53 @@ const VALID_VARIABLES = {
   ],
 };
 
-async function runVerifier({ environment = VALID_ENVIRONMENT, branches = VALID_BRANCHES, variables = VALID_VARIABLES } = {}) {
+// The mock routes on the EXACT path and asserts the Authorization header. The
+// previous catch-all matched any URL and ignored auth entirely, so it answered
+// 200 to requests the real API refuses — which is precisely how the 403 that
+// broke run 33793517588 stayed invisible to a green suite. `status` lets a case
+// return a non-200 for one path so the failure path is exercised, not assumed.
+const ENVIRONMENT_PATH = "/repos/owner/repository/environments/chrome-web-store";
+const BRANCHES_PATH = `${ENVIRONMENT_PATH}/deployment-branch-policies`;
+
+async function runVerifier({
+  environment = VALID_ENVIRONMENT,
+  branches = VALID_BRANCHES,
+  status = {},
+  args = ["CWS_EXTENSION_ID", extensionId, "CWS_PUBLISHER_ID", "publisher"],
+} = {}) {
+  const requested = [];
   const server = createServer((request, response) => {
-    let payload;
-    if (request.url.includes("deployment-branch-policies")) {
-      payload = branches;
-    } else if (request.url.includes("/variables")) {
-      payload = variables;
-    } else {
-      payload = environment;
+    const { pathname } = new URL(request.url, "http://127.0.0.1");
+    requested.push(pathname);
+    // A token-blind mock cannot catch an auth regression; the real API 401s.
+    if (request.headers.authorization !== "Bearer test-token") {
+      response.writeHead(401, { "Content-Type": "application/json" })
+        .end(JSON.stringify({ message: "Bad credentials" }));
+      return;
     }
-    response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(payload));
+    const bodies = { [ENVIRONMENT_PATH]: environment, [BRANCHES_PATH]: branches };
+    if (!(pathname in bodies)) {
+      // Unknown path is a hard failure rather than a default payload: the
+      // verifier must not call an endpoint this harness has not modelled.
+      response.writeHead(404, { "Content-Type": "application/json" })
+        .end(JSON.stringify({ message: `unexpected path ${pathname}` }));
+      return;
+    }
+    const code = status[pathname] ?? 200;
+    if (code !== 200) {
+      response.writeHead(code, {
+        "Content-Type": "application/json",
+        // Mirrors the header the real API returns, which the script now prints.
+        "x-accepted-github-permissions": "environments=read",
+      }).end(JSON.stringify({ message: "Resource not accessible by integration" }));
+      return;
+    }
+    response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(bodies[pathname]));
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   try {
-    return await run("bash", [
-      "scripts/verify-release-environment.sh", "chrome-web-store",
-      "CWS_EXTENSION_ID", extensionId,
-      "CWS_PUBLISHER_ID", "publisher",
+    const result = await run("bash", [
+      "scripts/verify-release-environment.sh", "chrome-web-store", ...args,
     ], {
       cwd: import.meta.dirname + "/..",
       env: {
@@ -221,9 +250,18 @@ async function runVerifier({ environment = VALID_ENVIRONMENT, branches = VALID_B
         GITHUB_API_URL: `http://127.0.0.1:${server.address().port}`,
       },
     });
+    return { ...result, requested };
   } finally {
     await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
+}
+
+// Runs the mode that executes outside the environment. It makes no API call,
+// so it needs no server and no token.
+async function runUnscoped(pairs) {
+  return run("bash", [
+    "scripts/verify-release-environment.sh", "--assert-unscoped-empty", ...pairs,
+  ], { cwd: import.meta.dirname + "/..", env: { ...process.env } });
 }
 
 test("protected environment verifier accepts the exact configuration", async () => {
@@ -256,25 +294,77 @@ test("protected environment verifier requires exactly the main branch", async ()
   );
 });
 
-test("protected environment verifier requires every variable at environment scope", async () => {
-  // A variable absent from the environment listing is the repository- or
-  // organization-scoped case the script exists to reject.
+test("protected environment verifier requires every variable to resolve inside the environment", async () => {
+  // An empty value is what `vars.X` yields when X is not defined on the
+  // environment at all, so this is the in-environment half of the scope check.
   await assert.rejects(
-    runVerifier({ variables: { variables: [{ name: "CWS_PUBLISHER_ID", value: "publisher" }] } }),
-    /CWS_EXTENSION_ID must be defined on chrome-web-store/,
+    runVerifier({ args: ["CWS_EXTENSION_ID", "", "CWS_PUBLISHER_ID", "publisher"] }),
+    /CWS_EXTENSION_ID is not defined on chrome-web-store/,
   );
 });
 
-test("protected environment verifier rejects a variable whose value drifted", async () => {
+test("protected environment verifier never calls the ungrantable variables endpoint", async () => {
+  // GET environments/{env}/variables requires `environments=read`, which no
+  // workflow token can hold (run 33793517588 died on it). The mock 404s any
+  // unmodelled path, so a reintroduced call fails loudly here rather than in a
+  // real release. Pinning the exact call list keeps that regression visible.
+  const result = await runVerifier();
+  assert.deepEqual(result.requested, [ENVIRONMENT_PATH, BRANCHES_PATH]);
+  assert.ok(!result.requested.some((path) => path.endsWith("/variables")));
+});
+
+test("protected environment verifier fails closed on a 403 from the environment endpoint", async () => {
+  // The exact failure of run 33793517588. It must abort the release, and the
+  // message must name the status and the endpoint — the old `--fail-with-body`
+  // path printed only "curl: (22) ... error: 403" with neither.
   await assert.rejects(
-    runVerifier({
-      variables: {
-        variables: [
-          { name: "CWS_EXTENSION_ID", value: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
-          { name: "CWS_PUBLISHER_ID", value: "publisher" },
-        ],
-      },
+    runVerifier({ status: { [ENVIRONMENT_PATH]: 403 } }),
+    (error) => {
+      assert.match(error.stderr, /GitHub returned HTTP 403 for environments\/chrome-web-store/);
+      assert.match(error.stderr, /x-accepted-github-permissions: environments=read/);
+      assert.notEqual(error.code, 0);
+      return true;
+    },
+  );
+});
+
+test("protected environment verifier fails closed on a 403 from the branch-policies endpoint", async () => {
+  await assert.rejects(
+    runVerifier({ status: { [BRANCHES_PATH]: 403 } }),
+    /GitHub returned HTTP 403 for environments\/chrome-web-store\/deployment-branch-policies/,
+  );
+});
+
+test("protected environment verifier fails closed when the token is rejected", async () => {
+  // The harness now checks Authorization, so a wrong token yields a real 401
+  // instead of the catch-all 200 the previous mock returned.
+  await assert.rejects(
+    run("bash", ["scripts/verify-release-environment.sh", "chrome-web-store", "CWS_PUBLISHER_ID", "publisher"], {
+      cwd: import.meta.dirname + "/..",
+      env: { ...process.env, GITHUB_TOKEN: "wrong-token", GITHUB_REPOSITORY: "owner/repository", GITHUB_API_URL: "http://127.0.0.1:1" },
     }),
-    /CWS_EXTENSION_ID does not match the environment-scoped value/,
+    /release environment validation failed/,
+  );
+});
+
+test("unscoped mode accepts variables that are invisible outside the environment", async () => {
+  const result = await runUnscoped(["CWS_PUBLISHER_ID", "", "CWS_EXTENSION_ID", ""]);
+  assert.match(result.stdout, /no release variable is defined at repository or organization scope/);
+});
+
+test("unscoped mode rejects a variable readable outside the environment", async () => {
+  // A repository- or organization-scoped variable resolves non-empty in a job
+  // with no `environment:` key. That is the misconfiguration this mode exists
+  // to catch, and it is the half the API listing used to cover.
+  await assert.rejects(
+    runUnscoped(["CWS_PUBLISHER_ID", "", "CWS_EXTENSION_ID", extensionId]),
+    /CWS_EXTENSION_ID is readable outside the environment/,
+  );
+});
+
+test("unscoped mode rejects malformed argument pairs", async () => {
+  await assert.rejects(
+    runUnscoped(["CWS_PUBLISHER_ID"]),
+    /expected NAME VALUE pairs/,
   );
 });

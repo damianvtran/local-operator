@@ -10,9 +10,17 @@ on:
 permissions:
   contents: read
   id-token: write
-  # Required by verify-release-environment.sh: reading environment protection
-  # rules and environment-scoped variables needs Actions read scope, and the
-  # default token here is otherwise stripped to the two scopes above.
+  # `actions: read` is what verify-release-environment.sh needs for the two
+  # endpoints it still calls: GET environments/{env} and its
+  # deployment-branch-policies (both answer 200 with
+  # x-accepted-github-permissions: actions=read).
+  #
+  # It is NOT sufficient for the environment-variables endpoint, which the
+  # script used to call and no longer does. That endpoint demands
+  # `environments=read`, which is not a permission a workflow token can be
+  # granted — a probe job with `permissions: write-all` still gets 403. The
+  # variable-scope invariant is proved by the preflight job below instead. Do
+  # not "fix" a future 403 there by adding scopes; there is no scope to add.
   actions: read
 
 concurrency:
@@ -20,7 +28,30 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Runs deliberately OUTSIDE the environment; see the equivalent job in
+  # chrome-web-store.yml. Promotion is the publish step, so the same
+  # variable-scope invariant has to hold before it authenticates.
+  preflight:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Require release variables to be environment-scoped only
+        env:
+          CWS_PUBLISHER_ID: ${{ vars.CWS_PUBLISHER_ID }}
+          CWS_EXTENSION_ID: ${{ vars.CWS_EXTENSION_ID }}
+          GCP_WIF_PROVIDER: ${{ vars.GCP_WIF_PROVIDER }}
+          CWS_SERVICE_ACCOUNT: ${{ vars.CWS_SERVICE_ACCOUNT }}
+        run: |
+          extension/scripts/verify-release-environment.sh --assert-unscoped-empty \
+            CWS_PUBLISHER_ID "$CWS_PUBLISHER_ID" \
+            CWS_EXTENSION_ID "$CWS_EXTENSION_ID" \
+            GCP_WIF_PROVIDER "$GCP_WIF_PROVIDER" \
+            CWS_SERVICE_ACCOUNT "$CWS_SERVICE_ACCOUNT"
+
   promote:
+    needs: preflight
     runs-on: ubuntu-latest
     # Promotion is a distinct, explicit launch decision: dispatching this
     # workflow is the act of publishing. The environment's former
