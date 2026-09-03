@@ -35,10 +35,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
-import subprocess
-import sys
-import time
 import uuid
 from pathlib import Path
 from typing import Any, Callable
@@ -311,6 +307,34 @@ class AttachClient:
 
     async def _request(self, op: str, **fields: Any) -> str:
         """Send one op and await its ack detail (or raise its error message)."""
+        reply = await self._request_frame(op, **fields)
+        if reply.get("op") == "error":
+            raise RuntimeError(str(reply.get("message", "request failed")))
+        return str(reply.get("detail", ""))
+
+    async def request_ack_with_duplicate(self, op: str, **fields: Any) -> tuple[str, bool]:
+        """Send one op and report ``(detail, duplicate)`` from its ack.
+
+        The idempotency seam for :func:`session.runtime.launch.engage_runtime`.
+        A retried errand (the sender crashed after the runtime admitted its
+        row, a supervisor re-fired a wake) must not append a second copy, so
+        the runtime answers ``duplicate: true`` for a ``command_id`` its
+        transcript already owns and the caller reports "already delivered"
+        rather than delivering again. An older runtime simply omits the field,
+        which reads as False — the pre-idempotency behaviour.
+        """
+        reply = await self._request_frame(op, **fields)
+        if reply.get("op") == "error":
+            raise RuntimeError(str(reply.get("message", "request failed")))
+        return str(reply.get("detail", "")), bool(reply.get("duplicate", False))
+
+    async def _request_frame(self, op: str, **fields: Any) -> dict[str, Any]:
+        """Send one op and return its whole reply frame.
+
+        The shared body of :meth:`_request` and
+        :meth:`request_ack_with_duplicate`, which differ only in how much of
+        the reply they keep.
+        """
         if not self._connected or self._writer is None:
             raise ConnectionError("not attached")
         self._req_seq += 1
@@ -321,15 +345,11 @@ class AttachClient:
         try:
             self._writer.write(json.dumps(frame).encode() + b"\n")
             await self._writer.drain()
-            reply = await asyncio.wait_for(future, timeout=ACK_TIMEOUT_S)
+            return await asyncio.wait_for(future, timeout=ACK_TIMEOUT_S)
         except (ConnectionResetError, BrokenPipeError, OSError) as exc:
-            self._pending.pop(req, None)
             raise ConnectionError(f"owner connection lost: {exc}") from exc
         finally:
             self._pending.pop(req, None)
-        if reply.get("op") == "error":
-            raise RuntimeError(str(reply.get("message", "request failed")))
-        return str(reply.get("detail", ""))
 
     async def _request_payload(self, op: str, **fields: Any) -> Any:
         """Send one op and await its structured ``result`` payload.
@@ -552,43 +572,41 @@ async def continue_command(
     Every contender may start a candidate. The atomic transcript lease, never
     a check before spawning, decides authority. Losing candidates exit and the
     producer redials the published winner with the unchanged command id.
+
+    That arbitration now lives in :func:`session.runtime.launch.engage_runtime`,
+    which is the ONE place any caller starts a runtime — this function's own
+    spawn-and-poll loop was the prototype for it and has been deleted rather
+    than left as a second implementation that could drift. The phone keeps its
+    connected :class:`AttachClient` (it streams the reply), so the dial happens
+    here after the engage guarantees a runtime exists.
     """
-    deadline = time.monotonic() + deadline_s
-    spawned = False
-    delay = 0.1
-    last_error: Exception | None = None
-    while time.monotonic() < deadline:
-        record, _ = await asyncio.to_thread(find_owner_record, config_dir, command.session_id)
-        if record is not None:
-            disconnected = asyncio.Event()
-            client = AttachClient(
-                on_projection or (lambda projection: None),
-                lambda reason: disconnected.set(),
-            )
-            try:
-                await client.connect(record, command.session_id)
-                detail = await client.send_command(command)
-                return client, detail
-            except (ConnectionError, RuntimeError, TimeoutError) as exc:
-                last_error = exc
-                client.close()
-        if not spawned:
-            # Only routing data enters the environment. Prompt text, images and
-            # command identity stay on the authenticated loopback connection.
-            env = dict(os.environ)
-            env["LOP_MOBILE_CHILD_CWD"] = str(Path.home())
-            env["LOP_MOBILE_CHILD_RESUME"] = command.session_id
-            await asyncio.create_subprocess_exec(
-                sys.executable,
-                "-m",
-                "local_operator.session.runtime.process",
-                env=env,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
-            spawned = True
-        await asyncio.sleep(min(delay, max(0.0, deadline - time.monotonic())))
-        delay = min(delay * 1.7, 1.0)
-    raise TimeoutError("Couldn’t continue this conversation. Try again.") from last_error
+    from local_operator.session.runtime.launch import PromptErrand, engage_runtime
+
+    await engage_runtime(
+        command.session_id,
+        str(Path.home()),
+        PromptErrand(
+            text=command.text,
+            images=list(command.images),
+            command_id=command.command_id,
+        ),
+        config_dir=config_dir,
+        deadline_s=deadline_s,
+    )
+    # The command is admitted; what remains is the phone's live view of the
+    # turn it started. A record must exist now (engage_runtime only returns
+    # once one answered), so a miss here is a runtime that died in the gap and
+    # is reported as the same timeout the caller already handles.
+    record, _ = await asyncio.to_thread(find_owner_record, config_dir, command.session_id)
+    if record is None:
+        raise TimeoutError("Couldn’t continue this conversation. Try again.")
+    client = AttachClient(
+        on_projection or (lambda projection: None),
+        lambda reason: None,
+    )
+    try:
+        await client.connect(record, command.session_id)
+    except (ConnectionError, RuntimeError, TimeoutError) as exc:
+        client.close()
+        raise TimeoutError("Couldn’t continue this conversation. Try again.") from exc
+    return client, "prompt admitted"

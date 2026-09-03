@@ -1383,8 +1383,11 @@ def send_command(args: argparse.Namespace) -> int:
     the piped payload was discarded silently."""
     import asyncio
 
-    from local_operator.mobile.peer_client import send_peer_message
-    from local_operator.mobile.peer_send import candidate_lines, validate_peer_body
+    from local_operator.mobile.peer_send import (
+        candidate_lines,
+        deliver_peer_message,
+        validate_peer_body,
+    )
 
     # stdin can only change the binding when at most ONE positional was typed:
     # with both slots filled the outcome is already decided (a conflict when a
@@ -1461,7 +1464,16 @@ def send_command(args: argparse.Namespace) -> int:
         if example:
             print(f"  e.g. `{example}`", file=sys.stderr)
         return 1
-    if error or record is None:
+    cold_session_id = ""
+    if record is None:
+        # No LIVE record, but an exact `--session` may still name a stored
+        # session that simply is not running. A quiet note to one of those is
+        # the mailbox mode's whole purpose, so it is spooled rather than
+        # refused; anything wanting attention starts a runtime for it.
+        from local_operator.mobile.peer_send import resolve_cold_session
+
+        cold_session_id = resolve_cold_session(args.session or "") or ""
+    if not cold_session_id and (error or record is None):
         _peer_red(error or "no target resolved")
         return 1
 
@@ -1480,7 +1492,7 @@ def send_command(args: argparse.Namespace) -> int:
     # once and using it for both is what keeps them from drifting apart again.
     sender = _peer_sender_identity()
     sender_pid = sender.get("pid")
-    if record.pid == sender_pid:
+    if record is not None and record.pid == sender_pid:
         _peer_red("that target is this session; use the composer to message yourself")
         return 1
 
@@ -1498,8 +1510,9 @@ def send_command(args: argparse.Namespace) -> int:
     mode = "steer" if args.steer else "mailbox"
     try:
         detail = asyncio.run(
-            send_peer_message(
+            deliver_peer_message(
                 record,
+                session_id=(record.session_id if record is not None else cold_session_id),
                 text=text,
                 mode=mode,
                 wake=bool(args.wake),
@@ -1512,8 +1525,11 @@ def send_command(args: argparse.Namespace) -> int:
         # non-zero "could not deliver" line, never an uncaught traceback (U1).
         _peer_red(f"could not deliver: {exc}")
         return 1
-    name = record.conversation_name or record.session_id
-    print(f"→ {name} (pid {record.pid}): {detail}")
+    if record is not None:
+        name = record.conversation_name or record.session_id
+        print(f"→ {name} (pid {record.pid}): {detail}")
+    else:
+        print(f"→ {cold_session_id} (not running): {detail}")
     return 0
 
 

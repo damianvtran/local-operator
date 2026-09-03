@@ -39,6 +39,7 @@ import os
 import signal
 import sys
 import time
+from typing import Awaitable, Callable, cast
 
 logger = logging.getLogger(__name__)
 
@@ -199,6 +200,48 @@ async def _reaper(handle: object, runtime: object, stop: asyncio.Event) -> None:
             return
 
 
+async def _drain_inbox_into(handle: object) -> int:
+    """Deliver every message spooled while this session was cold. Count sent.
+
+    Called from :func:`amain` after the session exists and before the control
+    socket listens — see the call site for why that ordering is the delivery
+    guarantee rather than an implementation detail.
+
+    Delivery uses the record-only branch (``mode="mailbox"``, ``wake=False``):
+    these arrived as QUIET notes, and a spool that opened a turn per message on
+    the next open would turn "read this when you next run" into "start work
+    now", which is the opposite of what the sender asked for.
+
+    Best-effort per message: one malformed or rejected row must not stop the
+    rest, and none of it may prevent the runtime from starting.
+    """
+    from local_operator.session.runtime.inbox import drain_inbox
+
+    session = getattr(handle, "_session", None)
+    directory = getattr(getattr(session, "transcript", None), "directory", None)
+    if directory is None:
+        return 0
+    try:
+        lines = await asyncio.to_thread(drain_inbox, directory)
+    except Exception:  # noqa: BLE001 — a bad spool must not block the runtime
+        logger.warning("inbox drain failed", exc_info=True)
+        return 0
+    probed = getattr(handle, "receive_peer_message", None)
+    if not lines or not callable(probed):
+        return 0
+    receive = cast(Callable[..., Awaitable[str]], probed)
+    delivered = 0
+    for line in lines:
+        try:
+            await receive(line.text, mode="mailbox", wake=False, sender=line.sender)
+            delivered += 1
+        except Exception:  # noqa: BLE001 — one bad row is not the others' problem
+            logger.warning("spooled message could not be delivered", exc_info=True)
+    if delivered:
+        logger.info("delivered %d spooled message(s) at open", delivered)
+    return delivered
+
+
 async def amain() -> int:
     # Deferred for startup cost, not to break a cycle: importing the owned
     # handle pulls the composition root, and `python -m` on this module must
@@ -208,6 +251,7 @@ async def amain() -> int:
         spawn_owned_session,
     )
     from local_operator.session.runtime.server import RuntimeServer
+    from local_operator.session_lease import SessionLeaseHeldError
 
     cwd = os.environ.get("LOP_MOBILE_CHILD_CWD") or os.path.expanduser("~")
     provider = os.environ.get("LOP_MOBILE_CHILD_PROVIDER") or None
@@ -219,9 +263,31 @@ async def amain() -> int:
         handle: OwnedSessionHandle = await spawn_owned_session(
             loop, cwd=cwd, provider=provider, model_id=model_id, resume=resume
         )
+    except SessionLeaseHeldError as exc:
+        # LOSING THE LEASE IS NOT AN ERROR. Under ``engage_runtime`` every
+        # contender is allowed to spawn a candidate and the lease decides which
+        # one lives (session/runtime/launch.py) — so a loser is a race working
+        # exactly as designed, and it exits 0. Returning non-zero here made an
+        # ordinary ten-way engage look like nine crashes in the logs, and would
+        # make a supervisor's KeepAlive treat normal arbitration as a failure
+        # loop.
+        logger.info(
+            "runtime lost the lease for %s to pid %s; exiting",
+            resume or "<new>",
+            exc.pid,
+        )
+        return 0
     except Exception:
         logger.exception("session runtime child: session construction failed")
         return 2
+
+    # THE ORDERING IS THE GUARANTEE (design §11.4). Messages spooled while the
+    # session was cold are delivered here, BEFORE the control socket begins
+    # listening, so they cannot be interleaved with an errand a client sends
+    # over that socket — there is no socket yet. Draining after
+    # ``start_in_process`` would race the engaging caller's own prompt and
+    # deliver a note written minutes ago after one written just now.
+    await _drain_inbox_into(handle)
 
     runtime = RuntimeServer(handle, kind="daemon")
     await runtime.start_in_process()

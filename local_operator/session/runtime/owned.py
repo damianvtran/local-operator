@@ -790,6 +790,28 @@ class OwnedSessionHandle(SessionHandle):
             raise ValueError("that question was already answered") from exc
         return "answered"
 
+    def has_admitted_command(self, command_id: str) -> bool:
+        """Has this session already durably admitted ``command_id``?
+
+        The DURABLE half of idempotency, and the half that survives a restart.
+        ``prompt``'s own ``_prompt_commands`` map dedupes within one runtime's
+        lifetime, but the case this exists for crosses lifetimes: a sender that
+        crashed after the row was appended, or a wake supervisor that re-fired
+        an occurrence it could not confirm, engages a NEW runtime whose
+        in-memory map is empty. The transcript is what remembers.
+        """
+        if not command_id:
+            return False
+        transcript = getattr(self._session, "transcript", None)
+        checker = getattr(transcript, "has_admitted_command", None)
+        if not callable(checker):
+            return False
+        try:
+            return bool(checker(command_id))
+        except Exception:  # noqa: BLE001 — a dedupe probe must never fail a turn
+            logger.debug("admitted-command probe failed", exc_info=True)
+            return False
+
     async def job_trajectory(self, job_id: str, offset: int, limit: int) -> dict[str, Any]:
         """One page of a child job's retained event window.
 

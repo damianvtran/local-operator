@@ -862,7 +862,25 @@ class RuntimeServer:
                 await self._push()
                 return
             else:
-                detail = await self._dispatch(op, frame)
+                duplicate = self._already_admitted(op, frame)
+                if duplicate:
+                    # A retry of an errand this transcript already owns (a
+                    # sender that crashed after the row was durable, a wake
+                    # re-fired by a restarted supervisor). Acked, not executed:
+                    # the caller's outcome is "delivered", which is true, and
+                    # nothing is appended twice. See
+                    # ``OwnedSessionHandle.has_admitted_command``.
+                    detail = "already admitted"
+                else:
+                    detail = await self._dispatch(op, frame)
+                await self._send_to(
+                    conn,
+                    {"op": "ack", "req": req, "detail": detail, "duplicate": duplicate},
+                )
+                if not duplicate:
+                    await self._handle.refresh()
+                    await self._push()
+                return
             await self._send_to(conn, {"op": "ack", "req": req, "detail": detail})
             # Mutations change the projection; push what every front end
             # should see. ``stop`` is exempt: its whole job is to END the
@@ -876,6 +894,31 @@ class RuntimeServer:
         except Exception as exc:  # noqa: BLE001 — the error IS the reply
             await self._send_to(conn, {"op": "error", "req": req, "message": str(exc)[:400]})
             await self._push()
+
+    def _already_admitted(self, op: str, frame: dict[str, Any]) -> bool:
+        """Is this a retry of a turn the transcript already carries?
+
+        Only ``prompt`` carries a durable, append-only identity, so only it can
+        be answered from the transcript. ``steer`` is deliberately excluded:
+        its idempotency is the handle's own reservation map, and a steer is not
+        an append-only user row to match against.
+
+        Optional capability, probed — a reduced handle without it simply never
+        reports a duplicate, which is the pre-idempotency behaviour.
+        """
+        if op != "prompt":
+            return False
+        command_id = str(frame.get("command_id") or "")
+        if not command_id:
+            return False
+        checker = getattr(self._handle, "has_admitted_command", None)
+        if not callable(checker):
+            return False
+        try:
+            return bool(checker(command_id))
+        except Exception:  # noqa: BLE001 — never fail a turn over a dedupe probe
+            logger.debug("admitted-command probe failed", exc_info=True)
+            return False
 
     async def _dispatch(self, op: str, frame: dict[str, Any]) -> str:
         from local_operator.mobile.types import validate_control_frame
