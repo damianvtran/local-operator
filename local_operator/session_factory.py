@@ -1151,6 +1151,27 @@ def _transcript_dir_and_agent_id(
     # refused, where silently starting a NEW session would look like a resume
     # that lost the history.
     if resume is not None:
+        # ADOPT vs RESUME. Under the viewer model the session id is minted in
+        # the TUI before anything exists on disk: `lop` opens a viewer bound
+        # to nothing, and the runtime the first message engages is what
+        # materialises the directory. So a runtime asked for an id with no
+        # directory is not a failed resume — it is the FIRST engage of a
+        # session that has only ever been a name, and refusing it (as
+        # `resume_dir` must, for a human typing `--resume`) would make every
+        # new detached session fail to start.
+        #
+        # Gated on the runtime's own env flag rather than applied generally,
+        # because the strictness is load-bearing everywhere else: a human's
+        # `--resume typo` must still say "no session to resume" rather than
+        # silently opening an empty conversation under that name.
+        if os.environ.get("LOP_RUNTIME_ADOPT_SESSION") == "1":
+            adopted = config_dir / "sessions" / str(resume)
+            if not adopted.exists():
+                # `parents` because a fresh config dir has no sessions/ yet;
+                # `exist_ok` because two contenders may race here and the
+                # lease, not this mkdir, is what arbitrates between them.
+                adopted.mkdir(parents=True, exist_ok=True)
+            return adopted, str(agent.id) if agent is not None else "main"
         resumed = resume_dir(config_dir, str(resume))
         return resumed, str(agent.id) if agent is not None else "main"
     train = bool(getattr(args, "train", False))

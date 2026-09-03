@@ -538,6 +538,49 @@ def build_cli_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    # Scheduled wakes, and the process that fires them for sessions nobody is
+    # running. Top-level beside `sessions`/`send`/`stop` for the same reason
+    # they are: it answers "what is scheduled and will it actually fire",
+    # which is a question about this machine rather than about one session.
+    wake_parser = subparsers.add_parser(
+        "wake",
+        help="Inspect scheduled wakes and the supervisor that fires them",
+        parents=[parent_parser],
+    )
+    wake_sub = wake_parser.add_subparsers(dest="wake_command")
+    wake_status = wake_sub.add_parser(
+        "status",
+        help="whether a supervisor is installed, and what it would fire next",
+        parents=[parent_parser],
+    )
+    wake_status.add_argument("--json", action="store_true", help="machine-readable output")
+    wake_status.add_argument(
+        "--install",
+        action="store_true",
+        help="install the supervisor now rather than waiting for the next schedule",
+    )
+    wake_status.add_argument(
+        "--uninstall",
+        action="store_true",
+        help="remove the supervisor; scheduled wakes then fire only when a session is open",
+    )
+    wake_list = wake_sub.add_parser(
+        "list",
+        help="every scheduled wake on this machine, soonest first",
+        parents=[parent_parser],
+    )
+    wake_list.add_argument("--json", action="store_true", help="machine-readable output")
+    wake_serve = wake_sub.add_parser(
+        "serve",
+        help="run the supervisor in the foreground (what the LaunchAgent runs)",
+        parents=[parent_parser],
+    )
+    wake_serve.add_argument(
+        "--once",
+        action="store_true",
+        help="fire whatever is due right now, then exit",
+    )
+
     # Exec command for single execution mode
     # PyPI upgrade. Not ``lop-update`` (hyphen), which archives local git
     # ``main`` into the uv-tool env — opposite audience, never invoked here.
@@ -1592,6 +1635,149 @@ def sessions_command(args: argparse.Namespace) -> int:
             f"{_format_duration(row['heartbeat_age_s']):>7}"
         )
     return 0
+
+
+def _wake_rows() -> "list[dict[str, Any]]":
+    """Every scheduled wake on this machine, soonest first.
+
+    Reads the derived index rather than each transcript: the index exists
+    exactly so this question can be answered without opening every session,
+    and it is rewritten on every persist and every open, so a stale row
+    self-heals rather than needing a repair path here.
+    """
+    import time as _time
+
+    from local_operator.paths import config_dir
+    from local_operator.wakes.store import read_index
+
+    now_ms = int(_time.time() * 1000)
+    rows: list[dict[str, Any]] = []
+    for session_id, entry in read_index(config_dir()).items():
+        if not isinstance(entry, dict):
+            continue
+        dormant = bool(entry.get("stopped_at"))
+        for raw in entry.get("schedules") or ():
+            if not isinstance(raw, dict):
+                continue
+            due = raw.get("next_due_at")
+            if isinstance(due, bool) or not isinstance(due, int):
+                continue
+            rows.append(
+                {
+                    "session_id": session_id,
+                    "cwd": entry.get("cwd") or "",
+                    "wake_id": raw.get("id") or "",
+                    "message": raw.get("message") or "",
+                    "next_due_at": due,
+                    "due_in_s": (due - now_ms) / 1000.0,
+                    "dormant": dormant,
+                }
+            )
+    rows.sort(key=lambda row: row["next_due_at"])
+    return rows
+
+
+def wake_command(args: argparse.Namespace) -> int:
+    """``lop wake status|list|serve`` — scheduled wakes and their supervisor.
+
+    The question this answers is "will my reminder actually fire", which
+    before the supervisor had an uncomfortable answer: only if a session
+    happened to be open. ``status`` is therefore the important subcommand —
+    it reports whether the thing that fires wakes for closed sessions exists.
+    """
+    from local_operator.paths import config_dir
+
+    command = getattr(args, "wake_command", None) or "status"
+
+    if command == "serve":
+        # The foreground form of what the LaunchAgent runs. Useful on its own
+        # for anyone who would rather run it under their own supervisor.
+        import asyncio as _asyncio
+
+        from local_operator.wakes.supervisor import serve
+
+        return _asyncio.run(serve(config_dir(), once=bool(args.once)))
+
+    if command == "list":
+        rows = _wake_rows()
+        if args.json:
+            print(_json_dumps(rows))
+            return 0
+        if not rows:
+            print("no scheduled wakes")
+            return 0
+        for row in rows:
+            when = _format_due(row["due_in_s"])
+            mark = " (dormant — session stopped)" if row["dormant"] else ""
+            name = row["session_id"]
+            print(f"{when:>12}  {name}  {row['message']}{mark}")
+        return 0
+
+    # status
+    from local_operator.wakes.install import (
+        ensure_supervisor_installed,
+        is_supported,
+        plist_path,
+        uninstall,
+    )
+
+    if getattr(args, "uninstall", False):
+        outcome = uninstall()
+        print(f"supervisor: {outcome.reason}")
+        return 0
+
+    rows = _wake_rows()
+    installed = is_supported() and plist_path().exists()
+    if getattr(args, "install", False):
+        outcome = ensure_supervisor_installed(config_dir())
+        installed = outcome.installed
+        print(f"supervisor: {outcome.reason}")
+
+    upcoming = [row for row in rows if not row["dormant"]]
+    payload = {
+        "supported": is_supported(),
+        "installed": installed,
+        "plist": str(plist_path()) if is_supported() else "",
+        "scheduled": len(rows),
+        "armed": len(upcoming),
+        "next_due_in_s": upcoming[0]["due_in_s"] if upcoming else None,
+    }
+    if args.json:
+        print(_json_dumps(payload))
+        return 0
+
+    print(f"supervisor:  {'installed' if installed else 'not installed'}")
+    if not is_supported():
+        # Honest rather than reassuring: on a platform with no installer the
+        # wakes of a CLOSED session do not fire, and saying so is the whole
+        # point of this line.
+        print("             (no installer for this platform — wakes fire only while a")
+        print("              session is open)")
+    print(f"scheduled:   {len(rows)} ({len(upcoming)} armed)")
+    if upcoming:
+        print(f"next:        {_format_due(upcoming[0]['due_in_s'])}  {upcoming[0]['message']}")
+    return 0
+
+
+def _json_dumps(value: Any) -> str:
+    import json as _json
+
+    return _json.dumps(value, indent=2)
+
+
+def _format_due(seconds: float) -> str:
+    """``in 4m`` / ``2h overdue`` — the relative form a reminder is read in."""
+    overdue = seconds < 0
+    seconds = abs(seconds)
+    if seconds < 90:
+        text = f"{int(seconds)}s"
+    elif seconds < 5400:
+        text = f"{int(seconds // 60)}m"
+    elif seconds < 172800:
+        text = f"{int(seconds // 3600)}h"
+    else:
+        text = f"{int(seconds // 86400)}d"
+    return f"{text} overdue" if overdue else f"in {text}"
 
 
 def stop_command(args: argparse.Namespace) -> int:
@@ -3206,6 +3392,8 @@ def main() -> int:
             return sessions_command(args)
         elif args.subcommand == "stop":
             return stop_command(args)
+        elif args.subcommand == "wake":
+            return wake_command(args)
         elif args.subcommand == "login":
             return login_command(args)
         elif args.subcommand == "logout":

@@ -257,6 +257,14 @@ async def amain() -> int:
     provider = os.environ.get("LOP_MOBILE_CHILD_PROVIDER") or None
     model_id = os.environ.get("LOP_MOBILE_CHILD_MODEL") or None
     resume = os.environ.get("LOP_MOBILE_CHILD_RESUME") or None
+    if resume:
+        # A runtime ADOPTS the id it was given rather than requiring a
+        # directory to already exist. The viewer mints the session id before
+        # anything is on disk (it is a name, not a directory, until there is
+        # work), so the first engage of a brand-new session arrives here with
+        # nothing to resume — and the strict `--resume` path would refuse it.
+        # See ``session_factory._transcript_dir_and_agent_id``.
+        os.environ["LOP_RUNTIME_ADOPT_SESSION"] = "1"
 
     loop = asyncio.get_running_loop()
     try:
