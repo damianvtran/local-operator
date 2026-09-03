@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import httpx
 
+from local_operator.compaction.thresholds import CompactionSettings, resolve_threshold_percent
 from local_operator.compaction.tokens import estimate_messages_tokens
 from local_operator.harness.types import (
     AgentTool,
@@ -675,52 +676,67 @@ def _sampling_params(request: ChatRequest, *, top_p_key: str = "top_p") -> dict[
 #: :func:`_estimated_prompt_tokens`, which returns the unscaled measurement
 #: separately for exactly that reason.
 #:
-#: Values, from ``docs/evidence/compaction-ruler/slope_fit.txt`` rounded up:
+#: **Why the value is 1.35 and not the 2.00 an earlier revision used.** That 2.00
+#: came from reading ``slope_fit.txt``'s Anthropic ``ratio p50`` of 1.82-1.96 as a
+#: multiplier. It is not one: those fits carry an INTERCEPT of 24k-50k tokens
+#: (``inter=`` in the table), so the ratio is inflated by a fixed additive term
+#: that a pure multiplier then re-applies proportionally to every prompt. Folding
+#: an intercept into a slope is what made the estimate diverge at scale, and it
+#: had a real cost — it drove the ask negative from ~50% occupancy on the
+#: hint-less path, where it was floored and truncated a live answer mid-word.
 #:
-#: =========================  =========  ======
-#: model                      ratio p50  used
-#: =========================  =========  ======
-#: ``claude-opus-4-8``             1.96    2.00
-#: ``claude-opus-5``               1.82    2.00
-#: ``gpt-5.6-sol``                 1.15    (default)
-#: ``glm-5.3``                     1.06    (default)
-#: =========================  =========  ======
-#: Keyed on a marker found in the MODEL ID, not on the route that serves it.
-#: The ratio is a property of the model's tokenizer, and an earlier revision
+#: Measured directly instead, same account, same model, live
+#: ``prompt_tokens`` over the local estimate on the content a first call
+#: actually carries:
+#:
+#: =========================  =======
+#: content                      ratio
+#: =========================  =======
+#: source code (60 KB)          1.156
+#: prose (20k tokens)           1.101
+#: mixed code + prose           1.146
+#: =========================  =======
+#:
+#: QA measured 1.18 independently on its own corpus. 1.35 sits comfortably above
+#: every observation with room for content this sample did not cover, while
+#: staying near enough that a healthy session keeps a usable reply budget.
+#:
+#: State it honestly: 1.35 is a CHOSEN CONSERVATIVE CONSTANT bounded by
+#: measurement, not a fitted parameter. The previous revision's 1.75 was defended
+#: as the p50 of ``slope_fit.txt``'s unattributed ``None/None`` rows, which
+#: claimed more evidentiary support than one median over an unlabelled bucket can
+#: give — and a median is the wrong statistic for a safety margin anyway, since
+#: half the population exceeds it by construction (review R18). What justifies
+#: this number is the headroom above the measurements above, plus the fact that
+#: :func:`_output_reserve_tokens` bounds what being wrong can cost.
+#: A SINGLE value, not a per-family table. An earlier revision kept one, and
 #: keyed it on ``ModelSpec.provider`` — the registry hosting id — so every
 #: aggregator-served Claude (``openrouter``, ``radient``, both real registry ids)
-#: silently took the low default and re-opened the original HTTP 400 on the very
-#: provider this bug was reported against (review R9).
-_MODEL_ESTIMATE_SLOPE: tuple[tuple[str, float], ...] = (("claude", 2.0),)
-
-#: Families with no measured entry above.
+#: took a different number than the same model served directly, re-opening the
+#: original HTTP 400 on the very provider this bug was reported against (review
+#: R9). Once the Anthropic figure was measured properly it landed on the same
+#: 1.35 as every other family, so the table decided nothing while still offering
+#: a way to get the routing wrong. One constant cannot be keyed off the wrong
+#: attribute.
 #:
-#: 1.75, NOT the 1.25 an earlier revision used. 1.25 was drawn from the two
-#: measured non-Anthropic families (1.06-1.15) and treated as a floor for
-#: everything unmeasured, which inverts the risk: over-estimating an unknown
-#: family costs output headroom, while under-estimating it re-opens the 400 the
-#: clamp exists to prevent, and the ``MIN_OUTPUT_TOKENS`` refusal cannot catch
-#: that because it fires on over-estimation. ``slope_fit.txt`` has no entry for
-#: xai, kimi, google, mistral, deepseek, alibaba or ollama, and its
-#: unattributed ``None/None`` rows sit at p50 **1.78** — evidence that an
-#: unidentified model behaves nothing like the cheap end of the range. 1.75
-#: covers that population; a family measured to be cheaper earns an entry above.
-DEFAULT_ESTIMATE_SLOPE = 1.75
+#: Cross-family measurements agree: QA measured 1.005-1.117 across families, and
+#: ``slope_fit.txt``'s non-Anthropic fits sit at 1.02-1.04. A family that is
+#: genuinely more expensive would earn a documented exception here, backed by the
+#: same kind of live measurement rather than by a fitted ratio carrying an
+#: intercept.
+DEFAULT_ESTIMATE_SLOPE = 1.35
 
 
 def _estimate_slope(model: ModelSpec) -> float:
-    """Local-estimate-to-provider ratio for ``model``, by model family.
+    """Local-estimate-to-provider ratio for ``model``.
 
-    Matches on the model id so an aggregator prefix does not hide the family:
-    ``anthropic/claude-sonnet-4.5`` served through OpenRouter is the same
-    tokenizer as ``claude-sonnet-4-5`` served directly, and must get the same
-    number. Unknown families take :data:`DEFAULT_ESTIMATE_SLOPE`, which is
-    deliberately nearer the expensive end — see its rationale.
+    Kept as a function rather than inlining :data:`DEFAULT_ESTIMATE_SLOPE` at the
+    one call site because the ratio IS a per-model property — the value is
+    uniform today only because measurement said so. A family that proves more
+    expensive gets its exception here, where the routing question (match the
+    model, never the provider that serves it — review R9) has already been
+    settled, instead of reintroducing a lookup at the call site.
     """
-    model_id = model.model_id.lower()
-    for marker, slope in _MODEL_ESTIMATE_SLOPE:
-        if marker in model_id:
-            return slope
     return DEFAULT_ESTIMATE_SLOPE
 
 
@@ -740,15 +756,60 @@ _CHARS_PER_TOKEN = 4
 #: a SMALL prompt against a SMALL window from landing exactly on the boundary.
 OUTPUT_CLAMP_SAFETY_MARGIN = 4_096
 
-#: Smallest output ask worth sending. Below this the reply cannot be a reply:
-#: QA measured ``x-ai/grok-4.6`` spending **689 tokens on reasoning alone** at a
-#: 512-token cap and emitting zero visible text, because reasoning tokens are
-#: billed against this same budget.
+#: Smallest output ask worth sending on a window large enough to afford it.
+#: Below this the reply cannot be a reply: QA measured ``x-ai/grok-4.6`` spending
+#: **689 tokens on reasoning alone** at a 512-token cap and emitting zero visible
+#: text, because reasoning tokens are billed against this same budget.
 #:
-#: This is now a REFUSAL threshold, not a value that goes on the wire. See
-#: :func:`_effective_max_tokens` for why silently sending a doomed cap is the
-#: one outcome this must not produce.
+#: This is a REFUSAL threshold, not a value that goes on the wire. See
+#: :func:`_effective_max_tokens` for why silently sending a doomed cap is the one
+#: outcome this must not produce.
+#:
+#: It is an ABSOLUTE token count, so it cannot be the whole story: on a small
+#: window a constant reserve is a large fraction of the model. 4096 + the 4096
+#: margin is the ENTIRE 8k window of ``gpt-4`` and ``moonshot-v1-8k``, which is
+#: how every request to those models — including a one-token ``"hi"`` — came to
+#: be refused. :func:`_output_reserve_tokens` scales it down for exactly that
+#: case.
 MIN_OUTPUT_TOKENS = 4_096
+
+
+def _output_reserve_tokens(window: int, settings: CompactionSettings | None = None) -> int:
+    """Tokens this clamp insists remain for the reply, or it refuses the request.
+
+    The number that decides a refusal has to keep ONE ordering true at EVERY
+    window size: **the refusal must never fire where compaction could still have
+    rescued the session.** If it fires first, the turn dies non-retryably while
+    the session sits below its compaction threshold — and the compaction
+    summarizer takes this same code path, so the one remedy the error names
+    cannot run either.
+
+    The previous revision reserved a CONSTANT ``MIN_OUTPUT_TOKENS +
+    OUTPUT_CLAMP_SAFETY_MARGIN`` (8192) while the compaction trigger is a
+    FRACTION of the window. Two different shapes cannot hold a fixed ordering
+    across a range, and this one inverted below ~41k: at 32,768 the refusal fired
+    at 24,576 against a 26,214 trigger, and at 8,192 it fired unconditionally.
+    That is the same wedge twice — which is why the reserve is now expressed in
+    the trigger's own shape rather than re-tuned.
+
+    The reserve is therefore the SMALLER of the absolute floor and a fraction of
+    the window strictly under the compaction headroom, making the ordering true
+    by construction:
+
+        reserve <= window * (1 - trigger_fraction) * SAFETY
+        =>  refusal point = window - reserve  >  window * trigger_fraction
+
+    Derived from the caller's ACTUAL settings, not a hardcoded 0.8, because
+    ``threshold_percent`` is user-configurable up to 1.0; a constant would
+    silently re-invert for anyone who raises it.
+    """
+    if window <= 0:
+        return MIN_OUTPUT_TOKENS
+    percent = resolve_threshold_percent(settings or CompactionSettings())
+    # Half the post-trigger headroom: strictly inside it, so the refusal point
+    # stays above the trigger with room to spare rather than landing on it.
+    proportional = int(window * (1.0 - percent) * 0.5)
+    return max(1, min(MIN_OUTPUT_TOKENS, proportional))
 
 
 def _effective_max_tokens(request: ChatRequest) -> int:
@@ -842,14 +903,49 @@ def _effective_max_tokens(request: ChatRequest) -> int:
         # would invent a limit from a number that means "no data".
         return requested
 
+    reserve = _output_reserve_tokens(window)
+    # The margin is scaled by the same rule and for the same reason: it is an
+    # absolute allowance for provider-side scaffolding, and on an 8k window a
+    # flat 4096 of it is half the model.
+    margin = min(OUTPUT_CLAMP_SAFETY_MARGIN, reserve)
+
     prompt, measured_prompt = _estimated_prompt_tokens(request)
-    available = window - prompt - OUTPUT_CLAMP_SAFETY_MARGIN
-    if window - measured_prompt - OUTPUT_CLAMP_SAFETY_MARGIN >= MIN_OUTPUT_TOKENS:
-        # The measured prompt leaves room to answer, so this session is NOT in
-        # the state the refusal exists for. Any shortfall below is an artifact of
-        # the safety scaling, and the honest response to our own margin is to
-        # shrink the ask — never to fail a request the provider would serve.
-        available = max(available, MIN_OUTPUT_TOKENS)
+    available = window - prompt - margin
+    measured_available = window - measured_prompt - margin
+    if available < reserve <= measured_available:
+        # The scaled ask has collapsed below a usable reply while the MEASURED
+        # prompt proves the session is not in the state the refusal exists for.
+        # Only this narrow case is rescued: when the scaled ask is already
+        # healthy it is the slope-protected number and must stand, or the
+        # rescue would hand back an ask larger than the safety scaling permits
+        # and re-open the overflow (caught by the muse-spark admission test).
+        #
+        # Restore a PROPORTIONATE ask, not a constant floor. Flooring at
+        # ``MIN_OUTPUT_TOKENS`` was round-1's truncation defect returning by
+        # another route: on the hint-less path (first call, forks, errands, the
+        # compaction summarizer) a Sonnet session at 50% occupancy asked for
+        # 4,096 with ~95k tokens of real headroom, and returned an answer cut
+        # mid-word with ``finish_reason='length'`` where main completed it. The
+        # margin may size the ask DOWN from what the spec wanted; it may not
+        # decide the size on its own once the measurement has shown the request
+        # is healthy.
+        #
+        # The restore is bounded by the reserve rather than allowed to consume
+        # ``measured_available`` outright. Handing back the full measured
+        # headroom would discard the family scaling completely and re-open the
+        # very overflow this clamp exists to prevent — the measured figure is a
+        # LOCAL count, and a Claude prompt really bills up to ~1.9x it, so an ask
+        # sized against it admits a request the provider then rejects. Verified
+        # by the suite: the unbounded form failed both the muse-spark admission
+        # test and the expensive-tokenizer one.
+        #
+        # It grants exactly ``reserve`` — enough for a real reply — and not the
+        # measured headroom, which assumes a ratio of 1.0 and therefore
+        # over-states what the provider will admit at high occupancy: sizing the
+        # rescue from it asked for 40,697 on an 85%-full Sonnet whose real prompt
+        # plus ask exceeds the window. The rescue's job is to keep a healthy
+        # session answering, not to reclaim headroom the scaling says is gone.
+        available = max(available, min(requested, reserve))
     if available >= requested:
         # The overwhelmingly common case, and the one an earlier revision broke:
         # an ordinary prompt against a sanely advertised cap sends the spec's
@@ -858,17 +954,22 @@ def _effective_max_tokens(request: ChatRequest) -> int:
         return requested
 
     explicit = request.max_tokens or 0
-    if available < MIN_OUTPUT_TOKENS and 0 < explicit <= available:
-        # An EXPLICIT small ask that still fits is not the failure this refuses.
-        # ``MIN_OUTPUT_TOKENS`` encodes "a reply needs room to be a reply", but a
-        # caller who asked for 1024 (``Session.ERRAND_MAX_TOKENS``, auto-naming)
-        # has already said how much it needs, and a tool-loop continuation
-        # emitting one ``tool_use`` block needs a few hundred. Refusing a request
-        # the provider would have admitted, over a floor meant to protect it,
-        # would be the clamp inventing a failure (review R12).
+    if available < reserve and 0 < explicit <= measured_available:
+        # An EXPLICIT small ask that the MEASURED headroom can fund is not the
+        # failure this refuses. ``reserve`` encodes "a reply needs room to be a
+        # reply", but a caller who asked for 1024 (``Session.ERRAND_MAX_TOKENS``,
+        # auto-naming) has already said how much it needs, and a tool-loop
+        # continuation emitting one ``tool_use`` block needs a few hundred.
+        #
+        # Compared against ``measured_available``, NOT ``available``: reaching
+        # here already means ``available < requested == explicit``, so testing
+        # ``explicit <= available`` was a contradiction that no input could
+        # satisfy — an exhaustive search reached it zero times (review R16). The
+        # measured headroom is the comparison the reasoning above actually
+        # describes, and it makes the branch live.
         return explicit
 
-    if available < MIN_OUTPUT_TOKENS:
+    if available < reserve:
         # REFUSE rather than send a cap too small to answer with. Sending it
         # anyway is the one outcome worse than the bug this fixes: reasoning
         # tokens are billed against this same budget (grok-4.6 spent 689 of them
@@ -886,15 +987,20 @@ def _effective_max_tokens(request: ChatRequest) -> int:
         # remedy the error names cannot run. Measured, a 200k Anthropic model
         # past ~135k local tokens could not compact at all.
         #
-        # Keying on the unscaled figure makes the invariant provable rather than
-        # tuned: the refusal point is ``window - MIN_OUTPUT_TOKENS -
-        # OUTPUT_CLAMP_SAFETY_MARGIN``, and compaction triggers at
-        # ``COMPACTION_TRIGGER_FRACTION * window``, so the refusal stays above
-        # the trigger whenever ``0.2 * window > 8192``, i.e. for every window
-        # above ~41k. Below that a model is too small for the trigger to help
-        # anyway. Compaction therefore always gets its chance first, and the
-        # summarizer's own call — a fresh prefix, not the bloated transcript —
-        # measures small and is never refused.
+        # Keying on the unscaled figure is half of what makes the invariant hold;
+        # :func:`_output_reserve_tokens` is the other half. An earlier revision
+        # reserved a constant 8192 and claimed the ordering held "for every window
+        # above ~41k, below which a model is too small for the trigger to help
+        # anyway". The first clause was true and the second was false —
+        # ``resolve_threshold_tokens`` returns a working trigger at 16k and 32k,
+        # and the refusal fired beneath it there, wedging exactly as before one
+        # window-band lower. The reserve is now a fraction of the same window the
+        # trigger is a fraction of, so the ordering holds BY CONSTRUCTION at every
+        # size rather than over a tested range.
+        #
+        # Compaction therefore always gets its chance first, and the summarizer's
+        # own call — a fresh prefix, not the bloated transcript — measures small
+        # and is never refused.
         #
         # A residual false refusal remains and is ACCEPTED rather than
         # overlooked: the local estimator can itself over-state a prompt (QA
@@ -909,7 +1015,7 @@ def _effective_max_tokens(request: ChatRequest) -> int:
             (
                 f"prompt is too large for {request.model.model_id}: about "
                 f"{measured_prompt:,} tokens of input against a {window:,}-token "
-                f"context window leaves under {MIN_OUTPUT_TOKENS:,} tokens for the "
+                f"context window leaves under {reserve:,} tokens for the "
                 f"reply. Compact the conversation or start a new session."
             ),
             kind="request",

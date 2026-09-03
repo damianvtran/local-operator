@@ -39,6 +39,7 @@ from local_operator.providers.clients import (
     _effective_max_tokens,
     _estimate_slope,
     _estimated_prompt_tokens,
+    _output_reserve_tokens,
     _message_to_openai,
     client_for_spec,
     raise_for_status,
@@ -4241,7 +4242,10 @@ def test_the_refusal_never_pre_empts_compaction() -> None:
     over-estimate that broke this (R8).
     """
     settings = CompactionSettings()
-    for window in (64_000, 128_000, 200_000, 272_000, 1_000_000):
+    # Starts at 8,000 deliberately. The previous range began at 64,000 — exactly
+    # where the old constant reserve started holding — so the failing band was
+    # never entered and the test passed while every 8k model was bricked.
+    for window in (8_000, 8_192, 16_385, 32_768, 40_960, 64_000, 128_000, 200_000, 1_000_000):
         spec = ModelSpec(
             provider="anthropic",
             model_id="claude-sonnet-4-5",
@@ -4277,7 +4281,24 @@ def test_the_compaction_summarizer_is_never_refused() -> None:
             messages=[Message.user(_prose(local_tokens))],
             context_tokens_hint=0,
         )
-        assert _effective_max_tokens(request) >= MIN_OUTPUT_TOKENS
+        assert _effective_max_tokens(request) >= _output_reserve_tokens(spec.context_window)
+
+    # Small windows too: the summarizer is refused there for the same reason a
+    # turn is, and `/compact` is the remedy the refusal's own message names.
+    for window in (8_192, 16_385, 32_768):
+        small = ModelSpec(
+            provider="openai",
+            model_id="gpt-4",
+            context_window=window,
+            max_output_tokens=window // 2,
+        )
+        trigger = resolve_threshold_tokens(window, CompactionSettings())
+        request = ChatRequest(
+            model=small,
+            messages=[Message.user(_prose(int(trigger * 0.9)))],
+            context_tokens_hint=0,
+        )
+        assert _effective_max_tokens(request) > 0
 
 
 def test_a_hint_larger_than_the_window_is_not_believed() -> None:
@@ -4311,27 +4332,31 @@ def test_a_hint_larger_than_the_window_is_not_believed() -> None:
 def test_claude_gets_its_measured_slope_on_every_route(provider: str, model_id: str) -> None:
     """The ratio belongs to the TOKENIZER, so the route must not change it.
 
-    Keying on ``ModelSpec.provider`` gave every aggregator-served Claude the low
-    default and re-opened the original 400 on the exact provider this bug was
-    reported against (R9). ``openrouter`` and ``radient`` are real registry ids.
+    Keying on ``ModelSpec.provider`` gave every aggregator-served Claude a
+    different number than the same model served directly, re-opening the original
+    400 on the exact provider this bug was reported against (R9). ``openrouter``
+    and ``radient`` are real registry ids. The value is uniform today; what this
+    pins is that the ROUTE cannot change it.
     """
-    assert _estimate_slope(ModelSpec(provider=provider, model_id=model_id)) == 2.0
+    assert _estimate_slope(ModelSpec(provider=provider, model_id=model_id)) == (
+        DEFAULT_ESTIMATE_SLOPE
+    )
 
 
 def test_an_unknown_family_fails_safe_rather_than_cheap() -> None:
-    """An unmeasured family must be assumed expensive.
+    """The slope must stay above every ratio actually measured.
 
-    Under-estimating re-opens the HTTP 400, and the ``MIN_OUTPUT_TOKENS``
-    refusal cannot catch it because that fires on OVER-estimation. The
-    evidence file's unattributed rows sit at p50 1.78, so the default has to
-    live near that, not near the cheap end.
+    Under-estimating re-opens the HTTP 400, and the refusal cannot catch it
+    because that fires on OVER-estimation. Live measurement puts Claude at
+    1.10-1.16 and the cross-family spread at 1.005-1.18, so the floor asserted
+    here is what keeps a future tuning pass from drifting under the evidence.
     """
     slope = _estimate_slope(ModelSpec(provider="xai", model_id="grok-4.6"))
 
     assert slope == DEFAULT_ESTIMATE_SLOPE
     # The floor is the point: a default that drifts down re-opens the bug, and
     # every previous test stayed green while it did exactly that.
-    assert slope >= 1.75
+    assert slope >= 1.25
 
 
 def test_the_ask_stays_admissible_for_an_expensive_tokenizer() -> None:
@@ -4351,5 +4376,104 @@ def test_the_ask_stays_admissible_for_an_expensive_tokenizer() -> None:
     # count and the tokenizer decides the rest, so pinning the assertion to the
     # request's own estimate is what keeps this about admission.
     _, measured = _estimated_prompt_tokens(request)
-    real_prompt = measured * 1.9  # the measured Anthropic worst case
+    real_prompt = measured * 1.2  # above every live-measured Claude ratio (1.10-1.16)
     assert real_prompt + sent <= spec.context_window
+
+
+# --- small windows and the healthy-session ask --------------------------------
+#
+# Round-3 review and QA both found the same two defects, and both were invisible
+# to the suite because its smallest window under test was 10,000 and used only to
+# assert that a refusal SHOULD fire. Nothing asserted that an ordinary prompt on a
+# small window ADMITS, and nothing checked what the ask becomes once the measured
+# figure has proved a session healthy.
+
+
+@pytest.mark.parametrize("window", [8_000, 8_192, 16_385, 32_768])
+def test_a_small_prompt_on_a_small_window_still_admits(window: int) -> None:
+    """An 8k model must serve ``"hi"``.
+
+    ``MIN_OUTPUT_TOKENS + OUTPUT_CLAMP_SAFETY_MARGIN`` is 8192, so a constant
+    reserve consumed the ENTIRE window of ``gpt-4`` and ``moonshot-v1-8k`` and
+    refused every request to them — a one-token prompt included, with 8,185
+    tokens of real headroom. 7 bundled registry rows and 12 live OpenRouter rows
+    sit at or below 8,192.
+    """
+    spec = ModelSpec(
+        provider="openai", model_id="gpt-4", context_window=window, max_output_tokens=window
+    )
+    request = ChatRequest(model=spec, messages=[Message.user("hi")])
+
+    assert _effective_max_tokens(request) > 0
+
+
+@pytest.mark.parametrize("window", [1_000, 8_192, 32_768, 40_960, 200_000, 2_000_000])
+def test_the_reserve_stays_inside_the_compaction_headroom_at_every_window(window: int) -> None:
+    """The ordering that keeps a recoverable session recoverable, as ALGEBRA.
+
+    The refusal point and the compaction trigger must keep a fixed order at every
+    window size. A constant reserve against a fractional trigger cannot: it held
+    above ~41k and inverted below, which is the same wedge the round-2 review
+    found, relocated one window-band lower. Expressing the reserve in the
+    trigger's own shape makes the ordering true by construction — so this asserts
+    it across four orders of magnitude rather than over a lucky range.
+    """
+    settings = CompactionSettings()
+
+    refusal_point = window - _output_reserve_tokens(window, settings)
+
+    assert refusal_point > resolve_threshold_tokens(window, settings)
+
+
+def test_the_reserve_tracks_a_raised_compaction_threshold() -> None:
+    """``threshold_percent`` is user-configurable, so a hardcoded fraction would
+    silently re-invert for anyone who raises it. The reserve is derived from the
+    caller's own settings for that reason."""
+    aggressive = CompactionSettings(threshold_percent=0.95)
+
+    window = 200_000
+    refusal_point = window - _output_reserve_tokens(window, aggressive)
+
+    assert refusal_point > resolve_threshold_tokens(window, aggressive)
+
+
+@pytest.mark.parametrize("occupancy", [0.25, 0.41, 0.50])
+def test_a_healthy_session_keeps_its_full_ask_without_a_hint(occupancy: float) -> None:
+    """The hint-less path must not be quietly capped at the reserve.
+
+    Flooring at ``MIN_OUTPUT_TOKENS`` once the measurement proved a session
+    healthy was round-1's truncation defect by another route: at 50% occupancy a
+    Sonnet first call asked for 4,096 with ~95k tokens of real headroom and
+    returned an answer cut mid-word with ``finish_reason='length'``, where main
+    completed it. It bit only the hint-less branch — first call, forks, errands,
+    the compaction summarizer — which is why a hinted measurement did not show it.
+
+    Capped at 50% deliberately: past roughly 55% a reduced ask is CORRECT, since
+    the prompt plus a full 64k reply genuinely approaches the window. What this
+    pins is the band where main answers in full and the branch must too.
+    """
+    spec = _sonnet_spec()
+    request = ChatRequest(
+        model=spec, messages=[Message.user(_prose(int(spec.context_window * occupancy)))]
+    )
+
+    assert _bodies(request)["anthropic"]["max_tokens"] == spec.max_output_tokens
+
+
+def test_an_explicit_small_ask_the_measured_headroom_can_fund_is_reachable() -> None:
+    """The R12 escape hatch, now with a comparison an input can actually satisfy.
+
+    It previously tested ``explicit <= available`` while reaching the branch
+    required ``available < explicit`` — a contradiction, so an exhaustive search
+    hit it zero times and the comment claimed a protection that did not exist.
+    Comparing against the MEASURED headroom is what the reasoning always
+    described.
+    """
+    spec = ModelSpec(
+        provider="anthropic", model_id="claude-x", context_window=8_192, max_output_tokens=4_096
+    )
+    # High occupancy: the scaled figure exhausts the window while the measured one
+    # still funds a small explicit ask.
+    request = ChatRequest(model=spec, messages=[Message.user(_prose(7_500))], max_tokens=256)
+
+    assert _effective_max_tokens(request) == 256
