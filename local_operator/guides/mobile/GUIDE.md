@@ -32,7 +32,8 @@ land in the **transcript or any other model-visible context** — a reply,
 a tool argument, a notice, a commit, a ticket, Slack, or a log. Printing
 it "just this once" still writes it into the conversation the next turn
 re-sends. Use the `ask` tool **before** install, with one question and
-these options (consequence in the description, recommended first):
+these options (consequence in the description; mark the one you recommend
+— it is moved to the top of the card):
 
 - **Leave it in the Keychain only** — you never print it. They retrieve it
   themselves with `lop mobile password` (or Keychain Access, service

@@ -134,16 +134,18 @@ async def test_an_empty_question_list_is_refused() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_valid_recommendation_reaches_the_host() -> None:
-    """The index is what the picker preselects, so it has to survive parsing."""
+async def test_a_valid_recommendation_reaches_the_host_at_the_top() -> None:
+    """The recommendation has to survive parsing, and it arrives HOISTED: the
+    model authored it at index 1 and the host is handed it at index 0, because
+    position is the only channel some surfaces have for it."""
     hook, seen = await _answer_with({"stale": ["Drop them"]})
     result = await _call(_context(hook), {"questions": _questions(recommended=1)})
 
     assert result.is_error is False
-    assert seen[0][0].recommended == 1
+    assert seen[0][0].recommended == 0
     assert [option.label for option in seen[0][0].options] == [
-        "Drop them",
         "Backfill from the audit log",
+        "Drop them",
     ]
 
 
