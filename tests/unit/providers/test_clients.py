@@ -25,6 +25,7 @@ from local_operator.harness.types import (
     ToolResult,
 )
 from local_operator.providers.clients import (
+    MIN_OUTPUT_TOKENS,
     AnthropicClient,
     GoogleClient,
     MockClient,
@@ -3675,8 +3676,19 @@ def _every_cache_control(body: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _large_context_request() -> ChatRequest:
+    """A request whose TTL tests drive ``context_tokens_hint`` up to 900k.
+
+    The window is stated explicitly (1M, Claude's real size) rather than left on
+    the ``ModelSpec`` default of 128k. These tests set hints of 150k-900k, and a
+    hint LARGER than the window is a state that cannot occur in production — the
+    hint is the provider's own count of a prompt it already accepted — so the
+    default made the fixture describe an impossible session. It now also has to
+    be a window the output clamp can fund a reply in, since
+    ``_effective_max_tokens`` refuses a request whose prompt leaves no room to
+    answer.
+    """
     return ChatRequest(
-        model=_spec(provider="anthropic"),
+        model=ModelSpec(provider="anthropic", model_id="claude-opus-5", context_window=1_000_000),
         system_blocks=["instructions", "inventory", "skills", "env"],
         messages=[Message.user("first"), Message.assistant("mid"), Message.user("second")],
     )
@@ -3815,7 +3827,10 @@ def test_anthropic_ttl_keeps_the_breakpoint_budget() -> None:
     blocks + two message targets still fit MAX_CACHE_BREAKPOINTS."""
     client = AnthropicClient(cache_ttl_1h_min_context_tokens=1)
     request = ChatRequest(
-        model=_spec(provider="anthropic"),
+        # Explicit 1M window for the same reason as ``_large_context_request``:
+        # a 500k hint against the spec default's 128k describes a session that
+        # cannot exist, and the output clamp refuses it.
+        model=ModelSpec(provider="anthropic", model_id="claude-opus-5", context_window=1_000_000),
         system_blocks=[f"block-{i}" for i in range(9)],
         messages=[Message.user("first"), Message.assistant("mid"), Message.user("second")],
         context_tokens_hint=500_000,
@@ -3954,6 +3969,32 @@ def _muse_spark_spec() -> ModelSpec:
     )
 
 
+def _sonnet_spec() -> ModelSpec:
+    """Claude Sonnet's real shape — the model round 1 silently truncated."""
+    return ModelSpec(
+        provider="anthropic",
+        model_id="claude-sonnet-4-5",
+        context_window=200_000,
+        max_output_tokens=64_000,
+    )
+
+
+def _prose(tokens: int, *, non_ascii: bool = False) -> str:
+    """About ``tokens`` tokens of ordinary prose (~4 chars/token).
+
+    Realistic content matters here: the round-1 defect was invisible precisely
+    because every test used a 2-token prompt or a 6x-window one, never the
+    ordinary middle where real sessions spend their time.
+    """
+    chunk = "The quick brown fox jumps over the lazy dog. "
+    if non_ascii:
+        # One curly apostrophe per chunk. Under a byte-length bound this single
+        # character multiplied the whole block's charge by 4; the output budget
+        # must not depend on it.
+        chunk = chunk.replace("dog.", "dog\u2019s.")
+    return chunk * max(1, tokens * 4 // len(chunk))
+
+
 @pytest.mark.parametrize("wire,key", MAX_TOKEN_KEYS)
 def test_output_cap_clamped_so_prompt_plus_output_fits_window(wire: str, key: str) -> None:
     """The reported 400: 943718 of reserved output against a 1M window left only
@@ -3971,19 +4012,41 @@ def test_output_cap_clamped_so_prompt_plus_output_fits_window(wire: str, key: st
 
 
 @pytest.mark.parametrize("wire,key", MAX_TOKEN_KEYS)
-def test_output_cap_unchanged_for_a_sanely_advertised_model(wire: str, key: str) -> None:
-    """The safeguard must not cost the models that work today anything. An
-    Anthropic-shaped spec (1M window, 128k cap) on an ordinary prompt sends the
-    spec's number byte-for-byte, because the clamp only ever lowers."""
-    spec = ModelSpec(
-        provider="anthropic",
-        model_id="claude-opus-5",
-        context_window=1_000_000,
-        max_output_tokens=128_000,
-    )
-    request = ChatRequest(model=spec, messages=[Message.user("hi")])
+@pytest.mark.parametrize("prompt_tokens", [2, 12_000, 30_000, 48_000])
+def test_output_cap_unchanged_for_a_sanely_advertised_model(
+    wire: str, key: str, prompt_tokens: int
+) -> None:
+    """The safeguard must not cost the models that work today anything — asserted
+    across the range real sessions actually occupy, not just a 2-token prompt.
 
-    assert _bodies(request)[wire][key] == 128_000
+    This is the test that let the round-1 defect ship: it made this exact claim
+    against ``Message.user("hi")``, the one input where a 4-18x over-estimate
+    cannot bite. At 48,000 tokens (24% of Sonnet's window) the previous revision
+    sent 512 instead of 64,000 and truncated a real answer mid-sentence.
+    """
+    spec = _sonnet_spec()
+    request = ChatRequest(model=spec, messages=[Message.user(_prose(prompt_tokens))])
+
+    assert _bodies(request)[wire][key] == 64_000
+
+
+@pytest.mark.parametrize("wire,key", MAX_TOKEN_KEYS)
+def test_output_budget_does_not_depend_on_non_ascii_characters(wire: str, key: str) -> None:
+    """An identical prompt must not lose its output budget because it contains a
+    curly apostrophe.
+
+    A byte-length bound charges ``4 * len(text)`` for any block that is not
+    ``str.isascii()``, so one ``\u2019`` — or an em dash, an emoji, an accented
+    name, any non-English text — used to cut the same conversation's budget from
+    64,000 to 512. The two asks must now agree.
+    """
+    spec = _sonnet_spec()
+    ascii_body = _bodies(ChatRequest(model=spec, messages=[Message.user(_prose(30_000))]))
+    unicode_body = _bodies(
+        ChatRequest(model=spec, messages=[Message.user(_prose(30_000, non_ascii=True))])
+    )
+
+    assert ascii_body[wire][key] == unicode_body[wire][key] == 64_000
 
 
 @pytest.mark.parametrize("wire,key", MAX_TOKEN_KEYS)
@@ -3997,27 +4060,49 @@ def test_explicit_small_max_tokens_is_still_honoured(wire: str, key: str) -> Non
         context_window=1_000_000,
         max_output_tokens=128_000,
     )
-    request = ChatRequest(model=spec, messages=[Message.user("hi")], max_tokens=1024)
+    request = ChatRequest(model=spec, messages=[Message.user(_prose(30_000))], max_tokens=1024)
 
     assert _bodies(request)[wire][key] == 1024
 
 
 @pytest.mark.parametrize("wire,key", MAX_TOKEN_KEYS)
-def test_output_cap_floors_rather_than_collapsing_on_a_full_context(wire: str, key: str) -> None:
-    """A nearly-full context must still ask for a usable completion. Zero is
-    rejected outright by several gateways and a negative number is a 400 with a
-    far less legible message than the overflow this clamp exists to prevent."""
+def test_a_prompt_too_large_to_answer_is_refused_not_truncated(wire: str, key: str) -> None:
+    """When the window cannot fund a usable reply the request is REFUSED.
+
+    Sending a tiny cap anyway is the one outcome worse than the overflow this
+    fixes: reasoning tokens are billed against the same budget (``grok-4.6``
+    spent 689 of them thinking at a 512 cap and emitted no text at all), and
+    ``harness/loop.py`` only retries a COMPLETELY silent truncation, so a partial
+    answer is accepted with no notice. The user previously got a legible HTTP
+    400 here and must still get something they can see.
+    """
     spec = ModelSpec(
         provider="openrouter",
         model_id="tiny",
         context_window=10_000,
         max_output_tokens=8_000,
     )
-    request = ChatRequest(model=spec, messages=[Message.user("word " * 20_000)])
+    request = ChatRequest(model=spec, messages=[Message.user(_prose(20_000))])
 
-    from local_operator.providers.clients import MIN_OUTPUT_TOKENS
+    with pytest.raises(ProviderError) as excinfo:
+        _bodies(request)[wire]
 
-    assert _bodies(request)[wire][key] == MIN_OUTPUT_TOKENS
+    # The message has to name the numbers that made it impossible, or it is just
+    # another opaque failure.
+    assert "too large" in str(excinfo.value)
+    assert excinfo.value.kind == "request"
+
+
+def test_the_clamp_still_lowers_an_overflowing_ask_before_refusing() -> None:
+    """Between "fits untouched" and "cannot be answered" there is a real middle
+    where the ask is reduced and the turn proceeds — the muse-spark case itself.
+    Without this the refusal above could pass while the clamp did nothing."""
+    spec = _muse_spark_spec()
+    request = ChatRequest(model=spec, messages=[Message.user(_prose(400_000))])
+
+    sent = _bodies(request)["openai-completions"]["max_tokens"]
+
+    assert MIN_OUTPUT_TOKENS <= sent < spec.max_output_tokens
 
 
 def test_system_blocks_and_tools_are_charged_against_the_window() -> None:

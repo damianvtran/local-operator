@@ -31,7 +31,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import httpx
 
-from local_operator.compaction.tokens import messages_tokens_upper_bound
+from local_operator.compaction.tokens import estimate_messages_tokens
 from local_operator.harness.types import (
     AgentTool,
     ChatRequest,
@@ -648,25 +648,71 @@ def _sampling_params(request: ChatRequest, *, top_p_key: str = "top_p") -> dict[
     }
 
 
-#: Tokens held back from the window when sizing the output ask, on top of the
-#: prompt estimate. Covers the two things the estimate below cannot see: the
-#: provider's own per-request overhead (chat templates, injected tool preambles,
-#: role scaffolding — none of it in our message list) and the drift of a local
-#: estimate against the provider's real tokenizer. ``messages_tokens_upper_bound``
-#: over-estimates prose by 3.5-4.5x, so on a large prompt this margin is noise;
-#: it matters on a SMALL prompt against a small window, where the bound is tight
-#: and a few hundred tokens of unseen scaffolding is the whole error budget.
-OUTPUT_CLAMP_SAFETY_MARGIN = 2_048
+#: Multiplier applied to a LOCAL token estimate before it is compared against a
+#: provider-scale window, keyed on the provider family.
+#:
+#: ``compaction/tokens.py`` is explicit that its numbers are "a RULER OF ITS OWN,
+#: never a prediction of the bill": it counts with ``cl100k_base``, which is
+#: OpenAI's tokenizer, so the gap against what a provider actually bills is a
+#: per-MODEL property rather than a constant. The window is a PROVIDER figure, so
+#: subtracting a raw local estimate from it mixes two rulers — the exact class of
+#: bug that module records as having already shipped twice.
+#:
+#: Values come from this repo's own fitted measurement,
+#: ``docs/evidence/compaction-ruler/slope_fit.txt``, using the per-request
+#: ``ratio p50`` column (the honest per-request figure) rather than the
+#: regression slope, then rounded UP to the next quarter:
+#:
+#: =========================  =========  ======
+#: model                      ratio p50  used
+#: =========================  =========  ======
+#: ``claude-opus-4-8``             1.96    2.00
+#: ``claude-opus-5``               1.82    2.00
+#: ``gpt-5.6-sol``                 1.15    1.25
+#: ``glm-5.3``                     1.06    1.25
+#: =========================  =========  ======
+#:
+#: A single global 2.0 was the first attempt and is wrong: it refuses an
+#: OpenAI-family request at ~60% of window that fits comfortably, because that
+#: family bills ~1.15x rather than ~1.9x. The asymmetry within a family is still
+#: deliberate — over-stating costs output headroom only once a request is near
+#: the window, while under-stating re-opens the HTTP 400 this clamp prevents.
+#:
+#: Applied ONLY to the local fallback: a provider-reported count is already on
+#: the right ruler and is used unscaled.
+_PROVIDER_ESTIMATE_SLOPE: dict[str, float] = {"anthropic": 2.0}
 
-#: Floor for a clamped output ask. Without it a nearly-full context computes a
-#: zero or negative cap, and both are worse than the overflow being fixed: zero
-#: is rejected outright by several gateways, and a negative number is a 400 with
-#: a far less legible message than the one this clamp exists to prevent. A model
-#: that cannot be given at least this much room is in a situation compaction has
-#: to resolve, so the request is still SENT — asking for a small completion lets
-#: the provider answer (or return its own honest context error) instead of
-#: failing here on a number we invented.
-MIN_OUTPUT_TOKENS = 512
+#: Families with no measured entry above. 1.25 covers the OpenAI/GLM cluster
+#: (1.06-1.15 measured) with headroom; an unmeasured provider is more likely to
+#: resemble that cluster than Anthropic's outlier, and the ``MIN_OUTPUT_TOKENS``
+#: refusal below is what catches a family that turns out to be worse.
+DEFAULT_ESTIMATE_SLOPE = 1.25
+
+#: Characters per token for the system-block and tool-schema term, matching the
+#: ratio ``compaction/tokens.py`` uses when tiktoken is absent. Deliberately a
+#: local constant rather than an import of that module's private
+#: ``_CHARS_PER_TOKEN_FALLBACK``: this is a coarse sizing input for one piece of
+#: arithmetic, not a claim to share that module's estimator contract.
+_CHARS_PER_TOKEN = 4
+
+#: Tokens held back on top of the prompt estimate, covering what no estimate of
+#: OUR message list can see: the provider's own per-request scaffolding (chat
+#: templates, injected tool preambles, role framing). Re-derived for the precise
+#: estimator — the previous 2048 was chosen against a 3.5-4.5x byte bound that
+#: already dwarfed it, so it was inert wherever it was supposed to help (review
+#: R4). 4096 is roughly a page of injected scaffolding and is the term that keeps
+#: a SMALL prompt against a SMALL window from landing exactly on the boundary.
+OUTPUT_CLAMP_SAFETY_MARGIN = 4_096
+
+#: Smallest output ask worth sending. Below this the reply cannot be a reply:
+#: QA measured ``x-ai/grok-4.6`` spending **689 tokens on reasoning alone** at a
+#: 512-token cap and emitting zero visible text, because reasoning tokens are
+#: billed against this same budget.
+#:
+#: This is now a REFUSAL threshold, not a value that goes on the wire. See
+#: :func:`_effective_max_tokens` for why silently sending a doomed cap is the
+#: one outcome this must not produce.
+MIN_OUTPUT_TOKENS = 4_096
 
 
 def _effective_max_tokens(request: ChatRequest) -> int:
@@ -695,12 +741,32 @@ def _effective_max_tokens(request: ChatRequest) -> int:
     time, because this is the first point that knows both the window and the
     actual prompt — the spec knows the window and never sees the messages.
 
-    The estimate deliberately uses :func:`messages_tokens_upper_bound` rather
-    than the precise memoized :func:`estimate_messages_tokens`. It is a rigorous
-    OVER-estimate that never loads tiktoken, and over-estimating the prompt
-    shrinks the ask, which is the safe direction: erring high costs a little
-    output headroom, erring low re-opens the 400. It also keeps a ~84 ms /
-    ~43.6 MB tokenizer load off a path that runs on every single request.
+    **Sizing the prompt: two rulers, in preference order.** The window is a
+    PROVIDER-scale number, so the subtrahend has to be one too. This mirrors
+    ``AnthropicClient._cache_ttl_for``, which faces the same problem and resolves
+    it the same way:
+
+    1. ``request.context_tokens_hint`` — the provider's OWN count from the
+       session's previous call. It is on the right ruler by construction and is
+       used unscaled, off only by the one turn appended since.
+    2. :func:`estimate_messages_tokens` scaled by
+       :data:`LOCAL_ESTIMATE_PROVIDER_SLOPE`, when no hint exists (a session's
+       first call, a fork, a one-shot errand).
+
+    An earlier revision used :func:`messages_tokens_upper_bound` on the argument
+    that over-estimating is "the safe direction". That reasoning was wrong and is
+    recorded here so it is not reintroduced: the bound counts one token per BYTE,
+    which is ~4.5x the real count on ASCII and jumps another ~4x the moment a
+    single non-ASCII character (a curly apostrophe, an em dash, an accented name)
+    flips a block to its ``4 * len`` branch. Subtracting that does not shave the
+    ask, it consumes the window several times over — measured, a Claude Sonnet
+    200k/64k session at **24% of its window** collapsed from 64000 to the floor
+    and returned a real answer truncated mid-sentence with
+    ``finish_reason='length'``. Trading a loud HTTP 400 on a handful of models
+    for silent truncation on every long session is a worse failure in kind,
+    because the user cannot see it happened. The direction-of-error argument
+    holds only for a THRESHOLD test that must never read low; here the magnitude
+    of the over-estimate is itself the cost.
 
     System blocks and tool schemas are charged too, not just messages. The 400
     above itemised **10,400 tokens of tool input** separately, and a system
@@ -713,6 +779,11 @@ def _effective_max_tokens(request: ChatRequest) -> int:
     (1024 for auto-naming) stays 1024 rather than being raised to fill the
     window. Returns ``0`` when neither the request nor the spec asks for a cap,
     which every call site already spells as "omit the key".
+
+    Raises:
+        ProviderError: when the window cannot fund even
+            :data:`MIN_OUTPUT_TOKENS` of output. See below for why this refuses
+            rather than sending a doomed cap.
     """
     requested = request.max_tokens or request.model.max_output_tokens
     if not requested or requested <= 0:
@@ -729,25 +800,72 @@ def _effective_max_tokens(request: ChatRequest) -> int:
         # would invent a limit from a number that means "no data".
         return requested
 
-    prompt = messages_tokens_upper_bound(request.messages)
-    for block in request.system_blocks:
-        prompt += len(block) if block.isascii() else 4 * len(block)
-    for tool in request.tools:
-        # Same one-byte-per-token bound the message estimator uses. The schema is
-        # serialized because that is what goes on the wire; ``default=str`` keeps
-        # a non-JSON-serialisable default in a schema from raising inside a body
-        # builder, where an exception would fail the turn over an estimate.
-        schema = json.dumps(tool.parameters, default=str, sort_keys=True)
-        text = tool.name + tool.description + schema
-        prompt += len(text) if text.isascii() else 4 * len(text)
-
+    prompt = _estimated_prompt_tokens(request)
     available = window - prompt - OUTPUT_CLAMP_SAFETY_MARGIN
     if available >= requested:
-        # The overwhelmingly common case: an ordinary prompt against a sanely
-        # advertised cap. Anthropic (1M/128k) and OpenAI (272k/128k) specs come
-        # out of here byte-identical to what they sent before this clamp existed.
+        # The overwhelmingly common case, and the one the previous revision broke:
+        # an ordinary prompt against a sanely advertised cap sends the spec's
+        # number untouched. Anthropic (200k/64k, 1M/128k) and OpenAI (272k/128k)
+        # come out byte-identical at every realistic session size.
         return requested
-    return max(MIN_OUTPUT_TOKENS, available)
+
+    if available < MIN_OUTPUT_TOKENS:
+        # REFUSE rather than send a cap too small to answer with. Sending it
+        # anyway is the one outcome worse than the bug this fixes: reasoning
+        # tokens are billed against this same budget (grok-4.6 spent 689 of them
+        # thinking at a 512 cap and emitted no text at all), and
+        # ``harness/loop.py`` only retries a COMPLETELY silent truncation —
+        # ``silent = not assistant.text and not assistant.tool_calls`` — so a
+        # partial answer is accepted with no notice and the user reads a
+        # confidently truncated reply. A ProviderError is legible, reaches the
+        # incident path, and says which numbers made the request impossible;
+        # the pre-fix behaviour for this case was itself a visible HTTP 400, so
+        # this preserves the failure's visibility instead of hiding it.
+        raise ProviderError(
+            None,
+            (
+                f"prompt is too large for {request.model.model_id}: about {prompt:,} "
+                f"tokens of input against a {window:,}-token context window leaves "
+                f"under {MIN_OUTPUT_TOKENS:,} tokens for the reply. Compact the "
+                f"conversation or start a new session."
+            ),
+            kind="request",
+        )
+    return available
+
+
+def _estimated_prompt_tokens(request: ChatRequest) -> int:
+    """Prompt size for :func:`_effective_max_tokens`, on the provider's ruler.
+
+    Split out so the two rulers and their scaling are readable in one place, and
+    so the estimate can be exercised directly by tests.
+
+    The messages term prefers ``context_tokens_hint`` (the provider's own count)
+    and otherwise scales the local estimate by the family's measured ratio — see
+    :data:`_PROVIDER_ESTIMATE_SLOPE`. System blocks and tools are always added
+    from the local side: they are not part of the hint's prefix on a first call
+    and, being English prose plus JSON, they are exactly the content the
+    ~4 chars/token ratio describes well.
+    """
+    slope = _PROVIDER_ESTIMATE_SLOPE.get(request.model.provider, DEFAULT_ESTIMATE_SLOPE)
+
+    hint = request.context_tokens_hint
+    if hint is not None and hint > 0:
+        # Already a provider figure — no slope, or it would be double-counted.
+        messages = hint
+    else:
+        messages = int(estimate_messages_tokens(request.messages) * slope)
+
+    extra_chars = sum(len(block) for block in request.system_blocks)
+    for tool in request.tools:
+        # ``len(str(...))`` rather than a json.dumps round trip: this runs per
+        # tool on every request across all four clients, and a character count of
+        # the schema is as good an input to a /4 estimate as its exact
+        # serialization would be (review R6).
+        extra_chars += len(tool.name) + len(tool.description) + len(str(tool.parameters))
+    # Same chars/token ratio the token module falls back to, scaled onto the
+    # provider's ruler for the same reason the messages term is.
+    return messages + int((extra_chars / _CHARS_PER_TOKEN) * slope)
 
 
 def _reasoning_effort(request: ChatRequest) -> str | None:
