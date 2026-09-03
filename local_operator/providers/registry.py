@@ -471,6 +471,18 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
         base_url="https://api.radienthq.com/v1",
     ),
     ProviderDefinition(
+        id="radient-oauth",
+        name="Radient (OAuth)",
+        login=_lazy_login("local_operator.providers.oauth.radient", "login_radient"),
+        refresh_token=_lazy_refresh(
+            "local_operator.providers.oauth.radient", "refresh_radient_token"
+        ),
+        get_api_key=_oauth_api_key,
+        store_credentials_as="radient",
+        callback_port=54549,
+        base_url="https://api.radienthq.com/v1",
+    ),
+    ProviderDefinition(
         id="alibaba",
         search_aliases=(
             "qwen",
