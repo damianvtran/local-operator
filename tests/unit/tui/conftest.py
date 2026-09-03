@@ -16,6 +16,7 @@ from textual.app import App, ComposeResult
 
 from local_operator.tui import animation
 from local_operator.tui import theme as theme_mod
+from local_operator.tui.settings import settings_reload
 from local_operator.tui.widgets.transcript import TranscriptView
 
 #: The real stylesheet, so styled tests exercise the shipped rules rather
@@ -35,6 +36,17 @@ def hermetic_tui_env(monkeypatch: pytest.MonkeyPatch) -> None:
     # Reverted here rather than in each test for the same reason the env pins
     # above are: a leak like this fails somewhere else entirely.
     animation.reset_animation_focus()
+    # The display-flag cache is a module global for the same reason, and leaks
+    # the same way (QA round 5, Q5-M1). Any test that writes a `display.*` key
+    # and then reads one — the config-watch propagation tests do exactly that —
+    # leaves the flag it wrote in `_cache`, which outlives its `tmp_path`. A
+    # later test reading `motion_enabled()` or a glyph then sees another test's
+    # config: `test_render_throttling.py` and `test_welcome.py` both fail that
+    # way, and only when they land on the same xdist worker AFTER the polluter,
+    # which is why it presents as a load flake rather than an ordering bug.
+    # Reset BEFORE each test rather than after, so a test that populates the
+    # cache cannot poison its successors no matter how it exits.
+    settings_reload()
     # Pin the tool-row icon mode host-independently. `nerd_icons_enabled()` now
     # autodetects from terminal-emulator env markers (glyphs.py), so the icon a
     # row leads with depends on the HOST: a dev box in ghostty/cmux renders the
