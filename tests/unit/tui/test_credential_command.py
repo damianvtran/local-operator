@@ -9,6 +9,9 @@ contains the secret.
 
 from __future__ import annotations
 
+import tempfile
+from pathlib import Path
+
 import pytest
 
 from local_operator.harness.types import CustomMessage, StreamEndEvent
@@ -77,7 +80,7 @@ async def test_storing_a_credential_masks_the_value_and_names_the_key() -> None:
 
 
 @pytest.mark.asyncio
-async def test_storing_a_credential_announces_it_to_the_session_journal(scratch_dir) -> None:
+async def test_storing_a_credential_announces_it_to_the_session_journal() -> None:
     """The model-visible half of /credential: the store write alone changes
     only the system-prompt tail, which the model has no reason to re-read.
     A real session journals a ``session_credential`` record naming the KEY
@@ -89,7 +92,9 @@ async def test_storing_a_credential_announces_it_to_the_session_journal(scratch_
     # A REAL session, not the FakeSession the pilot tests boot with: the
     # journal lives on Session (``journal_credential_change``), and the fake
     # has no journal to call.
-    real = make_real_session(scratch_dir(), ScriptedStream([[StreamEndEvent(stop_reason="stop")]]))
+    real = make_real_session(
+        Path(tempfile.mkdtemp()), ScriptedStream([[StreamEndEvent(stop_reason="stop")]])
+    )
     secret = "ghp_never_in_the_journal"
 
     real.journal_credential_change("GITHUB_TOKEN")

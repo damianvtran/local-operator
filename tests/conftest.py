@@ -24,10 +24,9 @@ one that has to opt in.
 
 from __future__ import annotations
 
-import itertools
 import logging
 import os
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -218,37 +217,6 @@ def restore_root_logger() -> Iterator[None]:
         logging.raiseExceptions = saved_raise
         root.handlers[:] = saved_handlers
         root.setLevel(saved_level)
-
-
-@pytest.fixture
-def scratch_dir(tmp_path: Path) -> Callable[[], Path]:
-    """Hand out throwaway directories that are actually reclaimed.
-
-    For tests that need a directory to point a registry or store at, where
-    ``tmp_path`` itself is awkward because the test builds several of them or
-    the allocation happens inside a module-level helper rather than the test
-    body.
-
-    WHY THIS EXISTS. A bare ``tempfile.mkdtemp()`` never self-cleans: nothing
-    unlinks it, no ``__del__`` or ``weakref.finalize`` reclaims it, and pytest
-    does not know about it. Suites here used it as a "throwaway dir" and it was
-    the opposite — measured at 71 abandoned directories per full-suite run,
-    against ~43,627 accumulated on one developer's machine until the disk hit
-    94% full. Each call here allocates under the test's own ``tmp_path``, which
-    pytest already rotates (it keeps the last three runs and deletes older
-    ones), so the directories are disposed of without any per-test bookkeeping.
-
-    Returns a factory rather than a single path because the common shape is
-    several independent registries in one test, which must not share a root.
-    """
-    counter = itertools.count()
-
-    def _make() -> Path:
-        path = tmp_path / f"scratch-{next(counter)}"
-        path.mkdir()
-        return path
-
-    return _make
 
 
 @pytest.fixture
