@@ -23,10 +23,12 @@ from unittest import mock
 import httpx
 import pytest
 
+from local_operator.harness.types import ChatRequest, Message
 from local_operator.model import catalogue
 from local_operator.model import configure as configure_mod
 from local_operator.model import effort
 from local_operator.model.catalogue import cached_listing
+from local_operator.providers.clients import OpenAICompatClient
 
 
 def _payload(model_id: str = "vendor/model", window: int = 1_000_000) -> dict[str, Any]:
@@ -1590,6 +1592,110 @@ def test_a_providers_listing_may_narrow_the_sampling_policy_but_never_widen_it()
         assert untouched.top_p == 0.95
     finally:
         configure_mod._sampling_support_memo.clear()
+
+
+@pytest.mark.parametrize(
+    "provider, model_id",
+    [
+        # "all other values will be rejected with a 400 error"
+        ("anthropic", "claude-opus-4-7"),
+        ("anthropic", "claude-opus-4-8"),
+        ("anthropic", "claude-sonnet-4.7"),
+        # "Unsupported parameters: Remove `temperature`, `top_p`"
+        ("openai", "gpt-6-astra"),
+        # The aggregator routes reach the same weights and must agree.
+        ("openrouter", "anthropic/claude-opus-4-7"),
+        ("radient", "openai/gpt-6-astra"),
+    ],
+)
+def test_a_reject_family_suppresses_an_override_instead_of_400ing(provider, model_id) -> None:
+    """REGRESSION (R1): dropping only our own default is not enough on a family
+    whose vendor REJECTS the parameter. A stored agent temperature — the shape
+    the server's own API examples advertise — would otherwise ride to the wire
+    and fail every single turn, which is the PR's headline outage relocated
+    from the default path onto the override path.
+
+    This is the distinction between "the vendor ignores it" (an override is
+    harmless) and "the vendor rejects it" (an override is a failed turn).
+    """
+    from local_operator.model.configure import configure_model
+
+    configured = configure_model(provider, model_id, None, temperature=0.2, top_p=0.9)
+    assert configured.spec.supports_sampling_params is False
+
+    request = ChatRequest(model=configured.spec, messages=[Message.user("hi")])
+    body = OpenAICompatClient("https://x")._build_body(request)
+    assert "temperature" not in body
+    assert "top_p" not in body
+
+
+@pytest.mark.parametrize(
+    "provider, model_id",
+    [
+        # Ignores an unwanted value, so an override costs nothing.
+        ("google", "gemini-3.8-flash"),
+        # Genuinely honours the pair.
+        ("anthropic", "claude-sonnet-4-5"),
+        ("google", "gemini-2.5-pro"),
+        # Legacy Kimi ids accept the pair; only the documented coding-host ids
+        # are hard-suppressed, via _KIMI_PINNED_SAMPLING.
+        ("kimi", "kimi-k2-0711-preview"),
+    ],
+)
+def test_an_ignore_or_honour_family_still_forwards_an_override(provider, model_id) -> None:
+    """The other half of R1: suppression must not spread. A user who asks for
+    determinism on a family that ignores or honours the value still gets it."""
+    from local_operator.model.configure import configure_model
+
+    configured = configure_model(provider, model_id, None, temperature=0.2, top_p=0.9)
+    request = ChatRequest(model=configured.spec, messages=[Message.user("hi")])
+    body = OpenAICompatClient("https://x")._build_body(request)
+    assert body["temperature"] == 0.2
+    assert body["top_p"] == 0.9
+
+
+@pytest.mark.parametrize(
+    "provider, model_id, expected",
+    [
+        # OMIT families: the errand must not re-assert a value the main turn
+        # deliberately stopped sending.
+        ("openai", "gpt-6-astra", None),
+        ("google", "gemini-3.8-flash", None),
+        ("deepseek", "deepseek-v4-pro", None),
+        ("anthropic", "claude-opus-4-7", None),
+        # A seeded family still gets its documented value on the errand.
+        ("google", "gemini-2.5-pro", 1.0),
+        ("alibaba", "qwen3-coder-plus", 0.7),
+    ],
+)
+def test_the_title_errand_follows_the_same_sampling_policy_as_a_turn(
+    provider, model_id, expected
+) -> None:
+    """REGRESSION (Q1): the conversation-titling errand built its own
+    ``ChatRequest(temperature=0)``, and a request value OUTRANKS the spec in
+    ``_sampling_params`` — so the errand re-asserted 0.0 on exactly the families
+    the policy table exists for, while the main turn correctly sent nothing.
+
+    The failure mode is quiet: the errand is ``isolated`` with one attempt and
+    no fallback, so a rejected request surfaces only as a conversation that
+    never gets a title.
+
+    Mirrors the construction at ``session.py``'s ``_title_via_model``.
+    """
+    spec = configure_mod.build_model_spec(provider, model_id)
+    request = ChatRequest(
+        model=spec,
+        messages=[Message.user("t")],
+        tools=[],
+        tool_choice="none",
+        max_tokens=32,
+        temperature=spec.temperature,
+    )
+    body = OpenAICompatClient("https://x")._build_body(request)
+    if expected is None:
+        assert "temperature" not in body
+    else:
+        assert body["temperature"] == expected
 
 
 def test_a_hard_rejection_still_beats_an_explicit_override() -> None:
