@@ -276,7 +276,22 @@ class RuntimeServer:
         kind: str = "tui",
         projection_sink: ProjectionSink | None = None,
     ) -> None:
+        #: Live state mirrored into the discovery record. Held here rather
+        #: than read off the record so the publish is one assignment and the
+        #: fields have a defined value before the record exists.
+        self._pending: str | None = None
+        self._busy = False
         self._handle = handle
+        # Back-reference so the handle can publish record state it alone knows
+        # about — today the parked-gate ``pending`` bit, which originates deep
+        # inside the approval gate and has to reach the discovery record for
+        # `lop sessions` and the picker to show it. Set defensively: reduced
+        # handles in tests are plain objects and must not fail on an attribute
+        # assignment they never asked for.
+        try:
+            handle._registrant = self  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001 — an unwritable handle simply cannot publish
+            logger.debug("handle does not accept a registrant back-reference", exc_info=True)
         seed = handle.session_projection_seed
         seed.kind = kind
         # The projection fold is an OPTIONAL, injected collaborator. A caller
@@ -806,6 +821,55 @@ class RuntimeServer:
             conn.writer.close()
         except Exception:  # noqa: BLE001
             pass
+
+    def set_record_pending(self, pending: str | None) -> None:
+        """Record that this session is waiting for a PERSON (or no longer is).
+
+        Named for the RECORD it writes, distinct from ``set_pending`` below,
+        which carries a ``PendingRequest`` into the projection so a front end
+        can paint the card. Two different consumers: that one is "show the
+        user this question", this one is "tell the machine a person is owed".
+
+        ``"approval"`` / ``"ask"`` / ``None``. Republished immediately rather
+        than waiting for the 15 s heartbeat, because the whole value of the
+        field is that a user hunting for "what is that 283 MB process doing"
+        finds the answer at once.
+        """
+        if self._pending == pending:
+            return
+        self._pending = pending
+        self._republish()
+
+    def set_busy(self, busy: bool) -> None:
+        """Record whether a turn is running, for the picker's liveness marker."""
+        if self._busy == busy:
+            return
+        self._busy = busy
+        self._republish()
+
+    def _republish(self) -> None:
+        """Refresh the discovery record with the current live state.
+
+        Through ``RecordPublisher.heartbeat``, which is already the one way
+        this process rewrites its record — a second publish path here would be
+        a second thing that can disagree about the record's contents.
+
+        Best-effort: publishing is one small staged write and rename, and a
+        failure costs a marker rather than a session. Called on every
+        transition rather than left to the 15 s heartbeat because the value of
+        these fields is that they are current when somebody looks.
+        """
+        publisher = getattr(self, "_publisher", None)
+        if publisher is None:
+            return
+        try:
+            publisher.heartbeat(
+                pending=self._pending,
+                busy=self._busy,
+                detached=self.attach_clients() == 0,
+            )
+        except Exception:  # noqa: BLE001 — a stale marker is not worth an exception
+            logger.debug("could not republish the session record", exc_info=True)
 
     def attach_clients(self) -> int:
         """How many attach (follower terminal) connections are live.

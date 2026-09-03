@@ -5388,6 +5388,15 @@ class OperatorApp(App[None]):
                 self._system_notice(RESUME_EMPTY_NOTICE, "warning")
                 return
 
+            # Live state is overlaid HERE rather than inside
+            # ``recent_session_rows``, and that placement is load-bearing:
+            # ``resume.py`` is stdlib-only and sits on the CLI startup path, so
+            # `lop --resume` must not pay for a registry walk. The picker is
+            # the one caller that wants it, and it pays for it once at open:
+            # ONE ``registry.scan()`` and ONE ``wakes.store.read_index()`` for
+            # the whole list, never a probe per row.
+            rows = self._overlay_live_state(rows)
+
             # AFTER the empty check, so a store with nothing to offer does no
             # scanning, and BEFORE the screen is pushed, so the first keystroke
             # filters against a complete index rather than a half-built one.
@@ -5507,6 +5516,66 @@ class OperatorApp(App[None]):
                 logger.debug("stopping the outgoing session failed", exc_info=True)
 
         self.run_worker(stop_outgoing(), group="resume-stop", exclusive=False)
+
+    def _overlay_live_state(self, rows: "list[Any]") -> "list[Any]":
+        """Fill in each row's runtime state, and float the ones needing a person.
+
+        Two reads for the whole list: the discovery records say which sessions
+        are running, working, attached or wedged, and the wake index says which
+        have reminders armed. Best-effort — a picker that cannot read either
+        one still lists every session exactly as it did before, because the
+        fields are defaulted and the markers simply do not appear.
+        """
+        from local_operator.paths import config_dir
+        from local_operator.session.runtime import registry
+        from local_operator.tui.widgets.session_picker import sort_needs_you_first
+
+        try:
+            scanned = registry.scan(config_dir())
+        except Exception:  # noqa: BLE001 — markers are an enhancement, never a gate
+            logger.debug("picker could not scan session records", exc_info=True)
+            scanned = []
+        try:
+            from local_operator.wakes.store import read_index
+
+            wake_index = read_index(config_dir())
+        except Exception:  # noqa: BLE001
+            logger.debug("picker could not read the wake index", exc_info=True)
+            wake_index = {}
+
+        live: dict[str, tuple[Any, str]] = {}
+        for record, state in scanned:
+            session_id = getattr(record, "session_id", "")
+            if session_id:
+                live[session_id] = (record, state)
+
+        updated: list[Any] = []
+        for row in rows:
+            record_state = live.get(row.id)
+            live_state = ""
+            pending: str | None = None
+            if record_state is not None:
+                record, state = record_state
+                if state == "wedged":
+                    live_state = "wedged"
+                elif getattr(record, "busy", False):
+                    live_state = "busy"
+                elif not getattr(record, "detached", False):
+                    live_state = "attached"
+                else:
+                    live_state = "idle"
+                pending = getattr(record, "pending", None) or None
+            entry = wake_index.get(row.id) or {}
+            schedules = entry.get("schedules") or () if isinstance(entry, dict) else ()
+            updated.append(
+                row._replace(
+                    live_state=live_state,
+                    pending=pending,
+                    wakes=len(schedules),
+                    wakes_dormant=bool(isinstance(entry, dict) and entry.get("stopped_at")),
+                )
+            )
+        return sort_needs_you_first(updated)
 
     def _run_session_transition(self, operation: Awaitable[None]) -> None:
         """Run one session replacement behind the standard composer boundary.

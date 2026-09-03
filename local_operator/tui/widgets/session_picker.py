@@ -79,6 +79,7 @@ from textual.widgets import Static
 from local_operator.resume import SessionRow, fork_haystack, format_age
 from local_operator.session.search_index import SoftSearchIndex, search_digests
 from local_operator.tui import theme as theme_mod
+from local_operator.tui.terminal_title import SPINNER_FRAMES
 from local_operator.tui.widgets.tool_card import truncate_cells
 
 #: Width the card will take when the terminal allows it, and the floor it will
@@ -198,6 +199,38 @@ BODY_MATCH_MARKER = "” "
 #: result set is forked, exactly as the body-match marker reserves its column
 #: and for the identical reason — see ``plan_columns``.
 FORK_MARKER = "[fork] "
+
+#: The needs-you mark: this session has parked a question and is holding a
+#: runtime resident until somebody answers it. The one marker here that is
+#: about the USER's attention rather than the session's state, which is why it
+#: is the only one that also reorders the list.
+NEEDS_YOU_MARKER = "!"
+
+#: A session with wakes armed. Dormant wakes (a stopped session) render the
+#: same glyph a step quieter rather than a different one: it is the same fact
+#: about the session, qualified.
+#:
+#: ONE CELL, like every other marker here, and that is a constraint rather
+#: than a preference: the column reserves ``STATE_COL_CELLS`` for glyph plus
+#: separator, so a two-cell glyph consumes the separator and the name starts
+#: flush against it. The first spelling was ⏰ (two cells) and rendered
+#: ``⏰Morning standup notes`` while every other row had its space — caught
+#: in the rendered frame, not by a test.
+WAKE_MARKER = "◷"
+
+#: An attached session — another terminal is already watching it. Resuming is
+#: still fine (that is what a viewer IS now), but the user should know they
+#: will not be alone in there.
+ATTACHED_MARKER = "○"
+
+#: A live pid whose heartbeat went stale. Distinguished from cold because the
+#: remedy differs: a wedged session is one to `lop stop`, not to reopen.
+WEDGED_MARKER = "✗"
+
+#: Cells reserved for the live-state column when ANY row in the result set
+#: carries state. One cell for the state glyph plus its separating space; the
+#: spinner frames, the wake glyph and the markers above are all one cell wide.
+STATE_COL_CELLS = 2
 
 
 def filter_rows(
@@ -371,12 +404,55 @@ def _wrap_cells(text: str, width: int) -> list[str]:
     return lines or [""]
 
 
+def row_state_mark(row: SessionRow, frame: int) -> tuple[str, str]:
+    """``(glyph, ink)`` for one row's live state. Empty glyph when cold.
+
+    The picker is the one place a user can see the whole fleet, so it is where
+    "which of these is actually running, and which one wants me" has to be
+    answerable at a glance. Precedence is by URGENCY, not by state machine:
+    needs-you outranks everything (a person is blocked), then wedged (broken),
+    then busy, then attached, then wakes.
+
+    The spinner reuses ``terminal_title.SPINNER_FRAMES`` rather than a second
+    animation vocabulary — the same glyphs the band and the terminal title
+    already animate with, so "this is working" looks the same everywhere.
+    """
+    if row.pending:
+        return NEEDS_YOU_MARKER, "warning"
+    if row.live_state == "wedged":
+        return WEDGED_MARKER, "danger"
+    if row.live_state == "busy":
+        return SPINNER_FRAMES[frame % len(SPINNER_FRAMES)], "accent"
+    if row.live_state == "attached":
+        return ATTACHED_MARKER, "muted"
+    if row.live_state == "idle":
+        return ATTACHED_MARKER, "dim"
+    if row.wakes:
+        return WAKE_MARKER, "dim" if row.wakes_dormant else "muted"
+    return "", "dim"
+
+
+def sort_needs_you_first(rows: Sequence[SessionRow]) -> list[SessionRow]:
+    """Rows with a parked question first, everything else in the given order.
+
+    The ONE marker that reorders. A parked gate is a person being waited on
+    and a runtime held resident until they answer; burying it under thirty
+    recent conversations is how a session stays parked for a day. Stable
+    otherwise, so the recency order the caller established is preserved within
+    each group.
+    """
+    waiting = [row for row in rows if row.pending]
+    rest = [row for row in rows if not row.pending]
+    return waiting + rest
+
+
 def plan_columns(
     rows: Sequence[SessionRow],
     width: int,
     ages: Sequence[str],
     marked: bool = False,
     forked: bool = False,
+    stated: bool = False,
 ) -> tuple[int, int, int]:
     """``(name, age, id)`` cell budgets for ``width``, dropping before cutting.
 
@@ -414,6 +490,11 @@ def plan_columns(
     """
     marker_col = cell_len(BODY_MATCH_MARKER) if marked else 0
     marker_col += cell_len(FORK_MARKER) if forked else 0
+    # The live-state column follows the same reserve-for-the-RESULT-SET rule as
+    # the two above, and for the same reason: a column that appears as a
+    # running row scrolls into view makes every name jump sideways on one
+    # arrow press.
+    marker_col += STATE_COL_CELLS if stated else 0
     age_col = max((cell_len(age) for age in ages), default=0)
     # Measured rather than assumed at 12: an id written by an older build with
     # a different length must still line up instead of ragging the column.
@@ -435,6 +516,7 @@ def render_rows(
     hovered: int | None = None,
     body_matched: AbstractSet[str] = frozenset(),
     forked: bool | None = None,
+    frame: int = 0,
 ) -> list[Text]:
     """One line per session: cursor, name, age, id.
 
@@ -466,9 +548,15 @@ def render_rows(
     any_forked = (
         bool(forked) if forked is not None else any(getattr(row, "forked", False) for row in rows)
     )
-    name_col, age_col, id_col = plan_columns(rows, width, ages, marked, any_forked)
+    # Same result-set question as `any_forked`, same scroll-stability reason.
+    any_stated = any(
+        getattr(row, "live_state", "") or getattr(row, "pending", None) or getattr(row, "wakes", 0)
+        for row in rows
+    )
+    name_col, age_col, id_col = plan_columns(rows, width, ages, marked, any_forked, any_stated)
     marker_col = cell_len(BODY_MATCH_MARKER) if marked else 0
     fork_col = cell_len(FORK_MARKER) if any_forked else 0
+    state_col = STATE_COL_CELLS if any_stated else 0
 
     lines: list[Text] = []
     for index, (row, age) in enumerate(zip(rows, ages)):
@@ -554,6 +642,18 @@ def render_rows(
             line.append(
                 _pad_cells(FORK_MARKER if getattr(row, "forked", False) else "", fork_col),
                 style=row_bg + Style(color=dim),
+            )
+        # The live-state mark sits immediately before the name, where the eye
+        # scanning the name column passes it anyway. Its ink is the state's own
+        # semantic colour rather than a fixed one: `warning` for needs-you and
+        # `danger` for wedged are the two the user must not miss, and painting
+        # them at `dim` beside the age would file a blocked session as a lookup
+        # key.
+        if state_col:
+            glyph, ink = row_state_mark(row, frame)
+            line.append(
+                _pad_cells(glyph, state_col),
+                style=row_bg + Style(color=theme_mod.semantic_color(ink)),
             )
         line.append(
             _pad_cells(truncate_cells(name, name_col), name_col),

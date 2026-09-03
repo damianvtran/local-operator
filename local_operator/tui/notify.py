@@ -79,6 +79,7 @@ conversation as a new turn, see ``Session._on_job_completed``).
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import shutil
@@ -89,6 +90,8 @@ from typing import Callable, Literal, Mapping
 from local_operator import terminals
 from local_operator.proc import spawn_detached
 from local_operator.tui.settings import settings_get
+
+logger = logging.getLogger(__name__)
 
 #: Environment kill switch, mirroring ``LOCAL_OPERATOR_NO_TERMINAL_TITLE`` and
 #: the shimmer/nerd-icon gates. Wanted by anything that records raw terminal
@@ -428,6 +431,75 @@ def cmux_command(surface_id: str, title: str, subtitle: str, body: str) -> list[
         "--body",
         argv_safe(body),
     ]
+
+
+def applescript_string(value: str) -> str:
+    """``value`` as an AppleScript string literal, quotes and all.
+
+    The macOS route is the one place in this module where the argument is not
+    an argv position but a PROGRAM: ``osascript -e`` takes AppleScript source,
+    so a conversation name containing a double quote does not merely look odd
+    — it ends the literal and the rest is parsed as code. ``argv_safe`` cannot
+    help here (the string is one argv element already, and its shape is not
+    the problem); escaping for the target language is.
+
+    Backslash first, then the quote, or the escape added second would itself
+    be escaped. Newlines become the AppleScript escape rather than a literal
+    break, which would otherwise terminate the statement.
+    """
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    escaped = escaped.replace("\n", "\\n").replace("\r", "")
+    return f'"{escaped}"'
+
+
+def osascript_command(title: str, body: str) -> list[str]:
+    """argv delivering one Notification Centre toast on macOS.
+
+    Pure, so a test asserts the exact wire shape (and the escaping above)
+    without spawning anything — the same discipline ``cmux_command`` follows.
+    """
+    script = (
+        f"display notification {applescript_string(body)} "
+        f"with title {applescript_string(title or APP_NAME)}"
+    )
+    return ["osascript", "-e", script]
+
+
+def detached_notify(title: str, body: str) -> bool:
+    """Tell the user out of band about a session they are not looking at.
+
+    The in-band paths above write escape sequences to a TERMINAL, which is
+    exactly what a detached runtime does not have: nobody is attached, so
+    there is no frame to write into. This is the route for "your session needs
+    you and you are not there" — a parked approval, most of all, which now
+    holds the runtime resident for up to a day.
+
+    STRICTLY BEST-EFFORT, and the constraint is stronger than for the in-band
+    paths: this is called from the runtime's gate path and from turn-end, so
+    it must never block the event loop and never delay the process's exit.
+    Delivery is a detached spawn that is never waited on (``spawn_detached``
+    documents the three properties that makes safe), every failure is
+    swallowed, and the return value reports only whether a child was STARTED.
+    """
+    if not notifications_enabled():
+        return False
+    try:
+        if sys.platform == "darwin":
+            if not shutil.which("osascript"):
+                return False
+            return _spawn_detached_ok(osascript_command(title, body))
+        notifier = shutil.which("notify-send")
+        if not notifier:
+            return False
+        return _spawn_detached_ok(desktop_notify_command(notifier, title, body, URGENCY))
+    except Exception:  # noqa: BLE001 — a toast must never affect its caller
+        logger.debug("detached notification failed", exc_info=True)
+        return False
+
+
+def _spawn_detached_ok(argv: list[str]) -> bool:
+    """``spawn_detached`` reporting whether the child started."""
+    return bool(spawn_detached(argv))
 
 
 def desktop_notify_command(

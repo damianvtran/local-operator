@@ -45,6 +45,7 @@ def _consumer_defaults() -> dict[str, object]:
         RetrySettings,
     )
     from local_operator.session.runtime.control import DEFAULT_BACKGROUND_ON_RESUME
+    from local_operator.session.runtime.owned import DEFAULT_UNATTENDED_GATE_TIMEOUT_H
     from local_operator.spawn.policy import (
         DEFAULT_FORK_CMUX_PLACEMENT,
         DEFAULT_FORK_MODE,
@@ -73,6 +74,7 @@ def _consumer_defaults() -> dict[str, object]:
         "retry.usageAwareAccountPick": retry.usage_aware_account_pick,
         "retry.fallbackChains": dict(retry.fallback_chains),
         "session.background_on_resume": DEFAULT_BACKGROUND_ON_RESUME,
+        "runtime.unattended_gate_timeout": DEFAULT_UNATTENDED_GATE_TIMEOUT_H,
         "subagents.max_running": DEFAULT_MAX_RUNNING_JOBS,
         "providers.openai.api": DEFAULT_CONFIG.values["providers"]["openai"]["api"],
         # The client-side constant is the real consumer (``_anthropic_cache_ttl_

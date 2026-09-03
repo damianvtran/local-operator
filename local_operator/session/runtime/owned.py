@@ -28,7 +28,7 @@ import uuid
 from asyncio import InvalidStateError
 from collections import deque
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, cast
 
 from local_operator.harness.jobs import TRAJECTORY_SEQ_KEY
 from local_operator.harness.types import AgentEvent, ModelChangeEvent
@@ -59,9 +59,26 @@ def _resolve_gate_future(future: asyncio.Future[Any], value: Any) -> None:
 
 
 #: How long an approval/ask may sit unanswered before the tool is denied and
-#: the turn told why. A phone in a pocket is the common case; an unbounded
-#: wait would pin the turn (and its tool slot) forever.
+#: the turn told why, when NOTHING CAN PRESENT THE CARD. A phone in a pocket
+#: is the common case; an unbounded wait would pin the turn (and its tool
+#: slot) forever.
+#:
+#: This is no longer the general case. Under the detached model a question can
+#: be waiting for a user who is simply not at the terminal right now, and
+#: denying their write tool after thirty seconds is the wrong answer to "I
+#: stepped away" — see :func:`_gate_timeout_s`.
 PENDING_REQUEST_TIMEOUT_S = 30.0
+
+#: How long a PARKED gate waits, in hours, when the setting is absent. A day
+#: is chosen to span an overnight: a question asked at 6pm is still answerable
+#: at breakfast, which is the whole point of a session that outlives the
+#: terminal. `0` in the setting means never time out.
+DEFAULT_UNATTENDED_GATE_TIMEOUT_H = 24
+
+#: Transcript row appended when the cap expires. The model and the next viewer
+#: must be able to tell "the user said no" from "nobody was there" — they are
+#: different facts and only one of them is a decision.
+GATE_TIMEOUT_CUSTOM_TYPE = "gate_timed_out_unattended"
 # Socket admission is intentionally bounded: many front ends may produce input,
 # but an abandoned automation loop must not grow one owner's memory forever.
 MAX_QUEUED_PROMPTS = 32
@@ -105,6 +122,13 @@ class OwnedSessionHandle(SessionHandle):
         # the gate is answered ``True`` inline instead. Stored so a future
         # per-session toggle can flip it without reconstructing the handle.
         self._auto_approve = auto_approve
+        #: The RuntimeServer serving this handle, set by its constructor. The
+        #: gate path needs it for two things only a server knows: how many
+        #: front ends could present a card right now, and how to publish the
+        #: parked-gate bit into the discovery record. Declared here (rather
+        #: than only assigned from outside) so it is a real attribute with a
+        #: type, not a dynamic one every reader has to guess at.
+        self._registrant: Any = None
         self._on_projection: Callable[[], None] | None = None
         self._projection = SessionProjection(
             session_id=session.session_id,
@@ -191,14 +215,17 @@ class OwnedSessionHandle(SessionHandle):
                 )
             )
             self._notify()
+            self._announce_pending("approval", tool_name, description)
             try:
-                return await asyncio.wait_for(future, timeout=PENDING_REQUEST_TIMEOUT_S)
+                return await asyncio.wait_for(future, timeout=self._gate_timeout_s())
             except TimeoutError:
+                await self._record_gate_timeout(tool_name, description)
                 return False
             finally:
                 self._pending_futures.pop(request_id, None)
                 self._fold.pop_pending(request_id)
                 self._notify()
+                self._announce_settled()
 
         async def ask_gate(questions: list[Any]) -> dict[str, list[str]] | None:
             if not questions:
@@ -236,9 +263,13 @@ class OwnedSessionHandle(SessionHandle):
                     )
                 )
                 self._notify()
+                self._announce_pending("ask", getattr(question, "text", "") or "question", "")
                 try:
-                    answer = await asyncio.wait_for(future, timeout=PENDING_REQUEST_TIMEOUT_S)
+                    answer = await asyncio.wait_for(future, timeout=self._gate_timeout_s())
                 except TimeoutError:
+                    await self._record_gate_timeout(
+                        "ask", getattr(question, "text", "") or "question"
+                    )
                     # A timed-out question ends the whole ask: report whatever
                     # earlier questions collected (partial, like the terminal's
                     # Escape) rather than blocking forever on the next one.
@@ -248,6 +279,7 @@ class OwnedSessionHandle(SessionHandle):
                     self._pending_question_ids.pop(request_id, None)
                     self._fold.pop_pending(request_id)
                     self._notify()
+                    self._announce_settled()
                 if not answer:
                     # The user answered nothing on this question. On the FIRST
                     # question that is "escaped" — fall back to the model's
@@ -811,6 +843,155 @@ class OwnedSessionHandle(SessionHandle):
         except Exception:  # noqa: BLE001 — a dedupe probe must never fail a turn
             logger.debug("admitted-command probe failed", exc_info=True)
             return False
+
+    def _gate_timeout_s(self) -> float | None:
+        """How long THIS gate may wait. ``None`` means never time out.
+
+        PARK, do not deny — the change the detached model forces. The old
+        30-second cap assumed a gate only ever waited on a phone that might be
+        in a pocket, so denying was the kind thing: the turn moved on instead
+        of pinning a tool slot forever. Under this model the same wait usually
+        means "the user stepped away from a session that is still running",
+        and denying their write tool after thirty seconds answers a question
+        nobody asked. The question is now held for
+        ``runtime.unattended_gate_timeout`` hours (default 24, so it spans an
+        overnight) and the user answers it when they come back.
+
+        The short cap survives for exactly the case it was written for: no
+        client can present the card at all. With a viewer attached, or a phone
+        watching, something is showing the question to someone; with nothing
+        attached the card exists only in this process's memory, and a bounded
+        wait is still the honest behaviour there.
+        """
+        if self._registrant is None:
+            # No control socket at all: an embedded or reduced host, where the
+            # card exists only in this process's memory and no front end can
+            # ever be attached to it. This is the case the ordinary cap was
+            # written for, and it keeps that constant meaningful — shortening
+            # it still shortens a gate, rather than being quietly ignored
+            # because the policy stopped reading it.
+            return PENDING_REQUEST_TIMEOUT_S
+        parked = self._parked_timeout_s()
+        if self._attached_clients() > 0:
+            return parked
+        # Nothing is presenting the card. A parked gate is still preferable to
+        # a denial when the user has an out-of-band way to be told about it
+        # (the desktop notification), so the configured cap applies here too —
+        # the short cap is reserved for the case where notification is off and
+        # nobody could learn of the question at all.
+        from local_operator.tui.notify import notifications_enabled
+
+        try:
+            reachable = notifications_enabled()
+        except Exception:  # noqa: BLE001 — an unreadable setting is "not reachable"
+            reachable = False
+        return parked if reachable else PENDING_REQUEST_TIMEOUT_S
+
+    def _parked_timeout_s(self) -> float | None:
+        """The configured park duration, never SHORTER than the ordinary cap.
+
+        ``PENDING_REQUEST_TIMEOUT_S`` is the floor rather than a separate
+        branch, and that keeps one property true: whatever this returns, a gate
+        always waits at least as long as it did before this change. It is also
+        what keeps the constant meaningful — a test (and a user) that shortens
+        it to make a gate expire quickly still gets a gate that expires
+        quickly, instead of silently waiting the configured 24 hours because
+        the policy stopped reading the constant at all.
+        """
+        hours = self._unattended_gate_hours()
+        if hours <= 0:
+            return None
+        return max(PENDING_REQUEST_TIMEOUT_S, float(hours) * 3600.0)
+
+    def _unattended_gate_hours(self) -> int:
+        """``runtime.unattended_gate_timeout`` in hours; 0 means never."""
+        try:
+            from local_operator.config import ConfigManager
+            from local_operator.paths import config_dir
+
+            values = ConfigManager(config_dir()).get_config().values
+            section = values.get("runtime")
+            if isinstance(section, dict) and "unattended_gate_timeout" in section:
+                return max(0, int(section["unattended_gate_timeout"]))
+        except Exception:  # noqa: BLE001 — a bad setting must not pin a turn
+            logger.debug("could not read runtime.unattended_gate_timeout", exc_info=True)
+        return DEFAULT_UNATTENDED_GATE_TIMEOUT_H
+
+    def _attached_clients(self) -> int:
+        """How many front ends could present a card right now."""
+        server = self._registrant
+        counter = getattr(server, "attach_clients", None)
+        if not callable(counter):
+            return 0
+        try:
+            return int(cast(int, counter()))
+        except Exception:  # noqa: BLE001
+            return 0
+
+    async def _record_gate_timeout(self, tool: str, description: str) -> None:
+        """Append the row that says NOBODY WAS THERE.
+
+        A denial and an expiry look identical to the model otherwise, and they
+        are different facts: one is the user's decision, the other is the
+        absence of one. Without this row the next turn reads "the user denied
+        this" and adjusts its plan around a choice nobody made.
+        """
+        transcript = getattr(self._session, "transcript", None)
+        append = getattr(transcript, "append_custom", None)
+        if not callable(append):
+            return
+        try:
+            result = append(
+                GATE_TIMEOUT_CUSTOM_TYPE,
+                {
+                    "tool": tool,
+                    "description": description,
+                    "waited_s": self._gate_timeout_s() or 0.0,
+                },
+            )
+            if inspect.isawaitable(result):
+                await result
+        except Exception:  # noqa: BLE001 — the denial still stands
+            logger.debug("could not record the unattended gate timeout", exc_info=True)
+
+    def _announce_pending(self, kind: str, title: str, detail: str) -> None:
+        """Publish that this session is WAITING FOR A PERSON, and say so.
+
+        A parked gate holds ~283 MB resident for up to a day, so the cost has
+        to be findable: the record's ``pending`` field puts it in `lop
+        sessions` and sorts it first in the picker, and the notification tells
+        the user out of band. A parked gate nobody can see is a process nobody
+        can find.
+        """
+        server = self._registrant
+        setter = getattr(server, "set_record_pending", None)
+        if callable(setter):
+            try:
+                setter(kind)
+            except Exception:  # noqa: BLE001
+                logger.debug("could not publish the pending state", exc_info=True)
+        if self._attached_clients() > 0:
+            # Someone is looking at it: the viewer paints the card in-band and
+            # a second, out-of-band toast for the same question is noise.
+            return
+        try:
+            from local_operator.tui.notify import detached_notify
+
+            name = getattr(self._session, "conversation_name", "") or "lop"
+            detached_notify(f"{name} needs you", f"{title}: {detail}".strip().rstrip(":"))
+        except Exception:  # noqa: BLE001 — a toast must never affect the gate
+            logger.debug("detached notification failed", exc_info=True)
+
+    def _announce_settled(self) -> None:
+        """Clear the waiting-for-a-person state once the gate resolves."""
+        server = self._registrant
+        setter = getattr(server, "set_record_pending", None)
+        if not callable(setter):
+            return
+        try:
+            setter(None)
+        except Exception:  # noqa: BLE001
+            logger.debug("could not clear the pending state", exc_info=True)
 
     async def job_trajectory(self, job_id: str, offset: int, limit: int) -> dict[str, Any]:
         """One page of a child job's retained event window.

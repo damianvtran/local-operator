@@ -719,6 +719,17 @@ SETTINGS: tuple[Setting, ...] = (
     ),
     # -- subagents ----------------------------------------------------------
     Setting(
+        key="runtime.unattended_gate_timeout",
+        path=("runtime", "unattended_gate_timeout"),
+        section="runtime",
+        label="Unattended question timeout (h)",
+        kind=Kind.INT,
+        default=24,
+        help="How long a question waits when you are away. 0 never times out.",
+        minimum=0,
+        maximum=720,
+    ),
+    Setting(
         key="subagents.max_running",
         path=("subagents", "max_running"),
         section="subagents",

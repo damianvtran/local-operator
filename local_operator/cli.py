@@ -1608,6 +1608,12 @@ def sessions_command(args: argparse.Namespace) -> int:
                 "footprint_bytes": use.footprint_bytes if use else None,
                 "uptime_s": max(0.0, now - rec.started_at),
                 "heartbeat_age_s": max(0.0, now - rec.heartbeat_at),
+                # Live state from the record. Defaulted through getattr so a
+                # record written by an OLDER runtime (which has no such fields)
+                # lists cleanly rather than raising mid-table.
+                "pending": getattr(rec, "pending", None),
+                "busy": bool(getattr(rec, "busy", False)),
+                "detached": bool(getattr(rec, "detached", False)),
             }
         )
 
@@ -1619,16 +1625,21 @@ def sessions_command(args: argparse.Namespace) -> int:
         print("no active lop sessions")
         return 0
 
+    # NEEDS is the column this release adds, and it earns its width: a parked
+    # question holds a runtime resident for up to a day, so "which of these is
+    # waiting on me" has to be answerable from the same place the memory is
+    # visible. Blank for every session that is simply working.
     header = (
-        f"{'STATE':<7} {'PID':>7} {'KIND':<7} {'CONVERSATION':<24} "
+        f"{'STATE':<7} {'PID':>7} {'KIND':<7} {'NEEDS':<8} {'CONVERSATION':<24} "
         f"{'MODEL':<24} {'RSS':>8} {'FOOTPRINT':>9} {'UPTIME':>8} {'HB_AGE':>7}"
     )
     print(header)
     for row in rows:
         name = (row["conversation_name"] or row["session_id"] or "")[:24]
         model = (row["model_label"] or "")[:24]
+        needs = (row.get("pending") or "")[:8]
         print(
-            f"{row['state']:<7} {row['pid']:>7} {row['kind']:<7} {name:<24} "
+            f"{row['state']:<7} {row['pid']:>7} {row['kind']:<7} {needs:<8} {name:<24} "
             f"{model:<24} {_format_bytes(row['rss_bytes']):>8} "
             f"{_format_bytes(row['footprint_bytes']):>9} "
             f"{_format_duration(row['uptime_s']):>8} "
