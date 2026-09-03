@@ -352,10 +352,17 @@ class RemoteSession:
                 config = ConfigManager(config_dir=self._config_dir)
                 provider = str(config.get_config_value("hosting", "") or "")
                 model_id = str(config.get_config_value("model_name", "") or "")
-                if provider or model_id:
-                    model = FrontendModelSpec(provider=provider, model_id=model_id)
-            except Exception:  # noqa: BLE001 — a cold band may show no model
+                model = FrontendModelSpec(provider=provider, model_id=model_id)
+            except Exception:  # noqa: BLE001 — an unreadable config is not fatal
                 logger.debug("cold state could not read the configured model", exc_info=True)
+            if model is None:
+                # NEVER None. ``RemoteSession.model`` raises without a spec, and
+                # a cold viewer is exactly the state where config may be empty
+                # (a first run, before `/login`) — so the band would crash on
+                # the very screen that exists to help the user fix it. An empty
+                # spec renders as "no model" and is replaced by the runtime's
+                # own on first engage.
+                model = FrontendModelSpec(provider="", model_id="")
 
             wakes: list[WakeState] = []
             try:

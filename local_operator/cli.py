@@ -33,7 +33,6 @@ Example Usage:
 from __future__ import annotations
 
 import argparse
-import copy
 import functools
 import math
 import os
@@ -3448,15 +3447,73 @@ def main() -> int:
             tui_config = config_manager.get_config_value("tui", None)
             theme_name = tui_config.get("theme", "dark") if isinstance(tui_config, dict) else "dark"
 
-            async def session_factory():
-                return await create_session(
-                    args,
-                    config_manager,
-                    credential_manager,
-                    agent_registry,
-                    has_ui=True,
-                    defer_mcp_wiring=True,
+            async def viewer_factory(resume_id: "str | None"):
+                """Build the TUI's session facade: a VIEWER, never an owner.
+
+                `lop` no longer hosts the agent. It opens a viewer bound to
+                nothing; the work runs in a separate runtime process that the
+                first message starts and that exits when it has nothing left to
+                do. That is what lets a turn survive the terminal closing.
+
+                Two entry states, and the choice between them is just "is
+                something already running for this id":
+
+                - a live record → ATTACH, so a second terminal joins a session
+                  that is already working rather than fighting it for the lease;
+                - otherwise → COLD, which costs no process and no directory.
+
+                ``--resume`` of a session whose runtime is gone is the cold
+                case, and so is a fresh launch: a new id is minted here, in the
+                viewer, and the runtime materialises the directory for it on
+                first engage.
+                """
+                import uuid as _uuid
+
+                from local_operator.mobile.attach_client import find_owner_record
+                from local_operator.session.remote import RemoteSession
+
+                config_directory = config_manager.config_dir
+                # Same expression session_factory uses for a new session's
+                # directory name, so ids minted by either path are one shape.
+                session_id = resume_id or _uuid.uuid4().hex[:12]
+
+                async def take_over():
+                    # A viewer must never win the transcript lease — the
+                    # runtime owns it, and a TUI holding one would look like a
+                    # runtime to the wake supervisor's live-record rule. Kept
+                    # wired (RemoteSession requires a factory) and deliberately
+                    # unreachable: `_can_go_cold` routes owner loss to the cold
+                    # state instead of to a takeover.
+                    raise RuntimeError("a viewer never takes over a session")
+
+                record = None
+                if resume_id:
+                    record, _owner = await asyncio.to_thread(
+                        find_owner_record, config_directory, session_id
+                    )
+                if record is not None:
+                    try:
+                        return await RemoteSession.connect(
+                            record,
+                            session_id,
+                            config_dir=config_directory,
+                            takeover_factory=take_over,
+                        )
+                    except (ConnectionError, OSError, TimeoutError):
+                        # The runtime died between the scan and the dial, or is
+                        # too old to attach to. Cold is the honest fallback:
+                        # the conversation still opens and the next message
+                        # starts a fresh runtime.
+                        pass
+                return await RemoteSession.cold(
+                    session_id,
+                    config_dir=config_directory,
+                    cwd=os.getcwd(),
+                    takeover_factory=take_over,
                 )
+
+            async def session_factory():
+                return await viewer_factory(getattr(args, "resume", None))
 
             # The provider controller gives the TUI the full provider/model/
             # credential/usage surface behind /model /provider /login /usage.
@@ -3497,20 +3554,11 @@ def main() -> int:
                 # startup; mutating the original here would confuse the exit
                 # hint's "resume with:" line).
                 async def resume_factory(resume_id: str | None):
-                    resume_args = copy.copy(args)
-                    # ``None`` is meaningful, not absent: ``create_session``
-                    # branches on ``resume is not None``, so passing it through
-                    # verbatim is what makes ``/new`` a genuine cold-launch
-                    # session rather than a special case beside one.
-                    resume_args.resume = resume_id
-                    return await create_session(
-                        resume_args,
-                        config_manager,
-                        credential_manager,
-                        agent_registry,
-                        has_ui=True,
-                        defer_mcp_wiring=True,
-                    )
+                    # ``None`` is meaningful, not absent: it means /new, which
+                    # mints a fresh id rather than reopening one — the same
+                    # distinction ``create_session``'s ``resume is not None``
+                    # branch used to carry, now expressed in the viewer.
+                    return await viewer_factory(resume_id)
 
                 tui_entry = functools.partial(tui_entry, resume_factory=resume_factory)
                 # The silence starts HERE, not inside ``run_tui``. The

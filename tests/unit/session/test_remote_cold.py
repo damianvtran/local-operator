@@ -229,3 +229,68 @@ async def test_concurrent_first_writes_engage_exactly_one_runtime(
     finally:
         await viewer.dispose()
         server.close()
+
+
+@pytest.mark.asyncio
+async def test_a_draft_warms_the_runtime_before_the_message_is_sent(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The speculative engage, driven through the REAL composer.
+
+    The seam is ``Editor.edit`` — the documented funnel every buffer mutation
+    passes through — and NOT a key handler on the App. An earlier attempt
+    overrode ``App._on_key``, which sits in Textual's dispatch path: it broke
+    key handling in 190 tests across settings, todo, analytics and selection,
+    because intercepting there stops the widgets that bind their own keys from
+    ever seeing them.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _seed_transcript(tmp_path, "s1")
+
+    from local_operator.tui.app import OperatorApp
+    from local_operator.tui.widgets.editor import Editor
+
+    engaged = asyncio.Event()
+
+    async def fake_engage(session_id, cwd, work, *, config_dir, deadline_s=30.0):  # noqa: ANN001
+        engaged.set()
+        raise ConnectionError("no runtime in this test")
+
+    monkeypatch.setattr("local_operator.session.runtime.launch.engage_runtime", fake_engage)
+
+    viewer = await RemoteSession.cold(
+        "s1", config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+    )
+
+    async def factory():
+        return viewer
+
+    app = OperatorApp(factory)
+    try:
+        async with app.run_test(size=(100, 30)) as pilot:
+            # Let the boot worker adopt the viewer: the app only holds it after
+            # the factory it awaits has returned.
+            for _ in range(30):
+                await pilot.pause()
+            assert app._session is viewer, "the app never adopted the cold viewer"
+            assert app._warm_engage_started is False, "an idle viewer must not engage"
+
+            editor = app.query_one(Editor)
+            editor.focus()
+            await pilot.press("h")
+            # Waited on the ENGAGE, not on the flag. The draft signal is a
+            # posted message so it lands a tick later, and the flag it sets is
+            # deliberately self-clearing: a warm-up that fails must leave the
+            # next real message free to try again, so asserting on the flag
+            # would be asserting on a value the failure path correctly resets.
+            for _ in range(100):
+                await pilot.pause()
+                if engaged.is_set():
+                    break
+            assert engaged.is_set(), "the first keystroke never engaged a runtime"
+
+            # And the failure is SILENT: a speculative warm-up the user did not
+            # ask for must not paint an error over their draft.
+            assert editor.text == "h", "the warm-up disturbed the draft"
+    finally:
+        await viewer.dispose()

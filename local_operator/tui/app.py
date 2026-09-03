@@ -164,6 +164,7 @@ from local_operator.tui.widgets.editor import (
     Editor,
     EditorCopied,
     EditorCopyStale,
+    EditorDraftStarted,
     EditorPasteAttached,
     EditorPasteEmpty,
     EditorQuit,
@@ -2662,6 +2663,13 @@ class OperatorApp(App[None]):
         # them and every page reads the empty-string default.
         self._trajectory_loads: set[str] = set()
         self._trajectory_state: dict[str, str] = {}
+        #: Whether the speculative engage has already fired for the CURRENT
+        #: binding. Reset by a session swap (`/new`, `/resume`), because the
+        #: new binding is cold again and owes its own warm-up.
+        self._warm_engage_started = False
+        #: True while a runtime is being started for a cold viewer; the band
+        #: says "starting…" for exactly this interval.
+        self._starting_runtime = False
         self._subagent_focus_restore: Any | None = None
         # The org-chart mode (``/team chart``), a sibling of the subagent view
         # with its own open/close and the same MODE contract: it hides the
@@ -7913,6 +7921,65 @@ class OperatorApp(App[None]):
         dock.styles.padding = (0, 0, lift, 0)
 
     # -- input --------------------------------------------------------------
+    def _warm_runtime_for_draft(self) -> None:
+        """Engage a runtime for a cold viewer, at most once per binding."""
+        if self._warm_engage_started:
+            return
+        session = self._session
+        ensure = getattr(session, "_ensure_bound", None)
+        if not callable(ensure) or not getattr(session, "is_cold", False):
+            return
+        self._warm_engage_started = True
+        self._set_starting(True)
+
+        async def run() -> None:
+            try:
+                await cast(Callable[[], Awaitable[None]], ensure)()
+            except Exception:  # noqa: BLE001 — the real prompt reports the failure
+                # A speculative warm-up that fails must stay silent: the user
+                # has not asked for anything yet, and the message they send
+                # next engages again and surfaces any error properly.
+                logger.debug("speculative runtime engage failed", exc_info=True)
+                self._warm_engage_started = False
+            finally:
+                self._set_starting(False)
+
+        self.run_worker(run(), group="warm-engage", exclusive=False)
+
+    def _set_starting(self, starting: bool) -> None:
+        """Show or clear the band's "starting…" state.
+
+        The one visible consequence of the viewer model at rest: between the
+        first keystroke and the runtime being ready there is a real interval,
+        and a band that said nothing would read as a dropped keystroke.
+        """
+        if self._starting_runtime == starting:
+            return
+        self._starting_runtime = starting
+        if self._status is not None:
+            setter = getattr(self._status, "set_starting", None)
+            if callable(setter):
+                setter(starting)
+        self._refresh_band()
+
+    def on_editor_draft_started(self, message: EditorDraftStarted) -> None:
+        """A draft just began: warm a runtime for a cold viewer.
+
+        Speculative, and it exists to hide a real cost. A viewer holds no
+        runtime until it needs one, so without this the first message pays
+        ~1.2 s of session construction AFTER the user hits Enter, with the
+        composer already cleared — the app looks hung at the exact moment it
+        should feel fastest. Starting the runtime while the user is still
+        typing turns that into no wait at all.
+
+        The waste is bounded by design: a draft that is abandoned leaves a
+        runtime whose viewer detaches, and the residency predicate reaps it
+        within the drain (~3 s). The runtime also DEFERS materialising the
+        session directory, so an abandoned draft leaves nothing on disk.
+        """
+        del message
+        self._warm_runtime_for_draft()
+
     def on_editor_submitted(self, message: EditorSubmitted) -> None:
         """Slash commands run synchronously BEFORE any prompt is sent."""
         if self._session_transition_pending:
