@@ -568,7 +568,7 @@ def list_login_providers() -> list[ProviderDefinition]:
 #: cache-control breakpoints, OpenAI's reasoning effort) is only reliable there.
 #: An aggregator remains the right answer for models with no direct route, which is
 #: most of its list.
-AGGREGATOR_PROVIDERS = frozenset({"openrouter", "radient"})
+AGGREGATOR_PROVIDERS = frozenset({"openrouter", "radient", "radient-key"})
 
 
 def credential_provider_id(provider_id: str) -> str:

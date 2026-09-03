@@ -1861,6 +1861,7 @@ def test_only_the_transport_that_changed_invalidates_its_cache(tmp_path) -> None
     assert discovery.listing_capture_version("anthropic") == 2
     assert discovery.listing_capture_version("openrouter") == 5
     assert discovery.listing_capture_version("radient") == 5
+    assert discovery.listing_capture_version("radient-key") == 5
     # Ollama's reader never changed: an OpenAI-compatible document with no
     # pricing object has nothing new to capture, so its stamp stays at 1.
     assert discovery.listing_capture_version("ollama") == discovery.LISTING_CAPTURE_DEFAULT
@@ -2232,3 +2233,47 @@ def test_merge_keeps_a_static_output_cap_that_exceeds_the_ratio() -> None:
     merged = merge_models(static, None)
 
     assert merged[0].max_tokens == 128_000
+
+
+def test_cached_available_models_reads_valid_disk_cache(tmp_path) -> None:
+    """cached_available_models loads on-disk listing with no network requests."""
+    cached = tmp_path / "openrouter.listing.json"
+    cached.write_text(
+        json.dumps(
+            {
+                "fetched_at": time.time(),
+                "payload": {
+                    "capture": 5,
+                    "models": [
+                        {
+                            "id": "meta/llama-3.3-70b",
+                            "name": "Meta Llama 3.3 70B",
+                            "context_window": 131072,
+                            "input_price": 0.12,
+                            "output_price": 0.30,
+                            "free": False,
+                        }
+                    ],
+                },
+            }
+        )
+    )
+
+    models, status = discovery.cached_available_models("openrouter", cache_dir=tmp_path)
+    assert status == "cached"
+    assert len(models) == 1
+    assert models[0].id == "meta/llama-3.3-70b"
+    assert models[0].context_window == 131072
+
+
+def test_cached_available_models_falls_back_to_static_on_cache_miss(tmp_path) -> None:
+    """cached_available_models returns static registry models when no cache exists."""
+    models, status = discovery.cached_available_models("anthropic", cache_dir=tmp_path)
+    assert status == "static"
+    # Bundled static models are returned
+    assert any(m.id == "claude-opus-5" for m in models)
+
+    # Aggregators with no static models return an empty list
+    agg_models, agg_status = discovery.cached_available_models("openrouter", cache_dir=tmp_path)
+    assert agg_status == "static"
+    assert agg_models == []
