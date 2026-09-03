@@ -443,31 +443,95 @@ def test_a_version_that_cannot_be_determined_refuses_to_build(
 
 
 def test_the_staged_pilot_release_digest_is_reproduced_from_committed_values() -> None:
-    """The pinned attestation of the staged pilot, recomputed from the tree.
+    """The pinned attestation of the staged pilot, through the REAL resolution.
 
-    This is the regression test the original defect needed: with the stale
-    ``0.1.0`` default it yields ``a15961b1...`` instead, so it fails outright
-    on the bug rather than only on a guard's error message.
+    This is the regression test the original defect needed: it fails outright
+    on the bug (the stale ``0.1.0`` version yields ``a15961b1...``) rather than
+    only on a guard's error message.
 
-    Hermetic because every input is committed or supplied here -- the adapter's
-    declared version, the release name and the task-hash manifest sha from
-    ``config/release-v2026.08.08.json``, plus the package digest of the wheel
-    the pilot installed. The COMPANION ``workspace_digest`` is deliberately not
-    asserted: it hashes the 4.2 GB gated corpus, which is an operator-fetched
-    input that CI does not have and must never download. That half is covered
-    structurally by the happy-path test above (a workspace ``workspace_digest``
-    accepts, rebuilt identically) and by the operator's build record.
+    It routes through ``resolve_attested_version`` -- the same call ``main``
+    makes -- rather than recomputing the rule. Calling ``_adapter_version()``
+    and passing the result straight to ``_release_digest`` would re-implement
+    the resolution, and a mutation to it would leave this test green: exactly
+    the bypass the original defect exploited, one level up.
+
+    Hermetic because every input is committed or supplied here -- the release
+    name and task-hash manifest sha from ``config/release-v2026.08.08.json``,
+    plus the package digest of the wheel the pilot installed. The COMPANION
+    ``workspace_digest`` is deliberately not asserted: it hashes the 4.2 GB
+    gated corpus, an operator-fetched input CI does not have and must never
+    download. That half is covered structurally by the happy-path test above
+    (a workspace ``workspace_digest`` accepts, rebuilt identically) and by the
+    operator's build record.
     """
 
     pin = json.loads(build._DEFAULT_PIN.read_text())
+    # Exactly what main does: nothing requested, so the tree's own declaration
+    # is what gets attested.
+    version, advisory = build.resolve_attested_version(
+        requested=None,
+        declared=build._adapter_version(),
+        allow_mismatch=False,
+    )
+    assert advisory is None
     digest = build._release_digest(
-        version=build._adapter_version() or "",
+        version=version,
         # The digest of the 0.1.1 wheel installed into the staged pilot venv.
         package_digest="69e8504d9caa6732940ec59030dc149f83549da7155fb828fa9f7de677d5a736",
         benchmark_release=pin["release"],
         task_manifest_sha256=pin["tasks"]["hash_manifest_sha256"],
     )
     assert digest == "d0067e23af3dc2ed790c2a8b802ee453200d516466ad27770d7f2bbe7b0b41cd"
+
+
+def test_main_takes_its_attested_version_from_the_resolver(
+    durable_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    """``main`` must OBTAIN the version from ``resolve_attested_version``.
+
+    Asserted structurally -- the resolver is replaced and its return value must
+    be what reaches ``_release_digest`` -- rather than by comparing versions.
+    A value comparison cannot detect this wiring at all: on the default path
+    ``args.version`` is None and the resolver returns ``declared``, and on the
+    override path the resolver returns ``args.version`` unchanged, so
+    "resolved" and "raw" are numerically identical on every reachable input.
+    Re-deriving the version at the call site is therefore an EQUIVALENT mutant
+    to any value assertion (verified: it passes one), while still being the
+    defect that matters -- two implementations of the rule, free to drift.
+
+    Runs against the fixture corpus, so it needs none of the gated inputs.
+    """
+
+    root, pin = _fixture_inputs(durable_path)
+    sentinel = "resolver-sentinel-version"
+    calls: list[dict[str, Any]] = []
+    seen: list[str] = []
+
+    def fake_resolver(
+        *, requested: str | None, declared: str | None, allow_mismatch: bool
+    ) -> tuple[str, str | None]:
+        calls.append(
+            {"requested": requested, "declared": declared, "allow_mismatch": allow_mismatch}
+        )
+        return sentinel, None
+
+    real_digest = build._release_digest
+
+    def spy(*, version: str, **kwargs: Any) -> str:
+        seen.append(version)
+        return real_digest(version=version, **kwargs)
+
+    monkeypatch.setattr(build, "resolve_attested_version", fake_resolver)
+    monkeypatch.setattr(build, "_release_digest", spy)
+
+    assert _run(root, pin, durable_path / "w") == 0
+    # main asked the resolver, handing it the real declared version...
+    assert calls == [
+        {"requested": None, "declared": build._adapter_version(), "allow_mismatch": False}
+    ]
+    # ...and attested exactly what it answered, rather than re-deriving it.
+    assert seen == [sentinel]
+    capsys.readouterr()
 
 
 def test_the_committed_release_pin_carries_the_known_hashes() -> None:

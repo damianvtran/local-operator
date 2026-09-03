@@ -112,6 +112,63 @@ def _adapter_version() -> str | None:
         return None
 
 
+class VersionRefused(Exception):
+    """The attested version cannot be trusted, so no workspace may be built.
+
+    Separate from ``VerificationFailed`` because it carries a different exit
+    code (2, a usage error) and fires BEFORE any input is read: the version is
+    a property of the build, not of the corpus.
+    """
+
+
+def resolve_attested_version(
+    *, requested: str | None, declared: str | None, allow_mismatch: bool
+) -> tuple[str, str | None]:
+    """The single implementation of "which version does this build attest".
+
+    Pure -- no argparse, no filesystem, no corpus -- so the tests exercise the
+    REAL resolution rather than re-implementing it. That distinction is not
+    academic: the digest regression test previously recomputed the rule itself
+    and therefore stayed green when the rule was mutated, which is the same
+    bypass the original stale-default defect exploited.
+
+    Returns the version to attest plus an optional advisory line the caller
+    should print. Raises ``VersionRefused`` when nothing trustworthy can be
+    attested.
+
+    The rule: the attested version must agree with what the tree declares
+    unless the operator says out loud that it should not. Attesting a version
+    OTHER than the tree's is legitimate (re-attesting an older wheel against
+    the same corpus) but deliberate, so it is opt-in and still announced --
+    the resulting digest is not reproducible from this tree alone.
+    """
+
+    version = requested if requested is not None else declared
+    if version is None:
+        raise VersionRefused(
+            "cannot determine the adapter version "
+            f"({_ADAPTER_PYPROJECT} is unreadable or declares none) and no "
+            "--version was given. Refusing to build: the version is an input "
+            "to release_digest, and adapter-release.json carries only that "
+            "digest, so the workspace could not record that its attestation "
+            "is unattributable."
+        )
+    if requested is not None and declared is not None and requested != declared:
+        if not allow_mismatch:
+            raise VersionRefused(
+                f"--version {requested!r} disagrees with the version the adapter "
+                f"declares ({declared!r} in {_ADAPTER_PYPROJECT}). release_digest "
+                "attests the distribution that was built, so a mismatch produces "
+                "a workspace claiming a version nobody can verify. Pass "
+                "--allow-version-mismatch if that is deliberate."
+            )
+        return version, (
+            f"attesting {requested!r} while this tree declares {declared!r} "
+            "(--allow-version-mismatch)."
+        )
+    return version, None
+
+
 class VerificationFailed(Exception):
     """An input does not match the pin. The message names the path."""
 
@@ -324,43 +381,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--package-digest", default="0" * 64)
     args = parser.parse_args(argv)
 
-    # Resolve the attested version under one rule: it must agree with what the
-    # tree declares, unless the operator says out loud that it should not.
-    # Building a version OTHER than the tree's is legitimate (re-attesting an
-    # older wheel against the same corpus), but it is a deliberate act, not
-    # something to accept silently -- silently accepting a mismatched value is
-    # the same shape as the stale-default defect this script already had.
-    declared = _adapter_version()
-    version = args.version if args.version is not None else declared
-    if version is None:
-        print(
-            "build_osworld_adapter: cannot determine the adapter version "
-            f"({_ADAPTER_PYPROJECT} is unreadable or declares none) and no "
-            "--version was given. Refusing to build: the version is an input "
-            "to release_digest, and adapter-release.json carries only that "
-            "digest, so the workspace could not record that its attestation "
-            "is unattributable.",
-            file=sys.stderr,
+    # Resolved BEFORE the corpus is touched: the version is a property of the
+    # build, not of the inputs, and refusing early means a bad attestation
+    # never gets as far as reading 4.2 GB of task bytes.
+    try:
+        version, advisory = resolve_attested_version(
+            requested=args.version,
+            declared=_adapter_version(),
+            allow_mismatch=args.allow_version_mismatch,
         )
+    except VersionRefused as error:
+        print(f"build_osworld_adapter: {error}", file=sys.stderr)
         return 2
-    if args.version is not None and declared is not None and args.version != declared:
-        if not args.allow_version_mismatch:
-            print(
-                f"build_osworld_adapter: --version {args.version!r} disagrees with the "
-                f"version the adapter declares ({declared!r} in {_ADAPTER_PYPROJECT}). "
-                "release_digest attests the distribution that was built, so a "
-                "mismatch produces a workspace claiming a version nobody can "
-                "verify. Pass --allow-version-mismatch if that is deliberate.",
-                file=sys.stderr,
-            )
-            return 2
-        # Deliberate and stated: still say so, because the resulting digest is
-        # not reproducible from this tree alone.
-        print(
-            f"build_osworld_adapter: attesting {args.version!r} while this tree "
-            f"declares {declared!r} (--allow-version-mismatch).",
-            file=sys.stderr,
-        )
+    if advisory is not None:
+        print(f"build_osworld_adapter: {advisory}", file=sys.stderr)
 
     pin = json.loads(Path(args.release_pin).read_bytes())
     if pin.get("release") != args.benchmark_release:
