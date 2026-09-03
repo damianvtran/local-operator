@@ -4652,6 +4652,104 @@ async def test_r_on_a_scrolled_usage_panel_does_not_jump_to_the_top() -> None:
 
 
 @pytest.mark.asyncio
+async def test_r_moves_the_header_even_when_one_account_stays_stuck() -> None:
+    """The reported bug, driven through the key the operator actually pressed.
+
+    Reported against v0.44.38: five Anthropic logins refreshed 1.8 minutes
+    earlier, one Kimi account serving 169-minute-old last-good from its
+    per-account backoff, and a title stuck on ``2h ago`` that ``r`` would not
+    move. It could not move: a forced re-probe that misses again keeps the
+    PREVIOUS report object (``ProviderController._mark_account_failure``) with
+    its old ``fetched_at``, so a header taken from the oldest stamp returned the
+    same 169-minute reading on every press.
+
+    So the assertion is that the header ADVANCES across successive forced
+    refreshes while the stuck account is still missing — the fetch really is
+    running, and the title has to show it.
+    """
+    from local_operator.providers.usage import UsageAmount, UsageLimit, UsageReport
+    from local_operator.tui.widgets.usage_panel import UsagePanel
+
+    now_ms = 200 * 60_000.0
+
+    def _limit(limit_id: str, percent: float) -> UsageLimit:
+        return UsageLimit(
+            id=limit_id,
+            label="5 hour",
+            amount=UsageAmount(
+                used=percent,
+                limit=100.0,
+                remaining=100.0 - percent,
+                used_fraction=percent / 100.0,
+                unit="percent",
+            ),
+            shared=True,
+        )
+
+    # Created once and handed back by identity on every fetch: that object
+    # identity IS the mechanism, not an approximation of it.
+    stuck = UsageReport(
+        provider="kimi",
+        identity="cred:8",
+        fetched_at=int(now_ms - 169 * 60_000),
+        limits=[_limit("kimi:5h", 64.0)],
+    )
+    stuck.consecutive_failures = 1
+
+    class _OneStuckAccount(FakeProviderController):
+        def __init__(self) -> None:
+            super().__init__()
+            self.now = now_ms
+
+        def _set(self):
+            healthy = UsageReport(
+                provider="anthropic",
+                identity="a@example.com",
+                fetched_at=int(self.now),
+                limits=[_limit("anthropic:5h", 20.0)],
+            )
+            stuck.consecutive_failures += 1  # the miss is re-counted, the stamp is not
+            return [healthy, stuck]
+
+        async def fetch_usage(self, provider_ids=None, *, force_refresh: bool = False):
+            self.usage_calls.append(provider_ids)
+            return self._set()
+
+    ctrl = _OneStuckAccount()
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=ctrl)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        await _run_usage_command(pilot, app)
+        panel = app.query_one(UsagePanel)
+        for _ in range(6):
+            await pilot.pause()
+        opened_ms = panel.fetched_ms
+
+        seen = []
+        for step in (1, 2):
+            ctrl.now = now_ms + step * 5 * 60_000
+            await pilot.press("r")
+            for _ in range(8):
+                await pilot.pause()
+            seen.append(panel.fetched_ms)
+
+        panel.set_clock(ctrl.now)
+        panel._repaint()
+        await pilot.pause()
+        panel.action_scroll_end()
+        for _ in range(4):
+            await pilot.pause()
+        rows = panel.render_lines_for_test()
+
+    assert opened_ms == now_ms
+    # Each forced refresh reports the confirmation it just obtained.
+    assert seen == [now_ms + 5 * 60_000, now_ms + 10 * 60_000], seen
+    # And the account that is genuinely stale still says so, on its own block.
+    assert any("last known" in row for row in rows), rows
+    assert stuck.fetched_at == int(now_ms - 169 * 60_000)  # never advanced
+
+
+@pytest.mark.asyncio
 async def test_a_failed_fetch_is_reported_inside_the_panel() -> None:
     """The panel is what has focus and what carries the key that retries, so an
     error anywhere else asks the user to look away from the fix."""

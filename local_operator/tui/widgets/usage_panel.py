@@ -121,6 +121,37 @@ PANEL_WIDTH_MARGIN = 4
 #: the one-row body floor overrides it on a terminal too short to grant both.
 PANEL_HEIGHT_MARGIN = 2
 
+
+def _stale_behind_ms() -> int:
+    """How far behind the title's stamp a row must fall to be called stale.
+
+    Derived from the CACHE's freshness contract, not from :func:`format_age`'s
+    display resolution. This panel renders cached data: a row lives
+    ``USAGE_REPORT_TTL_MS`` (5 min, jittered ±25%) and the background warmer
+    only refreshes the ACTIVE provider, so an idle provider's row is *supposed*
+    to be minutes old — that is the cache working, not an account failing.
+
+    Anchored to the formatter's one minute instead, a completely healthy panel
+    reported ``5 stale`` and dimmed five healthy dots on most opens (measured at
+    97% of opens for a four-provider user). That both states something false and
+    burns the signal: marks the operator sees constantly stop meaning
+    "degraded", and the genuinely stuck account this panel exists to surface
+    ends up looking like every other block.
+
+    A row is unremarkable until it is older than the freshness the system
+    promised it, so the floor is one full TTL plus the ±25% jitter that TTL is
+    spread by — a row at the top of its jitter band has not outlived its
+    contract. Taken from the cache's own constant rather than a copied literal
+    so the two cannot drift; the import is function-local for the same reason
+    :func:`format_amount` keeps ``UNIT_LABELS`` off this module's import graph
+    (``tui.app`` imports this widget, so importing back through it at module
+    level would be a cycle).
+    """
+    from local_operator.providers.usage_cache import USAGE_REPORT_TTL_MS
+
+    return int(USAGE_REPORT_TTL_MS * 1.25)
+
+
 #: Rows the pinned chrome costs: the title, the rule under it, the blank row
 #: that separates the report from the footer, the ``N of M`` position, and the
 #: hint row itself. The spacer is chrome rather than a body row because it must
@@ -391,10 +422,21 @@ def _measure_columns(reports, width: int, now_ms: float) -> _Columns:  # noqa: A
     return _Columns(label=label, numbers=numbers, reset=reset, bar=bar)
 
 
-def _limit_row(limit, columns: _Columns, now_ms: float) -> Text:  # noqa: ANN001
-    """One window: mark, label, bar, number, reset countdown."""
+def _limit_row(  # noqa: ANN001
+    limit, columns: _Columns, now_ms: float, degraded: bool = False
+) -> Text:
+    """One window: mark, label, bar, number, reset countdown.
+
+    ``degraded`` marks a row whose account is serving last-known numbers. The
+    mark takes the ``dim`` ramp then, because a healthy-green dot on a
+    two-hour-old meter is the block's highest-contrast element saying "fine"
+    while the note under the heading says otherwise. The BAR keeps its quota
+    tint — the fill still means what it measures; only the confidence in its
+    freshness has changed.
+    """
     status = limit.effective_status()
     tint = Style(color=_status_color(status))
+    mark_style = Style(color=theme_mod.semantic_color("dim")) if degraded else tint
     dim = Style(color=theme_mod.semantic_color("dim"))
     faint = Style(color=theme_mod.semantic_color("faint"))
     # A tier row is subordinate, so it takes the dim ramp even at full: the
@@ -403,7 +445,7 @@ def _limit_row(limit, columns: _Columns, now_ms: float) -> Text:  # noqa: ANN001
 
     fraction = limit.amount.fraction()
     row = Text()
-    row.append(f"{MARK_KNOWN if fraction is not None else MARK_UNKNOWN} ", style=tint)
+    row.append(f"{MARK_KNOWN if fraction is not None else MARK_UNKNOWN} ", style=mark_style)
 
     label = limit.label
     if limit.tier:
@@ -435,20 +477,42 @@ def _limit_row(limit, columns: _Columns, now_ms: float) -> Text:  # noqa: ANN001
     return row
 
 
-def _account_status_note(report, now_ms: float) -> str:  # noqa: ANN001
+def _account_status_note(  # noqa: ANN001
+    report, now_ms: float, header_ms: float | None = None
+) -> str:
     """Per-account stale / unavailable copy, or empty when the row is live.
 
-    Age already lives in the panel title for the *set*. A single 429 must
-    not drop the block, so the honesty sits on the account itself: last-known
-    numbers keep their meters and this note says they are last-known. An
-    exhausted 200 (100% weekly) is quota, not this path.
+    Age lives in the panel title for the *set*, measured from the newest
+    confirmation in it (``OperatorApp._usage_data_fetched_ms``). That makes this
+    note load-bearing rather than decorative: it is what stops a block the title
+    does not speak for from being read at the title's age.
+
+    So the trigger is "the title does not describe this row", not merely "this
+    row has a failure streak". ``header_ms`` is the stamp the title is showing;
+    a report materially older than it labels itself whatever its counters say.
+    Without that, a row could be hours stale with ``consecutive_failures == 0``
+    and ``usage_unavailable`` false and render completely unmarked beside a
+    20-second-old sibling — reachable on ordinary paths, since
+    ``cached_usage_reports`` reads with ``include_expired=True`` and the
+    lease-loser branch in ``_refresh_provider_usage`` returns the stale payload
+    verbatim, neither of which touches a counter. ``header_ms`` is optional so
+    the pure renderer stays callable without a title (tests, ``_measure_columns``).
+
+    An exhausted 200 (100% weekly) is quota, not this path.
     """
     unavailable = bool(getattr(report, "usage_unavailable", False))
     failures = int(getattr(report, "consecutive_failures", 0) or 0)
-    if not unavailable and failures <= 0:
+    fetched_at = int(getattr(report, "fetched_at", 0) or 0)
+    # Older than the title by more than a rendered age step would show. The
+    # threshold is the age formatter's own resolution: below a minute
+    # `format_age` says `just now` for both stamps, so a note there would
+    # contradict a title that is telling the same truth.
+    behind_header = bool(
+        header_ms is not None and fetched_at and (header_ms - fetched_at) >= _stale_behind_ms()
+    )
+    if not unavailable and failures <= 0 and not behind_header:
         return ""
     age = ""
-    fetched_at = int(getattr(report, "fetched_at", 0) or 0)
     if fetched_at and report.limits:
         age = format_age(max(0.0, now_ms - fetched_at))
     if unavailable:
@@ -458,6 +522,24 @@ def _account_status_note(report, now_ms: float) -> str:  # noqa: ANN001
     if age:
         return f"last known {age}"
     return "last known"
+
+
+def _fit_status_note(note: str, width: int) -> str:
+    """The status note, shortened rather than clipped when the card is narrow.
+
+    ``usage unavailable — last known 2h ago`` is 37 cells and truncates from the
+    right, which drops the AGE — the more actionable half — while keeping the
+    label. On a 40-column card the reader is left with
+    ``usage unavailable — last known 2h a…``. The short form states both facts in
+    20 cells, so it fits where the long one cannot; the long form is preferred
+    whenever there is room for it, since it reads as a sentence.
+    """
+    if cell_len(note) <= width or " — " not in note:
+        return note
+    label, _, tail = note.partition(" — ")
+    # `last known 2h ago` -> `2h ago`; the `·` keeps the two facts separable.
+    short = f"{label.replace('usage ', '')} · {tail.replace('last known ', '')}"
+    return short if cell_len(short) <= width else note
 
 
 def _provider_header(report, now_ms: float) -> Text:  # noqa: ANN001
@@ -500,14 +582,24 @@ class UsageBody:
     ``cuts`` holds row counts at which a window may end. ``blocks`` holds
     ``(start, end)`` ranges for provider groups, allowing a short viewport to
     remove decorative air without separating meters from their provider.
+
+    ``notes`` holds the LINE INDICES of staleness notes. Compaction has to keep
+    those ahead of the meters they qualify (see :meth:`UsagePanel._window_rows`),
+    and identifying them by index rather than by matching the rendered string
+    keeps that decision with the code that knows which row is which — a
+    substring test would silently start matching an account whose identity
+    happens to contain the copy.
     """
 
     lines: list[Text]
     cuts: frozenset[int]
     blocks: tuple[tuple[int, int], ...] = ()
+    notes: frozenset[int] = frozenset()
 
 
-def build_usage_body(reports, width: int, now_ms: float) -> UsageBody:  # noqa: ANN001
+def build_usage_body(  # noqa: ANN001
+    reports, width: int, now_ms: float, header_ms: float | None = None
+) -> UsageBody:
     """The scrolling half of the panel: one block per report.
 
     Column widths are measured over EVERY row rather than per provider, so the
@@ -519,16 +611,25 @@ def build_usage_body(reports, width: int, now_ms: float) -> UsageBody:  # noqa: 
     the "tight" the card was reported for. The blank is also why the returned
     :class:`UsageBody` carries its cut points: those three rows are one unit,
     and a window may not stop part way through them.
+
+    ``header_ms`` is the stamp the title is displaying, passed down so a block
+    the title does not speak for can say so (see :func:`_account_status_note`).
     """
     lines: list[Text] = []
     cuts: set[int] = set()
     blocks: list[tuple[int, int]] = []
+    notes: set[int] = set()
     if not reports:
         return UsageBody(lines, frozenset({0}))
 
     columns = _measure_columns(reports, width, now_ms)
 
     dim = Style(color=theme_mod.semantic_color("dim"))
+    # A degraded account's note is the only thing correcting the title for that
+    # block, so it is painted in the theme's `warning` (7.09:1 on the card)
+    # rather than `dim` (3.43:1 — the same colour as `resets in 4d` and the
+    # footer, i.e. the panel's "this is decoration" ramp).
+    warning = Style(color=theme_mod.semantic_color("warning"))
     for index, report in enumerate(reports):
         if index:
             lines.append(Text())
@@ -538,11 +639,22 @@ def build_usage_body(reports, width: int, now_ms: float) -> UsageBody:  # noqa: 
         # identity must lose its tail rather than widen or clip the whole card.
         header.truncate(max(1, width), overflow="ellipsis")
         lines.append(header)
-        account_note = _account_status_note(report, now_ms)
+        account_note = _account_status_note(report, now_ms, header_ms)
         if account_note:
-            note = Text(f"  {account_note}", style=dim)
+            # The two-cell indent is part of the budget the note has to fit in.
+            account_note = _fit_status_note(account_note, max(1, width - 2))
+            note = Text(f"  {account_note}", style=warning)
             note.truncate(max(1, width), overflow="ellipsis")
             lines.append(note)
+            # The note qualifies the meters below it, so it survives
+            # compaction with them: a cut point makes it eligible for a short
+            # viewport, and `notes` makes `_window_rows` keep it AHEAD of the
+            # meters rather than dropping it as the first row of the tail slice.
+            # Both are needed — with only the cut point, the layout still
+            # rendered `last known 2h ago`'s meter under a title reading `1m
+            # ago` with nothing correcting it.
+            cuts.add(len(lines))
+            notes.add(len(lines) - 1)
         if report.notes:
             note = Text(f"  {report.notes}", style=dim)
             note.truncate(max(1, width), overflow="ellipsis")
@@ -554,10 +666,10 @@ def build_usage_body(reports, width: int, now_ms: float) -> UsageBody:  # noqa: 
             continue
         lines.append(Text())
         for limit in report.limits:
-            lines.append(_limit_row(limit, columns, now_ms))
+            lines.append(_limit_row(limit, columns, now_ms, degraded=bool(account_note)))
             cuts.add(len(lines))
         blocks.append((block_start, len(lines)))
-    return UsageBody(lines, frozenset(cuts), tuple(blocks))
+    return UsageBody(lines, frozenset(cuts), tuple(blocks), frozenset(notes))
 
 
 class UsagePanel(Static):
@@ -1174,20 +1286,70 @@ class UsagePanel(Static):
                 [Text(truncate_cells(message, width), style=dim)],
                 frozenset({1}),
             )
-        return build_usage_body(self._reports, width, self._now())
+        return build_usage_body(self._reports, width, self._now(), self._fetched_ms)
+
+    def _stale_account_count(self) -> int:
+        """How many blocks the title's age does NOT speak for.
+
+        Same predicate the body uses, so the count and the `last known` notes
+        can never disagree about which accounts are stale.
+
+        "Stale" here means "not confirmed by the round the title reports", which
+        is very nearly but not exactly "older". The title takes the newest
+        CONFIRMED stamp, so a failing account whose last-good happens to be more
+        recent than that — an old confirmed reading beside a newer unconfirmed
+        one — is still counted. The direction is conservative (the title
+        under-claims freshness and the block states its own true age, so no
+        number is misdated) and the alternative, counting only rows that are
+        literally older, would leave an unconfirmed block unmarked.
+        """
+        return sum(
+            1
+            for report in self._reports
+            if _account_status_note(report, self._now(), self._fetched_ms)
+        )
 
     def _title_row(self) -> Text:
         muted = Style(color=theme_mod.semantic_color("muted"))
         dim = Style(color=theme_mod.semantic_color("dim"))
         faint = Style(color=theme_mod.semantic_color("faint"))
+        warning = Style(color=theme_mod.semantic_color("warning"))
         row = Text()
         row.append("Usage", style=Style(color=theme_mod.semantic_color("fg")))
-        if self._target:
-            row.append(f"  {self._target}", style=muted)
+        stale = 0
+        age = ""
         if self._fetched_ms is not None and not self._loading and not self._error:
+            stale = self._stale_account_count()
+            age = f"  {format_age(self._now() - self._fetched_ms)}"
+        # The target is dropped when the row cannot hold both it and the stale
+        # count. The title truncates from the RIGHT, so whatever is appended
+        # first survives — and on a narrow scoped panel (`/usage anthropic` in a
+        # 40-column split) the target pushed `· N stale` off the end, restoring
+        # the unmarked stale meter this panel was reported for. The target is
+        # the one piece of the title the user already knows: they just typed it,
+        # and every block header repeats it. The stale count is the thing they
+        # did not know, so it is the target that yields.
+        target = f"  {self._target}" if self._target else ""
+        if target and stale:
+            wanted = cell_len("Usage") + cell_len(target) + cell_len(age)
+            wanted += cell_len(f"  · {stale} stale")
+            if wanted > self._content_width():
+                target = ""
+        if target:
+            row.append(target, style=muted)
+        if age:
             # A `·` between the age and the refreshing mark so "2m ago" and
             # "refreshing…" read as two facts rather than one running phrase.
-            row.append(f"  {format_age(self._now() - self._fetched_ms)}", style=dim)
+            row.append(age, style=dim)
+            # The age is the NEWEST confirmation, so on a mixed set it does not
+            # describe every block. A bare age never named its subject; unqualified
+            # it reads as "all of this is one minute old", which is the same
+            # misreading in the opposite direction from the one this panel was
+            # reported for. The count makes the title self-correcting and points
+            # at the blocks carrying their own `last known` line.
+            if stale:
+                row.append("  · ", style=faint)
+                row.append(f"{stale} stale", style=warning)
         if self._refreshing and not self._error:
             row.append("  · ", style=faint)
             row.append("refreshing…", style=dim)
@@ -1321,17 +1483,30 @@ class UsagePanel(Static):
         """Visible rows plus the source position represented by their tail.
 
         A provider block taller than the short viewport is compacted
-        semantically: heading first, then the last meters that fit. Notes and
-        the decorative blank yield before identity or quota values.
+        semantically: heading first, then the last meters that fit. The
+        decorative blank yields before identity or quota values.
+
+        A staleness note is kept AHEAD of the meters rather than yielding with
+        the other air. Being a cut point only made it *eligible*: the tail slice
+        below keeps ``data[-(budget - 1):]`` and the note is ``data[0]``, so it
+        was still the first row discarded — which rendered a 169-minute-old
+        meter with nothing on the card saying so, the exact frame this panel was
+        reported for. The note qualifies the meters, so a budget that can show a
+        meter can show the sentence that says the meter is old; dropping a
+        *meter* to keep it is the honest trade, because an unlabelled stale
+        number is worse than one fewer number.
         """
         for start, end in body.blocks:
             if self._offset == start and end - start > budget:
-                data = [
-                    body.lines[index] for index in range(start + 1, end) if index + 1 in body.cuts
-                ]
                 if budget <= 1:
                     return [body.lines[start]], end
-                return [body.lines[start], *data[-(budget - 1) :]], end
+                indices = [index for index in range(start + 1, end) if index + 1 in body.cuts]
+                notes = [body.lines[i] for i in indices if i in body.notes]
+                meters = [body.lines[i] for i in indices if i not in body.notes]
+                # Notes first, then the last meters that still fit beside them.
+                room = max(0, budget - 1 - len(notes))
+                kept = [*notes[: budget - 1], *meters[-room:]] if room else notes[: budget - 1]
+                return [body.lines[start], *kept], end
         end = self._window_end(body, budget)
         return body.lines[self._offset : end], end
 
