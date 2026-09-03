@@ -1223,9 +1223,10 @@ ACTIVITY_APPROVAL = "approval"
 #: recompute rather than each setting the class from what it believes.
 BOOT_LAYOUT_CLASS = "boot"
 
-#: Class the Screen carries while ``display.comfortable_rows`` is on, which is
-#: the default. Same device as the boot class: a display MODE is one class on
-#: the Screen and the padding itself is the stylesheet's problem, so nothing
+#: Class the Screen carries while ``display.comfortable_rows`` is on (default
+#: was changed to OFF by the maintainer). Same device as the boot class: a
+#: display MODE is one class on the Screen and the padding itself is the
+#: stylesheet's problem, so nothing
 #: here knows a cell count and the setting cannot drift from the rule.
 #:
 #: On the Screen rather than per block because the blocks are built at
@@ -9737,8 +9738,9 @@ class OperatorApp(App[None]):
         yet (headless construction, an early failure) must not cost a boot.
         """
         try:
+            # Default was changed to False by the maintainer
             self.screen.set_class(
-                bool(settings_get("display.comfortable_rows", True)),
+                bool(settings_get("display.comfortable_rows", False)),
                 COMFORTABLE_ROWS_CLASS,
             )
         except Exception:  # noqa: BLE001 — density is cosmetic; never fail a boot for it

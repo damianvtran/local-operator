@@ -297,7 +297,7 @@ ToolCard.tool-expanded, WakeBlock.wake-expanded {
     height: auto;
 }
 
-/* COMFORTABLE DENSITY (`display.comfortable_rows`, default ON). One padding
+/* COMFORTABLE DENSITY (`display.comfortable_rows`, default ON changed to OFF by maintainer). One padding
  * row above and below an action's summary.
  *
  * This is a HIT TARGET, not decoration. The whole row is the click surface
