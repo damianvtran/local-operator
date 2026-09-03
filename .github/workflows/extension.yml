@@ -13,11 +13,20 @@ on:
       - 'extension/**'
       - 'local_operator/browser_bridge/protocol.py'
       - 'local_operator/browser_bridge/gen_ts.py'
+      # The store workflows are gated here because `release.test.mjs` asserts
+      # their job topology (preflight has no `environment:`, the deploying job
+      # `needs:` it). That guard is the primary boundary for an unattended
+      # store release, and without this path a YAML-only edit deleting it would
+      # never run the suite that catches it.
+      - '.github/workflows/chrome-web-store.yml'
+      - '.github/workflows/chrome-web-store-promote.yml'
   pull_request:
     paths:
       - 'extension/**'
       - 'local_operator/browser_bridge/protocol.py'
       - 'local_operator/browser_bridge/gen_ts.py'
+      - '.github/workflows/chrome-web-store.yml'
+      - '.github/workflows/chrome-web-store-promote.yml'
   workflow_dispatch:
 
 # Matches ci.yml, including the per-SHA group for `main` so a merge commit's
