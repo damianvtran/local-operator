@@ -15044,9 +15044,21 @@ class OperatorApp(App[None]):
         exists: after logging in to Anthropic, `claude-opus-5` has to be findable
         without the user already knowing its id.
         """
-        rows, note = self._catalogue_rows(
-            self._providers.static_catalogue() if self._providers else []
-        )
+        # Stale-then-update, not load-then-show. The shipped registry is already in
+        # memory, and cached aggregator listings from disk are layered in via
+        # `initial_catalogue()` so OpenRouter and Radient models appear on the first
+        # keystroke without waiting for the live fetch. The live fetch then adds
+        # what shipped too late to be in the registry or was updated on the network.
+        providers = self._providers
+        if providers is not None:
+            entries = (
+                providers.initial_catalogue()
+                if hasattr(providers, "initial_catalogue")
+                else providers.static_catalogue()
+            )
+        else:
+            entries = []
+        rows, note = self._catalogue_rows(entries)
         self._editor().model_picker.set_rows(
             rows,
             current=self._current_selector(),
