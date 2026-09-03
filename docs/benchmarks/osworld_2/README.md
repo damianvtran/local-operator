@@ -93,7 +93,7 @@ One episode owns one EC2 instance for its lifetime.
 | Region | `us-east-1` (infra `AWS_REGION`) | the release AMI exists only there |
 | AMI | `ami-01017272139e01feb` | release pin, `provider_images.aws` |
 | Instance type | `t3.xlarge` unless the task overrides it | `provisioning._DEFAULT_INSTANCE_TYPE` |
-| Root volume | gp3, 4000 IOPS, 1000 MB/s; size from the task or the AMI's own block-device mapping (30 GiB for this AMI) | `providers/aws.py` |
+| Root volume | gp3, 4000 IOPS, 1000 MB/s; **40 GiB** — a floor, raised only if the AMI's own block-device mapping is larger. The release AMI declares 30 GiB, so the request is 40 | `providers/aws.py` |
 | Screen | 1920x1080, headless, `action_space="pyautogui"` | `providers/aws.py` |
 | Subnet / SG | operator-supplied via infra `AWS_SUBNET_ID`, `AWS_SECURITY_GROUP_ID` | not created by the adapter |
 
