@@ -479,6 +479,62 @@ class OwnedSessionHandle(SessionHandle):
     def session_projection_seed(self) -> SessionProjection:
         return self._projection
 
+    # -- v4 full-TUI capability --------------------------------------------------
+    # These three are what makes ``RuntimeServer`` advertise
+    # ``FRONTEND_CAPABILITY``, and therefore what makes a TUI viewer's attach
+    # succeed at all: ``server.py`` advertises the capability only when the
+    # handle has ``subscribe_frontend``, and hangs up on any client that asks
+    # for a capability it did not advertise. ``RemoteSession`` asks for it
+    # unconditionally.
+    #
+    # They lived ONLY on ``mobile.tui_handle.TuiSessionHandle`` — the owner
+    # path this PR deletes — and were not re-homed with the rest of it, so
+    # every runtime published ``capabilities: []`` and refused every viewer:
+    # no message could be sent in any session. Round 1 QA (Q2) and UX (U1)
+    # both found it independently against the real binary.
+    #
+    # The delegation is DIRECT where the mobile bridge hops threads. That
+    # bridge adapts a session living on Textual's loop from a foreign thread,
+    # so it must marshal; this handle IS constructed on the runtime's own loop
+    # and owns its session outright (see ``spawn_owned_session``), so the hop
+    # would be a round trip to the thread already executing.
+
+    @property
+    def frontend_state_seed(self) -> Any:
+        """Canonical state seed for full-TUI attach clients."""
+        return self._session.frontend_state
+
+    async def subscribe_frontend(self, on_update: Callable[[Any], None]) -> Any:
+        """Snapshot and subscribe atomically, on the loop that publishes.
+
+        ``Session.subscribe_frontend`` refreshes through the publishing path
+        and returns the snapshot with its sequence number, which is what lets
+        every client's exact-``+1`` gap check detect transport loss. Awaited
+        rather than wrapped because the caller is already on this loop.
+        """
+        return self._session.subscribe_frontend(on_update)
+
+    def subscribe_events(self, on_event: Callable[[dict[str, Any]], None]) -> Callable[[], None]:
+        """Feed serialized AgentEvents to the runtime's v4 relay.
+
+        Serialization happens here, on the loop that emits the event, so no
+        pydantic object crosses a thread boundary; ``RuntimeServer._relay_event``
+        only schedules onto its own loop, so the callback is safe to call
+        inline and producer order is preserved.
+
+        Without this the handshake can succeed and the viewer still sees
+        nothing stream — the capability and the relay are two halves of one
+        feature, which is why they are re-homed together.
+        """
+
+        def handler(event: AgentEvent) -> None:
+            try:
+                on_event(event.model_dump(mode="json"))
+            except Exception:  # noqa: BLE001 — the relay is additive, never a gate
+                logger.debug("runtime event serialization failed", exc_info=True)
+
+        return self._session.subscribe(handler)
+
     def subscribe(self, on_projection: Callable[[], None]) -> Callable[[], None]:
         self._on_projection = on_projection
 
