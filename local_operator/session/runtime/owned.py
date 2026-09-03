@@ -158,6 +158,10 @@ class OwnedSessionHandle(SessionHandle):
         self._command_reservations = CommandReservations(session)
         self._unsubscribe_admitted_commands = self._command_reservations.subscribe_durable()
         self._disposing = False
+        #: Installed by the runtime process (``process.amain``): fires the
+        #: process's stop event so a socket ``stop`` op exits the way SIGTERM
+        #: does. ``None`` under a host that has no process to exit.
+        self.on_stop_requested: Callable[[], None] | None = None
         self._install_gates()
 
     # -- gates -----------------------------------------------------------------
@@ -357,6 +361,46 @@ class OwnedSessionHandle(SessionHandle):
             return None
         due = [s.next_due_at for s in schedules if isinstance(s.next_due_at, int)]
         return min(due) if due else None
+
+    def request_stop(self) -> None:
+        """The graceful rung of the kill switch (``control.stop_session``).
+
+        Runs the SAME clean-exit ordering the SIGTERM path in
+        ``process.amain`` runs: deny parked gates, then let the process's
+        own stop event fire so ``amain`` disposes the session (aborting any
+        in-flight turn, flushing the transcript, RELEASING the sole-writer
+        lease), closes the runtime (unpublishing the record) and exits.
+        One implementation of the ordering, two triggers (this op and a
+        signal), is the point: a stop that arrived over the socket must not
+        leave different state than one that arrived as SIGTERM.
+
+        It does NOT merely dispose and wait for the reaper: the reaper's
+        drain is a residency policy (``LOP_SESSION_GRACE_S`` can be minutes),
+        not an exit path, and measured against a 600 s grace the socket rung
+        "succeeded" only when the caller's timeout expired and SIGTERM did
+        the work. The hook the process installs (``on_stop_requested``) IS
+        the exit; without one — a host that hasn't wired it, e.g. a test —
+        the fallback disposes in place so the session still ends.
+
+        Sync and non-raising by contract (see SessionHandle): called on the
+        runtime loop from the ``stop`` dispatch, which acks right after.
+        """
+        self._deny_pending_gates()
+        trigger = self.on_stop_requested
+        if trigger is not None:
+            try:
+                trigger()
+            except Exception:  # noqa: BLE001 — a stop that faults is still a stop
+                logger.warning("session runtime: stop trigger failed", exc_info=True)
+            return
+
+        async def _dispose_in_place() -> None:
+            try:
+                await self.dispose()
+            except Exception:  # noqa: BLE001
+                logger.warning("session runtime: stop-path dispose failed", exc_info=True)
+
+        self._loop.create_task(_dispose_in_place())
 
     def _deny_pending_gates(self) -> None:
         """Refuse every parked approval/ask so teardown cannot hang on them.

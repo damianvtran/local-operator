@@ -229,6 +229,10 @@ async def amain() -> int:
     stop = asyncio.Event()
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, stop.set)
+    # The socket ``stop`` op (the kill switch's graceful rung) and SIGTERM
+    # converge on the same event, so the deny → dispose → aclose ordering
+    # below runs once, identically, for both triggers.
+    handle.on_stop_requested = stop.set
     # The self-reaper: a phone session nobody watches and nothing runs is a
     # live process doing nothing, and before this it idled FOREVER. Runs
     # beside the signal wait; whichever fires first wins.

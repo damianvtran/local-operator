@@ -244,6 +244,12 @@ ControlOp = Literal[
     # from ANOTHER local lop session hands a message to this one. Additive; no
     # PROTOCOL_VERSION bump (see validate_control_frame + the version note).
     "peer_message",  # {text, mode: mailbox|steer, wake?, sender?}
+    # The graceful rung of the kill switch (`lop stop` / `/stop`): deny parked
+    # gates, abort the turn, dispose the session, release the lease, unpublish
+    # the record, exit. Additive like peer_message — an old runtime answers
+    # unknown-op and the stop ladder proceeds to identity-confirmed SIGTERM,
+    # which old runtimes already honour, so no version bump and no split-brain.
+    "stop",  # {}
 ]
 
 # Events the registrant streams to the daemon.
