@@ -581,13 +581,32 @@ def resume_click_command(session_id: str) -> list[str]:
 
     A notification is clicked when NOTHING is attached, so there is no
     emulator around this process to detect — the click has to OPEN one. That
-    is `lop --resume` handed to the resume helper below, which asks the spawn
-    registry for the user's terminal at click time (when a terminal may well
-    be running) and falls back to the bare argv when it cannot pick one.
+    is the helper module's job: it asks the spawn registry for the user's
+    terminal at click time (when one may well be running) and falls back to
+    the bare argv when it cannot pick one.
+
+    THE LAUNCHER IS RESOLVED FOR THE USER, NOT FROM THIS PROCESS. Neither
+    `sys.executable` nor `broadcast.resume_executable()` is right here, and
+    both were measured wrong on this path:
+
+    - `sys.executable` is the runtime's interpreter, which lives in whatever
+      `.venv` the runtime was started from — on a shared machine a worktree
+      that may be deleted before the user clicks (mine was, twice).
+    - `resume_executable()` reads `sys.argv[0]`, which is correct for a
+      `lop` process restoring itself but is the bare INTERPRETER inside a
+      detached runtime child (`python -m …runtime.process`). Clicking that
+      opened a Python REPL.
+
+    The notification is clicked minutes or hours later, in the user's
+    session, so the right answer is the launcher THEY run: `lop` on PATH,
+    resolved at click time by the shell. An absolute path is used only when
+    one can be found now and still exists, which keeps a non-PATH install
+    working without baking in a disposable checkout.
 
     Pure: returns the argv so it can be asserted without launching anything.
     """
-    return [sys.executable, "-m", "local_operator.tui.resume_click", session_id]
+    launcher = shutil.which("lop") or "lop"
+    return [launcher, "resume-click", session_id]
 
 
 def _clickable_notify_command(notifier: str, title: str, body: str, session_id: str) -> list[str]:

@@ -492,6 +492,20 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # running / talk to it / end it" — and deliberately NOT the
     # `lop mobile start|stop|restart` shape, which manages the daemon
     # service rather than a session.
+    # The activation target of a desktop notification. Deliberately a real
+    # subcommand rather than `python -m …`: the toast is clicked minutes or
+    # hours later, by which time the interpreter that sent it may be gone (a
+    # runtime exits when its work is done, and a worktree's `.venv` is
+    # disposable) — so the command has to name the user's OWN launcher, which
+    # is what `lop` on PATH resolves to. Hidden from `--help`: nobody types
+    # this, and it is not a supported way to open a session.
+    resume_click_parser = subparsers.add_parser(
+        "resume-click",
+        help=argparse.SUPPRESS,
+        parents=[parent_parser],
+    )
+    resume_click_parser.add_argument("session", help="session id to reopen")
+
     stop_parser = subparsers.add_parser(
         "stop",
         help="Stop a running lop session (graceful, then signals)",
@@ -3553,6 +3567,13 @@ def main() -> int:
             return sessions_command(args)
         elif args.subcommand == "stop":
             return stop_command(args)
+        elif args.subcommand == "resume-click":
+            # Function-local like every other runtime import here: this module
+            # is on the CLI startup path and must not pull the spawn/terminal
+            # graph into every `lop` invocation.
+            from local_operator.tui.resume_click import open_session
+
+            return 0 if open_session(args.session) else 1
         elif args.subcommand == "wake":
             return wake_command(args)
         elif args.subcommand == "login":

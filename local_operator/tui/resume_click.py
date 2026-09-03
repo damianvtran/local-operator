@@ -31,26 +31,68 @@ import sys
 logger = logging.getLogger(__name__)
 
 
+def _session_cwd(session_id: str) -> str:
+    """Where the session was working, best effort.
+
+    Read from the discovery record (live session) and otherwise from the wake
+    index, which keeps a ``cwd`` for cold sessions. Falls back to the user's
+    home: an unknown project directory is a mild annoyance, whereas defaulting
+    to this process's cwd puts the user in a runtime's disposable worktree.
+    """
+    import os
+
+    try:
+        from local_operator.paths import config_dir
+        from local_operator.session.runtime import registry
+
+        for record, _state in registry.scan(config_dir()):
+            if record.session_id == session_id and record.cwd:
+                return str(record.cwd)
+    except Exception:  # noqa: BLE001 — a missing record is an ordinary answer
+        logger.debug("could not read the session record for cwd", exc_info=True)
+
+    try:
+        from local_operator.paths import config_dir
+        from local_operator.wakes import store as wake_store
+
+        entry = wake_store.read_entry(config_dir(), session_id) or {}
+        cwd = entry.get("cwd")
+        if isinstance(cwd, str) and cwd:
+            return cwd
+    except Exception:  # noqa: BLE001
+        logger.debug("could not read the wake entry for cwd", exc_info=True)
+
+    return os.path.expanduser("~")
+
+
 def open_session(session_id: str) -> bool:
     """Open ``session_id`` in a terminal. True if something was launched."""
+    import shutil
+
     from local_operator.multiplexer.broadcast import resume_argv, resume_executable
     from local_operator.spawn.registry import active_backend
     from local_operator.spawn.types import ForkLaunch, env_or_process
 
-    executable = resume_executable()
+    # PATH first, `resume_executable()` second. This module runs as `lop
+    # resume-click`, so `argv[0]` is usually right — but it is also reachable
+    # as `python -m`, where `resume_executable()` returns the interpreter and
+    # the terminal would open a REPL instead of the session. Resolving `lop`
+    # on PATH is what the user would type themselves.
+    executable = shutil.which("lop") or resume_executable()
     argv = tuple(resume_argv(session_id, executable))
     env = env_or_process(None)
 
-    # `cwd` is the process's own: a notification click carries no project
-    # context, and `--resume` restores the session's real working directory
-    # from its transcript anyway.
-    import os
-
+    # THE SESSION'S OWN DIRECTORY, not this process's. The click is handled by
+    # whatever process the notification activated — inheriting its cwd landed
+    # the user's new terminal in the runtime's worktree, which on a shared
+    # machine is a disposable checkout that may not even exist any more. The
+    # session's cwd is recorded when it is published, so read it back and fall
+    # back to the user's home rather than to an arbitrary directory.
     launch = ForkLaunch(
         session_id=session_id,
         executable=executable,
         argv=argv,
-        cwd=os.getcwd(),
+        cwd=_session_cwd(session_id),
         title="local-operator",
     )
 

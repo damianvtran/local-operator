@@ -506,8 +506,17 @@ def test_the_click_through_reopens_the_session_through_the_fork_machinery() -> N
 
     argv = resume_click_command("abc123def456")
 
-    assert argv[-2:] == ["--resume", "abc123def456"]
+    # `lop resume-click <id>` — the user's launcher, a real subcommand, and a
+    # POSITIONAL id. Every part of that shape was a defect once: the built
+    # command dropped the interpreter and ran a non-executable .py directly
+    # ("permission denied"), and it passed `--resume`, which this subcommand
+    # does not take.
+    assert argv[0].endswith("lop")
+    assert argv[1:] == ["resume-click", "abc123def456"]
     assert not any(part in ("--exec", "-e") for part in argv)
+    # Never this process's interpreter or checkout: the click happens later,
+    # in the user's session, when a worktree venv may be long gone.
+    assert not any(part.endswith(".py") for part in argv)
 
 
 def test_a_clickable_toast_launches_only_on_the_default_action() -> None:
@@ -527,7 +536,7 @@ def test_a_clickable_toast_launches_only_on_the_default_action() -> None:
     script = argv[2]
     assert "= default ]" in script, script
     assert "--action=default=" in script
-    assert "--resume abc123def456" in script
+    assert "resume-click abc123def456" in script
     # The title is model-derived; option parsing must still be terminated.
     assert " -- " in script
 
@@ -565,7 +574,7 @@ def test_the_click_opens_a_terminal_through_the_spawn_registry(monkeypatch) -> N
     """
     from local_operator.tui import resume_click
 
-    seen: dict[str, object] = {}
+    seen: dict[str, Any] = {}
 
     class _Backend:
         def spawn(self, launch, env):  # noqa: ANN001
@@ -573,14 +582,13 @@ def test_the_click_opens_a_terminal_through_the_spawn_registry(monkeypatch) -> N
             seen["session"] = launch.session_id
             return True
 
-    monkeypatch.setattr(
-        "local_operator.spawn.registry.active_backend", lambda env: _Backend()
-    )
+    monkeypatch.setattr("local_operator.spawn.registry.active_backend", lambda env: _Backend())
 
     assert resume_click.open_session("abc123def456") is True
     assert seen["session"] == "abc123def456"
-    assert tuple(seen["argv"])[-2:] == ("--resume", "abc123def456")
-    assert not any(part in ("--exec", "-e") for part in seen["argv"])
+    argv = tuple(seen["argv"])
+    assert argv[-2:] == ("--resume", "abc123def456")
+    assert not any(part in ("--exec", "-e") for part in argv)
 
 
 def test_a_click_with_no_terminal_backend_still_launches(monkeypatch) -> None:
@@ -588,9 +596,7 @@ def test_a_click_with_no_terminal_backend_still_launches(monkeypatch) -> None:
     from local_operator.tui import resume_click
 
     launched: list[list[str]] = []
-    monkeypatch.setattr(
-        "local_operator.spawn.registry.active_backend", lambda env: None
-    )
+    monkeypatch.setattr("local_operator.spawn.registry.active_backend", lambda env: None)
     monkeypatch.setattr(
         "local_operator.proc.spawn_detached",
         lambda argv, *a, **k: bool(launched.append(list(argv))) or True,
@@ -598,3 +604,44 @@ def test_a_click_with_no_terminal_backend_still_launches(monkeypatch) -> None:
 
     assert resume_click.open_session("abc123def456") is True
     assert launched and launched[0][-2:] == ["--resume", "abc123def456"]
+
+
+def test_the_built_click_command_actually_runs(tmp_path, monkeypatch) -> None:
+    """EXECUTE the command a toast carries, rather than asserting its shape.
+
+    The shipped defect was invisible to an argv assertion: the command that
+    reached the shell named a non-executable `.py` with no shebang and an
+    argument the target does not accept, so the click produced
+    `zsh: permission denied` and nothing else. Running it is what catches
+    that class — a wrong interpreter, a wrong flag, or a path that is not
+    executable all fail here and none of them fail a shape check.
+
+    A stub `lop` on PATH stands in for the user's launcher and records what
+    it was asked to do.
+    """
+    import shlex
+    import subprocess
+
+    from local_operator.tui.notify import resume_click_command
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    receipt = tmp_path / "ran.txt"
+    stub = bin_dir / "lop"
+    stub.write_text(f'#!/bin/sh\necho "$@" > {shlex.quote(str(receipt))}\n')
+    stub.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}:{__import__('os').environ['PATH']}")
+
+    argv = resume_click_command("abc123def456")
+    # Through a shell, exactly as the notifier's NSTask and notify-send's
+    # `--action` handler both do — that round trip is where the quoting and
+    # the interpreter were lost.
+    result = subprocess.run(
+        ["sh", "-c", " ".join(shlex.quote(part) for part in argv)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert receipt.read_text().strip() == "resume-click abc123def456"

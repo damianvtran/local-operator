@@ -80,7 +80,7 @@ def build(repo_root: Path) -> Path:
             ratio = min(inner / glyph.width, inner / glyph.height)
             scaled = glyph.resize(
                 (max(1, int(glyph.width * ratio)), max(1, int(glyph.height * ratio))),
-                Image.LANCZOS,
+                Image.Resampling.LANCZOS,
             )
             canvas.paste(
                 scaled,
