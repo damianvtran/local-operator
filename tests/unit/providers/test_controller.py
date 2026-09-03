@@ -58,10 +58,16 @@ class FakeAuthStore:
         return [types.SimpleNamespace(**r) for r in rows]
 
     def upsert_credential(self, provider, credential):
+        declared = credential.get("type")
+        cred_type = (
+            declared
+            if declared in ("oauth", "api_key")
+            else ("oauth" if credential.get("refresh") and credential.get("access") else "api_key")
+        )
         row = {
             "id": self._next_id,
             "provider": provider,
-            "credential_type": "api_key" if "refresh" not in credential else "oauth",
+            "credential_type": cred_type,
             "data": credential,
             "identity_key": credential.get("email"),
         }
@@ -1712,3 +1718,17 @@ async def test_the_picker_ttl_is_the_only_ttl_override(controller, store, monkey
     calls.clear()
     await controller.live_catalogue(ttl_s=PICKER_TTL_S)
     assert {ttl for _, ttl in calls} == {PICKER_TTL_S}
+
+
+@pytest.mark.asyncio
+async def test_usable_providers_suppresses_secondary_flavour_when_oauth_active(
+    controller, store
+) -> None:
+    """When a base provider has an active OAuth credential, secondary alias flavours
+    (like `radient-key` for `radient`) must be omitted from usable_providers so they
+    do not pollute /model suggestions."""
+    store.upsert_credential("radient", {"access": "token", "type": "oauth"})
+    usable = controller.usable_providers()
+    assert usable is not None
+    assert "radient" in usable
+    assert "radient-key" not in usable

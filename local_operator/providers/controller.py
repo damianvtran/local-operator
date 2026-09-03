@@ -234,12 +234,21 @@ class ProviderController:
         the keystroke that opens the picker.
         """
         try:
-            stored = {row.provider for row in self.auth_store.list_credentials(provider=None)}
+            stored_rows = self.auth_store.list_credentials(provider=None)
+            stored = {row.provider for row in stored_rows}
+            oauth_providers = {
+                row.provider for row in stored_rows if row.credential_type == "oauth"
+            }
         except Exception:  # noqa: BLE001 — an unreadable store is reported, not raised
             return None
         usable: set[str] = set()
         for definition in PROVIDER_REGISTRY:
             storage = credential_provider_id(definition.id)
+            # If the user has an active OAuth sign-in under the base provider
+            # (e.g. `radient` OAuth), suppress secondary legacy API-key flavours
+            # (`radient-key`) from being treated as usable alternatives.
+            if definition.store_credentials_as and storage in oauth_providers:
+                continue
             if (
                 definition.allows_missing_api_key  # a local Ollama needs no credential
                 or storage in stored
