@@ -31,7 +31,10 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import httpx
 
-from local_operator.compaction.thresholds import CompactionSettings, resolve_threshold_percent
+from local_operator.compaction.thresholds import (
+    CompactionSettings,
+    resolve_threshold_percent,
+)
 from local_operator.compaction.tokens import estimate_messages_tokens
 from local_operator.harness.types import (
     AgentTool,

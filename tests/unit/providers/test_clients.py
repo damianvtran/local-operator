@@ -39,8 +39,8 @@ from local_operator.providers.clients import (
     _effective_max_tokens,
     _estimate_slope,
     _estimated_prompt_tokens,
-    _output_reserve_tokens,
     _message_to_openai,
+    _output_reserve_tokens,
     client_for_spec,
     raise_for_status,
 )
