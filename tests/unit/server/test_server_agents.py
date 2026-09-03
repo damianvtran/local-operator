@@ -5,6 +5,8 @@ This module contains tests for agent-related functionality, including
 creating, updating, deleting, and listing agents.
 """
 
+import io
+import zipfile
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
@@ -1405,6 +1407,132 @@ async def test_upload_agent_to_radient_success(test_app_client, dummy_registry: 
     assert data.get("status") == 200
     assert data.get("message") == "Agent uploaded to Radient successfully"
     assert data.get("result", {}).get("agent_id") == agent_id
+
+
+@pytest.mark.asyncio
+async def test_upload_agent_to_radient_reclaims_the_export_temp_dir(
+    test_app_client, dummy_registry: AgentRegistry, tmp_path, monkeypatch
+):
+    """The upload route must not strand the exported zip's temp directory.
+
+    Pins the migration to ``exported_agent_archive``: the route used to call
+    the bare ``export_agent`` and leak a directory holding a full agent zip on
+    every upload. The sibling upload tests all patch ``export_agent`` out, so
+    none of them can see this — the export has to run for real here.
+
+    ``tempfile.tempdir`` is redirected so the assertion sees only directories
+    this test caused, rather than every temp entry on a shared machine.
+    """
+    import tempfile
+
+    scratch = tmp_path / "tmpdir"
+    scratch.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(scratch))
+
+    agent = dummy_registry.create_agent(
+        AgentEditFields(
+            name="Radient Cleanup Agent",
+            security_prompt="Test Security",
+            hosting="openai",
+            model="gpt-4",
+            description="Test agent for upload cleanup",
+            last_message=None,
+            tags=None,
+            categories=None,
+            temperature=0.7,
+            top_p=1.0,
+            top_k=None,
+            max_tokens=2048,
+            stop=None,
+            frequency_penalty=0.0,
+            presence_penalty=0.0,
+            seed=None,
+            current_working_directory=None,
+        )
+    )
+
+    uploaded: list[object] = []
+
+    with (
+        patch("local_operator.server.routes.agents.CredentialManager") as mock_cred_mgr,
+        patch("local_operator.server.routes.agents.RadientClient") as mock_radient_client,
+        patch.object(
+            dummy_registry,
+            "upload_agent_to_radient",
+            # Assert the archive EXISTS while the upload is in flight, so a
+            # cleanup that fired too early would fail here rather than pass
+            # silently.
+            side_effect=lambda _client, _id, zip_path: uploaded.append(zip_path.exists()),
+        ),
+    ):
+        mock_cred_mgr.return_value.get_credential.return_value = "dummy-api-key"
+        mock_radient_client.return_value = MagicMock()
+        response = await test_app_client.post(f"/v1/agents/{agent.id}/upload")
+
+    assert response.status_code == 200
+    assert uploaded == [True]
+    assert list(scratch.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_export_agent_download_is_safe_for_a_traversal_shaped_name(
+    test_app_client, dummy_registry: AgentRegistry, tmp_path, monkeypatch
+):
+    """The download route must not let an agent name steer its cleanup.
+
+    The name is attacker-controllable — ``import_agent`` keeps it verbatim from
+    a downloaded ``agent.yml`` — and this route reclaims the temp directory in
+    a ``BackgroundTask`` that used to target ``zip_path.parent``. For a name
+    like ``../../evil`` that parent was an unrelated directory, so serving one
+    download deleted it. Exercised through the real HTTP endpoint so the
+    BackgroundTask actually runs.
+    """
+    import tempfile
+
+    sandbox = tmp_path / "sandbox"
+    scratch = sandbox / "tmp"
+    scratch.mkdir(parents=True)
+    precious = sandbox / "precious"
+    precious.mkdir()
+    (precious / "keepme.txt").write_text("do not delete", encoding="utf-8")
+    monkeypatch.setattr(tempfile, "tempdir", str(scratch))
+
+    agent = dummy_registry.create_agent(
+        AgentEditFields(
+            name="../../evil",
+            security_prompt="Test Security",
+            hosting="openai",
+            model="gpt-4",
+            description="Traversal-shaped export name",
+            last_message=None,
+            tags=None,
+            categories=None,
+            temperature=0.7,
+            top_p=1.0,
+            top_k=None,
+            max_tokens=2048,
+            stop=None,
+            frequency_penalty=0.0,
+            presence_penalty=0.0,
+            seed=None,
+            current_working_directory=None,
+        )
+    )
+
+    response = await test_app_client.get(f"/v1/agents/{agent.id}/export")
+
+    assert response.status_code == 200
+    # A real, complete archive was served under a sanitised basename.
+    assert "evil.zip" in response.headers.get("content-disposition", "")
+    assert ".." not in response.headers.get("content-disposition", "")
+    with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+        assert archive.testzip() is None
+        assert "agent.yml" in archive.namelist()
+
+    # The temp directory is reclaimed and nothing outside it was touched.
+    assert list(scratch.iterdir()) == []
+    assert precious.is_dir()
+    assert (precious / "keepme.txt").read_text(encoding="utf-8") == "do not delete"
 
 
 @pytest.mark.asyncio

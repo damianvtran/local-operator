@@ -3102,25 +3102,28 @@ def main() -> int:
                 else:
                     print("\n\033[1;31mError: Must provide --name or --id for push\033[0m")
                     return 1
-                zip_path, _ = agent_registry.export_agent(agent.id)
-                try:
-                    agent_id = agent_registry.upload_agent_to_radient(
-                        radient_client, agent_id_to_overwrite, zip_path
-                    )
-                    if agent_id_to_overwrite:
-                        print(
-                            f"\n\033[1;32mSuccessfully pushed agent '{agent.name}' as "
-                            f"overwrite to Radient (ID: {agent_id_to_overwrite})\033[0m"
+                # The zip is uploaded and finished with inside this block, so
+                # the context manager reclaims its temp directory on every
+                # exit path. The bare export_agent() left one behind per push.
+                with agent_registry.exported_agent_archive(agent.id) as (zip_path, _):
+                    try:
+                        agent_id = agent_registry.upload_agent_to_radient(
+                            radient_client, agent_id_to_overwrite, zip_path
                         )
-                    else:
-                        print(
-                            f"\n\033[1;32mSuccessfully pushed agent '{agent.name}' to Radient. "
-                            f"New agent ID: {agent_id}\033[0m"
-                        )
-                    return 0
-                except Exception as e:
-                    print(f"\n\033[1;31mError pushing agent to Radient: {e}\033[0m")
-                    return 1
+                        if agent_id_to_overwrite:
+                            print(
+                                f"\n\033[1;32mSuccessfully pushed agent '{agent.name}' as "
+                                f"overwrite to Radient (ID: {agent_id_to_overwrite})\033[0m"
+                            )
+                        else:
+                            print(
+                                f"\n\033[1;32mSuccessfully pushed agent '{agent.name}' to "
+                                f"Radient. New agent ID: {agent_id}\033[0m"
+                            )
+                        return 0
+                    except Exception as e:
+                        print(f"\n\033[1;31mError pushing agent to Radient: {e}\033[0m")
+                        return 1
             elif args.agents_command == "pull":
                 # Pull agent from Radient
                 from local_operator.clients.radient import RadientClient  # lazy

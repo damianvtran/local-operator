@@ -43,14 +43,21 @@ async def create_transcription_endpoint(
             detail="Radient API key is not configured on the server.",
         )
 
-    # Save the uploaded file temporarily
+    # Save the uploaded file temporarily.
+    #
+    # The directory is created BEFORE the try so the cleanup below owns it
+    # unconditionally. It used to be created inside, which meant a failure
+    # while writing (a short read, a full disk) raised HTTPException out of
+    # this block and never reached the `finally: rmtree` further down — that
+    # sits on the *second* try, which the error path never enters. The result
+    # was a temp directory leaked on every failed upload.
+    temp_dir = tempfile.mkdtemp()
     try:
-        # Create a temporary directory to save the file
-        temp_dir = tempfile.mkdtemp()
         temp_file_path = os.path.join(temp_dir, file.filename if file.filename else "audio.tmp")
         with open(temp_file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
     except Exception as e:
+        shutil.rmtree(temp_dir, ignore_errors=True)
         raise HTTPException(
             status_code=HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to save uploaded audio file: {str(e)}",

@@ -483,14 +483,18 @@ async def upload_agent_to_radient(
             agent = agent_registry.get_agent(agent_id)
         except KeyError:
             raise HTTPException(status_code=404, detail=f"Agent with ID {agent_id} not found")
-        zip_path, _ = agent_registry.export_agent(agent.id)
-
-        # Upload to Radient
-        try:
-            agent_registry.upload_agent_to_radient(radient_client, agent_id, zip_path)
-        except Exception as e:
-            logger.exception("Error uploading agent to Radient")
-            raise HTTPException(status_code=400, detail=f"Error uploading agent to Radient: {e}")
+        # The archive is consumed entirely within this handler, so the context
+        # manager owns its temp directory. Using the bare export_agent() here
+        # leaked a directory holding a full agent zip on every upload.
+        with agent_registry.exported_agent_archive(agent.id) as (zip_path, _):
+            # Upload to Radient
+            try:
+                agent_registry.upload_agent_to_radient(radient_client, agent_id, zip_path)
+            except Exception as e:
+                logger.exception("Error uploading agent to Radient")
+                raise HTTPException(
+                    status_code=400, detail=f"Error uploading agent to Radient: {e}"
+                )
 
         return CRUDResponse(
             status=200,
@@ -1006,15 +1010,22 @@ async def export_agent(
         HTTPException: If the agent is not found or there is an error exporting the agent
     """
     try:
-        # Use the AgentRegistry's export_agent method
-        zip_path, filename = agent_registry.export_agent(agent_id)
+        # export_agent_archive rather than export_agent: this route cannot use
+        # the exported_agent_archive context manager (FileResponse streams the
+        # file after the handler returns), so it must reclaim the directory
+        # itself — and it needs the directory the export actually created.
+        temp_dir, zip_path, filename = agent_registry.export_agent_archive(agent_id)
 
         # Ensure the file exists before returning it
         if not zip_path.exists():
             raise FileNotFoundError(f"Failed to create ZIP file at {zip_path}")
 
-        # Add cleanup task to remove the temporary directory after the response is sent
-        background_tasks.add_task(shutil.rmtree, zip_path.parent, ignore_errors=True)
+        # Clean up after the response is sent. Removing the captured temp dir
+        # rather than zip_path.parent keeps this correct regardless of the
+        # filename: the agent name is attacker-controllable via import_agent,
+        # and a traversal-shaped name once made .parent an unrelated directory
+        # that this task then deleted.
+        background_tasks.add_task(shutil.rmtree, temp_dir, ignore_errors=True)
 
         # Return the ZIP file as a streaming response
         return FileResponse(
