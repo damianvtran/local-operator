@@ -952,6 +952,80 @@ class RemoteSession:
         finally:
             self._recovering = False
 
+    async def load_job_trajectory(self, job_id: str) -> bool:
+        """Fetch one child's retained event window from the owner, in pages.
+
+        Called when a reader OPENS a subagent page. The attach snapshot carries
+        no trajectories (a busy session's would exceed the socket's 1 MiB line
+        limit and made the session unattachable), so the rows are pulled here
+        and cached on the jobs facade.
+
+        ``watch_job`` is issued FIRST and deliberately: subscribing before the
+        read means events emitted during the fetch are relayed rather than
+        lost, and the worst case is a row delivered twice, which the page
+        already dedupes by ``TRAJECTORY_SEQ_KEY``. Returns False when the owner
+        cannot serve trajectories (an older runtime, or the socket dropped) so
+        the page can say so instead of rendering the child as empty.
+        """
+        client = self._client
+        if client is None:
+            return False
+        try:
+            await client.watch_job(job_id)
+        except (ConnectionError, RuntimeError):
+            # An owner too old for the op cannot serve the fetch either; treat
+            # the whole capability as absent.
+            return False
+        rows: list[dict[str, Any]] = []
+        offset = 0
+        base_seq: int | None = None
+        try:
+            while True:
+                payload = await client.job_trajectory(job_id, offset=offset)
+                if not isinstance(payload, Mapping):
+                    return False
+                page = [row for row in (payload.get("rows") or []) if isinstance(row, dict)]
+                page_base = payload.get("base_seq")
+                page_base = page_base if isinstance(page_base, int) else None
+                if offset and page_base != base_seq:
+                    # The owner evicted from the front while we paged, so the
+                    # offsets already read name different events now. Start over
+                    # rather than splicing two halves of different windows.
+                    rows, offset, base_seq = [], 0, None
+                    continue
+                base_seq = page_base
+                rows.extend(page)
+                total = payload.get("total")
+                offset += len(page)
+                if not page or not isinstance(total, int) or offset >= total:
+                    break
+        except (ConnectionError, RuntimeError):
+            return False
+        store = self._frontend_store
+        if store is None:
+            return False
+        # Into the canonical state, where the live append stream will extend it
+        # from here; see ``FrontendStateStore.seed_job_trajectory``.
+        if not store.seed_job_trajectory(job_id, rows):
+            return False
+        self._apply_frontend_facades(store.state)
+        return True
+
+    async def unload_job_trajectory(self, job_id: str) -> None:
+        """Stop watching one child's appends (its page closed).
+
+        The cached rows are kept: reopening the same page is common and the
+        next fetch refreshes them anyway. Only the owner-side subscription is
+        released, which is what bounds the delta stream.
+        """
+        client = self._client
+        if client is None:
+            return
+        try:
+            await client.unwatch_job(job_id)
+        except (ConnectionError, RuntimeError):
+            pass
+
     def set_takeover_callback(self, callback: Callable[[Any], Any]) -> None:
         self._takeover_callback = callback
 

@@ -146,6 +146,37 @@ class FakeHandle:
         self.calls.append(("cancel_subagents_count", (), {}))
         return 2
 
+    async def job_trajectory(self, job_id, offset, limit):  # noqa: ANN001, ANN202
+        """Serve a child's retained events the way the owned handle does.
+
+        Attach snapshots omit trajectories (they exceed the socket's line
+        limit), so a follower fetches them per job. Reading them back out of
+        the canonical store here keeps this double on the same contract as
+        production without a second source of job rows.
+        """
+        self.calls.append(("job_trajectory", (job_id, offset, limit), {}))
+        from local_operator.session.frontend_state import _wire_value
+
+        job = next((row for row in self._frontend.state.jobs if row.id == job_id), None)
+        # Production reads plain dicts off the live ``AsyncJob``; this double
+        # reads the canonical store, whose retained rows are immutable Mapping
+        # wrappers that JSON-encode as item pairs unless thawed first — the
+        # same boundary conversion the store's own serializer performs.
+        rows = [
+            _wire_value(row)
+            for row in (list(getattr(job, "trajectory", None) or []) if job is not None else [])
+        ]
+        first = rows[0] if rows else None
+        base_seq = first.get("_traj_seq") if isinstance(first, dict) else None
+        return {
+            "job_id": job_id,
+            "rows": rows[offset : offset + limit],
+            "offset": offset,
+            "total": len(rows),
+            "base_seq": base_seq if isinstance(base_seq, int) else None,
+            "known": job is not None,
+        }
+
     async def new_conversation(self):  # noqa: ANN202
         return await self._record("new_conversation")
 

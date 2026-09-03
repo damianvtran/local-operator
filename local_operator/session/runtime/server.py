@@ -115,7 +115,14 @@ _EVENT_QUEUE_MAX = 64
 #: frame degrades to the pre-announcement behaviour; the stop is unaffected.
 _ANNOUNCE_WRITE_TIMEOUT_S = 0.25
 
-_PAYLOAD_OPS = {"slash_result", "cancel_subagents"}
+_PAYLOAD_OPS = {"slash_result", "cancel_subagents", "job_trajectory"}
+
+#: Rows one ``job_trajectory`` reply may carry. The whole retained window is
+#: 500 events with no size bound per event, which is what overflows the frame
+#: limit in the first place, so the viewer pages rather than asking for all of
+#: it: 120 rows of ordinary tool traffic sit far inside ``_MAX_LINE_BYTES``
+#: while keeping the round trips for a full window in single digits.
+_TRAJECTORY_PAGE_MAX = 120
 
 
 @dataclass
@@ -159,6 +166,12 @@ class _ClientConn:
     # task per event. Held for shutdown and slow-client eviction.
     event_writer_task: asyncio.Task[None] | None = None
     frontend_unsubscribe: Callable[[], None] | None = None
+    # Job ids whose trajectory deltas this connection wants (``watch_job``).
+    # Empty by default and per-connection by necessity: the snapshot ships no
+    # trajectories at all (they overflow ``_MAX_LINE_BYTES``), so a viewer
+    # opts in only for the child page a reader actually opened. A second
+    # viewer watching a different child must not widen this one's stream.
+    watched_jobs: set[str] = field(default_factory=set)
 
 
 class SessionHandle(Protocol):
@@ -723,14 +736,20 @@ class RuntimeServer:
                 )
                 self._relay_frontend_to(conn, payload)
 
-            from local_operator.session.frontend_state import FrontendSubscription
+            from local_operator.session.frontend_state import (
+                FrontendSubscription,
+                sync_wire_payload,
+            )
 
             outcome = subscribe_frontend(on_update)
             if inspect.isawaitable(outcome):
                 outcome = await outcome
             subscription = cast(FrontendSubscription, outcome)
             sync = subscription.sync
-            sync_payload = sync.model_dump(mode="json")
+            # Trajectories are stripped here and re-fetched per job through
+            # ``job_trajectory``; see ``sync_wire_payload`` for why the frame
+            # cannot carry them.
+            sync_payload = sync_wire_payload(sync)
             conn.frontend_unsubscribe = subscription.unsubscribe
             # Registration and snapshot capture happened synchronously on the
             # authoritative loop. Mark ready only after queuing that snapshot;
@@ -809,7 +828,20 @@ class RuntimeServer:
                 raise ValueError(
                     "attached front ends cannot rebind the session; detach and /resume instead"
                 )
-            if op in ("watch", "unwatch"):
+            if op in ("watch_job", "unwatch_job"):
+                # Trajectory subscription for ONE child page, per connection.
+                # Handled here rather than in ``_dispatch`` because it mutates
+                # this connection's own state and never touches the session:
+                # the dispatcher deliberately has no ``conn``.
+                job_id = str(frame.get("job_id") or "")
+                if not job_id:
+                    raise ValueError("job_id must be a non-empty string")
+                if op == "watch_job":
+                    conn.watched_jobs.add(job_id)
+                else:
+                    conn.watched_jobs.discard(job_id)
+                detail = f"watching {len(conn.watched_jobs)} job(s)"
+            elif op in ("watch", "unwatch"):
                 # The reaper's phone-watcher signal (§2.8). watch_supported
                 # latches on the FIRST op seen so a mixed-version child never
                 # mistakes silence for zero watchers.
@@ -838,7 +870,7 @@ class RuntimeServer:
             # mid-dispose (the TUI's handle raises "session is still
             # starting" the moment its session reference drops) — the ack is
             # the reply and the ladder's exit-wait is the confirmation.
-            if op not in ("watch", "unwatch", "stop"):
+            if op not in ("watch", "unwatch", "watch_job", "unwatch_job", "stop"):
                 await self._handle.refresh()
                 await self._push()
         except Exception as exc:  # noqa: BLE001 — the error IS the reply
@@ -1013,6 +1045,25 @@ class RuntimeServer:
             if inspect.isawaitable(result):
                 result = await result
             return result if isinstance(result, int) else 0
+        if op == "job_trajectory":
+            # The other half of the frame-size fix: the attach snapshot omits
+            # trajectories, so a viewer opening a child page pulls that one
+            # job's window here, in pages. Optional capability — an older
+            # runtime answers unknown-op and the viewer degrades to "trajectory
+            # unavailable" rather than rendering the child as empty.
+            fetch = getattr(h, "job_trajectory", None)
+            if not callable(fetch):
+                raise ValueError("this owner cannot serve job trajectories")
+            job_id = str(frame.get("job_id") or "")
+            if not job_id:
+                raise ValueError("job_id must be a non-empty string")
+            offset = max(0, int(frame.get("offset") or 0))
+            requested = int(frame.get("limit") or _TRAJECTORY_PAGE_MAX)
+            limit = max(1, min(requested, _TRAJECTORY_PAGE_MAX))
+            result = fetch(job_id, offset, limit)
+            if inspect.isawaitable(result):
+                result = await result
+            return result
         raise ValueError(f"unknown op: {op!r}")
 
     # -- v5 frontend state relay ----------------------------------------------
@@ -1029,6 +1080,12 @@ class RuntimeServer:
     def _relay_frontend_to_on_loop(self, conn: _ClientConn, data: dict[str, Any]) -> None:
         if id(conn.writer) not in self._clients:
             return
+        from local_operator.session.frontend_state import filter_update_trajectories
+
+        # Per-connection, and applied on THIS loop rather than at the producer:
+        # one canonical update fans out to every client, each of which has its
+        # own open child page (or none).
+        data = filter_update_trajectories(data, conn.watched_jobs.__contains__)
         if not conn.frontend_ready:
             if len(conn.frontend_pending) >= _EVENT_QUEUE_MAX:
                 # A join that cannot install its boundary before this many

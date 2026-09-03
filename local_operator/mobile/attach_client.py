@@ -428,6 +428,30 @@ class AttachClient:
         """
         return await self._request("stop")
 
+    async def job_trajectory(self, job_id: str, offset: int = 0, limit: int = 120) -> Any:
+        """Fetch one page of a child job's retained events from the owner.
+
+        The attach snapshot carries no trajectories — a busy session's retained
+        events do not fit the socket's 1 MiB line limit — so the subagent page
+        pulls its own rows when a reader opens it.
+        """
+        return await self._request_payload(
+            "job_trajectory", job_id=job_id, offset=offset, limit=limit
+        )
+
+    async def watch_job(self, job_id: str) -> str:
+        """Subscribe this connection to one job's live trajectory appends.
+
+        Per-connection by design: deltas for jobs nobody is looking at are
+        dropped at the owner, which is what keeps a 100-child roster's event
+        stream bounded for a viewer reading one page.
+        """
+        return await self._request("watch_job", job_id=job_id)
+
+    async def unwatch_job(self, job_id: str) -> str:
+        """Stop receiving one job's trajectory appends (the page closed)."""
+        return await self._request("unwatch_job", job_id=job_id)
+
     async def slash(
         self,
         command: str,

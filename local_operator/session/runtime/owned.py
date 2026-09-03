@@ -30,6 +30,7 @@ from collections import deque
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable
 
+from local_operator.harness.jobs import TRAJECTORY_SEQ_KEY
 from local_operator.harness.types import AgentEvent, ModelChangeEvent
 
 if TYPE_CHECKING:
@@ -788,6 +789,40 @@ class OwnedSessionHandle(SessionHandle):
             # Human, reconciling copy: a stale tap means another front end won.
             raise ValueError("that question was already answered") from exc
         return "answered"
+
+    async def job_trajectory(self, job_id: str, offset: int, limit: int) -> dict[str, Any]:
+        """One page of a child job's retained event window.
+
+        Serves the viewer's on-demand fetch: attach snapshots ship no
+        trajectories (they overflow the socket's line limit), so a follower
+        that opens a subagent page asks for the rows here instead.
+
+        ``total`` is the CURRENT retained length and ``base_seq`` the identity
+        stamp of the first retained row (``TRAJECTORY_SEQ_KEY``). Both are
+        needed because the window ROTATES: ``AsyncJob.trajectory`` evicts from
+        the front past ``TRAJECTORY_CAP``, so an offset the caller computed one
+        page ago may now name a different event. The viewer compares
+        ``base_seq`` across pages and restarts the fetch when the floor moved,
+        which is the same eviction problem ``job_trajectory_replacements``
+        solves for the delta stream.
+        """
+        job = self._session.jobs.get(job_id)
+        rows = list(getattr(job, "trajectory", None) or []) if job is not None else []
+        total = len(rows)
+        page = rows[offset : offset + limit]
+        first = rows[0] if rows else None
+        base_seq = first.get(TRAJECTORY_SEQ_KEY) if isinstance(first, dict) else None
+        return {
+            "job_id": job_id,
+            "rows": page,
+            "offset": offset,
+            "total": total,
+            "base_seq": base_seq if isinstance(base_seq, int) else None,
+            # A job swept from the ledger is distinguishable from one with no
+            # events yet: the page renders "no longer on the ledger" for the
+            # first and "no activity" for the second.
+            "known": job is not None,
+        }
 
     async def refresh(self) -> None:
         self._refresh_state()

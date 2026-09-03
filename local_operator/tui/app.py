@@ -2656,6 +2656,12 @@ class OperatorApp(App[None]):
         # the mode has to put back on the way out: the composer's read-only
         # state and whatever held focus when it opened.
         self._subagent_view: SubagentView | None = None
+        # Jobs whose retained trajectory this viewer has already fetched from
+        # the owner, and the fetch state each page should render. Follower-only
+        # (see ``_load_subagent_trajectory``); an owner session never populates
+        # them and every page reads the empty-string default.
+        self._trajectory_loads: set[str] = set()
+        self._trajectory_state: dict[str, str] = {}
         self._subagent_focus_restore: Any | None = None
         # The org-chart mode (``/team chart``), a sibling of the subagent view
         # with its own open/close and the same MODE contract: it hides the
@@ -12131,6 +12137,9 @@ class OperatorApp(App[None]):
         subagents without going back up a level to do it.
         """
         if self._subagent_view is not None:
+            # Retargeting is opening another child's page; it owes the same
+            # fetch a first open does.
+            self._load_subagent_trajectory(job_id)
             self._refresh_subagent_view(job_id)
             return
         # Captured before anything is blurred: this is where Esc puts the
@@ -12154,10 +12163,52 @@ class OperatorApp(App[None]):
         self._sync_boot_layout()
         self._sync_subagent_compact_layout(self.size.height)
         self._set_composer_read_only(True)
+        # A follower has no trajectory until it asks for one: attach snapshots
+        # omit retained events because they overflow the control socket's line
+        # limit. Started before the first paint so the fetch overlaps the
+        # mount, and the page shows its loading row meanwhile.
+        self._load_subagent_trajectory(job_id)
         # Enter paints the new mode first; folding and mounting a retained
         # 500-event trajectory on the same key handler made the key appear lost
         # for about a second. The next refresh fills the already-visible page.
         self.call_after_refresh(self._refresh_subagent_view, job_id)
+
+    def _load_subagent_trajectory(self, job_id: str) -> None:
+        """Pull one child's retained events from the owner, if it has any.
+
+        Only a FOLLOWER needs this: an in-process session's job rows already
+        carry their trajectories, and its facade has no loader at all, so the
+        ``getattr`` below is what keeps the owner path untouched.
+
+        Fetched once per job per attachment and remembered in
+        ``_trajectory_loads``, because opening a page is a common gesture and
+        the live append stream keeps the cached window current after the first
+        read — a re-fetch on every open would re-read up to 500 events to learn
+        nothing.
+        """
+        session = self._session
+        loader = getattr(session, "load_job_trajectory", None)
+        if not callable(loader) or job_id in self._trajectory_loads:
+            return
+        load = cast(Callable[[str], Awaitable[bool]], loader)
+        self._trajectory_loads.add(job_id)
+        self._trajectory_state[job_id] = "loading"
+
+        async def run() -> None:
+            ok = False
+            try:
+                ok = bool(await load(job_id))
+            finally:
+                self._trajectory_state[job_id] = "" if ok else "unavailable"
+                if not ok:
+                    # Let a later open retry: the usual cause is a socket that
+                    # dropped, which the next attach repairs.
+                    self._trajectory_loads.discard(job_id)
+                view = self._subagent_view
+                if view is not None and view.job_id == job_id:
+                    self._refresh_subagent_view(job_id)
+
+        self.run_worker(run(), group="subagent-trajectory", exclusive=False)
 
     def _close_subagent_view(self) -> bool:
         """Leave the view and put the conversation back. True if it was open.
@@ -12170,6 +12221,17 @@ class OperatorApp(App[None]):
         view = self._subagent_view
         if view is None:
             return False
+        # Release the owner-side append subscription this page took out. Best
+        # effort and fire-and-forget: a viewer that fails to unwatch only keeps
+        # paying for one job's deltas until it detaches.
+        unload = getattr(self._session, "unload_job_trajectory", None)
+        if callable(unload):
+            self._trajectory_loads.discard(view.job_id)
+            self.run_worker(
+                cast(Callable[[str], Awaitable[None]], unload)(view.job_id),
+                group="subagent-trajectory",
+                exclusive=False,
+            )
         self._subagent_view = None
         view.remove()
         if self._subagent_panel is not None:
@@ -12657,6 +12719,9 @@ class OperatorApp(App[None]):
             transcript_directory=(
                 str(transcript_directory) if transcript_directory is not None else None
             ),
+            # Empty on an owner (rows ride the snapshot); on a follower this is
+            # what lets the page say "loading" instead of "nothing happened".
+            trajectory_state=self._trajectory_state.get(job_id, ""),
         )
         if self._subagent_panel is not None:
             self._subagent_panel.mark_current(job_id)

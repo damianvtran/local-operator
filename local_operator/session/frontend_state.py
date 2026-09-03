@@ -36,6 +36,7 @@ from pydantic import (
     TypeAdapter,
     field_validator,
     model_serializer,
+    model_validator,
 )
 from pydantic_core import PydanticSerializationError, to_jsonable_python
 
@@ -440,6 +441,15 @@ class JobState(BaseModel):
     started_at: float | None = None
     settled_at: float | None = None
     trajectory: list[dict[str, Any]] = Field(default_factory=list)
+    #: How many events the OWNER retains for this job, independent of how many
+    #: ride this particular frame. The attach snapshot omits trajectories
+    #: entirely (see :func:`_job_roster_row`) because a busy session's retained
+    #: events exceed the socket's ``_MAX_LINE_BYTES`` and made the session
+    #: unopenable; a viewer therefore needs the COUNT before it has the rows,
+    #: to say "loading 500 events" rather than "no activity". Owner-side this
+    #: is always ``len(trajectory)``; follower-side it stays the owner's number
+    #: even while the local list is empty or a partial page.
+    trajectory_length: int = 0
     # Nested spend (#297): a finished grandchild's usage folds into its root's
     # row here. Without carrying it, follower-side child-cost pricing counted
     # only the direct child while the owner priced the whole subtree.
@@ -458,6 +468,24 @@ class JobState(BaseModel):
     # than silently doing nothing.
     parent_job_id: str | None = None
     session_id: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _derive_trajectory_length(cls, data: Any) -> Any:
+        """Default the retained-event COUNT to the rows the job was built with.
+
+        Only when the caller supplied none. An explicit value is always kept,
+        because on a FOLLOWER the two legitimately disagree: the wire snapshot
+        carries the owner's count with an empty list (the rows do not fit the
+        frame), and a watched job accumulates only the appends seen since its
+        page opened. Deriving unconditionally would replace the owner's real
+        number with the length of whatever partial window happens to be local.
+        """
+        if isinstance(data, dict) and "trajectory_length" not in data:
+            trajectory = data.get("trajectory")
+            if isinstance(trajectory, Sequence) and not isinstance(trajectory, (str, bytes)):
+                data = {**data, "trajectory_length": len(trajectory)}
+        return data
 
     @model_serializer(mode="wrap")
     def _serialize_frozen_values(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
@@ -517,6 +545,7 @@ class JobState(BaseModel):
             started_at=getattr(job, "started_at", None),
             settled_at=getattr(job, "settled_at", None) or getattr(job, "finished_at", None),
             trajectory=trajectory,
+            trajectory_length=len(trajectory),
             descendant_usage=descendants,
             prompt=getattr(job, "prompt", None),
             agent_role=getattr(job, "agent_role", None),
@@ -747,6 +776,80 @@ class FrontendUpdate(BaseModel):
     job_trajectory_replacements: list[str] = Field(default_factory=list)
 
 
+def sync_wire_payload(sync: FrontendSync) -> dict[str, Any]:
+    """Serialize one attach snapshot with job trajectories left OUT.
+
+    The runtime's socket refuses a line over ``server._MAX_LINE_BYTES`` (1 MiB),
+    and a retained trajectory is unbounded in bytes while bounded only in COUNT
+    (``TRAJECTORY_CAP`` = 500 events, each holding a whole tool result). Ten
+    children at the cap serialize to ~3.1 MB, so before this the first frame of
+    a busy session could not be sent at all and the session simply could not be
+    attached to — 12 of 17 sessions on the reference machine.
+
+    Stripping happens HERE, at the wire boundary, rather than in
+    :class:`FrontendStateStore`: an in-process owner subscribes to the same
+    store and still wants its rows, and the follower re-acquires them per job
+    through the ``job_trajectory`` op once a reader actually opens that child's
+    page. ``trajectory_length`` survives so the viewer can say how many events
+    it is about to load instead of rendering the child as empty.
+    """
+    payload = sync.model_dump(mode="json")
+    snapshot = payload.get("snapshot")
+    if isinstance(snapshot, dict):
+        jobs = snapshot.get("jobs")
+        if isinstance(jobs, list):
+            for job in jobs:
+                if not isinstance(job, dict):
+                    continue
+                if job.get("trajectory"):
+                    # ``trajectory_length`` already states the count (derived at
+                    # construction, see JobState), so dropping the rows here
+                    # loses nothing the viewer needs to describe the job.
+                    job["trajectory"] = []
+    return payload
+
+
+def filter_update_trajectories(
+    payload: dict[str, Any], watched: Callable[[str], bool]
+) -> dict[str, Any]:
+    """Drop trajectory deltas for jobs this connection has not subscribed to.
+
+    Same budget as :func:`sync_wire_payload` applied to the delta stream: a
+    viewer that never opens a child's page must not pay for its events, and a
+    500-event burst on an unwatched job is exactly the frame that overflows the
+    line limit mid-turn. The row COUNT still rides along (``trajectory_length``
+    on the job summary), so an unwatched page opened later fetches the whole
+    window on demand rather than resuming from a hole.
+
+    Returns the input unchanged when nothing needs dropping, so the common
+    no-trajectory delta costs one dict lookup and no copy.
+    """
+    appends = payload.get("job_trajectory_appends")
+    replacements = payload.get("job_trajectory_replacements")
+    has_appends = isinstance(appends, dict) and appends
+    has_replacements = isinstance(replacements, list) and replacements
+    if not has_appends and not has_replacements:
+        return payload
+    kept_appends = (
+        {job_id: rows for job_id, rows in appends.items() if watched(str(job_id))}
+        if isinstance(appends, dict)
+        else {}
+    )
+    kept_replacements = (
+        [job_id for job_id in replacements if watched(str(job_id))]
+        if isinstance(replacements, list)
+        else []
+    )
+    if len(kept_appends) == (len(appends) if isinstance(appends, dict) else 0) and len(
+        kept_replacements
+    ) == (len(replacements) if isinstance(replacements, list) else 0):
+        return payload
+    filtered = dict(payload)
+    filtered["job_trajectory_appends"] = kept_appends
+    filtered["job_trajectory_replacements"] = kept_replacements
+    return filtered
+
+
 @dataclass(frozen=True, slots=True)
 class FrontendSubscription:
     sync: FrontendSync
@@ -950,6 +1053,38 @@ class FrontendStateStore:
         for subscriber in list(self._subscribers):
             subscriber(update.model_copy(deep=True))
         return self.state
+
+    def seed_job_trajectory(self, job_id: str, rows: Sequence[dict[str, Any]]) -> bool:
+        """Install rows a FOLLOWER fetched on demand for one child's page.
+
+        The attach snapshot ships job rows with empty trajectories — a busy
+        session's would exceed the socket's line limit — so the viewer pulls
+        one child's window over ``job_trajectory`` and seeds it here.
+
+        It goes into the canonical state rather than a cache beside it because
+        ``apply_update`` extends each job's trajectory from the PREVIOUS
+        canonical value: a second store would make the delta stream and the
+        fetched window two accumulators of the same list, and the page would
+        show whichever won. Seeding is deliberately NOT a sequence-bearing
+        mutation — no delta is published and the sequence does not move, since
+        this changes what this follower has locally, not what the owner said.
+
+        Returns False when the job is no longer on the roster (it settled and
+        was swept while the fetch was in flight), so the caller can leave the
+        page's "no longer on the ledger" state alone.
+        """
+        jobs = list(self._state.jobs)
+        for index, job in enumerate(jobs):
+            if job.id != job_id:
+                continue
+            jobs[index] = job.model_copy(
+                update={"trajectory": list(rows), "trajectory_length": max(len(rows), 0)}
+            )
+            self._state = _freeze_state_jobs(
+                self._state.model_copy(update={"jobs": jobs}), jobs_are_canonical=False
+            )
+            return True
+        return False
 
     def mutate(self, **changes: Any) -> FrontendUpdate | None:
         normalized: dict[str, Any] = {}

@@ -175,6 +175,15 @@ LEDGER_GONE_NOTE = "this subagent has left the ledger — what is above was capt
 #: their keys do nothing.
 READ_ONLY_NOTE = "read-only"
 HISTORY_PAGE_ROWS = 100
+#: Shown while a FOLLOWER is fetching this child's retained events from the
+#: owner. Attach snapshots carry no trajectories (they do not fit the control
+#: socket's line limit), so the page has a real interval with nothing to draw
+#: and no other row that would admit it — without this the child reads as
+#: "ran and left nothing behind", which is the one wrong answer.
+TRAJECTORY_LOADING_NOTE = "loading trajectory…"
+#: The owner could not serve the window (an older runtime, or the socket
+#: dropped mid-fetch). Distinct from the empty state for the same reason.
+TRAJECTORY_UNAVAILABLE_NOTE = "trajectory unavailable"
 HISTORY_LOADING_NOTE = "loading earlier…"
 HISTORY_START_NOTE = "transcript start"
 HISTORY_UNAVAILABLE_NOTE = "history unavailable"
@@ -1623,6 +1632,9 @@ class SubagentView(Vertical):
         #: The delegated instruction, and the raw string it was derived from.
         self._prompt_raw = ""
         self._instruction = ""
+        # Follower-only fetch state for this child's retained events; see
+        # ``TRAJECTORY_LOADING_NOTE`` and ``_tail_entry``.
+        self._trajectory_state = ""
         self._launch_message_id = ""
         #: Every deterministic ``subagent-launch:<id>`` identity this lineage
         #: owns mapped to its concise delegated instruction, including attempts
@@ -1772,6 +1784,7 @@ class SubagentView(Vertical):
         effort: str = "",
         ancestors: Sequence[str] = (),
         transcript_directory: str | None = None,
+        trajectory_state: str = "",
     ) -> None:
         """Point the page at a job's current state and reconcile the body.
 
@@ -1810,6 +1823,9 @@ class SubagentView(Vertical):
         self._ancestors = [strip_control_sequences(item).strip() for item in ancestors if item]
         self._running = status == "running" and not queued
         gone = status == "gone"
+        # "" (owner: rows ride the snapshot), "loading" or "unavailable" on a
+        # follower fetching them over the socket. See ``_tail_entry``.
+        self._trajectory_state = trajectory_state
 
         # The prompt leads the accumulated list and is absorbed like any other
         # entry, so it participates in the diff and is mounted exactly once.
@@ -2351,6 +2367,14 @@ class SubagentView(Vertical):
         # the instruction and then nothing — no row admitting the run left
         # nothing behind, which is the state this slot exists to name.
         activity = bool(self._history_entries) or any(key != "__prompt__" for key in self._order)
+        # A follower's rows arrive over the socket after the page opens, so
+        # "nothing yet" here is a fetch in flight rather than a child that did
+        # nothing. Only claimed while the page is genuinely still empty: once
+        # rows land, the ordinary running/settled tails describe the page.
+        if not activity and self._trajectory_state:
+            if self._trajectory_state == "loading":
+                return _notice("__working__", TRAJECTORY_LOADING_NOTE, "info")
+            return _notice("__empty__", TRAJECTORY_UNAVAILABLE_NOTE, "note")
         if self._history_loading and not activity:
             return None
         if not self._running and not self._queued:
