@@ -842,6 +842,17 @@ async def test_a_parked_gate_spawns_no_desktop_notifier_under_the_suite_gate(
     import local_operator.tui.notify as notify_mod
 
     monkeypatch.setattr(notify_mod, "spawn_detached", _record, raising=False)
+    # Also patch the helper that runs AFTER a platform notifier is found. On a
+    # runner with neither `osascript` nor `notify-send` (CI's Linux images) a
+    # spawn-level assertion passes for the wrong reason — the binary was
+    # missing, not the gate. This one cannot: it fires whenever the gate lets
+    # execution reach the spawn at all.
+    monkeypatch.setattr(
+        notify_mod, "_spawn_detached_ok", lambda argv: bool(spawned.append(argv)) or True
+    )
+    # And prove the gate the fixture sets is the reason, rather than an
+    # unrelated early return: with it removed, this same path DOES spawn.
+    assert notify_mod.notifications_enabled() is False
 
     handle, session = make_handle()
     # No attached clients: this is exactly the condition that routes the
@@ -882,8 +893,15 @@ async def test_a_pending_announcement_routes_to_whoever_is_watching(
 
     monkeypatch.delenv("LOCAL_OPERATOR_NO_NOTIFICATIONS", raising=False)
     spawned: list[list[str]] = []
+    # Patch at `detached_notify`, not at the spawn helper: the helper is only
+    # reached once a platform notifier has been FOUND, and CI's Linux runners
+    # have no `notify-send` (nor `osascript`), so a spawn-level probe measures
+    # the runner's installed binaries instead of this module's routing
+    # decision — which is the only thing under test here.
     monkeypatch.setattr(
-        notify_mod, "_spawn_detached_ok", lambda argv: bool(spawned.append(argv)) or True
+        notify_mod,
+        "detached_notify",
+        lambda title, body, **kwargs: bool(spawned.append([title, body])) or True,
     )
 
     handle, _session = make_handle()
