@@ -392,7 +392,11 @@ def resolve_resource_url(
     name = unquote(parts.netloc)
     title = label.title()
     if not name:
-        raise ValueError(f"{title} URL missing a name: expected {scheme}://<name>")
+        available = ", ".join(sorted(resources.keys())) or "(none)"
+        raise ValueError(
+            f"{title} URL missing a name: expected {scheme}://<name>\n"
+            f"Available {label}s: {available}"
+        )
 
     resource = resources.get(name)
     if resource is None:

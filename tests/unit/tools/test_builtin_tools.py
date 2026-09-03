@@ -777,6 +777,33 @@ async def test_read_skill_url_via_resolver(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_read_missing_skill_path_suggests_protocol(tools, context, tmp_path) -> None:
+    result = await _call(
+        tools,
+        "read",
+        {"path": "/tmp/custom/skills/team-workflow/SKILL.md"},
+        context,
+    )
+    assert result.is_error is True
+    assert "Path does not exist" in result.text
+    assert "Skills are virtual resources loaded via `skill://`" in result.text
+    assert "`skill://team-workflow`" in result.text
+
+
+@pytest.mark.asyncio
+async def test_read_missing_plain_path_keeps_plain_error(tools, context, tmp_path) -> None:
+    result = await _call(
+        tools,
+        "read",
+        {"path": "nonexistent.txt"},
+        context,
+    )
+    assert result.is_error is True
+    assert "Path does not exist" in result.text
+    assert "skill://" not in result.text
+
+
+@pytest.mark.asyncio
 async def test_read_skill_url_without_resolver(tmp_path) -> None:
     context = ToolContext(cwd=str(tmp_path), session_id="s")  # no resolver installed
     tools = {t.name: t for t in create_tools(context)}

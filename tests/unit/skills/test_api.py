@@ -101,6 +101,17 @@ class TestMakeSkillResolver:
         assert content is not None
         assert "# alpha" in content
 
+    def test_empty_name_returns_error_message_with_available_skills(self, tmp_path: Path) -> None:
+        skills = {
+            "alpha": _make_skill(tmp_path, "alpha"),
+            "beta": _make_skill(tmp_path, "beta"),
+        }
+        resolver = make_skill_resolver(skills)
+        content = resolver("skill://")
+        assert content is not None
+        assert "missing a name" in content
+        assert "Available skills: alpha, beta" in content
+
     def test_unknown_name_returns_error_message_as_content(self, tmp_path: Path) -> None:
         # RS-09: the adapter never raises; the available-names list reaches
         # the model as a clean tool result instead of an exception envelope.
