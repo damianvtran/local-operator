@@ -2414,3 +2414,192 @@ async def test_hub_ask_reaches_a_child_under_the_eager_task_factory(tmp_path, mo
         await parent.dispose()
     finally:
         loop.set_task_factory(old_factory)
+
+
+@pytest.mark.asyncio
+async def test_a_childs_tool_context_carries_its_label_and_its_parents_live_title(
+    tmp_path, monkeypatch
+):
+    """The browser tab group of a delegated child must name the work, not `Session`.
+
+    A subagent never generates a conversation title — naming runs in the TUI
+    host and the owned-session runtime and a one-shot child passes through
+    neither — so its ONLY display identity is the label its parent launched it
+    under plus its parent's title. Both have to survive the trip to the
+    EXECUTE-time context (``_build_tool_context``), which is rebuilt per turn
+    and is the one a tool actually sees; the construction-time context that
+    ``create_tools`` inspects is not it.
+
+    The parent's title is asserted through a rename performed AFTER the child
+    was built, because that is the real sequence: a parent is named a second or
+    two into its first turn while its children are launched later, so a value
+    snapshotted at child construction would be empty for the child's whole life.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    from local_operator.tools import builtin
+
+    stream = OneShotStream()
+    # A real cwd, because the unnamed-parent half of the label falls back to
+    # its basename and the Session default (".") has none.
+    parent = make_session(tmp_path, stream, cwd="/Users/damian/local-operator")
+    child = await build_child(parent)
+
+    context = child._build_tool_context()
+    assert context.job_label == "sub"
+    assert context.job_id == "job-1"
+    # Its own identity is untouched: the borrowed NAME must never become a
+    # borrowed identity.
+    assert context.session_id == child.session_id != parent.session_id
+
+    # Unnamed parent: the child is still distinguishable from its siblings by
+    # its own label, where before it fell back to the cwd every sibling shares.
+    assert builtin._browser_session_label(context).endswith("› sub")
+
+    # The rename case, end to end through the real holder the child was handed.
+    parent.set_conversation_name("Fix tab groups")
+    assert builtin._browser_session_label(child._build_tool_context()) == "Fix tab groups › sub"
+
+    await child.dispose()
+    await parent.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_top_level_session_is_never_composed_as_a_subagent(tmp_path):
+    """The discriminator must not misfire on the operator's own session."""
+    from local_operator.tools import builtin
+
+    stream = OneShotStream()
+    parent = make_session(tmp_path, stream)
+    parent.set_conversation_name("Debug browser extension port binding issue")
+
+    context = parent._build_tool_context()
+    assert context.job_id is None and context.job_label == ""
+    # The exact label the operator's pill should have read.
+    assert builtin._browser_session_label(context) == "Debug browser extension…"
+    await parent.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_grandchilds_pill_names_the_conversation_not_the_shared_cwd(tmp_path, monkeypatch):
+    """Depth 2 must resolve to the TOP-LEVEL title, not fall back to the cwd.
+
+    Delegation nests: a child of a top-level session keeps ``task``/``wait``/
+    ``jobs``, so a manager fanning out to workers is depth 2 and is the shape
+    the operator actually runs. The middle child has no title of its own and
+    can never grow one, so handing a grandchild the middle child's title
+    HOLDER yielded "" forever and the pill fell through to the parent cwd that
+    every session in the repo shares. Resolving the parent's DISPLAY name
+    walks past the untitled middle to the conversation that owns the work.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    from local_operator.tools import builtin
+
+    top = make_session(tmp_path, OneShotStream(), cwd="/Users/damian/local-operator")
+    top.set_conversation_name("Fix browser tab group naming")
+    middle = await build_child(top)
+    grandchild = await build_child(middle, job_id="job-2")
+
+    assert middle.conversation_name == "", "a subagent never holds a title of its own"
+    assert (
+        builtin._browser_session_label(grandchild._build_tool_context())
+        == "Fix browser tab group… › sub"
+    )
+
+    await grandchild.dispose()
+    await middle.dispose()
+    await top.dispose()
+
+
+@pytest.mark.asyncio
+async def test_grandchildren_of_different_conversations_do_not_collide(tmp_path, monkeypatch):
+    """The reported collision, one level deeper than the direct-child fix.
+
+    Two managers under two different conversations each fan out to a worker
+    called ``qa``. Before the transitive resolution both rendered
+    ``local-operator › qa`` — the same class of indistinguishable pill the
+    direct-child case was fixed for.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    from local_operator.tools import builtin
+
+    async def qa_pill(title: str, session_dir: str) -> str:
+        top = make_session(
+            tmp_path / session_dir, OneShotStream(), cwd="/Users/damian/local-operator"
+        )
+        top.set_conversation_name(title)
+        manager = await build_child(top)
+        worker = await build_child(manager, job_id="job-2")
+        pill = builtin._browser_session_label(worker._build_tool_context())
+        await worker.dispose()
+        await manager.dispose()
+        await top.dispose()
+        return pill
+
+    first = await qa_pill("Fix browser tab group naming", "a")
+    second = await qa_pill("Add Radient OAuth PKCE sign-in", "b")
+
+    assert first != second
+    assert first.endswith("› sub") and second.endswith("› sub")
+
+
+@pytest.mark.asyncio
+async def test_a_late_rename_of_the_grandparent_reaches_the_grandchild(tmp_path, monkeypatch):
+    """The live-resolution property has to survive the extra hop.
+
+    A title normally lands a second or two into the top-level session's first
+    turn, while children — and their children — are launched later. Each hop
+    resolves on read, so the rename reaches depth 2 on the grandchild's next
+    command exactly as it reaches depth 1.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    from local_operator.tools import builtin
+
+    top = make_session(tmp_path, OneShotStream(), cwd="/Users/damian/local-operator")
+    middle = await build_child(top)
+    grandchild = await build_child(middle, job_id="job-2")
+
+    # Unnamed grandparent: the cwd stands in, and the label still separates it
+    # from its siblings.
+    assert builtin._browser_session_label(grandchild._build_tool_context()) == (
+        "local-operator › sub"
+    )
+
+    top.set_conversation_name("Fix tab groups")
+    assert (
+        builtin._browser_session_label(grandchild._build_tool_context()) == "Fix tab groups › sub"
+    )
+
+    await grandchild.dispose()
+    await middle.dispose()
+    await top.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_parent_name_resolver_holds_its_parent_weakly(tmp_path, monkeypatch):
+    """The display-name resolver must not add a child→parent retention edge.
+
+    A detached child can outlive the session that launched it, and a strong
+    reference back would pin the parent's whole graph — transcript, tools, MCP
+    manager — for that child's lifetime. Asserted on the resolver itself
+    rather than through a live child, because a child already shares its
+    parent's ``SubagentComms`` and that edge (not this one) governs when a
+    parent is actually collectable; this test pins the property THIS code owns.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    from local_operator.harness import subagent as subagent_mod
+
+    parent = make_session(tmp_path, OneShotStream(), cwd="/Users/damian/local-operator")
+    parent.set_conversation_name("Fix tab groups")
+    resolve = subagent_mod._parent_display_name_resolver(parent)
+    assert resolve() == "Fix tab groups"
+
+    parent_ref = weakref.ref(parent)
+    await parent.dispose()
+    del parent
+    for _ in range(3):
+        gc.collect()
+        await asyncio.sleep(0)
+
+    # The resolver alone never kept it alive, and a dead parent lends no name.
+    assert parent_ref() is None
+    assert resolve() == ""
