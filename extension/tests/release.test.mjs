@@ -176,50 +176,105 @@ test("promotion refuses a staged revision below 100 percent", async () => {
   );
 });
 
-test("protected environment verifier rejects a non-custom branch policy and accepts exact configuration", async () => {
-  // The required-reviewers check was removed by operator decision on
-  // 2026-09-03 (see verify-release-environment.sh), so the rejection path now
-  // exercises the remaining environment-level guard: the custom
-  // deployment-branch-policy shape that allows exactly `main`.
-  let validBranchPolicy = false;
+// The required-reviewers check was removed by operator decision on 2026-09-03
+// (see verify-release-environment.sh). Every guard that REMAINS is asserted
+// here one mutation at a time, because a suite that only covers the accept
+// path plus one rejection stays green when a retained guard is deleted — and
+// these guards are now the whole fail-closed contract, so a silent regression
+// in one of them is exactly what would let an unprotected environment mint a
+// release token. Each case perturbs a single field of the valid configuration.
+const VALID_ENVIRONMENT = {
+  deployment_branch_policy: { protected_branches: false, custom_branch_policies: true },
+};
+const VALID_BRANCHES = { total_count: 1, branch_policies: [{ name: "main", type: "branch" }] };
+const VALID_VARIABLES = {
+  variables: [
+    { name: "CWS_EXTENSION_ID", value: extensionId },
+    { name: "CWS_PUBLISHER_ID", value: "publisher" },
+  ],
+};
+
+async function runVerifier({ environment = VALID_ENVIRONMENT, branches = VALID_BRANCHES, variables = VALID_VARIABLES } = {}) {
   const server = createServer((request, response) => {
     let payload;
-    if (request.url.endsWith("/environments/chrome-web-store")) {
-      payload = {
-        deployment_branch_policy: validBranchPolicy
-          ? { protected_branches: false, custom_branch_policies: true }
-          : { protected_branches: true, custom_branch_policies: false },
-      };
-    } else if (request.url.includes("deployment-branch-policies")) {
-      payload = { total_count: 1, branch_policies: [{ name: "main", type: "branch" }] };
+    if (request.url.includes("deployment-branch-policies")) {
+      payload = branches;
+    } else if (request.url.includes("/variables")) {
+      payload = variables;
     } else {
-      payload = {
-        variables: [
-          { name: "CWS_EXTENSION_ID", value: extensionId },
-          { name: "CWS_PUBLISHER_ID", value: "publisher" },
-        ],
-      };
+      payload = environment;
     }
     response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(payload));
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const env = {
-    ...process.env,
-    GITHUB_TOKEN: "test-token",
-    GITHUB_REPOSITORY: "owner/repository",
-    GITHUB_API_URL: `http://127.0.0.1:${server.address().port}`,
-  };
-  const args = [
-    "scripts/verify-release-environment.sh", "chrome-web-store",
-    "CWS_EXTENSION_ID", extensionId,
-    "CWS_PUBLISHER_ID", "publisher",
-  ];
   try {
-    await assert.rejects(run("bash", args, { cwd: import.meta.dirname + "/..", env }), /custom deployment branch policy/);
-    validBranchPolicy = true;
-    const result = await run("bash", args, { cwd: import.meta.dirname + "/..", env });
-    assert.match(result.stdout, /validated protected environment chrome-web-store/);
+    return await run("bash", [
+      "scripts/verify-release-environment.sh", "chrome-web-store",
+      "CWS_EXTENSION_ID", extensionId,
+      "CWS_PUBLISHER_ID", "publisher",
+    ], {
+      cwd: import.meta.dirname + "/..",
+      env: {
+        ...process.env,
+        GITHUB_TOKEN: "test-token",
+        GITHUB_REPOSITORY: "owner/repository",
+        GITHUB_API_URL: `http://127.0.0.1:${server.address().port}`,
+      },
+    });
   } finally {
     await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
+}
+
+test("protected environment verifier accepts the exact configuration", async () => {
+  const result = await runVerifier();
+  assert.match(result.stdout, /validated protected environment chrome-web-store/);
+});
+
+test("protected environment verifier requires a custom deployment branch policy", async () => {
+  await assert.rejects(
+    runVerifier({ environment: { deployment_branch_policy: { protected_branches: true, custom_branch_policies: false } } }),
+    /must use a custom deployment branch policy/,
+  );
+});
+
+test("protected environment verifier requires exactly the main branch", async () => {
+  // Both halves matter: an extra allowed branch is a bypass, and a single
+  // policy naming something other than main is a different bypass.
+  await assert.rejects(
+    runVerifier({
+      branches: {
+        total_count: 2,
+        branch_policies: [{ name: "main", type: "branch" }, { name: "release/*", type: "branch" }],
+      },
+    }),
+    /must allow exactly the main branch/,
+  );
+  await assert.rejects(
+    runVerifier({ branches: { total_count: 1, branch_policies: [{ name: "develop", type: "branch" }] } }),
+    /must allow exactly the main branch/,
+  );
+});
+
+test("protected environment verifier requires every variable at environment scope", async () => {
+  // A variable absent from the environment listing is the repository- or
+  // organization-scoped case the script exists to reject.
+  await assert.rejects(
+    runVerifier({ variables: { variables: [{ name: "CWS_PUBLISHER_ID", value: "publisher" }] } }),
+    /CWS_EXTENSION_ID must be defined on chrome-web-store/,
+  );
+});
+
+test("protected environment verifier rejects a variable whose value drifted", async () => {
+  await assert.rejects(
+    runVerifier({
+      variables: {
+        variables: [
+          { name: "CWS_EXTENSION_ID", value: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+          { name: "CWS_PUBLISHER_ID", value: "publisher" },
+        ],
+      },
+    }),
+    /CWS_EXTENSION_ID does not match the environment-scoped value/,
+  );
 });
