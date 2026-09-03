@@ -291,9 +291,11 @@ class TestRenderBlock:
             ),
         ]
         assert render_block(skills) == (
-            "Read these selected skills before proceeding: `skill://alpha`, "
-            "`skill://beta`. The skill body ends with its reference files; read those "
-            "with `skill://<name>/<path>`, never a raw filesystem path.\n"
+            "Skills provide domain-specific instructions and workflows. Read these selected "
+            "skills immediately before proceeding: `skill://alpha`, `skill://beta`. Do not search "
+            "the filesystem or use bash/glob to locate skills — skills are virtual resources "
+            "loaded only via `skill://`. The skill body ends with its reference files; read "
+            "those with `skill://<name>/<path>`, never a raw filesystem path.\n"
             "<skills>\n"
             "- alpha: first skill\n"
             "- beta: second skill\n"

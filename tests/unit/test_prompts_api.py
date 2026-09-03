@@ -142,6 +142,9 @@ def test_dotted_path_lookup() -> None:
 def test_system_md_loads_and_renders() -> None:
     text = render_template("system.md", {})
     assert "Local Operator" in text
+    assert "<skills>" in text
+    assert "skill://<name>" in text
+    assert "skill://<name>/<relpath>" in text
 
 
 def test_system_md_states_harness_identity() -> None:

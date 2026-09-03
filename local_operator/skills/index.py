@@ -287,9 +287,13 @@ def render_block(skills: list[Skill]) -> str:
         # virtual resource protocol. This cost stays local to selected skills.
         selected_urls = ", ".join(f"`{resource_url('skill', skill.name)}`" for skill in user_skills)
         lines = [
-            f"Read these selected skills before proceeding: {selected_urls}. The skill "
-            "body ends with its reference files; read those with "
-            "`skill://<name>/<path>`, never a raw filesystem path.",
+            (
+                "Skills provide domain-specific instructions and workflows. Read these selected "
+                f"skills immediately before proceeding: {selected_urls}. Do not search the "
+                "filesystem or use bash/glob to locate skills — skills are virtual resources "
+                "loaded only via `skill://`. The skill body ends with its reference files; read "
+                "those with `skill://<name>/<path>`, never a raw filesystem path."
+            ),
             "<skills>",
         ]
         lines.extend(f"- {skill.name}: {skill.description}" for skill in user_skills)

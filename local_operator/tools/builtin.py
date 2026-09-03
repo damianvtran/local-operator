@@ -2349,7 +2349,21 @@ async def execute_read(
     cwd = _safe_cwd(context)
     path, inside, resolvable = _resolve_workspace_path(target, cwd)
     if not path.exists():
-        return _error(tool_call_id, "read", f"Path does not exist: {path}")
+        message = f"Path does not exist: {path}"
+        # Skills are virtual resources, not files on disk. Point the agent to
+        # skill://<name> when it tries to read a discovered or guessed SKILL.md.
+        folded_parts = [p.casefold() for p in path.parts]
+        if "skills" in folded_parts and path.name.casefold() == "skill.md":
+            skill_name = path.parent.name
+            resource = (
+                f"skill://{skill_name}"
+                if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", skill_name)
+                else "skill://<name>"
+            )
+            message += (
+                f". Skills are virtual resources loaded via `skill://`: read with `{resource}`."
+            )
+        return _error(tool_call_id, "read", message)
 
     # Outside-workspace reads escalate to an approval prompt regardless of
     # the read tier auto-approval the host normally applies.

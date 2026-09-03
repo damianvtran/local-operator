@@ -58,8 +58,9 @@ class TestBareReads:
         )
 
     def test_empty_name_raises(self, skills: dict[str, Skill]) -> None:
-        with pytest.raises(ValueError, match="missing a name"):
+        with pytest.raises(ValueError, match="missing a name") as excinfo:
             resolve_skill_url("skill://", skills)
+        assert "Available skills: alpha, beta" in str(excinfo.value)
 
 
 class TestUnknownName:
