@@ -508,26 +508,78 @@ to maximum. Not seeding resolves that population at the root; no
 
 #### The rule as shipped
 
-**Listing-derived defaults never seed `reasoning_effort`. Table-derived
-defaults still do.** The asymmetry is not caution, it is the evidence:
+**On an aggregator route, nothing seeds `reasoning_effort` — not the listing's
+default and not the table's. On a direct provider route the table seeds exactly
+as it always has.** The ladder and the seed are separate questions:
 
-- **Table (`_EFFORT_TABLE`) — seeds, unchanged.** Anthropic *documents*
-  `effort: "high"` and omitting the parameter as the same request, so
-  `default_effort()` remains a legitimate seed. This is existing behaviour and
-  must not regress.
-- **Listing — ladder only, level starts unset.** Enforced structurally:
-  `_effort_memo` carries the ladder alone, so there is no listing default in
-  scope at the seeding site to be used by accident.
+- **Ladder** — the listing wins where it speaks; the table answers its silence.
+  Unchanged, and it is what fixes the reported bug.
+- **Seed, aggregator (`openrouter`, `radient`)** — nothing, on every path.
+- **Seed, direct** — the table's `default_effort()`, guarded by membership of
+  the effective ladder so a narrowed ladder seeds nothing rather than clamping
+  to a rung no source stated.
+
+#### Why the table's default does not seed on an aggregator either
+
+That seed rests on Anthropic documenting `effort: "high"` as exactly equivalent
+to omitting the parameter — but that is a documented fact about **Anthropic's
+own API**, and on an aggregator we are not talking to it. OpenRouter interposes
+its own reasoning gate ahead of the upstream model, which it publishes as
+`reasoning.default_enabled`, and that gate changes the answer. Measured, same
+prompt, n=10 per arm, real 200s:
+
+| model | key omitted | seeded `high` | `default_enabled` |
+|---|---|---|---|
+| `anthropic/claude-opus-4.6` | **0** reasoning tokens | **70** | `false` |
+| `anthropic/claude-sonnet-4.6` | **0** | **164** | absent |
+| `anthropic/claude-opus-4.5` | **0** | **190** | absent |
+| `anthropic/claude-opus-5` | 65 | 67.5 | `true` |
+
+So on that route sending `high` does not restate a default — it switches
+reasoning **on**. That is the same defect as §5.1's `default_enabled: false`
+finding, arriving through the table instead of through the listing. We therefore
+assert the equivalence only on the route whose documentation establishes it.
+Omitting is the one choice that needs no claim: it is what the user gets today
+if they never touch the dial, and one keystroke sets a real rung.
+
+#### What this costs, and warm/cold parity
+
+**8 OpenRouter Anthropic rows that boot showing `high` today now boot showing
+`auto`**: `claude-opus-5`, `claude-sonnet-5`, `claude-fable-5`,
+`claude-fable-5.1` and their `:batch` twins. That is **wire-neutral** —
+`opus-5` measured 65 vs 67.5 reasoning tokens, i.e. genuinely equivalent, and
+the `fable-*` rows are `mandatory: true` so their reasoning is on regardless.
+The band stops asserting a level we cannot substantiate on that route.
+
+This also closes the warm/cold split completely. An earlier revision stopped
+seeding only on the *listing* branch while the table branch kept its default,
+which made the boot state of the 16 rows both sources answer for depend on
+whether an HTTP call landed — `openrouter/anthropic/claude-opus-4.6` resolved
+band `auto` with no key when the listing was reached and band `high` with
+`reasoning_effort: 'high'` when it was not. Because neither arm seeds now, both
+agree by construction. Verified over a live 424-row pull on both aggregators:
+**0 rows** resolve a different seed warm than cold, and **0 rows** seed at all.
 
 What this costs and what it keeps: an OpenRouter reasoning model boots showing
 `auto` rather than a level. `auto` is an already-defined rung in this
 vocabulary — every OpenAI reasoning model boots that way by design, and
 `_effort_listing` renders it as a rung of its own — so this invents no new
 display state. The reported bug is fixed by the **ladder**: the segment appears,
-`shift+tab` and `/effort` cycle it, and the picked rung is shown. **The wire is
-unchanged: no model starts sending a `reasoning_effort` it was not already
-sending**, which removes the entire ~137-model blast radius this section was
-written to size.
+`shift+tab` and `/effort` cycle it, and the picked rung is shown.
+
+**The wire delta, stated exactly.** On the aggregator route it is **zero**: the
+~137-model listing-default blast radius this section was written to size is
+gone, and no model there starts sending a `reasoning_effort` it was not already
+sending. The dotted-id repair in `model.effort` (widening the separator to
+`[.-]`) gives ~9 Anthropic ids the table ladder they should always have had, and
+on that route they gain the ladder while sending no key at all.
+
+On the **direct** Anthropic route those same dotted spellings do newly seed
+`high`, and there that is safe for the reason the aggregator cannot borrow: it
+is Anthropic's own API, which is what documents the equivalence. It reaches no
+shipped registry row — all 18 are hyphenated, and every one was verified
+byte-identical to base — so it is only reachable by typing a dotted id by hand,
+which previously resolved no ladder at all.
 
 `/effort auto` stays coherent and reads the same field it always did: on
 Anthropic it restores the documented `high`; on a listing-derived model

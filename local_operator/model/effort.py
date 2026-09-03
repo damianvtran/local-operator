@@ -283,12 +283,31 @@ def next_effort(levels: tuple[str, ...], current: str | None) -> str | None:
     """The level one cycle step above ``current``, wrapping at the top.
 
     ``None`` in (nothing selected) starts at :data:`FALLBACK_START` when the
-    model has it, else the lowest level — never at whatever happens to sit at
-    index 0, which on OpenAI is ``none``: a user pressing the key to find the
-    control would have turned reasoning OFF with their first press.
+    model has it, else the lowest rung ABOVE ``none`` — never at whatever
+    happens to sit at index 0, which on OpenAI is ``none``: a user pressing the
+    key to find the control would have turned reasoning OFF with their first
+    press.
+
+    That guard used to be spelled ``FALLBACK_START in levels``, falling through
+    to ``levels[0]``, and it was insufficient the moment ladders stopped coming
+    only from the hand-transcribed table. A provider listing can state a ladder
+    with no ``medium`` at all: measured over a live 424-row OpenRouter pull, 45
+    of 153 stated ladders start at ``none`` and 8 of those lack ``medium``
+    (``mistralai/mistral-small-2603`` is ``('none','high')``), so the fallthrough
+    landed the discovery press on precisely the rung the docstring promised it
+    would never pick. Skipping ``none`` restores the stated property for any
+    ladder shape rather than for the two the table happened to contain.
+
+    ``none`` stays fully reachable — by cycling round to it, and by an explicit
+    ``/effort none``. It is a legitimate choice; it is just not one to make on
+    a user's behalf when they pressed a key to find out what the control does.
+    A ladder whose ONLY rung is ``none`` still answers ``none``, because there
+    is nothing else to offer and refusing to move would be a dead key.
     """
     if not levels:
         return None
     if current is None or current.lower() not in levels:
-        return FALLBACK_START if FALLBACK_START in levels else levels[0]
+        if FALLBACK_START in levels:
+            return FALLBACK_START
+        return next((level for level in levels if level != "none"), levels[0])
     return levels[(levels.index(current.lower()) + 1) % len(levels)]

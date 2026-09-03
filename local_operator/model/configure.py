@@ -253,7 +253,10 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
     conversation that had eight times the room, and an absent one disables
     compaction until the provider rejects the request.
     """
-    from local_operator.providers.registry import get_provider_definition
+    from local_operator.providers.registry import (
+        AGGREGATOR_PROVIDERS,
+        get_provider_definition,
+    )
 
     canonical = "test" if hosting == "noop" else hosting
     if info is None:
@@ -299,54 +302,81 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
     # stops offering `none`/`low` on the OpenRouter route, because the router
     # says those rungs 400 there. A rung we cannot send is not a rung.
     listing_levels = _listing_effort(canonical, model_name)
-    if listing_levels:
-        effort_levels = listing_levels
-        # The ladder is taken; the listing's own `default_effort` is NOT seeded,
-        # and that asymmetry is the measured result rather than caution.
-        #
-        # Seeding it would have let the band name a real level from the first
-        # frame instead of `auto`, and the inference that made it look free was
-        # that OpenRouter's `default_effort` merely describes what happens when
-        # you send nothing — so sending it explicitly should be a no-op. QA put
-        # that on the wire and it is FALSE: `z-ai/glm-5.3` seeded at `max`
-        # returned 2.16x the reasoning tokens of omitting the key (medians 200
-        # vs 92.5, n=12 per arm, distributions non-overlapping — seeded min 165
-        # above omitted max 127). It is also model-specific — `gemini-3.8-flash`
-        # measured 0.93x, a genuine no-op — so no general equivalence can be
-        # relied on, which is what a seeding rule would need.
-        #
-        # The second consequence is the one that decides it. If omission yields
-        # materially LESS reasoning than sending the stated default, then
-        # `default_effort` does not describe what omission actually does, so
-        # painting it on the band as the level in force would be a status band
-        # asserting a depth that is not in force — the one thing that segment
-        # must never do.
-        #
-        # Leaving this unset costs the band a word and nothing else: `auto` is
-        # an already-defined rung in this vocabulary (every OpenAI reasoning
-        # model boots that way by design), and `shift+tab` and `/effort` then
-        # cycle the listing's ladder and show the chosen rung. The reported bug
-        # — no effort segment at all on `openrouter/google/gemini-3.8-flash` —
-        # is fixed by the LADDER, which is what this branch is for. The wire is
-        # left exactly as it is today: no model starts sending a
-        # `reasoning_effort` it was not already sending.
+    effort_levels = listing_levels if listing_levels else supported_efforts(model_name)
+    # THE LADDER and THE SEED are two separate questions with two different
+    # answers, and conflating them is what made two earlier revisions wrong.
+    #
+    # The ladder: the provider's own listing wins where it speaks (above), the
+    # table answers its silence.
+    #
+    # The seed: NOTHING is seeded on an aggregator route. Not the listing's
+    # `default_effort`, and not the table's either. On a direct provider route
+    # the table still seeds exactly as it always has.
+    #
+    # Why the listing's `default_effort` never seeds. The inference that made it
+    # look free was that `default_effort` merely describes what happens when you
+    # send nothing — so sending it explicitly should be a no-op. Measured on the
+    # wire, it is FALSE: `z-ai/glm-5.3` seeded at `max` returned 3.06x the
+    # reasoning tokens of omitting the key (n=12 per arm, real 200s), and
+    # `mistralai/mistral-small-2603` went from a median 0 reasoning tokens
+    # omitted to 167.5 with its stated `high` sent. It is also model-specific
+    # (`gemini-3.8-flash` measured 0.93x, a genuine no-op), so no general
+    # equivalence can be relied on — which is what a seeding rule would need.
+    #
+    # Why the TABLE's default does not seed there either, which is the subtler
+    # half. That seed rests on Anthropic documenting `effort:"high"` as exactly
+    # equivalent to omitting the parameter — but that is a documented fact about
+    # ANTHROPIC'S OWN API, and on an aggregator we are not talking to it.
+    # OpenRouter interposes its own reasoning gate ahead of the upstream model
+    # (it publishes the gate as `reasoning.default_enabled`), and that gate
+    # changes the answer. Measured, same prompt, n=10 per arm, real 200s:
+    #
+    #     anthropic/claude-opus-4.6     omitted   0 reasoning tokens (min 0, max 0)
+    #                                   'high'   70                 (min 61, max 73)
+    #     anthropic/claude-sonnet-4.6   omitted   0
+    #                                   'high'  164                 (min 146, max 176)
+    #     anthropic/claude-opus-5       omitted  65   'high'  67.5   <- equivalent here
+    #
+    # So on that route sending `high` does not restate a default, it switches
+    # reasoning ON — the same defect measured for listing defaults, arriving
+    # through the table instead. We therefore assert the equivalence only on the
+    # route whose documentation establishes it, and omit everywhere else.
+    # Omitting is the one choice that is safe without a claim: it is what the
+    # user gets today if they never touch the dial, and one keystroke sets a
+    # real rung.
+    #
+    # What this costs, stated plainly: 8 OpenRouter Anthropic rows that boot
+    # showing `high` today (`claude-opus-5`, `claude-sonnet-5`, `claude-fable-5*`
+    # and their `:batch` twins) now boot showing `auto`. That is wire-neutral —
+    # opus-5 measured 65 vs 67.5 tokens — and the band stops asserting a level
+    # we cannot substantiate on that route. The direct `anthropic::claude-opus-5`
+    # route is untouched and still seeds `high`.
+    #
+    # The wire delta that remains, stated exactly rather than as "none". On the
+    # AGGREGATOR route no model sends a key it was not already sending: the
+    # dotted-id repair in `model.effort` gives ~9 Anthropic ids the ladder they
+    # should always have had, and they gain that ladder while sending nothing.
+    # On the DIRECT Anthropic route those same dotted spellings do newly seed
+    # `high` — but there the documented equivalence genuinely applies, because
+    # that is the API the documentation describes. It reaches no shipped
+    # registry row (all 18 are hyphenated and verified byte-identical to base);
+    # it is only reachable by typing a dotted id by hand, which previously got
+    # no ladder at all.
+    # `AGGREGATOR_PROVIDERS`, not `PUBLIC_LISTING_PROVIDERS`: the question here
+    # is whether something sits between us and the model's own API, not whether
+    # its catalogue happens to be readable without a key. The two sets are equal
+    # today, and this is the one that stays right if they diverge.
+    if canonical in AGGREGATOR_PROVIDERS:
         reasoning_effort = None
     else:
-        # No listing, or a listing that said nothing about efforts: the
-        # hand-transcribed table, i.e. exactly today's behaviour. This is the
-        # COMMON case and the one that must not regress — 91 shipped registry
-        # rows never fetch a listing at all, and every direct provider but
-        # Anthropic publishes no reasoning field. Its seed is safe for a reason
-        # the listing branch above cannot borrow: Anthropic documents
-        # `effort: "high"` as exactly equivalent to omitting the parameter, so
-        # the seed changes no behaviour and only stops the band understating
-        # what is already in force. OpenAI, whose default varies per snapshot,
-        # is seeded with nothing for the same reason. That DOCUMENTED
-        # equivalence is exactly what the listing branch above lacks and could
-        # not establish by measurement, which is why one seeds and the other
-        # does not.
-        effort_levels = supported_efforts(model_name)
-        reasoning_effort = default_effort(model_name)
+        # The direct route, i.e. exactly today's behaviour and the one that must
+        # not regress: 91 shipped registry rows never fetch a listing, and every
+        # direct provider but Anthropic publishes no reasoning field. The
+        # membership guard is for a listing that NARROWS below the table's
+        # default; seed nothing rather than clamping to a neighbouring rung no
+        # source stated.
+        table_default = default_effort(model_name)
+        reasoning_effort = table_default if table_default in effort_levels else None
     # A model with an effort ladder reasons BY DEFINITION, whatever its name
     # looks like: `claude-opus-5` matches none of the markers below — it says
     # neither "thinking" nor "reasoner" — so before the ladder existed the

@@ -25,6 +25,7 @@ import pytest
 
 from local_operator.model import catalogue
 from local_operator.model import configure as configure_mod
+from local_operator.model import effort
 from local_operator.model.catalogue import cached_listing
 
 
@@ -1951,8 +1952,12 @@ def test_the_listing_may_narrow_a_ladder_the_table_over_granted(monkeypatch, tmp
 def test_a_silent_listing_still_defers_to_the_table(monkeypatch, tmp_path) -> None:
     """The case that must not regress, and it is the common one: 91 shipped
     registry rows never fetch a listing, and every direct provider but Anthropic
-    publishes no reasoning field. Silence means the table answers, exactly as it
-    did before this feature existed."""
+    publishes no reasoning field. Silence means the table answers for the
+    LADDER, exactly as it did before this feature existed.
+
+    The SEED is a separate question and this is an aggregator route, so nothing
+    is seeded — see `test_an_aggregator_route_never_seeds_warm_or_cold`. The
+    direct route still seeds the table's default."""
     _stub_discovery(monkeypatch, [_row("anthropic/claude-opus-5")])
     monkeypatch.setattr(catalogue, "default_cache_dir", lambda: tmp_path)
     configure_mod.invalidate_model_info_cache()
@@ -1960,7 +1965,7 @@ def test_a_silent_listing_still_defers_to_the_table(monkeypatch, tmp_path) -> No
     spec = configure_mod.build_model_spec("openrouter", "anthropic/claude-opus-5")
 
     assert spec.reasoning_efforts == ("low", "medium", "high", "xhigh", "max")
-    assert spec.reasoning_effort == "high"
+    assert spec.reasoning_effort is None
 
 
 def test_an_aggregator_ladder_never_reaches_a_direct_providers_model(monkeypatch, tmp_path) -> None:
@@ -2135,11 +2140,173 @@ def test_the_listing_client_branch_defers_to_the_table_when_the_row_is_silent(
     )
 
     assert config.spec.reasoning_efforts == ("low", "medium", "high", "xhigh", "max")
-    # The TABLE-derived seed, which is unchanged behaviour and must not regress:
-    # Anthropic documents `high` and omitting the parameter as the same request,
-    # so seeding it changes no wire behaviour and only stops the band
-    # understating what is already in force.
-    assert config.spec.reasoning_effort == "high"
+    # The table answers the LADDER here. It does not seed, because this is an
+    # aggregator route: the `high` ≡ omission equivalence is documented for
+    # Anthropic's own API, and OpenRouter interposes its own reasoning gate
+    # ahead of it (measured: `claude-opus-4.6` 0 reasoning tokens omitted vs 70
+    # seeded). The direct route still seeds — see
+    # `test_a_direct_route_still_seeds_the_tables_default`.
+    assert config.spec.reasoning_effort is None
+
+
+def test_an_aggregator_route_never_seeds_warm_or_cold(monkeypatch, tmp_path) -> None:
+    """The seeding rule, pinned directly rather than as a side assertion.
+
+    Nothing seeds on an aggregator route — not the listing's `default_effort`
+    and not the table's either. The table's `high` rests on Anthropic
+    documenting it as equivalent to omission, and that is a fact about
+    ANTHROPIC'S OWN API; an aggregator interposes its own reasoning gate ahead
+    of it. Measured through OpenRouter, n=10 per arm: `claude-opus-4.6` returned
+    0 reasoning tokens with the key omitted and 70 with `high` sent, so there
+    the seed does not restate a default, it switches reasoning on.
+
+    It also closes the warm/cold split. An earlier revision stopped seeding only
+    on the listing branch while the table branch kept its default, so the boot
+    state of every model both sources answer for depended on whether an HTTP
+    call landed: band `auto` and no key when the listing was reached, band
+    `high` and `reasoning_effort: 'high'` when it was not. Because neither arm
+    seeds now, both agree by construction.
+    """
+    model_id = "anthropic/claude-opus-4.6"
+    listing_ladder = ("low", "medium", "high", "max")
+    monkeypatch.setattr(catalogue, "default_cache_dir", lambda: tmp_path)
+    # The table DOES answer for this id, so a regression cannot hide behind
+    # both sources happening to be silent.
+    assert effort.default_effort(model_id) == "high"
+
+    # WARM: the listing states a ladder, and it wins the LADDER.
+    _stub_discovery(
+        monkeypatch,
+        [
+            _row(
+                model_id,
+                reasoning_efforts=listing_ladder,
+                reasoning_default_effort="high",
+            )
+        ],
+    )
+    configure_mod.invalidate_model_info_cache()
+    warm = configure_mod.build_model_spec("openrouter", model_id)
+
+    # COLD: no listing row at all, so the table supplies the ladder.
+    _stub_discovery(monkeypatch, [])
+    configure_mod.invalidate_model_info_cache()
+    cold = configure_mod.build_model_spec("openrouter", model_id)
+
+    assert warm.reasoning_efforts == listing_ladder  # the listing wins the ladder
+    assert cold.reasoning_efforts == effort.supported_efforts(model_id)
+    # Neither arm seeds, so neither sends a key.
+    assert warm.reasoning_effort is None
+    assert cold.reasoning_effort is None
+    assert warm.reasoning_default_effort is None
+    assert cold.reasoning_default_effort is None
+    # The property that failed: same model, same route, same answer either way.
+    assert warm.reasoning_effort == cold.reasoning_effort
+
+
+def test_a_direct_route_still_seeds_the_tables_default(monkeypatch, tmp_path) -> None:
+    """The non-regression the aggregator rule must not cost: on the route whose
+    documentation establishes the `high` ≡ omission equivalence, the table still
+    seeds exactly as it always has. Measured on that route, omitting and sending
+    `high` are the same request, so the seed only stops the band understating
+    what is already in force."""
+    monkeypatch.setattr(catalogue, "default_cache_dir", lambda: tmp_path)
+    _stub_discovery(monkeypatch, [])
+    configure_mod.invalidate_model_info_cache()
+
+    spec = configure_mod.build_model_spec("anthropic", "claude-opus-5")
+
+    assert spec.reasoning_efforts == ("low", "medium", "high", "xhigh", "max")
+    assert spec.reasoning_effort == "high"
+    assert spec.reasoning_default_effort == "high"
+
+
+def test_the_dotted_repair_gains_a_ladder_without_gaining_a_wire_key(monkeypatch, tmp_path) -> None:
+    """F7's claim, pinned. Widening the table's separator to `[.-]` gives dotted
+    Anthropic ids the ladder they should always have had. On the aggregator
+    route that must buy a LADDER and nothing else — no `reasoning_effort` on the
+    wire — because those are exactly the rows measured to switch reasoning on
+    when seeded (`claude-sonnet-4.6`: 0 tokens omitted, 164 seeded)."""
+    monkeypatch.setattr(catalogue, "default_cache_dir", lambda: tmp_path)
+    _stub_discovery(monkeypatch, [])
+    configure_mod.invalidate_model_info_cache()
+
+    for model_id in ("anthropic/claude-opus-4.6", "anthropic/claude-sonnet-4.6"):
+        spec = configure_mod.build_model_spec("openrouter", model_id)
+        # The ladder the repair restored: the reported bug is fixed —
+        # `shift+tab` and `/effort` have rungs to offer.
+        assert spec.reasoning_efforts
+        assert spec.reasoning is True
+        # And no key reaches the wire.
+        assert spec.reasoning_effort is None
+
+
+def test_a_listing_default_never_seeds_even_when_the_table_is_silent(monkeypatch, tmp_path) -> None:
+    """The other half: a LISTING-derived default is never a seed, on any path.
+
+    Measured, not cautious. Sending OpenRouter's stated `default_effort` is not
+    the same request as omitting the key — `z-ai/glm-5.3` seeded at `max`
+    returned 3.06x the reasoning tokens of omission (n=12 per arm), and
+    `mistralai/mistral-small-2603` went from a median 0 reasoning tokens to
+    167.5. So the listing default describes neither what omission does nor a
+    level in force, and painting it on the band would assert a depth that is not.
+    """
+    monkeypatch.setattr(catalogue, "default_cache_dir", lambda: tmp_path)
+    _stub_discovery(
+        monkeypatch,
+        [
+            _row(
+                "z-ai/glm-5.3",
+                reasoning_efforts=("low", "high", "max"),
+                reasoning_default_effort="max",
+            )
+        ],
+    )
+    configure_mod.invalidate_model_info_cache()
+
+    spec = configure_mod.build_model_spec("openrouter", "z-ai/glm-5.3")
+
+    # The table has no arm for this id, so nothing legitimises a seed.
+    assert effort.default_effort("z-ai/glm-5.3") is None
+    assert spec.reasoning_efforts == ("low", "high", "max")
+    assert spec.reasoning_effort is None
+    assert spec.reasoning_default_effort is None
+
+
+def test_an_off_ladder_table_default_seeds_nothing_rather_than_clamping(
+    monkeypatch, tmp_path
+) -> None:
+    """The membership guard on the direct route, for the day a listing NARROWS.
+
+    Aggregator routes no longer seed at all, so this is reachable only where a
+    direct provider's listing supplies a ladder narrower than the table's
+    default. Seeding the default anyway would put a level on the wire the route
+    rejects, and clamping to a neighbour would be this code inventing a depth no
+    source stated. `None` — band `auto`, key omitted — is the honest answer, and
+    the user can still pick a rung.
+    """
+    monkeypatch.setattr(catalogue, "default_cache_dir", lambda: tmp_path)
+    assert effort.default_effort("claude-opus-5") == "high"
+
+    # A listing that offers everything EXCEPT the table's default.
+    _stub_discovery(
+        monkeypatch,
+        [
+            _row(
+                "claude-opus-5",
+                reasoning_efforts=("low", "medium"),
+                reasoning_default_effort="medium",
+            )
+        ],
+    )
+    configure_mod.invalidate_model_info_cache()
+    configure_mod._store_listing_effort("anthropic", "claude-opus-5", ("low", "medium"))
+
+    spec = configure_mod.build_model_spec("anthropic", "claude-opus-5")
+
+    assert spec.reasoning_efforts == ("low", "medium")
+    assert spec.reasoning_effort is None
+    assert spec.reasoning_default_effort is None
 
 
 def test_the_ladder_memo_enforces_its_bound_within_one_bucket(monkeypatch, tmp_path) -> None:

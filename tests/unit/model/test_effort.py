@@ -180,6 +180,35 @@ class TestTheCycleOrder:
         assert next_effort(supported_efforts("gpt-5.4"), None) == "medium"
         assert next_effort(supported_efforts("claude-opus-5"), None) == "medium"
 
+    def test_from_unset_it_skips_none_on_a_ladder_without_medium(self) -> None:
+        """The `medium`-only guard was insufficient once ladders stopped coming
+        only from the table.
+
+        A provider listing can state a ladder with no `medium` at all: over a
+        live 424-row OpenRouter pull, 45 of 153 stated ladders start at `none`
+        and 8 of those lack `medium` — `mistralai/mistral-small-2603` is
+        `('none','high')`. The old fallthrough to `levels[0]` landed the very
+        first `shift+tab` on `none`, silently turning reasoning OFF on a press
+        the user made to discover the control, with the status band as the only
+        receipt. That is precisely what the guard exists to prevent.
+        """
+        assert next_effort(("none", "high"), None) == "high"
+        assert next_effort(("none", "low", "high"), None) == "low"
+        # `medium` still wins when the ladder has it, including one starting at
+        # `none` — 37 of those 45 ladders are safe for this reason.
+        assert next_effort(("none", "low", "medium", "high"), None) == "medium"
+
+    def test_none_stays_reachable_by_cycling_and_when_it_is_the_only_rung(self) -> None:
+        """Skipping `none` is about the DISCOVERY press, not about denying it.
+
+        `none` is a legitimate choice — it is just not one to make on a user's
+        behalf. It stays reachable by cycling round to it and by an explicit
+        `/effort none`, and a ladder offering nothing else still answers it
+        rather than leaving the key dead.
+        """
+        assert next_effort(("none", "high"), "high") == "none"
+        assert next_effort(("none",), None) == "none"
+
     def test_a_level_the_model_no_longer_supports_restarts_the_cycle(self) -> None:
         """Stale state cannot wedge the key: an unrecognised current value is
         treated as unset rather than raising or sticking."""
