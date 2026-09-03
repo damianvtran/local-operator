@@ -61,9 +61,13 @@ async def test_radient_oauth_exchange_code():
         # Generate auth url to set PKCE verifier
         await flow.generate_auth_url("state", "http://localhost:54549/callback")
         creds = await flow.exchange_token("code-123", "state", "http://localhost:54549/callback")
+        assert creds["type"] == "oauth"
+        assert creds["access"] == "rad-jwt-access-token"
+        assert creds["refresh"] == "rad-refresh-token-12345"
         assert creds["access_token"] == "rad-jwt-access-token"
         assert creds["refresh_token"] == "rad-refresh-token-12345"
         assert creds["expires"] > 0
+        assert creds["authorized_at"] > 0
 
 
 @pytest.mark.asyncio
@@ -83,11 +87,46 @@ async def test_radient_refresh_token():
     transport = httpx.MockTransport(handler)
     async with httpx.AsyncClient(transport=transport) as client:
         initial = {
+            "type": "oauth",
+            "access": "old-token",
+            "refresh": "old-refresh",
             "access_token": "old-token",
             "refresh_token": "old-refresh",
             "expires": 1000,
+            "authorized_at": 500,
         }
         refreshed = await refresh_radient_token(initial, http_client=client)
+        assert refreshed["type"] == "oauth"
+        assert refreshed["access"] == "new-jwt-access-token"
+        assert refreshed["refresh"] == "new-refresh-token-67890"
         assert refreshed["access_token"] == "new-jwt-access-token"
         assert refreshed["refresh_token"] == "new-refresh-token-67890"
         assert refreshed["expires"] > initial["expires"]
+        assert refreshed["authorized_at"] == 500
+
+
+@pytest.mark.asyncio
+async def test_radient_auth_store_round_trip(tmp_path):
+    from local_operator.providers.auth_store import AuthStore
+
+    store = AuthStore(tmp_path / "auth.db")
+    creds = {
+        "type": "oauth",
+        "access": "rad-jwt-access-token",
+        "refresh": "rad-refresh-token",
+        "access_token": "rad-jwt-access-token",
+        "refresh_token": "rad-refresh-token",
+        "expires": 2000000000000,
+    }
+    # Upsert under storage provider 'radient'
+    stored = store.upsert_credential("radient", creds)
+    assert stored.credential_type == "oauth"
+
+    # Resolves through cascade via get_api_key and get_oauth_access
+    key = await store.get_api_key("radient")
+    assert key == "rad-jwt-access-token"
+
+    oauth_access = await store.get_oauth_access("radient")
+    assert oauth_access is not None
+    assert oauth_access.access_token == "rad-jwt-access-token"
+    assert oauth_access.kind == "oauth"

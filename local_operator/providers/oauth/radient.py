@@ -116,10 +116,18 @@ class RadientOAuthFlow(OAuthCallbackFlow):
         expires_in = data.get("expires_in", 3600)
         expires_at = int(time.time() * 1000) + int(expires_in * 1000) - EXPIRY_SKEW_MS
 
+        refresh_token = data.get("refresh_token")
         return {
+            # Declared type avoids structural guessing in AuthStore.upsert_credential.
+            "type": "oauth",
+            # AuthStore standard keys.
+            "access": access_token,
+            "refresh": refresh_token,
+            # Retain OAuth token response keys for compatibility.
             "access_token": access_token,
-            "refresh_token": data.get("refresh_token"),
+            "refresh_token": refresh_token,
             "expires": expires_at,
+            "authorized_at": int(time.time() * 1000),
             "token_type": data.get("token_type", "Bearer"),
             "scope": data.get("scope", ""),
         }
@@ -131,7 +139,8 @@ async def refresh_radient_token(
     http_client: httpx.AsyncClient | None = None,
 ) -> dict[str, Any]:
     """Refresh a Radient access token using rolling refresh token."""
-    refresh_token = credentials.get("refresh_token")
+    # Check both standard 'refresh' and compatibility 'refresh_token' keys
+    refresh_token = credentials.get("refresh") or credentials.get("refresh_token")
     if not refresh_token:
         raise LoginError("No refresh token stored for Radient")
 
@@ -169,12 +178,21 @@ async def refresh_radient_token(
     # If server rotated the refresh token, save new one; otherwise retain existing
     new_refresh = data.get("refresh_token") or refresh_token
 
-    return {
-        **credentials,
-        "access_token": access_token,
-        "refresh_token": new_refresh,
-        "expires": expires_at,
-    }
+    merged = dict(credentials)
+    merged.update(
+        {
+            "type": "oauth",
+            "access": access_token,
+            "refresh": new_refresh,
+            "access_token": access_token,
+            "refresh_token": new_refresh,
+            "expires": expires_at,
+        }
+    )
+    # Preserve original authorized_at timestamp if present
+    if "authorized_at" in credentials:
+        merged["authorized_at"] = credentials["authorized_at"]
+    return merged
 
 
 async def login_radient(
