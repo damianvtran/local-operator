@@ -61,7 +61,8 @@ footer (which is the only place the card says how to get out).
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import logging
+from collections.abc import Callable, Sequence
 from collections.abc import Set as AbstractSet
 
 from rich.cells import cell_len
@@ -79,8 +80,10 @@ from textual.widgets import Static
 from local_operator.resume import SessionRow, fork_haystack, format_age
 from local_operator.session.search_index import SoftSearchIndex, search_digests
 from local_operator.tui import theme as theme_mod
-from local_operator.tui.terminal_title import SPINNER_FRAMES
+from local_operator.tui.terminal_title import SPINNER_FRAMES, SPINNER_INTERVAL_S
 from local_operator.tui.widgets.tool_card import truncate_cells
+
+logger = logging.getLogger(__name__)
 
 #: Width the card will take when the terminal allows it, and the floor it will
 #: not go below. Both are CELL counts of the card's content, inside its
@@ -222,6 +225,18 @@ WAKE_MARKER = "◷"
 #: still fine (that is what a viewer IS now), but the user should know they
 #: will not be alone in there.
 ATTACHED_MARKER = "○"
+
+#: A runtime that is up and warm with NOBODY watching it. A DIFFERENT glyph
+#: from ``ATTACHED_MARKER``, not the same one in a quieter ink: round 1 (D6)
+#: measured `muted` against `dim` at **1.90:1**, below any threshold for
+#: telling two states apart (WCAG's 3:1 non-text floor is the comparison), and
+#: invisible on a mismatched palette or to a reader with reduced colour
+#: discrimination. "Someone else is watching" and "nobody is, it is just warm"
+#: are two different facts, and DESIGN §10 assigns them different glyphs.
+#:
+#: Filled against the hollow ``○`` so the pair reads as a presence contrast at
+#: a glance rather than as a brightness one. One cell, like every marker here.
+IDLE_MARKER = "●"
 
 #: A live pid whose heartbeat went stale. Distinguished from cold because the
 #: remedy differs: a wedged session is one to `lop stop`, not to reopen.
@@ -426,7 +441,7 @@ def row_state_mark(row: SessionRow, frame: int) -> tuple[str, str]:
     if row.live_state == "attached":
         return ATTACHED_MARKER, "muted"
     if row.live_state == "idle":
-        return ATTACHED_MARKER, "dim"
+        return IDLE_MARKER, "muted"
     if row.wakes:
         return WAKE_MARKER, "dim" if row.wakes_dormant else "muted"
     return "", "dim"
@@ -699,6 +714,7 @@ class SessionPickerScreen(ModalScreen[str | None]):
         rows: Sequence[SessionRow],
         now: float,
         digests: dict[str, str] | None = None,
+        refresh_live_state: Callable[[list[SessionRow]], list[SessionRow]] | None = None,
     ) -> None:
         super().__init__()
         self._all = list(rows)
@@ -737,6 +753,14 @@ class SessionPickerScreen(ModalScreen[str | None]):
         self._body_matches: set[str] = set()
         self._admitted: set[str] = set()
         self._body: Static
+        #: Spinner phase for the running marker, advanced by ``_tick``.
+        self._frame = 0
+        #: Re-reads each row's live state, supplied by the host that knows how
+        #: (``OperatorApp._overlay_live_state``). Optional: a host that does
+        #: not pass one gets the pre-refresh behaviour — markers from open,
+        #: and no animation — which is what keeps this widget testable without
+        #: a registry and usable by an embedder that has none.
+        self._refresh_live_state = refresh_live_state
 
     # -- state ---------------------------------------------------------------
     # ``visible_rows``/``filter_query``/``_card_text``, not ``visible``/``query``/
@@ -1122,6 +1146,50 @@ class SessionPickerScreen(ModalScreen[str | None]):
 
     def on_mount(self) -> None:
         self._repaint()
+        # D1+D3, fixed together on purpose. The running marker borrowed the
+        # band's spinner GLYPH but nothing advanced it, so it sat on frame 0 —
+        # and a frozen braille dot does not read as "busy", it reads as a
+        # static bullet, which is the marker for a DIFFERENT state. That
+        # collapsed the one distinction the picker exists to make under this
+        # release: which of these is actually working right now.
+        #
+        # The liveness data is refreshed on the SAME tick rather than only the
+        # frame index, because animating a snapshot taken at open would be
+        # worse than the freeze: motion is a stronger claim of liveness than a
+        # still, so a convincing spinner over minutes-old state actively
+        # misleads. If we cannot re-read the state we stop animating too (see
+        # ``_tick``) — the two must never come apart.
+        self._timer = self.set_interval(SPINNER_INTERVAL_S, self._tick)
+
+    def _tick(self) -> None:
+        """Advance the spinner and re-read what it is claiming.
+
+        Cheap by construction: the refresh is the same one `registry.scan()` +
+        `read_index()` pair the picker already budgets for as a per-open cost,
+        and the repaint is one `Static.update`. It runs only while the picker
+        is on screen — the timer dies with the screen.
+
+        Skipped entirely when no row is animating, so a store of cold sessions
+        costs nothing: without a running session there is no motion to drive,
+        and re-scanning the registry ten times a second to discover that would
+        be the picker's own idle cost.
+        """
+        refresh = self._refresh_live_state
+        if refresh is not None:
+            try:
+                self._all = list(refresh(self._all))
+                # The filter cache is keyed on the query, which has not
+                # changed — invalidate it explicitly or the refreshed rows are
+                # computed and then thrown away.
+                self._filtered_for = "\x00 never a real query"
+            except Exception:  # noqa: BLE001 — a stale marker is not worth the picker
+                logger.debug("picker could not refresh live state", exc_info=True)
+        if not any(getattr(row, "live_state", "") == "busy" for row in self._all):
+            # Nothing is spinning. Leave the frame where it is so a session
+            # that STARTS working picks the animation up from a clean phase.
+            return
+        self._frame += 1
+        self._repaint()
 
     def on_resize(self, event) -> None:  # type: ignore[no-untyped-def]
         """Re-measure: every column and the page size come from the screen."""
@@ -1235,6 +1303,9 @@ class SessionPickerScreen(ModalScreen[str | None]):
                     # fork scrolls into view and disappears as it scrolls out
                     # makes every name jump sideways on one arrow press.
                     any(getattr(row, "forked", False) for row in rows),
+                    # The animated phase. Without it every call took the
+                    # default 0 and the running marker never moved (D1).
+                    self._frame,
                 )
             ):
                 if index:

@@ -1585,3 +1585,63 @@ def test_the_empty_state_footer_offers_only_what_works() -> None:
     # And the populated footer is untouched.
     populated = [key for key, _ in _footer_hints(100, empty=False)]
     assert "↑↓" in populated and "enter" in populated
+
+
+def test_the_running_marker_animates_and_idle_is_not_the_attached_glyph() -> None:
+    """D1 and D6, the two findings a still frame caught and no test did.
+
+    D1: `render_rows` was correct for every frame index, but the ONE call site
+    never passed one, so the marker sat on frame 0 forever. A frozen braille
+    dot does not read as "busy" — it reads as a static bullet, which is the
+    marker for a different state, collapsing the one distinction the picker
+    exists to make.
+
+    D6: `attached` and `idle` shared `○`, separated only by muted-vs-dim ink at
+    1.90:1. Two different facts (someone else is watching / nobody is, it is
+    just warm) need two different glyphs, not two brightnesses of one.
+    """
+    from local_operator.tui.terminal_title import SPINNER_FRAMES
+    from local_operator.tui.widgets.session_picker import (
+        ATTACHED_MARKER,
+        IDLE_MARKER,
+        row_state_mark,
+    )
+
+    busy = _row("busy00000001", "a running session")._replace(live_state="busy")
+    glyphs = {row_state_mark(busy, frame)[0] for frame in range(len(SPINNER_FRAMES))}
+    assert glyphs == set(SPINNER_FRAMES), "the running marker does not cover its cycle"
+
+    attached = _row("attach000002", "watched elsewhere")._replace(live_state="attached")
+    idle = _row("idle00000003", "an idle session")._replace(live_state="idle")
+    assert row_state_mark(attached, 0)[0] == ATTACHED_MARKER
+    assert row_state_mark(idle, 0)[0] == IDLE_MARKER
+    assert row_state_mark(attached, 0)[0] != row_state_mark(idle, 0)[0]
+
+
+def test_every_state_marker_is_exactly_one_cell() -> None:
+    """The column reserves one cell plus a separator.
+
+    A two-cell glyph eats the separator and the name starts flush against it —
+    how `⏰` was caught. Asserted over the whole marker set so a new one cannot
+    reintroduce it, including the idle glyph D6 added.
+    """
+    from rich.cells import cell_len
+
+    from local_operator.tui.terminal_title import SPINNER_FRAMES
+    from local_operator.tui.widgets.session_picker import (
+        ATTACHED_MARKER,
+        IDLE_MARKER,
+        NEEDS_YOU_MARKER,
+        WAKE_MARKER,
+        WEDGED_MARKER,
+    )
+
+    markers = (
+        NEEDS_YOU_MARKER,
+        WEDGED_MARKER,
+        ATTACHED_MARKER,
+        IDLE_MARKER,
+        WAKE_MARKER,
+        *SPINNER_FRAMES,
+    )
+    assert {cell_len(marker) for marker in markers} == {1}

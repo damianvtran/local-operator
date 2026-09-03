@@ -5454,7 +5454,21 @@ class OperatorApp(App[None]):
                 if session_id:
                     self._resume_session(session_id, notice)
 
-            self.push_screen(SessionPickerScreen(rows, time.time(), digests), _resume_choice)
+            self.push_screen(
+                SessionPickerScreen(
+                    rows,
+                    time.time(),
+                    digests,
+                    # The picker re-reads liveness on its own animation tick
+                    # (D1+D3): a spinner that moves while reporting state from
+                    # when the picker opened is a stronger claim than a frozen
+                    # one and less true. The same overlay used to build the
+                    # rows does the refresh, so there is one definition of what
+                    # each marker means.
+                    refresh_live_state=self._overlay_live_state,
+                ),
+                _resume_choice,
+            )
             return
 
         # ``@latest`` is the oldest part of the CLI vocabulary (--resume
