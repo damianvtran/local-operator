@@ -463,23 +463,26 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
     ),
     ProviderDefinition(
         id="radient",
+        search_aliases=("radient-oauth",),
         name="Radient",
         env_keys="RADIENT_API_KEY",
-        login=create_api_key_login(
-            "Radient", "https://radienthq.com/", "The console calls it a Radient Pass key."
-        ),
-        base_url="https://api.radienthq.com/v1",
-    ),
-    ProviderDefinition(
-        id="radient-oauth",
-        name="Radient (OAuth)",
         login=_lazy_login("local_operator.providers.oauth.radient", "login_radient"),
         refresh_token=_lazy_refresh(
             "local_operator.providers.oauth.radient", "refresh_radient_token"
         ),
         get_api_key=_oauth_api_key,
-        store_credentials_as="radient",
         callback_port=54549,
+        base_url="https://api.radienthq.com/v1",
+    ),
+    ProviderDefinition(
+        id="radient-key",
+        search_aliases=("radient-api-key",),
+        name="Radient (API key)",
+        env_keys="RADIENT_API_KEY",
+        login=create_api_key_login(
+            "Radient", "https://radienthq.com/", "The console calls it a Radient Pass key."
+        ),
+        store_credentials_as="radient",
         base_url="https://api.radienthq.com/v1",
     ),
     ProviderDefinition(

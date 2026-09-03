@@ -18,14 +18,16 @@ def test_radient_provider_definition():
     assert radient.id == "radient"
     assert radient.base_url == "https://api.radienthq.com/v1"
     assert radient.login is not None
+    assert radient.refresh_token is not None
+    assert radient.callback_port == 54549
+    assert "radient-oauth" in radient.search_aliases
 
-    oauth_def = get_provider_definition("radient-oauth")
-    assert oauth_def is not None
-    assert oauth_def.id == "radient-oauth"
-    assert oauth_def.store_credentials_as == "radient"
-    assert oauth_def.callback_port == 54549
-    assert oauth_def.login is not None
-    assert oauth_def.refresh_token is not None
+    key_def = get_provider_definition("radient-key")
+    assert key_def is not None
+    assert key_def.id == "radient-key"
+    assert key_def.store_credentials_as == "radient"
+    assert key_def.login is not None
+    assert key_def.paste_prompt_required is True
 
 
 @pytest.mark.asyncio
