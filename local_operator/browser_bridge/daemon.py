@@ -246,8 +246,34 @@ class ExtensionLink:
         keyed = _is_real_handle(tab)
         key = tab if keyed else _UNKEYED_TAB
         if not keyed and self.driven:
-            latest = self._latest_driven()
-            key = next((k for k, v in self.driven.items() if v is latest), _UNKEYED_TAB)
+            # A REDACTED handle may not KEY a record, but it still carries
+            # enough nonce to RECOGNISE the one it belongs to, so match it
+            # before falling back to recency. The fallback is only safe when
+            # nothing names the tab: the two sides count "most recent" on
+            # DIFFERENT clocks — `nav.ts` resolves a handle-less command
+            # against the most recently USED surface (bumped by every
+            # tab-scoped command), while `_latest_driven` sees the most
+            # recently UPDATED record — so a handle-less `status` describing
+            # tab A could refresh tab B's record with A's URL. Cosmetic (it
+            # heals on B's next keyed update and forks no phantom), but the
+            # daemon already owns the exact matcher `repair()` uses for this
+            # question, so recency is the wrong answer when a handle is here.
+            # Only a REDACTED token can name a tab; a truly handle-less update
+            # (an old build) stays on the documented recency path, where an
+            # existing unkeyed record would otherwise self-match on "".
+            matched = (
+                next(
+                    (key_ for key_ in self.driven if _handle_matches_listed(key_, tab)),
+                    None,
+                )
+                if tab
+                else None
+            )
+            if matched is not None:
+                key = matched
+            else:
+                latest = self._latest_driven()
+                key = next((k for k, v in self.driven.items() if v is latest), _UNKEYED_TAB)
         self.driven[key] = DrivenTab(url=url, title=title, updated_at=time.time())
 
     def note_closed(self, tab: str) -> None:
