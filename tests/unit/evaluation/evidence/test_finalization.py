@@ -820,3 +820,387 @@ def test_terminal_conflict_and_outcome_tamper_are_detected(tmp_path: Path) -> No
         "outcome_mismatch",
         "counter_mismatch",
     } & {issue.code for issue in report.issues}
+
+
+def _crashed_mid_rollout(
+    root: Path, *, failure_kind: str | None = "crash", steps: int = 2
+) -> tuple[EvidenceWriter, ScoreArtifact]:
+    """Write the exact interleaving a crash-terminated episode leaves on disk.
+
+    ``steps`` non-terminal environment steps (no ``finish`` batch, nothing
+    terminated or truncated), then the adapter error, then the unscored
+    finalization, receipts, and the terminal snapshot -- the shape produced by
+    ``EpisodeRunner._finalize_failure`` when the environment RPC dies mid-run.
+    """
+
+    writer = EvidenceWriter.create(root, manifest(), RedactionSet.from_resolved_values(()))
+    try:
+        clock = 0
+        _append_provenance(writer, monotonic_ns=clock, wall_time_ms=clock)
+        clock += 2
+        action_artifact = writer.publish_artifact(b"safe", media_type="text/plain")
+        for index in range(steps):
+            writer.append(
+                "observation",
+                ObservationPayload(observation_id=f"observation-{index}", sequence=index),
+                monotonic_ns=clock,
+                wall_time_ms=clock,
+            )
+            clock += 1
+            writer.append(
+                "action_batch",
+                ActionBatchPayload(
+                    action_batch_id=f"batch-{index}",
+                    observation_id=f"observation-{index}",
+                    action_count=1,
+                    action_artifact=action_artifact,
+                ),
+                monotonic_ns=clock,
+                wall_time_ms=clock,
+            )
+            clock += 1
+            writer.append(
+                "environment_step",
+                EnvironmentStepPayload(
+                    step_id=f"step-{index}",
+                    action_batch_id=f"batch-{index}",
+                    receipt_id=DIGEST,
+                    input_observation_id=f"observation-{index}",
+                    output_observation_id=f"observation-{index + 1}",
+                    terminated=False,
+                    truncated=False,
+                ),
+                monotonic_ns=clock,
+                wall_time_ms=clock,
+            )
+            clock += 1
+        # The rollout's final output observation still lands: the step receipt
+        # resolved before the adapter broke.
+        writer.append(
+            "observation",
+            ObservationPayload(observation_id=f"observation-{steps}", sequence=steps),
+            monotonic_ns=clock,
+            wall_time_ms=clock,
+        )
+        clock += 1
+        writer.append(
+            "error",
+            {
+                "error_id": "err-306591b1400e",
+                "category": "adapter",
+                "diagnostic_code": "rpcremoteerror",
+                "retryable": False,
+            },
+            monotonic_ns=clock,
+            wall_time_ms=clock,
+        )
+        clock += 1
+        writer.begin_finalization(
+            "final",
+            None,
+            FinalizationIntent(kind="unscored"),
+            monotonic_ns=clock,
+            wall_time_ms=clock,
+        )
+        clock += 1
+        clock, _ = _append_final_receipts(writer, monotonic_ns=clock, wall_time_ms=clock)
+        score = ScoreArtifact(status="unscored", reason="crash")
+        writer.record_final_lifecycle(
+            LifecycleTransitionPayload(
+                previous_state_id=None,
+                state_id=OTHER_DIGEST,
+                state="completed",
+                finalization_id="final",
+                preflight_seal_id=DIGEST,
+                commitment_id=OTHER_DIGEST,
+                reconciliation_id=DIGEST,
+                reconciliation_reportable=True,
+                score_id=score.score_id,
+                cleanup_result_id=OTHER_DIGEST,
+                rescue_required=False,
+                failure_kind=failure_kind,  # pyright: ignore[reportArgumentType]
+            ),
+            monotonic_ns=clock,
+            wall_time_ms=clock,
+        )
+    except BaseException:
+        writer.close()
+        raise
+    return writer, score
+
+
+def test_crash_after_nonterminal_steps_verifies_and_seals_unscored(tmp_path: Path) -> None:
+    """A crash mid-rollout must seal as unscored, not fail verification.
+
+    Regression: the rollout-completion invariant demanded a terminated/truncated
+    step or a ``finish`` batch on every bundle carrying a terminal snapshot. A
+    crash leaves neither -- nothing got to decide the rollout was over -- so the
+    bundle failed its own seal verification AND the abandonment fallback,
+    leaving the episode unscoreable instead of unscored.
+    """
+
+    root = tmp_path / "bundle"
+    writer, score = _crashed_mid_rollout(root)
+    try:
+        report = verify_bundle(root)
+        assert report.valid, report.issues
+        assert report.terminal_state == "finalizing"
+        outcome = writer.seal(
+            OutcomeDraft(
+                finalization_id="final",
+                preflight_seal_id=DIGEST,
+                commitment_id=OTHER_DIGEST,
+                reconciliation_id=DIGEST,
+                cleanup_result_id=OTHER_DIGEST,
+                result=score,
+                reportability_label="unscored",
+                comparability_label="comparable",
+                ended_wall_time_ms=99,
+            )
+        )
+    finally:
+        writer.close()
+    assert outcome.result.status == "unscored" and outcome.result.reason == "crash"
+    sealed = verify_bundle(root)
+    assert sealed.valid, sealed.issues
+    assert sealed.terminal_state == "sealed"
+    assert sealed.outcome is not None
+    assert sealed.outcome.reportability_label == "unscored"
+
+
+def test_crash_abandonment_fallback_now_succeeds(tmp_path: Path) -> None:
+    """The safety net must work: a recovered crash bundle can be abandoned.
+
+    ``open_for_abandon``/``abandon`` both re-verify independently and refuse on
+    any error-severity issue, so the same over-broad invariant disabled the
+    fallback that exists precisely for a bundle nobody can seal.
+    """
+
+    root = tmp_path / "bundle"
+    writer, _ = _crashed_mid_rollout(root)
+    writer.close()
+
+    recovered = EvidenceWriter.open_for_abandon(root, RedactionSet.from_resolved_values(()))
+    try:
+        record = recovered.abandon("ambiguous_finalization", "rpcremoteerror")
+    finally:
+        recovered.close()
+    assert record.reason == "ambiguous_finalization"
+    report = verify_bundle(root)
+    assert report.valid, report.issues
+    assert report.terminal_state == "abandoned"
+
+
+def test_crash_bundle_missing_terminal_event_still_refuses(tmp_path: Path) -> None:
+    """Do not over-correct: a genuinely incomplete bundle must stay unsealed.
+
+    Same interleaving, but the process died BEFORE the terminal lifecycle event
+    reached the journal. There is no ``failure_kind`` to explain the truncated
+    rollout, so the bundle has no terminal state and cannot be sealed.
+    """
+
+    root = tmp_path / "bundle"
+    writer = EvidenceWriter.create(root, manifest(), RedactionSet.from_resolved_values(()))
+    try:
+        clock = 0
+        _append_provenance(writer, monotonic_ns=clock, wall_time_ms=clock)
+        clock += 2
+        action_artifact = writer.publish_artifact(b"safe", media_type="text/plain")
+        writer.append(
+            "observation",
+            ObservationPayload(observation_id="observation-0", sequence=0),
+            monotonic_ns=clock,
+            wall_time_ms=clock,
+        )
+        clock += 1
+        writer.append(
+            "action_batch",
+            ActionBatchPayload(
+                action_batch_id="batch-0",
+                observation_id="observation-0",
+                action_count=1,
+                action_artifact=action_artifact,
+            ),
+            monotonic_ns=clock,
+            wall_time_ms=clock,
+        )
+        clock += 1
+        writer.append(
+            "environment_step",
+            EnvironmentStepPayload(
+                step_id="step-0",
+                action_batch_id="batch-0",
+                receipt_id=DIGEST,
+                input_observation_id="observation-0",
+                output_observation_id="observation-1",
+                terminated=False,
+                truncated=False,
+            ),
+            monotonic_ns=clock,
+            wall_time_ms=clock,
+        )
+        clock += 1
+        writer.append(
+            "observation",
+            ObservationPayload(observation_id="observation-1", sequence=1),
+            monotonic_ns=clock,
+            wall_time_ms=clock,
+        )
+        clock += 1
+        writer.begin_finalization(
+            "final",
+            None,
+            FinalizationIntent(kind="unscored"),
+            monotonic_ns=clock,
+            wall_time_ms=clock,
+        )
+        clock += 1
+        _append_final_receipts(writer, monotonic_ns=clock, wall_time_ms=clock)
+        score = ScoreArtifact(status="unscored", reason="crash")
+        with pytest.raises(EvidenceBundleInvalid):
+            writer.seal(
+                OutcomeDraft(
+                    finalization_id="final",
+                    preflight_seal_id=DIGEST,
+                    commitment_id=OTHER_DIGEST,
+                    reconciliation_id=DIGEST,
+                    cleanup_result_id=OTHER_DIGEST,
+                    result=score,
+                    reportability_label="unscored",
+                    comparability_label="comparable",
+                    ended_wall_time_ms=99,
+                )
+            )
+    finally:
+        writer.close()
+    report = verify_bundle(root)
+    assert report.terminal_state == "finalizing"
+    assert not any(
+        state.state == "completed"
+        for state in (
+            event.payload
+            for event in report.events
+            if isinstance(event.payload, LifecycleTransitionPayload)
+        )
+    )
+
+
+def test_truncated_rollout_without_failure_kind_still_refuses(tmp_path: Path) -> None:
+    """The invariant still bites where it was designed to.
+
+    A terminal snapshot claiming a clean run (``failure_kind=None``) over a
+    rollout that never terminated, truncated, or finished is exactly the
+    "sealed as if it concluded" case the check exists to catch.
+    """
+
+    root = tmp_path / "bundle"
+    writer, _ = _crashed_mid_rollout(root, failure_kind=None)
+    writer.close()
+    report = verify_bundle(root)
+    assert not report.valid
+    assert ("finalization_invalid", "events.jsonl") in {
+        (issue.code, issue.location) for issue in report.issues
+    }
+
+
+def test_scored_bundle_with_failure_kind_still_requires_completed_rollout(
+    tmp_path: Path,
+) -> None:
+    """A scoring result claims a finished rollout, so a crash excuse must not apply.
+
+    Pins the ``not results`` clause: without it, attaching any ``failure_kind``
+    to a scored bundle would waive the rollout-completion requirement and let a
+    run that never reached its own end be reported with a score.
+    """
+
+    root = tmp_path / "bundle"
+    writer = EvidenceWriter.create(root, manifest(), RedactionSet.from_resolved_values(()))
+    try:
+        clock = 0
+        _append_provenance(writer, monotonic_ns=clock, wall_time_ms=clock)
+        clock += 2
+        action_artifact = writer.publish_artifact(b"safe", media_type="text/plain")
+        writer.append(
+            "observation",
+            ObservationPayload(observation_id="observation-0", sequence=0),
+            monotonic_ns=clock,
+            wall_time_ms=clock,
+        )
+        clock += 1
+        writer.append(
+            "action_batch",
+            ActionBatchPayload(
+                action_batch_id="batch-0",
+                observation_id="observation-0",
+                action_count=1,
+                action_artifact=action_artifact,
+            ),
+            monotonic_ns=clock,
+            wall_time_ms=clock,
+        )
+        clock += 1
+        writer.append(
+            "environment_step",
+            EnvironmentStepPayload(
+                step_id="step-0",
+                action_batch_id="batch-0",
+                receipt_id=DIGEST,
+                input_observation_id="observation-0",
+                output_observation_id="observation-1",
+                terminated=False,
+                truncated=False,
+            ),
+            monotonic_ns=clock,
+            wall_time_ms=clock,
+        )
+        clock += 1
+        writer.append(
+            "observation",
+            ObservationPayload(observation_id="observation-1", sequence=1),
+            monotonic_ns=clock,
+            wall_time_ms=clock,
+        )
+        clock += 1
+        writer.begin_finalization(
+            "final",
+            "score-op",
+            FinalizationIntent(kind="score", scorer_id="scorer", scorer_version="1"),
+            monotonic_ns=clock,
+            wall_time_ms=clock,
+        )
+        clock += 1
+        score = ScoreArtifact(status="scored", binary=1)
+        writer.record_scoring_result(
+            ScoringResultPayload(
+                finalization_id="final", scoring_operation_id="score-op", score=score
+            ),
+            monotonic_ns=clock,
+            wall_time_ms=clock,
+        )
+        clock += 1
+        clock, _ = _append_final_receipts(writer, monotonic_ns=clock, wall_time_ms=clock)
+        writer.record_final_lifecycle(
+            LifecycleTransitionPayload(
+                previous_state_id=None,
+                state_id=OTHER_DIGEST,
+                state="completed",
+                finalization_id="final",
+                preflight_seal_id=DIGEST,
+                commitment_id=OTHER_DIGEST,
+                reconciliation_id=DIGEST,
+                reconciliation_reportable=True,
+                score_id=score.score_id,
+                cleanup_result_id=OTHER_DIGEST,
+                rescue_required=False,
+                failure_kind="scorer",
+            ),
+            monotonic_ns=clock,
+            wall_time_ms=clock,
+        )
+    finally:
+        writer.close()
+    report = verify_bundle(root)
+    assert not report.valid
+    assert ("finalization_invalid", "events.jsonl") in {
+        (issue.code, issue.location) for issue in report.issues
+    }
