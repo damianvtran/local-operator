@@ -2414,3 +2414,66 @@ async def test_hub_ask_reaches_a_child_under_the_eager_task_factory(tmp_path, mo
         await parent.dispose()
     finally:
         loop.set_task_factory(old_factory)
+
+
+@pytest.mark.asyncio
+async def test_a_childs_tool_context_carries_its_label_and_its_parents_live_title(
+    tmp_path, monkeypatch
+):
+    """The browser tab group of a delegated child must name the work, not `Session`.
+
+    A subagent never generates a conversation title — naming runs in the TUI
+    host and the owned-session runtime and a one-shot child passes through
+    neither — so its ONLY display identity is the label its parent launched it
+    under plus its parent's title. Both have to survive the trip to the
+    EXECUTE-time context (``_build_tool_context``), which is rebuilt per turn
+    and is the one a tool actually sees; the construction-time context that
+    ``create_tools`` inspects is not it.
+
+    The parent's title is asserted through a rename performed AFTER the child
+    was built, because that is the real sequence: a parent is named a second or
+    two into its first turn while its children are launched later, so a value
+    snapshotted at child construction would be empty for the child's whole life.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    from local_operator.tools import builtin
+
+    stream = OneShotStream()
+    # A real cwd, because the unnamed-parent half of the label falls back to
+    # its basename and the Session default (".") has none.
+    parent = make_session(tmp_path, stream, cwd="/Users/damian/local-operator")
+    child = await build_child(parent)
+
+    context = child._build_tool_context()
+    assert context.job_label == "sub"
+    assert context.job_id == "job-1"
+    # Its own identity is untouched: the borrowed NAME must never become a
+    # borrowed identity.
+    assert context.session_id == child.session_id != parent.session_id
+
+    # Unnamed parent: the child is still distinguishable from its siblings by
+    # its own label, where before it fell back to the cwd every sibling shares.
+    assert builtin._browser_session_label(context).endswith("› sub")
+
+    # The rename case, end to end through the real holder the child was handed.
+    parent.set_conversation_name("Fix tab groups")
+    assert builtin._browser_session_label(child._build_tool_context()) == "Fix tab groups › sub"
+
+    await child.dispose()
+    await parent.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_top_level_session_is_never_composed_as_a_subagent(tmp_path):
+    """The discriminator must not misfire on the operator's own session."""
+    from local_operator.tools import builtin
+
+    stream = OneShotStream()
+    parent = make_session(tmp_path, stream)
+    parent.set_conversation_name("Debug browser extension port binding issue")
+
+    context = parent._build_tool_context()
+    assert context.job_id is None and context.job_label == ""
+    # The exact label the operator's pill should have read.
+    assert builtin._browser_session_label(context) == "Debug browser extension port…"
+    await parent.dispose()

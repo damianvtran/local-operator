@@ -967,3 +967,134 @@ async def test_retitle_declines_rather_than_sending_a_constant_identity(monkeypa
 
     await builtin.retitle_browser_surface(surface, ToolContext(session_id="real", session_name="N"))
     assert calls == ["session:real"]
+
+
+# ---------------------------------------------------------------------------
+# Subagent tab groups: a delegated child has no title and can never grow one.
+# ---------------------------------------------------------------------------
+# Reported as `LO · Session` on the operator's screen. The cwd substitution
+# above fixed that for TOP-LEVEL sessions, but a subagent's context carries its
+# PARENT's cwd, so every child of one parent derived the identical label and a
+# fleet of them rendered as `local-operator (2)`/`(3)`/… — distinct only by an
+# ordinal that names nothing. Title generation lives in the TUI host and the
+# owned-session runtime; a one-shot child passes through neither, so it has no
+# title of its own and never will (no subagent session directory on disk holds
+# a `title.json`). Its identity is the label its parent launched it under.
+
+
+def test_a_subagent_is_named_by_its_parent_and_its_own_job_label() -> None:
+    context = ToolContext(
+        session_id="child-1",
+        job_id="job-1",
+        job_label="zoom-scroll-fix",
+        # The PARENT's cwd and the parent's title: a child has neither of its
+        # own, which is the whole reason both halves are needed.
+        cwd="/Users/damian/local-operator",
+        # Short enough that both halves fit whole — the clipping behaviour when
+        # they do not has its own test below.
+        session_name_provider=lambda: "Tab groups",
+    )
+    assert builtin._browser_session_label(context) == "Tab groups › zoom-scroll-fix"
+
+
+def test_two_siblings_of_one_parent_do_not_collide() -> None:
+    # The failure the ordinal was papering over: same parent, same cwd, so
+    # before the label was carried these two produced identical pills.
+    def child(label: str) -> str:
+        return builtin._browser_session_label(
+            ToolContext(
+                session_id=f"child-{label}",
+                job_id=f"job-{label}",
+                job_label=label,
+                cwd="/Users/damian/local-operator",
+                session_name_provider=lambda: "Fix the tab groups",
+            )
+        )
+
+    assert child("bridge-qa") != child("tabgroup-naming")
+
+
+def test_job_id_not_job_label_is_what_marks_a_context_as_a_child() -> None:
+    # A top-level session must never be composed as a subagent. `job_id` is set
+    # by the harness on exactly the child contexts; `job_label` is display text
+    # that a host could plausibly leave empty.
+    parent = ToolContext(session_id="s", cwd="/Users/damian/local-operator", job_id=None)
+    assert builtin._browser_session_label(parent) == "local-operator"
+
+
+def test_a_child_of_an_unnamed_parent_still_beats_the_bare_cwd() -> None:
+    # The parent has no title yet (it is named a second or two into its first
+    # turn, and children are launched later). The cwd stands in for the parent
+    # half, but the child's label is what makes the pill distinguishable.
+    context = ToolContext(
+        session_id="child-1",
+        job_id="job-1",
+        job_label="bridge-qa",
+        cwd="/Users/damian/local-operator",
+        session_name_provider=lambda: "",
+    )
+    assert builtin._browser_session_label(context) == "local-operator › bridge-qa"
+
+
+def test_a_child_with_no_usable_label_falls_back_to_its_parents_name() -> None:
+    # A label that sanitises away must not drop the child to the bare fallback.
+    context = ToolContext(
+        session_id="child-1",
+        job_id="job-1",
+        job_label="\u200b\u202e",
+        cwd="/Users/damian/local-operator",
+        session_name_provider=lambda: "Fix the tab groups",
+    )
+    assert builtin._browser_session_label(context) == "Fix the tab groups"
+
+
+def test_a_renamed_parent_reaches_a_running_childs_next_command() -> None:
+    # The rename case, from the child's side: the parent's holder is SHARED
+    # with the child, so a title generated or `/rename`d after the child was
+    # launched is picked up by its next reconcile rather than latching the
+    # launch-time value.
+    name = {"text": ""}
+    context = ToolContext(
+        session_id="child-1",
+        job_id="job-1",
+        job_label="qa",
+        cwd="/Users/damian/proj",
+        session_name_provider=lambda: name["text"],
+    )
+    assert builtin._browser_session_label(context) == "proj › qa"
+    name["text"] = "Fix the tab groups"
+    assert builtin._browser_session_label(context) == "Fix the tab groups › qa"
+
+
+def test_the_childs_label_survives_a_parent_title_too_long_to_fit() -> None:
+    # Clipping the composed string as ONE unit loses the distinguishing half:
+    # measured on a real pair, `Fix Slack-reported UI zoom and overlap bugs` +
+    # `zoom-scroll-fix` clipped to `Fix Slack-reported UI zoom…` and dropped
+    # the label entirely, re-creating the collision. The parent absorbs the cut.
+    label = builtin._browser_session_label(
+        ToolContext(
+            session_id="child-1",
+            job_id="job-1",
+            job_label="zoom-scroll-fix",
+            session_name_provider=lambda: "Fix Slack-reported UI zoom and overlap bugs",
+        )
+    )
+    assert label.endswith("› zoom-scroll-fix")
+    # And the composition still respects the pill budget the extension clips at
+    # (the ellipsis the clipper appends is paid out of the parent's room).
+    assert len(builtin._browser_clusters(label)) <= builtin._BROWSER_SESSION_LABEL_CLUSTERS
+
+
+def test_a_label_that_fills_the_pill_alone_drops_the_parent_rather_than_a_stub() -> None:
+    # `Fi…` identifies no conversation and only steals room from the half that
+    # does, so below the minimum the label stands alone.
+    label = builtin._browser_session_label(
+        ToolContext(
+            session_id="child-1",
+            job_id="job-1",
+            job_label="an-enormous-child-label-that-fills-it",
+            session_name_provider=lambda: "Some Parent Conversation",
+        )
+    )
+    assert "›" not in label
+    assert label.startswith("an-enormous-child-label")

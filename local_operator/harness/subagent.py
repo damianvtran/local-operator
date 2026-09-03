@@ -1243,6 +1243,13 @@ async def _build_child_session(
         session_id=transcript.directory.name,
         agent_id=parent_session.agent_id,
         job_id=job_id,
+        # The child's own name for display surfaces that must not render a
+        # fleet of children identically (browser tab groups today). Set on the
+        # CONSTRUCTION context for the same defensive-parity reason
+        # ``variables`` is: what actually reaches an executing tool is the
+        # child ``Session``'s per-turn rebuild, which receives it via the
+        # ``job_label=`` argument below.
+        job_label=label,
         has_ui=parent_session._has_ui,
         request_approval=request_approval,
         # The parent's variable store. DEFENSIVE PARITY, not a bug fix: no
@@ -1364,6 +1371,22 @@ async def _build_child_session(
         # ``Session._build_tool_context``; the construction-time context above
         # only feeds createIf.
         job_id=job_id,
+        # The label the operator launched this child under, and the PARENT's
+        # live title holder. Together they are the only identity a subagent
+        # has: naming runs in the TUI host and the owned-session runtime, so a
+        # one-shot child never generates a title of its own and every display
+        # surface asking "which session is this?" had nothing to answer with.
+        #
+        # The holder is SHARED, not copied, and that is what makes a parent
+        # renamed after launch (the usual case — the naming errand lands a
+        # second or two into the parent's first turn, while children are
+        # launched later) reach the child's next tab-group reconcile. Passing
+        # the string would freeze whatever the title was at launch.
+        #
+        # Display-only on both counts: a child is authorized by its own
+        # ``session_id``, never by a name it borrowed from its parent.
+        job_label=label,
+        parent_conversation_name=parent_session.conversation_name_state,
         # The PARENT's comms instance, so the child's every-turn tool context
         # rebuild keeps pointing at the agent that delegated to it instead of
         # minting a private one nobody is listening to.

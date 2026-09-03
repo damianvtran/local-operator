@@ -10659,6 +10659,16 @@ class OperatorApp(App[None]):
             agent_id=getattr(session, "agent_id", "") or "",
             has_ui=True,
             variables=getattr(session, "variables", None),
+            # Bang mode builds its OWN context rather than reusing the
+            # session's per-turn one (it runs outside a turn), so the title has
+            # to be carried explicitly or every display-only consumer sees an
+            # unnamed session. `getattr` because this path also runs before a
+            # session exists; the provider re-reads the holder so a title that
+            # lands while a long `! cmd` is running is still current.
+            session_name=getattr(session, "conversation_name", "") or "",
+            session_name_provider=(
+                None if session is None else (lambda: getattr(session, "conversation_name", ""))
+            ),
         )
 
         def on_update(update: AgentToolUpdate) -> None:
