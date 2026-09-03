@@ -1654,11 +1654,12 @@ def test_import_agent_and_export_agent_roundtrip(temp_agents_dir: Path):
             current_working_directory="/tmp",
         )
     )
-    # Export the agent
-    zip_path, filename = registry.export_agent(agent.id)
-    assert zip_path.exists()
-    # Import the agent (should create a new agent with a new id)
-    imported_agent = registry.import_agent(zip_path)
+    # Export the agent. The import happens inside the block because the
+    # archive must still exist while it is read.
+    with registry.exported_agent_archive(agent.id) as (zip_path, filename):
+        assert zip_path.exists()
+        # Import the agent (should create a new agent with a new id)
+        imported_agent = registry.import_agent(zip_path)
     assert imported_agent.id == agent.id
     assert imported_agent.name == agent.name
     assert imported_agent.security_prompt == agent.security_prompt
@@ -1668,6 +1669,192 @@ def test_import_agent_and_export_agent_roundtrip(temp_agents_dir: Path):
     assert imported_agent.last_message == ""
     assert imported_agent.tags == agent.tags
     assert imported_agent.categories == agent.categories
+
+
+def _export_fixture_agent(registry: AgentRegistry, name: str):
+    """Create a minimal agent for the export-cleanup tests."""
+    return registry.create_agent(
+        AgentEditFields(
+            name=name,
+            security_prompt="prompt",
+            hosting="host",
+            model="model",
+            description="desc",
+            last_message="msg",
+            tags=[],
+            categories=[],
+            temperature=None,
+            top_p=None,
+            top_k=None,
+            max_tokens=None,
+            stop=None,
+            frequency_penalty=None,
+            presence_penalty=None,
+            seed=None,
+            current_working_directory=None,
+        )
+    )
+
+
+def test_exported_agent_archive_removes_the_temp_dir(temp_agents_dir: Path):
+    """The context manager reclaims the export dir on the SUCCESS path.
+
+    Regression guard for a leak that reached users: ``export_agent`` removed
+    its temp dir only in the ``except`` branch, so every successful export left
+    a directory containing a full agent zip behind forever.
+    """
+    registry = AgentRegistry(temp_agents_dir)
+    agent = _export_fixture_agent(registry, "ExportCleanup")
+
+    with registry.exported_agent_archive(agent.id) as (zip_path, filename):
+        assert zip_path.exists()
+        assert filename == "ExportCleanup.zip"
+        temp_dir = zip_path.parent
+
+    assert not temp_dir.exists()
+
+
+def test_exported_agent_archive_removes_the_temp_dir_on_error(temp_agents_dir: Path):
+    """A failure inside the block must not strand the directory either.
+
+    The upload callers raise from inside the ``with`` (a failed Radient push
+    becomes an HTTPException), so the error path is the common one in
+    production, not an edge case.
+    """
+    registry = AgentRegistry(temp_agents_dir)
+    agent = _export_fixture_agent(registry, "ExportCleanupError")
+
+    temp_dir: Path | None = None
+    with pytest.raises(RuntimeError, match="upload failed"):
+        with registry.exported_agent_archive(agent.id) as (zip_path, _):
+            temp_dir = zip_path.parent
+            assert temp_dir.exists()
+            raise RuntimeError("upload failed")
+
+    assert temp_dir is not None
+    assert not temp_dir.exists()
+
+
+@pytest.mark.parametrize(
+    "agent_name, expected_filename",
+    [
+        ("../../evil", "evil.zip"),
+        ("a/b", "b.zip"),
+        ("/etc/passwd", "passwd.zip"),
+        # A name that degenerates to nothing once separators are stripped must
+        # still yield a usable filename rather than a bare ".zip" or a path.
+        ("..", "agent.zip"),
+        ("/", "agent.zip"),
+        # Windows-style separators are normalised too: the name travels in
+        # agent.yml, so the OS that wrote it is not the OS that reads it.
+        (r"..\..\evil", "evil.zip"),
+    ],
+)
+def test_export_filename_cannot_escape_the_temp_dir(
+    temp_agents_dir: Path, tmp_path: Path, monkeypatch, agent_name: str, expected_filename: str
+):
+    """A traversal-shaped agent name must not steer the archive out of its temp dir.
+
+    The name is attacker-controllable: ``import_agent`` preserves it verbatim
+    from a downloaded agent's ``agent.yml``. With the filename derived from the
+    raw name, ``zip_path.parent`` was NOT the ``mkdtemp()`` directory — for
+    ``../../evil`` it resolved two levels up — so the cleanup
+    ``shutil.rmtree(zip_path.parent)`` deleted an unrelated tree, and the zip
+    itself was written outside the temp dir.
+
+    ``tempfile.tempdir`` is redirected into a sandbox so that a regression
+    destroys only this test's scratch space, and ``precious`` proves the blast
+    radius concretely rather than by inspecting the path alone.
+    """
+    import tempfile
+
+    sandbox = tmp_path / "sandbox"
+    scratch = sandbox / "tmp"
+    scratch.mkdir(parents=True)
+    precious = sandbox / "precious"
+    precious.mkdir()
+    (precious / "keepme.txt").write_text("do not delete", encoding="utf-8")
+    monkeypatch.setattr(tempfile, "tempdir", str(scratch))
+
+    registry = AgentRegistry(temp_agents_dir)
+    agent = _export_fixture_agent(registry, agent_name)
+
+    with registry.exported_agent_archive(agent.id) as (zip_path, filename):
+        # The filename is a plain basename, so it can never redirect the write.
+        assert filename == expected_filename
+        assert "/" not in filename and "\\" not in filename
+        assert zip_path.name == filename
+        # The archive lives inside the sandbox's temp root, not above it.
+        assert scratch in zip_path.resolve().parents
+        assert zip_path.exists()
+        temp_dir = zip_path.parent
+
+    # Cleanup removed the directory the export created...
+    assert not temp_dir.exists()
+    # ...and nothing outside it.
+    assert precious.is_dir()
+    assert (precious / "keepme.txt").read_text(encoding="utf-8") == "do not delete"
+    assert scratch.is_dir()
+
+
+def test_export_cleanup_survives_a_filename_sanitisation_regression(
+    temp_agents_dir: Path, tmp_path: Path, monkeypatch
+):
+    """Cleanup targets the directory export CREATED, not one derived from the name.
+
+    Belt and braces beside :func:`_export_archive_filename`: this simulates a
+    future regression that lets a traversal-shaped name reach the archive path
+    again, and pins that cleanup still removes only the ``mkdtemp()``
+    directory. With cleanup deriving its target from ``zip_path.parent`` this
+    deletes ``sibling`` instead; with the captured directory it cannot.
+    """
+    import tempfile
+
+    from local_operator import agents as agents_module
+
+    sandbox = tmp_path / "sandbox"
+    scratch = sandbox / "tmp"
+    scratch.mkdir(parents=True)
+    sibling = sandbox / "sibling"
+    sibling.mkdir()
+    (sibling / "keepme.txt").write_text("do not delete", encoding="utf-8")
+    monkeypatch.setattr(tempfile, "tempdir", str(scratch))
+
+    # Re-introduce the unsafe filename. Two levels up from the mkdtemp dir
+    # (``sandbox/tmp/tmpXXXX``) resolves to ``sandbox``, so a cleanup deriving
+    # its target from ``zip_path.parent`` would delete ``sibling`` with it.
+    monkeypatch.setattr(
+        agents_module, "_export_archive_filename", lambda _name: "../../regressed.zip"
+    )
+
+    # Record the directory the export actually creates, so the assertion pins
+    # that exact directory rather than inferring one from the archive path.
+    created_dirs: list[Path] = []
+    real_mkdtemp = tempfile.mkdtemp
+
+    def _recording_mkdtemp(*args, **kwargs):
+        made = real_mkdtemp(*args, **kwargs)
+        created_dirs.append(Path(made))
+        return made
+
+    monkeypatch.setattr(tempfile, "mkdtemp", _recording_mkdtemp)
+
+    registry = AgentRegistry(temp_agents_dir)
+    agent = _export_fixture_agent(registry, "RepointedName")
+
+    with registry.exported_agent_archive(agent.id) as (zip_path, _):
+        # The simulated regression really did place the archive outside the
+        # temp dir — otherwise this test would prove nothing.
+        assert zip_path.exists()
+        assert created_dirs
+        assert zip_path.resolve().parent != created_dirs[-1]
+
+    # The temp dir the export created is gone...
+    assert not created_dirs[-1].exists()
+    # ...and the unrelated sibling tree is untouched.
+    assert sibling.is_dir()
+    assert (sibling / "keepme.txt").read_text(encoding="utf-8") == "do not delete"
+    assert scratch.is_dir()
 
 
 def test_export_strips_conversation_history(temp_agents_dir: Path):
@@ -1709,21 +1896,23 @@ def test_export_strips_conversation_history(temp_agents_dir: Path):
             agent_system_prompt="You review Python.",
         ),
     )
-    zip_path, _ = registry.export_agent(agent.id)
-    with zipfile.ZipFile(zip_path, "r") as archive:
-        names = set(archive.namelist())
-    assert "agent.yml" in names
-    assert "system_prompt.md" in names
-    assert "conversation.jsonl" not in names
-    assert "execution_history.jsonl" not in names
-    assert "learnings.jsonl" not in names
-    assert "schedules.jsonl" not in names
-    assert "context.pkl" not in names
-    assert "current_plan.txt" not in names
-    assert "instruction_details.txt" not in names
-    with zipfile.ZipFile(zip_path, "r") as archive:
-        dumped = yaml.safe_load(archive.read("agent.yml"))
-    assert dumped["last_message"] == ""
+    # The archive is read entirely within this block, so the context manager
+    # owns its temp dir — the bare export_agent() left one behind per run.
+    with registry.exported_agent_archive(agent.id) as (zip_path, _):
+        with zipfile.ZipFile(zip_path, "r") as archive:
+            names = set(archive.namelist())
+        assert "agent.yml" in names
+        assert "system_prompt.md" in names
+        assert "conversation.jsonl" not in names
+        assert "execution_history.jsonl" not in names
+        assert "learnings.jsonl" not in names
+        assert "schedules.jsonl" not in names
+        assert "context.pkl" not in names
+        assert "current_plan.txt" not in names
+        assert "instruction_details.txt" not in names
+        with zipfile.ZipFile(zip_path, "r") as archive:
+            dumped = yaml.safe_load(archive.read("agent.yml"))
+        assert dumped["last_message"] == ""
 
 
 def test_import_strips_history_from_an_older_archive(temp_agents_dir: Path):
@@ -1853,20 +2042,23 @@ def test_upload_agent_to_radient_new_and_overwrite(tmp_path: Path):
             current_working_directory=None,
         )
     )
-    zip_path, _ = registry.export_agent(agent.id)
-
-    radient_client = MagicMock()
-    # New agent upload
-    radient_client.upload_agent_to_marketplace.return_value = "market-id"
-    result = registry.upload_agent_to_radient(radient_client, None, zip_path)
-    assert result == "market-id"
-    radient_client.upload_agent_to_marketplace.assert_called_once_with(zip_path)
-    # Overwrite agent upload
-    radient_client.reset_mock()
-    radient_client.overwrite_agent_in_marketplace.return_value = None
-    result = registry.upload_agent_to_radient(radient_client, "existing-id", zip_path)
-    assert result is None
-    radient_client.overwrite_agent_in_marketplace.assert_called_once_with("existing-id", zip_path)
+    # Mirrors the production upload callers, which hold the archive only for
+    # the duration of the upload and let the context manager reclaim it.
+    with registry.exported_agent_archive(agent.id) as (zip_path, _):
+        radient_client = MagicMock()
+        # New agent upload
+        radient_client.upload_agent_to_marketplace.return_value = "market-id"
+        result = registry.upload_agent_to_radient(radient_client, None, zip_path)
+        assert result == "market-id"
+        radient_client.upload_agent_to_marketplace.assert_called_once_with(zip_path)
+        # Overwrite agent upload
+        radient_client.reset_mock()
+        radient_client.overwrite_agent_in_marketplace.return_value = None
+        result = registry.upload_agent_to_radient(radient_client, "existing-id", zip_path)
+        assert result is None
+        radient_client.overwrite_agent_in_marketplace.assert_called_once_with(
+            "existing-id", zip_path
+        )
 
 
 def test_download_agent_from_radient(tmp_path: Path):
@@ -1898,8 +2090,9 @@ def test_download_agent_from_radient(tmp_path: Path):
             current_working_directory=None,
         )
     )
-    zip_path, _ = registry.export_agent(agent.id)
-    zip_bytes = zip_path.read_bytes()
+    # Only the BYTES outlive the block, so the archive itself is reclaimed.
+    with registry.exported_agent_archive(agent.id) as (zip_path, _):
+        zip_bytes = zip_path.read_bytes()
     # Mock radient_client
     radient_client = MagicMock()
 

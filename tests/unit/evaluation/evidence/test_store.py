@@ -1003,6 +1003,16 @@ def test_closed_writer_fork_does_not_close_reused_descriptors(tmp_path: Path) ->
 
 
 def test_nested_at_fork_close_does_not_deadlock(tmp_path: Path) -> None:
+    # The bundle root lives in a TemporaryDirectory, not a bare mkdtemp: this
+    # script runs as a subprocess, so pytest's `tmp_path` never sees the
+    # directory and nothing else would ever remove it. Leaked evidence bundles
+    # are unbounded on disk (see the 64 MiB sibling test below), so the
+    # subprocess itself has to own the cleanup.
+    #
+    # The forked child deliberately leaves via `os._exit(0)`, which skips the
+    # context manager's __exit__ — that is required, not incidental: the child
+    # shares the parent's path and must not unlink a directory the parent is
+    # still using.
     script = r"""
 import os, sys, tempfile
 from pathlib import Path
@@ -1010,14 +1020,15 @@ sys.path.insert(0, sys.argv[1])
 from local_operator.evaluation.evidence.store import EvidenceWriter
 from local_operator.evaluation.receipts import RedactionSet
 from tests.unit.evaluation.evidence.test_models import manifest
-root=Path(tempfile.mkdtemp())/'bundle'
-first=EvidenceWriter.create(root,manifest(),RedactionSet.from_resolved_values(()))
-def nested(): first.close()
-os.register_at_fork(before=nested)
-pid=os.fork()
-if pid == 0: os._exit(0)
-_, status=os.waitpid(pid,0)
-print(os.waitstatus_to_exitcode(status))
+with tempfile.TemporaryDirectory() as tmp:
+ root=Path(tmp)/'bundle'
+ first=EvidenceWriter.create(root,manifest(),RedactionSet.from_resolved_values(()))
+ def nested(): first.close()
+ os.register_at_fork(before=nested)
+ pid=os.fork()
+ if pid == 0: os._exit(0)
+ _, status=os.waitpid(pid,0)
+ print(os.waitstatus_to_exitcode(status))
 """
     import subprocess
     import sys
@@ -1056,22 +1067,30 @@ def test_streaming_redaction_memory_is_bounded_for_64mib(tmp_path: Path) -> None
 
 
 def test_streaming_redaction_rss_delta_is_bounded_in_fresh_process() -> None:
+    # This test publishes a 64 MiB artifact, so a bare `mkdtemp()` here leaked
+    # 64 MiB of disk per run — the single largest contributor to a measured
+    # ~30 GB of abandoned bundles. The TemporaryDirectory keeps the RSS
+    # measurement intact (the write still happens) while guaranteeing removal.
+    #
+    # `before` is sampled inside the context manager's setup rather than
+    # before it so the baseline still excludes the writer's own allocations.
     script = r"""
 import resource, tempfile
 from pathlib import Path
 from local_operator.evaluation.evidence.store import EvidenceWriter
 from local_operator.evaluation.receipts import RedactionSet
 from tests.unit.evaluation.evidence.test_models import manifest
-before=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-root=Path(tempfile.mkdtemp())/'bundle'
-chunk=b'x'*(1024*1024)
-redactions=RedactionSet.from_resolved_values(('very-secret-value',))
-with EvidenceWriter.create(root,manifest(),redactions) as writer:
- writer.publish_artifact(
-  (chunk for _ in range(64)),media_type='application/octet-stream'
- )
-after=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-print(after-before)
+with tempfile.TemporaryDirectory() as tmp:
+ before=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+ root=Path(tmp)/'bundle'
+ chunk=b'x'*(1024*1024)
+ redactions=RedactionSet.from_resolved_values(('very-secret-value',))
+ with EvidenceWriter.create(root,manifest(),redactions) as writer:
+  writer.publish_artifact(
+   (chunk for _ in range(64)),media_type='application/octet-stream'
+  )
+ after=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+ print(after-before)
 """
     import subprocess
     import sys

@@ -100,8 +100,19 @@ async def test_create_transcription_no_api_key(test_app_client, temp_audio_file)
 
 
 @pytest.mark.asyncio
-async def test_create_transcription_file_save_failure(test_app_client):
-    """Test transcription creation when saving the uploaded file fails."""
+async def test_create_transcription_file_save_failure(test_app_client, tmp_path, monkeypatch):
+    """Test transcription creation when saving the uploaded file fails.
+
+    Also pins the leak fix: the temp directory used to be created *inside* the
+    try, so a write failure raised straight past the ``finally: rmtree`` (which
+    sits on a later try) and stranded a directory on every failed upload.
+    ``tempfile.tempdir`` is redirected so the assertion sees only directories
+    this test caused.
+    """
+    scratch = tmp_path / "tmp"
+    scratch.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(scratch))
+
     mock_radient_client = MagicMock()
     mock_radient_client.api_key = "fake_api_key"
 
@@ -126,6 +137,8 @@ async def test_create_transcription_file_save_failure(test_app_client):
 
     assert response.status_code == 500
     assert "Failed to save uploaded audio file" in response.json()["detail"]
+    # The failed upload must leave nothing behind.
+    assert list(scratch.iterdir()) == []
 
 
 @pytest.mark.asyncio

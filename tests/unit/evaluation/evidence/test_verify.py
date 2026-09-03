@@ -780,6 +780,10 @@ def test_sparse_oversized_journal_and_artifact_are_bounded(tmp_path: Path) -> No
     import subprocess
     import sys
 
+    # Runs as a subprocess, so pytest's `tmp_path` cannot reclaim the bundle:
+    # the script owns cleanup via TemporaryDirectory. The files here are
+    # sparse (`truncate` to 128 MiB / 256 MiB without writing), so the leak was
+    # small on disk but still a directory per run that nothing removed.
     script = r"""
 import json, os, resource, tempfile
 from pathlib import Path
@@ -787,26 +791,27 @@ from local_operator.evaluation.evidence.store import EvidenceWriter
 from local_operator.evaluation.evidence.verify import verify_bundle
 from local_operator.evaluation.receipts import RedactionSet
 from tests.unit.evaluation.evidence.test_models import manifest
-root=Path(tempfile.mkdtemp())/'bundle'
-with EvidenceWriter.create(root,manifest(),RedactionSet.from_resolved_values(())):
- pass
-with open(root/'events.jsonl','wb') as stream:
- stream.truncate(128*1024*1024)
-before=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-journal=verify_bundle(root)
-after_journal=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-(root/'events.jsonl').write_bytes(b'')
-digest='f'*64
-with open(root/'artifacts'/digest,'wb') as stream:
- stream.truncate(256*1024*1024+1)
-artifact=verify_bundle(root)
-after_artifact=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-scale=1 if __import__('sys').platform=='darwin' else 1024
-print(json.dumps({
- 'journal':[i.code for i in journal.issues],
- 'artifact':[i.code for i in artifact.issues],
- 'rss_delta':(max(after_journal,after_artifact)-before)*scale,
-}))
+with tempfile.TemporaryDirectory() as tmp:
+ root=Path(tmp)/'bundle'
+ with EvidenceWriter.create(root,manifest(),RedactionSet.from_resolved_values(())):
+  pass
+ with open(root/'events.jsonl','wb') as stream:
+  stream.truncate(128*1024*1024)
+ before=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+ journal=verify_bundle(root)
+ after_journal=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+ (root/'events.jsonl').write_bytes(b'')
+ digest='f'*64
+ with open(root/'artifacts'/digest,'wb') as stream:
+  stream.truncate(256*1024*1024+1)
+ artifact=verify_bundle(root)
+ after_artifact=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+ scale=1 if __import__('sys').platform=='darwin' else 1024
+ print(json.dumps({
+  'journal':[i.code for i in journal.issues],
+  'artifact':[i.code for i in artifact.issues],
+  'rss_delta':(max(after_journal,after_artifact)-before)*scale,
+ }))
 """
     result = subprocess.run(
         [sys.executable, "-c", script],
