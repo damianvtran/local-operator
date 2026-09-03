@@ -460,6 +460,13 @@ def _effort_ladder(value: object) -> tuple[str, ...] | None:
     descending today: a reverse is a bet on the wire's ordering and a sort is
     not.
 
+    DEDUPED on the way through, via the ``set`` the sort reads from. A listing
+    that repeats a rung (or states ``High`` beside ``high``, since the words are
+    lowercased first) would otherwise put a duplicate on the ladder, and the
+    ladder is a CYCLE: ``next_effort`` steps by index, so a repeated rung is a
+    ``shift+tab`` that appears not to move. Collapsing here keeps that a
+    property of ingest rather than something each reader has to defend against.
+
     Words outside ``EFFORT_ORDER`` are DROPPED rather than kept or passed
     through. The nearest-rung clamp indexes ``EFFORT_ORDER`` for every rung of
     the ladder it is clamping toward, and an unknown word made that raise —

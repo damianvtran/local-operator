@@ -298,25 +298,39 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
     # The consequence to accept is that this can NARROW: `openai/gpt-5.4-pro`
     # stops offering `none`/`low` on the OpenRouter route, because the router
     # says those rungs 400 there. A rung we cannot send is not a rung.
-    listing_levels, listing_default = _listing_effort(canonical, model_name)
+    listing_levels = _listing_effort(canonical, model_name)
     if listing_levels:
         effort_levels = listing_levels
-        # Seeded from the listing so the band names a real level from the first
-        # frame rather than `auto` — stating the level in force is the reported
-        # bug. Weaker ground than the Anthropic seed below, and deliberately so:
-        # Anthropic DOCUMENTS `high` and omission as the same request, whereas
-        # OpenRouter's `default_effort` only describes what happens when you
-        # send nothing, so sending it explicitly *should* be a no-op but is an
-        # inference rather than a guarantee. It is being validated live: ~99
-        # models begin sending `reasoning_effort` where the key was previously
-        # omitted, 41 of them `mandatory: true` and 25 seeded at the TOP rung of
-        # their own ladder (`z-ai/glm-5.3` at `max`, the `qwen3.8-*` family at
-        # `xhigh`), which raises spend and latency on the first turn with no
-        # keystroke. If that inference turns out to be wrong, the fallback is to
-        # keep this ladder and seed `None` instead: the band then reads `auto`,
-        # the key is omitted, and `shift+tab` and `/effort` still work — the
-        # narrow fix, without the wire change.
-        reasoning_effort = listing_default
+        # The ladder is taken; the listing's own `default_effort` is NOT seeded,
+        # and that asymmetry is the measured result rather than caution.
+        #
+        # Seeding it would have let the band name a real level from the first
+        # frame instead of `auto`, and the inference that made it look free was
+        # that OpenRouter's `default_effort` merely describes what happens when
+        # you send nothing — so sending it explicitly should be a no-op. QA put
+        # that on the wire and it is FALSE: `z-ai/glm-5.3` seeded at `max`
+        # returned 2.16x the reasoning tokens of omitting the key (medians 200
+        # vs 92.5, n=12 per arm, distributions non-overlapping — seeded min 165
+        # above omitted max 127). It is also model-specific — `gemini-3.8-flash`
+        # measured 0.93x, a genuine no-op — so no general equivalence can be
+        # relied on, which is what a seeding rule would need.
+        #
+        # The second consequence is the one that decides it. If omission yields
+        # materially LESS reasoning than sending the stated default, then
+        # `default_effort` does not describe what omission actually does, so
+        # painting it on the band as the level in force would be a status band
+        # asserting a depth that is not in force — the one thing that segment
+        # must never do.
+        #
+        # Leaving this unset costs the band a word and nothing else: `auto` is
+        # an already-defined rung in this vocabulary (every OpenAI reasoning
+        # model boots that way by design), and `shift+tab` and `/effort` then
+        # cycle the listing's ladder and show the chosen rung. The reported bug
+        # — no effort segment at all on `openrouter/google/gemini-3.8-flash` —
+        # is fixed by the LADDER, which is what this branch is for. The wire is
+        # left exactly as it is today: no model starts sending a
+        # `reasoning_effort` it was not already sending.
+        reasoning_effort = None
     else:
         # No listing, or a listing that said nothing about efforts: the
         # hand-transcribed table, i.e. exactly today's behaviour. This is the
@@ -327,7 +341,10 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
         # `effort: "high"` as exactly equivalent to omitting the parameter, so
         # the seed changes no behaviour and only stops the band understating
         # what is already in force. OpenAI, whose default varies per snapshot,
-        # is seeded with nothing for the same reason.
+        # is seeded with nothing for the same reason. That DOCUMENTED
+        # equivalence is exactly what the listing branch above lacks and could
+        # not establish by measurement, which is why one seeds and the other
+        # does not.
         effort_levels = supported_efforts(model_name)
         reasoning_effort = default_effort(model_name)
     # A model with an effort ladder reasons BY DEFINITION, whatever its name
@@ -605,7 +622,7 @@ def _info_from_listing(
         if model.id != model_name:
             continue
         try:
-            return _map_entry(model, template)
+            mapped = _map_entry(model, template)
         except (TypeError, ValueError, OverflowError) as exc:
             # Validation is NOT a guarantee that the mapping will succeed: the
             # listing schemas set ``extra="allow"``, so a payload whose extra
@@ -623,6 +640,22 @@ def _info_from_listing(
             # Letting any of them escape fails session start outright — the
             # exact outcome this module exists to prevent.
             raise _UnmappableEntry(f"{source} entry for {model_name} did not map: {exc}") from exc
+        # Warm the effort memo HERE too, not only in `_info_from_discovery`.
+        # `configure_model` has two branches and this is the other one: passing
+        # a `model_info_client` routes through this function instead, which
+        # parses its own payload and never touched the memo — so
+        # `build_model_spec` found it cold and fell back to `model.effort`'s
+        # table. The same model then resolved a DIFFERENT ladder depending on
+        # which constructor the caller used, which is precisely the
+        # two-derivations-disagree failure `resolve_effort_in` exists to
+        # eliminate, reintroduced one layer up. This branch is live:
+        # `server/routes/speech.py` builds a client whenever an OpenRouter key
+        # is set, so on that path the reported bug was simply not fixed.
+        #
+        # `source` is the canonical provider id ("openrouter"/"radient"), which
+        # is the key `build_model_spec` reads under.
+        _remember_listing_entry_effort(source, model_name, model)
+        return mapped
     raise ValueError(f"Model not found from {source} models API: {model_name}")
 
 
@@ -674,6 +707,36 @@ def _map_entry(model: Any, template: ModelInfo) -> ModelInfo:
             float(cache_write) * 1_000_000 if cache_write is not None else info.input_price
         )
     return info
+
+
+def _remember_listing_entry_effort(provider: str, model_id: str, entry: BaseModel) -> None:
+    """Warm the effort memo from a RAW listing entry, as ``_info_from_listing`` sees it.
+
+    The sibling :func:`_remember_listing_effort` takes a ``DiscoveredModel``,
+    which discovery has already parsed. This path never builds one — it reads
+    the ``list_models()`` payload directly — so the ladder has to be derived
+    here instead.
+
+    It is derived through ``discovery._effort_ladder``, NOT by a second reading
+    of the same JSON. That function owns the ingest rules (ascending sort,
+    unknown words dropped, an entirely-unknown list reported as unstated rather
+    than as a denial), and a parallel reading of the field is exactly how the
+    two constructors came to disagree in the first place. One parser, two
+    callers.
+
+    Never raises: this decorates a model-info resolution that must not fail over
+    a display dial, and a cold memo is a correct fallback to ``model.effort``'s
+    table rather than an error.
+    """
+    try:
+        from local_operator.model.discovery import _effort_ladder
+
+        reasoning = _extra_mapping(entry, "reasoning")
+        ladder = _effort_ladder(reasoning.get("supported_efforts"))
+        if ladder:
+            _store_listing_effort(provider, model_id, ladder)
+    except Exception as exc:  # noqa: BLE001 — a display dial is never worth a failed start
+        logger.debug("could not read %s effort ladder for %s: %s", provider, model_id, exc)
 
 
 def get_model_info_from_openrouter(client: ModelListingClient, model_name: str) -> ModelInfo:
@@ -1495,18 +1558,24 @@ def resolve_model_info_paint(provider: str, model_id: str) -> tuple[ModelInfo, b
 #: out of ``ModelInfo`` is what makes that leak unrepresentable rather than
 #: merely unwritten.
 #:
-#: The value is ``(ladder, default)``. A miss and a listing that said nothing
-#: are the same answer — ``(None, None)`` — because both mean the same thing to
-#: the caller: defer to ``model.effort``'s table.
-_effort_memo: dict[tuple[str, str, int], tuple[tuple[str, ...] | None, str | None]] = {}
+#: The value is the LADDER ALONE. The listing also states a ``default_effort``
+#: and this memo deliberately does not carry it: measured on the wire, sending
+#: that default is NOT equivalent to omitting the key (``z-ai/glm-5.3`` at
+#: ``max`` returned 2.16x the reasoning tokens of omission, n=12, non-overlapping
+#: distributions) and the gap is model-specific, so it describes neither what
+#: omission does nor a level that is in force. ``build_model_spec`` is the only
+#: reader, and keeping the field out of the memo is what makes seeding it
+#: unrepresentable rather than merely not done today — the same discipline the
+#: paragraph above applies to keeping the ladder off ``ModelInfo``.
+_effort_memo: dict[tuple[str, str, int], tuple[str, ...] | None] = {}
 
 
-def _listing_effort(provider: str, model_id: str) -> tuple[tuple[str, ...] | None, str | None]:
+def _listing_effort(provider: str, model_id: str) -> tuple[str, ...] | None:
     """What the provider's listing said this model's effort ladder is.
 
-    ``(None, None)`` when the listing said nothing, when it has not been read in
-    this TTL bucket, or when anything at all goes wrong — every one of which
-    means "the table answers", which is exactly today's behaviour. TOTAL and
+    ``None`` when the listing said nothing, when it has not been read in this
+    TTL bucket, or when anything at all goes wrong — every one of which means
+    "the table answers", which is exactly today's behaviour. TOTAL and
     NON-RAISING by contract: this sits on the session-start path and
     ``build_model_spec`` is reachable from a TUI repaint, so a failure here must
     cost a fallback, never a frame or a start.
@@ -1519,26 +1588,54 @@ def _listing_effort(provider: str, model_id: str) -> tuple[tuple[str, ...] | Non
     """
     try:
         bucket = int(time.time() // DEFAULT_TTL_S)
-        return _effort_memo.get((provider, model_id, bucket), (None, None))
+        return _effort_memo.get((provider, model_id, bucket))
     except Exception:  # noqa: BLE001 — a display dial is never worth a failed start
-        return (None, None)
+        return None
+
+
+#: Hard ceiling on :data:`_effort_memo`. Bucket eviction alone does not bound a
+#: dict that is written once per model per resolve: a long-lived process (the
+#: server, a scheduler worker) resolving hundreds of models inside ONE TTL
+#: bucket evicts nothing, because every key it holds is current. Entries are
+#: tiny, so this is a leak ceiling rather than a cache-efficiency knob.
+_EFFORT_MEMO_MAX = 64
+
+
+def _store_listing_effort(provider: str, model_id: str, ladder: tuple[str, ...] | None) -> None:
+    """The ONE bounded write into :data:`_effort_memo`.
+
+    Both warmers land here — the discovery path, which has a parsed row, and the
+    ``list_models()`` path, which has only the raw entry — so the ceiling cannot
+    be enforced on one and bypassed by the other.
+
+    Bounded and bucket-evicted: the dict has no TTL of its own, and a long-lived
+    process (the server, a scheduler worker) would otherwise gain one dead entry
+    per model per day for its whole lifetime.
+
+    The bound is ENFORCED, not merely intended. Dropping stale buckets is the
+    cheap half and it does nothing for the case that actually grows — many
+    models resolved inside ONE bucket, where every key is current and the sweep
+    evicts nothing — so once that sweep has run and the dict is still over the
+    ceiling, current-bucket entries are dropped too. They cost a fallback to
+    ``model.effort``'s table on the next read and rewarm on the next resolve,
+    which is the same degradation a cold memo already has.
+    """
+    bucket = int(time.time() // DEFAULT_TTL_S)
+    _effort_memo[(provider, model_id, bucket)] = ladder
+    if len(_effort_memo) > _EFFORT_MEMO_MAX:
+        for key in [key for key in _effort_memo if key[2] != bucket]:
+            del _effort_memo[key]
+        # Insertion order is age order here (a re-remembered key overwrites in
+        # place and keeps its original position, which is fine: it is the same
+        # model in the same bucket, not a newer fact), so trimming from the
+        # front drops the least recently first-seen models.
+        for key in list(_effort_memo)[: len(_effort_memo) - _EFFORT_MEMO_MAX]:
+            del _effort_memo[key]
 
 
 def _remember_listing_effort(provider: str, model_id: str, row: "DiscoveredModel") -> None:
-    """Stash ``row``'s stated ladder for :func:`_listing_effort` to read.
-
-    Bounded and bucket-evicted like ``_paint_memo``: the dict has no TTL of its
-    own, and a long-lived process (the server, a scheduler worker) would
-    otherwise gain one dead entry per model per day for its whole lifetime.
-    """
-    bucket = int(time.time() // DEFAULT_TTL_S)
-    _effort_memo[(provider, model_id, bucket)] = (
-        row.reasoning_efforts,
-        row.reasoning_default_effort,
-    )
-    if len(_effort_memo) > 64:
-        for key in [key for key in _effort_memo if key[2] != bucket]:
-            del _effort_memo[key]
+    """Stash ``row``'s stated ladder for :func:`_listing_effort` to read."""
+    _store_listing_effort(provider, model_id, row.reasoning_efforts)
 
 
 def refresh_model_info_background(provider: str, model_id: str) -> None:

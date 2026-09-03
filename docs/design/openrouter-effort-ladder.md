@@ -4,6 +4,23 @@ Status: proposal for one coder PR. Author: architect (lopdev team), 2026-09-03.
 Cites the working tree at `origin/main` (`ecabd0de`) and a live
 `GET https://openrouter.ai/api/v1/models` pull taken 2026-09-03 (424 rows).
 
+> **AMENDED after round-1 QA (2026-09-03). One decision in this note was
+> REVERSED by measurement: the listing's `default_effort` is NOT seeded.**
+>
+> §5.1 recommended seeding it, resting on the inference that sending
+> OpenRouter's own stated default is equivalent to omitting the key. QA put
+> that on the wire and **disproved it**: `z-ai/glm-5.3` seeded at `max`
+> returned 2.16× the reasoning tokens of omission (medians 200 vs 92.5, n=12
+> per arm, non-overlapping distributions), and the effect is model-specific
+> (`gemini-3.8-flash` measured 0.93×, a genuine no-op), so no general
+> equivalence can be relied on. The documented fallback in §5.1 — *"adopt the
+> listing's ladder but seed `reasoning_effort=None`"* — is what shipped.
+>
+> §5.1 below is rewritten to record that result. **The rest of this note stands
+> as written**: precedence, route scoping, the plumbing, the ordering rules and
+> the `reasoning` flag were all confirmed by review and QA. Anything elsewhere
+> in this document that assumes a seeded listing default is superseded by §5.1.
+
 ---
 
 ## 0. Corrections to the brief
@@ -397,19 +414,30 @@ turn. Defence in depth on a one-line guard is cheap.
 
 ## 5. Q5 — Blast radius
 
-The change makes ~99 more OpenRouter models carry a non-empty ladder **and a
-seeded `reasoning_effort`** (all 153 rows carry a `default_effort`, so every
-gainer gets seeded). Vendors affected: google 21, anthropic 8, meta 7, deepseek
-7, thinkingmachines 6, z-ai 5, qwen 4, x-ai 4, nvidia 4, openai 4, and a tail.
+The change makes **91** more OpenRouter models carry a non-empty ladder.
+Vendors affected: google 21, anthropic 8, meta 7, deepseek 7, thinkingmachines
+6, z-ai 5, qwen 4, x-ai 4, nvidia 4, openai 4, and a tail.
+
+**No model gains a seeded `reasoning_effort`, and the wire is unchanged.** This
+section originally sized the radius as "~99 models begin sending the key"; both
+halves of that are now obsolete. Round-1 review recomputed the true figures
+against the live listing — **137** models would have started sending the key
+(not ~99, which counted ladder-gainers and missed 46 rows where the table
+already gave a ladder but `default_effort()` returned `None`), **60** of them
+`mandatory: true` (not 41) and **29** seeded at their top rung (not 25). Those
+corrected numbers are recorded because they are what the seeding decision was
+re-judged against; §5.1 then removed the seed entirely, so **the wire-key
+radius is now zero**. What remains is the ladder radius: models that had no
+ladder now have one.
 
 | Consumer | Site | Behaviour change | Safe? |
 |---|---|---|---|
-| `_reasoning_effort` | `clients.py:634-652` | **Starts sending `reasoning_effort` on the wire for ~99 models where the key was previously omitted.** | **The main risk — §5.1** |
-| `_effort_label` | `tui/app.py:20308-20339` | Band renders the seeded rung (`medium`, `high`, …) where it rendered `""`. The reported bug, fixed. | Yes |
+| `_reasoning_effort` | `clients.py:634-652` | **No change.** The level starts unset on a listing-derived model, so the key stays omitted until the user picks a rung. §5.1 | Yes — the risk was removed, not accepted |
+| `_effort_label` | `tui/app.py:20308-20339` | Band renders `auto` where it rendered `""` — the segment appears, which is the reported bug, and names the picked rung once one is chosen. | Yes |
 | `next_effort` / shift+tab | `effort.py:216`, `tui/app.py:13448` | Cycling becomes available. Reads the spec, not the table — no second derivation. | Yes |
 | `/effort` | `tui/app.py:13565+`, `:17515+` | Stops saying "not adjustable". | Yes — but §5.2 |
 | `resolve_effort` | `failover.py:1502` | Re-derives from **the table**, not the spec — split brain. §5.3 | **No — must fix** |
-| `map_tier_to_effort` / auto-effort | `effort_classifier.py:107-120`, `configure.py:3509` | Auto-effort begins acting on ~99 more models. Off by default (`values.effort.auto`), so opt-in only. | Yes |
+| `map_tier_to_effort` / auto-effort | `effort_classifier.py:107-120`, `configure.py:3509` | Auto-effort begins acting on 91 more models. Off by default (`values.effort.auto`), so opt-in only. | Yes |
 | `_effort_for` refit | `configure.py:1950-1965` | More models have ladders to re-fit onto; already guards membership. | Yes |
 | `_lower_effort` (empty-truncation retreat) | `harness/loop.py:143-157` | Gains a retreat path on models that previously had none — a strict improvement. | Yes |
 | `effort_ceiling` clamp | `harness/loop.py:896-905`, `configure.py:3534` | Both index the ladder only after `in ladder` checks. | Yes |
@@ -418,52 +446,95 @@ gainer gets seeded). Vendors affected: google 21, anthropic 8, meta 7, deepseek
 | `Session._lowest_effort` | `session/session.py:7303-7308` | **Errand/naming calls now clamp to the bottom rung on ~99 more models.** §5.4 | Mostly — check |
 | `ModelSpec.reasoning` | `configure.py:365` → read only at `tui/app.py:20339` | Display only; one reader in the tree. | Yes |
 
-### 5.1 The named risk: a wire key that was previously omitted
+### 5.1 The named risk: RESOLVED by measurement — the listing default is not seeded
 
-This is the risk the brief asked to have named explicitly, so here it is
-precisely.
+**This section originally recommended seeding the listing's `default_effort`.
+Round-1 QA measured the inference that recommendation rested on and it is
+false. The decision is reversed; what follows is the evidence and the rule.**
 
-`_reasoning_effort` gates on `level in request.model.reasoning_efforts`. Today
-`reasoning_efforts` is `()` for `google/gemini-3.8-flash`, so the key is never
-sent. After this change the ladder is `('low','medium','high')` with a seeded
-default of `medium`, and **`body["reasoning_effort"] = "medium"` goes out on
-every turn** (`clients.py:1173-1183`).
+#### What was proposed, and the inference under it
 
-Why it is *probably* fine: the value comes from the listing's own
-`supported_efforts` for that exact model, all 153 rows advertise
-`reasoning_effort` in `supported_parameters` (0 exceptions), and OpenRouter is
-the party that both publishes the ladder and parses the key. The only measured
-evidence in this repo is narrow and honestly scoped
-(`clients.py:1176-1183`: `gpt-5.4` and `o4-mini` at `low`, 2026-08-11).
+`_reasoning_effort` gates on `level in request.model.reasoning_efforts`. Before
+this change `reasoning_efforts` is `()` for `google/gemini-3.8-flash`, so the
+key is never sent. Seeding the listing default would have made
+`body["reasoning_effort"] = "medium"` go out on every turn
+(`clients.py:1173-1183`), and the argument for it was that this costs nothing:
+OpenRouter's `default_effort` describes what happens when you send nothing, so
+sending it explicitly *should* be a no-op. This note flagged that as "an
+inference, not a documented guarantee" and asked QA to settle it.
 
-Why it still needs QA: **41 of the 99 gainers have `reasoning.mandatory: true`**,
-and 25 are seeded at the **top rung of their own ladder** — including
-`z-ai/glm-5.3` and `~z-ai/glm-latest` seeded at `max`, and four `qwen/qwen3.8-*`
-seeded at `xhigh`. For those models this change does not just make a band
-render: it **materially raises token spend and latency on the very first turn**,
-with no keystroke from the user.
+#### What QA measured
 
-The existing `default_effort` doctrine (`effort.py:158-168`) permits seeding
-"only because the provider says so" — Anthropic documents `high` and omission as
-the same request. **OpenRouter makes no such equivalence claim.** Its
-`default_effort` is a description of what happens if you send nothing, so
-sending it explicitly *should* be a no-op — but that is an inference, not a
-documented guarantee.
+Same prompt, alternating arms, `usage.completion_tokens_details.reasoning_tokens`:
 
-**Recommendation: seed the listing default, and treat this as the PR's primary
-QA target rather than as a design open question.** Seeding is what makes the
-band state a real level instead of `auto`, which is the reported bug. But the
-QA matrix must include: a live request to a mandatory-reasoning gainer seeded at
-`max` (`z-ai/glm-5.3`), a gainer seeded at `medium` (`google/gemini-3.8-flash`),
-and a narrowed row (`openai/gpt-5.4-pro`, where `none`/`low` disappear),
-capturing the actual HTTP status and the response's reasoning-token usage. If
-any of the three 400s, precedence is still right but seeding must degrade to
-`None` for that case.
+```
+z-ai/glm-5.3   ladder ('low','high','max')   seed 'max'   n=12 per arm
+  WITH seed on the wire : median 200.0  mean 227.5  min 165  max 421
+  key OMITTED           : median  92.5  mean  90.9  min  66  max 127
+  explicit 'low'        : median  50.0
+  -> median ratio 2.16x, distributions NON-OVERLAPPING (165 > 127)
 
-A conservative variant, if QA finds trouble: adopt the listing's *ladder* but
-seed `reasoning_effort=None` (band shows `auto`, key omitted, user opts in).
-That fixes shift+tab and `/effort` with zero wire change, and is the fallback I
-would take rather than abandoning precedence.
+google/gemini-3.8-flash  seed 'medium'  ->  351.5 vs 379.5  =  0.93x  (a no-op)
+```
+
+**The inference is false, and it is model-specific.** Sending the stated default
+is a materially different request from omitting the key on `glm-5.3`, and
+genuinely equivalent on `gemini-3.8-flash`. Because the router guarantees no
+equivalence, a seeding rule cannot rely on one holding for any given model —
+and `z-ai/glm-5.3`, `~z-ai/glm-latest`, `~z-ai/glm-flash-latest`,
+`moonshotai/kimi-k3` and `~moonshotai/kimi-latest` were all seeded at `max`.
+
+#### The consequence that actually decides it
+
+The spend is small in absolute terms (~107 extra completion tokens ≈
+$0.00047/turn at glm-5.3's rate). The disqualifying consequence is a
+**correctness** one, and it follows directly from the same measurement:
+
+> If omitting the key produces materially LESS reasoning than sending the
+> stated default, then `default_effort` does not describe what omission
+> actually does.
+
+So painting it on the status band as the current level would be **a status band
+asserting a depth that is not in force** — the one thing that segment must never
+do, and the rule §6 already applies to the `reasoning` word. Seeding fails on
+the band's own terms, not merely on cost.
+
+QA also found the seed reaching rows whose listing says reasoning is off unless
+asked: **15 models with `default_enabled: false` were seeded anyway**, measured
+0 → 141 reasoning tokens. `mistralai/mistral-small-2603` is the sharp case —
+ladder `('none','high')`, `default_effort: high`, so the seed moved it from off
+to maximum. Not seeding resolves that population at the root; no
+`default_enabled` subset check is needed, because nothing is seeded to gate.
+
+#### The rule as shipped
+
+**Listing-derived defaults never seed `reasoning_effort`. Table-derived
+defaults still do.** The asymmetry is not caution, it is the evidence:
+
+- **Table (`_EFFORT_TABLE`) — seeds, unchanged.** Anthropic *documents*
+  `effort: "high"` and omitting the parameter as the same request, so
+  `default_effort()` remains a legitimate seed. This is existing behaviour and
+  must not regress.
+- **Listing — ladder only, level starts unset.** Enforced structurally:
+  `_effort_memo` carries the ladder alone, so there is no listing default in
+  scope at the seeding site to be used by accident.
+
+What this costs and what it keeps: an OpenRouter reasoning model boots showing
+`auto` rather than a level. `auto` is an already-defined rung in this
+vocabulary — every OpenAI reasoning model boots that way by design, and
+`_effort_listing` renders it as a rung of its own — so this invents no new
+display state. The reported bug is fixed by the **ladder**: the segment appears,
+`shift+tab` and `/effort` cycle it, and the picked rung is shown. **The wire is
+unchanged: no model starts sending a `reasoning_effort` it was not already
+sending**, which removes the entire ~137-model blast radius this section was
+written to size.
+
+`/effort auto` stays coherent and reads the same field it always did: on
+Anthropic it restores the documented `high`; on a listing-derived model
+`reasoning_default_effort` is `None`, so the key returns to being omitted and
+the band returns to `auto`. Command and band agree by construction because both
+read `spec.reasoning_default_effort` rather than re-deriving from the model
+name — which is why that field is kept rather than removed.
 
 ### 5.2 `/effort auto` re-derives from the table
 
@@ -474,6 +545,15 @@ whose default came from the listing — so `/effort auto` on
 `google/gemini-3.8-flash` would report "the provider's default (nothing sent)"
 while the band had been showing `medium`. **Both sites must read the seeded
 default off the spec instead**, which argues for carrying it there.
+
+**Still required after the §5.1 reversal, for a reason worth stating.** With no
+listing seed, `reasoning_default_effort` is `None` on a listing-derived model,
+so re-deriving from the table would now be wrong in the *opposite* direction:
+the table would answer `high` for `openrouter/anthropic/claude-opus-4.6` and
+`/effort auto` would restore a level the spec never seeded, putting the band
+back into the state §5.1 rejected — naming a depth that is not in force. Reading
+the one field keeps the command and the band in agreement by construction under
+both rules, which is why the field is kept rather than removed.
 
 Smallest fix: add `reasoning_default_effort: str | None` to `ModelSpec` beside
 `reasoning_efforts` (`types.py:1568`), set once in `build_model_spec` from
@@ -506,7 +586,7 @@ and makes the spec the single source of truth, which is the division
 
 `Session._lowest_effort` (`session.py:7303-7308`) forces the **bottom rung** for
 naming/errand calls, and its docstring reasons carefully about reasoning tokens
-eating `ERRAND_MAX_TOKENS`. With ladders on ~99 more models this now fires much
+eating `ERRAND_MAX_TOKENS`. With ladders on 91 more models this now fires much
 more often — which is the *intended* direction (it prevents exactly the silent
 no-title failure it describes). One thing to check: 19 gainers have ladders
 starting at `none`, so an errand on those will now send
@@ -558,7 +638,7 @@ whose merge rule is `default_enabled is not False`. It should not ride this PR.
 |---|---|
 | `model/discovery.py` | `DiscoveredModel.reasoning_efforts` (3-state) + `reasoning_default_effort`; `_effort_ladder` / `_effort_default` coercers; read in `_row_from_openai_entry`; round-trip in `_rows_from_payload`; pass through `_merge_one`; `LISTING_CAPTURE_VERSIONS` openrouter/radient → 5 + docstring paragraph |
 | `model/effort.py` | Dot/hyphen fix in the three Anthropic arms; `resolve_effort_in(levels, default, requested)` extracted; `resolve_effort` hardened against unrankable rungs |
-| `model/configure.py` | `_listing_effort(provider, model_id)` reading the memoized rows; `build_model_spec` prefers it over the table; **no `_fill_from_row` change** |
+| `model/configure.py` | `_listing_effort(provider, model_id)` reading the memoized rows \u2014 the **ladder alone**, so a listing default cannot be seeded by accident (\u00a75.1); `build_model_spec` prefers it over the table; both constructors warm the memo (the discovery path and `_info_from_listing`, so the ladder is not a function of the caller); one bounded write enforces the memo ceiling; **no `_fill_from_row` change** |
 | `harness/types.py` | `ModelSpec.reasoning_default_effort` |
 | `providers/failover.py` | `spec_for_target` clamps against `target_spec.reasoning_efforts` |
 | `tui/app.py` | Two `/effort auto` sites read the spec's default, not `default_effort(model_id)` |
@@ -570,9 +650,14 @@ Not changed, deliberately: `ModelInfo`, `_fill_from_row`, `prices.py`,
 
 ## 8. Risks a reviewer must check
 
-1. **The wire key.** ~99 models start sending `reasoning_effort` where it was
-   omitted; 41 are `mandatory: true` and 25 are seeded at their top rung
-   (`max`/`xhigh`). Live requests required, not a green suite. §5.1
+1. **The wire key. — RESOLVED in round 1; the risk was removed, not accepted.**
+   QA measured that sending the listing's stated default is not equivalent to
+   omitting it (`z-ai/glm-5.3` at `max`, 2.16× the reasoning tokens, n=12,
+   non-overlapping), so §5.1 no longer seeds it. **No model starts sending
+   `reasoning_effort`.** What a re-reviewer should now confirm is the negative:
+   that a listing-derived model boots with `reasoning_effort=None` and the key
+   absent from the body, and that the TABLE-derived Anthropic seed (`high`,
+   documented as identical to omission) still survives. §5.1
 2. **The `_fill_from_row` boundary.** Confirm no path lets the OpenRouter
    ladder reach a model resolved through a *direct* provider via
    `OPENROUTER_NAMESPACE` (`prices.py:191`). This is the leak that would

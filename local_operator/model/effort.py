@@ -243,23 +243,36 @@ def resolve_effort_in(
     (``discovery._effort_ladder``) already drops unknown words before a listing
     ladder reaches a spec, so this is defence in depth on a public function
     whose ladder can also arrive from a caller we do not control. A ladder with
-    NO rankable member has nothing to clamp toward, so the default answers.
+    NO rankable member has nothing to clamp toward, so the default answers — but
+    only if the default is ITSELF on the ladder.
+
+    That membership check is the contract of the whole function: every return
+    here is a rung this target accepts, and ``default`` is the CALLER's, with
+    nothing upstream tying it to ``levels``. ``resolve_effort_in(('turbo',
+    'warp'), 'high', 'medium')`` would otherwise answer ``high``, a rung not on
+    the ladder it was asked to clamp into. Unreachable through the in-tree
+    callers today — ingest filtering means a spec-borne ladder is always
+    rankable, and the wire client re-checks membership — but a public helper
+    documented to take ladders from a caller we do not control should not hand
+    back a level the ladder denies. ``None`` (send nothing) is the honest answer
+    when the default is off-ladder.
     """
     if not levels:
         return None
     if not requested:
-        return default
+        return default if default in levels else None
     wanted = requested.lower()
     if wanted in levels:
         return wanted
     if wanted not in EFFORT_ORDER:
         # Not a level at all (stale state, a hand-edited config). Nothing to
-        # clamp toward, so the model's own default is the only honest answer.
-        return default
+        # clamp toward, so the model's own default is the only honest answer —
+        # when it is a rung this ladder actually offers.
+        return default if default in levels else None
     rank = EFFORT_ORDER.index(wanted)
     rankable = [name for name in levels if name in EFFORT_ORDER]
     if not rankable:
-        return default
+        return default if default in levels else None
     return min(
         rankable,
         key=lambda name: (abs(EFFORT_ORDER.index(name) - rank), EFFORT_ORDER.index(name)),
