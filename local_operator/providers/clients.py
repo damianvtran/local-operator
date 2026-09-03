@@ -649,7 +649,7 @@ def _sampling_params(request: ChatRequest, *, top_p_key: str = "top_p") -> dict[
 
 
 #: Multiplier applied to a LOCAL token estimate before it is compared against a
-#: provider-scale window, keyed on the provider family.
+#: provider-scale window.
 #:
 #: ``compaction/tokens.py`` is explicit that its numbers are "a RULER OF ITS OWN,
 #: never a prediction of the bill": it counts with ``cl100k_base``, which is
@@ -658,35 +658,71 @@ def _sampling_params(request: ChatRequest, *, top_p_key: str = "top_p") -> dict[
 #: subtracting a raw local estimate from it mixes two rulers — the exact class of
 #: bug that module records as having already shipped twice.
 #:
-#: Values come from this repo's own fitted measurement,
-#: ``docs/evidence/compaction-ruler/slope_fit.txt``, using the per-request
-#: ``ratio p50`` column (the honest per-request figure) rather than the
-#: regression slope, then rounded UP to the next quarter:
+#: **This scaling is a safety margin, not a prediction, and it is deliberately
+#: confined to sizing the ASK.** Two independent measurements of the same
+#: Anthropic ratio disagree by a lot: ``slope_fit.txt`` fits a real session
+#: transcript (tool calls, images, cache scaffolding) at p50 1.82-1.96, while QA
+#: measured plain conversational text live at 1.21-1.34. Both are probably right
+#: about their own content, which is the point — a single number cannot predict
+#: this, so it is not asked to. It is rounded UP to 2.0 for the Claude family so
+#: the ask stays admissible on the expensive end, and the cost of being wrong on
+#: the cheap end is bounded output headroom near the window and nothing below it.
+#: Note also that ``ratio p50`` is a median: half the observed requests exceed it
+#: by construction, which is another reason to round up rather than to treat the
+#: figure as a forecast.
+#:
+#: What the scaling must NEVER do is decide a refusal — see
+#: :func:`_estimated_prompt_tokens`, which returns the unscaled measurement
+#: separately for exactly that reason.
+#:
+#: Values, from ``docs/evidence/compaction-ruler/slope_fit.txt`` rounded up:
 #:
 #: =========================  =========  ======
 #: model                      ratio p50  used
 #: =========================  =========  ======
 #: ``claude-opus-4-8``             1.96    2.00
 #: ``claude-opus-5``               1.82    2.00
-#: ``gpt-5.6-sol``                 1.15    1.25
-#: ``glm-5.3``                     1.06    1.25
+#: ``gpt-5.6-sol``                 1.15    (default)
+#: ``glm-5.3``                     1.06    (default)
 #: =========================  =========  ======
-#:
-#: A single global 2.0 was the first attempt and is wrong: it refuses an
-#: OpenAI-family request at ~60% of window that fits comfortably, because that
-#: family bills ~1.15x rather than ~1.9x. The asymmetry within a family is still
-#: deliberate — over-stating costs output headroom only once a request is near
-#: the window, while under-stating re-opens the HTTP 400 this clamp prevents.
-#:
-#: Applied ONLY to the local fallback: a provider-reported count is already on
-#: the right ruler and is used unscaled.
-_PROVIDER_ESTIMATE_SLOPE: dict[str, float] = {"anthropic": 2.0}
+#: Keyed on a marker found in the MODEL ID, not on the route that serves it.
+#: The ratio is a property of the model's tokenizer, and an earlier revision
+#: keyed it on ``ModelSpec.provider`` — the registry hosting id — so every
+#: aggregator-served Claude (``openrouter``, ``radient``, both real registry ids)
+#: silently took the low default and re-opened the original HTTP 400 on the very
+#: provider this bug was reported against (review R9).
+_MODEL_ESTIMATE_SLOPE: tuple[tuple[str, float], ...] = (("claude", 2.0),)
 
-#: Families with no measured entry above. 1.25 covers the OpenAI/GLM cluster
-#: (1.06-1.15 measured) with headroom; an unmeasured provider is more likely to
-#: resemble that cluster than Anthropic's outlier, and the ``MIN_OUTPUT_TOKENS``
-#: refusal below is what catches a family that turns out to be worse.
-DEFAULT_ESTIMATE_SLOPE = 1.25
+#: Families with no measured entry above.
+#:
+#: 1.75, NOT the 1.25 an earlier revision used. 1.25 was drawn from the two
+#: measured non-Anthropic families (1.06-1.15) and treated as a floor for
+#: everything unmeasured, which inverts the risk: over-estimating an unknown
+#: family costs output headroom, while under-estimating it re-opens the 400 the
+#: clamp exists to prevent, and the ``MIN_OUTPUT_TOKENS`` refusal cannot catch
+#: that because it fires on over-estimation. ``slope_fit.txt`` has no entry for
+#: xai, kimi, google, mistral, deepseek, alibaba or ollama, and its
+#: unattributed ``None/None`` rows sit at p50 **1.78** — evidence that an
+#: unidentified model behaves nothing like the cheap end of the range. 1.75
+#: covers that population; a family measured to be cheaper earns an entry above.
+DEFAULT_ESTIMATE_SLOPE = 1.75
+
+
+def _estimate_slope(model: ModelSpec) -> float:
+    """Local-estimate-to-provider ratio for ``model``, by model family.
+
+    Matches on the model id so an aggregator prefix does not hide the family:
+    ``anthropic/claude-sonnet-4.5`` served through OpenRouter is the same
+    tokenizer as ``claude-sonnet-4-5`` served directly, and must get the same
+    number. Unknown families take :data:`DEFAULT_ESTIMATE_SLOPE`, which is
+    deliberately nearer the expensive end — see its rationale.
+    """
+    model_id = model.model_id.lower()
+    for marker, slope in _MODEL_ESTIMATE_SLOPE:
+        if marker in model_id:
+            return slope
+    return DEFAULT_ESTIMATE_SLOPE
+
 
 #: Characters per token for the system-block and tool-schema term, matching the
 #: ratio ``compaction/tokens.py`` uses when tiktoken is absent. Deliberately a
@@ -748,10 +784,16 @@ def _effective_max_tokens(request: ChatRequest) -> int:
 
     1. ``request.context_tokens_hint`` — the provider's OWN count from the
        session's previous call. It is on the right ruler by construction and is
-       used unscaled, off only by the one turn appended since.
-    2. :func:`estimate_messages_tokens` scaled by
-       :data:`LOCAL_ESTIMATE_PROVIDER_SLOPE`, when no hint exists (a session's
-       first call, a fork, a one-shot errand).
+       used unscaled and WHOLE: it already covers the system blocks and tool
+       schemas, because ``Usage.context_tokens`` is normalized in this same file
+       as ``input + cache_read + cache_write``, i.e. the entire prompt the
+       provider read. Adding a locally-estimated prefix on top of it double-counts
+       (~21.8k phantom tokens with this repo's default tool set), which is review
+       finding R7.
+    2. :func:`estimate_messages_tokens` scaled by the model family's measured
+       ratio, when no hint exists (a session's first call, a fork, a one-shot
+       errand). Only this branch adds the system/tool term, because only here is
+       the term genuinely missing.
 
     An earlier revision used :func:`messages_tokens_upper_bound` on the argument
     that over-estimating is "the safe direction". That reasoning was wrong and is
@@ -800,61 +842,119 @@ def _effective_max_tokens(request: ChatRequest) -> int:
         # would invent a limit from a number that means "no data".
         return requested
 
-    prompt = _estimated_prompt_tokens(request)
+    prompt, measured_prompt = _estimated_prompt_tokens(request)
     available = window - prompt - OUTPUT_CLAMP_SAFETY_MARGIN
+    if window - measured_prompt - OUTPUT_CLAMP_SAFETY_MARGIN >= MIN_OUTPUT_TOKENS:
+        # The measured prompt leaves room to answer, so this session is NOT in
+        # the state the refusal exists for. Any shortfall below is an artifact of
+        # the safety scaling, and the honest response to our own margin is to
+        # shrink the ask — never to fail a request the provider would serve.
+        available = max(available, MIN_OUTPUT_TOKENS)
     if available >= requested:
-        # The overwhelmingly common case, and the one the previous revision broke:
+        # The overwhelmingly common case, and the one an earlier revision broke:
         # an ordinary prompt against a sanely advertised cap sends the spec's
         # number untouched. Anthropic (200k/64k, 1M/128k) and OpenAI (272k/128k)
         # come out byte-identical at every realistic session size.
         return requested
 
+    explicit = request.max_tokens or 0
+    if available < MIN_OUTPUT_TOKENS and 0 < explicit <= available:
+        # An EXPLICIT small ask that still fits is not the failure this refuses.
+        # ``MIN_OUTPUT_TOKENS`` encodes "a reply needs room to be a reply", but a
+        # caller who asked for 1024 (``Session.ERRAND_MAX_TOKENS``, auto-naming)
+        # has already said how much it needs, and a tool-loop continuation
+        # emitting one ``tool_use`` block needs a few hundred. Refusing a request
+        # the provider would have admitted, over a floor meant to protect it,
+        # would be the clamp inventing a failure (review R12).
+        return explicit
+
     if available < MIN_OUTPUT_TOKENS:
         # REFUSE rather than send a cap too small to answer with. Sending it
         # anyway is the one outcome worse than the bug this fixes: reasoning
         # tokens are billed against this same budget (grok-4.6 spent 689 of them
-        # thinking at a 512 cap and emitted no text at all), and
-        # ``harness/loop.py`` only retries a COMPLETELY silent truncation —
-        # ``silent = not assistant.text and not assistant.tool_calls`` — so a
-        # partial answer is accepted with no notice and the user reads a
-        # confidently truncated reply. A ProviderError is legible, reaches the
-        # incident path, and says which numbers made the request impossible;
-        # the pre-fix behaviour for this case was itself a visible HTTP 400, so
-        # this preserves the failure's visibility instead of hiding it.
+        # thinking at a 512 cap), and ``harness/loop.py`` only retries a
+        # COMPLETELY silent truncation — ``silent = not assistant.text and not
+        # assistant.tool_calls`` — so a partial answer is accepted with no notice
+        # and the user reads a confidently truncated reply.
+        #
+        # The refusal is judged on ``measured_prompt``, NOT on the scaled
+        # estimate, and that distinction is the whole of review finding R8. A
+        # scaled figure can exceed the window on a session that is genuinely
+        # fine, and refusing there wedges it: the turn dies non-retryably while
+        # the session sits BELOW its compaction threshold, and the compaction
+        # summarizer — which takes this same path — is refused too, so the one
+        # remedy the error names cannot run. Measured, a 200k Anthropic model
+        # past ~135k local tokens could not compact at all.
+        #
+        # Keying on the unscaled figure makes the invariant provable rather than
+        # tuned: the refusal point is ``window - MIN_OUTPUT_TOKENS -
+        # OUTPUT_CLAMP_SAFETY_MARGIN``, and compaction triggers at
+        # ``COMPACTION_TRIGGER_FRACTION * window``, so the refusal stays above
+        # the trigger whenever ``0.2 * window > 8192``, i.e. for every window
+        # above ~41k. Below that a model is too small for the trigger to help
+        # anyway. Compaction therefore always gets its chance first, and the
+        # summarizer's own call — a fresh prefix, not the bloated transcript —
+        # measures small and is never refused.
+        #
+        # A residual false refusal remains and is ACCEPTED rather than
+        # overlooked: the local estimator can itself over-state a prompt (QA
+        # measured ~8.8k high at ~93% occupancy), so a request with a little real
+        # headroom left can be refused. That band sits far above the compaction
+        # trigger, it is not a regression — the pre-fix behaviour there is an
+        # HTTP 400 from the provider — and the two failures differ only in which
+        # side reports them. Closing it would mean trusting a local count at
+        # exactly the occupancy where being wrong is most expensive.
         raise ProviderError(
             None,
             (
-                f"prompt is too large for {request.model.model_id}: about {prompt:,} "
-                f"tokens of input against a {window:,}-token context window leaves "
-                f"under {MIN_OUTPUT_TOKENS:,} tokens for the reply. Compact the "
-                f"conversation or start a new session."
+                f"prompt is too large for {request.model.model_id}: about "
+                f"{measured_prompt:,} tokens of input against a {window:,}-token "
+                f"context window leaves under {MIN_OUTPUT_TOKENS:,} tokens for the "
+                f"reply. Compact the conversation or start a new session."
             ),
             kind="request",
         )
     return available
 
 
-def _estimated_prompt_tokens(request: ChatRequest) -> int:
-    """Prompt size for :func:`_effective_max_tokens`, on the provider's ruler.
+def _estimated_prompt_tokens(request: ChatRequest) -> tuple[int, int]:
+    """Prompt size for :func:`_effective_max_tokens`, as ``(scaled, measured)``.
 
-    Split out so the two rulers and their scaling are readable in one place, and
-    so the estimate can be exercised directly by tests.
+    TWO numbers, because they answer two different questions and conflating them
+    is review finding R8:
 
-    The messages term prefers ``context_tokens_hint`` (the provider's own count)
-    and otherwise scales the local estimate by the family's measured ratio — see
-    :data:`_PROVIDER_ESTIMATE_SLOPE`. System blocks and tools are always added
-    from the local side: they are not part of the hint's prefix on a first call
-    and, being English prose plus JSON, they are exactly the content the
-    ~4 chars/token ratio describes well.
+    * ``scaled`` carries the safety margin and sizes the ASK. Erring high here
+      costs a little output headroom near the window and nothing at all below it.
+    * ``measured`` is the best unembellished figure available — the provider's
+      own count when there is one, the raw local estimate otherwise. It decides
+      whether the request is REFUSED. A refusal must never rest on our own
+      inflation: that is what wedged sessions that were fine and blocked the
+      compaction pass that would have rescued them.
+
+    On the hinted branch the two are equal, because there is nothing to be
+    uncertain about.
+
+    The hint is used WHOLE. ``Usage.context_tokens`` is normalized in this file
+    as ``input + cache_read + cache_write`` — the entire prompt the provider
+    read, system blocks and tool schemas included — so the prefix term below
+    belongs only to the estimated branch. Adding it to a hint double-counts it
+    (R7).
     """
-    slope = _PROVIDER_ESTIMATE_SLOPE.get(request.model.provider, DEFAULT_ESTIMATE_SLOPE)
-
     hint = request.context_tokens_hint
-    if hint is not None and hint > 0:
-        # Already a provider figure — no slope, or it would be double-counted.
-        messages = hint
-    else:
-        messages = int(estimate_messages_tokens(request.messages) * slope)
+    window = request.model.context_window
+    if hint is not None and hint > 0 and not (window > 0 and hint > window):
+        # Already a provider figure, and about a model this size: no slope, no
+        # prefix, nothing to add. A hint LARGER than the window is deliberately
+        # excluded — it cannot describe this request, so believing it would
+        # refuse a session whose real context fits. That state is reachable two
+        # ways, both reproduced by reviewers: `Session.set_model` swaps to a
+        # smaller-window model without clearing the hint (a `/model` down-switch),
+        # and the failover clone keeps the primary's hint while moving to a
+        # smaller fallback spec. Falling through to the local estimate re-measures
+        # the messages actually in hand, which is the only honest answer.
+        return hint, hint
+
+    local = estimate_messages_tokens(request.messages)
 
     extra_chars = sum(len(block) for block in request.system_blocks)
     for tool in request.tools:
@@ -863,9 +963,10 @@ def _estimated_prompt_tokens(request: ChatRequest) -> int:
         # the schema is as good an input to a /4 estimate as its exact
         # serialization would be (review R6).
         extra_chars += len(tool.name) + len(tool.description) + len(str(tool.parameters))
-    # Same chars/token ratio the token module falls back to, scaled onto the
-    # provider's ruler for the same reason the messages term is.
-    return messages + int((extra_chars / _CHARS_PER_TOKEN) * slope)
+    prefix = int(extra_chars / _CHARS_PER_TOKEN)
+
+    measured = local + prefix
+    return int(measured * _estimate_slope(request.model)), measured
 
 
 def _reasoning_effort(request: ChatRequest) -> str | None:

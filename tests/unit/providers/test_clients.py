@@ -24,13 +24,18 @@ from local_operator.harness.types import (
     ToolContext,
     ToolResult,
 )
+from local_operator.compaction.thresholds import CompactionSettings, resolve_threshold_tokens
 from local_operator.providers.clients import (
+    DEFAULT_ESTIMATE_SLOPE,
     MIN_OUTPUT_TOKENS,
     AnthropicClient,
     GoogleClient,
     MockClient,
     OpenAICompatClient,
     _anthropic_stream_error,
+    _effective_max_tokens,
+    _estimate_slope,
+    _estimated_prompt_tokens,
     _message_to_openai,
     client_for_spec,
     raise_for_status,
@@ -3678,14 +3683,20 @@ def _every_cache_control(body: dict[str, Any]) -> list[dict[str, Any]]:
 def _large_context_request() -> ChatRequest:
     """A request whose TTL tests drive ``context_tokens_hint`` up to 900k.
 
-    The window is stated explicitly (1M, Claude's real size) rather than left on
-    the ``ModelSpec`` default of 128k. These tests set hints of 150k-900k, and a
-    hint LARGER than the window is a state that cannot occur in production — the
-    hint is the provider's own count of a prompt it already accepted — so the
-    default made the fixture describe an impossible session. It now also has to
-    be a window the output clamp can fund a reply in, since
-    ``_effective_max_tokens`` refuses a request whose prompt leaves no room to
-    answer.
+    The window is stated explicitly (1M, Claude's real size) so these tests
+    exercise the TTL policy on a session that plausibly holds that much, rather
+    than inheriting the ``ModelSpec`` default of 128k.
+
+    An earlier revision justified this by claiming a hint larger than the window
+    "cannot occur in production". **That claim was false** and is corrected here
+    rather than deleted, because it is the kind of premise someone later widens
+    a refusal on: two real paths strand a hint from a bigger model —
+    ``Session.set_model`` swaps the spec on a ``/model`` down-switch without
+    clearing ``_context_tokens_hint``, and the failover clone keeps the primary's
+    hint while moving to a smaller fallback spec. That case is covered directly
+    by ``test_a_hint_larger_than_the_window_is_not_believed`` and by
+    ``test_anthropic_ttl_hint_above_a_small_window_still_marks_1h`` below; the
+    window here is large only so the TTL assertions stay about TTL.
     """
     return ChatRequest(
         model=ModelSpec(provider="anthropic", model_id="claude-opus-5", context_window=1_000_000),
@@ -3722,6 +3733,35 @@ def test_anthropic_ttl_hint_below_threshold_stays_5m() -> None:
     request = _large_context_request().model_copy(update={"context_tokens_hint": 149_999})
     markers = _every_cache_control(client._build_body(request))
     assert markers and all(m == {"type": "ephemeral"} for m in markers)
+
+
+def test_anthropic_ttl_hint_above_a_small_window_still_marks_1h() -> None:
+    """The hint-larger-than-window case the original fixtures encoded, restored.
+
+    A ``/model`` down-switch or a failover onto a smaller spec leaves the
+    previous model's count on the request, so this pairing is real and the body
+    must still build: the TTL policy reads the hint as a SIZE signal and is
+    entitled to believe a large one, while the output clamp separately refuses to
+    believe it as a prompt measurement. Raising these fixtures to a 1M window
+    removed the only coverage of that combination and let the clamp's refusal
+    ship without anyone deciding what should happen here (R10).
+    """
+    client = AnthropicClient(cache_ttl_1h_min_context_tokens=150_000)
+    request = _large_context_request().model_copy(
+        update={
+            "model": ModelSpec(
+                provider="anthropic", model_id="claude-opus-4.1", context_window=128_000
+            ),
+            "context_tokens_hint": 900_000,
+        }
+    )
+
+    body = client._build_body(request, oauth=True)
+
+    markers = _every_cache_control(body)
+    assert markers and all(m == {"type": "ephemeral", "ttl": "1h"} for m in markers)
+    # And the clamp does not refuse it: the messages actually in hand are tiny.
+    assert body["max_tokens"] > 0
 
 
 def test_anthropic_ttl_without_hint_falls_back_to_byte_estimate() -> None:
@@ -4144,3 +4184,169 @@ def test_no_cap_anywhere_leaves_the_key_absent() -> None:
     assert "max_tokens" not in body["openai-completions"]
     assert "max_output_tokens" not in body["openai-responses"]
     assert "maxOutputTokens" not in body["google"]
+
+
+# --- the clamp's safety properties, not just its arithmetic --------------------
+#
+# Round-2 review mutation-tested the previous set and found it ONE-SIDED: raising
+# the slope failed 12 tests, but emptying the table entirely — which is the
+# aggregator bug made global, and re-opens the HTTP 400 — left all 766 provider
+# tests green. Downward mutations are the dangerous direction, so these pin the
+# floor, the family keying, the hinted path (previously untested altogether) and
+# the compaction interaction.
+
+
+def _tool(name: str = "t", schema_chars: int = 1_500) -> AgentTool:
+    """A tool whose schema is bulky enough to move a token estimate."""
+    return AgentTool(
+        name=name,
+        description="d" * schema_chars,
+        parameters={"type": "object"},
+        execute=lambda ctx, **kw: ToolResult(),  # type: ignore[arg-type,return-value]
+    )
+
+
+def test_context_tokens_hint_is_used_whole_and_not_re_padded() -> None:
+    """``Usage.context_tokens`` already covers system blocks and tool schemas, so
+    adding a locally-estimated prefix on top double-counts it.
+
+    Measured at ~21.8k phantom tokens with this repo's default tool set (R7).
+    The same hint must therefore produce the same budget no matter how large the
+    prefix is — the hint already contains it.
+    """
+    spec = _sonnet_spec()
+    bare = ChatRequest(model=spec, messages=[Message.user("hi")], context_tokens_hint=100_000)
+    padded = ChatRequest(
+        model=spec,
+        messages=[Message.user("hi")],
+        system_blocks=["s" * 20_000],
+        tools=[_tool(f"t{i}") for i in range(15)],
+        context_tokens_hint=100_000,
+    )
+
+    assert _estimated_prompt_tokens(bare) == (100_000, 100_000)
+    assert _estimated_prompt_tokens(padded) == _estimated_prompt_tokens(bare)
+
+
+def test_the_refusal_never_pre_empts_compaction() -> None:
+    """The invariant that keeps a recoverable session recoverable.
+
+    The refusal must not fire below the compaction trigger, or the turn dies
+    non-retryably on a session that would have compacted at the next boundary and
+    continued. Asserted against the real ``resolve_threshold_tokens`` rather than
+    a copied constant, and across tool counts, because it was a tool-scaled
+    over-estimate that broke this (R8).
+    """
+    settings = CompactionSettings()
+    for window in (64_000, 128_000, 200_000, 272_000, 1_000_000):
+        spec = ModelSpec(
+            provider="anthropic",
+            model_id="claude-sonnet-4-5",
+            context_window=window,
+            max_output_tokens=min(64_000, window // 2),
+        )
+        trigger = resolve_threshold_tokens(window, settings)
+        for tool_count in (0, 10, 30):
+            request = ChatRequest(
+                model=spec,
+                messages=[Message.user("hi")],
+                tools=[_tool(f"t{i}") for i in range(tool_count)],
+                # A session sitting exactly ON its compaction trigger is the last
+                # moment compaction can still save it; it must not be refused.
+                context_tokens_hint=trigger,
+            )
+            _effective_max_tokens(request)  # must not raise
+
+
+def test_the_compaction_summarizer_is_never_refused() -> None:
+    """``Session._one_shot_complete`` sends the transcript with
+    ``context_tokens_hint=0``, so it takes the estimated branch.
+
+    If that path can refuse, the one remedy the refusal's own message names
+    cannot run and the session is wedged with no in-session recovery — strictly
+    worse than the HTTP 400 this PR set out to fix. Measured before the fix: a
+    200k Anthropic model past ~135k local tokens could not compact.
+    """
+    spec = _sonnet_spec()
+    for local_tokens in (90_000, 135_000, 180_000):
+        request = ChatRequest(
+            model=spec,
+            messages=[Message.user(_prose(local_tokens))],
+            context_tokens_hint=0,
+        )
+        assert _effective_max_tokens(request) >= MIN_OUTPUT_TOKENS
+
+
+def test_a_hint_larger_than_the_window_is_not_believed() -> None:
+    """A stale hint must not refuse a session whose real context fits.
+
+    Reachable two ways, both reproduced by reviewers: ``Session.set_model``
+    swaps to a smaller-window model without clearing the hint (a ``/model``
+    down-switch), and the failover clone keeps the primary's hint while moving
+    to a smaller fallback spec. The hint cannot be describing THIS request, so
+    the local estimate is the only honest figure (R10).
+    """
+    spec = ModelSpec(
+        provider="anthropic",
+        model_id="claude-opus-4.1",
+        context_window=200_000,
+        max_output_tokens=32_000,
+    )
+    request = ChatRequest(model=spec, messages=[Message.user("hi")], context_tokens_hint=600_000)
+
+    assert _effective_max_tokens(request) == 32_000
+
+
+@pytest.mark.parametrize(
+    "provider,model_id",
+    [
+        ("anthropic", "claude-sonnet-4-5"),
+        ("openrouter", "anthropic/claude-sonnet-4.5"),
+        ("radient", "anthropic/claude-opus-4.1"),
+    ],
+)
+def test_claude_gets_its_measured_slope_on_every_route(provider: str, model_id: str) -> None:
+    """The ratio belongs to the TOKENIZER, so the route must not change it.
+
+    Keying on ``ModelSpec.provider`` gave every aggregator-served Claude the low
+    default and re-opened the original 400 on the exact provider this bug was
+    reported against (R9). ``openrouter`` and ``radient`` are real registry ids.
+    """
+    assert _estimate_slope(ModelSpec(provider=provider, model_id=model_id)) == 2.0
+
+
+def test_an_unknown_family_fails_safe_rather_than_cheap() -> None:
+    """An unmeasured family must be assumed expensive.
+
+    Under-estimating re-opens the HTTP 400, and the ``MIN_OUTPUT_TOKENS``
+    refusal cannot catch it because that fires on OVER-estimation. The
+    evidence file's unattributed rows sit at p50 1.78, so the default has to
+    live near that, not near the cheap end.
+    """
+    slope = _estimate_slope(ModelSpec(provider="xai", model_id="grok-4.6"))
+
+    assert slope == DEFAULT_ESTIMATE_SLOPE
+    # The floor is the point: a default that drifts down re-opens the bug, and
+    # every previous test stayed green while it did exactly that.
+    assert slope >= 1.75
+
+
+def test_the_ask_stays_admissible_for_an_expensive_tokenizer() -> None:
+    """The end-to-end property the slope exists for, stated as admission.
+
+    A Claude prompt whose real cost is ~1.9x the local estimate must still leave
+    ``prompt + max_tokens`` inside the window. This is the assertion that fails
+    when the slope table is emptied — the mutation the previous suite could not
+    detect.
+    """
+    spec = _sonnet_spec()
+    request = ChatRequest(model=spec, messages=[Message.user(_prose(90_000))])
+
+    sent = _bodies(request)["anthropic"]["max_tokens"]
+
+    # Measured, not the nominal size asked for: `_prose` targets a character
+    # count and the tokenizer decides the rest, so pinning the assertion to the
+    # request's own estimate is what keeps this about admission.
+    _, measured = _estimated_prompt_tokens(request)
+    real_prompt = measured * 1.9  # the measured Anthropic worst case
+    assert real_prompt + sent <= spec.context_window
