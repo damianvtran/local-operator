@@ -4794,6 +4794,36 @@ def build_send_tool(context: ToolContext) -> AgentTool | None:
     )
 
 
+def _peer_sender_conversation_name(context: ToolContext) -> str:
+    """The name a peer's inbound card should show for THIS session.
+
+    ``session_name`` alone is wrong on a subagent. It resolves to the PARENT's
+    title (a child has none of its own and can never grow one), so a peer
+    message sent by a child presented under its parent's conversation name
+    while the ``session_id`` beside it correctly named the child — two
+    different sessions in one card. Composing the child's own label onto it is
+    the same answer the browser tab pill gives (``<parent> › <label>``), and
+    for the same reason: the label is the only name the child actually owns.
+
+    Composed here rather than through :func:`_browser_subagent_label` even
+    though the form is identical: that function budgets the result to the
+    browser pill's 30 clusters, a constraint a peer card does not have (a
+    registry-sourced ``conversation_name`` runs to ``MAX_TITLE_CHARS``), and
+    borrowing it would silently ellipsise a name for a surface that had room.
+
+    Display only, on the FALLBACK path alone — a host that published a registry
+    record names the sender from that record and never reaches here. Identity
+    stays ``session_id``, which is the child's throughout.
+    """
+    # Both fields, matching the browser side's discriminator: ``job_id`` alone
+    # is also carried by server sessions, and only a subagent has a label.
+    if context.job_id is None or not context.job_label.strip():
+        return context.session_name
+    parent = context.session_name.strip()
+    label = context.job_label.strip()
+    return f"{parent}{_BROWSER_SUBAGENT_SEPARATOR}{label}" if parent else label
+
+
 @_guard("send")
 async def execute_send(
     tool_call_id: str,
@@ -4869,12 +4899,13 @@ async def execute_send(
     if "session_id" not in sender and context is not None:
         # No registry record named this process (a reduced host that never
         # published one): fall back to the ToolContext identity so the peer's
-        # inbound indicator can still name the sender. session_name maps to
+        # inbound indicator can still name the sender. The name maps to
         # ``conversation_name`` because that is the key the indicator reads.
         if context.session_id:
             sender["session_id"] = context.session_id
-        if context.session_name:
-            sender["conversation_name"] = context.session_name
+        name = _peer_sender_conversation_name(context)
+        if name:
+            sender["conversation_name"] = name
 
     from local_operator.mobile.peer_client import send_peer_message
 
@@ -6155,6 +6186,16 @@ _BROWSER_SESSION_LABEL_CLUSTERS = 30
 #: root, where ``cwd_label`` itself declines to answer.
 _BROWSER_FALLBACK_LABEL = "Session"
 
+#: Separator between a subagent's parent conversation and its own job label.
+#: U+203A, matching the TUI's own ``lo › <cwd>`` composition rather than
+#: introducing a second convention for the same "A, narrowed to B" relation.
+_BROWSER_SUBAGENT_SEPARATOR = " › "
+
+#: Below this many clusters a clipped parent title identifies no conversation
+#: (``Fi…`` names nothing), so the child's label stands alone instead of
+#: wearing a stub prefix. See :func:`_browser_subagent_label`.
+_BROWSER_SUBAGENT_PARENT_MIN = 8
+
 
 def _browser_live_session_name(context: ToolContext | None) -> str:
     """The session's title as of NOW, not as of the turn's context snapshot.
@@ -6208,13 +6249,31 @@ def _browser_session_label(context: ToolContext | None) -> str:
     intentionally broader than the known bidi and zero-width set: browser tab
     chrome is too small to make invisible direction changes attributable.
 
-    An UNNAMED session falls back to its working directory's basename, which is
-    the same substitution the TUI's status band and terminal title already make
-    in this exact slot (``tui/terminal_title.cwd_label`` — ``lo › <cwd>``). The
-    slot has always held "the best label we have", and a directory the user
-    chose the session for distinguishes three concurrent groups where three
-    copies of ``Session`` do not.
+    A SUBAGENT is named first, before any title lookup, because it is the one
+    session kind that can never acquire a title: naming lives in the TUI host
+    and the owned-session runtime, and a one-shot child runs through neither
+    (confirmed on this machine — no subagent session directory holds a
+    ``title.json``). Its context carries no ``session_name`` and its cwd is its
+    PARENT's, so every child of one parent derived the identical cwd label and
+    a fleet of them rendered as ``LO · local-operator (2)``/``(3)``/… — the
+    ordinal is the only thing that differed, and it names nothing. See
+    :func:`_browser_subagent_label` for the form and why the parent's name is
+    carried alongside the child's.
+
+    An UNNAMED top-level session falls back to its working directory's
+    basename, which is the same substitution the TUI's status band and terminal
+    title already make in this exact slot (``tui/terminal_title.cwd_label`` —
+    ``lo › <cwd>``). The slot has always held "the best label we have", and a
+    directory the user chose the session for distinguishes three concurrent
+    groups where three copies of ``Session`` do not.
     """
+    # Subagent first: a child's own ``session_name`` is empty by construction,
+    # but the cwd fallback below would still answer (with the parent's
+    # directory) and thereby hide the far more specific label the parent
+    # launched this child under. Order is the whole fix.
+    subagent = _browser_clean_label(_browser_subagent_label(context))
+    if subagent:
+        return _browser_clip_label(subagent)
     # Emptiness is decided by the SANITISED text, not by ``str.strip()``.
     # ``strip()`` removes whitespace but NOT the Cf/Cc classes, so a title of
     # nothing but zero-width or bidi characters (U+200B, U+FEFF, U+2060,
@@ -6228,23 +6287,146 @@ def _browser_session_label(context: ToolContext | None) -> str:
         cleaned = _browser_clean_label(_browser_cwd_label(context.cwd))
     if not cleaned:
         return _BROWSER_FALLBACK_LABEL
+    return _browser_clip_label(cleaned)
 
+
+def _browser_clusters(text: str) -> list[str]:
+    """``text`` split into grapheme-ish clusters (base char + its marks).
+
+    The pill's budget is counted in what the user perceives as characters, so
+    combining marks and modifier symbols ride with the base they attach to
+    rather than each costing a slot. Approximates ``Intl.Segmenter``, which is
+    what the extension side counts with; exactness is not required because
+    both sides only ever clip, never realign.
+    """
     clusters: list[str] = []
-    for char in cleaned:
+    for char in text:
         if clusters and (unicodedata.combining(char) or unicodedata.category(char) == "Sk"):
             clusters[-1] += char
         else:
             clusters.append(char)
-    if len(clusters) <= _BROWSER_SESSION_LABEL_CLUSTERS:
+    return clusters
+
+
+def _browser_clip_label(cleaned: str, budget: int = _BROWSER_SESSION_LABEL_CLUSTERS) -> str:
+    """``cleaned`` cut to ``budget`` grapheme clusters, ellipsised if cut.
+
+    Split out of :func:`_browser_session_label` so the subagent form goes
+    through the SAME clip as a conversation title: both are user-visible text
+    of unbounded length landing in the same 30-cluster pill, and a second
+    hand-rolled truncation beside this one is how the two drift apart. Expects
+    text that has already been through :func:`_browser_clean_label`.
+
+    ``budget`` is inclusive of the ellipsis, so the RESULT never exceeds it.
+    It previously counted the clusters KEPT and then appended the ellipsis on
+    top, which returned 31 clusters against a documented 30 — harmless in
+    practice, since the extension's ``cleanLabel`` re-clips anything it is sent
+    (its ``slice(0, MAX) + "…"`` has the same shape), but it made every
+    statement of the ceiling in this module false by one and left the composed
+    subagent form paying for the ellipsis with a hand-rolled ``budget - 1``.
+    A pill one cluster shorter is the price of a bound that is actually true;
+    the extension now never has to re-clip a label this side produced.
+
+    ``budget`` is a parameter only because the subagent composition spends part
+    of the pill on the child's label and the separator; every other caller
+    takes the full width.
+    """
+    clusters = _browser_clusters(cleaned)
+    if len(clusters) <= budget:
         return cleaned
 
-    clipped = "".join(clusters[:_BROWSER_SESSION_LABEL_CLUSTERS]).rstrip()
+    clipped = "".join(clusters[: max(budget - 1, 0)]).rstrip()
     # Prefer a complete word when that still leaves a useful title; long words
     # fall back to the grapheme-safe hard boundary rather than an empty label.
     word_boundary = clipped.rfind(" ")
     if word_boundary >= 8:
         clipped = clipped[:word_boundary].rstrip()
     return f"{clipped}…" if clipped else _BROWSER_FALLBACK_LABEL
+
+
+def _browser_subagent_label(context: ToolContext | None) -> str:
+    """``<parent title> › <job label>`` for a subagent, else ``""``.
+
+    ``job_id`` is the discriminator, not ``job_label``: the TUI host leaves it
+    unset, so the operator's own session can never be mistaken for a child. It
+    is NOT unique to subagents — a server-side session carries one too (see
+    ``server/utils/operator.py`` and the queued-job path) — which is why the
+    two fields are required TOGETHER below rather than ``job_id`` alone: only
+    ``_build_child_session`` sets ``job_label``, so a server session reaches
+    the ``label or parent`` branch and keeps its own title unchanged. Stated
+    because a future reader deciding what may set ``job_id`` would otherwise
+    rely on an exclusivity that does not hold.
+
+    A child whose label is missing or sanitises away still gets the parent's
+    name rather than falling through to the shared-cwd label every sibling
+    would also derive.
+
+    BOTH halves are carried because each answers a different question the
+    operator actually asks of a tab group. The child's label says WHICH slice
+    of work this is (it is what they typed into ``task`` and what the jobs list
+    and ``hub`` address it by); the parent's title says WHICH CONVERSATION
+    spawned it, which is the part that separates two concurrent sessions both
+    running a child called ``qa``. The separator is U+203A, matching the TUI's
+    own ``lo › <cwd>`` composition rather than inventing a second convention.
+
+    The parent's name is read through the normal live/snapshot chain, so a
+    parent titled after this child was launched still reaches the pill on the
+    child's next command.
+
+    When the composition does not fit, the PARENT half is what gets clipped —
+    the child's label is kept whole. Clipping the composed string as one unit
+    (the obvious implementation) is wrong here and was measured to be: a real
+    pair, ``Fix Slack-reported UI zoom and overlap bugs`` + ``zoom-scroll-fix``,
+    clipped to ``Fix Slack-reported UI zoom…`` and lost the label entirely,
+    leaving every sibling of that parent identical again — precisely the
+    failure this function exists to fix. The label is the distinguishing half
+    (siblings share a parent by definition), so it holds its ground and the
+    shared prefix absorbs the loss.
+
+    Past a point there is nothing left to absorb it with, and the parent half
+    DISAPPEARS rather than shrinking to a stub: with a 30-cluster pill, a
+    3-cluster separator and an 8-cluster minimum for a parent worth reading,
+    that happens once the child's own label reaches 20 clusters. Beyond that
+    the pill is the bare label — correct (the label is what distinguishes
+    siblings) but worth knowing when a fleet of long-labelled children shows
+    no conversation prefix at all.
+    """
+    if context is None or context.job_id is None:
+        return ""
+    label = _browser_clean_label(context.job_label)
+    # The parent's title, never the child's: a child has no ``session_name`` of
+    # its own, and the provider chain is what picks up a parent renamed since
+    # launch. Falls back to the parent's cwd basename for an unnamed parent —
+    # the same substitution a top-level session gets — so the composed form
+    # degrades to `<dir> › <label>` rather than to a bare label.
+    parent = _browser_clean_label(_browser_live_session_name(context))
+    if not parent and context.cwd:
+        parent = _browser_clean_label(_browser_cwd_label(context.cwd))
+    if not (parent and label):
+        # Only one half is available, so the caller's full-width clip applies
+        # to it unchanged.
+        return label or parent
+    # Budget in CLUSTERS, matching what the clip and the extension count, and
+    # measure the composed result rather than assuming it fits: a parent that
+    # is already short enough must not be ellipsised for nothing.
+    room = (
+        _BROWSER_SESSION_LABEL_CLUSTERS
+        - len(_browser_clusters(label))
+        - len(_browser_clusters(_BROWSER_SUBAGENT_SEPARATOR))
+    )
+    # A parent squeezed below ``_BROWSER_SUBAGENT_PARENT_MIN`` is not worth
+    # showing — ``Fi…`` identifies no conversation and merely steals room from
+    # the half that does identify something — so the label stands alone. This
+    # also covers a label long enough to fill the pill by itself, where ``room``
+    # goes negative; the caller then clips the label on the normal path.
+    if room < _BROWSER_SUBAGENT_PARENT_MIN:
+        return label
+    # Guarded rather than clipped unconditionally: ``_browser_clip_label``
+    # returns its input untouched when it already fits, so this only spells out
+    # that a parent short enough to fit is never ellipsised for nothing.
+    if len(_browser_clusters(parent)) > room:
+        parent = _browser_clip_label(parent, room)
+    return f"{parent}{_BROWSER_SUBAGENT_SEPARATOR}{label}"
 
 
 def _browser_cwd_label(cwd: str) -> str:

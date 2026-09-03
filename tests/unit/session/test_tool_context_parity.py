@@ -53,6 +53,11 @@ SENTINELS: dict[str, Any] = {
     "agent_id": "sentinel-agent",
     "has_ui": True,
     "job_id": "sentinel-job",
+    # The short name a subagent was delegated under. Dropped on the way to the
+    # executor, a child's browser tab group falls back to its PARENT's cwd —
+    # which every sibling shares — and a fleet of children renders as one
+    # repeated pill distinguished only by an ordinal.
+    "job_label": "sentinel-job-label",
     "variables": VariableStore(cwd="/tmp", config_values={"SENTINEL_VAR": "1"}),
     "request_approval": lambda tool_name, description: None,
     "resolve_internal_url": lambda url: None,

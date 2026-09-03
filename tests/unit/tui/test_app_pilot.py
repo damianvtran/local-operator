@@ -25,6 +25,7 @@ from local_operator.harness.types import (
     ImageContent,
     NoticeEvent,
     TextContent,
+    ToolResult,
 )
 from local_operator.paths import config_dir
 from local_operator.session.mcp_status import McpStartupOutcome
@@ -9925,3 +9926,53 @@ async def test_the_picker_shows_a_model_released_since_the_listing_was_cached() 
         offered = {row.model_id for row in picker.rows()}
     assert "claude-fable-5-1" in offered, offered
     assert ctrl.fetches == 1, "and it cost exactly one live listing"
+
+
+@pytest.mark.asyncio
+async def test_a_bang_command_carries_the_conversation_title_to_its_tools() -> None:
+    """Bang mode builds its OWN ToolContext, outside any turn.
+
+    ``Session._build_tool_context`` is what carries the title to every ordinary
+    tool call, and this path deliberately does not use it (there is no turn to
+    build one for). It therefore has to carry the title itself, or every
+    display-only consumer — the browser tab group above all — sees an unnamed
+    session for the whole of a `! cmd`.
+
+    The provider is asserted alongside the snapshot because a `! cmd` can
+    outlive the naming errand that titles the conversation.
+    """
+    session = FakeSession()
+    session.set_conversation_name("Debug browser extension port binding issue")
+    seen: list[Any] = []
+
+    async def fake_execute_bash(tool_call_id, args, signal, on_update, context):
+        seen.append(context)
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            tool_name="bash",
+            content=[TextContent(text="exit code: 0")],
+        )
+
+    app = OperatorApp(lambda: _factory(session))
+    with patch("local_operator.tools.builtin.execute_bash", fake_execute_bash):
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            editor = app.query_one(Editor)
+            editor.focus()
+            await pilot.press("!")
+            for key in "echo hi":
+                await pilot.press("space" if key == " " else key)
+            await pilot.press("enter")
+            for _ in range(200):
+                await pilot.pause()
+                if seen:
+                    break
+
+    assert seen, "the bang command never reached a tool"
+    context = seen[-1]
+    assert context.session_name == "Debug browser extension port binding issue"
+    # Live too: a title that lands while a long `! cmd` runs must still reach
+    # the tab group, exactly as it does on the per-turn path.
+    session.set_conversation_name("Renamed mid-command")
+    assert context.session_name_provider is not None
+    assert context.session_name_provider() == "Renamed mid-command"

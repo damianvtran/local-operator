@@ -718,6 +718,29 @@ class ToolContext(BaseModel):
     # Optional and display-only for the same reason ``session_name`` is:
     # identity and authorization continue to use ``session_id``.
     session_name_provider: Callable[[], str] | None = None
+    # The DELEGATED-WORK label, set only on a subagent's context: the short
+    # name its parent launched it under (``zoom-scroll-fix``, ``bridge-qa``).
+    #
+    # A subagent has no conversation title and can never grow one — title
+    # generation lives in the TUI host and the owned-session runtime, and a
+    # one-shot child runs through neither, so every subagent session directory
+    # on disk has no ``title.json``. That is by design (a child answers one
+    # prompt and exits; naming it would cost a provider call for a title
+    # nobody resumes), but it left every display surface that asks "which
+    # session is this?" with nothing to say — browser tab groups above all,
+    # where a fleet of children rendered as a wall of identical pills.
+    #
+    # The label is the identity the OPERATOR already recognises: it is what
+    # they typed into ``task``, what the jobs list shows, and what they address
+    # with ``hub``. Display-only and never an identity, exactly like
+    # ``session_name`` — a child is authorized by ``session_id``/``requester``,
+    # and two children may legitimately carry the same label.
+    #
+    # Named after ``job_id`` above rather than after the browser's wire field:
+    # this is the human name of the same background job that field identifies,
+    # and calling it ``session_label`` would collide with the DERIVED display
+    # value the browser bridge already sends under that exact key.
+    job_label: str = ""
     # Resolver hook for lazy internal URLs (``skill://`` and ``guide://``);
     # returns content or None when the URL is not handled. Installed by session.
     resolve_internal_url: Callable[[str], str | None] | None = None

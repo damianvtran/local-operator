@@ -1374,6 +1374,26 @@ class Session:
         #: rebuilt every turn, so anything set only on the construction-time
         #: context reaches the createIf check and never the executor.
         job_id: str | None = None,
+        #: The short name this session was DELEGATED under, set only on a
+        #: subagent (``zoom-scroll-fix``, ``bridge-qa``). A child never
+        #: generates a conversation title — naming runs in the TUI host and the
+        #: owned-session runtime, neither of which a one-shot child passes
+        #: through — so this plus ``parent_display_name`` below is the
+        #: whole of its display identity. Reaches tools via
+        #: ``_build_tool_context``; display-only, never an authorization input.
+        job_label: str = "",
+        #: The parent's own :meth:`_display_session_name`, on a subagent only.
+        #: A RESOLVER rather than the parent's title holder, for two reasons
+        #: that are really one: it re-reads on every call, so a parent named or
+        #: renamed AFTER this child launched still reaches the child's display
+        #: surfaces (the common case — the naming errand lands early in the
+        #: parent's first turn while children are launched later); and it
+        #: resolves TRANSITIVELY, so a grandchild under a middle child whose
+        #: own holder is permanently empty still reads the top-level
+        #: conversation's title instead of falling through to the shared cwd.
+        #: A holder cannot do the second: the middle child has no title of its
+        #: own to hold. ``None`` on every top-level session.
+        parent_display_name: Callable[[], str] | None = None,
         #: The parent↔child messaging surface (``harness.comms.SubagentComms``).
         #: A top-level session mints its own; a CHILD is handed its parent's,
         #: which is what makes ``hub`` inside a subagent talk to the agent that
@@ -1430,6 +1450,8 @@ class Session:
         self._goal_state = goal_state if goal_state is not None else GoalState()
         self._variables = variables
         self._job_id = job_id
+        self._job_label = job_label
+        self._parent_display_name = parent_display_name
         self._subagent_comms = subagent_comms
         self.agent_registry = agent_registry
         self.team_registry = team_registry
@@ -3188,6 +3210,52 @@ class Session:
     def conversation_name(self) -> str:
         """The conversation's title ("" until one is set or generated)."""
         return self._conversation_name.text
+
+    def _display_session_name(self) -> str:
+        """The conversation title DISPLAY surfaces should show for this session.
+
+        Identical to :attr:`conversation_name` for a top-level session. On a
+        SUBAGENT — which has no title of its own and can never generate one,
+        since naming runs in the TUI host and the owned-session runtime and a
+        one-shot child passes through neither — it resolves to the PARENT's
+        live title instead, so a delegated tab group reads
+        ``<parent conversation> › <job label>`` rather than a bare fallback.
+
+        Resolved on every call, never cached: the parent is normally named a
+        second or two into its first turn while its children are launched
+        later, so a value snapshotted at the child's construction would be the
+        empty string for the child's whole life. That staleness is the exact
+        failure this method exists to close, and it is why
+        :meth:`_build_tool_context` passes this as the PROVIDER as well as the
+        snapshot.
+
+        RECURSIVE by construction, because delegation nests: a child of a
+        top-level session keeps ``task``/``wait``/``jobs`` (see
+        ``harness.subagent``), so a manager fanning out to workers is depth 2
+        and the operator's usual shape. The middle child has no title of its
+        own and can never grow one, so asking it for its *holder* yields ""
+        forever and a grandchild fell back to the cwd every sibling of every
+        conversation shares — two ``qa`` grandchildren under two different
+        conversations rendered identically, the very collision this method
+        exists to prevent. Asking the parent for its resolved DISPLAY name
+        instead walks the chain to whichever ancestor actually holds a title.
+        The walk is bounded by the lineage depth built at construction (no
+        cycle is constructible: a parent always predates its child).
+
+        Display only. Identity and authorization stay on ``session_id`` — a
+        child borrowing its parent's name for a tab pill must never be read as
+        a child acting with its parent's identity.
+
+        Deliberately does NOT reach for a parent's title on an unnamed FORK:
+        a fork is not a child, holds no ``_parent_display_name``, and
+        ``_load_conversation_name`` declines the inheritance on purpose (see
+        :attr:`wears_inherited_title`). Its display label stays the cwd
+        substitution every unnamed session gets.
+        """
+        own = self._conversation_name.text
+        if own or self._parent_display_name is None:
+            return own
+        return self._parent_display_name()
 
     @property
     def wears_inherited_title(self) -> bool:
@@ -5094,15 +5162,22 @@ class Session:
             session_id=self._session_id,
             # Re-read the live holder every turn so generated, user-set, and
             # resumed titles reach display-only browser metadata after renames.
-            session_name=self.conversation_name,
+            # On a CHILD this resolves to the parent's title (see
+            # :meth:`_display_session_name`), which is the only conversation
+            # name a subagent has.
+            session_name=self._display_session_name(),
             # Per-turn is not enough on its own: this context is a SNAPSHOT
             # taken once at turn start, and the naming errand lands a second or
             # two into the FIRST turn — so a browse in that turn read "" even
             # after the title existed, and the tab group latched the fallback
             # label for the life of the tab. The callable re-reads the holder at
             # tool-call time. Display-only, like ``session_name`` itself.
-            session_name_provider=lambda: self.conversation_name,
+            session_name_provider=self._display_session_name,
             agent_id=self._agent_id,
+            # The delegated name, on a subagent only. Empty on every top-level
+            # session, which is what keeps ``_browser_subagent_label``'s
+            # ``job_id`` discriminator honest.
+            job_label=self._job_label,
             has_ui=self._has_ui,
             resolve_internal_url=self._skill_resolver,
             request_approval=None if self._yolo else self._request_approval,
