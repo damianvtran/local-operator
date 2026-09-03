@@ -109,7 +109,10 @@ class Scope(enum.Enum):
     split).
     """
 
-    #: Takes effect immediately in this running session.
+    #: Takes effect immediately in every running session on this machine —
+    #: on the same call stack in the process that wrote it, and within
+    #: ``ConfigWatcher.POLL_INTERVAL_S`` for sessions in other processes (see
+    #: :mod:`local_operator.config_watch`).
     LIVE = "live"
     #: Read when a session is built — a ``/new`` or ``/reload`` picks it up.
     NEW_SESSIONS = "new sessions"
@@ -231,10 +234,39 @@ SECTIONS: tuple[Section, ...] = (
         Scope.NEW_LAUNCH,
         "The provider and model new launches boot on.",
     ),
+    # Split out of ``model`` (review round 1, M3). The design left this key in
+    # ``model`` and proposed documenting the discrepancy, which was defensible
+    # while nothing read the scope aloud — but the config-change notice now
+    # says "takes effect on /new" for every non-LIVE key, and for this one that
+    # is FALSE: ``Session._apply_config_change`` rebinds the stream fn on it and
+    # ``configure._openai_api_mode`` reads the rebound mapping when it builds
+    # the next client. Scope is uniform within a section by construction, so
+    # saying something true here means a section of its own, exactly as ``fork``
+    # and ``web_tools`` are. ``hosting``/``model_name`` genuinely stay
+    # NEW_LAUNCH: they are the session's identity, not a knob it re-reads.
+    Section(
+        "providers",
+        # Titled for the WIRE FORMAT, not the word "provider" (design review
+        # round 1, D4): the pane one column to the right is headed `providers`
+        # and lists the user's credentials, so two adjacent things called
+        # "provider" meant two entirely different concepts. This also makes the
+        # header agree with its rows instead of colliding with the pane.
+        #
+        # NOT the designer's other suggestion, "OpenAI API surface": that was
+        # right when this section held one row, but M6 moved the Anthropic
+        # cache-TTL key in beside it, so an OpenAI-specific title would now
+        # mislabel half the section.
+        "Wire protocol",
+        Scope.LIVE,
+        "How direct provider connections are made: API surface and cache TTL.",
+    ),
+    # LIVE: every ``retry.*`` key routes through ``RetrySettings.from_settings``
+    # PER CALL on the mapping ``SessionStreamFn`` holds, and the config watcher
+    # rebinds that mapping on every change (``SessionStreamFn.apply_settings``).
     Section(
         "failover",
         "Failover and retry",
-        Scope.NEW_SESSIONS,
+        Scope.LIVE,
         "What happens when a provider call fails or a quota runs out.",
     ),
     Section(
@@ -243,40 +275,67 @@ SECTIONS: tuple[Section, ...] = (
         Scope.LIVE,
         "Theme and the terminal features the TUI is allowed to use.",
     ),
+    # Deliberately NOT live, and split from ``subagents`` for that reason (scope
+    # is uniform within a section by construction). A tool-approval mode that
+    # flipped under a running turn would be a security-relevant surprise; the
+    # per-session ``/approvals`` toggle is the live control, and it WRITES this
+    # default rather than following it.
     Section(
         "session",
         "Session",
         Scope.NEW_SESSIONS,
-        "Approvals, autosave, and how many background jobs may run.",
+        "Approvals and autosave for sessions started from now on.",
     ),
+    # LIVE: ``max_running`` is pushed into the running ``AsyncJobManager`` by
+    # ``Session._apply_config_change`` (raising it lets the next launch through;
+    # lowering it lets running jobs finish — nothing is evicted), and the
+    # ``models.*`` tiers are read at every spawn.
+    Section(
+        "subagents",
+        "Subagents",
+        Scope.LIVE,
+        "Concurrency cap and the model each effort tier runs on.",
+    ),
+    # LIVE: the session re-coerces its ``CompactionSettings`` on every change,
+    # and all three trigger checks read that attribute at check time.
     Section(
         "compaction",
         "Compaction",
-        Scope.NEW_SESSIONS,
+        Scope.LIVE,
         "When the conversation is summarised to reclaim context.",
     ),
-    # LIVE, and stated deliberately: ``/fork`` reads these through the config
-    # manager at the moment it runs, so an edit takes effect on the very next
-    # fork in this same session. Claiming NEW_SESSIONS would be the painted lie
-    # the anti-drift test exists to prevent. A section of its own rather than
-    # folding into "Session" because scope is uniform within a section by
-    # construction and that one is NEW_SESSIONS.
+    # LIVE: ``/fork`` reads these through the config manager at the moment it
+    # runs, so an edit takes effect on the very next fork.
     Section(
         "fork",
         "Fork",
         Scope.LIVE,
         "Where /fork opens the branched conversation.",
     ),
+    # The GATE comes first, then the knobs it gates (design review round 1,
+    # D3). Whether each tool is offered at all is decided when the tool
+    # inventory is built, so these two flags cannot be LIVE — but reading order
+    # is the hierarchy the user sees, and putting the master switches after
+    # four tuning knobs left someone scanning for "is web search on?" finding
+    # the answer next to the retired-keys graveyard.
+    Section(
+        "web_tools",
+        "Web tools",
+        Scope.NEW_SESSIONS,
+        "Whether the search and fetch tools are offered to the model.",
+    ),
+    # LIVE: both tools build their settings from config on EVERY call
+    # (``web_search/tool.py``, ``web_fetch/tool.py``).
     Section(
         "web_search",
         "Web search",
-        Scope.NEW_SESSIONS,
+        Scope.LIVE,
         "Providers and load balancing for the search tool.",
     ),
     Section(
         "web_fetch",
         "Web fetch",
-        Scope.NEW_SESSIONS,
+        Scope.LIVE,
         "Limits and rendering for the fetch tool.",
     ),
     Section(
@@ -361,10 +420,11 @@ SETTINGS: tuple[Setting, ...] = (
         help="Model id new launches boot on. Written by /model default.",
         empty_unsets=True,
     ),
+    # -- providers ----------------------------------------------------------
     Setting(
         key="providers.openai.api",
         path=("providers", "openai", "api"),
-        section="model",
+        section="providers",
         label="OpenAI API surface",
         kind=Kind.ENUM,
         default="responses",
@@ -377,7 +437,13 @@ SETTINGS: tuple[Setting, ...] = (
     Setting(
         key="providers.anthropic.cache_ttl_1h_min_context_tokens",
         path=("providers", "anthropic", "cache_ttl_1h_min_context_tokens"),
-        section="model",
+        # LIVE, not NEW_LAUNCH (review round 2, M6). `_client_for` reads this
+        # off the same mapping `apply_settings` rebinds, and the session rebinds
+        # on ANY `retry.*` change — so under NEW_LAUNCH the notice told the user
+        # a key needed a `/new` while a neighbouring edit had already moved it.
+        # Applying it live is harmless (it only affects the next client build),
+        # so the honest label is the cheaper of the two fixes.
+        section="providers",
         label="Anthropic 1h cache above (tokens)",
         kind=Kind.INT,
         default=150_000,
@@ -615,10 +681,11 @@ SETTINGS: tuple[Setting, ...] = (
         help="Write the conversation to disk as it goes.",
         choices=_bool_choices("save automatically", "save on request"),
     ),
+    # -- subagents ----------------------------------------------------------
     Setting(
         key="subagents.max_running",
         path=("subagents", "max_running"),
-        section="session",
+        section="subagents",
         label="Max background jobs",
         kind=Kind.INT,
         default=15,
@@ -629,7 +696,7 @@ SETTINGS: tuple[Setting, ...] = (
     Setting(
         key="subagents.models.lo",
         path=("subagents", "models", "lo"),
-        section="session",
+        section="subagents",
         label="Subagent model: lo",
         kind=Kind.TEXT,
         default="",
@@ -639,7 +706,7 @@ SETTINGS: tuple[Setting, ...] = (
     Setting(
         key="subagents.models.med",
         path=("subagents", "models", "med"),
-        section="session",
+        section="subagents",
         label="Subagent model: med",
         kind=Kind.TEXT,
         default="",
@@ -649,7 +716,7 @@ SETTINGS: tuple[Setting, ...] = (
     Setting(
         key="subagents.models.hi",
         path=("subagents", "models", "hi"),
-        section="session",
+        section="subagents",
         label="Subagent model: hi",
         kind=Kind.TEXT,
         default="",
@@ -775,10 +842,13 @@ SETTINGS: tuple[Setting, ...] = (
         choices=_bool_choices("compact mid-turn", "only between turns"),
     ),
     # -- web search ---------------------------------------------------------
+    # The two ``enabled`` flags sit in ``web_tools`` (NEW_SESSIONS), apart from
+    # the knobs that share their YAML block: they gate whether the tool exists
+    # in the inventory, which is decided once at build.
     Setting(
         key="web_search.enabled",
         path=("web_search", "enabled"),
-        section="web_search",
+        section="web_tools",
         label="Web search",
         kind=Kind.BOOL,
         default=True,
@@ -840,7 +910,7 @@ SETTINGS: tuple[Setting, ...] = (
     Setting(
         key="web_fetch.enabled",
         path=("web_fetch", "enabled"),
-        section="web_fetch",
+        section="web_tools",
         label="Web fetch",
         kind=Kind.BOOL,
         default=True,
@@ -1186,6 +1256,7 @@ def write_setting(manager: "ConfigManager", setting: Setting, value: Any) -> Non
         return
     _store(manager, setting.path, value)
     _invalidate_caches()
+    _notify_watcher(manager)
 
 
 def reset_setting(manager: "ConfigManager", setting: Setting) -> None:
@@ -1202,6 +1273,7 @@ def reset_setting(manager: "ConfigManager", setting: Setting) -> None:
         raise ValueError("this setting is retired and cannot be changed")
     _delete(manager, setting.path)
     _invalidate_caches()
+    _notify_watcher(manager)
 
 
 def _reload_before_write(manager: "ConfigManager") -> None:
@@ -1373,6 +1445,41 @@ def _invalidate_caches() -> None:
 
         settings_reload()
     except Exception:  # pragma: no cover - a cache drop must never fail a write
+        pass
+
+
+def _notify_watcher(manager: "ConfigManager") -> None:
+    """Hand the write to this process's config watcher, if one exists.
+
+    The in-process FAST PATH of :mod:`local_operator.config_watch`: the
+    watcher's poll would deliver this change within its interval anyway, but
+    a user who toggles ``compaction.enabled`` on the page expects their OWN
+    session to honour it on the same keystroke, not two seconds later. The
+    watcher re-reads the file and fans out with ``source="local"`` so the TUI
+    knows not to announce a change the page already showed.
+
+    Sits beside :func:`_invalidate_caches` at the facade level rather than in
+    ``_store``/``_delete`` because a write is one facade call but may be
+    several primitive calls; notifying once per facade call is what keeps a
+    single edit from being announced twice.
+
+    ``existing_watcher`` rather than ``process_watcher``: the CLI's ``config
+    edit`` runs in a process that never started one, and building a watcher
+    there would be work with no subscriber. Keyed on the MANAGER's directory,
+    not ``paths.config_dir()``, so a write through a manager pointed at some
+    other directory (tests, ``--config-dir``) cannot notify the wrong watcher.
+
+    Imported function-locally and guarded for the same reason as
+    ``_invalidate_caches``: a notification must never fail a write that has
+    already landed on disk.
+    """
+    try:
+        from local_operator.config_watch import existing_watcher
+
+        watcher = existing_watcher(getattr(manager, "config_dir", None))
+        if watcher is not None:
+            watcher.notify_local()
+    except Exception:  # pragma: no cover - a notification must never fail a write
         pass
 
 
@@ -1557,6 +1664,7 @@ def write_chains(
     }
     _store(manager, ("retry", "fallbackChains"), stored)
     _invalidate_caches()
+    _notify_watcher(manager)
 
 
 def validate_hop(text: str) -> str | None:

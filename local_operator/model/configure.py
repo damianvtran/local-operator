@@ -1749,11 +1749,7 @@ class SessionStreamFn:
         # ``retry.*``; the store itself defaults to ON and knows nothing about
         # config. Duck-typed (``getattr``) because the test doubles handed in
         # as ``auth_store`` implement only the failover protocol.
-        configure_pick = getattr(auth_store, "configure_usage_aware_pick", None)
-        if callable(configure_pick):
-            from local_operator.providers.failover import RetrySettings
-
-            configure_pick(RetrySettings.from_settings(settings).usage_aware_account_pick)
+        self._push_usage_aware_pick(settings)
         # Deliberately NO prompt-cache TTL hint memory (or reader registry)
         # here: subagents share the parent's stream fn (``harness/subagent.py``),
         # so any per-conversation state held on this object — even a
@@ -1778,18 +1774,64 @@ class SessionStreamFn:
     def routing_settings(self) -> Mapping[str, Any]:
         """The settings mapping THIS stream will actually route on.
 
-        Captured once at session build (``session_factory``) and held for the
-        session's life, so it is not necessarily what is on disk: nothing
-        watches ``config.yml``, and the only ``ConfigManager.reload`` caller is
-        the first-run ``/login`` path. A read-only surface that wants to report
-        what the SESSION will do — rather than what a later edit intends — has
-        to read this rather than re-reading the file, or it shows a green light
-        for a cascade the running session will not honour.
+        Captured at session build (``session_factory``) and REBOUND by
+        :meth:`apply_settings` whenever the process's config watcher sees
+        ``config.yml`` change, so it tracks disk within the watcher's poll
+        interval. A read-only surface that wants to report what the SESSION
+        will do has to read this rather than re-reading the file — the two
+        agree by construction now, but this is the one that is authoritative.
 
-        Exposed read-only for exactly that reason; mutating routing mid-session
-        is not what this is for.
+        Exposed read-only; :meth:`apply_settings` is the single write door.
         """
         return self._settings if isinstance(self._settings, Mapping) else {}
+
+    def _push_usage_aware_pick(self, settings: Mapping[str, Any] | None) -> None:
+        """Push ``retry.usageAwareAccountPick`` into the auth store.
+
+        The operator's opt-out for the cascade's usage-ranked first pick
+        travels through here because this is the one place a session parses
+        ``retry.*``; the store itself defaults to ON and knows nothing about
+        config. Duck-typed (``getattr``) because the test doubles handed in as
+        ``auth_store`` implement only the failover protocol.
+
+        Factored out of ``__init__`` so :meth:`apply_settings` can re-push it
+        (review round 2, B1). This is the ONE ``retry.*`` key that is not read
+        back off the mapping per call — the store copies it into its own state
+        (``AuthStore._usage_aware_pick``) — so a rebind alone moves what
+        ``RetrySettings`` reports while leaving what the cascade actually does
+        unchanged. That gap is what made a live ``— applied`` notice untrue for
+        this key. Constructor and re-push share this method precisely so the
+        two cannot drift apart again.
+        """
+        configure_pick = getattr(self._auth_store, "configure_usage_aware_pick", None)
+        if callable(configure_pick):
+            from local_operator.providers.failover import RetrySettings
+
+            configure_pick(RetrySettings.from_settings(settings).usage_aware_account_pick)
+
+    def apply_settings(self, values: Mapping[str, Any] | None) -> None:
+        """Rebind the settings mapping every routing decision reads.
+
+        Nearly sufficient on its own, because almost nothing here caches a
+        DERIVED view: ``RetrySettings.from_settings(self._settings)`` runs per
+        model call, ``_openai_api_mode`` per client build, and the effort ladder
+        reads ``self._settings["effort"]`` per message. The one exception is
+        ``retry.usageAwareAccountPick``, which is PUSHED into the auth store
+        rather than pulled from the mapping, so it is re-pushed here — see
+        :meth:`_push_usage_aware_pick`.
+
+        Deliberately does NOT touch ``_route_state``, the usage memo, or the
+        per-message effort freeze: a pinned hard fallback must survive a
+        threshold edit (the provider that just rejected us has not recovered
+        because the user typed a number), and a mid-message effort is frozen
+        for a reason ``_effort_for`` documents. Those reset on their own
+        boundaries.
+
+        Called from ``Session._apply_config_change``. A subagent shares its
+        parent's stream fn, so one rebind covers the whole tree.
+        """
+        self._settings = values
+        self._push_usage_aware_pick(values)
 
     def set_notice_handler(
         self, handler: Callable[[str, str], Awaitable[None] | None] | None

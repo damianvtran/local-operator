@@ -2590,8 +2590,24 @@ class SettingsView(Vertical):
             # title, and the half that carries the meaning is the scope. Dropped
             # entirely only when even the bare scope will not fit, which is the
             # one case where a clipped tag would be worse than none.
-            full = f"takes effect: {row.section.scope.value}"
-            short = row.section.scope.value
+            # `retired` is the one section whose SCOPE is not the honest
+            # answer (design review round 2, D8). Its keys are read and do
+            # nothing, so `takes effect: new launch` promises a relaunch will
+            # make them work — while the description one line below says the
+            # opposite, and the config-change notice now says "is retired and
+            # does nothing" about the very same key. Two surfaces describing
+            # one key two different ways is the defect class D1 fixed in the
+            # notice; this is the same thing pointing the other way.
+            #
+            # Special-cased HERE rather than by adding a fourth `Scope` member:
+            # scope answers "when does a change take effect", and "never,
+            # because this key is inert" is a property of the section, not a
+            # new point on that timeline. A fourth member would have to be
+            # handled by every consumer of `Scope` to say one thing about one
+            # section.
+            scope_word = "never" if row.section.name == "retired" else row.section.scope.value
+            full = f"takes effect: {scope_word}"
+            short = scope_word
             # LEFT-aligned on one shared column, not right-aligned against each
             # title. Right-aligning made the tag's position depend on the
             # title's length, so `Model` and `Failover and retry` — two headers
