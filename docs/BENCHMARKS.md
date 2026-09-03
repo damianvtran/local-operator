@@ -3,6 +3,11 @@
 Measurable evidence for the harness's fixed cost and its per-task workload.
 Run these with a real provider key; they hit the live API.
 
+This document measures the *harness*. For the external computer-use benchmark
+— the OSWorld 2.0 apparatus, its sandbox, its evidence rules, and what has and
+has not been measured there — see
+[`docs/benchmarks/osworld_2/README.md`](benchmarks/osworld_2/README.md).
+
 ## Complex-task cost (`scripts/bench_task_cost.py`)
 
 The predecessor of this section measured four prompts and trusted the agent's
