@@ -1203,43 +1203,325 @@ class TestPerAccountLastKnown:
         )
 
 
-# -- credential-change invalidation (the Fable 5.1 report) -------------------
+# ---------------------------------------------------------------------------
+# The picker's prices come from the same keyless chain as the status band
+# ---------------------------------------------------------------------------
+#
+# A direct-provider model the shipped registry did not carry showed a BLANK
+# price in the picker (``_price``'s unknown sentinel) while the status band said
+# ``$10/50`` the moment it was selected: the rows were priced from
+# ``merge_models(registry, listing)`` alone, and Anthropic's listing quotes no
+# money. ``live_catalogue`` now fills those holes through ``prices.price_row``
+# over ONE read of each document, so the two surfaces cannot drift.
+
+from local_operator.model.discovery import DiscoveredModel  # noqa: E402
+
+# The picker's own formatter, so these tests assert what a USER would read in
+# the price column rather than re-spelling the sentinel convention themselves.
+from local_operator.tui.widgets.model_picker import format_price_pair  # noqa: E402
+
+#: The models.dev projection's ``providers`` map, as ``models_dev_providers``
+#: returns it — one row per case the tests below exercise.
+_PROJECTION = {
+    "anthropic": {
+        "claude-fable-5-1": {
+            "name": "Claude Fable 5.1",
+            "cost": {"input": 10, "output": 50, "cache_read": 0.25, "cache_write": 12.5},
+            "limit": {"context": 1_000_000, "output": 128_000},
+        },
+    },
+    "openai": {
+        "gpt-5.4": {
+            "name": "GPT-5.4",
+            "cost": {"input": 2.5, "output": 15},
+            "limit": {"context": 400_000, "output": 128_000},
+        },
+    },
+}
+
+_OPENROUTER_ROWS = [
+    DiscoveredModel(
+        id="anthropic/claude-fable-5.1",
+        name="Anthropic: Claude Fable 5.1",
+        context_window=1_000_000,
+        max_tokens=128_000,
+        input_price=10.0,
+        output_price=50.0,
+        cache_read_price=0.25,
+        cache_write_price=12.5,
+    ),
+    DiscoveredModel(
+        id="anthropic/claude-nova-9",
+        name="Anthropic: Claude Nova 9",
+        context_window=2_000_000,
+        input_price=7.0,
+        output_price=35.0,
+    ),
+    DiscoveredModel(id="openrouter/free-router", name="Free Router", context_window=8_000),
+]
 
 
-def _spy_available_models(monkeypatch, *, live: dict[str, list[str]] | None = None):
-    """Record every ``available_models`` call and the TTL it was given.
+def _listing(monkeypatch, rows: dict[str, list[DiscoveredModel]], status: str = "ok"):
+    """Stub discovery per provider: ``rows`` for the named ids, nothing elsewhere."""
+    calls: list[str] = []
 
-    Returns the call log. ``live`` names the model ids a provider answers with;
-    anything absent answers as an unauthenticated provider, which is what the
-    registry's two dozen unconfigured entries look like in a real run.
-    """
-    from local_operator.model.discovery import DiscoveredModel
-
-    calls: list[tuple[str, float | None]] = []
-    live = live or {}
-
-    def fake(provider_id: str, **kwargs: Any):
-        calls.append((provider_id, kwargs.get("ttl_s")))
-        ids = live.get(provider_id)
-        if ids is None:
-            return [], "unauthenticated"
-        return [DiscoveredModel(id=model_id, name=model_id) for model_id in ids], "ok"
+    def fake(provider_id, **kwargs):
+        calls.append(provider_id)
+        return list(rows.get(provider_id, [])), status if provider_id in rows else "static"
 
     monkeypatch.setattr("local_operator.providers.controller.available_models", fake)
     return calls
 
 
+def _projection(monkeypatch, providers):
+    reads: list[int] = []
+
+    def fake(**kwargs):
+        reads.append(1)
+        return providers
+
+    monkeypatch.setattr("local_operator.model.prices.models_dev_providers", fake)
+    return reads
+
+
+def _by_selector(entries):
+    return {entry.selector: entry for entry in entries}
+
+
+@pytest.mark.asyncio
+async def test_an_unpriced_direct_row_is_priced_from_models_dev(
+    controller, store, monkeypatch
+) -> None:
+    """The operator's screenshot: ``claude-fable-5-1`` blank, ``claude-fable-5``
+    ``$10/50``. Anthropic's listing carries the window and no money; the row
+    must leave with models.dev's price and KEEP the listing's window."""
+    store.upsert_credential("anthropic", {"key": "sk-ant", "type": "api_key"})
+    unpriced = DiscoveredModel(
+        id="claude-fable-5-1", name="Claude Fable 5.1", context_window=999_000, max_tokens=128_000
+    )
+    _listing(monkeypatch, {"anthropic": [unpriced]})
+    reads = _projection(monkeypatch, _PROJECTION)
+
+    entries, statuses = await controller.live_catalogue()
+
+    row = _by_selector(entries)["anthropic/claude-fable-5-1"]
+    assert (row.input_price, row.output_price) == (10.0, 50.0)
+    assert row.context_window == 999_000, "the provider's own window wins over the catalogue"
+    assert statuses["anthropic"] == "ok"
+    assert len(reads) == 1, "the projection is read once for the whole catalogue"
+
+
+@pytest.mark.asyncio
+async def test_a_price_the_listing_quoted_is_never_overridden(
+    controller, store, monkeypatch
+) -> None:
+    """The provider's own number is authoritative; the chain fills holes only."""
+    store.upsert_credential("anthropic", {"key": "sk-ant", "type": "api_key"})
+    quoted = DiscoveredModel(
+        id="claude-fable-5-1", context_window=1_000_000, input_price=8.0, output_price=40.0
+    )
+    _listing(monkeypatch, {"anthropic": [quoted]})
+    _projection(monkeypatch, _PROJECTION)
+
+    entries, _ = await controller.live_catalogue()
+
+    row = _by_selector(entries)["anthropic/claude-fable-5-1"]
+    assert (row.input_price, row.output_price) == (8.0, 40.0)
+
+
+@pytest.mark.asyncio
+async def test_a_stated_zero_reaches_the_picker_as_free_not_as_unknown(
+    controller, store, monkeypatch
+) -> None:
+    """The ``:free`` routes, which rendered a BLANK price cell.
+
+    ``_price`` maps ``0.0`` to its ``-1.0`` unknown sentinel for every provider
+    that wants a credential, so a vendor's quoted ``$0`` was indistinguishable
+    from silence and got the same empty cell — eighteen rows literally named
+    ``:free`` among them. The flag the parser sets is what tells them apart.
+    """
+    store.upsert_credential("anthropic", {"key": "sk-ant", "type": "api_key"})
+    stated = DiscoveredModel(id="gemma-free", context_window=32_000, free=True)
+    _listing(monkeypatch, {"anthropic": [stated]})
+    _projection(monkeypatch, _PROJECTION)
+
+    entries, _ = await controller.live_catalogue()
+
+    row = _by_selector(entries)["anthropic/gemma-free"]
+    assert (row.input_price, row.output_price) == (0.0, 0.0), "the stated zero survived"
+    assert format_price_pair(row.input_price, row.output_price) == "free"
+
+
+@pytest.mark.asyncio
+async def test_a_row_nobody_priced_still_renders_blank(controller, store, monkeypatch) -> None:
+    """The other half of the same distinction, and the reason it cannot simply
+    stop mapping zero to the sentinel: an UNPRICED row must keep its blank cell
+    rather than gain a ``free`` it was never quoted."""
+    store.upsert_credential("anthropic", {"key": "sk-ant", "type": "api_key"})
+    silent = DiscoveredModel(id="claude-unpriced", context_window=200_000)
+    _listing(monkeypatch, {"anthropic": [silent]})
+    _projection(monkeypatch, {})
+
+    entries, _ = await controller.live_catalogue()
+
+    row = _by_selector(entries)["anthropic/claude-unpriced"]
+    assert (row.input_price, row.output_price) == (-1.0, -1.0), "unknown, not free"
+    assert format_price_pair(row.input_price, row.output_price) == ""
+
+
+@pytest.mark.asyncio
+async def test_a_plan_billed_row_stays_blank_rather_than_claiming_to_be_free(
+    controller, store, monkeypatch
+) -> None:
+    """``alibaba-token-plan`` bills CREDITS, so models.dev quotes it 0/0 to mean
+    "not priced in dollars" — a stated zero whose real cost is still unknowable.
+
+    It must stop the chain exactly as before (never taking ``alibaba``'s
+    pay-per-token rate) and must NOT print ``free``, which would be a lie the
+    user could act on. This is the case that keeps the fix honest.
+    """
+    store.upsert_credential("alibaba-token-plan", {"key": "sk-plan", "type": "api_key"})
+    plan_row = DiscoveredModel(id="glm-5.2", context_window=1_000_000)
+    _listing(monkeypatch, {"alibaba-token-plan": [plan_row]})
+    _projection(
+        monkeypatch,
+        {
+            "alibaba-token-plan": {
+                "glm-5.2": {"cost": {"input": 0, "output": 0}, "limit": {"context": 1_000_000}}
+            },
+            # A priced sibling under the pay-per-token key: if the plan's zero
+            # stopped answering, this is the number that would wrongly appear.
+            "alibaba": {"glm-5.2": {"cost": {"input": 0.6, "output": 2.2}}},
+        },
+    )
+
+    entries, _ = await controller.live_catalogue()
+
+    row = _by_selector(entries)["alibaba-token-plan/glm-5.2"]
+    assert (row.input_price, row.output_price) == (-1.0, -1.0), "unknowable, so blank"
+    assert format_price_pair(row.input_price, row.output_price) == ""
+
+
+@pytest.mark.asyncio
+async def test_a_models_dev_miss_falls_back_to_the_openrouter_rows_already_listed(
+    controller, store, monkeypatch
+) -> None:
+    """The secondary leg for the picker is the ``openrouter`` provider's OWN rows
+    from this same call — no second document, no second request. The projection
+    lacks ``claude-nova-9``; OpenRouter prices it under ``anthropic/``."""
+    store.upsert_credential("anthropic", {"key": "sk-ant", "type": "api_key"})
+    unpriced = DiscoveredModel(id="claude-nova-9", context_window=0)
+    _listing(monkeypatch, {"anthropic": [unpriced], "openrouter": list(_OPENROUTER_ROWS)})
+    _projection(monkeypatch, _PROJECTION)
+
+    entries, _ = await controller.live_catalogue()
+
+    rows = _by_selector(entries)
+    nova = rows["anthropic/claude-nova-9"]
+    assert (nova.input_price, nova.output_price) == (7.0, 35.0)
+    assert nova.context_window == 2_000_000, "a window the listing left at 0 is filled"
+    # OpenRouter's own rows are untouched by the enrichment: an unpriced
+    # ``openrouter/*`` row stays unknown (aggregator ⇒ never enriched).
+    assert rows["openrouter/openrouter/free-router"].input_price == -1.0
+    assert rows["openrouter/anthropic/claude-fable-5.1"].input_price == 10.0
+
+
+@pytest.mark.asyncio
+async def test_models_dev_beats_openrouter_when_both_price_a_picker_row(
+    controller, store, monkeypatch
+) -> None:
+    store.upsert_credential("anthropic", {"key": "sk-ant", "type": "api_key"})
+    _listing(
+        monkeypatch,
+        {
+            "anthropic": [DiscoveredModel(id="claude-fable-5-1", context_window=1_000_000)],
+            "openrouter": [
+                dataclasses.replace(_OPENROUTER_ROWS[0], input_price=1.0, output_price=2.0)
+            ],
+        },
+    )
+    _projection(monkeypatch, _PROJECTION)
+
+    entries, _ = await controller.live_catalogue()
+
+    row = _by_selector(entries)["anthropic/claude-fable-5-1"]
+    assert (row.input_price, row.output_price) == (10.0, 50.0)
+
+
+@pytest.mark.asyncio
+async def test_neither_document_leaves_the_unknown_sentinel_and_never_fetches(
+    controller, store, monkeypatch
+) -> None:
+    """Offline picker: no projection on disk, no OpenRouter rows. The row keeps
+    the ``-1`` unknown sentinel (never ``free``), and nothing raises."""
+    store.upsert_credential("anthropic", {"key": "sk-ant", "type": "api_key"})
+    _listing(monkeypatch, {"anthropic": [DiscoveredModel(id="claude-fable-5-1")]})
+    _projection(monkeypatch, None)
+
+    def no_network(*args, **kwargs):  # pragma: no cover - the assertion is that it is unused
+        raise AssertionError("the picker path must not fetch")
+
+    monkeypatch.setattr("httpx.get", no_network)
+    monkeypatch.setattr("httpx.Client.send", no_network)
+
+    entries, _ = await controller.live_catalogue()
+
+    row = _by_selector(entries)["anthropic/claude-fable-5-1"]
+    assert (row.input_price, row.output_price) == (-1.0, -1.0)
+
+
+@pytest.mark.asyncio
+async def test_a_login_flavour_is_priced_under_its_canonical_provider(
+    controller, store, monkeypatch
+) -> None:
+    """``openai-device`` prices as ``openai`` — the same translation the resolver
+    applies — so a ChatGPT account's live rows get the pay-per-token price the
+    projection keys under ``openai``."""
+    store.upsert_credential("openai", {"key": "sk", "type": "api_key"})
+    _listing(monkeypatch, {"openai-device": [DiscoveredModel(id="gpt-5.4", context_window=0)]})
+    _projection(monkeypatch, _PROJECTION)
+
+    entries, _ = await controller.live_catalogue()
+
+    row = _by_selector(entries)["openai-device/gpt-5.4"]
+    assert (row.input_price, row.output_price) == (2.5, 15.0)
+    assert row.context_window == 400_000
+
+
+@pytest.mark.asyncio
+async def test_a_keyless_provider_stays_free_rather_than_unknown(controller, monkeypatch) -> None:
+    """Ollama really is free per token; the chain has no mapping for it and the
+    ``_price`` rule keeps a genuine zero visible."""
+    _listing(monkeypatch, {"ollama": [DiscoveredModel(id="qwen3:8b", context_window=32_000)]})
+    _projection(monkeypatch, _PROJECTION)
+
+    entries, _ = await controller.live_catalogue()
+
+    row = _by_selector(entries)["ollama/qwen3:8b"]
+    assert (row.input_price, row.output_price) == (0.0, 0.0)
+
+
+def test_the_static_catalogue_reads_nothing_and_still_paints(controller, monkeypatch) -> None:
+    """The first frame is registry-only by contract: no document read, no thread."""
+
+    def not_here(**kwargs):  # pragma: no cover - the assertion is that it is unused
+        raise AssertionError("static_catalogue must not read the price documents")
+
+    monkeypatch.setattr("local_operator.model.prices.models_dev_providers", not_here)
+    assert controller.static_catalogue()
+
+
+# ---------------------------------------------------------------------------
+# Credential-change invalidation (ported from bbqben's #535)
+# ---------------------------------------------------------------------------
+
+
 @pytest.mark.asyncio
 async def test_logging_in_drops_the_cached_listing(controller, store, monkeypatch) -> None:
-    """Re-authing is what a user does when a model is missing, and before this it
-    provably could not help: the credential row was written and the listing cache
-    -- the thing actually hiding the model -- was left alone for the rest of its
-    TTL.
-
-    The picker's own TTL (``PICKER_TTL_S``) bounds how long a stale list can
-    survive an idle session; this bounds how long it can survive the action the
-    user takes when they notice.
-    """
+    """Re-authing is what a user does when a model is missing. The credential
+    row is written AND the listing document — fetched anonymously, or under
+    whatever account came before — is dropped, so the next picker open lists
+    under the new credential instead of serving the old catalogue."""
     dropped: list[str] = []
     monkeypatch.setattr(
         "local_operator.providers.controller.invalidate_listing",
@@ -1268,11 +1550,11 @@ async def test_logging_in_drops_the_cached_listing(controller, store, monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_an_api_key_login_also_drops_the_cached_listing(
+async def test_an_api_key_login_drops_the_listing_under_the_storage_id(
     controller, store, monkeypatch
 ) -> None:
-    """The paste-a-key path stores a credential exactly as the OAuth path does, and
-    a key for a different account lists a different catalogue."""
+    """The paste-a-key path stores under ``store_credentials_as``; the document
+    is named the same way, so that is the id to invalidate."""
     dropped: list[str] = []
     monkeypatch.setattr(
         "local_operator.providers.controller.invalidate_listing",
@@ -1280,22 +1562,22 @@ async def test_an_api_key_login_also_drops_the_cached_listing(
     )
 
     async def fake_login(_callbacks):
-        return "sk-ant-pasted"
+        return "xai-key"
 
-    definition = controller.provider("anthropic")
-    assert definition is not None
+    definition = controller.provider("xai-oauth")
+    assert definition is not None and definition.store_credentials_as == "xai"
     monkeypatch.setattr(
         "local_operator.providers.controller.get_provider_definition",
         lambda provider_id: (
             dataclasses.replace(definition, login=fake_login)
-            if provider_id == "anthropic"
+            if provider_id == "xai-oauth"
             else get_provider_definition(provider_id)
         ),
     )
 
-    await controller.login("anthropic")
+    await controller.login("xai-oauth")
 
-    assert dropped == ["anthropic"]
+    assert dropped == ["xai"]
 
 
 @pytest.mark.asyncio
@@ -1314,6 +1596,107 @@ async def test_logging_out_clears_the_listing_the_next_credential_must_not_inher
     await controller.logout("anthropic")
 
     assert "anthropic" in dropped
+
+
+@pytest.mark.asyncio
+async def test_a_failed_invalidation_never_fails_a_successful_login(
+    controller, store, monkeypatch
+) -> None:
+    def boom(provider_id):
+        raise OSError("read-only cache")
+
+    monkeypatch.setattr("local_operator.providers.controller.invalidate_listing", boom)
+
+    async def fake_login(_callbacks):
+        return "sk-ant"
+
+    definition = controller.provider("anthropic")
+    assert definition is not None
+    monkeypatch.setattr(
+        "local_operator.providers.controller.get_provider_definition",
+        lambda provider_id: (
+            dataclasses.replace(definition, login=fake_login)
+            if provider_id == "anthropic"
+            else get_provider_definition(provider_id)
+        ),
+    )
+
+    assert "Stored API key" in await controller.login("anthropic")
+
+
+@pytest.mark.asyncio
+async def test_login_and_logout_drop_the_in_process_model_info_memo(
+    controller, store, monkeypatch
+) -> None:
+    """A status-band resolution that degraded before the login (no credential
+    → registry-only numbers) is memoised per TTL bucket; without this drop a
+    long-lived TUI keeps the stale answer for the rest of the bucket. The
+    server's credential route already pairs the two invalidations for exactly
+    this event; the controller hook now matches."""
+    cleared: list[str] = []
+    monkeypatch.setattr("local_operator.providers.controller.invalidate_listing", lambda pid: 1)
+    monkeypatch.setattr(
+        "local_operator.model.configure.invalidate_model_info_cache",
+        lambda: cleared.append("memo"),
+    )
+
+    async def fake_login(_callbacks):
+        return "sk-ant"
+
+    definition = controller.provider("anthropic")
+    assert definition is not None
+    monkeypatch.setattr(
+        "local_operator.providers.controller.get_provider_definition",
+        lambda provider_id: (
+            dataclasses.replace(definition, login=fake_login)
+            if provider_id == "anthropic"
+            else get_provider_definition(provider_id)
+        ),
+    )
+
+    await controller.login("anthropic")
+    assert cleared == ["memo"]
+
+    store.upsert_credential("anthropic", {"key": "sk-ant", "type": "api_key"})
+    await controller.logout("anthropic")
+    assert cleared == ["memo", "memo"]
+
+
+@pytest.mark.asyncio
+async def test_logout_invalidates_once_per_storage_id(controller, store, monkeypatch) -> None:
+    """``zai-oauth`` and ``zai`` resolve to the SAME document set, so iterating
+    both would glob the cache dir twice per logout."""
+    dropped: list[str] = []
+    monkeypatch.setattr(
+        "local_operator.providers.controller.invalidate_listing",
+        lambda provider_id: dropped.append(provider_id) or 1,
+    )
+    store.upsert_credential("zai", {"key": "sk-zai", "type": "api_key"})
+
+    await controller.logout("zai-oauth")
+
+    assert dropped == ["zai"]
+
+
+def _spy_available_models(monkeypatch, *, live: dict[str, list[str]] | None = None):
+    """Record every ``available_models`` call and the TTL it was given.
+
+    Returns the call log. ``live`` names the model ids a provider answers with;
+    anything absent answers as an unauthenticated provider, which is what the
+    registry's two dozen unconfigured entries look like in a real run.
+    """
+    calls: list[tuple[str, float | None]] = []
+    live = live or {}
+
+    def fake(provider_id: str, **kwargs: Any):
+        calls.append((provider_id, kwargs.get("ttl_s")))
+        ids = live.get(provider_id)
+        if ids is None:
+            return [], "unauthenticated"
+        return [DiscoveredModel(id=model_id, name=model_id) for model_id in ids], "ok"
+
+    monkeypatch.setattr("local_operator.providers.controller.available_models", fake)
+    return calls
 
 
 @pytest.mark.asyncio

@@ -176,6 +176,142 @@ def test_openai_compat_parses_a_captured_openrouter_payload() -> None:
     assert rows[1].supports_images is False
     assert rows[1].supports_prompt_cache is False
     assert rows[1].cache_write_price == 0.0
+    # Both are priced, so neither claims to be free.
+    assert [row.free for row in rows] == [False, False]
+
+
+def test_a_quoted_zero_is_read_as_free_and_a_router_price_is_not() -> None:
+    """OpenRouter spells THREE things in this field and two of them collapse to
+    ``0.0`` once ``_positive_float`` is done, so the difference has to be read
+    off the wire.
+
+    ``"0"`` is a model that is genuinely free at the point of use (the 18
+    ``:free`` routes, verified against the live listing); ``"-1"`` is a
+    meta-route whose cost depends on the model it picks (``openrouter/auto``)
+    and is emphatically NOT free; an absent leg is a listing that quoted
+    nothing. Only the first may ever reach the picker's ``free`` label.
+    """
+    body = {
+        "data": [
+            {"id": "google/gemma:free", "pricing": {"prompt": "0", "completion": "0"}},
+            {"id": "openrouter/auto", "pricing": {"prompt": "-1", "completion": "-1"}},
+            {"id": "terse/model"},
+            # Half-stated: a model you pay for on output. Calling it free would
+            # understate it by the whole output bill.
+            {"id": "half/stated", "pricing": {"prompt": "0", "completion": "0.000015"}},
+        ]
+    }
+    rows = fetch_models("openrouter", api_key="k", client=_StubClient([_Response(200, body)]))
+
+    assert rows is not None
+    assert {row.id: row.free for row in rows} == {
+        "google/gemma:free": True,
+        "openrouter/auto": False,
+        "terse/model": False,
+        "half/stated": False,
+    }
+    # Every one of them still reports 0.0 on at least the input leg, which is
+    # exactly why the flag rather than the price is what carries the answer.
+    assert all(row.input_price == 0.0 for row in rows)
+
+
+def test_a_token_zero_is_not_free_when_the_model_does_not_bill_in_tokens() -> None:
+    """A quoted ``0`` per token is only a whole price for a model whose product
+    IS tokens.
+
+    Both lyria rows are real: OpenRouter quotes ``{"prompt": "0",
+    "completion": "0"}`` for them while billing $0.08 per song and $0.04 per
+    clip. The symmetric zero is a silence about the leg that charges, and
+    reading it as ``free`` is the one error this column must not make. The wire
+    discriminator is ``architecture.output_modalities`` — ``["text", "audio"]``
+    on exactly those rows against ``["text"]`` on all 19 genuinely-free routes
+    in the live listing — so the gate closes the class rather than two ids.
+    """
+    body = {
+        "data": [
+            {
+                "id": "google/lyria-3-pro-preview",
+                "pricing": {"prompt": "0", "completion": "0"},
+                "architecture": {"output_modalities": ["text", "audio"]},
+            },
+            {
+                "id": "google/lyria-3-clip-preview",
+                "pricing": {"prompt": "0", "completion": "0"},
+                "architecture": {"output_modalities": ["text", "audio"]},
+            },
+            # The genuinely-free shape, which must keep saying the word.
+            {
+                "id": "google/gemma:free",
+                "pricing": {"prompt": "0", "completion": "0"},
+                "architecture": {"output_modalities": ["text"]},
+            },
+            # Silence about modalities defaults to text: every lean
+            # OpenAI-compatible gateway sends an id and little else, and the
+            # conservative default would strip ``free`` from every real free
+            # route on all of them.
+            {"id": "terse/free", "pricing": {"prompt": "0", "completion": "0"}},
+            # The older arrow encoding carries the same fact on the right.
+            {
+                "id": "legacy/audio",
+                "pricing": {"prompt": "0", "completion": "0"},
+                "architecture": {"modality": "text->text+audio"},
+            },
+            # A3: the arrow branch is case-folded like the list branch and like
+            # ``_has_image_input``'s own arrow branch, so a gateway shouting the
+            # output side does not cost a genuinely free route its label.
+            {
+                "id": "legacy/shouty-free",
+                "pricing": {"prompt": "0", "completion": "0"},
+                "architecture": {"modality": "TEXT->TEXT"},
+            },
+        ]
+    }
+    rows = fetch_models("openrouter", api_key="k", client=_StubClient([_Response(200, body)]))
+
+    assert rows is not None
+    assert {row.id: row.free for row in rows} == {
+        "google/lyria-3-pro-preview": False,
+        "google/lyria-3-clip-preview": False,
+        "google/gemma:free": True,
+        "terse/free": True,
+        "legacy/audio": False,
+        "legacy/shouty-free": True,
+    }
+
+
+def test_the_free_flag_survives_a_cache_round_trip(tmp_path) -> None:
+    """A document is read back by a different function than the one that parsed
+    the wire, and a field it forgets silently reverts to the unstated default —
+    the same failure mode ``supports_images`` documents just below."""
+    body = {"data": [{"id": "google/gemma:free", "pricing": {"prompt": "0", "completion": "0"}}]}
+    client = _StubClient([_Response(200, body)])
+
+    live, live_status = available_models(
+        "openrouter", api_key=None, client=client, cache_dir=tmp_path
+    )
+    assert live_status == "ok" and live[0].free is True
+
+    cached, cached_status = available_models(
+        "openrouter", api_key=None, client=client, cache_dir=tmp_path
+    )
+    assert cached_status == "cached", "premise: served from disk, not refetched"
+    assert len(client.calls) == 1
+    assert cached[0].free is True, "the stated zero must survive the document"
+
+
+def test_a_registry_price_clears_a_stale_free_flag() -> None:
+    """The merge falls back to the bundled numbers for a silent listing, so a row
+    that ends up quoting a real price must not also claim to be free — the two
+    would render as a contradiction in one cell."""
+    static = {"m": _info("m", input_price=3.0, output_price=15.0)}
+    merged = merge_models(static, [DiscoveredModel(id="m", free=True)])
+
+    assert (merged[0].input_price, merged[0].output_price) == (3.0, 15.0)
+    assert merged[0].free is False, "priced rows are not free"
+
+    # With nothing bundled to fall back to, the live statement stands.
+    kept = merge_models({}, [DiscoveredModel(id="m", free=True)])
+    assert kept[0].free is True
 
 
 def test_openai_compat_reads_the_legacy_modality_string() -> None:
@@ -1007,7 +1143,9 @@ def test_an_openrouter_document_from_capture_one_is_refetched_once(tmp_path) -> 
     assert status == "ok"
     assert len(client.calls) == 1
     assert models[0].cache_write_price == pytest.approx(12.5)
-    assert json.loads(stale.read_text())["payload"]["capture"] == 2
+    assert json.loads(stale.read_text())["payload"]["capture"] == discovery.listing_capture_version(
+        "openrouter"
+    )
 
 
 def test_an_unstated_capability_defers_to_the_registry() -> None:
@@ -1709,11 +1847,18 @@ def test_only_the_transport_that_changed_invalidates_its_cache(tmp_path) -> None
 
     A single global number invalidated every provider's cache on upgrade, and for
     an aggregator — whose registry has no static rows to fall back on — the
-    replacement answer was an empty model list. Only the Anthropic reader started
-    needing a field its writer had not recorded, so only Anthropic's stamp moved.
+    replacement answer was an empty model list. Each stamp moves only when that
+    transport's own reader starts needing something its writer did not record:
+    Anthropic's at the capability read (2), the two aggregators' again at the
+    stated-zero ``free`` read (3), which no other transport can express because
+    no other listing in the tree quotes a price, and once more at the modality
+    gate on that flag (4) — ``free`` is stored COMPUTED, so a version-3 document
+    carries the ungated ``true`` for the per-song-billed rows and the reader has
+    no modality left to re-judge it with.
     """
     assert discovery.listing_capture_version("anthropic") == 2
-    assert discovery.listing_capture_version("openrouter") == 2
+    assert discovery.listing_capture_version("openrouter") == 4
+    assert discovery.listing_capture_version("radient") == 4
     # Ollama's reader never changed: an OpenAI-compatible document with no
     # pricing object has nothing new to capture, so its stamp stays at 1.
     assert discovery.listing_capture_version("ollama") == discovery.LISTING_CAPTURE_DEFAULT
@@ -1770,13 +1915,11 @@ def test_an_unstamped_document_is_the_original_shape_not_a_stale_one(tmp_path) -
     assert "qwen3:8b" in {row.id for row in models}
 
 
-# -- credential-change invalidation (the Fable 5.1 report) --------------------
+# -- credential-change invalidation (ported from bbqben's #535) ---------------
 
 #: The listing as it stood the day before ``claude-fable-5-1`` shipped, and as it
-#: answers after. The pair is the whole bug: a cache written from the first is
-#: served for 24h, so the model in the second is unreachable through the picker
-#: for up to a day and re-authing -- the one recovery a user tries -- did not
-#: clear it.
+#: answers after. A cache written from the first is served until its TTL lapses;
+#: what a re-auth adds is a way to drop it that no TTL provides.
 _FABLE_BEFORE = {
     "data": [
         {
@@ -1806,16 +1949,10 @@ _FABLE_AFTER = {
 }
 
 
-def test_a_model_released_inside_the_ttl_is_invisible_until_the_listing_is_dropped(
-    tmp_path,
-) -> None:
-    """The reported defect, end to end.
-
-    A cache written before ``claude-fable-5-1`` shipped is still fresh, so the
-    second call issues NO request and cannot see the new model however many
-    times the picker is opened. Only invalidation reaches it -- which is why a
-    credential change has to perform one.
-    """
+def test_a_dropped_listing_is_refetched_on_the_next_call(tmp_path) -> None:
+    """End to end against the cache layer: a fresh document is served with NO
+    request however often the picker opens inside its TTL; invalidation is
+    what makes the next call list live again."""
     client = _StubClient([_Response(200, _FABLE_BEFORE), _Response(200, _FABLE_AFTER)])
 
     first, first_status = available_models(
@@ -1824,13 +1961,11 @@ def test_a_model_released_inside_the_ttl_is_invisible_until_the_listing_is_dropp
     assert first_status == "ok"
     assert "claude-fable-5-1" not in {row.id for row in first}, "premise: not released yet"
 
-    # Anthropic ships it. The picker opens again inside the 24h TTL.
     stale, stale_status = available_models(
         "anthropic", api_key="sk-ant", client=client, cache_dir=tmp_path
     )
     assert stale_status == "cached"
     assert len(client.calls) == 1, "a fresh cache issues no request at all"
-    assert "claude-fable-5-1" not in {row.id for row in stale}, "the reported symptom"
 
     dropped = discovery.invalidate_listing("anthropic", cache_dir=tmp_path)
     assert dropped == 1

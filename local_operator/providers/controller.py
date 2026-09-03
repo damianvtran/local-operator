@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import logging
 import random
 import time
 from typing import TYPE_CHECKING, Any, Callable, Protocol
@@ -26,7 +27,11 @@ from local_operator.harness.types import ModelSpec
 from local_operator.model.configure import (  # noqa: F401  (used by callers)
     build_model_spec,
 )
-from local_operator.model.discovery import available_models, invalidate_listing
+from local_operator.model.discovery import (
+    DiscoveredModel,
+    available_models,
+    invalidate_listing,
+)
 from local_operator.model.naming import model_label
 from local_operator.model.registry import static_models
 from local_operator.providers.registry import (
@@ -62,6 +67,8 @@ if TYPE_CHECKING:  # auth_store stays off this module's runtime import graph
     from local_operator.providers.oauth.callback_server import LoginCallbacks
 
 LoginCallbackFactory = Callable[[ProviderDefinition], "LoginCallbacks"]
+
+logger = logging.getLogger("local_operator.providers.controller")
 
 #: How long an empty refresh keeps deferring to old data before it is believed.
 #: The empty-over-data heuristic reads a blank answer over non-empty history as
@@ -311,17 +318,18 @@ class ProviderController:
                 self.auth_store.upsert_credential(
                     storage, {"key": result, "source": "login", "type": "api_key"}
                 )
-                invalidate_listing(storage)
+                _invalidate_cached_listing(storage)
                 return f"Stored API key for '{storage}'."
             return f"Login for '{storage}' produced no key; nothing stored."
 
         result.setdefault("authorized_at", int(time.time() * 1000))
         self.auth_store.upsert_credential(storage, result)
         # The new credential may list DIFFERENT models than the one it replaced
-        # -- a different account, a different plan, or simply a catalogue that
-        # grew while the old listing sat in cache. Nothing about a TTL can
-        # observe that, so the login event has to say so itself.
-        invalidate_listing(storage)
+        # -- a different account, a different plan, or a catalogue listed
+        # anonymously before there was a credential at all. No TTL can observe
+        # that, so the login event has to say so itself. Same hook as the CLI's
+        # ``run_login``; the TUI's ``/login`` arrives here.
+        _invalidate_cached_listing(storage)
         identity = result.get("email") or result.get("account_id") or result.get("org_name") or ""
         suffix = f" ({identity})" if identity else ""
         msg = f"Logged in to '{storage}'{suffix}."
@@ -343,9 +351,11 @@ class ProviderController:
         if removed == 0:
             raise ValueError(f"No stored credentials for '{provider_id}'.")
         # Symmetrical with login: a catalogue fetched under the credential just
-        # removed must not decide what the NEXT credential can select.
-        for target in sorted(targets):
-            invalidate_listing(target)
+        # removed must not decide what the NEXT credential can select. One call
+        # per STORAGE id: alias and storage id (``zai-oauth``/``zai``) resolve
+        # to the same document set, so iterating both would glob twice.
+        for storage_id in sorted({credential_provider_id(t) for t in targets}):
+            _invalidate_cached_listing(storage_id)
         return f"Removed {removed} credential(s) for '{provider_id}'."
 
     # -- usage -------------------------------------------------------------
@@ -1088,6 +1098,7 @@ class ProviderController:
         """
         entries: list[CatalogueEntry] = []
         statuses: dict[str, str] = {}
+        listed: list[tuple[ProviderDefinition, bool, list[DiscoveredModel]]] = []
         usable = self.usable_providers()
         for definition in PROVIDER_REGISTRY:
             connected = usable is None or definition.id in usable
@@ -1111,15 +1122,30 @@ class ProviderController:
             # provider fetches on the loop would freeze a TUI's repaint.
             models, status = await asyncio.to_thread(available_models, definition.id, **kwargs)
             statuses[definition.id] = status
-            for model in models:
+            listed.append((definition, connected, models))
+        # Prices for the rows no listing priced, from the same keyless chain the
+        # status band resolves through (see :func:`_enrich_prices`). After the
+        # listings rather than per provider so the two documents are read ONCE
+        # for the whole catalogue, and off-loop for the same reason the listings
+        # are: the OpenRouter document is ~120 KB of JSON.
+        rows_by_provider = await asyncio.to_thread(
+            _enrich_prices, [(definition, models) for definition, _connected, models in listed]
+        )
+        for definition, connected, _models in listed:
+            for model in rows_by_provider[definition.id]:
                 entries.append(
                     CatalogueEntry(
                         provider=definition.id,
                         model_id=model.id,
                         label=model_label(definition.id, model.id, model.name or "").full,
                         context_window=max(0, model.context_window),
-                        input_price=_price(model.input_price, definition),
-                        output_price=_price(model.output_price, definition),
+                        # ``free`` is consumed HERE and goes no further: a
+                        # stated zero survives ``_price`` as ``0.0``, which is
+                        # already the entry's way of saying free (an unknown is
+                        # ``-1.0``). Carrying the flag onto the entry as well
+                        # would be a second spelling of one fact, free to drift.
+                        input_price=_price(model.input_price, definition, free=model.free),
+                        output_price=_price(model.output_price, definition, free=model.free),
                         connected=connected,
                         aggregated=definition.id in AGGREGATOR_PROVIDERS,
                     )
@@ -1221,7 +1247,112 @@ class ProviderController:
         return report
 
 
-def _price(value: float | None, definition: ProviderDefinition) -> float:
+def _invalidate_cached_listing(storage_id: str) -> None:
+    """Best-effort listing drop after a credential change; never raises.
+
+    An exception here would fail a login that actually succeeded, which is far
+    worse than a stale list that the picker's TTL clears within the quarter
+    hour anyway. The in-process resolver memo is dropped too: a status-band
+    resolution that degraded BEFORE the credential arrived (no key →
+    registry-only limits/price) is memoised per TTL bucket and would otherwise
+    stay pinned for the rest of the bucket in a long-lived TUI. Same pairing
+    the server's credential route performs for exactly this event.
+    """
+    try:
+        invalidate_listing(storage_id)
+    except Exception:  # noqa: BLE001 - never fail a successful login over a cache
+        logger.debug("listing invalidation failed for %s", storage_id, exc_info=True)
+    try:
+        from local_operator.model.configure import invalidate_model_info_cache
+
+        invalidate_model_info_cache()
+    except Exception:  # noqa: BLE001 - same rule as the listing drop above
+        logger.debug("model-info invalidation failed for %s", storage_id, exc_info=True)
+
+
+def _enrich_prices(
+    listed: list[tuple[ProviderDefinition, list[DiscoveredModel]]],
+) -> dict[str, list[DiscoveredModel]]:
+    """Each provider's rows with price/limit HOLES filled from the keyless chain.
+
+    WHY: the picker used to price a row from ``merge_models(registry, listing)``
+    alone, while the status band priced the same model through the resolver's
+    models.dev/OpenRouter leg. A direct-provider model the shipped registry did
+    not carry therefore showed a blank price in the picker (``_price``'s unknown
+    sentinel) and ``$10/50`` in the band the moment it was selected — the
+    operator's ``claude-fable-5-1`` screenshot. Both surfaces now go through
+    ``prices.price_row`` so they cannot drift again.
+
+    CONSTRAINTS. (1) Disk only, one read per document: the models.dev projection
+    is ~141 KB and the OpenRouter document ~120 KB; parsing either per row would
+    turn 400 OpenRouter rows into seconds, and ``resolve_model_info`` per row is
+    a three-leg memoised resolution that may fetch. The OpenRouter rows come
+    straight from the ``openrouter`` provider's own listing, which this same
+    ``live_catalogue`` call has just read under the picker's TTL — so no second
+    document, no second request. (2) Only rows whose listing quoted NO money are
+    touched, and only the money and the limits the listing left at zero: a price
+    the provider's own listing stated is authoritative and never overridden.
+    (3) Aggregator rows are never enriched — their listing IS the priced source —
+    and a provider the chain does not map (``ollama``, ``radient``) is left as
+    is, so a keyless provider's genuine ``free`` stays free (``_price``). An
+    aggregator's ``:free`` routes therefore take their ``free`` flag straight
+    from ``discovery._row_from_openai_entry``, the parser that saw the explicit
+    ``0`` on the wire, and never pass through here at all.
+    """
+    from local_operator.model.prices import models_dev_providers, price_row
+
+    models_dev = models_dev_providers()
+    openrouter: list[DiscoveredModel] = next(
+        (rows for definition, rows in listed if definition.id == "openrouter"), []
+    )
+    result: dict[str, list[DiscoveredModel]] = {}
+    for definition, rows in listed:
+        if definition.id in AGGREGATOR_PROVIDERS or (models_dev is None and not openrouter):
+            result[definition.id] = rows
+            continue
+        # The chain is keyed on the canonical provider, the same translation the
+        # resolver applies: ``openai-device`` prices as ``openai``.
+        canonical = credential_provider_id(definition.id)
+        enriched: list[DiscoveredModel] = []
+        for row in rows:
+            if row.input_price > 0 or row.output_price > 0 or row.free:
+                # ``free`` counts as priced: the listing already ANSWERED the
+                # money question with a quoted zero, and re-asking the chain
+                # could only replace that answer with a third party's rate.
+                enriched.append(row)
+                continue
+            found = price_row(canonical, row.id, models_dev=models_dev, openrouter=openrouter)
+            if found is None:
+                enriched.append(row)
+                continue
+            if found.free:
+                # A stated zero fills the HOLE without filling the prices: the
+                # numbers stay 0.0 and the flag is what the picker reads. Kept
+                # ahead of the positive-price test below because a free row has
+                # no positive leg and would otherwise be dropped as unanswered.
+                enriched.append(dataclasses.replace(row, free=True))
+                continue
+            if not (found.input_price > 0 or found.output_price > 0):
+                enriched.append(row)
+                continue
+            enriched.append(
+                dataclasses.replace(
+                    row,
+                    input_price=found.input_price,
+                    output_price=found.output_price,
+                    cache_read_price=row.cache_read_price or found.cache_read_price,
+                    cache_write_price=row.cache_write_price or found.cache_write_price,
+                    # Limits only where the listing gave none: the provider's
+                    # own window is the right number for its endpoint.
+                    context_window=row.context_window or found.context_window,
+                    max_tokens=row.max_tokens or found.max_tokens,
+                )
+            )
+        result[definition.id] = enriched
+    return result
+
+
+def _price(value: float | None, definition: ProviderDefinition, *, free: bool = False) -> float:
     """A per-million price, with UNKNOWN kept distinct from FREE.
 
     Discovery and the static registry both use ``0`` for "no price known", and the
@@ -1230,10 +1361,30 @@ def _price(value: float | None, definition: ProviderDefinition) -> float:
     this immediate rather than theoretical: its listing carries no pricing at all,
     so every model it discovers that we did not already ship would read ``free``.
 
-    ``-1`` is the unknown sentinel the picker blanks. Zero is preserved only for
-    providers that need no credential — a local Ollama really is free per token,
-    and blanking that would hide the one thing that makes it interesting.
+    ``-1`` is the unknown sentinel the picker blanks. Zero — and therefore the
+    word ``free`` — survives in exactly two cases:
+
+    * ``allows_missing_api_key``: a local Ollama really is free per token, and
+      blanking that would hide the one thing that makes it interesting.
+    * ``free``: a SOURCE stated the zero. That is a quoted price, not a silence,
+      and repeating a quoted zero fabricates nothing. This is what makes the
+      picker's ``free`` label reachable for the 18 ``:free`` OpenRouter routes,
+      every one of which the listing prices at an explicit ``0``; before it, a
+      stated zero collapsed into the unknown sentinel here and rendered as the
+      same blank cell as a model nobody had priced.
+
+    ``free`` is never derived from ``value`` — it arrives from the parser that
+    read the wire (:attr:`DiscoveredModel.free`) — which is what keeps two rows
+    that both reach here as ``0.0`` apart: a plan-billed row whose real cost is
+    unknowable stays blank, because the plan catalogues do not set it (see
+    ``prices._PLAN_BILLED_KEYS``), and so does a row nobody quoted at all.
+
+    NOT the same ``-1.0`` as ``model.prices._STATED_ZERO``, which means the
+    opposite — "models.dev stated this price and it is zero". That marker is
+    module-private to ``prices`` and stripped back to ``0.0`` before any row
+    reaches here, so the two never meet; they would collide silently if either
+    one's reach were widened, hence the note on both.
     """
     if value is not None and value > 0:
         return float(value)
-    return 0.0 if definition.allows_missing_api_key else -1.0
+    return 0.0 if (free or definition.allows_missing_api_key) else -1.0

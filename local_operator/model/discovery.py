@@ -139,7 +139,27 @@ LYING_MAX_TOKENS = 4096
 #: after the upgrade, not in the background. Exactly once per install, which is
 #: acceptable; a bump here is not free for the user whose only provider is
 #: OpenRouter.
-LISTING_CAPTURE_VERSIONS: dict[str, int] = {"anthropic": 2, "openrouter": 2, "radient": 2}
+#:
+#: Version 3 for ``openrouter`` and ``radient`` is ``_row_from_openai_entry``
+#: reading an explicitly quoted ``0`` into ``DiscoveredModel.free`` — a MEANING
+#: the version-2 writer could not express, which is exactly the case this stamp
+#: is for. A version-2 document parses to rows with ``free=False``, a perfectly
+#: valid shape in which the 18 ``:free`` routes render a blank price cell
+#: instead of the word ``free``; nothing else could notice, so without the bump
+#: the fix would stay invisible for a day on every install. Same one-time
+#: synchronous refetch the version-2 bump described, and paid by the same two
+#: aggregators, since they are the only transports that quote a price at all.
+#:
+#: Version 4 for ``openrouter`` and ``radient`` is the modality gate on that
+#: same flag (:func:`_bills_in_tokens`). Unlike the version-3 bump this one is
+#: not about a field the writer omitted: the document records ``free`` as a
+#: COMPUTED boolean, so a version-3 document written by the ungated parser
+#: carries ``free: true`` for the two per-song-billed lyria rows and the reader
+#: has no modality left to re-judge it with. Without the bump every existing
+#: install keeps making the false claim on screen until its listing TTL expires
+#: — the fix would ship and change nothing for a day. Same one-time synchronous
+#: refetch, paid by the same two aggregators.
+LISTING_CAPTURE_VERSIONS: dict[str, int] = {"anthropic": 2, "openrouter": 4, "radient": 4}
 #: What a transport not named above is stamped with. Version 1 is the original
 #: shape; a transport only earns a bump when its own reader starts needing a
 #: field its writer did not record.
@@ -199,6 +219,14 @@ class DiscoveredModel:
     all, and the OpenAI-compatible wires only imply it through a priced cache-read
     leg. There is no explicit ``false`` to preserve, so there is nothing for a
     third state to carry.
+
+    ``free`` is the second exception to the "``0`` means unknown" rule above, and
+    it exists for the same reason ``supports_images`` is three-state: the source
+    said something the struct could not otherwise record. Both price legs are
+    ``0.0`` for "nobody quoted a price" AND for "the vendor quotes zero", and the
+    picker renders those two opposite facts as a blank cell and the word ``free``
+    respectively. Only the parser that read the wire knows which it saw, so it
+    sets this flag rather than leaving the display to guess from a float.
     """
 
     id: str
@@ -213,6 +241,12 @@ class DiscoveredModel:
     #: Anthropic 5-minute write by 20% (1.25x base), so a quoted number is
     #: worth carrying rather than guessing.
     cache_write_price: float = 0.0
+    #: The SOURCE stated that both price legs are zero — the model is free at the
+    #: point of use, not merely unpriced. Never inferred from the prices
+    #: themselves (that is precisely the inference this field exists to replace):
+    #: a row is only ``True`` here when a parser read an explicit zero off a wire
+    #: or a document. A row that carries a positive price must never set it.
+    free: bool = False
     supports_images: bool | None = None
     supports_prompt_cache: bool = False
 
@@ -289,6 +323,39 @@ def _positive_float(value: object) -> float:
     if not math.isfinite(number) or number <= 0:
         return 0.0
     return number
+
+
+def _stated_zero_price(value: object) -> bool:
+    """Whether ``value`` is a price the wire explicitly quoted as ZERO.
+
+    The counterpart to :func:`_positive_float`, which deliberately collapses
+    "absent", "zero" and "nonsense" into one falsy answer. That collapse is right
+    for arithmetic and wrong for display, so this reads the one bit it discards:
+    did the source actually write a zero here?
+
+    OpenRouter is why the distinction has to be read off the WIRE rather than
+    inferred later. Its listing spells three different things in this field, and
+    two of them arrive as ``0.0`` once :func:`_positive_float` is done:
+    ``"0"`` for a model that is genuinely free at the point of use
+    (``google/gemma-4-31b-it:free``), ``"-1"`` for a meta-route whose cost
+    depends on which model it picks (``openrouter/auto``), and an absent leg for
+    a listing that quoted nothing. Only the first may ever render as ``free``;
+    reading a negative as a statement would put that word on a router whose real
+    cost is unknowable, which is the one error this column must not make.
+    """
+    if isinstance(value, bool):
+        # bool is an int subclass, and ``False`` is not a quoted price.
+        return False
+    if isinstance(value, (int, float)):
+        number = float(value)
+    elif isinstance(value, str):
+        try:
+            number = float(value.strip())
+        except ValueError:
+            return False
+    else:
+        return False
+    return math.isfinite(number) and number == 0.0
 
 
 def _per_million(value: object) -> float:
@@ -428,6 +495,53 @@ def _has_image_input(architecture: Mapping[str, object]) -> bool | None:
     return None
 
 
+def _bills_in_tokens(architecture: Mapping[str, object]) -> bool:
+    """Whether a token price of zero can be this model's WHOLE price.
+
+    A quoted ``0`` per token only means "free" for a model whose product IS
+    tokens. OpenRouter prices ``google/lyria-3-pro-preview`` at $0.08 per SONG
+    and ``google/lyria-3-clip-preview`` at $0.04 per CLIP, and quotes
+    ``{"prompt": "0", "completion": "0"}`` for both — not because they are free
+    but because the leg that bills is not denominated in tokens at all. The
+    symmetric zero there is a silence about the charge, and reading it as
+    ``free`` advertises a paid model as free, the one error
+    ``format_price_pair`` exists to prevent.
+
+    The wire carries the discriminator: ``architecture.output_modalities`` is
+    ``["text", "audio"]`` on exactly those two rows against ``["text"]`` on all
+    19 genuinely-free routes in the live listing. Gating on the modality closes
+    the whole class — any future image/audio/video generator priced per artifact
+    is covered — rather than naming two ids that go stale.
+
+    ABSENT modalities — the key missing, or an empty list, which is how the
+    models.dev projection normalises "said nothing" — default to text
+    (permissive), and that direction is deliberate. Every lean
+    OpenAI-compatible gateway sends an id and little else, and the same
+    reasoning :func:`_has_image_input` documents applies: silence is not a
+    statement. The conservative default would strip ``free`` from every
+    genuinely-free route on any gateway that omits the field — a large, silent
+    regression against a hypothetical one, where the permissive default is wrong
+    only for a gateway that both omits modalities AND quotes a token zero for a
+    non-token-billed model. OpenRouter, the only transport that quotes zeros at
+    all today, states the field on 100% of its rows.
+    """
+    modalities = architecture.get("output_modalities")
+    if isinstance(modalities, (list, tuple)) and modalities:
+        return all(isinstance(item, str) and item.strip().lower() == "text" for item in modalities)
+    modality = architecture.get("modality")
+    if isinstance(modality, str) and "->" in modality:
+        # The older encoding packs the same fact to the RIGHT of the arrow.
+        # Only the output side decides what the model bills for.
+        # Lowercased like the list branch above and like ``_has_image_input``'s
+        # own arrow branch: the encoding is the gateway's, not a normalised
+        # field, so ``text->TEXT`` must not read as a non-text output and strip
+        # ``free`` from a genuinely free model.
+        return all(
+            part.strip().lower() == "text" for part in modality.split("->")[-1].split("+") if part
+        )
+    return True
+
+
 def _row_from_openai_entry(entry: Mapping[str, object]) -> DiscoveredModel | None:
     """One OpenAI-compatible listing entry, or ``None`` when it has no id.
 
@@ -469,6 +583,17 @@ def _row_from_openai_entry(entry: Mapping[str, object]) -> DiscoveredModel | Non
         ),
         input_price=_per_million(pricing.get("prompt")),
         output_price=_per_million(pricing.get("completion")),
+        # BOTH legs, and only when the wire wrote a zero in each. A half-stated
+        # row (``prompt: 0`` beside a priced ``completion``) is a model you pay
+        # for, and calling it free would understate it by the whole output bill.
+        # The modality gate is the same guard one level up: a zero per TOKEN is
+        # only a whole price for a model that bills in tokens (see
+        # :func:`_bills_in_tokens`).
+        free=(
+            _stated_zero_price(pricing.get("prompt"))
+            and _stated_zero_price(pricing.get("completion"))
+            and _bills_in_tokens(architecture)
+        ),
         cache_read_price=cache_read_price,
         supports_images=_has_image_input(architecture),
         # A priced cache-read leg is the only machine-readable evidence of prompt
@@ -1043,6 +1168,14 @@ def _merge_one(row: DiscoveredModel, info: ModelInfo | None) -> DiscoveredModel:
         # listing win here would advertise a paid model as free.
         input_price=_positive_float(row.input_price) or _positive_float(info.input_price),
         output_price=_positive_float(row.output_price) or _positive_float(info.output_price),
+        # The LIVE listing is the only source that can state this, and it only
+        # survives when the registry does not then supply a price: the two lines
+        # above fall back to the bundled numbers for a silent listing, and a row
+        # that ends up quoting $3/15 must not also claim to be free. The
+        # registry has no field of its own here — a bundled row cannot say
+        # "free", only "priced" or "unknown".
+        free=row.free
+        and not (_positive_float(info.input_price) or _positive_float(info.output_price)),
         cache_read_price=(
             _positive_float(row.cache_read_price) or _positive_float(info.cache_reads_price)
         ),
@@ -1171,6 +1304,10 @@ def _rows_from_payload(
                 output_price=_positive_float(entry.get("output_price")),
                 cache_read_price=_positive_float(entry.get("cache_read_price")),
                 cache_write_price=_positive_float(entry.get("cache_write_price")),
+                # A stored ``false`` and an absent key mean the same thing here
+                # (not stated free), so a plain bool is enough — unlike
+                # ``supports_images`` below, this field has no third state.
+                free=bool(entry.get("free")),
                 # ``null`` in the document is the listing's silence, faithfully
                 # stored by ``dataclasses.asdict``. Reading it as False would let
                 # a cache round-trip turn "unstated" into a denial, so the same
@@ -1186,11 +1323,12 @@ def invalidate_listing(provider_id: str, *, cache_dir: Path | None = None) -> in
     """Drop ``provider_id``'s cached listing so the next call refetches.
 
     For callers reacting to an event that can CHANGE WHAT THE LISTING RETURNS
-    but that no TTL can observe -- a login, a re-auth, a logout. Without this the
-    24h TTL is the only thing that can refresh a catalogue, so the one action a
-    user takes when a model is missing (log in again) provably cannot fix it:
-    ``lop login anthropic`` wrote the credential row and left a listing fetched
-    before the model existed in place for the rest of the day.
+    but that no TTL can observe -- a login, a re-auth, a logout. The picker's
+    15-minute TTL and the hourly background revalidation bound ordinary drift,
+    but neither knows that the CREDENTIAL changed: a different account or plan
+    can list a different catalogue, and a listing fetched anonymously (or under
+    the account just removed) must not decide what the next credential can
+    select.
 
     Keyed on the CREDENTIAL identity, not the provider id, because that is what
     names the documents: ``openai-device`` and ``openai`` are one logged-in

@@ -11,6 +11,15 @@ Scope was extended twice mid-design by the manager; the final scope is:
 
 Everything below cites the working tree at `origin/main` as of today.
 
+> **Addendum (2026-09-02, follow-up PR to #527).** Two amendments after the
+> design shipped. (a) §3.3/§3.5: leg 2 is a **ranked chain of two independent
+> keyless sources**, models.dev first and OpenRouter's public listing second,
+> rather than models.dev alone — the operator ruled that a single community
+> source is a single point of failure. (b) §3.6: the picker's rows go through
+> the **same chain** as the status band, over one read of each document. The
+> "delete `_AGGREGATOR_NAMESPACE`" instruction in §3.3 and §7 is superseded:
+> the map lives on as `prices.OPENROUTER_NAMESPACE`, behind models.dev.
+
 ---
 
 ## 1. The problem as found
@@ -289,6 +298,42 @@ transcription and is not overridden by the catalogue in this PR; a
 `prices_from_catalogue` flag mirroring `limits_from_listing`
 (`configure.py:677-701`) would let the catalogue correct it and is deferred.
 
+**Leg 2 is a ranked chain, not one source (amended 2026-09-02).** Inside
+`_from_price_catalogue`, `prices.price_catalogue_row` runs:
+
+```
+models.dev projection  → PRICED row?  yes → answer (limits ride along)
+                       → no  → OpenRouter public listing, `<namespace>/<spelling>`, priced rows only
+                                 → hit → answer (money from OpenRouter; any native limits
+                                          models.dev's cost-less stub carried are kept)
+                                 → miss → None → the registry row the caller already holds
+```
+
+Why two: one community-maintained JSON is one point of failure. A day-0 gap
+(the row not merged yet), a shape drift, or the host being down would unprice
+*every* direct provider at once — the same class of outage that motivated
+leaving OpenRouter, only with the roles swapped. OpenRouter's listing is
+keyless and already on disk for the picker's `openrouter` rows, so keeping it
+as the secondary costs users nothing and gives a second, independently
+maintained opinion. Rules, all enforced in `price_row` and its tests:
+
+- OpenRouter never overrides a price models.dev quoted, and neither overrides
+  a price the provider's own listing quoted (`_fill_from_row` is holes-only).
+- OpenRouter stays authoritative for `openrouter/*` ids; those never enter the
+  chain's secondary step (no namespace entry), and legs 1/3 own them.
+- Both documents sit under the same SWR / lease / `want_id` machinery
+  (`prices._models_dev_providers`, `prices.openrouter_rows` →
+  `available_models("openrouter", want_id="<ns>/<id>")`).
+- The OpenRouter step fits `_remaining_budget`: it receives what the models.dev
+  step left of the leg's 3 s, and is **not reached at all** when models.dev
+  answered — no second parse, no second request on the paint path.
+- `alibaba-token-plan` has no namespace on purpose: models.dev's 0/0 for a
+  credit-billed plan is the intended answer, and borrowing `qwen/`'s USD rate
+  would print a cost the user is not paying.
+- When both sources price an id and disagree by more than 5 %
+  (`PRICE_DISAGREEMENT_RATIO`), the fact is logged at debug and nothing acts
+  on it.
+
 `_info_from_discovery` (`:886`): pass `want_id=model_name` through to
 `available_models`; take `cache_writes_price` from `row.cache_write_price`
 when `> 0`, else keep the input-price fallback at `:958-959` (now only for
@@ -398,6 +443,16 @@ else → raise (`read_listing` turns that into stale-beats-absent).
 absent from a document ≥10 min old triggers one refetch — which for models.dev
 is usually a 0-byte 304 unless the row really did just land.
 
+**Second source.** models.dev is the primary, not the only, keyless price
+source — see the chain in §3.3. `prices.OPENROUTER_NAMESPACE` maps each direct
+provider to its OpenRouter vendor namespace (`anthropic`, `openai`, `google`,
+`deepseek`, `mistral→mistralai`, `xai→x-ai`, `alibaba→qwen`, `kimi→moonshotai`,
+`zai→z-ai`); `openrouter_lookup` tries `<ns>/<spelling>` for every
+`id_spellings` candidate against PRICED rows only. The pure `price_row(provider,
+model_id, *, models_dev, openrouter)` helper takes both documents pre-read so
+the resolver (one id, may fetch) and the picker's row builder (hundreds of ids,
+disk only) share one ranking and cannot drift.
+
 **Cold start.** The very first resolution on a machine with no document pays
 one 4.4 MB download inside the 3s leg budget. On a slow link that times out
 and the session runs unpriced until the next resolution — so on a cold miss
@@ -412,6 +467,19 @@ budget was too small, not that the network is down). Every later start is a
 `_populate_model_picker` (`app.py:13622`) is unchanged: static rows paint on
 the keystroke with the footer clause `checking providers…`.
 `_refresh_catalogue` (`:13650`) calls `live_catalogue(ttl_s=PICKER_TTL_S)`.
+
+**Row prices come from the same chain (amended 2026-09-02).** #527 left the
+picker pricing rows from `merge_models(registry, listing)` only, so a
+direct-provider model absent from the shipped registry painted a blank price
+(`_price`'s `-1` sentinel) while the status band priced it at `$10/50` the
+moment it was selected. `live_catalogue` now runs `controller._enrich_prices`
+after the listings: one `models_dev_providers()` read (disk only, any age, no
+fetch), the `openrouter` provider's own rows from the same call as the
+secondary, `price_row` per row whose listing quoted no money. Only the money
+and the limits the listing left at zero are filled; aggregator rows are never
+enriched; providers the chain does not map keep `_price`'s unknown-≠-free
+rule. Measured: ~1–3 ms over 588 rows. `static_catalogue` (the first frame)
+stays registry-only — it reads no document.
 `_catalogue_status` (`:19946`) becomes:
 
 - `"cached"` → **silent**. With a 15-minute picker TTL "cached" means "listed
@@ -574,6 +642,8 @@ the `.fetching` lease gone.
   `want_id` pass-through, write-price plumbing, gate/prune
   `_from_aggregator_catalogue`, delete `_AGGREGATOR_NAMESPACE` and
   `_aggregator_spellings` (move spelling helpers to `prices.py`).
+  *Amended:* the namespace map returns as `prices.OPENROUTER_NAMESPACE`, the
+  secondary step of leg 2's chain (§3.3).
 - `local_operator/providers/controller.py` — `PICKER_TTL_S`.
 - `local_operator/tui/app.py` — `:13655` pass the TTL; `_catalogue_status`
   wording.
@@ -593,8 +663,9 @@ Rough size: ~350 lines of source, ~500 of tests. One coder, one PR.
 - Parallelising `live_catalogue`'s per-provider fetches with `gather` — turns
   the picker's worst case from a sum of provider timeouts into a max; small,
   independent, and reviewable on its own.
-- LiteLLM's `model_prices_and_context_window.json` as a second neutral source
-  — per-token floats under litellm-specific ids; worse fit, not needed.
+- LiteLLM's `model_prices_and_context_window.json` as a third neutral source
+  — per-token floats under litellm-specific ids; worse fit than the OpenRouter
+  secondary the chain already carries.
 
 ---
 
