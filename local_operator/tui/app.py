@@ -1271,6 +1271,73 @@ SETTINGS_LAYOUT_CLASS = "settings"
 #: behind. Flipped in exactly two places, ``_open_aside``/``_close_aside``.
 ASIDE_LAYOUT_CLASS = "aside"
 
+#: The chord that scrolls the `/btw` aside from the KEYBOARD, back and forward.
+#:
+#: NAMED CONSTANTS rather than string literals in `BINDINGS` because the key is
+#: the one part of this feature that is not settled by the app: a chord only
+#: works if the TERMINAL delivers it, and that is measured per terminal, not
+#: reasoned about. The audit that picked this pair is in
+#: `docs/proposals/aside-overflow.md` §5.3 and the byte-level delivery captures
+#: belong in `docs/evidence/aside-chord/MEASURED.md`, the same evidence shape
+#: `Cmd+V` was settled with (`docs/evidence/cmd-chords/MEASURED.md`, and see
+#: `editor.py` on what an undelivered chord looks like: Terminal.app sends ZERO
+#: bytes and beeps). If a target terminal turns out not to send these, CHANGE
+#: THE TWO CONSTANTS — every other line of the feature is key-agnostic.
+#:
+#: Why these two and not the keys a reader reaches for first: `up`/`down`,
+#: `pageup`/`pagedown`, `home`/`end` and `shift+up`/`shift+down` are all
+#: TextArea cursor or selection bindings, and the aside's whole premise is that
+#: the composer keeps every key it had while the user types into it
+#: (`aside_panel.py`'s wheel-only note rejects ↑/↓ for exactly this reason).
+#: `ctrl+u`/`ctrl+d` are DESTRUCTIVE in the composer (delete-to-start-of-line /
+#: delete-right and exit-on-empty). `alt+up`/`alt+down` are rewritten to plain
+#: up/down by `Editor.VERTICAL_CHORD_KEYS` and binding them caused a real past
+#: defect. `ctrl+up`/`ctrl+down` page the todos and `ctrl+home`/`ctrl+end` page
+#: the transcript. That leaves `ctrl+pageup`/`ctrl+pagedown`, which nothing in
+#: `local_operator/` binds and `TextArea` does not claim.
+ASIDE_SCROLL_BACK_KEY = "ctrl+pageup"
+ASIDE_SCROLL_FORWARD_KEY = "ctrl+pagedown"
+
+#: The chord that lifts the aside's full text to the clipboard.
+#:
+#: `omp`, the reference implementation this surface is modelled on, ships copy
+#: as a first-class footer action next to branch and dismiss
+#: (`btw-panel.ts:126-131`), on a BARE `c` made safe by four guards in order —
+#: key matches, action available, composer focused, and the DRAFT IS EMPTY
+#: (`input-controller.ts:280-289`). The fourth is the clever one there: a bare
+#: letter costs no chord, because once anything is typed it falls through to
+#: being an ordinary character.
+#:
+#: THAT PATTERN DOES NOT PORT, and the reason is a DISPATCH-ORDER difference
+#: rather than a naming clash — which is why "just use `c` like omp does" is a
+#: change that looks obviously right and cannot work. `omp`'s input controller
+#: sees raw keypresses BEFORE its editor does, so a bare letter can be
+#: intercepted and conditionally passed through. Textual dispatches to the
+#: FOCUSED widget first, and an App-level bubbling binding is reached only if
+#: nothing focused consumed the key. So with the composer focused — which is
+#: the aside's whole premise — a bare `c` is a character, not a binding, and
+#: the empty-draft guard is UNREACHABLE: by the time it could be tested, the
+#: `c` is already in the buffer it was supposed to check.
+#:
+#: MEASURED against a real `/btw` aside, Editor focused, empty draft:
+#:
+#:     'c'        fired=[]           composer='c'   <- typed, never dispatched
+#:     'ctrl+y'   fired=[]           composer=''    <- swallowed (TextArea redo)
+#:     'ctrl+r'   fired=['ctrl+r']   composer=''    <- reaches the app, clean
+#:
+#: This app's own bare `c`/`p`/`r` are not a counter-example: they work only
+#: inside the subagent view, which sets the composer READ-ONLY (see
+#: ``_open_subagent_view``/``_set_composer_read_only``), so nothing focused is
+#: claiming characters there. The aside is the exact opposite by design — the
+#: composer stays live, because the user is meant to keep typing into it.
+#:
+#: So it is a chord. `ctrl+r` because nothing in `local_operator/` binds it and
+#: `TextArea` does not claim it (audited against its full table: it takes
+#: ctrl+a/e/w/d/x/k/u/z/y/c/v and f6/f7). NOT `ctrl+y`, which looks free and is
+#: TextArea's REDO — measured, it is swallowed and never reaches the app, which
+#: is exactly the failure this audit exists to catch.
+ASIDE_COPY_KEY = "ctrl+r"
+
 #: Class the input dock carries while the COMPOSER holds focus, which is what
 #: brightens the chevron from `dim` to `fg` (D23). NOT the accent: that means
 #: "a turn is live", and a composer is focused in nearly every frame, so an
@@ -1810,6 +1877,56 @@ class OperatorApp(App[None]):
         # the common path.
         Binding("ctrl+down", "scroll_todos_down", "Scroll todos down", show=False),
         Binding("ctrl+up", "scroll_todos_up", "Scroll todos up", show=False),
+        # Scroll the `/btw` ASIDE from the keyboard, the same problem as the
+        # todo chords above and solved the same way. The card is `can_focus =
+        # False` and holds no bindings of its own, so a focus-then-arrow gesture
+        # cannot reach it — and until this landed the WHEEL was its only scroll
+        # gesture. That is fine right up until the wheel is not delivered:
+        # `tmux set -g mouse off`, a terminal with mouse reporting disabled,
+        # `screen(1)` and non-SGR terminals all send no wheel event at all, and
+        # in those setups the card's own `↑ … · scroll` marker named content
+        # with LITERALLY no way to reach it. A row-offset scroll model does not
+        # fix that on its own; it needs a gesture that is not the mouse.
+        #
+        # Bubbling, NOT `priority`, for the todo chords' stated reason: a
+        # focused picker keeps first refusal on the key. And they no-op unless
+        # the aside is open AND overflowing, so they shadow nothing on the
+        # common path — the `_scroll_todos` rule.
+        #
+        # The key itself is a constant; see `ASIDE_SCROLL_BACK_KEY` for the
+        # audit and for what to change if a terminal does not deliver it.
+        #
+        # IN-APP DISPATCH IS MEASURED, not assumed. Driven through a real
+        # `/btw` aside at 120x40 with the Editor focused and holding a draft,
+        # pressing both chords through the pilot:
+        #
+        #     aside open: True | focused: Editor
+        #     ACTIONS FIRED: ['ctrl+pageup', 'ctrl+pagedown']
+        #     composer text unchanged: True 'half a thought'
+        #     caret unchanged: True
+        #
+        # That is the half this file can settle: the chord reaches app level
+        # past a focused `TextArea` and neither key lands in the buffer. It
+        # says NOTHING about whether the terminal emits the bytes — that is
+        # the separate probe the constants point at, and the two must not be
+        # confused for each other.
+        Binding(ASIDE_SCROLL_BACK_KEY, "scroll_aside_back", "Scroll aside back", show=False),
+        Binding(
+            ASIDE_SCROLL_FORWARD_KEY, "scroll_aside_forward", "Scroll aside forward", show=False
+        ),
+        # Lift the aside's FULL text to the clipboard. The scroll chords above
+        # make every row reachable on screen; this is the answer to the other
+        # half of the complaint — the exchange is discarded on `esc` and `^F`
+        # is the only thing that saves it, at the cost of writing it into the
+        # context and the transcript permanently. The clipboard is outside the
+        # session, so this keeps the card's off-the-record contract that
+        # forking deliberately breaks.
+        #
+        # Bubbling and guarded like its neighbours: it no-ops unless the aside
+        # is open with copyable content and the composer holds focus, so it
+        # shadows nothing on the common path. See `ASIDE_COPY_KEY` for why this
+        # is a chord and not `omp`'s bare `c`.
+        Binding(ASIDE_COPY_KEY, "copy_aside", "Copy the aside", show=False),
         # Page the TRANSCRIPT from the composer (UX round 1, U2). A bounded
         # resume is the first time scrolling the transcript is REQUIRED to see
         # one's own history, and every plain scroll key is spoken for: `up`,
@@ -14880,6 +14997,66 @@ class OperatorApp(App[None]):
         """``ctrl+up`` — page the expanded todo overflow toward the start (U2)."""
         self._scroll_todos(down=False)
 
+    def action_scroll_aside_back(self) -> None:
+        """``ctrl+pageup`` — page the aside toward the START of the exchange."""
+        self._scroll_aside(back=True)
+
+    def action_scroll_aside_forward(self) -> None:
+        """``ctrl+pagedown`` — page the aside back toward the newest rows."""
+        self._scroll_aside(back=False)
+
+    def action_copy_aside(self) -> None:
+        """``ctrl+r`` — lift the aside's FULL text to the clipboard.
+
+        The exchange is discarded on ``esc``, and until this key the only thing
+        that saved it was ``^f`` — which writes it permanently into the context
+        AND the transcript, the one thing the card's own title promises will
+        not happen. The clipboard is outside the session, so this rescues the
+        text without touching the record: the docstring's load-bearing claim
+        (the aside READS the conversation and never writes to it) survives.
+
+        The payload is :meth:`AsidePanel.copy_text`'s, which takes it off the
+        ``AsideTurn`` dataclass rather than off the painted rows — the rows are
+        the windowed subset the reader can already see, which is the very
+        defect this key exists beside, and they carry the card's chrome.
+
+        Deliberately NOT gated on ``_aside_can_fork``. That refuses while the
+        session is streaming, because splicing a message into a live batch
+        produces a request no provider accepts — a constraint on WRITING to the
+        session, which this does not do. Streaming is precisely when a long
+        answer is on screen and precisely when ``^f`` is unavailable, so
+        refusing here would withhold the escape hatch exactly when it is the
+        only one left.
+        """
+        panel = self._aside_panel()
+        if panel is None or not panel.is_open:
+            return
+        # Focus is part of the guard, following `omp`'s copy gesture
+        # (`input-controller.ts:280-289`): the key belongs to the surface the
+        # user is working in. Its fourth guard, "the draft is empty", is
+        # dropped rather than forgotten — it exists there to make a BARE letter
+        # safe, and a chord cannot eat a keystroke. See `ASIDE_COPY_KEY`.
+        if self.screen.focused is not self._editor():
+            return
+        # The panel composes the payload; this method only decides WHEN to copy
+        # and routes the result to the one clipboard write. Which turns qualify
+        # and how they are joined is a fact about the exchange, so it lives with
+        # the exchange — beside `fork_messages`, whose sibling rule it is.
+        #
+        # This is not a stylistic split. Rebuilding the payload here from
+        # `panel.turns` produced a SECOND implementation of one idea, and the
+        # two immediately drifted: they disagreed on whitespace, and both
+        # filtered on "the answer is non-empty" while claiming to exclude
+        # failed turns — so a turn that streamed a few tokens and then errored
+        # had that fragment copied as though the model had said it. One
+        # implementation cannot disagree with itself.
+        #
+        # Silent when there is nothing to take — the `_scroll_aside` rule.
+        # `_put_on_clipboard` already treats empty as "no copy happened"
+        # rather than raising a receipt for it, so this needs no notice of its
+        # own; a warning row per stray press would be drawn behind the card.
+        self._put_on_clipboard(panel.copy_text())
+
     def action_transcript_home(self) -> None:
         """``ctrl+home`` — take the transcript to its oldest row (UX1, U2).
 
@@ -14916,6 +15093,34 @@ class OperatorApp(App[None]):
         """
         if self._todo_panel is not None:
             self._todo_panel.scroll_expanded(down=down)
+
+    def _scroll_aside(self, *, back: bool) -> None:
+        """Drive the aside card's keyboard scroll, the one path both keys share.
+
+        The todo chords' shape exactly (``_scroll_todos`` above), for the same
+        reasons: a no-op before the card exists, and SILENT when there is
+        nothing to scroll. Silence is the deliberate half. The gesture is only
+        meaningful while an open card overflows, and the aside is open across
+        whole conversations — a notice on every stray press would put warning
+        rows into the transcript from a card whose title says nothing here
+        joins it, and they would be drawn BEHIND the card, so the user finds
+        them only after dismissing the thing they were reading.
+
+        A PAGE per press rather than a row: this is the no-mouse substitute for
+        a wheel that can be spun, so a press has to be worth making. The page
+        SIZE is the panel's to decide and is decided inside it — a page is the
+        rows the card is showing, not the rows it budgeted for, because the
+        window spends budget on the marker and the pinned question. See
+        :meth:`AsidePanel.scroll_page`.
+        """
+        panel = self._aside_panel()
+        if panel is None or not panel.is_open:
+            return
+        # ``down`` is toward the NEWEST rows, matching both the wheel
+        # (`on_mouse_scroll_down`) and `TodoPanel.scroll_expanded`'s sense of
+        # the word. The one translation from "back through the exchange" lives
+        # here rather than in the two actions, so the keys cannot drift apart.
+        panel.scroll_page(down=not back)
 
     def action_cycle_effort(self) -> None:
         """``shift+tab`` — step one level up this model's ladder, wrapping.
@@ -18181,6 +18386,17 @@ class OperatorApp(App[None]):
         lines.append(_key_row("ctrl+t", "expand or collapse the todo panel"))
         lines.append(_key_row("ctrl+g", "expand or collapse the subagent panel"))
         lines.append(_key_row("ctrl+b", "open an aside; ctrl+f forks it in"))
+        # Directly under `ctrl+b`, because it is only meaningful once an aside
+        # is open. ONE row for the pair rather than two: the partner chord fits
+        # inside the description, which keeps the gutter reading as one gesture
+        # per row. MEASURED at 62 composed cells against the 74-cell ceiling
+        # this block documents above — headroom, unlike the `cmd+v` row.
+        lines.append(_key_row("ctrl+pageup", "scroll a long aside; ctrl+pagedown returns"))
+        # Names the CONTRAST with ctrl+f rather than just the verb: the two
+        # keys both get the text out of a card that says nothing here joins the
+        # conversation, and which one keeps that promise is the whole reason a
+        # user picks between them. 67 composed cells against the 74 ceiling.
+        lines.append(_key_row("ctrl+r", "copy the open aside; ctrl+f folds it in instead"))
         lines.append(_key_row("esc", "stop the agent; leave a mode"))
         lines.append(_key_row("ctrl+d", "quit, on an empty composer"))
         # Where the logs went. Console logging is off while the TUI owns the
