@@ -613,7 +613,9 @@ async def test_browser_session_label_is_sanitized_and_host_derived(monkeypatch) 
         ("", "Session"),
         ("\x00\x7f\x85\u202d\u2066\ufeff", "Session"),
         ("  one\t two\nthree  ", "one two three"),
-        ("e\u0301" * 31, "e\u0301" * 30 + "…"),
+        # 29 clusters kept plus the ellipsis: the 30-cluster cap is inclusive
+        # of the ellipsis the clipper appends, so the RESULT never exceeds it.
+        ("e\u0301" * 31, "e\u0301" * 29 + "…"),
     ],
 )
 def test_browser_session_label_edge_cases(name: str, expected: str) -> None:
@@ -717,8 +719,9 @@ def test_unnamed_session_labels_itself_by_cwd_not_a_bare_fallback() -> None:
     # survives exactly there — `LO · /` names a session no better than
     # `LO · Session` does.
     assert builtin._browser_session_label(ToolContext(cwd="/")) == "Session"
-    # The cwd goes through the same sanitizer/clipper as a title.
-    assert builtin._browser_session_label(ToolContext(cwd="/tmp/" + "d" * 40)) == "d" * 30 + "…"
+    # The cwd goes through the same sanitizer/clipper as a title, ellipsis
+    # included in the 30-cluster budget.
+    assert builtin._browser_session_label(ToolContext(cwd="/tmp/" + "d" * 40)) == "d" * 29 + "…"
 
 
 def test_live_session_name_beats_the_per_turn_snapshot() -> None:
@@ -1098,3 +1101,83 @@ def test_a_label_that_fills_the_pill_alone_drops_the_parent_rather_than_a_stub()
     )
     assert "›" not in label
     assert label.startswith("an-enormous-child-label")
+
+
+def test_a_clipped_label_respects_the_documented_cluster_cap() -> None:
+    # The clip counts the ellipsis it appends. It used to keep `budget`
+    # clusters and then add one, so every label it touched came back at 31
+    # against a documented 30 — harmless (the extension re-clips) but it made
+    # the ceiling this module states false, on the plain-title path as much as
+    # on the composed one.
+    cap = builtin._BROWSER_SESSION_LABEL_CLUSTERS
+    for text in (
+        "d" * 40,
+        "Fix Slack-reported UI zoom and overlap bugs today",
+        "e\u0301" * 40,
+    ):
+        clipped = builtin._browser_clip_label(text)
+        assert len(builtin._browser_clusters(clipped)) <= cap, clipped
+
+
+def test_the_composed_subagent_pill_never_exceeds_the_cap() -> None:
+    # Q2's case: parent + separator + label, at the length where the parent is
+    # clipped and the ellipsis has to be paid for out of its room.
+    for label in ("zoom-scroll-fix", "a-really-very-long-subagent-job-label", "qa"):
+        pill = builtin._browser_session_label(
+            ToolContext(
+                session_id="child-1",
+                job_id="job-1",
+                job_label=label,
+                session_name_provider=lambda: "Fix Slack-reported UI zoom and overlap bugs",
+            )
+        )
+        assert len(builtin._browser_clusters(pill)) <= builtin._BROWSER_SESSION_LABEL_CLUSTERS, pill
+
+
+def test_a_server_session_carrying_a_job_id_keeps_its_own_title() -> None:
+    # `job_id` is NOT unique to subagents — a server-side session carries one
+    # too — so the composition requires a `job_label` as well. A server session
+    # must render its own conversation title, unchanged.
+    context = ToolContext(
+        session_id="server-1",
+        job_id="queued-job",
+        job_label="",
+        cwd="/Users/damian/local-operator",
+        session_name_provider=lambda: "Reduce agent RAM usage",
+    )
+    assert builtin._browser_session_label(context) == "Reduce agent RAM usage"
+
+
+def test_a_peer_message_from_a_child_is_not_signed_with_its_parents_name() -> None:
+    # The `send` fallback path reads the ToolContext when no registry record
+    # names the process. `session_name` on a child resolves to its PARENT's
+    # title, so the card presented one session's name beside another's id.
+    child = ToolContext(
+        session_id="child-1",
+        job_id="job-1",
+        job_label="bridge-qa",
+        session_name="Fix the tab groups",
+    )
+    assert builtin._peer_sender_conversation_name(child) == "Fix the tab groups › bridge-qa"
+
+    # A top-level session is untouched, and so is a server session (job_id set,
+    # no label): both sign with their own title.
+    top = ToolContext(session_id="s", session_name="Fix the tab groups")
+    assert builtin._peer_sender_conversation_name(top) == "Fix the tab groups"
+    server = ToolContext(session_id="s", job_id="queued-job", session_name="Reduce agent RAM")
+    assert builtin._peer_sender_conversation_name(server) == "Reduce agent RAM"
+
+    # An unnamed parent leaves the child its own label rather than a bare
+    # separator, and the peer card is NOT clipped to the browser pill's width.
+    orphan = ToolContext(session_id="child-2", job_id="job-2", job_label="bridge-qa")
+    assert builtin._peer_sender_conversation_name(orphan) == "bridge-qa"
+    long_parent = ToolContext(
+        session_id="child-3",
+        job_id="job-3",
+        job_label="zoom-scroll-fix",
+        session_name="Fix Slack-reported UI zoom and overlap bugs",
+    )
+    assert (
+        builtin._peer_sender_conversation_name(long_parent)
+        == "Fix Slack-reported UI zoom and overlap bugs › zoom-scroll-fix"
+    )

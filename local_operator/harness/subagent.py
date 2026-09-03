@@ -107,6 +107,7 @@ import asyncio
 import contextlib
 import logging
 import uuid
+import weakref
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
@@ -1087,6 +1088,42 @@ def _child_mcp_wiring(parent_session: "Session", *, restricted: bool = False) ->
     )
 
 
+def _parent_display_name_resolver(parent_session: "Session") -> Callable[[], str]:
+    """A callable returning the parent's DISPLAY name at the moment it is asked.
+
+    The child's browser tab group reads ``<parent conversation> › <job label>``,
+    and both halves have to survive nesting. Handing the child the parent's
+    title HOLDER only worked one level down: a middle child never generates a
+    title of its own (naming runs in the TUI host and the owned-session
+    runtime, neither of which a one-shot child passes through), so its holder
+    is permanently empty and a grandchild fell back to the cwd that every
+    sibling of every conversation shares — two ``qa`` grandchildren under two
+    different conversations rendered identically. Delegation really does nest:
+    a child of a top-level session keeps ``task``/``wait``/``jobs`` (see the
+    depth-aware prune below), which is exactly the manager-fans-out-to-workers
+    shape. Resolving through ``_display_session_name`` instead walks the
+    lineage to whichever ancestor actually holds a title.
+
+    Called per read rather than snapshotted, because a parent is normally named
+    a second or two into its first turn while its children are launched later:
+    a string captured here would be "" for the child's whole life.
+
+    WEAK reference on purpose. Every other parent-derived value the child gets
+    is a shared collaborator (the comms surface, the variable store, the job
+    manager's parent row); this one would be a strong child→parent edge that
+    pins the parent's entire object graph — transcript, tools, MCP manager —
+    for as long as a detached child outlives it. A dead parent simply has no
+    name to lend, and the caller degrades to the cwd form it already handles.
+    """
+    parent_ref = weakref.ref(parent_session)
+
+    def resolve() -> str:
+        parent = parent_ref()
+        return parent._display_session_name() if parent is not None else ""
+
+    return resolve
+
+
 async def _build_child_session(
     *,
     label: str,
@@ -1371,22 +1408,17 @@ async def _build_child_session(
         # ``Session._build_tool_context``; the construction-time context above
         # only feeds createIf.
         job_id=job_id,
-        # The label the operator launched this child under, and the PARENT's
-        # live title holder. Together they are the only identity a subagent
-        # has: naming runs in the TUI host and the owned-session runtime, so a
-        # one-shot child never generates a title of its own and every display
-        # surface asking "which session is this?" had nothing to answer with.
-        #
-        # The holder is SHARED, not copied, and that is what makes a parent
-        # renamed after launch (the usual case — the naming errand lands a
-        # second or two into the parent's first turn, while children are
-        # launched later) reach the child's next tab-group reconcile. Passing
-        # the string would freeze whatever the title was at launch.
+        # The label the operator launched this child under, and a resolver for
+        # the PARENT's display name. Together they are the only identity a
+        # subagent has: naming runs in the TUI host and the owned-session
+        # runtime, so a one-shot child never generates a title of its own and
+        # every display surface asking "which session is this?" had nothing to
+        # answer with.
         #
         # Display-only on both counts: a child is authorized by its own
         # ``session_id``, never by a name it borrowed from its parent.
         job_label=label,
-        parent_conversation_name=parent_session.conversation_name_state,
+        parent_display_name=_parent_display_name_resolver(parent_session),
         # The PARENT's comms instance, so the child's every-turn tool context
         # rebuild keeps pointing at the agent that delegated to it instead of
         # minting a private one nobody is listening to.
