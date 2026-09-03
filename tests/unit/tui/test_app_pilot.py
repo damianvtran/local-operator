@@ -8163,7 +8163,17 @@ async def test_model_default_alone_confirms_and_writes_nothing(
     ctrl = _AccessController(stored=("openrouter", "anthropic"))
     app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
     async with app.run_test(size=(90, 24)) as pilot:
-        await pilot.pause()
+        # Poll for the session rather than betting one frame is enough. A
+        # single `pause()` lost the race under parallel CPU load: `/model`
+        # refused with "session is still starting…" and the assertion below
+        # then read a transcript containing only that refusal. Same cause and
+        # same remedy as the submit-worker polls elsewhere in this file —
+        # observed failing 4 of 6 runs on clean origin/main, so it is the test
+        # that is racy, not the command.
+        for _ in range(200):
+            await pilot.pause()
+            if app._session is not None:
+                break
         app._run_slash_command("/model anthropic/claude-opus-5")
         await pilot.pause()
         app._run_slash_command("/model default")
