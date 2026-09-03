@@ -3571,9 +3571,7 @@ async def test_preflight_reuses_stale_row_when_a_peer_holds_the_lease(tmp_path) 
 def test_anthropic_cache_ttl_threshold_setting_reads_like_openai_api() -> None:
     """Same resolution rules as ``_openai_api_mode``: missing/malformed → the
     default, an explicit non-negative int (including the 0 off switch) wins."""
-    from local_operator.model.configure import (
-        ANTHROPIC_CACHE_TTL_1H_MIN_CONTEXT_TOKENS,
-    )
+    from local_operator.model.configure import ANTHROPIC_CACHE_TTL_1H_MIN_CONTEXT_TOKENS
     from local_operator.model.configure import (
         _anthropic_cache_ttl_1h_min_context_tokens as read,
     )
