@@ -252,7 +252,7 @@ def test_a_timed_out_gate_reaches_the_model_on_replay() -> None:
     prevent. Asserts the rendered TEXT distinguishes expiry from decision.
     """
     from local_operator.harness.approval import GATE_TIMEOUT_CUSTOM_TYPE
-    from local_operator.harness.types import CustomMessage
+    from local_operator.harness.types import CustomMessage, TextContent
     from local_operator.session.session import _default_convert_to_llm
 
     rendered = _default_convert_to_llm(
@@ -266,6 +266,8 @@ def test_a_timed_out_gate_reaches_the_model_on_replay() -> None:
     )
 
     assert len(rendered) == 1, "the expiry row was dropped by the allow-list"
-    text = rendered[0].content[0].text
+    block = rendered[0].content[0]
+    assert isinstance(block, TextContent)
+    text = block.text
     assert "expired" in text and "not a decision" in text
     assert "bash" in text
